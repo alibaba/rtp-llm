@@ -1,11 +1,20 @@
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <exception>
+#include <future>
 #include <limits>
+#include <optional>
+#include <thread>
+#include <utility>
+#include <vector>
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #undef private
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -230,6 +239,240 @@ TEST_F(NormalEngineTest, testMakeStreamReservesKVBeforeEnqueue) {
             EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
         }
     }
+}
+
+TEST_F(NormalEngineTest, testCaptureAdmissionAndEnqueueCancellationUseRequestAndGlobalGates) {
+    class RecordingExecutor: public Executor {
+    public:
+        absl::Status process(const std::list<GenerateStreamPtr>&, int64_t) override {
+            ADD_FAILURE() << "the engine loop must remain stopped for admission-only tests";
+            return absl::InternalError("unexpected model execution");
+        }
+
+        HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t request_id, int64_t tokens) override {
+            reserve_calls.emplace_back(request_id, tokens);
+            return std::exchange(next_reservation, {});
+        }
+
+        HiddenStateCaptureReservationPtr         next_reservation;
+        std::vector<std::pair<int64_t, int64_t>> reserve_calls;
+    };
+    enum class Rejection {
+        NONE,
+        EXISTING_ERROR,
+        SCHEDULER_LENGTH
+    };
+    struct TestCase {
+        const char* name;
+        bool        global_capture;
+        int         max_new_tokens;
+        bool        export_hidden_states;
+        bool        offer_reservation;
+        bool        expect_reserve_call;
+        Rejection   rejection = Rejection::NONE;
+    };
+    const TestCase cases[] = {
+        {"global-off", false, 1, true, true, false},
+        {"generation-default", true, 1, false, true, false},
+        {"generation-opt-in", true, 1, true, true, true},
+        {"zero-token-legacy", true, 0, false, true, true},
+        {"admission-miss", true, 1, true, false, true},
+        {"enqueue-invalid-stream", true, 1, true, true, true, Rejection::EXISTING_ERROR},
+        {"enqueue-scheduler-length-rejection", true, 1, true, true, true, Rejection::SCHEDULER_LENGTH},
+    };
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    auto  executor     = std::make_unique<RecordingExecutor>();
+    auto* recorder     = executor.get();
+    engine->executor_  = std::move(executor);
+    int64_t request_id = 1000;
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        ASSERT_EQ(engine->getScheduler().onflightStreams(), 0);
+        engine->model_config_.hidden_state_capture_layer_ids =
+            test_case.global_capture ? std::vector<int64_t>{0} : std::vector<int64_t>{};
+        engine->reserve_step_                               = 0;
+        auto                             cancellation_count = std::make_shared<std::atomic<int>>(0);
+        HiddenStateCaptureReservationPtr offered;
+        if (test_case.offer_reservation) {
+            offered = std::make_shared<HiddenStateCaptureReservation>(
+                [cancellation_count]() noexcept { ++*cancellation_count; });
+        }
+        recorder->next_reservation = offered;
+        recorder->reserve_calls.clear();
+        auto query             = std::make_shared<GenerateInput>();
+        query->request_id      = request_id++;
+        query->input_ids       = torch::tensor({1, 2}, torch::kInt32);
+        query->generate_config = std::make_shared<GenerateConfig>();
+        ASSERT_FALSE(query->generate_config->export_hidden_states);
+        query->generate_config->max_new_tokens       = test_case.max_new_tokens;
+        query->generate_config->export_hidden_states = test_case.export_hidden_states;
+
+        auto stream = engine->makeStream(query);
+        ASSERT_NE(stream, nullptr);
+        ASSERT_FALSE(stream->hasError());
+        const auto expected_calls = test_case.expect_reserve_call ?
+                                        (std::vector<std::pair<int64_t, int64_t>>{{query->request_id, 2}}) :
+                                        (std::vector<std::pair<int64_t, int64_t>>{});
+        EXPECT_EQ(recorder->reserve_calls, expected_calls);
+        const bool expected_reservation = test_case.expect_reserve_call && test_case.offer_reservation;
+        EXPECT_EQ(stream->hasHiddenStateCaptureReservation(), expected_reservation);
+        EXPECT_EQ(cancellation_count->load(), 0);
+        EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+
+        if (test_case.rejection == Rejection::EXISTING_ERROR) {
+            stream->reportError(ErrorCode::INVALID_PARAMS, "existing request error");
+        } else if (test_case.rejection == Rejection::SCHEDULER_LENGTH) {
+            // enqueue rewrites reserveStep before the real FIFO length check.
+            engine->reserve_step_ = engine->model_config_.max_seq_len;
+        }
+        engine->enqueue(stream);
+        EXPECT_EQ(recorder->reserve_calls, expected_calls);
+        if (test_case.rejection == Rejection::NONE) {
+            EXPECT_FALSE(stream->hasError());
+            EXPECT_EQ(engine->getScheduler().onflightStreams(), 1);
+            EXPECT_EQ(stream->hasHiddenStateCaptureReservation(), expected_reservation);
+            EXPECT_EQ(cancellation_count->load(), 0);
+        } else {
+            EXPECT_TRUE(stream->hasError());
+            EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+            EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+            EXPECT_EQ(cancellation_count->load(), 1);
+            if (test_case.rejection == Rejection::EXISTING_ERROR) {
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_EQ(stream->stopReason(), "existing request error");
+            } else {
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::LONG_PROMPT_ERROR);
+            }
+        }
+        stream->cancelHiddenStateCapture();
+        stream->cancelHiddenStateCapture();
+        EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+        EXPECT_EQ(cancellation_count->load(), expected_reservation ? 1 : 0);
+        if (expected_reservation) {
+            EXPECT_FALSE(offered->active());
+            offered->cancel();
+            EXPECT_EQ(cancellation_count->load(), 1);
+        }
+        ASSERT_TRUE(engine->getScheduler().stop().ok());
+        recorder->next_reservation.reset();
+    }
+}
+
+TEST_F(NormalEngineTest, testStopJoinsAsyncWorkerWithoutMovingExecutorDestructionToWorker) {
+    struct ShutdownState {
+        std::promise<std::thread::id> callback_entered;
+        std::promise<std::thread::id> destructor_entered;
+        std::promise<void>            worker_returned;
+        std::shared_future<void>      resume_callback;
+        std::atomic<int>              cancellation_count{0};
+        std::atomic<bool>             callback_resumed{false};
+    };
+    class ObservedExecutor: public NormalExecutor {
+    public:
+        ObservedExecutor(const EngineInitParams&          params,
+                         std::shared_ptr<ShutdownState>   state,
+                         HiddenStateCaptureReservationPtr reservation):
+            NormalExecutor(params, nullptr), state_(std::move(state)), reservation_(std::move(reservation)) {}
+
+        ~ObservedExecutor() override {
+            state_->destructor_entered.set_value(std::this_thread::get_id());
+        }
+
+        HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t, int64_t) override {
+            return std::exchange(reservation_, {});
+        }
+
+    private:
+        std::shared_ptr<ShutdownState>   state_;
+        HiddenStateCaptureReservationPtr reservation_;
+    };
+    auto               state              = std::make_shared<ShutdownState>();
+    auto               callback_entered   = state->callback_entered.get_future();
+    auto               destructor_entered = state->destructor_entered.get_future();
+    auto               worker_returned    = state->worker_returned.get_future();
+    std::promise<void> resume_callback;
+    state->resume_callback = resume_callback.get_future().share();
+    auto reservation       = std::make_shared<HiddenStateCaptureReservation>([state]() noexcept {
+        ++state->cancellation_count;
+        state->callback_entered.set_value(std::this_thread::get_id());
+        state->callback_resumed =
+            state->resume_callback.wait_for(std::chrono::seconds(30)) == std::future_status::ready;
+    });
+    auto engine            = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    EngineInitParams params;
+    params.model_config_      = engine->model_config_;
+    params.runtime_config     = engine->runtime_config;
+    params.parallelism_config = engine->parallelism_config;
+    params.pd_sep_config      = engine->pd_sep_config;
+    params.py_model           = py::none();
+    auto  executor            = std::make_unique<ObservedExecutor>(params, state, reservation);
+    auto* observed_executor   = executor.get();
+    engine->executor_         = std::move(executor);
+    engine->model_config_.hidden_state_capture_layer_ids = {0};
+    auto query                                           = std::make_shared<GenerateInput>();
+    query->request_id                                    = 2000;
+    query->input_ids                                     = torch::tensor({1, 2}, torch::kInt32);
+    query->generate_config                               = std::make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens               = 1;
+    query->generate_config->export_hidden_states         = true;
+    auto stream                                          = engine->makeStream(query);
+    ASSERT_TRUE(stream->hasHiddenStateCaptureReservation());
+    stream->incPendingAsyncBookkeeping();
+    stream->markDeferredRelease();
+
+    std::optional<py::gil_scoped_release> release;
+    if (Py_IsInitialized() && PyGILState_Check()) {
+        release.emplace();
+    }
+    // Use the real runner and last-worker release path. No fake dispatch queue
+    // or Executor owner is captured by this pending task or its token.
+    observed_executor->dispatch_runner_.launch([stream, state] {
+        stream->decPendingAsyncBookkeepingAndMaybeRelease();
+        state->worker_returned.set_value();
+    });
+    const auto callback_ready = callback_entered.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(callback_ready, std::future_status::ready);
+    std::thread::id worker_id;
+    if (callback_ready == std::future_status::ready) {
+        worker_id = callback_entered.get();
+    }
+    std::promise<absl::Status> stop_result;
+    auto                       stopped = stop_result.get_future();
+    std::thread                stop_thread([engine, &stop_result] {
+        try {
+            stop_result.set_value(engine->stop());
+        } catch (...) {
+            stop_result.set_exception(std::current_exception());
+        }
+    });
+    const auto                 destructor_ready = destructor_entered.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(destructor_ready, std::future_status::ready);
+    if (destructor_ready == std::future_status::ready) {
+        const auto destructor_thread = destructor_entered.get();
+        EXPECT_EQ(destructor_thread, stop_thread.get_id());
+        EXPECT_NE(destructor_thread, worker_id);
+    }
+    // Destruction has begun, but the real AsyncRunner must still join the
+    // worker whose cancellation callback is blocked on our explicit gate.
+    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    resume_callback.set_value();
+    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    stop_thread.join();
+    EXPECT_NO_THROW({
+        const auto status = stopped.get();
+        EXPECT_TRUE(status.ok()) << status.ToString();
+    });
+    EXPECT_EQ(worker_returned.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_TRUE(state->callback_resumed.load());
+    EXPECT_EQ(state->cancellation_count.load(), 1);
+    EXPECT_EQ(engine->executor_.get(), nullptr);
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(stream->isDeferredReleasePending());
+    EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+    stream->cancelHiddenStateCapture();
+    EXPECT_EQ(state->cancellation_count.load(), 1);
 }
 
 TEST(NormalEnginePolicyTest, testEmptyBatchEarlyReturnPreservesRequiredAlignment) {

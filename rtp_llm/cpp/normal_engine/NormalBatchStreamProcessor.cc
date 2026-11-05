@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 
 namespace rtp_llm {
 
@@ -43,7 +44,13 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
             model_input_gatherer_config_.kv_cache_group_types.push_back(group.policy.group_type);
         }
     }
-    model_input_gatherer_config_.warm_up                 = warm_up;
+    model_input_gatherer_config_.warm_up = warm_up;
+    model_input_gatherer_config_.enable_hidden_state_capture =
+        !selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::TARGET,
+                                          pd_sep_config.role_type,
+                                          warm_up,
+                                          model_config.hidden_state_capture_layer_ids)
+             .empty();
     model_input_gatherer_config_.enable_detail_log       = profiling_debug_logging_config.enable_detail_log;
     model_input_gatherer_config_.enable_model_inputs_log = profiling_debug_logging_config.enable_model_inputs_log;
 

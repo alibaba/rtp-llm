@@ -214,6 +214,8 @@ class GenerateConfig(BaseModel):
     return_incremental: bool = False
     return_hidden_states: bool = False
     return_all_hidden_states: bool = False
+    # Opt in to best-effort store export during generation; zero-token prefill is unchanged.
+    export_hidden_states: bool = False
     hidden_states_cut_dim: int = 0
     normalized_hidden_states: bool = False
     select_tokens_str: List[str] = []

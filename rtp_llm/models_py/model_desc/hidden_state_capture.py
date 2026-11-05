@@ -14,6 +14,47 @@ CanonicalHiddenHook = Callable[
 ]
 
 
+_FATAL_CAPTURE_TYPES = tuple(
+    error_type
+    for error_type in (
+        MemoryError,
+        getattr(torch, "OutOfMemoryError", None),
+        getattr(torch, "AcceleratorError", None),
+        getattr(getattr(torch, "distributed", None), "DistError", None),
+    )
+    if error_type is not None
+)
+_FATAL_CAPTURE_MARKERS = (
+    "out of memory",
+    "outofmemoryerror",
+    "cuda error",
+    "cuda driver error",
+    "cuda runtime error",
+    "hip error",
+    "hip runtime error",
+    "cublas_status_alloc_failed",
+    "cudnn_status_alloc_failed",
+    "illegal memory access",
+    "illegal address",
+    "invalid device pointer",
+    "misaligned address",
+    "device-side assert",
+    "launch failure",
+    "launch failed",
+    "nccl error",
+    "collective failed",
+    "collective timed out",
+)
+
+
+def is_fatal_capture_error(error: BaseException) -> bool:
+    """Shared Python/C++ capture policy: typed fatal errors precede message fallback."""
+    if not isinstance(error, Exception) or isinstance(error, _FATAL_CAPTURE_TYPES):
+        return True
+    message = str(error).lower()
+    return any(marker in message for marker in _FATAL_CAPTURE_MARKERS)
+
+
 class CaptureContext:
     """Model-instance capture plan and forward-local capture state.
 
@@ -28,6 +69,8 @@ class CaptureContext:
         "_canonical_layer",
         "_canonical_final",
         "_captured_hidden_states",
+        "_capture_sources",
+        "_capture_error",
         "_supported",
         "_enabled",
         "_profile_enabled",
@@ -51,6 +94,10 @@ class CaptureContext:
         self._canonical_layer = canonical_layer
         self._canonical_final = canonical_final
         self._captured_hidden_states = captured_hidden_states
+        self._capture_sources: list[tuple[torch.Tensor, torch.Tensor | None]] | None = (
+            [] if enabled else None
+        )
+        self._capture_error: str | None = None
         self._supported = supported
         self._enabled = enabled
         self._profile_enabled = False
@@ -125,8 +172,18 @@ class CaptureContext:
             enabled=True,
         )
 
+    def _record_error(self, error: Exception) -> None:
+        if is_fatal_capture_error(error):
+            raise error
+        self._capture_error = f"{type(error).__name__}: {error}"
+        self._captured_hidden_states = None
+
     def wants_layer(self, layer_id: int) -> bool:
-        return self._enabled and layer_id in self._layer_slots
+        return (
+            self._enabled
+            and self._capture_error is None
+            and layer_id in self._layer_slots
+        )
 
     def capture_layer(
         self,
@@ -134,21 +191,32 @@ class CaptureContext:
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> None:
-        if not self._enabled:
+        if not self.wants_layer(layer_id):
             return
-        slot = self._layer_slots.get(layer_id)
-        if slot is None:
-            return
-        canonical_layer = self._canonical_layer
-        captured_hidden_states = self._captured_hidden_states
-        if canonical_layer is None or captured_hidden_states is None:
-            raise RuntimeError("active capture context is missing canonical hooks")
-        with (
-            self._record_function_fast(f"hidden_state_capture.layer(layer={layer_id})")
-            if self._record_function_fast is not None
-            else self._profile_noop
-        ):
-            captured_hidden_states[slot] = canonical_layer(hidden_states, residual)
+        slot = self._layer_slots[layer_id]
+        try:
+            canonical_layer = self._canonical_layer
+            captured_hidden_states = self._captured_hidden_states
+            capture_sources = self._capture_sources
+            if (
+                canonical_layer is None
+                or captured_hidden_states is None
+                or capture_sources is None
+            ):
+                raise RuntimeError("active capture context is missing canonical hooks")
+            # Canonicalization can allocate a new tensor; retain its inputs until
+            # this forward ends so graph memory planning cannot reuse them early.
+            capture_sources.append((hidden_states, residual))
+            with (
+                self._record_function_fast(
+                    f"hidden_state_capture.layer(layer={layer_id})"
+                )
+                if self._record_function_fast is not None
+                else self._profile_noop
+            ):
+                captured_hidden_states[slot] = canonical_layer(hidden_states, residual)
+        except Exception as error:
+            self._record_error(error)
 
     def finalize(
         self,
@@ -162,43 +230,55 @@ class CaptureContext:
                     "active capture context is missing canonical final hook"
                 )
             return PyModelOutputs(hidden_states)
+        if self._capture_sources is not None:
+            self._capture_sources.append((hidden_states, residual))
         final_hidden_states = canonical_final(hidden_states, residual)
         if not self._enabled:
             return PyModelOutputs(final_hidden_states)
 
-        captured_hidden_states = self._captured_hidden_states
-        if captured_hidden_states is None:
-            raise RuntimeError("active capture context has no forward-local storage")
-        missing_layer_ids = [
-            layer_id
-            for layer_id, captured in zip(
-                self._ordered_layer_ids, captured_hidden_states
-            )
-            if captured is None
-        ]
-        if missing_layer_ids:
-            raise RuntimeError(
-                "hidden-state capture did not visit configured layers "
-                f"{missing_layer_ids}"
-            )
-        with (
-            self._record_function_fast("hidden_state_capture.pack")
-            if self._record_function_fast is not None
-            else self._profile_noop
-        ):
-            packed_hidden_states = torch.cat(
-                [
-                    captured
-                    for captured in captured_hidden_states
-                    if captured is not None
+        outputs = PyModelOutputs(final_hidden_states)
+        if self._capture_error is None:
+            try:
+                captured_hidden_states = self._captured_hidden_states
+                if captured_hidden_states is None:
+                    raise RuntimeError(
+                        "active capture context has no forward-local storage"
+                    )
+                missing_layer_ids = [
+                    layer_id
+                    for layer_id, captured in zip(
+                        self._ordered_layer_ids, captured_hidden_states
+                    )
+                    if captured is None
                 ]
-                + [final_hidden_states],
-                dim=-1,
-            )
-        return PyModelOutputs(packed_hidden_states)
+                if missing_layer_ids:
+                    raise RuntimeError(
+                        "hidden-state capture did not visit configured layers "
+                        f"{missing_layer_ids}"
+                    )
+                with (
+                    self._record_function_fast("hidden_state_capture.pack")
+                    if self._record_function_fast is not None
+                    else self._profile_noop
+                ):
+                    packed_hidden_states = torch.cat(
+                        [
+                            captured
+                            for captured in captured_hidden_states
+                            if captured is not None
+                        ]
+                        + [final_hidden_states],
+                        dim=-1,
+                    )
+            except Exception as error:
+                self._record_error(error)
+            else:
+                outputs.captured_hidden_states = packed_hidden_states
+        outputs.capture_error = self._capture_error
+        return outputs
 
 
 _UNSUPPORTED_CAPTURE_CONTEXT = CaptureContext()
 
 
-__all__ = ["CanonicalHiddenHook", "CaptureContext"]
+__all__ = ["CanonicalHiddenHook", "CaptureContext", "is_fatal_capture_error"]

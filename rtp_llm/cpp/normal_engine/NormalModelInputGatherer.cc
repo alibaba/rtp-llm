@@ -919,9 +919,29 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
         report_mixed_mode_error(context_streams);
     }
 
-    auto model_input                  = allocateModelInputBuffers(stream_groups);
-    model_input.skip_lm_head          = prefill_only;
-    model_input.capture_hidden_states = prefill_only;
+    auto model_input         = allocateModelInputBuffers(stream_groups);
+    model_input.skip_lm_head = prefill_only;
+    const bool pure_context  = stream_groups.totalDecodeBatchSize() == 0 && stream_groups.totalContextBatchSize() > 0;
+
+    // Admission is request-level and must be checked before setting the batch
+    // capture bit. PyWrappedModel may only cancel reservations belonging to the
+    // model input it receives; keeping an unadmitted/errored context stream out
+    // here prevents a later side-path failure from cancelling another request's
+    // reservation in the same scheduler batch.
+    const bool all_context_capture_candidates =
+        config_.enable_hidden_state_capture && pure_context && !mixed_execution_modes && !model_input.is_fake_stream
+        && std::all_of(context_streams.begin(), context_streams.end(), [](const auto& stream) {
+               return stream->isHiddenStateCaptureCandidate() && stream->hasHiddenStateCaptureReservation();
+           });
+    // Hidden-state export and response generation are independent. Capture the
+    // complete context forward only when every participating context stream was
+    // admitted; skip_lm_head remains solely responsible for prefill-only responses.
+    model_input.capture_hidden_states = all_context_capture_candidates;
+    if (config_.enable_hidden_state_capture && !model_input.capture_hidden_states) {
+        for (const auto& stream : context_streams) {
+            stream->cancelHiddenStateCapture();
+        }
+    }
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));

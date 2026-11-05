@@ -579,6 +579,30 @@ class ModelRpcClientTest(TestCase):
             "max_new_tokens", {field.name for field, _ in config_pb.ListFields()}
         )
 
+    def test_trans_input_round_trips_export_hidden_states_without_changing_response(
+        self,
+    ):
+        self.assertFalse(
+            self._round_trip_generate_config(GenerateConfig()).export_hidden_states
+        )
+        for max_new_tokens in (0, 7):
+            for enabled in (False, True):
+                with self.subTest(max_new_tokens=max_new_tokens, enabled=enabled):
+                    config = GenerateConfig(
+                        max_new_tokens=max_new_tokens,
+                        export_hidden_states=enabled,
+                        is_streaming=True,
+                    )
+                    before = config.model_dump()
+                    config_pb = self._round_trip_generate_config(config)
+                    self.assertEqual(config.model_dump(), before)
+                    self.assertEqual(config_pb.export_hidden_states, enabled)
+                    self.assertEqual(config_pb.max_new_tokens, max_new_tokens)
+                    self.assertEqual(config_pb.prefill_only, max_new_tokens == 0)
+                    self.assertTrue(config_pb.is_streaming)
+                    self.assertFalse(config_pb.return_hidden_states)
+                    self.assertFalse(config_pb.return_all_hidden_states)
+
     def test_trans_input_round_trips_zero_max_new_tokens_with_prefill_flag(self):
         config_pb = self._round_trip_generate_config(GenerateConfig(max_new_tokens=0))
 
@@ -2146,6 +2170,7 @@ class BatchTraceCleanupTest(TestCase):
 
 
 class ModelRpcClientGrpcMetadataTest(TestCase):
+
     def _check_fetch_response_teardown(
         self, status, *, finished=True, close_at_frame=False, trace_enabled=True
     ):
@@ -2589,6 +2614,7 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
 
 
 class _FakeAux:
+
     def __init__(
         self, input_len, output_len, first_token_cost_time=8.5, cost_time=20.0
     ):

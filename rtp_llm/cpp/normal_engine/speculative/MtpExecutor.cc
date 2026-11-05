@@ -42,6 +42,10 @@
 
 namespace rtp_llm {
 
+HiddenStateCaptureReservationPtr MtpExecutor::tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) {
+    return model_ ? model_->tryReserveHiddenStateCapture(request_id, valid_tokens) : nullptr;
+}
+
 bool MtpExecutor::dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type) {
     return !prefill_cp_config.is_enabled() || role_type == RoleType::PREFILL;
 }
@@ -1201,15 +1205,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         cudaSyncAndCheck();
         releaseAllModelBuffers();
-        if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
-            deferred_capture_error.has_value()) {
-            for (const auto& stream : streams) {
-                if (!stream->hasError()) {
-                    stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *deferred_capture_error);
-                }
-            }
-            return absl::OkStatus();
-        }
+
         if (isTpRank0()) {
             return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
         }
@@ -1299,24 +1295,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (!dspark_cache_store_ok) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
-        return absl::OkStatus();
-    }
-
-    // Do not consume the target publisher error until every required draft/FFN/DP
-    // alignment forward has completed. If alignment itself fails, the publisher's
-    // sticky fail-closed state preserves the capture error for the next request.
-    if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
-        deferred_capture_error.has_value()) {
-        if (metrics_reporter_) {
-            collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
-        }
-        cudaSyncAndCheck();
-        releaseAllModelBuffers();
-        for (const auto& stream : streams) {
-            if (!stream->hasError()) {
-                stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *deferred_capture_error);
-            }
-        }
         return absl::OkStatus();
     }
 
