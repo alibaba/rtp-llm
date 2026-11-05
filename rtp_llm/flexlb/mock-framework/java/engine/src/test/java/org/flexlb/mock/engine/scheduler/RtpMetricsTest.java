@@ -18,6 +18,9 @@ class RtpMetricsTest {
         return text.lines().filter(line -> line.startsWith(name + "{") && line.contains(label))
             .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
     }
+    static double mean(String text, String name, String label) {
+        return sample(text, name + "_sum", label) / sample(text, name + "_count", label);
+    }
 
     @Test void exposesZeroCountersAndCurrentStateWithoutResetOnScrape() {
         var state = new AtomicReference<>(IDLE);
@@ -49,7 +52,7 @@ class RtpMetricsTest {
         assertEquals(110, sample(text, "rtp_llm_forward_tokens_total", "kind=\"input\""));
         assertEquals(2, sample(text, "rtp_llm_model_forward_seconds_count", ""));
         assertEquals(.03, sample(text, "rtp_llm_model_forward_seconds_sum", ""), 1e-9);
-        assertEquals(15_000, sample(text, "rtp_llm_model_forward_us", ""));
+        assertEquals(15_000, mean(text, "rtp_llm_model_forward_us", ""));
         assertEquals(10_000, sample(text, "mock_model_forward_actual_us", ""));
         assertFalse(metrics.scrape().contains("rtp_llm_model_forward_us{"));
         assertEquals(1, sample(text, "mock_model_forward_planned_us", ""));
@@ -65,15 +68,15 @@ class RtpMetricsTest {
         assertFalse(prefill.scrape().contains("rtp_llm_kv_cache_reuse_length"));
         prefill.requestFinished(RtpMetrics.Outcome.success, REQUEST, true);
         var completed = prefill.scrape();
-        assertEquals(4, sample(completed, "rtp_llm_kv_cache_reuse_length", "role=\"prefill\""));
-        assertEquals(10, sample(completed, "rtp_llm_input_token_length", "role=\"prefill\""));
+        assertEquals(4, mean(completed, "rtp_llm_kv_cache_reuse_length", "role=\"prefill\""));
+        assertEquals(10, mean(completed, "rtp_llm_input_token_length", "role=\"prefill\""));
 
         var decode = new RtpMetrics("decode", () -> IDLE);
         decode.prepared(10, 4, 100);
         decode.requestFinished(RtpMetrics.Outcome.success, REQUEST, true);
         var decoded = decode.scrape();
-        assertEquals(4, sample(decoded, "rtp_llm_kv_cache_reuse_length", "role=\"decode\""));
-        assertEquals(10, sample(decoded, "rtp_llm_input_token_length", "role=\"decode\""));
+        assertEquals(4, mean(decoded, "rtp_llm_kv_cache_reuse_length", "role=\"decode\""));
+        assertEquals(10, mean(decoded, "rtp_llm_input_token_length", "role=\"decode\""));
 
         var disabled = new RtpMetrics("decode", () -> IDLE);
         disabled.requestFinished(RtpMetrics.Outcome.success, REQUEST, false);
@@ -88,31 +91,31 @@ class RtpMetricsTest {
         metrics.recordPrefillCacheKeys(List.of(1L, 2L), 10, 4);
         clock.addAndGet(TimeUnit.MINUTES.toNanos(20));
         var first = metrics.scrape();
-        assertEquals(0, sample(first, hit, ""));
-        assertEquals(10, sample(first, total, ""));
+        assertEquals(0, sample(first, hit + "_sum", ""));
+        assertEquals(10, sample(first, total + "_sum", ""));
 
         metrics.recordPrefillCacheKeys(List.of(1L), 6, 4);
         clock.addAndGet(TimeUnit.MINUTES.toNanos(11));
-        assertEquals(4, sample(metrics.scrape(), hit, ""));
+        assertEquals(4, sample(metrics.scrape(), hit + "_sum", ""));
         metrics.recordPrefillCacheKeys(List.of(1L, 2L), 10, 4);
         clock.incrementAndGet();
-        assertEquals(4, sample(metrics.scrape(), hit, ""));
+        assertEquals(8, sample(metrics.scrape(), hit + "_sum", ""));
     }
 
     @Test void batchAndForwardMetricsFollowWorkAndProductionRole() {
         var p = new RtpMetrics("prefill", () -> IDLE);
         p.stepCompleted(new StepStats(2, 0, 12, 0, 0, 0, 0, 0, 0, 0, 0, 0));
         var prefill = p.scrape();
-        assertEquals(2, sample(prefill, "rtp_llm_context_batch_size_when_has_context", ""));
+        assertEquals(2, mean(prefill, "rtp_llm_context_batch_size_when_has_context", ""));
         assertFalse(prefill.contains("rtp_llm_generate_batch_size"));
         assertFalse(prefill.contains("rtp_llm_execute_token_size"));
         p.stepCompleted(new StepStats(2, 3, 12, 0, 0, 0, 0, 10, 10, 0, 0, 0));
-        assertEquals(3, sample(p.scrape(), "rtp_llm_generate_batch_size_when_has_context", ""));
+        assertEquals(3, mean(p.scrape(), "rtp_llm_generate_batch_size_when_has_context", ""));
 
         var d = new RtpMetrics("decode", () -> IDLE);
         d.stepCompleted(new StepStats(0, 3, 12, 5_000_000, 5_000_000, 5_000_000, 4_000_000, 6, 6, 3, 0, 5_000_000));
         var decode = d.scrape();
-        assertEquals(3, sample(decode, "rtp_llm_generate_batch_size", ""));
+        assertEquals(3, mean(decode, "rtp_llm_generate_batch_size", ""));
         assertEquals(5_000, sample(decode, "mock_model_forward_actual_us", ""));
         assertFalse(decode.contains("rtp_llm_model_forward_us"));
         assertFalse(decode.contains("rtp_llm_context_batch_size"));
@@ -123,7 +126,7 @@ class RtpMetricsTest {
         var prefill = new RtpMetrics("prefill", () -> IDLE);
         prefill.stepCompleted(new StepStats(1, 0, 12, 7_000_000, 7_000_000, 0, 0, 0, 0, 0, 0, 7_000_000));
         var text = prefill.scrape();
-        assertEquals(7000, sample(text, "rtp_llm_step_latency_us", ""));
+        assertEquals(7000, mean(text, "rtp_llm_step_latency_us", ""));
         assertFalse(text.contains("rtp_llm_sp_estimate_tpot_us"));
 
         var decode = new RtpMetrics("decode", () -> IDLE);
@@ -131,8 +134,9 @@ class RtpMetricsTest {
         assertFalse(decode.scrape().contains("rtp_llm_sp_estimate_tpot_us"));
         decode.stepCompleted(new StepStats(0, 2, 12, 9_000_000, 9_000_000, 0, 0, 2, 2, 6, 6, 12_000_000));
         text = decode.scrape();
-        assertEquals(9000, sample(text, "rtp_llm_step_latency_us", ""));
-        assertEquals(4000, sample(text, "rtp_llm_sp_estimate_tpot_us", ""));
+        assertEquals(7500, mean(text, "rtp_llm_step_latency_us", ""));
+        assertEquals(2, sample(text, "rtp_llm_step_latency_us_count", ""));
+        assertEquals(4000, mean(text, "rtp_llm_sp_estimate_tpot_us", ""));
 
     }
 
@@ -188,17 +192,31 @@ class RtpMetricsTest {
         metrics.requestFinished(RtpMetrics.Outcome.error, REQUEST, true);
         var error = metrics.scrape();
         assertEquals(1, sample(error, "rtp_llm_framework_requests_total", "outcome=\"error\""));
-        assertFalse(error.contains("rtp_llm_latency_us{"));
+        assertFalse(error.contains("rtp_llm_latency_us_count{"));
 
         metrics.requestFinished(RtpMetrics.Outcome.cancelled, REQUEST, true);
         var cancelled = metrics.scrape();
         assertEquals(1, sample(cancelled, "rtp_llm_framework_requests_total", "outcome=\"cancelled\""));
-        assertEquals(20, sample(cancelled, "rtp_llm_latency_us", ""));
-        assertEquals(4, sample(cancelled, "rtp_llm_wait_latency_us", ""));
-        assertEquals(2, sample(cancelled, "rtp_llm_stream_enqueue_to_canrun_us", ""));
-        assertEquals(3, sample(cancelled, "rtp_llm_output_token_length", ""));
-        assertFalse(cancelled.contains("rtp_llm_first_token_latency_us{"));
-        assertFalse(cancelled.contains("rtp_llm_stream_canrun_to_running_us{"));
+        assertEquals(20, mean(cancelled, "rtp_llm_latency_us", ""));
+        assertEquals(4, mean(cancelled, "rtp_llm_wait_latency_us", ""));
+        assertEquals(2, mean(cancelled, "rtp_llm_stream_enqueue_to_canrun_us", ""));
+        assertEquals(3, mean(cancelled, "rtp_llm_output_token_length", ""));
+        assertFalse(cancelled.contains("rtp_llm_first_token_latency_us_count{"));
+        assertFalse(cancelled.contains("rtp_llm_stream_canrun_to_running_us_count{"));
+    }
+
+    @Test void nativeStreamZeroRulesDoNotDiscardZeroCacheReuseObservations() {
+        var metrics = new RtpMetrics("prefill", () -> IDLE);
+        var zero = new RtpMetrics.RequestStats(1000, 0, 0, 0, 0, 10, 0, 0, 0);
+        metrics.requestFinished(RtpMetrics.Outcome.cancelled, zero, true);
+        var text = metrics.scrape();
+        for (var name : List.of("rtp_llm_wait_latency_us", "rtp_llm_first_token_latency_us",
+                "rtp_llm_stream_enqueue_to_canrun_us", "rtp_llm_stream_canrun_to_running_us",
+                "rtp_llm_output_token_length", "rtp_llm_iterate_count", "rtp_llm_reuse_length"))
+            assertFalse(text.contains(name + "_count{"), name);
+        assertEquals(1, sample(text, "rtp_llm_input_token_length_count", ""));
+        assertEquals(0, sample(text, "rtp_llm_kv_cache_reuse_length_sum", ""));
+        assertEquals(1, sample(text, "rtp_llm_kv_cache_reuse_length_count", ""));
     }
 
     @Test void decodeThroughputUsesActiveTimeAndPreservesCommittedOutputCounter() {

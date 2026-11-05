@@ -97,9 +97,9 @@ class VitTest {
                 String metrics=java.net.http.HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(java.net.URI.create((String)node.endpoints().get("metrics"))).GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString()).body();
                 assertEquals(1, sample(metrics, "py_rtp_vit_embedding_forward_rt_count"));
                 assertEquals(6, sample(metrics, "mock_vit_theoretical_forward_rt_sum"));
-                for (String metric : List.of("py_rtp_vit_qps", "py_rtp_vit_success_qps", "py_rtp_vit_image_count",
-                        "py_rtp_vit_embedding_length", "py_rtp_vit_embedding_queue_wait_rt", "py_rtp_vit_embedding_queue_size",
-                        "py_rtp_vit_embedding_cache_tokens", "py_rtp_vit_embedding_batch_size"))
+                for (String metric : List.of("py_rtp_vit_qps", "py_rtp_vit_success_qps", "py_rtp_vit_image_count_sum",
+                        "py_rtp_vit_embedding_length_sum", "py_rtp_vit_embedding_queue_wait_rt_sum", "py_rtp_vit_embedding_queue_size",
+                        "py_rtp_vit_embedding_cache_tokens", "py_rtp_vit_embedding_batch_size_sum"))
                     assertTrue(Double.isFinite(sample(metrics, metric)), metrics);
                 assertFalse(metrics.contains("mock_engine_requests"));
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }

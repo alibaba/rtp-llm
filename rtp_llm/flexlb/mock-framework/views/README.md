@@ -70,3 +70,9 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 | ViT 缓存 | `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps`、`tokens` / `bytes` | GPU+CPU 逻辑驻留合计，不能作为真实 GPU/JVM 物理占用 |
 
 新增事件 Gauge 用采集窗口均值而非只保留最后一个事件；无事件时不发耗时样本。`_sum` / `_count` 为本地累计查询辅助量。QPS 按实际窗口秒数换算，空闲为零。它们与 KMonitor 的固定上报周期并非逐点相同；共享 JVM 不能导出可信的单 Engine CPU/堆/GPU 利用率，资源面板继续留空。
+
+## 事件指标的权重
+
+事件类均值统一由每个实例的累计 `_sum`、`_count` 计算。All 时分别汇总各实例增量再相除；选择具体实例时保留 instance 分组，用同一公式。禁止先计算各实例均值再 avg，也不使用已经删除的裸事件 Gauge。需要 token 总量或命中率的面板使用 `_sum` 增量，不能把样本数当成 token 数。
+
+原来使用 max 聚合事件窗口均值的面板，明确标为“实例均值最大值”，展示各实例在查询区间内事件均值的最大值；这不是单个事件峰值或 P99。每请求图片数和 Embedding 长度改为请求加权均值，不再把各实例均值相加。状态 Gauge、周期 TPS/QPS、Client Histogram 保持各自口径。线上 KMonitor 大盘不修改。

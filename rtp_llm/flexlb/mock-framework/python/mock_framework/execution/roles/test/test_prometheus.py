@@ -127,6 +127,15 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
                 assert completed.returncode == 0, completed.stderr
             await asyncio.to_thread(wait_until, lambda: (samples := query('sum(rtp_llm_forward_tokens_total{job="mock",kind="output"})'))
                                     and float(samples[0]['value'][1]) == 12)
+            await asyncio.to_thread(wait_until, lambda: (samples := query('sum(rtp_llm_input_token_length_count{job="mock"})'))
+                                    and float(samples[0]['value'][1]) == 12)
+            # Unequal worker populations: 2 requests of length 5 and 10 of length 9.
+            # The population mean is 100/12, not the mean of worker means (5+9)/2.
+            weighted = query('sum(rtp_llm_input_token_length_sum{job="mock"}) / sum(rtp_llm_input_token_length_count{job="mock"})')
+            assert math.isclose(float(weighted[0]['value'][1]), 100 / 12)
+            per_instance = query('rtp_llm_input_token_length_sum{job="mock"} / rtp_llm_input_token_length_count{job="mock"}')
+            assert sorted(float(sample['value'][1]) for sample in per_instance) == [5, 9]
+            assert query('rtp_llm_input_token_length{job="mock"}') == []
             native = query('rtp_llm_kv_cache_left_seq{job="mock"}')
             assert len(native) == 2 and all(float(row['value'][1]) >= 0 for row in native)
             assert len(query('rtp_llm_wait_stream_size{job="mock"}')) == 2

@@ -296,11 +296,11 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 | rtp_llm_host_kv_tokens | Gauge | 本地 Host total/free token 容量，与 Device 分开。 |
 | rtp_llm_cache_lookup_tokens_total / rtp_llm_cache_hit_tokens_total | Counter | 分配时实际输入/历史命中 token，取消不撤销已发生查找。 |
 | rtp_llm_forward_tokens_total | Counter，kind=input/compute/output | 完成 Forward 的 token；input/compute 汇总本批全部执行成员，output 只计有效提交。全部取消的 Forward 不补完成样本。 |
-| rtp_llm_model_forward_us | Gauge | Prefill 完成 Forward 的采集窗口均值，微秒。当前生产 MTP 兼容口径下 Decode 缺席。 |
-| rtp_llm_step_latency_us | Gauge | P/D 完成的非空执行步耗时，微秒，从调度返回到处理完本轮输出。 |
+| rtp_llm_model_forward_us | 事件：Prometheus Summary / KMonitor Gauge | Prefill 每次完成 Forward 的原始耗时样本，微秒。当前生产 MTP 兼容口径下 Decode 缺席。 |
+| rtp_llm_step_latency_us | 事件：Prometheus Summary / KMonitor Gauge | P/D 完成的非空执行步耗时，微秒，从调度返回到处理完本轮输出。 |
 | rtp_llm_{context,generate,total}_tps | Gauge | 有效执行时间内的 token/s。P 的 context 计未命中计算量，with_cache 计输入；D 计实际提交的输出量。 |
-| rtp_llm_sp_estimate_tpot_us | Gauge | Decode 本轮执行耗时 ÷（模拟验收 token 总数 / 本轮参与 stream 数），微秒；不使用停止截断后的交付量。 |
-| rtp_llm_gather_model_input_us | Gauge | P/D 构造批输入的耗时，微秒；不含选批、KV 准备和模拟 Forward。 |
+| rtp_llm_sp_estimate_tpot_us | 事件：Prometheus Summary / KMonitor Gauge | Decode 本轮执行耗时 ÷（模拟验收 token 总数 / 本轮参与 stream 数），微秒；不使用停止截断后的交付量。 |
+| rtp_llm_gather_model_input_us | 事件：Prometheus Summary / KMonitor Gauge | P/D 构造批输入的耗时，微秒；不含选批、KV 准备和模拟 Forward。 |
 | mock_client_tpot_seconds | Histogram | 成功请求收到首尾 token 的时间差，除以首 token 后的 token 数。单 token 请求不采样。 |
 | mock_model_forward_actual_us | Gauge | P/D 最近一次完成 Forward 的模拟实际耗时，微秒，用于与计划值对照。 |
 | mock_model_forward_planned_us | Gauge | 同一个完成 Forward 的计划耗时，微秒，包含公式和可选噪声。 |
@@ -320,15 +320,15 @@ P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长�
 
 ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。实际读取时提供 rtp_llm_vit_image_fetch_rt_us（μs）；成功完成图片准备后采样总耗时、下载及其余耗时（ms）。其余耗时包括读尺寸、内容摘要和几何计算。跳过读取时这些指标无样本。py_rtp_vit_preprocess_queue_size 是尚未完成准备的工作数（含排队和执行），py_rtp_vit_embedding_rt 仅计成功工作的就绪排队加 Forward，py_rtp_vit_request_rt 覆盖阻塞媒体调用的成功/失败全程，包括缓存命中等待但不含 RPC 传输和输出编码。未实现的像素预处理和 CUDA Graph 指标不补零。详见 [指标覆盖与边界](../views/README.md)。
 
-新增事件 Gauge 为采集窗口均值，无事件的窗口不发耗时样本；其 `_sum` / `_count` 辅助累计量不清零。QPS 使用真实窗口秒数换算，空闲归零；窗口与 KMonitor 固定周期不保证逐点相同。原有 Forward 最近值与 Histogram 口径保持不变。 下表的 `engine/decode/tps` 用于衡量按墙钟计的已提交输出 token 速率。
+事件指标统一通过 EventMetrics.observe 记录。Prometheus 使用无客户端分位数的 Summary，导出累计 `_sum` / `_count`，不再导出同名窗口均值 Gauge；抓取和空闲期间不清零。单实例和跨实例均值均使用 sum/count 的区间增量比值，跨实例先分别汇总，再相除。KMonitor 在事件发生时以原名逐样本提交，由 SDK 保留样本数、总和及极值，不再从周期快照提交事件均值或累计辅助量。SDK 出口在构造时选定，没有全局 observer 或原始样本队列；业务埋点不区分 SDK。周期线程只负责状态和已计算的速率。Prometheus 的事件 QPS 仍使用真实窗口秒数换算，KMonitor 的事件 QPS 提交原始计数；已计算的 TPS/QPS 快照保持 Gauge。原有 Forward 最近值与 Histogram 口径保持不变。 下表的 `engine/decode/tps` 用于衡量按墙钟计的已提交输出 token 速率。
 
-累计量预建 0，抓取不清零；分母为 0 不补比率。以下查询在 Python `interfaces/metrics.py` 实现，直接调用本次托管 Prometheus：
+累计量预建 0，抓取不清零；分母为 0 不补比率。以下查询在 Python `execution/step/` 的对应指标接口中实现，直接调用本次托管 Prometheus：
 
 | 接口 | 口径 |
 | --- | --- |
 | engine/cache/hit_rate | P 历史命中 token 增量／输入 token 增量，token 加权；可选 targets。 |
-| engine/prefill/tps | P 实际计算 token 增量／含实际计算的 Forward 耗时增量。 |
-| engine/prefill/tps_with_cache | P 输入 token 增量／有输入的 Forward 耗时增量，输入含命中。 |
+| engine/prefill/tps | 原生 rtp_llm_context_tps Gauge 的实例区间均值之和。 |
+| engine/prefill/tps_with_cache | 原生 rtp_llm_context_tps_with_cache Gauge 的实例区间均值之和，输入含命中。 |
 | engine/decode/tps | D 完成 Forward 输出 token 增量／墙钟时间。 |
 | client/success_rate | 必填 range 区间内成功终态计数增量／全部终态计数增量，先对各 Client 算增量再聚合；可选 targets。 |
 | prometheus/query | 固定 query_time 的一次 scalar 或 float instant vector，保留标签、数值和 sample_time。 |
@@ -395,4 +395,6 @@ real 的依据为 `cpp/engine_base/stream/GenerateStream.cc`、`GenerateStateMac
 | rtp_llm_kv_cache_load_ref_blocks / store_ref_blocks / active_blocks | blocks，Device 池拉取当前状态；统计去重块数，不是引用次数；取消请求后未停止的 I/O 仍占用引用。沿用 pool_name/tier 标签。 |
 | mock_remote_cache_in_flight / mock_remote_cache_rejected_qps | 次、次/s，operation=read/write；Mock 自身逻辑在途任务、未实际调用后端的任务。无完全对应的 native 统计边界，所以保留 mock 前缀。 |
 
-延迟/长度 native Gauge 使用采集窗口内事件平均值，QPS 使用事件数/窗口墙钟；辅助 _sum/_count 保留跨采集累计值，空闲窗口不重放旧延迟。没有真实 SDK、StartWrite/FinishWrite 分段或 payload 时，不导出对应 SDK、写会话分段、字节或带宽数据。指标回调失败不改变 I/O 结果。
+延迟/长度事件沿用上述 EventMetrics 规则；Prometheus 的累计 sum/count 保留事件权重，KMonitor 接收原始样本。没有真实 SDK、StartWrite/FinishWrite 分段或 payload 时，不导出对应 SDK、写会话分段、字节或带宽数据。指标回调失败不改变 I/O 结果。
+
+请求类零值规则对齐 Real 的 REPORT_GAUGE：等待/首 token 耗时、输出长度、迭代次数和 reuse_length 为零时不产生样本。KV 复用类使用直接 Report，kv_cache_reuse_length 等仍包含零命中样本；不能统一过滤零值。

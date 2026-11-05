@@ -8,6 +8,8 @@ import java.util.Map;
 public interface MetricReporter {
     void initialize(Map<String, String> environment);
     default long intervalMillis() { return 1000; }
-    /** Values are already sampled: QPS values are rates, counters are cumulative. */
+    /** An original event sample; names ending in _qps carry counts, not precomputed rates. */
+    void observe(String name, Map<String, String> tags, double value);
+    /** Periodic state/rate snapshots; Prometheus-only counter and histogram helpers are ignored. */
     void report(List<MetricFamilySamples> snapshot);
 }

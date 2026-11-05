@@ -50,20 +50,34 @@ public final class KMonitorReporter implements MetricReporter {
 
     @Override public long intervalMillis() { return interval; }
 
+    public KMonitorReporter() { }
+    KMonitorReporter(KMonitor monitor) { this.monitor = Objects.requireNonNull(monitor); }
+
+    private void register(String name, MetricType type) {
+        if (registered.add(name) && !monitor.register(name, type)) {
+            registered.remove(name);
+            throw new IllegalStateException("Cannot register KMonitor metric: " + name);
+        }
+    }
+
+    @Override public synchronized void observe(String name, Map<String, String> tags, double value) {
+        if (monitor == null) throw new IllegalStateException("KMonitor reporter is not initialized");
+        register(name, name.endsWith("_qps") ? MetricType.QPS : MetricType.GAUGE);
+        monitor.report(name, new ImmutableMetricTags(tags), value);
+    }
+
     @Override public synchronized void report(List<MetricFamilySamples> snapshot) {
         if (monitor == null) throw new IllegalStateException("KMonitor reporter is not initialized");
-        for (var family : snapshot) for (var sample : family.samples) {
-            if (!Double.isFinite(sample.value)) continue;
-            if (registered.add(sample.name)) {
-                // These are completed window snapshots, not raw QPS events or Histogram observations.
-                if (!monitor.register(sample.name, MetricType.GAUGE)) {
-                    registered.remove(sample.name);
-                    throw new IllegalStateException("Cannot register KMonitor metric: " + sample.name);
-                }
+        for (var family : snapshot) {
+            // Prometheus counters/histograms are local query helpers, not native Gauge observations.
+            if (family.type != io.prometheus.client.Collector.Type.GAUGE) continue;
+            for (var sample : family.samples) {
+                if (!Double.isFinite(sample.value)) continue;
+                register(sample.name, MetricType.GAUGE);
+                var tags = new HashMap<String,String>();
+                for (int i = 0; i < sample.labelNames.size(); i++) tags.put(sample.labelNames.get(i), sample.labelValues.get(i));
+                monitor.report(sample.name, new ImmutableMetricTags(tags), sample.value);
             }
-            var tags = new HashMap<String,String>();
-            for (int i = 0; i < sample.labelNames.size(); i++) tags.put(sample.labelNames.get(i), sample.labelValues.get(i));
-            monitor.report(sample.name, new ImmutableMetricTags(tags), sample.value);
         }
     }
 }

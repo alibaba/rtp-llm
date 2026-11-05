@@ -2,6 +2,8 @@
 
 唯一线上来源：[Whale-LLM-New【禁止修改】v514](https://grafana.alibaba-inc.com/d/iZ5Q_81nz)。本清单记录默认 View 使用的原面板；不再使用独立 FlexLB 旧大盘。
 
+事件类原指标名在本表表示逻辑指标：Prometheus 使用该名的 `_sum` / `_count` 累计系列计算事件加权均值，KMonitor 使用原名提交原始样本；不再导出裸事件窗口均值 Gauge。
+
 状态表示源码中是否有对应导出，不表示每次实验必有样本。待埋点项仅保留查询/说明，不增加虚假指标；资源项因共享 JVM 归属未接线，暂不绑定每 Engine 查询。
 
 P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指标只在模拟 draft 验收的执行步出现。P/D KV 仅展示本地 Device 池的块数、比例和事件。PD 仅保留 Mock 已模拟的流状态和逻辑加载耗时，真实 CacheStore 传输阶段没有样本。ViT 的图片准备指标仅在成功完成实际 URL 路径时采样。
