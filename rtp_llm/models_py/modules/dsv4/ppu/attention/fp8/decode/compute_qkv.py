@@ -6,7 +6,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
 )
 from typing import TYPE_CHECKING, NamedTuple
 import torch
-from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
+from rtp_llm.models_py.kernels.ppu.attention.ppu_rmsnorm_rope import fused_rmsnorm_rope
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import AttentionFP8

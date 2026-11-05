@@ -9,6 +9,7 @@ import triton.language as tl
 def _hc_post_sum(
     R, S, RES, POST, COMB, OUT, D: tl.constexpr, BLOCK: tl.constexpr,
     FUSE_SUM: tl.constexpr = True,
+    REFERENCE_ORDER: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -25,13 +26,21 @@ def _hc_post_sum(
     mix = tl.load(COMB + row * 16 + output_lane)
     # Match TileLang's first contraction: post * summed + round(mix0 * res0).
     # Reversing the FMA operands changes BF16 bits near cancellation.
-    acc = tl.fma(post[:, None], summed[None, :], mix[:, None] * first[None, :])
+    if REFERENCE_ORDER:
+        acc = mix[:, None] * first[None, :]
+    else:
+        acc = tl.fma(post[:, None], summed[None, :], mix[:, None] * first[None, :])
     for lane in tl.static_range(1, 4):
         residual = tl.load(RES + row * 4 * D + lane * D + col, col < D, 0).to(
             tl.float32
         )
         mix = tl.load(COMB + row * 16 + lane * 4 + output_lane)
-        acc = tl.fma(mix[:, None], residual[None, :], acc)
+        if REFERENCE_ORDER:
+            acc = acc + mix[:, None] * residual[None, :]
+        else:
+            acc = tl.fma(mix[:, None], residual[None, :], acc)
+    if REFERENCE_ORDER:
+        acc = post[:, None] * summed[None, :] + acc
     tl.store(
         OUT + row * 4 * D + output_lane[:, None] * D + col[None, :],
         acc,

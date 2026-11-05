@@ -443,3 +443,13 @@ class PpuV4Transformer(V4Transformer):
         if normalized.shape[-1] == self.args.dim:
             return normalized
         return tp_gather_hidden(normalized, tp_size=self.args.tp_size)
+
+    def _decode_norm(self, x: torch.Tensor) -> torch.Tensor:
+        weight = self.norm.weight.data
+        if x.shape[-1] == self.args.dim and weight.numel() == self.args.dim:
+            # Keep the reference FP32 reduction and affine multiply before casting.
+            hidden = x.float()
+            variance = hidden.square().mean(-1, keepdim=True)
+            scaled = hidden * torch.rsqrt(variance + self.norm.variance_epsilon)
+            return (weight.float() * scaled).to(x.dtype)
+        return self._norm(x)

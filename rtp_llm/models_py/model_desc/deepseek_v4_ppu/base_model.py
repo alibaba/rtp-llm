@@ -239,7 +239,10 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
         torch.set_default_dtype(torch.bfloat16)
         try:
             with torch.device("meta"):
-                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+                self.v4 = self._platform_provider.build_transformer(
+                    V4Transformer, self._v4_args, self.weight,
+                    platform_provider=self._platform_provider,
+                )
         finally:
             torch.set_default_dtype(prev_dtype)
 
@@ -509,8 +512,14 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
                 if getattr(_moe_layer, "strategy_name", None) in (
                     "mega_moe",
                     "mega_moe_se",
+                    "ppu_mega_moe_fp4",
+                    "ppu_mega_moe_a8",
                 ):
-                    _executor = _moe_layer.fused_moe.fused_experts
+                    _executor = (
+                        _moe_layer._strategy
+                        if _moe_layer.strategy_name.startswith("ppu_")
+                        else _moe_layer.fused_moe.fused_experts
+                    )
                     if _dist.is_available() and _dist.is_initialized():
                         _dist.barrier()
                     _cfg = _executor.cfg
@@ -677,11 +686,19 @@ class DeepSeekV4Model(_BaseDeepSeekV4Model):
                     device=_jit_device,
                 )
                 _mhc_prenorm_shapes = _collect_dsv4_mhc_prenorm_shapes(self.v4)
-                warmup_mhc_prenorm_gemm_jit(
-                    _mhc_prenorm_shapes,
-                    max_m=_dense_gemm_max_m,
-                    device=_jit_device,
-                )
+                if (self._execution_options or {}).get("DSV4_MHC_PRE_GEMM_BACKEND") == "fp32":
+                    # The shared warmup does not know the PPU FP32 adapter.
+                    for layer in self.v4.layers:
+                        for unit, norm in ((layer.attn_hc, layer.attn_norm), (layer.ffn_hc, layer.ffn_norm)):
+                            if unit is not None:
+                                dummy = torch.zeros((1, 1, unit.hc_mult, unit.dim), device=_jit_device, dtype=torch.bfloat16)
+                                unit.pre_norm(dummy, norm, tp_size=unit.tp_size, tp_rank=unit.tp_rank)
+                else:
+                    warmup_mhc_prenorm_gemm_jit(
+                        _mhc_prenorm_shapes,
+                        max_m=_dense_gemm_max_m,
+                        device=_jit_device,
+                    )
                 _mhc_head_fused_shapes = _collect_dsv4_mhc_head_fused_shapes(self.v4)
                 warmup_mhc_head_fused_jit(
                     _mhc_head_fused_shapes,

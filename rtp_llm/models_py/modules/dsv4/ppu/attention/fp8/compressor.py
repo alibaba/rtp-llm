@@ -131,21 +131,22 @@ class CompressorFP8(_BaseCompressorFP8):
             KV_ENTRY_BYTES if head_dim == KV_HEAD_DIM else INDEXER_ENTRY_BYTES
         )
 
-        # ape stays FP32. wkv/wgate are stored as BF16, while the fused
-        # projection below uses BF16 operands with FP32 accumulation/output.
+        # Main compressed KV follows the native separate FP32 projections.
+        # The FP4 indexer retains its packed BF16 projection contract.
         # Register ape as a non-trainable Parameter so .to(device) follows the
         # module.
         self.ape = nn.Parameter(
             compressor_weights["ape"].float().contiguous(), requires_grad=False
         )
+        projection_dtype = torch.float32 if head_dim == KV_HEAD_DIM else torch.bfloat16
         self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
         self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
         with torch.no_grad():
             self.wkv.weight = nn.Parameter(
-                compressor_weights["wkv"].to(torch.bfloat16), requires_grad=False
+                compressor_weights["wkv"].to(projection_dtype), requires_grad=False
             )
             self.wgate.weight = nn.Parameter(
-                compressor_weights["wgate"].to(torch.bfloat16), requires_grad=False
+                compressor_weights["wgate"].to(projection_dtype), requires_grad=False
             )
         self.norm = _CompressorNorm(head_dim)
         self.norm.weight = nn.Parameter(
@@ -153,10 +154,10 @@ class CompressorFP8(_BaseCompressorFP8):
             requires_grad=False,
         )
 
-        # Fuse wkv + wgate into one bf16 weight matrix; saves one
-        # GEMM launch per compressor decode call (~92/step at bs16).
+        # Only the FP4 indexer consumes a fused BF16 weight matrix.
         self._wkv_wgate_fused: Optional[torch.Tensor] = None
-        self._fuse_wkv_wgate(coff)
+        if head_dim != KV_HEAD_DIM:
+            self._fuse_wkv_wgate(coff)
 
         # Legacy attribute kept for attention.py's cmp_T fallback (line 1583).
         self._kv_cache_t: int = 0
@@ -174,6 +175,23 @@ class CompressorFP8(_BaseCompressorFP8):
         # _forward_prefill_body uses it as the rec name root. None / empty
         # string suppresses recording.
         self._dbg_prefix: Optional[str] = None
+
+    def _project_raw(self, x: torch.Tensor) -> torch.Tensor:
+        if self.head_dim == KV_HEAD_DIM:
+            # Fusing these GEMMs changes rounding before compressed KV quantization.
+            x = x.float()
+            if x.ndim == 3 and x.shape[1] == 6:
+                # Verify projections persist into later C4 windows. Match the
+                # native token GEMMs before that state crosses a BF16 boundary.
+                flat = x.reshape(-1, x.shape[-1])
+                return torch.cat(
+                    [torch.cat((self.wkv(row), self.wgate(row)), dim=-1)
+                     for row in flat.split(1)], dim=0
+                ).reshape(*x.shape[:-1], 2 * self.coff * self.head_dim)
+            return torch.cat((self.wkv(x), self.wgate(x)), dim=-1)
+        return _linear_bf16_bf16_fp32(
+            x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
+        )
 
     def _launch(
         self,
@@ -340,9 +358,7 @@ class CompressorFP8(_BaseCompressorFP8):
 
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(
-                x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
-            )
+            fused_out = self._project_raw(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
@@ -443,9 +459,7 @@ class CompressorFP8(_BaseCompressorFP8):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = _linear_bf16_bf16_fp32(
-                x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
-            )
+            fused_out = self._project_raw(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
@@ -542,9 +556,13 @@ class CompressorFP8(_BaseCompressorFP8):
 
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
-        fused_out = _linear_bf16_bf16_fp32(
-            x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
-        )
+        if T > 1 and self.compress_ratio in (4, 128) and self.head_dim == KV_HEAD_DIM:
+            # Each projected token can become history for a later compressed KV entry.
+            flat = x.reshape(T, x.shape[-1])
+            fused_out = torch.cat([self._project_raw(row) for row in flat.split(1)], dim=0)
+            fused_out = fused_out.reshape(bsz, q_len, -1)
+        else:
+            fused_out = self._project_raw(x)
         kv, score = fused_out[..., :out_dim], fused_out[..., out_dim:]
 
         # ``kv`` and ``score`` are last-dim slices of ``fused_out``. Keep

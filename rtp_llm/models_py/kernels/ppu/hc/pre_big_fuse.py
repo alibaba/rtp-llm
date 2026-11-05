@@ -138,7 +138,9 @@ def mhc_pre_big_fuse(
         raise ValueError("HC prenorm_output must be partials or reduced")
     if prenorm_output == "reduced" and prenorm_gemm is None:
         raise ValueError("Reduced HC output requires an explicit prenorm adapter")
-    deepgemm_backend = backend in ("deepgemm", "deepgemm_deterministic")
+    deepgemm_backend = backend in ("deepgemm", "deepgemm_deterministic", "fp32")
+    if backend == "fp32" and prenorm_gemm is None:
+        raise ValueError("FP32 HC requires an explicit prenorm adapter")
     block_k = 64
     block_m = 64
     n_splits = (
@@ -158,7 +160,7 @@ def mhc_pre_big_fuse(
     )
 
     if prenorm_partials is not None:
-        if backend != "deepgemm_deterministic":
+        if backend not in ("deepgemm_deterministic", "fp32"):
             raise ValueError("Exposed HC partials require deterministic prenorm")
         gemm_out_mul, gemm_out_sqrsum = prenorm_partials(
             residual_flat.view(num_tokens, mhc_hidden_size), fn_flat
@@ -247,6 +249,7 @@ def mhc_pre_big_fuse(
         stabilize_mixes=stabilize_atomic,
         stabilize_comb=stabilize_atomic,
         parallel_reduction=prenorm_partials is not None,
+        reference_order=backend == "fp32",
         fuse_norm=norm_weight is not None,
         norm_eps=norm_eps if norm_eps is not None else 1e-6,
     )(

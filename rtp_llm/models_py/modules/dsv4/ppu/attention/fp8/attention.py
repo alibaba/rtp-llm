@@ -119,7 +119,85 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor, *, platform_provider=None):
     return platform_provider.build_fp8_linear(_default_factory, w, s)
 
 class AttentionFP8(_BaseAttentionFP8):
+    def init_rope_cache(self, device=None):
+        if device is None:
+            return _BaseAttentionFP8.init_rope_cache(self)
+        # CPU-generated phases can cross BF16 rounding boundaries on PPU.
+        with torch.device(device):
+            return _BaseAttentionFP8.init_rope_cache(self, device=device)
+
+    def _get_fp8_decode_op(self):
+        if self._fp8_decode_op is None:
+            from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_flash_mla import PpuSparseAttnV4DecodeFp8Op
+
+            self._fp8_decode_op = PpuSparseAttnV4DecodeFp8Op(
+                self.n_heads, self.head_dim, self.softmax_scale
+            )
+        return self._fp8_decode_op
+
+    def _prefill_output_all_reduce(self, out):
+        from rtp_llm.models_py.modules.dsv4.ppu.communication import reduce_tp_sum
+
+        if self.tp_size > 1 and not getattr(self.wo_a, "bf16_input", False):
+            with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
+                reduce_tp_sum(out, tp_size=self.tp_size)
+
     prefill_fast_protocol = "dsv4.fp8-attention.v1"
+
+    def _prefill_compute_qkv(self, x, common, shared_input_quant=None):
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_rmsnorm_rope import fused_rmsnorm_rope
+
+        if common.cp_on:
+            raise ValueError("PPU DSV4 prefill requires CP disabled")
+        x_3d = x.unsqueeze(0)
+        if self._can_reuse_qkv_input_quant():
+            if shared_input_quant is None:
+                shared_input_quant = self.wq_a.quantize_input(x)
+        else:
+            shared_input_quant = None
+        with record_function_range("dsv4.fp8.attn.qkv.q_lora_a_norm"):
+            q_proj = (
+                self._lin(self.wq_a, x_3d) if shared_input_quant is None
+                else self._lin_from_shared_quant(self.wq_a, shared_input_quant, x_3d.shape)
+            )
+            # Preserve the native full-input FP32 reduction and BF16 boundary.
+            q_proj_fp32 = q_proj.float()
+            q_inv_rms = torch.rsqrt(
+                q_proj_fp32.square().mean(-1, keepdim=True) + self.eps
+            )
+            qr = (self.q_norm.float() * (q_proj_fp32 * q_inv_rms)).to(q_proj.dtype)
+            del q_proj_fp32, q_inv_rms
+        with record_function_range("dsv4.fp8.attn.qkv.kv_proj_rope"):
+            kv_in = (
+                self._lin(self.wkv, x_3d) if shared_input_quant is None
+                else self._lin_from_shared_quant(self.wkv, shared_input_quant, x_3d.shape)
+            )
+            kv = fused_rmsnorm_rope(
+                kv_in, self.kv_norm, common.freqs_cis, common.rd, eps=self.eps
+            )
+            if getattr(self, "_prefill_kv_qat", False):
+                from rtp_llm.models_py.kernels.ppu.attention.ppu_kv_qat import quantize_dequantize_swa_kv_
+
+                quantize_dequantize_swa_kv_(kv)
+        return PrefillQKV(qr=qr.squeeze(0), q=None, kv_full=kv.squeeze(0))
+
+    def _materialize_prefill_q(self, qkv, common):
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_rmsnorm_rope import fused_rmsnorm_rope
+
+        if qkv.q is not None:
+            return qkv
+        assert common.workspace is not None, "prefill workspace not bound"
+        seqlen = qkv.qr.shape[0]
+        with record_function_range("dsv4.fp8.attn.qkv.q_lora_b_rope"):
+            q_out = common.workspace.prefill_q(seqlen)
+            q_flat = self._lin(
+                self.wq_b, qkv.qr.unsqueeze(0),
+                out=q_out.view(seqlen, self.n_heads * self.head_dim),
+            )
+            assert q_flat.data_ptr() == q_out.data_ptr()
+            q = q_flat.view(1, seqlen, self.n_heads, self.head_dim)
+            fused_rmsnorm_rope(q, None, common.freqs_cis, common.rd, eps=self.eps, out=q)
+        return qkv._replace(q=q.squeeze(0))
 
     def __init__(
         self,
@@ -500,6 +578,8 @@ class AttentionFP8(_BaseAttentionFP8):
         freqs_cis: torch.Tensor,
         B: int,
         S: int,
+        *,
+        prefill: bool = False,
     ) -> torch.Tensor:
         """Inverse-RoPE then invoke a provider-owned grouped FP8 projection."""
         assert self.wo_a is not None
@@ -514,7 +594,7 @@ class AttentionFP8(_BaseAttentionFP8):
                 inverse=True,
             )
         grouped = o_4d.reshape(B, S, self.n_groups, -1)
-        return self.wo_a(grouped)
+        return self.wo_a(grouped, prefill=True) if prefill else self.wo_a(grouped)
 
     def _forward_decode_body(
         self,
@@ -1500,6 +1580,7 @@ class AttentionFP8(_BaseAttentionFP8):
                         M=wm.M,
                         N=wm.N,
                         flash_mla_indices=True,
+                        swa_first=True,
                     )
 
             post_gather_stream = None
@@ -1778,7 +1859,7 @@ class AttentionFP8(_BaseAttentionFP8):
         profile_name: str,
         out: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Run sparse prefill attention in Q chunks and project immediately.
+        """Run sparse Prefill in Q chunks without allocating a full O buffer.
 
         ``q`` is the live view of the per-forward ``PrefillWorkspace`` Q
         region. Keeping the chunking here (instead of copying Q into another
@@ -1788,11 +1869,10 @@ class AttentionFP8(_BaseAttentionFP8):
         topk-length and RoPE frequencies on the same boundaries is equivalent
         to a full launch.
 
-        The projected result is written directly into the final contiguous
-        ``[T, dim]`` tensor. The unprojected full ``[T, H, D]`` output is never
-        allocated. A caller may preallocate ``out`` to overlap its allocation
-        with preceding GPU work; the same tensor is returned after an in-place
-        all-reduce. The caller must keep ``kv`` alive until this method returns.
+        BF16 wo_a must retain the full Prefill M for native rounding. Store
+        each consumed chunk's O back into Q, then project once. FP8 wo_a keeps
+        streaming projection. A caller may preallocate the final ``[T, dim]``
+        output; the same tensor is returned. Keep KV alive until return.
         """
         assert prefill_workspace is not None, "prefill workspace not bound"
         s_q = int(q.shape[0])
@@ -1823,9 +1903,15 @@ class AttentionFP8(_BaseAttentionFP8):
             int(freqs_cis.shape[0]) == s_q
         ), f"RoPE rows ({freqs_cis.shape[0]}) != Q rows ({s_q})"
 
-        from rtp_llm.models_py.utils.flash_mla_legacy import (
-            flash_mla_sparse_fwd,  # type: ignore[import-not-found]
-        )
+        bf16_projection = getattr(self.wo_a, "bf16_input", False)
+        if bf16_projection:
+            from rtp_llm.models_py.kernels.ppu.attention.ppu_sparse_attention import (
+                forward_prefill as flash_mla_sparse_fwd,
+            )
+        else:
+            from rtp_llm.models_py.utils.flash_mla_legacy import (
+                flash_mla_sparse_fwd,  # type: ignore[import-not-found]
+            )
 
         chunk_rows = min(_FLASH_MLA_SPARSE_Q_CHUNK, s_q)
         if out is None:
@@ -1856,14 +1942,20 @@ class AttentionFP8(_BaseAttentionFP8):
                 )
             if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
                 _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_flash_out", o_part)
-            with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                self._prefill_output_proj_into(
-                    o_part,
-                    freqs_cis[start:end],
-                    out=out[start:end, :],
-                )
+            if bf16_projection:
+                q[start:end].copy_(o_part)
+            else:
+                with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                    self._prefill_output_proj_into(
+                        o_part,
+                        freqs_cis[start:end],
+                        out=out[start:end, :],
+                    )
             dispose_tensor(o_part)
 
+        if bf16_projection:
+            with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
+                self._prefill_output_proj_into(q, freqs_cis, out=out)
         self._prefill_output_all_reduce(out)
         if self.compress_ratio == 4 and _rt.should_record_layer(self.layer_id):
             _rt.record_if_level(2, f"L{self.layer_id:02d}_csa_projected_out", out)
@@ -1886,7 +1978,10 @@ class AttentionFP8(_BaseAttentionFP8):
         seqlen = o_3d.shape[0]
         if self.wo_a is not None:
             with record_function_range("dsv4.fp8.attn.out.provider_wo_a"):
-                o_proj = self._wo_a_from_bf16(o_3d, freqs_cis, 1, seqlen)
+                if getattr(self.wo_a, "bf16_input", False):
+                    o_proj = self._wo_a_from_bf16(o_3d, freqs_cis, 1, seqlen, prefill=True)
+                else:
+                    o_proj = self._wo_a_from_bf16(o_3d, freqs_cis, 1, seqlen)
         else:
             with record_function_range("dsv4.fp8.attn.out.fused_inv_rope_quant"):
                 o_fp8, o_scale = fused_inv_rope_fp8_quant(
@@ -1901,9 +1996,28 @@ class AttentionFP8(_BaseAttentionFP8):
                 o_proj = self._wo_a_einsum_from_fp8(o_fp8, o_scale, 1, seqlen)
         with record_function_range("dsv4.fp8.attn.out.wo_b"):
             wo_b_in = o_proj.flatten(2).reshape(seqlen, -1)
-            self.wo_b(wo_b_in, out=out)
+            if self.tp_size > 1 and getattr(self.wo_a, "bf16_input", False):
+                from deep_gemm.jit_kernels.gemm_fp8_fp32 import gemm_fp8_fp8_fp32_nt
+                from rtp_llm.models_py.modules.dsv4.ppu.communication import reduce_tp_sum
+
+                # Keep local partials in FP32 through the TP sum. Casting a
+                # local partial to BF16 first changes replicated P/D KV.
+                partial = torch.empty_like(out, dtype=torch.float32)
+                for start in range(0, seqlen, _FLASH_MLA_SPARSE_Q_CHUNK):
+                    end = min(start + _FLASH_MLA_SPARSE_Q_CHUNK, seqlen)
+                    payload, scale = self.wo_b.quantize_input(wo_b_in[start:end].contiguous())
+                    gemm_fp8_fp8_fp32_nt(
+                        (payload, scale),
+                        (self.wo_b.weight, self.wo_b.weight_scale),
+                        partial[start:end],
+                    )
+                out.copy_(reduce_tp_sum(partial, tp_size=self.tp_size))
+            else:
+                self.wo_b(wo_b_in, out=out)
 
 class CommitOnlyAttentionFP8(_BaseCommitOnlyAttentionFP8):
+    init_rope_cache = AttentionFP8.init_rope_cache
+
     def __init__(
         self,
         layer_id: int,
@@ -1974,7 +2088,8 @@ class CommitOnlyAttentionFP8(_BaseCommitOnlyAttentionFP8):
         from rtp_llm.utils.model_weight import W
 
         self.wkv = _v4_fp8_linear(
-            layer_weights[W.v4_attn_wkv_w], layer_weights[W.v4_attn_wkv_s]
+            layer_weights[W.v4_attn_wkv_w], layer_weights[W.v4_attn_wkv_s],
+            platform_provider=platform_provider,
         )
         self.kv_norm = layer_weights[W.v4_attn_kv_norm]
 

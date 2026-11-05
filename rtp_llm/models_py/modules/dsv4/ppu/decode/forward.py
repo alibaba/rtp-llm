@@ -218,7 +218,7 @@ def forward_layers(
     bsz, q_len, dim_ = h.shape
     # Production models expose the TP-aware `_norm`; mainline test stubs
     # still carry the plain `norm`.
-    norm_fn = getattr(v4, "_norm", None) or v4.norm
+    norm_fn = getattr(v4, "_decode_norm", None) or getattr(v4, "_norm", None) or v4.norm
     h = norm_fn(h.reshape(bsz * q_len, dim_)).view(bsz, q_len, -1)
     if _rt_on:
         _rt.record("decode_final_norm", h)

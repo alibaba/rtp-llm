@@ -176,6 +176,7 @@ def mhc_post_fwd(
     *,
     enable_pdl: bool | None = None,
     prefill_tuned: bool = False,
+    reference_order: bool = False,
 ) -> torch.Tensor:
     num_seqs, num_tokens, mhc, hidden = residual.shape
 
@@ -218,9 +219,12 @@ def mhc_post_fwd(
             block = 512 if prefill_tuned and 1024 <= rows <= 65536 else 256
             _hc_post_sum[(rows, 4096 // block)](
                 x, x, residual, post_layer_mix, comb_res_mix, out,
-                4096, block, FUSE_SUM=False, num_warps=4, enable_fp_fusion=True,
+                4096, block, FUSE_SUM=False, REFERENCE_ORDER=reference_order,
+                num_warps=4, enable_fp_fusion=not reference_order,
             )
         return out
+    if reference_order:
+        raise ValueError("Reference HC POST requires Flash geometry and PDL disabled")
     if (
         prefill_tuned
         and mhc == 4

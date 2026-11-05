@@ -24,13 +24,14 @@ using deepseek_v4::fp8::pack_fp8;
 
 SGL_DEVICE uint8_t quant_fp4_e2m1(float x) {
   const float ax = fminf(fabsf(x), 6.0f);
+  // FP4 conversion rounds midpoint ties to an even encoded magnitude.
   uint8_t idx = 0;
   idx += ax > 0.25f;
-  idx += ax > 0.75f;
+  idx += ax >= 0.75f;
   idx += ax > 1.25f;
-  idx += ax > 1.75f;
+  idx += ax >= 1.75f;
   idx += ax > 2.5f;
-  idx += ax > 3.5f;
+  idx += ax >= 3.5f;
   idx += ax > 5.0f;
   if (x < 0.0f && idx != 0) idx |= 0x8;
   return idx;
@@ -279,7 +280,7 @@ SGL_DEVICE void norm_rope_store_indexer_fp4(
     float sum_of_squares = 0.0f;
 #pragma unroll
     for (int i = 0; i < kVecSize; ++i) {
-      const auto fp32_input = cast<float>(input_vec[i]);
+      const auto fp32_input = cast<float>(cast<bf16_t>(input_vec[i]));
       sum_of_squares += fp32_input * fp32_input;
     }
 
@@ -288,9 +289,9 @@ SGL_DEVICE void norm_rope_store_indexer_fp4(
 
 #pragma unroll
     for (int i = 0; i < kVecSize; ++i) {
-      const auto fp32_input = cast<float>(input_vec[i]);
+      const auto fp32_input = cast<float>(cast<bf16_t>(input_vec[i]));
       const auto fp32_weight = cast<float>(weight_vec[i]);
-      data[i] = fp32_input * norm_factor * fp32_weight;
+      data[i] = cast<float>(cast<bf16_t>(fp32_input * norm_factor * fp32_weight));
     }
   }
 
@@ -308,6 +309,11 @@ SGL_DEVICE void norm_rope_store_indexer_fp4(
     data[2] = y_real * freq_y_real - y_imag * freq_y_imag;
     data[3] = y_real * freq_y_imag + y_imag * freq_y_real;
   }
+
+  // Preserve the model BF16 RoPE output before Hadamard.
+#pragma unroll
+  for (int i = 0; i < kVecSize; ++i)
+    data[i] = cast<float>(cast<bf16_t>(data[i]));
 
   {
     {
@@ -339,7 +345,7 @@ SGL_DEVICE void norm_rope_store_indexer_fp4(
     const float kHadamardScale = math::rsqrt(static_cast<float>(kHeadDim));
 #pragma unroll
     for (int i = 0; i < kVecSize; ++i)
-      data[i] *= kHadamardScale;
+      data[i] = cast<float>(cast<bf16_t>(data[i] * kHadamardScale));
   }
 
   {

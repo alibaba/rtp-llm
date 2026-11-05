@@ -94,14 +94,19 @@ class PpuTPMoE(nn.Module):
             max_tokens_per_rank=self.max_tokens_per_rank,
             tp_size=tp_size,
         )
-        self._strategy = PpuGroupedFP4Strategy(
-            cfg,
-            sglang_moe=True,
-            fused_gather=True,
-            fused_scale_gather=platform_provider._bool(
-                "DSV4_MOE_SCALE_GATHER_FUSED", True
-            ),
-        )
+        precision = platform_provider.execution_options.get("DSV4_PPU_EXPERT_PRECISION", "a4")
+        if precision not in ("a4", "a8"):
+            raise ValueError("DSV4_PPU_EXPERT_PRECISION must be a4 or a8")
+        self._a8_experts = precision == "a8"
+        if self._a8_experts:
+            from .ppu_grouped_a8 import PpuGroupedA8Strategy
+
+            self._strategy = PpuGroupedA8Strategy(cfg)
+        else:
+            self._strategy = PpuGroupedFP4Strategy(
+                cfg, sglang_moe=True, fused_gather=True,
+                fused_scale_gather=platform_provider._bool("DSV4_MOE_SCALE_GATHER_FUSED", True),
+            )
         self._strategy.setup_weights(layer_weights)
         self.strategy_name = self._strategy.name
         if self._strategy.routed_tp_size != tp_size:
@@ -121,10 +126,12 @@ class PpuTPMoE(nn.Module):
             tp_rank=tp_rank,
             swiglu_limit=swiglu_limit,
             platform_provider=platform_provider,
+            a8=self._a8_experts,
         )
         self._reduce = partial(all_reduce, group=Group.TP, inplace=True) if tp_size > 1 else None
         self._shared_phases = (
             platform_provider._bool("DSV4_PPU_PREFILL_MOE_SHARED_PHASES", True)
+            and not self._a8_experts
             and tp_size == 4
             and ep_size == 1
             and dim == 4096
@@ -151,7 +158,7 @@ class PpuTPMoE(nn.Module):
         if debug:
             recorder.record_if_level(2, prefix + "_x_in", x)
         with record_function_range("dsv4.moe.gate"):
-            weights, indices = self.gate(x, input_ids, include_route_scale=False)
+            weights, indices = self.gate(x, input_ids, include_route_scale=self._a8_experts)
         if debug:
             recorder.record_if_level(2, prefix + "_topk_weights", weights)
             recorder.record_if_level(2, prefix + "_topk_indices", indices)
@@ -167,7 +174,9 @@ class PpuTPMoE(nn.Module):
         if debug:
             recorder.record_if_level(2, prefix + "_tp_local_bf16", local)
         with record_function_range("dsv4.moe.tp_all_reduce_bf16"):
-            result = self._reduce(local) if self._reduce is not None else local
+            result = local.to(x.dtype) if self._a8_experts else (
+                self._reduce(local) if self._reduce is not None else local
+            )
         if debug:
             recorder.record_if_level(2, prefix + "_tp_reduced_bf16", result)
         return result
@@ -178,11 +187,14 @@ class PpuTPMoE(nn.Module):
         with record_function_range("dsv4.moe.routed_experts"):
             if self._fused_gather_shared:
                 return self._strategy(
-                    x, weights, indices, shared=shared, route_scale=self.route_scale
+                    x, weights, indices, shared=shared,
+                    route_scale=1.0 if self._a8_experts else self.route_scale,
                 )
             routed = self._strategy(x, weights, indices)
         with record_function_range("dsv4.moe.add_shared"):
-            return combine_tp_partials(routed, shared, self.route_scale)
+            return routed.add_(shared) if self._a8_experts else combine_tp_partials(
+                routed, shared, self.route_scale
+            )
 
     def _forward_phased(self, x, weights, indices):
         from rtp_llm.models_py.kernels.ppu.runtime import PpuStreamPool

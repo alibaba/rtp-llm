@@ -7,12 +7,22 @@ from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase
 
 
 class PpuHCHead(HCHeadBase):
-    def __init__(self, *args, options, **kwargs) -> None:
+    def __init__(self, *args, options, rowwise=False, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._rowwise = rowwise
         try:
             self._chunk_tokens = max(int(options.get("DSV4_HC_FALLBACK_CHUNK_TOKENS", "16384")), 1)
         except (TypeError, ValueError):
             self._chunk_tokens = 16384
+
+    def _project(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        if self._rowwise and x.numel():
+            rows = x.reshape(-1, x.shape[-1])
+            # Match singleton FP32 projection when Decode batches requests.
+            return torch.cat([F.linear(row[None], weight) for row in rows]).view(
+                *x.shape[:-1], weight.shape[0]
+            )
+        return F.linear(x, weight)
 
     def _head_impl(self, x: torch.Tensor) -> torch.Tensor:
         shape, dtype = x.size(), x.dtype
@@ -28,7 +38,7 @@ class PpuHCHead(HCHeadBase):
             _rsqrt = torch.rsqrt(
                 _x_flat.square().mean(-1, keepdim=True) + self.norm_eps
             )
-            _mixes = F.linear(_x_flat, self.fn) * _rsqrt
+            _mixes = self._project(_x_flat, self.fn) * _rsqrt
             _pre = torch.sigmoid(_mixes * self.scale + self.base) + self.hc_eps
             return torch.sum(_pre.unsqueeze(-1) * _x_flat.view(_x.shape), dim=-2)
 
@@ -60,7 +70,7 @@ class PpuDecodeHCHead(PpuHCHead):
             return super()._head_impl(x)
         from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_head_sum import hc_head_sum
 
-        mixes = F.linear(x.flatten(-2).float(), self.fn.float())
+        mixes = self._project(x.flatten(-2).float(), self.fn.float())
         mixes *= torch.rsqrt(x.flatten(-2).float().square().mean(-1, keepdim=True) + self.norm_eps)
         pre = torch.sigmoid(mixes * self.scale + self.base)
         return hc_head_sum(x, pre, self.hc_eps)
