@@ -3,6 +3,7 @@ package org.flexlb.mock.engine.scheduler;
 import static org.junit.jupiter.api.Assertions.*;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.junit.jupiter.api.Test;
 
 class RequestStateTest {

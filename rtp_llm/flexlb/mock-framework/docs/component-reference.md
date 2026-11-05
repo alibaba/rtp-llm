@@ -53,9 +53,9 @@ RTP 请求公共支持范围集中在 `RequestValidation`，本地单 token、P/
 
 - P 的 `GenerateStreamCall(max_new_tokens=1)` 由 PrefillRpcServer 接入，不启用 D。请求经过 FIFO→选中时分配 KV→共享 Compute→真实等待→编码输出→释放；排队不占 KV。
 - 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillRpcServer 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
-- D 的 DecodeRpcServer 处理原生协议，RtpScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
+- D 的 DecodeRpcServer 处理原生协议，AbstractRtpScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
 
-PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用原生 RemoteGenerate TCP 连接，不注册自定义回调服务，也不跨节点比对 prompt、块布局或 cache keys。P 必须等自身 Scheduler 报告首轮 Forward 完成后才发送 LOAD；D 对已分配的请求执行零耗时异步传输事件，完成后回复 LOAD ACK。P 收到 ACK 才释放源 KV，然后发送 GENERATE 或 PREFILL_COMPLETE，D Scheduler 决定开始计算或结束。两端块大小各自独立，KV 的申请、持有、释放及 finished 记录仍归各自 Scheduler 管理。
+PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用原生 RemoteGenerate TCP 连接，不注册自定义回调服务，也不跨节点比对 prompt、块布局或 cache keys。P 必须等自身 EngineScheduler 报告首轮 Forward 完成后才发送 LOAD；D 对已分配的请求执行零耗时异步传输事件，完成后回复 LOAD ACK。P 收到 ACK 才释放源 KV，然后发送 GENERATE 或 PREFILL_COMPLETE，D EngineScheduler 决定开始计算或结束。两端块大小各自独立，KV 的申请、持有、释放及 finished 记录仍归各自 EngineScheduler 管理。
 
 接入层信任正常 P 生产者发送的 LOAD 和首 Token 完成事实，不模拟损坏的 KV 数据、假冒来源、迟到的跨请求交接或生产传输恢复。请求取消、总 deadline、节点关闭和下游 RPC 失败仍必须终止在途任务并回收资源。零耗时传输没有独立加载计时器；real 的 `load_cache_timeout_ms` 在此模型中忽略。
 
@@ -73,7 +73,7 @@ WorkerStatus 报真实等待/执行任务、finished/version，available_concurr
 
 ## Block 容量与 RTP 缓存
 
-每个 P/D Engine 有一个本地逻辑池。容量为 `test_block_num - 1`，首次分配仍受 `reserve_block_ratio` 约束。Scheduler 同步申请容量并取得完整 Block 前缀的复用量。等待中的请求可以在容量释放后重试，运行中的 Decode 增长失败按容量错误结束。
+每个 P/D Engine 有一个本地逻辑池。容量为 `test_block_num - 1`，首次分配仍受 `reserve_block_ratio` 约束。EngineScheduler 同步申请容量并取得完整 Block 前缀的复用量。等待中的请求可以在容量释放后重试，运行中的 Decode 增长失败按容量错误结束。
 
 容量不足时，按 LRU 淘汰可回收的前缀树叶子。请求持有的块不会被淘汰。成功终态只发布已计算的完整块，失败或取消只释放占用。Master CacheStatus 与 KVCM Reporter 使用同一份有效块状态。P/D 网络交接仍走原生协议。
 
@@ -83,7 +83,7 @@ Engine 是运行实例的概念，prefill/decode/vit 是 Engine 的角色；RTP/
 
 P/D/V 各实例拥有独立 JVM、端口、队列、缓存和产物目录。统一产物为 `java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar`。
 
-原生 `RemoteMultimodalEmbedding` 的一个请求可含多张图。缓存未命中的每份唯一媒体进入同一条异步准备链：准入 → 执行器排队 → 获取尺寸 → GPU 就绪队列 → Forward → 结果发布。RPC 等待线程、准备执行器和 Forward 执行线程分开；HTTP 慢读不会占用 Forward 线程。缓存命中直接返回，在途重复请求共用同一生产者和额度。`vit_concurrency` 限制准备执行器工作线程数，线程持续持有到该媒体计算完成；`vit_max_queue_size` 是额外等待额度，已接纳的唯一媒体总数不超过两者之和，GPU 就绪队列也按这个总预算派生。满时返回 RESOURCE_EXHAUSTED。任务额度由 VitPreparation 持有，直到共享结果发布完成后才释放；Scheduler 的完成通知只表示计算阶段结束。缓存条目的成功/失败发布采用身份校验，旧任务和重复完成不会覆盖新条目。
+原生 `RemoteMultimodalEmbedding` 的一个请求可含多张图。缓存未命中的每份唯一媒体进入同一条异步准备链：准入 → 执行器排队 → 获取尺寸 → GPU 就绪队列 → Forward → 结果发布。RPC 等待线程、准备执行器和 Forward 执行线程分开；HTTP 慢读不会占用 Forward 线程。缓存命中直接返回，在途重复请求共用同一生产者和额度。`vit_concurrency` 限制准备执行器工作线程数，线程持续持有到该媒体计算完成；`vit_max_queue_size` 是额外等待额度，已接纳的唯一媒体总数不超过两者之和，GPU 就绪队列也按这个总预算派生。满时返回 RESOURCE_EXHAUSTED。任务额度由 VitPreparation 持有，直到共享结果发布完成后才释放；ViT 合批循环的完成通知只表示计算阶段结束。缓存条目的成功/失败发布采用身份校验，旧任务和重复完成不会覆盖新条目。
 
 `gpu_max_batch_size=1` 串行执行一份就绪媒体工作项且不等待合批；大于 1 时按工作项数和收集窗口合批。同一 RPC 的多图分别准备，可进入不同 Forward，全部结果就绪后才完成 RPC。单张图的 patch/row 不拆分。最后一个等待者取消时，尚未执行的任务移出队列，进行中的下载中断；已经选入 Forward 的任务保留额度到实际计算/发布结束。状态查询不经过这些阻塞执行器。
 
@@ -122,9 +122,9 @@ V 以 miss 的图片组成 ForwardBatch，复用公式和 SimulatedCompute。计
 
 Embedding Device/Host 按逻辑 rows*hidden_size*BF16(2 bytes) 计费，各自 LRU；Device 淘汰转存 Host，Host 淘汰移除 embedding。Hash 独立按行数和 key 字节计费，因此 hash_hit 与 embedding_hit 不等价。在途计算使用独立 claim，失败移除，旧 claim 的迟到完成不能覆盖新 claim。消费者持有不可变结果，不依赖缓存继续驻留。缓存 key 对齐 Linux real MultimodalInput 的 URL/type/preprocess 身份，hash 内容是稳定模拟值，不宣称与实际 tensor 的 hash 相等。
 
-Client 按 Master 的 V-only route 选 V，读取元数据、计算路由长度和缓存 key，再带 selected_vit 与原始输入请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/Scheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P Scheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
+Client 按 Master 的 V-only route 选 V，读取元数据、计算路由长度和缓存 key，再带 selected_vit 与原始输入请求完整 P/D 路由；Master 切换使 pin 失效时重新取一次 V 路由。P 在输入准备完成后才把规范化 token 序列交给 KV/EngineScheduler，并用同一输入准备 D ALLOCATE 和 PD 交接。P 的输入准备发生在调度锁外，受原请求 deadline/取消约束；这段准备暂不计入 P EngineScheduler 的队列快照，但计入 Client 端到端耗时。D 接收已准备输入，不重复编码。
 
-P 的本地单 token、P/D 单请求和 Master batch 都由 PrefillRpcServer 管理输入准备，RtpRpcService 只负责路由。提交 Scheduler 的单个与批量入口只接受已准备输入，不在调度器里调用 V。接入层直接用 Session 登记 PENDING，并负责过滤已取消的 Batch 成员、整理逐项结果；提交成功后在同一执行锁内交给 Scheduler；准备失败同样发布 finished 增量，但不增加计算请求和队列指标。开始时间和 deadline 在接入时确定，显式组不会在准备结束后重置预算。
+P 的本地单 token、P/D 单请求和 Master batch 都由 PrefillRpcServer 管理输入准备，RtpRpcService 只负责路由。提交 EngineScheduler 的单个与批量入口只接受已准备输入，不在调度器里调用 V。接入层直接用 Session 登记 PENDING，并负责过滤已取消的 Batch 成员、整理逐项结果；提交成功后在同一执行锁内交给 EngineScheduler；准备失败同样发布 finished 增量，但不增加计算请求和队列指标。开始时间和 deadline 在接入时确定，显式组不会在准备结束后重置预算。
 
 VP 同 JVM 和跨进程都走 TCP gRPC，只传 shape/dtype、split_size 和逐行 INT32 hash，不生成 embedding payload，也不伪造 RDMA lease。Mock P 校验形状、长度和展开 span 后使用；此响应不能交给真实 tensor 解码器，VP 网络带宽和 GPU 内存复制不在模拟范围内。
 
@@ -168,7 +168,7 @@ environment:
 
 RtpConfig 只加载 ComputeSpec；ComputeModel 组合 FormulaForward、可选噪声、DecodeStepModel 和 StoppingModel。非默认 Decode 进度参数只允许配置在 D，P/D 都可以配置 EOS。旧字段、未知字段、null、错误类型或缺少必要 seed 明确拒绝，没有别名和兼容分支。模型校验来自 Java，Python 只编译组件配置结构。effective-config 只保存生效值及解析后的模型参数，原始输入由 Runner 的 config.json 保留；不再产生 pending_config。
 
-调度前 Compute.prepare 固定请求快照、本轮进度和 KV 需求。Forward 完成后 Compute.completed 按 EOS 和长度上限截断本轮输出，返回 committedTokens/finished。Scheduler 只校验请求仍有效并提交结果、更新队列、处理资源和 PD；不判断正常结束是 EOS 还是达到上限。取消、超时、关闭和计算失败仍走独立失败路径，不能成为正常 finished，也不能因旧回调再提交 token。
+调度前 Compute.prepare 固定请求快照、本轮进度和 KV 需求。Forward 完成后 Compute.completed 按 EOS 和长度上限截断本轮输出，返回 committedTokens/finished。EngineScheduler 只校验请求仍有效并提交结果、更新队列、处理资源和 PD；不判断正常结束是 EOS 还是达到上限。取消、超时、关闭和计算失败仍走独立失败路径，不能成为正常 finished，也不能因旧回调再提交 token。
 
 P 每轮只产首 token，finished 表示整个请求是否结束，不表示 Prefill 阶段是否完成。P 阶段完成后退出计算集合，保留传输需要的 KV；即使首 token EOS，也仍完成 LOAD 确认，再通过 PREFILL_COMPLETE 让 D 结束，不启动 D Forward。PD 不再传预测的 stop_after，不由 P 决定 D 的未来停止长度。
 
@@ -252,7 +252,7 @@ P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 
 
 `engine/cache/KvcmReporter` 使用同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 仅发布本地 HBM 有效块。RTP 装配方提供注册模型、布局和 spec，Reporter 管理发现与传输资源。
 
-变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。注册和增量由同一个执行者每 20ms 处理，快照与心跳分别使用独立执行者，慢快照不阻塞 ADD/DELETE 或心跳。它们均不占用 Scheduler 线程。
+变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。注册和增量由同一个执行者每 20ms 处理，快照与心跳分别使用独立执行者，慢快照不阻塞 ADD/DELETE 或心跳。它们均不占用 EngineLoop 线程。
 
 快照在缓存锁内一次捕获 HBM long[] 与版本，在锁外流式 JSON 编码，不构建逐 key JSON 对象树；仍保留完整请求体，并非零拷贝。对齐原生 Publisher：快照失败（包括限流）丢弃本轮，不重放、不暂停增量；下一次周期或服务端恢复请求捕获新快照。重新注册后旧快照回包不影响新注册，增量不按快照 ACK 过滤。注册和增量失败按原生默认 500ms→16s 指数退避；不使用 retry_after_ms 暂停整个数据通道。控制请求超时 1.5 秒，快照上传超时 30 秒。KVCM 响应先汇总 header 与全部 item 的恢复信号，再判断是否失败，前面的普通错误不会遮蔽后面的注册失效。心跳连续 snapshot_required=true 只触发一次，false 或重新注册重置。正常心跳或非空增量 ACK 启动/刷新 60 秒恢复窗口；超期后的心跳失败触发一次重新注册，注册和快照 ACK 不启动或续期该窗口，避免恢复风暴。队列溢出和增量失败请求新快照，不维护磁盘事件历史。关闭停止快照和心跳、收尾增量执行者，再尽力上报 HOST_DOWN；意外退出由服务端心跳失效处理。快照间隔 `kv_cache_event_snapshot_interval_ms` 必须为正。
 
@@ -359,7 +359,7 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 ### RTP 调度实现边界
 
-`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交和取消，并提供运行状态和指标采样源；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。两种调度器都同步准备本地缓存。
+`AbstractRtpScheduler` 共享请求状态、KV 引用、PD 生命周期、Forward 提交和取消，并提供运行状态和指标采样源；`RtpFifoScheduler` 仅做普通 FIFO 准入，`RtpPrefillGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。两种调度器都同步准备本地缓存。
 
 `RtpNode` 装配指标导出，并在调度锁内调用采集。`RtpMetrics` 读取调度状态快照并按各指标的口径采样。
 

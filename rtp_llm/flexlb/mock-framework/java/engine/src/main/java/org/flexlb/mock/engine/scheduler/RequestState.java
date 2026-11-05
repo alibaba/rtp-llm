@@ -2,7 +2,8 @@ package org.flexlb.mock.engine.scheduler;
 
 import java.util.Objects;
 import java.util.function.Consumer;
-import static org.flexlb.mock.engine.scheduler.RequestFailure.Reason.*;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
+import static org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure.Reason.*;
 
 /** Mutated under the owning scheduling domain's lock; snapshots are immutable. */
 public final class RequestState {

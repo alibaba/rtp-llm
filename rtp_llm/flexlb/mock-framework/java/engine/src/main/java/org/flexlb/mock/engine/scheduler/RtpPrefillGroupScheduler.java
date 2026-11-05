@@ -3,19 +3,19 @@ package org.flexlb.mock.engine.scheduler;
 import java.util.*;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.config.RtpConfig;
-import static org.flexlb.mock.engine.scheduler.RequestFailure.Reason.*;
+import static org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure.Reason.*;
 
 /** Explicit-group admission, isolated from ordinary FIFO scheduling. */
-final class RtpGroupScheduler extends RtpSchedulerBase {
+final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
     private final ArrayDeque<ArrayDeque<Entry>> groups = new ArrayDeque<>();
     private final Map<Entry, ArrayDeque<Entry>> memberships = new IdentityHashMap<>();
     private boolean preferGroup;
 
-    RtpGroupScheduler(Object lock, RtpConfig config, KvCache cache) {
-        this(lock, config, cache, new org.flexlb.mock.engine.scheduler.TaskHistory());
+    RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCache cache) {
+        this(lock, config, cache, new TaskHistory());
     }
 
-    RtpGroupScheduler(Object lock, RtpConfig config, KvCache cache, org.flexlb.mock.engine.scheduler.TaskHistory finished) {
+    RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory finished) {
         super(lock, config, cache, finished);
     }
 

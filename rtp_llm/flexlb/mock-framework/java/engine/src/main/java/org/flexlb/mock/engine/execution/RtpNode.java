@@ -10,8 +10,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.flexlb.mock.engine.cache.KvCache;
 import org.flexlb.mock.engine.cache.KvcmReporter;
 import org.flexlb.mock.engine.config.RtpConfig;
-import org.flexlb.mock.engine.scheduler.RtpScheduler;
-import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler;
+import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.flexlb.mock.engine.service.RtpRpcService;
 import org.flexlb.mock.metrics.MetricTags;
@@ -33,7 +33,7 @@ public final class RtpNode implements AutoCloseable {
 
     private record MetricSource(Object lock, java.util.function.Supplier<List<MetricFamilySamples>> metrics) {}
 
-    private RtpNode(RtpConfig config, Scheduler.Factory schedulers) {
+    private RtpNode(RtpConfig config, EngineScheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
         cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.deviceCache());
@@ -41,7 +41,7 @@ public final class RtpNode implements AutoCloseable {
         var finished = new TaskHistory();
         try {
             var scheduler = schedulers.create(lock, cache, finished);
-            var samples = RtpScheduler.metricsFor(scheduler);
+            var samples = AbstractRtpScheduler.metricsFor(scheduler);
             if (samples != null) metricSource = new MetricSource(lock, samples);
             engine = new RtpEngineLoop(lock, scheduler, finished, cache, config.compute(), config.role(), config.id());
             try {
@@ -61,14 +61,14 @@ public final class RtpNode implements AutoCloseable {
     }
 
     public static RtpNode start(RtpConfig config, int rpcPort, int controlPort) throws IOException {
-        return start(config, rpcPort, controlPort, RtpScheduler.factory(config));
+        return start(config, rpcPort, controlPort, AbstractRtpScheduler.factory(config));
     }
 
-    public static RtpNode start(RtpConfig config, Scheduler.Factory schedulers) throws IOException {
+    public static RtpNode start(RtpConfig config, EngineScheduler.Factory schedulers) throws IOException {
         return start(config, 0, 0, schedulers);
     }
 
-    public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, Scheduler.Factory schedulers) throws IOException {
+    public static RtpNode start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers) throws IOException {
         var node = new RtpNode(config, schedulers);
         try {
             var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);

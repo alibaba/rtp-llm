@@ -14,7 +14,6 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.RtpNode;
 import org.flexlb.mock.engine.scheduler.RtpNodeTest;
-import org.flexlb.mock.engine.scheduler.RtpScheduler;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
@@ -142,7 +141,7 @@ class LocalRpcTest {
                 var bytes = error.getTrailers().get(Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER));
                 assertEquals(602, ErrorDetailsPB.parseFrom(bytes).getErrorCode());
                 var text = metrics(node);
-                assertEquals(0, sample(text, "rtp_llm_requests_started_total", ""), "Permanently oversized prompts never enter Scheduler");
+                assertEquals(0, sample(text, "rtp_llm_requests_started_total", ""), "Permanently oversized prompts never enter EngineScheduler");
                 assertEquals(0, sample(text, "rtp_llm_framework_requests_total", "outcome=\"error\""));
                 assertEquals(0, sample(text, "rtp_llm_cache_lookup_tokens_total", ""));
             } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }

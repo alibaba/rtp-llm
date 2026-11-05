@@ -6,9 +6,9 @@ Python/Java 模块、主要类与调用关系的逐项说明见[钉钉架构文�
 
 本文说明组件职责、调度与协议边界，以及接口扩展方式。运行步骤见 README，Case 与启动配方用法见 [Case 指南](case-guide.md)。设计目标中尚未实现的能力仍按原文标明。文中路径和命令均以框架目录为基准。
 
-## Scheduler 输入、执行完成、传输完成与状态查询
+## EngineScheduler 输入、执行完成、传输完成与状态查询
 
-Scheduler 是每个后端的请求状态与调度策略所有者，不只是选择 batch 的函数。公共接入代码解析协议、检查格式并发送回执；`input` 决定初始状态、队列与资源准入，成功登记不等于资源已就绪。计算结果、传输结果和协议许可分别进入明确入口，外部组件不直接修改请求阶段或队列。
+EngineScheduler 是每个后端的请求状态与调度策略所有者，不只是选择 batch 的函数。公共接入代码解析协议、检查格式并发送回执；`input` 决定初始状态、队列与资源准入，成功登记不等于资源已就绪。计算结果、传输结果和协议许可分别进入明确入口，外部组件不直接修改请求阶段或队列。
 
 - `input(request, listener)`：登记请求并执行后端准入策略。
 - `schedule()`：返回本次 Forward 的执行计划，不暴露或取走内部 running 容器。
@@ -17,7 +17,7 @@ Scheduler 是每个后端的请求状态与调度策略所有者，不只是选�
 - `control(request, event)`：处理后端协议许可等少量控制输入；GENERATE、LOAD ACK 等类型属于原生接入与 RTP 后端的约定，不是共享状态机。
 - `tasks()`：按需返回当前执行任务的不可变观测快照，不推进状态机；内部状态机和队列仍由后端自行定义。
 
-PD 的初始通知/初始化和 KV 传输分开。当前接入协议共用，KV 传输使用公共异步组件，第一版只建模零耗时完成；保留完成、失败、取消和资源使用权接口，不加入带宽、分块或争用模型。P 计算完成后可以退出计算集合，但仍持有 KV；本地传输结束和 D 的 LOAD ACK 是不同事实，确认前不能释放源 KV。网络协议仍由 RTP 适配器执行，状态决策及转移归 Scheduler。
+PD 的初始通知/初始化和 KV 传输分开。当前接入协议共用，KV 传输使用公共异步组件，第一版只建模零耗时完成；保留完成、失败、取消和资源使用权接口，不加入带宽、分块或争用模型。P 计算完成后可以退出计算集合，但仍持有 KV；本地传输结束和 D 的 LOAD ACK 是不同事实，确认前不能释放源 KV。网络协议仍由 RTP 适配器执行，状态决策及转移归 EngineScheduler。
 
 EngineLoop 负责唤醒、执行和结果交接，不判断后端队列和协议阶段。新输入、Compute/Transfer 完成、输出恢复可写、取消、资源释放和关闭触发唤醒；同时按最近请求 deadline 定时唤醒。无事件、无期限时阻塞等待，不固定周期轮询。Forward 在途时仍处理状态维护和 I/O 事件，但不提交第二个 Forward。资源可用变化必须有明确通知，不能在移除轮询后遗漏容量唤醒。
 
@@ -37,7 +37,7 @@ Python 提供面向 Case 的业务接口，Java Engine 提供实例原子能力�
 | Python Case 接口实现 | 选择 Engine、扩缩容、向 client0 提交流量任务、跨实例查询与聚合；使用进程管理和发现文件能力。 |
 | Java 实例协议 | 停止实例、查询自身状态、接收已分配的流量计划等。Engine 宿主另负责创建和关闭本 JVM 内的 Engine 对象。 |
 | Java client0 协调者 | 固定参与者、分配总流量与输入、协调准备/启动/停止、汇总活动状态；与本地请求执行分开。 |
-| Java 公共 Mock Engine | 请求接入、调度循环、资源机制、Forward 执行、输出和指标；组合 RTP 或 vLLM Scheduler。 |
+| Java 公共 Mock Engine | 请求接入、调度循环、资源机制、Forward 执行、输出和指标；组合 RTP 或 vLLM EngineScheduler。 |
 
 缩容一个 Decode 时，Python 从全局候选集合中选择并固定一个地址，再通知其宿主关闭该实例，更新发现文件并返回实际结果。Java 不接收全局 `count: 1`；不能对每个 JVM 广播一次缩容，否则会缩掉多个实例。Client 总 QPS、请求数和并发预算由 client0 只分配一次，各 Client 收到自己的份额，不能广播完整总量。
 
@@ -65,31 +65,31 @@ Runner 管理声明了 background 的 Step 任务。任务属于当前 Phase，P
 
 每个 Engine 使用一套统一的逻辑 KV block 容量计量。不同模型网络层的 KV 成本合并在这个预算中；不实现按模型层分池、Full/SWA/Linear 多资源组、各组独立配额及它们之间的联合分配。这是有意的 Mock 模型边界，不是后续必须补齐的 real 能力。Device/Host 仅表示已有的缓存存放介质，不扩展成每层或每种注意力各自的资源池。涉及真实混合池瓶颈和逐层容量的实验不由此模型给出结论。
 
-Scheduler 决定申请、增长和提交时机；KvCache 管匹配、分配、索引及引用。正常结束且 Compute/PD 使用结束后，P 提交已计算 prompt；D 提交 prompt 加实际已计算的输出前缀，排除最后一个仅采样、尚未计算 KV 的 token。共享 CacheSequence 保存语义输入和 cache-only 多模态区间，并统一生成完整 block key；生成 token 值由接入层从原生 GENERATE 传入，不能猜测为 prompt 最后一个 token。失败或取消不发布新缓存。
+EngineScheduler 决定申请、增长和提交时机；KvCache 管匹配、分配、索引及引用。正常结束且 Compute/PD 使用结束后，P 提交已计算 prompt；D 提交 prompt 加实际已计算的输出前缀，排除最后一个仅采样、尚未计算 KV 的 token。共享 CacheSequence 保存语义输入和 cache-only 多模态区间，并统一生成完整 block key；生成 token 值由接入层从原生 GENERATE 传入，不能猜测为 prompt 最后一个 token。失败或取消不发布新缓存。
 
 当前 Host↔Device 保持瞬时逻辑迁移。对齐的 feature 源码中，Host→Device 加载使用异步任务和完成上下文，Device→Host 转存也由后台任务执行；调用方在源/目标资源尚未就绪时保留引用。因而瞬时模型不覆盖搬运延迟、传输重叠和在途额外占用，不能表述成 real 使用同步瞬时迁移。
 
 ### 公共 Engine 与独立调度域
 
-RTP 和 vLLM 的设计目标是复用请求事实、资源机制、EngineLoop、Forward、输出和生命周期工具；各自的 Scheduler 拥有队列模型、准入、组批、抢占恢复和结果后的状态转换。替换调度策略不应修改 Compute 或 EngineLoop。原生协议和计算模型参数仍在各自接入/配置边界适配，不宣称两个真实后端只有调度差异。
+RTP 和 vLLM 的设计目标是复用请求事实、资源机制、EngineLoop、Forward、输出和生命周期工具；各自的 EngineScheduler 拥有队列模型、准入、组批、抢占恢复和结果后的状态转换。替换调度策略不应修改 Compute 或 EngineLoop。原生协议和计算模型参数仍在各自接入/配置边界适配，不宣称两个真实后端只有调度差异。
 
-当前已打通 Java 装配入口 `RtpNode.start(config, Scheduler.Factory)`，指定监听端口时使用 `start(config, rpcPort, controlPort, factory)`。工厂的 `create(lock, cache, finished)` 为每个实例创建一个新 Scheduler，收到协议接入层与 EngineLoop 共用的调度锁，以及本实例独占的 RTP Full-KV 管理器 KvCache 和统一的 finished 增量记录。工厂不关闭缓存；节点在关闭或调度器创建失败时回收它。默认入口只在 RtpNode 选择 RTP 工厂，PrefillAdmission/DecodeAdmission 不再创建或引用 RtpScheduler，公共执行层不识别 RTP 配置。
+当前已打通 Java 装配入口 `RtpNode.start(config, EngineScheduler.Factory)`，指定监听端口时使用 `start(config, rpcPort, controlPort, factory)`。工厂的 `create(lock, cache, finished)` 为每个实例创建一个新 EngineScheduler，收到协议接入层与 EngineLoop 共用的调度锁，以及本实例独占的 RTP Full-KV 管理器 KvCache 和统一的 finished 增量记录。工厂不关闭缓存；节点在关闭或调度器创建失败时回收它。默认入口只在 RtpNode 选择 RTP 工厂，PrefillAdmission/DecodeAdmission 不再创建或引用 RtpFifoScheduler，公共执行层不识别 RTP 配置。
 
-P 接入层保留原生报文、模型上下文及生成参数校验，单批 token 预算等调度策略由 Scheduler 判定。RTP 默认策略仍拒绝超出单批预算的 Prefill，并返回原有 INVALID_ARGUMENT/605；替换 Scheduler 不会被接入层的重复策略校验拦截。请求数量保护上限统一来自 RtpConfig，不再由接入层读取具体调度器的常量。
+P 接入层保留原生报文、模型上下文及生成参数校验，单批 token 预算等调度策略由 EngineScheduler 判定。RTP 默认策略仍拒绝超出单批预算的 Prefill，并返回原有 INVALID_ARGUMENT/605；替换 EngineScheduler 不会被接入层的重复策略校验拦截。请求数量保护上限统一来自 RtpConfig，不再由接入层读取具体调度器的常量。
 
-本批仅完成装配与公共组件边界；vLLM Scheduler 尚未实现，Python 后端选择和对应 Case 接线留到后续。没有自动插件扫描、空后端占位或静默回退到 RTP。
+本批仅完成装配与公共组件边界；vLLM EngineScheduler 尚未实现，Python 后端选择和对应 Case 接线留到后续。没有自动插件扫描、空后端占位或静默回退到 RTP。
 
 ```text
 网络/控制线程 → input / control / transferCompleted / finish
                            ↓
-EngineLoop：维护到期与依赖 → Scheduler.schedule → Compute.forward
+EngineLoop：维护到期与依赖 → EngineScheduler.schedule → Compute.forward
                            ↑                         ↓
-                      下一轮调度 ← Scheduler.computeCompleted
+                      下一轮调度 ← EngineScheduler.computeCompleted
                                       ↓
                          锁外发送输出/就绪/终态通知
 ```
 
-每个 Engine 同时至多一个 Forward。初次和空闲后先调度；每轮计算结束后，结果交回 Scheduler 提交进度、检查有效性并决定继续或结束。公共 RequestState 保证终态与资源清理只发生一次，但不定义后端阶段或替调度器决定队列迁移。Scheduler 不持有执行器、计时线程或 EngineLoop，也不发送网络响应。
+每个 Engine 同时至多一个 Forward。初次和空闲后先调度；每轮计算结束后，结果交回 EngineScheduler 提交进度、检查有效性并决定继续或结束。公共 RequestState 保证终态与资源清理只发生一次，但不定义后端阶段或替调度器决定队列迁移。EngineScheduler 不持有执行器、计时线程或 EngineLoop，也不发送网络响应。
 
 | 边界 | 职责 |
 | --- | --- |
@@ -100,9 +100,9 @@ EngineLoop：维护到期与依赖 → Scheduler.schedule → Compute.forward
 | `finish` / `beginTransfer` | 终止请求，或为已经就绪的数据取得短期读取引用；读取结束不等于收到远端传输确认。 |
 | `tasks()` / `queues()` | 同一调度锁内读取已提交任务的观测事实及真实队列计数；不推进状态，不返回可变请求。 |
 
-ForwardBatch 是本轮执行输入，不是 running 容器本身。它固定请求成员、本轮 token 数和执行身份；请求的持续状态由 Scheduler 保留。P 通常只执行一轮，D 在 running 中跨轮保留，不每轮回到 waiting。外部线程可在 Forward 期间经公共入口提交请求或依赖事实，但不能修改已经提交的 batch。
+ForwardBatch 是本轮执行输入，不是 running 容器本身。它固定请求成员、本轮 token 数和执行身份；请求的持续状态由 EngineScheduler 保留。P 通常只执行一轮，D 在 running 中跨轮保留，不每轮回到 waiting。外部线程可在 Forward 期间经公共入口提交请求或依赖事实，但不能修改已经提交的 batch。
 
-Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络发送。公共 EngineLoop 使用一个虚拟线程等待事件和最近 deadline，入队、控制/执行完成、容量释放和关闭都会唤醒；没有固定周期轮询，容量版本未变化时不反复尝试初始分配。没有可执行 batch 也必须处理取消、期限和传输结果，不能依赖下一次 Forward 才收尾。
+EngineScheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络发送。公共 EngineLoop 使用一个虚拟线程等待事件和最近 deadline，入队、控制/执行完成、容量释放和关闭都会唤醒；没有固定周期轮询，容量版本未变化时不反复尝试初始分配。没有可执行 batch 也必须处理取消、期限和传输结果，不能依赖下一次 Forward 才收尾。
 
 通知按请求顺序、锁外执行。每个请求最多一个尚未处理完的调度通知；RTP 输出通知只交给协议容器，不等待 Fetch 或网络可写，不暂停后续计算。计算接纳上限覆盖等待调度通知完成的请求；协议结果按独立保留上限清理。通知失败进入该请求的失败清理；终态通知等基础设施异常使 Engine 的后续状态读取明确报错。
 
@@ -110,7 +110,7 @@ Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络�
 
 ### 队列模型、观察与注入
 
-队列模型属于 Scheduler，不另建强制共享的 QueueModel 层。一个实现可以有独立 loading 队列，另一个可以把 loading 作为 waiting 成员的状态；抢占也可能回到 waiting 重新计算，而不是进入 swap。外部只通过操作和快照契约交互。公共请求事实需要逐步覆盖输入、缓存命中、已完成 Prefill、生成进度和本轮工作量；尚未实现分块 Prefill，不能把重复执行当作分块支持。
+队列模型属于 EngineScheduler，不另建强制共享的 QueueModel 层。一个实现可以有独立 loading 队列，另一个可以把 loading 作为 waiting 成员的状态；抢占也可能回到 waiting 重新计算，而不是进入 swap。外部只通过操作和快照契约交互。公共请求事实需要逐步覆盖输入、缓存命中、已完成 Prefill、生成进度和本轮工作量；尚未实现分块 Prefill，不能把重复执行当作分块支持。
 
 当前 RTP 保留普通 FIFO waiting、显式 batch 队列、持续 running 和请求上的容量/输出/传输就绪状态。`concurrency_limit` 控制 P/D 每批请求数，默认 32。P 按完整输入长度和 `最长序列长度×序列数` 检查 `max_batch_tokens_size`，生成模式额外保留一个 token；合法 singleton 可超过该 batch token 预算。预算为 0 时 P 仍可执行 singleton，不表示无限组 batch。D 按请求数上限接纳，不复用 P 的 token/矩形限制。Compute 使用扣除命中后的实际计算长度。P/D 初始分配遇到临时容量不足等待容量变化；已进入生成的 D 增长 KV 失败则终止，对齐当前 real RTP，不实现 vLLM 抢占/重算策略。
 
@@ -123,9 +123,9 @@ Scheduler 调用在同一短锁下串行化；锁不覆盖计算等待或网络�
 - `loading`：资源已预留，等待 KV 加载或生成许可的请求。
 - `ready`：P 计算阶段已完成，仍持有传输数据的请求。
 
-上述四类互斥，由 Scheduler 统计；终止但仍被执行引用的成员不计入四类，KV 占用继续保留。公共 QueueSnapshot 不再根据“不是 FORWARD 就是 waiting”推导。Mock 指标保留四类；原生状态接口只有 waiting/running，因此将 waiting、loading、ready 合并为原生 waiting，与任务列表的 is_waiting 一致，避免 Master 漏算已预留资源的请求。
+上述四类互斥，由 EngineScheduler 统计；终止但仍被执行引用的成员不计入四类，KV 占用继续保留。EngineScheduler.QueueSnapshot 不再根据“不是 FORWARD 就是 waiting”推导。Mock 指标保留四类；原生状态接口只有 waiting/running，因此将 waiting、loading、ready 合并为原生 waiting，与任务列表的 is_waiting 一致，避免 Master 漏算已预留资源的请求。
 
-Scheduler 的 `input(Input, Listener)` 提交普通 single；`input(List<InputItem>)` 一次提交一个完整显式 batch，每项返回独立的 Request 或失败，登记在同一 EngineLoop 锁内完成后才唤醒调度。组来自调用边界，不按相同 groupId 拼接，也不等待缺失成员。每个成员仍各自管理 Listener、deadline、取消和 KV 租约。
+EngineScheduler 的 `input(Input, Listener)` 提交普通 single；`input(List<InputItem>)` 一次提交一个完整显式 batch，每项返回独立的 Request 或失败，登记在同一 EngineLoop 锁内完成后才唤醒调度。组来自调用边界，不按相同 groupId 拼接，也不等待缺失成员。每个成员仍各自管理 Listener、deadline、取消和 KV 租约。
 
 P 默认保留 Master batch 边界。正常组只从本组选择实际 Forward 成员，不与其他组或普通 single 混合；组内按输入顺序扫描，暂时放不下的成员保留，后续较小成员仍可准入，剩余成员留在原组。成员失败、超时或取消不默认结束整组。有效组成员数超过 concurrency_limit，或超过已开启的 max_inited_kv_cache_streams，按 real 退回普通 single。普通工作与组在空 Forward 边界切换；组完全无法推进时允许普通请求推进，不因组屏障造成容量依赖死锁。无需等待一组在 D 全部生成完成才开始下一组 P Forward。
 
@@ -133,15 +133,15 @@ EnqueueBatch/EnqueueGroup 先并行准备各成员 D 资源，收齐准备结果
 
 ### 请求观测与接入交接
 
-对外只有一次 GetWorkerStatus。PrefillAdmission 在同一执行锁内合并接入阶段与执行阶段：准备中的 Session 以 PENDING 上报；提交成功后持有 Scheduler.Request，由 Scheduler.tasks() 按需返回执行事实。Loop 不持有接入登记表，不过滤 Batch 成员，也不映射逐项结果。状态查询不驱动执行，Scheduler 不向 EngineLoop 逐次回报阶段变化，也不需要使用共享状态机。RTP 将自己的内部状态映射为 RECEIVED/KV_ALLOCATED/RUNNING；其他后端负责自己的映射。
+对外只有一次 GetWorkerStatus。PrefillAdmission 在同一执行锁内合并接入阶段与执行阶段：准备中的 Session 以 PENDING 上报；提交成功后持有 EngineScheduler.Request，由 EngineScheduler.tasks() 按需返回执行事实。Loop 不持有接入登记表，不过滤 Batch 成员，也不映射逐项结果。状态查询不驱动执行，EngineScheduler 不向 EngineLoop 逐次回报阶段变化，也不需要使用共享状态机。RTP 将自己的内部状态映射为 RECEIVED/KV_ALLOCATED/RUNNING；其他后端负责自己的映射。
 
 接入层在接受有效请求时固定 started 和绝对 deadline，单请求、多模态准备和显式组提交沿用同一预算。取消与提交使用同一执行锁，旧句柄不能删除或结束同身份的新请求。显式组中已取消的成员不再提交，其他合法成员继续准入。
 
-TaskHistory 位于共享 engine 模块，每个 Engine 只有一份 finished 版本序列，由接入层创建，经 EngineLoop 传给 Scheduler.Factory。提交前失败由接入 Session 发布，提交后由 Scheduler 在本地终态和资源清理条件满足时发布；不另外维护一份活动执行状态。错误保留 RequestFailure，到 RpcMessages 编码时才转换原生协议错误。准备中的任务不计入 Scheduler waiting/running，不占 KV；协议输出容器和 Fetch 保留结果同样不计入执行负载。P 交接完成后的本地 finished 与其继续代理 D 输出的会话结束是两个边界，后续网络结束不重复发布 P 的本地终态。
+TaskHistory 位于共享 engine 模块，每个 Engine 只有一份 finished 版本序列，由接入层创建，经 EngineLoop 传给 EngineScheduler.Factory。提交前失败由接入 Session 发布，提交后由 EngineScheduler 在本地终态和资源清理条件满足时发布；不另外维护一份活动执行状态。错误保留 RequestFailure，到 RpcMessages 编码时才转换原生协议错误。准备中的任务不计入 EngineScheduler waiting/running，不占 KV；协议输出容器和 Fetch 保留结果同样不计入执行负载。P 交接完成后的本地 finished 与其继续代理 D 输出的会话结束是两个边界，后续网络结束不重复发布 P 的本地终态。
 
 ### PD 数据就绪与资源生命周期
 
-PD 通过“数据就绪”和“传输完成”衔接。Scheduler 判断阶段是否完成、发布就绪通知并管理依赖；协议/传输组件负责 ALLOCATE、LOAD、GENERATE、网络读写和 ACK；公共引用机制保证资源不会提前释放。Compute 不在每轮完成后自动传输，分块 Prefill、加载命中和提前发起 LOAD 都不能依赖这一假设。
+PD 通过“数据就绪”和“传输完成”衔接。EngineScheduler 判断阶段是否完成、发布就绪通知并管理依赖；协议/传输组件负责 ALLOCATE、LOAD、GENERATE、网络读写和 ACK；公共引用机制保证资源不会提前释放。Compute 不在每轮完成后自动传输，分块 Prefill、加载命中和提前发起 LOAD 都不能依赖这一假设。
 
 P 完成 Forward 后退出计算集合，保留 KV 和请求期限。交接期间额外持有资源引用；P 收到 D 的 LOAD ACK 后才提交传输完成并释放阶段资源。没有确认、传输失败或超时仍走失败清理，不发布成功缓存。释放 P KV 后，端到端 P RPC 仍可继续转发 D 输出。
 
@@ -205,7 +205,7 @@ Python 在 stop 或最终清理时收集异常，不增加实时发压监控。�
 
 `client/start` 通过 `requests_file` 读取 JSONL 或 Protobuf + Zstd 输入。以 `data/` 开头的路径从共享根解析，其他相对路径从 Case YAML 所在目录解析，也可使用绝对路径。当前所有 Client 位于同一机器并共享文件系统。
 
-压缩输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 python/mock_framework/execution/test/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存未展开的回放输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset；每张图只占 token_ids 中的一个位置，offset 按升序排列且不得重复。LoadClient 按显式配置的 image_token_id 将这些位置写为图片标记；Mock V 默认异步下载真实图片，使用 Java 读取尺寸并按文件内容摘要生成模拟特征身份；本地 mock.vit.skip.download=true 时使用回放宽高，其他准入、排队和计算路径相同。Client 查询 V 元数据后计算路由长度和缓存 key，发送给后端的仍是原始媒体输入。P 在进入 Scheduler 前展开图片位置，保留语义图片标记，将逐行特征 hash 单独保存在缓存区间中；hash 不替换语义 token。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
+压缩输入定义为 `java/client/src/main/proto/client_input.proto`，Java 由 Maven 生成，Python 测试辅助目录 python/mock_framework/execution/test/helpers 提交同一 protoc 3.25.1 生成的 client_input_pb2.py；输入读写器 input.py 也仅供框架测试与镜像终验生成、检查测试数据，不发布到 mock_framework 运行包。Request 保存未展开的回放输入：非空、非负 int32 token_ids，正 int32 max_new_tokens（本格式中的固定目标输出长度，LoadClient 发送 ignore_eos=true），可选非负 int32 priority（缺省为 50，显式 0 保留），可选非负 int64 arrival_offset_ms（相对于源起点的毫秒偏移，尚未除以倍速）。可选 images 保存 url、width、height、offset；每张图只占 token_ids 中的一个位置，offset 按升序排列且不得重复。LoadClient 按显式配置的 image_token_id 将这些位置写为图片标记；Mock V 默认异步下载真实图片，使用 Java 读取尺寸并按文件内容摘要生成模拟特征身份；本地 mock.vit.skip.download=true 时使用回放宽高，其他准入、排队和计算路径相同。Client 查询 V 元数据后计算路由长度和缓存 key，发送给后端的仍是原始媒体输入。P 在进入 EngineScheduler 前展开图片位置，保留语义图片标记，将逐行特征 hash 单独保存在缓存区间中；hash 不替换语义 token。完整生成参数及真实观测仍不是此播放格式的内容。未知字段、非法请求及不支持的版本均拒绝。
 
 文件以 `MCKINP01` 标识输入格式 v1，之后每批为 4 字节大端压缩长度加一个 Zstd 压缩的 Protobuf InputChunk。帧必须为 single-segment、声明解压长度并带校验和，压缩及解压单批上限均为 4 MiB；每请求 Protobuf 上限 1 MiB，每批至多 1024 个请求。写入器按约 1 MiB 或 1024 请求封批，不累积整个文件。InputChunk.sequence 从 1 连续递增，末批只含 total_requests；缺末批、计数不符、截断或尾随数据均报错。InputChunk 仅用于文件分块，不决定请求发送或 Engine 计算的 batch。压缩输入和分片使用同一份格式与读写器。
 
@@ -344,20 +344,20 @@ Trace 的两个 JSONL 流共用 `run_id` 和 `seq`。Step 事件、关联动作�
 
 新增 Case 操作在 `execution/step/` 定义 Step 子类并注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
 
-这里的 EngineLoop 是 P/D 文本生成执行内核，不是 JVM 宿主循环，也不是 ViT 调度循环。runtime 仅提供访问和实例管理设施；EngineLoop 驱动 Scheduler 选批及 Forward 执行，Scheduler 提交生成进度、队列和资源变化。ViT 保留自己的图片合批循环。RequestState 负责进度、终态及资源使用计数；QueueSnapshot 只是队列计数值，不统一各调度器的队列容器。
+这里的 EngineLoop 是 P/D 文本生成执行内核，不是 JVM 宿主循环，也不是 ViT 调度循环。runtime 仅提供访问和实例管理设施；EngineLoop 驱动 EngineScheduler 选批及 Forward 执行，EngineScheduler 提交生成进度、队列和资源变化。ViT 保留自己的图片合批循环。RequestState 负责进度、终态及资源使用计数；EngineScheduler.QueueSnapshot 只是队列计数值，不统一各调度器的队列容器。
 
 protocol 供 Client、P 接入层和 ViT 共用媒体输入与 RPC；图片几何、模拟输出 hash 生成和缓存大小计算归 ViT 的 VitGeometry。它们不反向依赖 ViT 服务实现。java/metrics 提供公共指标标签、窗口统计与导出；RTP 指标名称、单位及 TPS/容量统计放在后端 RtpMetrics，ViT 仍使用 VitMetrics。指标记录不参与模拟计算；窗口统计在 scrape 时推进，因此同一目标应由一个采集者抓取，额外 scrape 会改变窗口划分。
 
 ViT 的终态分三步：VitScheduler 只完成已准备图片的计算阶段 Future，不依赖 VitCache；VitPreparation.Task 等待阶段结果，统一调用 VitCache.publish 发布成功/失败，随后移除任务、释放准入额度。VitCache 保留同 key 的共享结果条目、等待者和驻留淘汰，不再从 pending 数量推导执行额度。mm_inflight_inputs 来源于 Preparation 的在途任务数，包含发布尚未返回的任务。排队取消通过阶段 Future 返回给任务所有者；已经选入 Forward 的工作保留到实际完成。关闭同样由 Preparation 收口任务终态，Cache.close 仅关闭缓存驻留。
 
 
-KvTransfer 是接入层使用的零耗时异步 PD 传输执行器，放在 admission 包内，不作为公共调度接口。传输开始与完成仍通过 EngineLoop 交给 Scheduler 处理；移动执行器不改变资源使用权和 LOAD ACK 顺序。KvCache/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 Scheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
+KvTransfer 是接入层使用的零耗时异步 PD 传输执行器，放在 admission 包内，不作为公共调度接口。传输开始与完成仍通过 EngineLoop 交给 EngineScheduler 处理；移动执行器不改变资源使用权和 LOAD ACK 顺序。KvCache/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 EngineScheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
 
-共享指代码复用，不是不同实例共享资源。RtpRpcService 负责协议路由和查询结果编码。PrefillRpcServer 管理 P 的本地单 token、P/D 和显式组接入，DecodeRpcServer 管理 D 的协议会话。两者保留原生校验、输入准备、协议顺序和响应投递，通过 Scheduler.Request 句柄与 EngineLoop 交互。RpcMessages 转换完整输入和观测快照，RpcErrors 转换原生错误码；KV、队列、计算和本地完成条件由后端 Scheduler 管理。RtpEvents 定义 Scheduler 接受的 RTP 生成许可和交接结果；共享 Scheduler 只提供扩展点，不定义所有后端必须经历的状态推进序列。RtpScheduler 负责普通 FIFO 准入，RtpGroupScheduler 单独负责显式组调度；两者共用基类，无 gRPC/protobuf/执行器依赖。
+共享指代码复用，不是不同实例共享资源。RtpRpcService 负责协议路由和查询结果编码。PrefillRpcServer 管理 P 的本地单 token、P/D 和显式组接入，DecodeRpcServer 管理 D 的协议会话。两者保留原生校验、输入准备、协议顺序和响应投递，通过 EngineScheduler.Request 句柄与 EngineLoop 交互。RpcMessages 转换完整输入和观测快照，RpcErrors 转换原生错误码；KV、队列、计算和本地完成条件由后端 EngineScheduler 管理。`AbstractRtpScheduler` 中的 RTP 控制事件定义生成许可和交接结果；共享 EngineScheduler 只提供扩展点，不定义所有后端必须经历的状态推进序列。RtpFifoScheduler 负责普通 FIFO 准入，RtpPrefillGroupScheduler 单独负责显式组调度；两者共用基类，无 gRPC/protobuf/执行器依赖。
 
 RequestState 是共享的请求进度、终态和资源清理机制。调度器决定何时申请和成功发布缓存；公共机制确保终态只通知一次、发布失败也尝试释放、取消请求不能再提交进度。Forward 持有资源使用权，终止请求不会提前释放仍被使用的块；EngineLoop 对执行对象做身份校验，晚到回调不能影响下一次执行。当前模拟 Forward 使用可取消计时；单成员取消保留整批执行，全部成员终止或关闭 Engine 时才取消计时并释放使用权。
 
-P 的 retained 请求计算完成后变成 READY，释放 Forward 槽位但保留 KV，直到 LOAD ACK、取消或期限到达；读取期间另持资源引用。D 的接入/传输与计算进度分开保存，完成后的 token/迭代数只由调度域推进。请求终态先清理资源；Scheduler 在同次状态提交中记录指标、发布原生完成增量并移除活动请求。随后由协议适配器异步完成 RPC 响应，不影响状态查询的可见性。
+P 的 retained 请求计算完成后变成 READY，释放 Forward 槽位但保留 KV，直到 LOAD ACK、取消或期限到达；读取期间另持资源引用。D 的接入/传输与计算进度分开保存，完成后的 token/迭代数只由调度域推进。请求终态先清理资源；EngineScheduler 在同次状态提交中记录指标、发布原生完成增量并移除活动请求。随后由协议适配器异步完成 RPC 响应，不影响状态查询的可见性。
 
 当前生产路径支持多个独立请求合批，P/D 使用相同调度循环。测试覆盖持续 Decode、批内独立取消、临时容量等待、输出阻塞和 PD 确认边界；完整 group、分块 Prefill 和 vLLM 未实现。
 
@@ -383,7 +383,7 @@ Java 内部端点仍可使用 ApiServer 和 Endpoint 的序列化/校验机制�
 
 ### Fetch 与计算解耦
 
-RTP 的 Enqueue ACK 后持续推进 LOAD、Prefill 和 Decode，不等待 Fetch。Scheduler 仍统一管理
+RTP 的 Enqueue ACK 后持续推进 LOAD、Prefill 和 Decode，不等待 Fetch。EngineScheduler 仍统一管理
 RECEIVED、KV_ALLOCATED、RUNNING、KV 资源和按版本查询的 finished 记录；P 在 LOAD ACK 后结束
 本地阶段，D 在最终输出交给协议容器后结束计算阶段。Fetch 接入、网络可写和输出消费不参与这些状态转换。
 
@@ -398,9 +398,9 @@ Master HA Case 在 environment 中声明两个独立 Master JVM，启动后通�
 
 原生 Master 的正常停止和最终清理使用每进程 60 秒退出预算，覆盖选举交接、gRPC 静默期和资源回收。最终清理按启动尝试的逆序逐个等待退出，期间保持其他 Master、Engine 和 ZooKeeper 存活；超时仍强杀并记录清理错误，不把退出失败当作成功。
 
-接入层只处理原生 RPC 的解析、响应关联和异步输出；Scheduler 是队列、计算进度、容量和终态的唯一来源。D 的网络不可写只阻塞输出缓冲发送，不再阻塞 Decode Forward 或 KV 释放；缓冲仍受请求生成长度和整体输出保留策略约束。PD 交接只保留 ALLOCATE→Prefill 完成→LOAD/ACK→GENERATE 或 PREFILL_COMPLETE，不实现额外来源注册表、Reader 所有权及自定义 proto。Wire 阶段仅用于拒绝乱序帧，不代替 Scheduler 的调度状态。
+接入层只处理原生 RPC 的解析、响应关联和异步输出；EngineScheduler 是队列、计算进度、容量和终态的唯一来源。D 的网络不可写只阻塞输出缓冲发送，不再阻塞 Decode Forward 或 KV 释放；缓冲仍受请求生成长度和整体输出保留策略约束。PD 交接只保留 ALLOCATE→Prefill 完成→LOAD/ACK→GENERATE 或 PREFILL_COMPLETE，不实现额外来源注册表、Reader 所有权及自定义 proto。Wire 阶段仅用于拒绝乱序帧，不代替 EngineScheduler 的调度状态。
 
-RTP 接入位于 `java/engine` 的 `service` 包。RtpRpcService 路由原生 RPC，PrefillRpcServer 和 DecodeRpcServer 管理各自的协议会话。RtpEngineLoop 连接 RPC 与 Scheduler。P 默认使用 FIFO，显式组模式使用 RtpGroupScheduler，D 使用普通调度。
+RTP 接入位于 `java/engine` 的 `service` 包。RtpRpcService 路由原生 RPC，PrefillRpcServer 和 DecodeRpcServer 管理各自的协议会话。RtpEngineLoop 连接 RPC 与 EngineScheduler。P 默认使用 FIFO，显式组模式使用 RtpPrefillGroupScheduler，D 使用普通调度。
 
 ## 构建与检查
 
@@ -422,7 +422,7 @@ PROMETHEUS_BIN=/path/to/prometheus ./scripts/test-framework.sh
 
 EngineMain 本地启动时原子发布 effective-config、endpoints 和 ready。Whale 启动时在日志记录有效配置和端点，平台管理发现和重拉。
 
-Engine 的 HTTP 与原生健康检查读取现有 Loop/Scheduler 失败状态，不采集指标。独立进程每秒调用同一检查，不可恢复失败退出。不开新的健康管理模块，不把普通请求失败当作 Engine 故障。
+Engine 的 HTTP 与原生健康检查读取现有 Loop/EngineScheduler 失败状态，不采集指标。独立进程每秒调用同一检查，不可恢复失败退出。不开新的健康管理模块，不把普通请求失败当作 Engine 故障。
 
 RTP 在同步本地缓存上执行。KVCM Reporter 消费有效块发布和淘汰，保留注册、事件、快照和恢复。
 
@@ -432,6 +432,6 @@ KvCache 同步取得本地容量和复用前缀。资源释放或新前缀发布
 
 ### 状态与观测边界
 
-Scheduler 的 allocator loading 与 D 的 PD 协议等待分开统计。WorkerStatus 按 real 输出 phase/is_waiting，不再填写 real 未实现的 waiting_query_len/running_query_len；活动 execution_time_ms=-1，终态总耗时减最后一次离开 WAITING 时冻结的 wait 得到 execution_time_ms。正常加载后重新调度会更新 wait，加载中取消则保留之前的 wait；不能把该字段当作纯 Forward 时长。微秒阶段指标在终态上报，具体名称、零值和统计窗口见 component-reference。
+EngineScheduler 的 allocator loading 与 D 的 PD 协议等待分开统计。WorkerStatus 按 real 输出 phase/is_waiting，不再填写 real 未实现的 waiting_query_len/running_query_len；活动 execution_time_ms=-1，终态总耗时减最后一次离开 WAITING 时冻结的 wait 得到 execution_time_ms。正常加载后重新调度会更新 wait，加载中取消则保留之前的 wait；不能把该字段当作纯 Forward 时长。微秒阶段指标在终态上报，具体名称、零值和统计窗口见 component-reference。
 
-KvCache 投递类型化的 match/read/write 完成事件，由 RTP 指标层映射 real 名称与单位，不把协议细节放入 Scheduler。读取未成功不增加远端复用，写入确认数由适配器返回；独立拉取 LOAD/STORE 引用与逻辑在途状态，后台写失败不依赖请求是否还存活。未模拟的 SDK/payload 子阶段没有指标样本。
+KvCache 投递类型化的 match/read/write 完成事件，由 RTP 指标层映射 real 名称与单位，不把协议细节放入 EngineScheduler。读取未成功不增加远端复用，写入确认数由适配器返回；独立拉取 LOAD/STORE 引用与逻辑在途状态，后台写失败不依赖请求是否还存活。未模拟的 SDK/payload 子阶段没有指标样本。

@@ -9,11 +9,11 @@ import org.flexlb.mock.engine.forward.SimulatedCompute;
 import org.flexlb.mock.protocol.CacheSequence;
 
 /** Called under the RtpEngineLoop lock. Queues, reservations and result commits belong to the implementation. */
-public interface Scheduler extends AutoCloseable {
+public interface EngineScheduler extends AutoCloseable {
     /** Create one fresh policy per Engine, sharing its domain lock, cache and terminal log. Internal state transitions remain backend-owned. */
     @FunctionalInterface
     interface Factory {
-        Scheduler create(Object lock, KvCache cache, TaskHistory finished);
+        EngineScheduler create(Object lock, KvCache cache, TaskHistory finished);
     }
 
     record Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
@@ -46,6 +46,25 @@ public interface Scheduler extends AutoCloseable {
 
     interface Control {}
     interface TransferResult { RequestFailure failure(); }
+    /** Request counts by scheduling stage. Loading and transfer-ready requests are not compute waiters. */
+    record QueueSnapshot(int waiting, int running, int loading, int ready) {
+        public QueueSnapshot {
+            if (waiting < 0 || running < 0 || loading < 0 || ready < 0)
+                throw new IllegalArgumentException("Negative request count");
+        }
+    }
+
+    /** Scheduling failures carry facts; protocol adapters choose wire codes. */
+    final class RequestFailure extends RuntimeException {
+        public enum Reason { CANCELLED, TIMEOUT, CAPACITY, OVERLOADED, PREEMPTED, CLOSED, DUPLICATE, INVALID, INTERNAL }
+        private final Reason reason;
+        public RequestFailure(Reason reason, String message) { this(reason, message, null); }
+        public RequestFailure(Reason reason, String message, Throwable cause) {
+            super(message, cause); this.reason = java.util.Objects.requireNonNull(reason);
+        }
+        public Reason reason() { return reason; }
+    }
+
     enum ReportedPhase { PENDING, RECEIVED, KV_ALLOCATED, RUNNING }
     record Task(long requestId, long batchId, int inputLength, int prefixLength, int priority,
                 ReportedPhase phase, int iterations, long waitingMillis, long executionMillis,

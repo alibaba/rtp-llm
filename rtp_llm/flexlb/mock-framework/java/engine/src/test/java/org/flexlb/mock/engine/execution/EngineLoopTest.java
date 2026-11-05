@@ -5,22 +5,22 @@ import java.util.concurrent.*;
 import org.flexlb.mock.engine.forward.ComputeSpec;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.forward.*;
-import org.flexlb.mock.engine.scheduler.QueueSnapshot;
-import org.flexlb.mock.engine.scheduler.RequestFailure;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.QueueSnapshot;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.RequestState;
-import org.flexlb.mock.engine.scheduler.Scheduler;
+import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class EngineLoopTest {
-    private static Scheduler.Work work(String id) {
+    private static EngineScheduler.Work work(String id) {
         var item = new ForwardBatch.Request(id, 4, 0, 8, 0, 4, 0, List.of());
-        return new Scheduler.Work(new Object(), new ForwardBatch(id, List.of(new ForwardBatch.Partition(0, List.of(item)))));
+        return new EngineScheduler.Work(new Object(), new ForwardBatch(id, List.of(new ForwardBatch.Partition(0, List.of(item)))));
     }
 
     /** Two policies with different queue order exercise the same execution loop. */
-    private static class Policy implements Scheduler {
+    private static class Policy implements EngineScheduler {
         final Deque<Work> queue = new ArrayDeque<>();
         final BlockingQueue<String> finished = new LinkedBlockingQueue<>();
         final List<Work> failures = new ArrayList<>();
