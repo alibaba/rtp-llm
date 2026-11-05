@@ -3,6 +3,7 @@
 from typing import Any, Dict
 
 import torch
+
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -140,6 +141,11 @@ class CudaNvfp4CutlassStrategy(MoeStrategy):
 class CudaNvfp4MarlinStrategy(CudaNvfp4CutlassStrategy):
     strategy_name = "nvfp4_marlin"
 
+    def can_handle(self, config):
+        if config.moe_strategy != self.strategy_name:
+            return False
+        return super().can_handle(config)
+
     @classmethod
     def check_conditions(cls, checker, config):
         checker.check(MoeConfigResolver().get_quant_method(config) == "modelopt_fp4")
@@ -150,12 +156,12 @@ class CudaNvfp4MarlinStrategy(CudaNvfp4CutlassStrategy):
             PureTpRouterNvfp4Cutlass,
         )
         from rtp_llm.models_py.modules.qwen4_exp.moe.marlin_nvfp4 import (
-            Qwen4HopperMarlinExecutor,
+            Qwen4MarlinExecutor,
         )
 
         return StrategyAttributes(
             router_class=PureTpRouterNvfp4Cutlass,
-            executor_class=Qwen4HopperMarlinExecutor,
+            executor_class=Qwen4MarlinExecutor,
             quant_config=FusedMoEQuantConfig(
                 quant_dtype=torch.uint8, block_shape=[16, 16]
             ),

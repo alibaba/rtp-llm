@@ -88,10 +88,14 @@ def prepare_target_reduce(config, parallelism):
         and communicator.cpp_small_enabled
     ):
         return None
-    enabled = os.getenv("RTP_QWEN4_TARGET_REDUCE", "legacy") == "ipc256"
+    mode = os.getenv("RTP_QWEN4_TARGET_REDUCE", "legacy")
     peers = [None] * 2
-    dist.all_gather_object(peers, enabled, group=communicator.group)
-    if not all(peers):
+    dist.all_gather_object(peers, mode, group=communicator.group)
+    if any(peer not in ("legacy", "ipc256") for peer in peers):
+        raise ValueError(
+            "RTP_QWEN4_TARGET_REDUCE must be legacy or ipc256 on every rank"
+        )
+    if any(peer != "ipc256" for peer in peers):
         return None
     return Qwen4TargetReduce(communicator)
 

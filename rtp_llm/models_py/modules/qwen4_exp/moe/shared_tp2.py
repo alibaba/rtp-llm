@@ -199,13 +199,7 @@ def maybe_prepare_bf16_shared_tp2(layer):
     """
     if os.getenv(_ENV, "0") != "1":
         return False
-    if (
-        os.getenv("RTP_QWEN4_BF16_SHARED_OVERLAP", "0") != "0"
-        or os.getenv("RTP_QWEN4_MTP_FP32_SHARED_GATE", "0") != "0"
-        or os.getenv("RTP_QWEN4_GDN_BF16_NK_LAYOUT", "0") != "0"
-        or os.getenv("RTP_QWEN4_DECODE_MOE_IMPL", "auto") != "cutlass"
-        or not _eligible(layer)
-    ):
+    if not _eligible(layer):
         return False
 
     shared = layer.shared_expert

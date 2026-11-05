@@ -242,6 +242,9 @@ class QsaCubTopkTest(unittest.TestCase):
 
     def test_mtp3_target_opt_in_preserves_default_and_adjacent_domains(self):
         self.assertEqual(torch.version.git_version, cub._TORCH_GIT)
+        with patch.dict("os.environ", RTP_QWEN4_TARGET_TOPK_IMPL="invalid"):
+            with self.assertRaisesRegex(ValueError, "must be native or cub"):
+                cub.is_supported(None, None)
         with patch.dict(
             "os.environ",
             RTP_QWEN4_TARGET_TOPK_IMPL="native",

@@ -51,6 +51,7 @@ class FlashInferAllReduce:
         single_node: bool,
         disable_custom_all_reduce: Optional[bool] = None,
         large_prefill: bool = False,
+        enable_sm120_collectives: bool = False,
     ) -> None:
         self.group = group
         self.device = device
@@ -68,9 +69,11 @@ class FlashInferAllReduce:
         self.allow_ipc_capture = False
 
         admitted = enabled_by_config(disable_custom_all_reduce) and single_node
-        peers = [None] * self.world_size
-        dist.all_gather_object(peers, admitted, group=self.group)
-        if not all(peers):
+        if enable_sm120_collectives:
+            peers = [None] * self.world_size
+            dist.all_gather_object(peers, admitted, group=self.group)
+            admitted = all(peers)
+        if not admitted:
             logging.info(
                 "FlashInfer all-reduce fallback: explicit_disable=%s env_disable=%s single_node=%s",
                 disable_custom_all_reduce,
@@ -96,7 +99,8 @@ class FlashInferAllReduce:
             self._flashinfer_comm = flashinfer_comm
             self.disabled = False
             self.cpp_small_enabled = (
-                self.world_size == 2
+                enable_sm120_collectives
+                and self.world_size == 2
                 and torch.cuda.get_device_capability(device) == (12, 0)
                 and torch.cuda.device_count() == 2
                 and torch.cuda.can_device_access_peer(0, 1)
@@ -115,14 +119,15 @@ class FlashInferAllReduce:
             logging.info("FlashInfer all-reduce unavailable; using NCCL: %s", error)
 
         self._large_prefill = large_prefill
-        policy = (not self.disabled, self.cpp_small_enabled, self._large_prefill)
-        dist.all_gather_object(peers, policy, group=self.group)
-        if any(peer != policy for peer in peers):
-            self.disabled = True
-            self.cpp_small_enabled = False
-            logging.warning(
-                "FlashInfer all-reduce eligibility differs across ranks; using NCCL"
-            )
+        if enable_sm120_collectives:
+            policy = (not self.disabled, self.cpp_small_enabled, self._large_prefill)
+            dist.all_gather_object(peers, policy, group=self.group)
+            if any(peer != policy for peer in peers):
+                self.disabled = True
+                self.cpp_small_enabled = False
+                logging.warning(
+                    "FlashInfer all-reduce eligibility differs across ranks; using NCCL"
+                )
 
     def _create_workspace(self, tensor: torch.Tensor) -> bool:
         if self.disabled or self._flashinfer_comm is None:
@@ -321,6 +326,7 @@ def init_flashinfer_allreduce(
     single_node: bool,
     disable_custom_all_reduce: Optional[bool] = None,
     large_prefill: bool = False,
+    enable_sm120_collectives: bool = False,
 ) -> Optional[FlashInferAllReduce]:
     global _communicator
     communicator = FlashInferAllReduce(
@@ -329,6 +335,7 @@ def init_flashinfer_allreduce(
         single_node=single_node,
         disable_custom_all_reduce=disable_custom_all_reduce,
         large_prefill=large_prefill,
+        enable_sm120_collectives=enable_sm120_collectives,
     )
     _communicator = None if communicator.disabled else communicator
     return _communicator

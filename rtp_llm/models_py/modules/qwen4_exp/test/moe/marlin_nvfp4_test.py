@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -272,11 +273,7 @@ class MarlinNvfp4Test(unittest.TestCase):
                     payload, activation, expert_map, None, apply_input, None
                 )
 
-    @unittest.skipUnless(
-        torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0),
-        "requires Hopper",
-    )
-    def test_hopper_strategy_uses_prepared_weights(self):
+    def test_explicit_strategy_uses_prepared_weights(self):
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.config.quant_config import (
             QWEN4_FP8_NVFP4_RECIPE,
@@ -311,6 +308,14 @@ class MarlinNvfp4Test(unittest.TestCase):
         moe.use_all_gather, moe.use_deepep_moe = True, False
         config = MoEConfigAdapter(model, pc, moe)
         strategy = CudaNvfp4MarlinStrategy()
+        config.moe_strategy = "auto"
+        with patch.object(
+            strategy,
+            "get_attributes",
+            side_effect=AssertionError("auto imported Marlin"),
+        ):
+            self.assertFalse(strategy.can_handle(config))
+        config.moe_strategy = "nvfp4_marlin"
         self.assertTrue(strategy.can_handle(config))
         factory = FusedMoeFactory()
         self.assertIsInstance(
@@ -339,6 +344,9 @@ class MarlinNvfp4Test(unittest.TestCase):
             ).fused_expert_output
             self.assert_reference(actual, self.reference(*args, 0))
         model.model_type = "other"
+        self.assertFalse(strategy.can_handle(config))
+        model.model_type = "qwen4_exp"
+        moe.fp4_moe_op = "cutlass"
         self.assertFalse(strategy.can_handle(config))
 
 

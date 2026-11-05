@@ -77,6 +77,7 @@ def _init_flashinfer_allreduce(
     parallelism_config: ParallelismConfig,
     disable_custom_all_reduce: Optional[bool] = None,
     ipc_all_reduce_large_prefill: bool = False,
+    enable_sm120_collectives: bool = False,
 ) -> None:
     global _canonical_p2p
     if parallelism_config.tp_size <= 1:
@@ -87,10 +88,12 @@ def _init_flashinfer_allreduce(
         single_node=parallelism_config.tp_size <= parallelism_config.local_world_size,
         disable_custom_all_reduce=disable_custom_all_reduce,
         large_prefill=ipc_all_reduce_large_prefill,
+        enable_sm120_collectives=enable_sm120_collectives,
     )
 
     if (
-        parallelism_config.tp_size == 8
+        enable_sm120_collectives
+        and parallelism_config.tp_size == 8
         and parallelism_config.world_size == 8
         and parallelism_config.local_world_size == 8
     ):
@@ -174,6 +177,7 @@ def init_distributed_environment(
     timeout: Optional[int] = None,
     disable_custom_all_reduce: Optional[bool] = None,
     ipc_all_reduce_large_prefill: bool = False,
+    enable_sm120_collectives: bool = False,
 ):
     """Initialize distributed environment and create process groups.
 
@@ -190,6 +194,9 @@ def init_distributed_environment(
             override. ``None`` preserves the implementation-specific default.
         ipc_all_reduce_large_prefill: Opt in to supported eager large-prefill IPC
             reductions, including their larger per-rank workspace.
+        enable_sm120_collectives: The selected model owns the SM120 IPC/capture
+            lifecycle. False preserves the existing communication backend and
+            skips the additional initialization agreements.
 
     Raises:
         RuntimeError: If already initialized and not destroyed
@@ -218,7 +225,10 @@ def init_distributed_environment(
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_flashinfer_allreduce(
-            parallelism_config, disable_custom_all_reduce, ipc_all_reduce_large_prefill
+            parallelism_config,
+            disable_custom_all_reduce,
+            ipc_all_reduce_large_prefill,
+            enable_sm120_collectives,
         )
         return
 
@@ -255,7 +265,10 @@ def init_distributed_environment(
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_flashinfer_allreduce(
-            parallelism_config, disable_custom_all_reduce, ipc_all_reduce_large_prefill
+            parallelism_config,
+            disable_custom_all_reduce,
+            ipc_all_reduce_large_prefill,
+            enable_sm120_collectives,
         )
         return
 
@@ -298,7 +311,10 @@ def init_distributed_environment(
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
     init_user_buffers_environment(parallelism_config)
     _init_flashinfer_allreduce(
-        parallelism_config, disable_custom_all_reduce, ipc_all_reduce_large_prefill
+        parallelism_config,
+        disable_custom_all_reduce,
+        ipc_all_reduce_large_prefill,
+        enable_sm120_collectives,
     )
 
 

@@ -11,6 +11,7 @@ import torch.multiprocessing as mp
 
 def _worker(rank, store):
     import flashinfer.comm
+
     from rtp_llm.models_py.distributed.flashinfer_all_reduce import FlashInferAllReduce
 
     torch.cuda.set_device(rank)
@@ -29,7 +30,11 @@ def _worker(rank, store):
         del flashinfer.comm.allreduce_fusion
     try:
         communicator = FlashInferAllReduce(
-            group, device, single_node=True, disable_custom_all_reduce=False
+            group,
+            device,
+            single_node=True,
+            enable_sm120_collectives=True,
+            disable_custom_all_reduce=False,
         )
         assert communicator.disabled and not communicator.cpp_small_enabled
     finally:
@@ -42,13 +47,18 @@ def _worker(rank, store):
         return_value=(12, 0) if rank == 0 else (8, 9),
     ):
         communicator = FlashInferAllReduce(
-            group, device, single_node=True, disable_custom_all_reduce=False
+            group,
+            device,
+            single_node=True,
+            enable_sm120_collectives=True,
+            disable_custom_all_reduce=False,
         )
         assert communicator.disabled and not communicator.cpp_small_enabled
     communicator = FlashInferAllReduce(
         group,
         device,
         single_node=True,
+        enable_sm120_collectives=True,
         disable_custom_all_reduce=False,
         large_prefill=bool(rank),
     )
@@ -62,7 +72,11 @@ def _worker(rank, store):
         return_value=(12, 0),
     ):
         communicator = FlashInferAllReduce(
-            group, device, single_node=True, disable_custom_all_reduce=False
+            group,
+            device,
+            single_node=True,
+            enable_sm120_collectives=True,
+            disable_custom_all_reduce=False,
         )
         assert communicator.disabled
     original_empty = torch.empty
@@ -73,7 +87,11 @@ def _worker(rank, store):
         return original_empty(*args, **kwargs)
 
     communicator = FlashInferAllReduce(
-        group, device, single_node=True, disable_custom_all_reduce=False
+        group,
+        device,
+        single_node=True,
+        enable_sm120_collectives=True,
+        disable_custom_all_reduce=False,
     )
     x = torch.full((4, 2560), rank + 1, dtype=torch.bfloat16, device=device)
     with patch.object(torch, "empty", side_effect=allocate):
@@ -84,7 +102,11 @@ def _worker(rank, store):
     from flashinfer.comm import vllm_ar
 
     communicator = FlashInferAllReduce(
-        group, device, single_node=True, disable_custom_all_reduce=False
+        group,
+        device,
+        single_node=True,
+        enable_sm120_collectives=True,
+        disable_custom_all_reduce=False,
     )
     original_register = vllm_ar.register_buffer
 
@@ -101,7 +123,11 @@ def _worker(rank, store):
     torch.testing.assert_close(x, torch.full_like(x, 3), rtol=0, atol=0)
 
     communicator = FlashInferAllReduce(
-        group, device, single_node=True, disable_custom_all_reduce=False
+        group,
+        device,
+        single_node=True,
+        enable_sm120_collectives=True,
+        disable_custom_all_reduce=False,
     )
     assert not communicator.disabled and communicator.cpp_small_enabled
     x = torch.full((4, 2560), rank + 1, dtype=torch.bfloat16, device=device)
@@ -112,6 +138,7 @@ def _worker(rank, store):
         group,
         device,
         single_node=True,
+        enable_sm120_collectives=True,
         disable_custom_all_reduce=False,
         large_prefill=True,
     )

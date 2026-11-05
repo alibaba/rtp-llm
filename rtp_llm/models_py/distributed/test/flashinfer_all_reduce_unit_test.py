@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.distributed import flashinfer_all_reduce as flashinfer_ar
 
@@ -50,8 +52,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertFalse(flashinfer_ar.enabled_by_env())
         for value in ("0", "false", "off", "no"):
-            with self.subTest(value=value), patch.dict(
-                os.environ, {"FT_DISABLE_CUSTOM_AR": value}, clear=True
+            with (
+                self.subTest(value=value),
+                patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": value}, clear=True),
             ):
                 self.assertTrue(flashinfer_ar.enabled_by_env())
         with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "1"}, clear=True):
@@ -68,13 +71,19 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         group = object()
         config = SimpleNamespace(tp_size=2, local_rank=0, local_world_size=2)
 
-        with patch.object(
-            collective, "_get_flashinfer_allreduce", return_value=communicator_module
-        ), patch.object(collective, "_get_group", return_value=group):
+        with (
+            patch.object(
+                collective,
+                "_get_flashinfer_allreduce",
+                return_value=communicator_module,
+            ),
+            patch.object(collective, "_get_group", return_value=group),
+        ):
             collective._init_flashinfer_allreduce(
                 config,
                 disable_custom_all_reduce=True,
                 ipc_all_reduce_large_prefill=True,
+                enable_sm120_collectives=True,
             )
 
         communicator_module.init_flashinfer_allreduce.assert_called_once_with(
@@ -83,7 +92,69 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
             single_node=True,
             disable_custom_all_reduce=True,
             large_prefill=True,
+            enable_sm120_collectives=True,
         )
+
+    def test_default_initialization_does_not_add_collectives(self):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(flashinfer_ar.dist, "get_world_size", return_value=2),
+            patch.object(flashinfer_ar.dist, "get_rank", return_value=0),
+            patch.object(flashinfer_ar.dist, "all_gather_object") as gather,
+        ):
+            communicator = flashinfer_ar.FlashInferAllReduce(
+                object(), torch.device("cuda", 0), single_node=True
+            )
+        self.assertTrue(communicator.disabled)
+        gather.assert_not_called()
+
+    def test_existing_custom_ar_keeps_legacy_backend_on_sm120(self):
+        comm = MagicMock()
+        with (
+            patch.dict(
+                sys.modules,
+                {"flashinfer": MagicMock(comm=comm), "flashinfer.comm": comm},
+            ),
+            patch.object(flashinfer_ar.dist, "get_world_size", return_value=2),
+            patch.object(flashinfer_ar.dist, "get_rank", return_value=0),
+            patch.object(flashinfer_ar.dist, "all_gather_object") as gather,
+            patch.object(torch.cuda, "get_device_capability", return_value=(12, 0)),
+            patch.object(torch.cuda, "is_current_stream_capturing", return_value=False),
+            patch.object(flashinfer_ar.dist, "all_reduce"),
+            patch.object(torch, "tensor", return_value=MagicMock()),
+            patch.dict(sys.modules, {"flashinfer.comm.mnnvl": MagicMock()}),
+        ):
+            communicator = flashinfer_ar.FlashInferAllReduce(
+                object(),
+                torch.device("cuda", 0),
+                single_node=True,
+                disable_custom_all_reduce=False,
+            )
+            tensor = _FakeTensor()
+            tensor.shape = (4, 2560)
+            self.assertFalse(communicator.cpp_small_enabled)
+            self.assertTrue(communicator._create_workspace(tensor))
+        comm.create_allreduce_fusion_workspace.assert_called_once()
+        self.assertEqual(
+            comm.create_allreduce_fusion_workspace.call_args.kwargs["backend"], "trtllm"
+        )
+        gather.assert_not_called()
+
+    def test_default_tp8_skips_canonical_initialization(self):
+        module = MagicMock()
+        canonical = MagicMock()
+        config = SimpleNamespace(
+            tp_size=8, world_size=8, local_rank=0, local_world_size=8
+        )
+        with (
+            patch.object(collective, "_get_flashinfer_allreduce", return_value=module),
+            patch.object(collective, "_get_group", return_value=object()),
+            patch.dict(
+                sys.modules, {"rtp_llm.models_py.distributed.canonical_p2p": canonical}
+            ),
+        ):
+            collective._init_flashinfer_allreduce(config)
+        canonical.init_canonical_p2p.assert_not_called()
 
     def test_large_prefill_workspace_capacity_and_shape_policy(self):
         from rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce import (
@@ -97,15 +168,14 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
             workspace = MagicMock()
             tensor = _FakeTensor()
             tensor.shape = (4, 2560)
-            with patch(
-                "torch.cuda.is_current_stream_capturing", return_value=False
-            ), patch(
-                "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce",
-                return_value=workspace,
-            ) as factory, patch(
-                "torch.tensor", return_value=MagicMock()
-            ), patch(
-                "torch.distributed.all_reduce"
+            with (
+                patch("torch.cuda.is_current_stream_capturing", return_value=False),
+                patch(
+                    "rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce.FlashInferIpcAllReduce",
+                    return_value=workspace,
+                ) as factory,
+                patch("torch.tensor", return_value=MagicMock()),
+                patch("torch.distributed.all_reduce"),
             ):
                 self.assertTrue(communicator._create_workspace(tensor))
             capacity = 128 * 1024 * 1024 if enabled else 32 * 2560 * 2
@@ -132,6 +202,39 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
                 self.assertFalse(
                     policy.is_buffer_size_sufficient(2, 4096, 2560, torch.bfloat16)
                 )
+
+    def test_target_reduce_default_and_invalid_peer_do_not_allocate(self):
+        from rtp_llm.models_py.modules.qwen4_exp import tp_reduce
+
+        communicator = SimpleNamespace(
+            disabled=False, cpp_small_enabled=True, group=object()
+        )
+        config = SimpleNamespace(is_mtp=False)
+        parallelism = SimpleNamespace(
+            role_type="DECODE", tp_size=2, dp_size=1, local_world_size=2
+        )
+        for modes in (("legacy", "legacy"), ("ipc256", "invalid")):
+
+            def gather(peers, value, group):
+                peers[:] = modes
+
+            with (
+                self.subTest(modes=modes),
+                patch.dict(os.environ, {}, clear=True),
+                patch.object(
+                    tp_reduce, "get_flashinfer_allreduce", return_value=communicator
+                ),
+                patch.object(tp_reduce.dist, "all_gather_object", side_effect=gather),
+                patch.object(tp_reduce, "Qwen4TargetReduce") as factory,
+            ):
+                if "invalid" in modes:
+                    with self.assertRaisesRegex(ValueError, "on every rank"):
+                        tp_reduce.prepare_target_reduce(config, parallelism)
+                else:
+                    self.assertIsNone(
+                        tp_reduce.prepare_target_reduce(config, parallelism)
+                    )
+                factory.assert_not_called()
 
     def test_shape_and_dtype_eligibility(self):
         workspace = MagicMock()

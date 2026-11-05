@@ -22,12 +22,7 @@ import torch.nn.functional as F
 from rtp_llm.models_py.modules.qwen4_exp.moe import shared_tp2
 
 _ENV = {
-    "RTP_QWEN4_BF16_SHARED_TP2_OVERLAP": "0",
     "RTP_QWEN4_BF16_SHARED_TP2": "1",
-    "RTP_QWEN4_BF16_SHARED_OVERLAP": "0",
-    "RTP_QWEN4_MTP_FP32_SHARED_GATE": "0",
-    "RTP_QWEN4_GDN_BF16_NK_LAYOUT": "0",
-    "RTP_QWEN4_DECODE_MOE_IMPL": "cutlass",
     "RTP_QWEN4_TARGET_REDUCE": "ipc256",
 }
 
@@ -419,13 +414,6 @@ def _fallback_checks(pc, source, executor):
             assert not layer.use_unified_tp_allreduce
         finally:
             setattr(obj, key, old)
-    for key in (
-        "RTP_QWEN4_BF16_SHARED_OVERLAP",
-        "RTP_QWEN4_MTP_FP32_SHARED_GATE",
-        "RTP_QWEN4_GDN_BF16_NK_LAYOUT",
-    ):
-        with patch.dict(os.environ, {key: "1"}):
-            assert not shared_tp2.maybe_prepare_bf16_shared_tp2(layer)
     assert layer.shared_expert.up_proj.weight is up
     assert layer.shared_expert.down_proj.weight is down
 
@@ -579,7 +567,9 @@ def _worker(rank, port):
     # the real model communicator before installing any layer reduction.
     nccl = NcclCommConfig()
     nccl.nccl_ip = "127.0.0.1"
-    ct.init_distributed_environment(pc, nccl, port, disable_custom_all_reduce=False)
+    ct.init_distributed_environment(
+        pc, nccl, port, disable_custom_all_reduce=False, enable_sm120_collectives=True
+    )
     communicator = get_flashinfer_allreduce()
     assert communicator is not None and communicator.cpp_small_enabled
     communicator.allow_ipc_capture = True
@@ -594,9 +584,7 @@ def _worker(rank, port):
 
     reducer.workspace.all_reduce = record_target_ipc
     source = _source()
-    # Decode CUTLASS is required. Do not silently activate the eager-P library.
-    os.environ.pop("RTP_LLM_NVFP4_SM120_LIBRARY", None)
-    os.environ.pop("RTP_LLM_NVFP4_SM120_LIBRARY_SHA256", None)
+    # Decode CUTLASS is required for this consumer qualification.
     weights = _nvfp4_weights(device)
     executor, full = _executor(pc, weights), _executor(pc, weights, full=True)
     graphs = []

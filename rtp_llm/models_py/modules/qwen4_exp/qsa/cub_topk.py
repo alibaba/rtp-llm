@@ -299,8 +299,11 @@ void qsa_cub_topk_draft(
 def is_supported(scores, lengths):
     # Opt in only the two MTP3 target buckets captured with an 8K KV capacity.
     # Other row counts/column widths retain their existing dispatch domain.
+    mode = os.getenv("RTP_QWEN4_TARGET_TOPK_IMPL", "native")
+    if mode not in ("native", "cub"):
+        raise ValueError("RTP_QWEN4_TARGET_TOPK_IMPL must be native or cub")
     mtp3_target = (
-        os.getenv("RTP_QWEN4_TARGET_TOPK_IMPL", "native") == "cub"
+        mode == "cub"
         and scores.ndim == 2
         and scores.shape[0] in (64, 256)
         and scores.shape[1] == 2048

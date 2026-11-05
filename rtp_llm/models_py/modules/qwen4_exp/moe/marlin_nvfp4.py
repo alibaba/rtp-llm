@@ -4,9 +4,7 @@ Weight/scale conversion follows vLLM v0.31.0 marlin_utils_fp4.py (Apache-2.0).
 """
 
 import functools
-import logging
 import math
-import os
 from pathlib import Path
 
 import torch
@@ -50,18 +48,6 @@ def load_library():
         ],
         is_python_module=False,
     )
-
-
-@functools.lru_cache(maxsize=1)
-def _library_available():
-    try:
-        load_library()
-        return True
-    except (RuntimeError, OSError) as error:
-        logging.getLogger(__name__).warning(
-            "Qwen decode Marlin is unavailable; retaining CUTLASS: %s", error
-        )
-        return False
 
 
 def prepare_weight(q, sf, global_sf):
@@ -434,62 +420,6 @@ def _linear_scales(swizzled, experts, rows, cols):
     )
 
 
-def make_decode_marlin_executor(native, role, max_generate_batch_size):
-    """Replace only the measured EP2 SM120 Qwen decode geometry.
-
-    Repacking reuses the original weight/scale storages. Keeping both layouts
-    for every layer would exceed device memory. Prefill and larger serving
-    capacities retain the factory-selected executor.
-    """
-    mode = os.getenv("RTP_QWEN4_DECODE_MOE_IMPL", "auto")
-    if mode not in ("auto", "cutlass"):
-        raise ValueError("RTP_QWEN4_DECODE_MOE_IMPL must be auto or cutlass")
-    capacity = 8
-    if (
-        mode == "cutlass"
-        or str(role).upper().rsplit(".", 1)[-1] != "DECODE"
-        or not 0 < max_generate_batch_size <= capacity
-        or type(native).__name__ != "CutlassNvfp4Executor"
-        or torch.version.hip is not None
-    ):
-        return native
-
-    from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
-        CutlassNvfp4Executor,
-    )
-    from rtp_llm.utils.model_weight import W
-
-    if not (
-        isinstance(native, CutlassNvfp4Executor)
-        and native.ep_size == 2
-        and native.tp_size == 1
-        and native.w1.shape == (256, 1280, 160)
-        and native.w2.shape == (256, 2560, 40)
-        and native.w1.is_cuda
-        and torch.cuda.get_device_capability(native.w1.device) == (12, 0)
-        and not native.config.model_config.eplb_config.enable_eplb()
-        and all(
-            native.weights[name].is_contiguous()
-            and native.weights[name].data_ptr() == value.data_ptr()
-            for name, value in (
-                (W.moe_w1, native.w1),
-                (W.moe_w2, native.w2),
-                (W.moe_s1, native.quant_scales[1]),
-                (W.moe_s2, native.quant_scales[4]),
-            )
-        )
-    ):
-        return native
-    if not _library_available():
-        return native
-    executor = Qwen4DecodeMarlinExecutor(native)
-    logging.getLogger(__name__).info(
-        "Qwen4 DECODE MoE executor=Marlin NVFP4 W4A16; capacity=%s",
-        max_generate_batch_size,
-    )
-    return executor
-
-
 class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
@@ -609,8 +539,8 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
         return CombineForwardPayload(fused_expert_output=output)
 
 
-class Qwen4HopperMarlinExecutor(Qwen4DecodeMarlinExecutor):
-    """Use NVFP4 weight-only Marlin for Hopper prefill and decode."""
+class Qwen4MarlinExecutor(Qwen4DecodeMarlinExecutor):
+    """Explicit NVFP4 weight-only Marlin selection through the MoE factory."""
 
     @classmethod
     def executor_type(cls):
@@ -636,7 +566,8 @@ class Qwen4HopperMarlinExecutor(Qwen4DecodeMarlinExecutor):
             and not quant.is_quanted()
         )
         checker.check(
-            torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
+            torch.cuda.is_available()
+            and torch.cuda.get_device_capability() in ((9, 0), (12, 0))
         )
         checker.check(config.tp_size == config.ep_size)
         checker.check(config.parallelism_config.get_ffn_tp_size() == 1)

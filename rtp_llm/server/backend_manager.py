@@ -60,6 +60,8 @@ class BackendManager(object):
                 timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
                 disable_custom_all_reduce=self.py_env_configs.ft_disable_custom_ar_override,
                 ipc_all_reduce_large_prefill=self.py_env_configs.ipc_all_reduce_large_prefill,
+                enable_sm120_collectives=self.py_env_configs.model_args.model_type
+                in ("qwen4_exp", "qwen4_exp_mtp"),
             )
         world_info = get_world_info(
             self.py_env_configs.server_config,

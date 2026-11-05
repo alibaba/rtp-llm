@@ -938,7 +938,6 @@ qwen4_test(
     src = "moe/shared_expert_tp2_integration_test.py",
     gpu = "RTX_5000_PRO_CU13",
     gpus = 2,
-    env = {"RTP_QWEN4_BF16_SHARED_TP2_OVERLAP": "0"},
     deps = [
         ":math_references",
         ":test_support",
