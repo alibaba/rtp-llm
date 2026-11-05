@@ -172,8 +172,9 @@ def _curl_server_single_worker(
     try:
         owner = i % native_dp_size if native_dp_size else None
         request_port = base_port + 5 + owner * 9 if native_dp_size else base_port
+        request_path = "/inference_internal" if native_dp_size and owner else "/"
         response = requests.post(
-            f"http://127.0.0.1:{request_port}",
+            f"http://127.0.0.1:{request_port}{request_path}",
             json=req,
             timeout=wait_time,
             stream=detailed,

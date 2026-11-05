@@ -121,7 +121,9 @@ class TestPrepareConfig(unittest.TestCase):
                     9, 20000, "hello", True, 2, 60, native_dp_size=8
                 )
         self.assertTrue(result.success)
-        self.assertEqual(post.call_args.args[0], "http://127.0.0.1:20014")
+        self.assertEqual(
+            post.call_args.args[0], "http://127.0.0.1:20014/inference_internal"
+        )
         self.assertEqual(result.raw_measurement["owner_rank"], 1)
 
     def test_grid_mode_explicit_bs(self):
