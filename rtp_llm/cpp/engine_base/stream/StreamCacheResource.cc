@@ -339,12 +339,43 @@ absl::Status StreamCacheResource::initKVBlock() {
 
     // The manager initializes the cache keys inside malloc, so the registration
     // reads them only after the first prefill allocation succeeded.
-    // C-layer separation (A+B checkpoint): the match/reuse foundation does not
-    // create registration points, so forward saves, sparse writer plumbing, and
-    // short-leaf publication remain inert. Tail registration is introduced by
-    // the follow-up C commit.
     if (is_first_malloc && !prefix_cache_registration_ && partialTailReuseEnabled()) {
-        // Intentionally left empty until the tail-register layer is applied.
+        PrefixCacheRegistration registration;
+        registration.token_ids             = malloc_info.complete_token_ids->completeTokenIdsVec(0);
+        registration.original_input_tokens = static_cast<size_t>(malloc_info.complete_token_ids->seqLength());
+        RTP_LLM_CHECK_WITH_INFO(registration.token_ids.size() >= registration.original_input_tokens,
+                                "missing original input tokens for partial tail registration");
+        registration.token_ids.resize(registration.original_input_tokens);
+        registration.base_keys = batch_kv_cache_resource_->cacheKeys(0);
+
+        const size_t base_tokens = static_cast<size_t>(seqSizePerBlock());
+        const size_t full_unit   = static_cast<size_t>(reuseBlockTokens());
+        RTP_LLM_CHECK_WITH_INFO(base_tokens > 0 && full_unit >= base_tokens && full_unit % base_tokens == 0,
+                                "invalid full checkpoint unit for partial tail registration");
+        for (size_t pos = full_unit; pos <= registration.original_input_tokens; pos += full_unit) {
+            // LINEAR materializes every slot while prefix reuse is on, and
+            // regular SWA groups keep their published blocks until eviction,
+            // so every full-unit boundary is an original checkpoint.
+            const size_t index = pos / base_tokens - 1;
+            RTP_LLM_CHECK_WITH_INFO(index < registration.base_keys.size(), "missing full checkpoint key");
+            registration.points.push_back({{index, registration.base_keys[index], pos}, {}});
+        }
+        if (registration.original_input_tokens > 0
+            && (registration.points.empty()
+                || registration.points.back().endpoint.pos != registration.original_input_tokens)) {
+            const size_t index = (registration.original_input_tokens - 1) / base_tokens;
+            RTP_LLM_CHECK_WITH_INFO(index < registration.base_keys.size(), "missing tail checkpoint key");
+            registration.points.push_back(
+                {{index, registration.base_keys[index], registration.original_input_tokens}, {}});
+        }
+        for (auto& point : registration.points) {
+            for (const auto& group_set : resource_context_.cache_manager->blockTreeCache()->groupSets()) {
+                PrefixCacheGroupSaveBinding binding;
+                binding.group_set_id = group_set->groupSetId();
+                point.group_bindings.push_back(std::move(binding));
+            }
+        }
+        prefix_cache_registration_ = std::move(registration);
     }
 
     // HOST/DISK reuse is published after the asynchronous load completes.
