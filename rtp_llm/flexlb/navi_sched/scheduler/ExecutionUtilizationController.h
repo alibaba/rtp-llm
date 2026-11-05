@@ -13,36 +13,76 @@ struct ClusterExecutionUtilization {
     uint64_t waiting = 0;
     size_t nodes = 0;
 
-    void add(double busy, int32_t runningRequests, int32_t waitingRequests) {
-        if (!std::isfinite(busy) || busy < 0.0 || busy > 1.0 ||
-            runningRequests < 0 || waitingRequests < 0) return;
+    void add(double busy, int32_t runningRequests, int32_t waitingRequests)
+    {
+        if (!std::isfinite(busy) || busy < 0.0 || busy > 1.0 || runningRequests < 0 ||
+            waitingRequests < 0)
+            return;
         busySum += busy;
         running += static_cast<uint64_t>(runningRequests);
         waiting += static_cast<uint64_t>(waitingRequests);
         ++nodes;
     }
     double average() const { return nodes ? static_cast<double>(busySum / nodes) : 0.0; }
-    double effective() const {
+    double effective() const
+    {
         const auto capacity = std::max<long double>(running, 5.0L * nodes);
         return capacity > 0 ? average() * (1.0L + waiting / capacity) : 0.0;
     }
 };
 
+class ExecutionUtilizationWindow {
+public:
+    bool sample(int64_t nowMonoUs, int64_t totalBusyUs)
+    {
+        if (!_initialized) {
+            _lastMonoUs = nowMonoUs;
+            _lastBusyUs = totalBusyUs;
+            _initialized = true;
+            return false;
+        }
+        if (nowMonoUs <= _lastMonoUs || totalBusyUs < _lastBusyUs) return false;
+        _elapsedUs = nowMonoUs - _lastMonoUs;
+        _busyUs = std::clamp<int64_t>(totalBusyUs - _lastBusyUs, 0, _elapsedUs);
+        _value = static_cast<double>(_busyUs) / _elapsedUs;
+        _lastMonoUs = nowMonoUs;
+        _lastBusyUs = totalBusyUs;
+        return true;
+    }
+    double value() const { return _value; }
+    int64_t busyUs() const { return _busyUs; }
+    int64_t elapsedUs() const { return _elapsedUs; }
+    int64_t sampleMonoUs() const { return _lastMonoUs; }
+
+private:
+    bool _initialized = false;
+    int64_t _lastMonoUs = 0;
+    int64_t _lastBusyUs = 0;
+    int64_t _busyUs = 0;
+    int64_t _elapsedUs = 0;
+    double _value = 0.0;
+};
+
 class ExecutionUtilizationEstimator {
 public:
     explicit ExecutionUtilizationEstimator(int64_t nowMonoUs = 0)
-        : _lastSampleMonoUs(nowMonoUs) {}
+        : _lastSampleMonoUs(nowMonoUs)
+    {
+    }
 
-    void begin(int64_t nowMonoUs) {
+    void begin(int64_t nowMonoUs)
+    {
         if (_active++ == 0) _busyStartMonoUs = nowMonoUs;
     }
-    bool end(int64_t nowMonoUs) {
+    bool end(int64_t nowMonoUs)
+    {
         if (_active == 0) return false;
         if (--_active == 0) {
             _busyUs += std::max<int64_t>(0, nowMonoUs - _busyStartMonoUs);
         }
-        const auto totalBusyUs = _busyUs + (_active > 0
-            ? std::max<int64_t>(0, nowMonoUs - _busyStartMonoUs) : 0);
+        const auto totalBusyUs =
+            _busyUs +
+            (_active > 0 ? std::max<int64_t>(0, nowMonoUs - _busyStartMonoUs) : 0);
         if (!_hasSampleBaseline) {
             _lastSampleMonoUs = nowMonoUs;
             _lastSampleBusyUs = totalBusyUs;
@@ -53,10 +93,11 @@ public:
         _sampleElapsedUs = elapsedUs;
         _sampleBusyUs = totalBusyUs - _lastSampleBusyUs;
         if (elapsedUs > 0) {
-            const auto busyUs = std::clamp<int64_t>(
-                totalBusyUs - _lastSampleBusyUs, 0, elapsedUs);
+            const auto busyUs =
+                std::clamp<int64_t>(totalBusyUs - _lastSampleBusyUs, 0, elapsedUs);
             _busyEmaUs = _sampled ? _busyEmaUs + 0.1 * (busyUs - _busyEmaUs) : busyUs;
-            _elapsedEmaUs = _sampled ? _elapsedEmaUs + 0.1 * (elapsedUs - _elapsedEmaUs) : elapsedUs;
+            _elapsedEmaUs =
+                _sampled ? _elapsedEmaUs + 0.1 * (elapsedUs - _elapsedEmaUs) : elapsedUs;
             _ema = _busyEmaUs / _elapsedEmaUs;
             _sampled = true;
             _lastSampleMonoUs = nowMonoUs;
@@ -93,7 +134,8 @@ public:
         double proportionalGain = 0.05;
         double integralGainPerSecond = 0.01;
 
-        bool valid() const {
+        bool valid() const
+        {
             return std::isfinite(target) && target > 0.0 &&
                    std::isfinite(proportionalGain) && proportionalGain >= 0.0 &&
                    std::isfinite(integralGainPerSecond) && integralGainPerSecond >= 0.0;
@@ -101,18 +143,21 @@ public:
     };
 
     static double effectiveUtilization(double busyFraction, double executionCapacity,
-                                       int32_t queuedRequests) {
+                                       int32_t queuedRequests)
+    {
         if (!std::isfinite(busyFraction) || busyFraction < 0.0 || busyFraction > 1.0 ||
-            !std::isfinite(executionCapacity) || executionCapacity < 0 || queuedRequests < 0) {
+            !std::isfinite(executionCapacity) || executionCapacity < 0 ||
+            queuedRequests < 0) {
             return -1.0;
         }
         if (executionCapacity == 0) return busyFraction;
-        return busyFraction * (1.0 + queuedRequests /
-            std::max(executionCapacity, MIN_EXECUTION_CAPACITY));
+        return busyFraction * (1.0 + queuedRequests / std::max(executionCapacity,
+                                                               MIN_EXECUTION_CAPACITY));
     }
 
     double update(const Config &config, double averageUtilization,
-                  size_t reportingNodeCount, int64_t nowMonoUs) {
+                  size_t reportingNodeCount, int64_t nowMonoUs)
+    {
         if (!config.valid() || reportingNodeCount == 0 ||
             !std::isfinite(averageUtilization) || averageUtilization < 0.0) {
             reset();
@@ -135,7 +180,8 @@ public:
         return _probability;
     }
 
-    void reset() {
+    void reset()
+    {
         _integral = 0.0;
         _probability = 0.0;
         _lastUpdateMonoUs = 0;

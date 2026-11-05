@@ -140,6 +140,8 @@ private:
     KERNEL_DEPEND_ON(AgentSchedulerConfigR, _agentSchedulerConfigR);
     KERNEL_DEPEND_ON_FALSE(kmonitor::MetricsReporterR, _metricsReporterR);
     navi::AsyncPipePtr _samplePipe;
+    navi::AsyncPipePtr _executionUtilizationPipe;
+    int64_t _executionUtilizationActivationCount = 0;
     std::atomic<int64_t> _queueLatencyUs{0};
     std::unordered_map<int64_t, int64_t> _batchLatencyUs;
     std::unordered_map<int64_t, QueueFeatures> _batchQueueFeatures;

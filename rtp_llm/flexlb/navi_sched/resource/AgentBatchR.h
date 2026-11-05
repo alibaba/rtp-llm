@@ -232,6 +232,10 @@ public:
     bool beginBatchExecution(int64_t batchId);
     struct ExecutionUtilizationSnapshot {
         double busyEma = 0.0;
+        double busyWindow = 0.0;
+        int64_t windowBusyUs = 0;
+        int64_t windowElapsedUs = 0;
+        int64_t windowSampleMonoUs = 0;
         size_t activeCount = 0;
         int64_t sampleBusyUs = 0;
         int64_t sampleElapsedUs = 0;
@@ -243,10 +247,12 @@ public:
         int32_t gpuReadyQueuedRequests = 0;
     };
     ExecutionUtilizationSnapshot getExecutionUtilizationSnapshot() const;
-    const std::shared_ptr<std::atomic<double>> &getExecutionUtilizationSource() const {
+    const std::shared_ptr<std::atomic<double>> &getExecutionUtilizationSource() const
+    {
         return _executionUtilization;
     }
-    const std::shared_ptr<std::atomic<double>> &getExecutionBusyUtilizationSource() const {
+    const std::shared_ptr<std::atomic<double>> &getExecutionBusyUtilizationSource() const
+    {
         return _backendExecutionUtilization;
     }
     GraphRecoveryState getGraphRecoveryState() const;
@@ -283,6 +289,7 @@ public:
     bool endBackendExecution(int64_t eventTimeUs = 0);
     bool hasBackendExecutionObservation() const;
     int64_t getBackendExecutionBusyTimeUs(int64_t currentTimeUs) const;
+    bool sampleBackendExecutionUtilization(int64_t nowMonoUs = 0);
     static const std::vector<NaviSchedRequestStats> &getRequestStats(
         const NaviSchedBatch &batch);
     navi::SummaryErrorCode getSummary(const std::string &query,
@@ -396,6 +403,7 @@ private:
     int64_t _executionBusyTimeUs = 0;
     int64_t _executionBusyStartTimeUs = 0;
     ExecutionUtilizationEstimator _executionUtilizationEstimator;
+    ExecutionUtilizationWindow _executionUtilizationWindow;
     std::shared_ptr<std::atomic<double>> _backendExecutionUtilization =
         std::make_shared<std::atomic<double>>(0.0);
     std::atomic<double> _backendExecutionCapacity{0.0};

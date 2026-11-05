@@ -611,8 +611,8 @@ void AgentLatencyKernel::logLatencyTrainingSample(
     const AgentLatencyInput &input, uint64_t sampleSequence,
     const NaviSchedLatencySample &sample, const QueueFeatures *queueFeatures,
     const std::shared_ptr<const NaviSchedLatencyModelSnapshot> &snapshot,
-    const std::optional<NonLinearPrefillModelR::NonlinearOperatingPoint>
-        &operatingPoint) const
+    const std::optional<NonLinearPrefillModelR::NonlinearOperatingPoint> &operatingPoint)
+    const
 {
     const auto basePrediction =
         snapshot && snapshot->valid()
@@ -635,8 +635,9 @@ void AgentLatencyKernel::logLatencyTrainingSample(
             : 0.0;
     const char *region = "invalid";
     if (operatingPoint) {
-        region = operatingPoint->region < 0 ? "negative_far"
-                 : operatingPoint->region > 0 ? "positive_far" : "transition";
+        region = operatingPoint->region < 0   ? "negative_far"
+                 : operatingPoint->region > 0 ? "positive_far"
+                                              : "transition";
     }
     const auto requestIds = formatRequestIds(input);
     NAVI_KERNEL_LOG(
@@ -679,12 +680,12 @@ void AgentLatencyKernel::logLatencyTrainingSample(
         "latest_local_batch_id=%ld revision_before=%ld",
         sampleSequence, getLatencyInputTypeName(input.type), sample.eventTimeUs,
         input.batchId, input.localBatch.scheduleBatchId, requestIds.c_str(),
-        input.inflightRequests,
-        sample.features.getBatchCount(), sample.features.getBatchSize(),
-        sample.features.getPrecedingRequestCount(), input.predictedCacheHitTokenCount,
-        input.actualCacheHitTokenCount, sample.features.getCacheHitTokenCount(),
-        sample.features.getCacheMissTokenCount(), input.cacheHitMismatchRequestCount,
-        input.cacheHitAbsoluteErrorTokenCount, input.cacheHitMaxAbsoluteErrorTokenCount,
+        input.inflightRequests, sample.features.getBatchCount(),
+        sample.features.getBatchSize(), sample.features.getPrecedingRequestCount(),
+        input.predictedCacheHitTokenCount, input.actualCacheHitTokenCount,
+        sample.features.getCacheHitTokenCount(), sample.features.getCacheMissTokenCount(),
+        input.cacheHitMismatchRequestCount, input.cacheHitAbsoluteErrorTokenCount,
+        input.cacheHitMaxAbsoluteErrorTokenCount,
         sample.features.getCacheMissTokenSquareSum(),
         sample.features.getCacheHitMissTokenProductSum(), sample.latencyMs,
         sample.features.usesCapacitySplit() ? 1 : 0,
@@ -715,8 +716,8 @@ void AgentLatencyKernel::logLatencyTrainingSample(
         residualEvaluation.correctionMs, residualEvaluation.predictionMs, residualDecay,
         operatingPoint ? operatingPoint->u : 0.0,
         operatingPoint ? operatingPoint->curvature : 0.0,
-        operatingPoint ? operatingPoint->r : 0.0, region,
-        input.predictedQueueLatencyMs, input.backendQueueLatencyMs, queueFeatures ? 1 : 0,
+        operatingPoint ? operatingPoint->r : 0.0, region, input.predictedQueueLatencyMs,
+        input.backendQueueLatencyMs, queueFeatures ? 1 : 0,
         queueFeatures ? queueFeatures->rawLatencyMs : 0.0,
         queueFeatures ? queueFeatures->predictedLatencyMs : 0.0,
         queueFeatures ? queueFeatures->precedingBatchCount : 0.0,
@@ -768,19 +769,17 @@ void AgentLatencyKernel::logLatencyTrainingUpdate(
                     "residual_parameters_before=[%s] residual_parameters_after=[%s] "
                     "residual_last_update_time_us_before=%ld "
                     "residual_last_update_time_us_after=%ld",
-                    sampleSequence, eventTimeUs,
-                    fitInflight.beforeAvailable ? 1 : 0,
+                    sampleSequence, eventTimeUs, fitInflight.beforeAvailable ? 1 : 0,
                     fitInflight.before.requestCount, fitInflight.before.revision,
                     fitInflight.beforeTimeUs, fitInflight.afterAvailable ? 1 : 0,
                     fitInflight.after.requestCount, fitInflight.after.revision,
                     fitInflight.afterTimeUs, before->revision, after->revision,
-                    before->overloadPredictionTrusted ? 1 : 0,
-                    optimizerBefore.step, optimizerAfter.step, parameterCount,
-                    parametersBefore.c_str(), parametersAfter.c_str(),
-                    moment1Before.c_str(), moment2Before.c_str(), moment1After.c_str(),
-                    moment2After.c_str(), residualParametersBefore.c_str(),
-                    residualParametersAfter.c_str(), before->residualLastUpdateTimeUs,
-                    after->residualLastUpdateTimeUs);
+                    before->overloadPredictionTrusted ? 1 : 0, optimizerBefore.step,
+                    optimizerAfter.step, parameterCount, parametersBefore.c_str(),
+                    parametersAfter.c_str(), moment1Before.c_str(), moment2Before.c_str(),
+                    moment1After.c_str(), moment2After.c_str(),
+                    residualParametersBefore.c_str(), residualParametersAfter.c_str(),
+                    before->residualLastUpdateTimeUs, after->residualLastUpdateTimeUs);
 }
 
 void AgentLatencyKernel::logQueueDebugSample(
@@ -872,6 +871,13 @@ navi::ErrorCode AgentLatencyKernel::init(navi::KernelInitContext &ctx)
     if (derivesUnifiedWorkloadFromBatches()) {
         reportUnifiedWorkload(autil::TimeUtility::currentTime());
     }
+    _executionUtilizationPipe = ctx.createAsyncPipe(navi::AS_INDEPENDENT);
+    if (!_executionUtilizationPipe ||
+        !ctx.registerPeriodicPipe(_executionUtilizationPipe, 500, -1)) {
+        NAVI_KERNEL_LOG(ERROR, "register Agent execution utilization timer failed");
+        return navi::EC_INIT_SUB_GRAPH;
+    }
+    _agentBatchR->sampleBackendExecutionUtilization();
     return navi::EC_NONE;
 }
 
@@ -1141,26 +1147,23 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
         const auto sampleSequence = ++_latencyTrainingSampleSequence;
         const auto auditTraining = _agentReportR->latencyValidationEnabled();
         const auto snapshotBefore = _latencyModelR->getSnapshot();
-        const auto operatingPoint =
-            snapshotBefore && snapshotBefore->valid()
-                ? _latencyModelR->getNonlinearOperatingPoint(
-                      sample.features, snapshotBefore->parameters)
-                : std::nullopt;
+        const auto operatingPoint = snapshotBefore && snapshotBefore->valid()
+                                        ? _latencyModelR->getNonlinearOperatingPoint(
+                                              sample.features, snapshotBefore->parameters)
+                                        : std::nullopt;
         if (operatingPoint && _metricsReporterR) {
             const auto &reporter = _metricsReporterR->getReporter();
             if (reporter) {
-                const char *region = operatingPoint->region < 0 ? "negative_far"
+                const char *region = operatingPoint->region < 0   ? "negative_far"
                                      : operatingPoint->region > 0 ? "positive_far"
                                                                   : "transition";
                 const kmonitor::MetricsTags tags("region", region);
-                const auto report = [&reporter, &tags](const char *name,
-                                                        double value) {
-                    reporter->report(value, name, kmonitor::MetricType::GAUGE,
-                                     &tags, kmonitor::MetricLevel::FATAL);
+                const auto report = [&reporter, &tags](const char *name, double value) {
+                    reporter->report(value, name, kmonitor::MetricType::GAUGE, &tags,
+                                     kmonitor::MetricLevel::FATAL);
                 };
                 report("agent.latency_nonlinear_u", operatingPoint->u);
-                report("agent.latency_nonlinear_curvature",
-                       operatingPoint->curvature);
+                report("agent.latency_nonlinear_curvature", operatingPoint->curvature);
                 report("agent.latency_nonlinear_r", operatingPoint->r);
             }
         }
@@ -1202,10 +1205,30 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
             _agentReportR->reportLatencyModelUpdated(updatedSnapshot);
         }
     }
+    navi::DataPtr timerData;
+    bool timerEof = false;
+    _executionUtilizationPipe->getData(timerData, timerEof);
+    int64_t activatedCount = 0;
+    int64_t remainingCount = 0;
+    int64_t periodMs = 0;
+    int64_t nextTickTimeMs = 0;
+    if (!ctx.getPeriodicPipeActivationCount(_executionUtilizationPipe, activatedCount,
+                                            remainingCount, periodMs, nextTickTimeMs)) {
+        NAVI_KERNEL_LOG(ERROR, "read Agent execution utilization timer failed");
+        return navi::EC_ABORT;
+    }
+    if (!eof && activatedCount > _executionUtilizationActivationCount &&
+        _agentBatchR->sampleBackendExecutionUtilization()) {
+        reportExecutionLoad();
+    }
+    _executionUtilizationActivationCount = activatedCount;
     if (saveNeeded || eof) {
         ctx.setOutput(navi::PortIndex(0, navi::INVALID_INDEX), nullptr, eof);
     }
     if (eof) {
+        if (!ctx.stopPeriodicAsyncPipe(_executionUtilizationPipe)) {
+            NAVI_KERNEL_LOG(WARN, "stop Agent execution utilization timer failed");
+        }
         ctx.setOutput(navi::PortIndex(1, navi::INVALID_INDEX), nullptr, true);
     }
     return navi::EC_NONE;

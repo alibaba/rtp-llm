@@ -19,6 +19,10 @@ public:
     int32_t serverPort = 0;
     bool pdSeparated = true;
     double executionBusyEma = 0.0;
+    double executionBusyWindow = 0.0;
+    int64_t executionWindowBusyUs = 0;
+    int64_t executionWindowElapsedUs = 0;
+    int64_t executionWindowSampleMonoUs = 0;
     size_t executionActiveCount = 0;
     int64_t executionSampleBusyUs = 0;
     int64_t executionSampleElapsedUs = 0;

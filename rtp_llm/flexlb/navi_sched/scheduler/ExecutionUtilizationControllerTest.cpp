@@ -6,7 +6,54 @@ using namespace navi_sched;
 
 class ExecutionUtilizationControllerTest : public TESTBASE {};
 
-TEST_F(ExecutionUtilizationControllerTest, testFirstCompletionOnlyEstablishesSampleBaseline)
+TEST_F(ExecutionUtilizationControllerTest,
+       testPeriodicWindowClearsBusyValueWithoutRequests)
+{
+    ExecutionUtilizationWindow window;
+    EXPECT_FALSE(window.sample(1000000, 0));
+    ASSERT_TRUE(window.sample(1500000, 500000));
+    EXPECT_DOUBLE_EQ(1.0, window.value());
+    for (int i = 1; i <= 3600; ++i) {
+        ASSERT_TRUE(window.sample(1500000 + i * 500000LL, 500000));
+        EXPECT_DOUBLE_EQ(0.0, window.value());
+        EXPECT_EQ(0, window.busyUs());
+        EXPECT_EQ(500000, window.elapsedUs());
+    }
+}
+
+TEST_F(ExecutionUtilizationControllerTest, testPeriodicWindowUsesActualElapsedTime)
+{
+    ExecutionUtilizationWindow window;
+    EXPECT_FALSE(window.sample(100, 100));
+    ASSERT_TRUE(window.sample(1000100, 250100));
+    EXPECT_DOUBLE_EQ(0.25, window.value());
+    EXPECT_EQ(250000, window.busyUs());
+    EXPECT_EQ(1000000, window.elapsedUs());
+    EXPECT_EQ(1000100, window.sampleMonoUs());
+    EXPECT_FALSE(window.sample(1000100, 250100));
+    EXPECT_FALSE(window.sample(1000099, 250100));
+    EXPECT_FALSE(window.sample(1500100, 250099));
+    EXPECT_DOUBLE_EQ(0.25, window.value());
+    ASSERT_TRUE(window.sample(1500100, 750100));
+    EXPECT_DOUBLE_EQ(1.0, window.value());
+}
+
+TEST_F(ExecutionUtilizationControllerTest, testPeriodicWindowIncludesUnfinishedExecution)
+{
+    ExecutionUtilizationWindow window;
+    EXPECT_FALSE(window.sample(100, 0));
+    ASSERT_TRUE(window.sample(500100, 500000));
+    EXPECT_DOUBLE_EQ(1.0, window.value());
+    ASSERT_TRUE(window.sample(1000100, 1000000));
+    EXPECT_DOUBLE_EQ(1.0, window.value());
+    ASSERT_TRUE(window.sample(1500100, 1250000));
+    EXPECT_DOUBLE_EQ(0.5, window.value());
+    ASSERT_TRUE(window.sample(2000100, 1250000));
+    EXPECT_DOUBLE_EQ(0.0, window.value());
+}
+
+TEST_F(ExecutionUtilizationControllerTest,
+       testFirstCompletionOnlyEstablishesSampleBaseline)
 {
     ExecutionUtilizationEstimator estimator(100);
     estimator.begin(721655793);
@@ -21,13 +68,19 @@ TEST_F(ExecutionUtilizationControllerTest, testFirstCompletionOnlyEstablishesSam
     EXPECT_EQ(3424818, estimator.sampleElapsedUs());
 }
 
-TEST_F(ExecutionUtilizationControllerTest, testUnknownExecutionCapacityDoesNotAmplifyQueue)
+TEST_F(ExecutionUtilizationControllerTest,
+       testUnknownExecutionCapacityDoesNotAmplifyQueue)
 {
-    EXPECT_DOUBLE_EQ(0.5, ExecutionUtilizationController::effectiveUtilization(0.5, 0, 9));
-    EXPECT_DOUBLE_EQ(0.95, ExecutionUtilizationController::effectiveUtilization(0.5, 10, 9));
-    EXPECT_DOUBLE_EQ(1.4, ExecutionUtilizationController::effectiveUtilization(0.5, 1, 9));
-    EXPECT_DOUBLE_EQ(1.4, ExecutionUtilizationController::effectiveUtilization(0.5, 4, 9));
-    EXPECT_DOUBLE_EQ(1.4, ExecutionUtilizationController::effectiveUtilization(0.5, 5, 9));
+    EXPECT_DOUBLE_EQ(0.5,
+                     ExecutionUtilizationController::effectiveUtilization(0.5, 0, 9));
+    EXPECT_DOUBLE_EQ(0.95,
+                     ExecutionUtilizationController::effectiveUtilization(0.5, 10, 9));
+    EXPECT_DOUBLE_EQ(1.4,
+                     ExecutionUtilizationController::effectiveUtilization(0.5, 1, 9));
+    EXPECT_DOUBLE_EQ(1.4,
+                     ExecutionUtilizationController::effectiveUtilization(0.5, 4, 9));
+    EXPECT_DOUBLE_EQ(1.4,
+                     ExecutionUtilizationController::effectiveUtilization(0.5, 5, 9));
 }
 
 TEST_F(ExecutionUtilizationControllerTest, testCompletionSamplesIdleAndBusyWithEma)
@@ -103,9 +156,12 @@ TEST_F(ExecutionUtilizationControllerTest, testSameTimestampAndImmediateQueueSca
     estimator.begin(100);
     ASSERT_TRUE(estimator.end(200));
     EXPECT_DOUBLE_EQ(1.0, estimator.value());
-    EXPECT_DOUBLE_EQ(1.0, ExecutionUtilizationController::effectiveUtilization(estimator.value(), 10, 0));
-    EXPECT_DOUBLE_EQ(2.0, ExecutionUtilizationController::effectiveUtilization(estimator.value(), 10, 10));
-    EXPECT_DOUBLE_EQ(3.0, ExecutionUtilizationController::effectiveUtilization(estimator.value(), 10, 20));
+    EXPECT_DOUBLE_EQ(1.0, ExecutionUtilizationController::effectiveUtilization(
+                              estimator.value(), 10, 0));
+    EXPECT_DOUBLE_EQ(2.0, ExecutionUtilizationController::effectiveUtilization(
+                              estimator.value(), 10, 10));
+    EXPECT_DOUBLE_EQ(3.0, ExecutionUtilizationController::effectiveUtilization(
+                              estimator.value(), 10, 20));
     EXPECT_DOUBLE_EQ(1.0, estimator.value());
 }
 
@@ -156,8 +212,9 @@ TEST_F(ExecutionUtilizationControllerTest, testMissingInvalidAndRestartReset)
     controller.update(config, 1.0, 1, 2000000);
     EXPECT_DOUBLE_EQ(0.0, controller.update(config, 1.0, 0, 3000000));
     EXPECT_DOUBLE_EQ(0.0, controller.integral());
-    EXPECT_DOUBLE_EQ(0.0, controller.update(config,
-        std::numeric_limits<double>::quiet_NaN(), 1, 4000000));
+    EXPECT_DOUBLE_EQ(
+        0.0,
+        controller.update(config, std::numeric_limits<double>::quiet_NaN(), 1, 4000000));
     EXPECT_DOUBLE_EQ(0.0, controller.update(config, -0.01, 1, 5000000));
     config.integralGainPerSecond = -1.0;
     EXPECT_FALSE(config.valid());
@@ -179,13 +236,20 @@ TEST_F(ExecutionUtilizationControllerTest, testBacklogAboveOneHundredPercent)
 
 TEST_F(ExecutionUtilizationControllerTest, testRequestCountConversion)
 {
-    EXPECT_DOUBLE_EQ(2.0, ExecutionUtilizationController::effectiveUtilization(1.0, 100, 100));
-    EXPECT_DOUBLE_EQ(1.0, ExecutionUtilizationController::effectiveUtilization(0.5, 100, 100));
-    EXPECT_DOUBLE_EQ(0.5, ExecutionUtilizationController::effectiveUtilization(0.5, 100, 0));
-    EXPECT_DOUBLE_EQ(1.0, ExecutionUtilizationController::effectiveUtilization(1.0, 0, 0));
-    EXPECT_DOUBLE_EQ(1.0, ExecutionUtilizationController::effectiveUtilization(1.0, 0, 100));
-    EXPECT_DOUBLE_EQ(-1.0, ExecutionUtilizationController::effectiveUtilization(1.0, -1, 100));
-    EXPECT_DOUBLE_EQ(-1.0, ExecutionUtilizationController::effectiveUtilization(1.01, 100, 100));
+    EXPECT_DOUBLE_EQ(2.0,
+                     ExecutionUtilizationController::effectiveUtilization(1.0, 100, 100));
+    EXPECT_DOUBLE_EQ(1.0,
+                     ExecutionUtilizationController::effectiveUtilization(0.5, 100, 100));
+    EXPECT_DOUBLE_EQ(0.5,
+                     ExecutionUtilizationController::effectiveUtilization(0.5, 100, 0));
+    EXPECT_DOUBLE_EQ(1.0,
+                     ExecutionUtilizationController::effectiveUtilization(1.0, 0, 0));
+    EXPECT_DOUBLE_EQ(1.0,
+                     ExecutionUtilizationController::effectiveUtilization(1.0, 0, 100));
+    EXPECT_DOUBLE_EQ(-1.0,
+                     ExecutionUtilizationController::effectiveUtilization(1.0, -1, 100));
+    EXPECT_DOUBLE_EQ(
+        -1.0, ExecutionUtilizationController::effectiveUtilization(1.01, 100, 100));
 }
 
 TEST_F(ExecutionUtilizationControllerTest, testSaturationDoesNotDelayRecovery)
