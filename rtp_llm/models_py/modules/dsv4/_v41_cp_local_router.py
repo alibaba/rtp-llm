@@ -115,9 +115,7 @@ def padded_local_routes(gate, x, m_full):
     if m_full == t:
         return gate._forward_local(x, None)
     if m_full < t:
-        raise ValueError(
-            f"DSV41_CP_LOCAL_ROUTER padded M {m_full} < local rows {t}"
-        )
+        raise ValueError(f"DSV41_CP_LOCAL_ROUTER padded M {m_full} < local rows {t}")
     if (
         router_plumbing_enabled()
         and getattr(gate, "fp32_logits", False)
@@ -129,17 +127,50 @@ def padded_local_routes(gate, x, m_full):
         # E2 fast path: persistent FP32 pad (no per-call 42MB memset + 84MB
         # cast), cached FP32 weight (no per-call 7.9MB cast), and the epilogue
         # over the local rows only (3/4 of the top-k work saved). The GEMM
-        # keeps the M=m_full shape (bitwise parity requirement). The router-TC
-        # verify hook is diagnostics for non-default TC modes and is skipped
-        # here; production mode "0" has no hook.
+        # keeps the M=m_full shape (bitwise parity requirement). R23 step-0:
+        # the router-TC verify hook lives HERE now — this fast path is the
+        # production V41 route, so the _forward_local hook never saw it
+        # (zero [V41ROUTERVERIFY] lines in the field despite env delivery).
         from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
             router_linear as _router_linear,
+        )
+        from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
             router_tc_mode as _router_tc_mode,
+        )
+        from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
+            router_verify_enabled as _router_verify_enabled,
         )
 
         _announce_e2(t)
         buf = _padded_fp32_buffer(x, t, m_full)
-        scores = _router_linear(buf, gate._weight_fp32(), _router_tc_mode())
+        _tc_mode = _router_tc_mode()
+        scores = _router_linear(buf, gate._weight_fp32(), _tc_mode)
+        if (
+            _tc_mode != "0"
+            and _router_verify_enabled()
+            and getattr(gate, "bias", None) is not None
+            and getattr(gate, "score_func", "sqrtsoftplus") == "sqrtsoftplus"
+        ):
+            # Diagnostics only (non-default TC modes + explicit verify env):
+            # recompute the SIMT FP32 reference on the same padded buffer and
+            # compare the production epilogue's top-k ids on the LIVE local
+            # rows (the padded rows never route). allow_tf32 is False here
+            # (worker init + router_linear restores it), so F.linear is the
+            # SIMT reference.
+            import torch.nn.functional as _F
+
+            from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
+                verify_router_parity as _verify_router_parity,
+            )
+
+            _verify_router_parity(
+                _F.linear(buf, gate._weight_fp32())[:t],
+                scores[:t],
+                1.0,
+                gate.bias,
+                gate.topk,
+                None,
+            )
         weights, indices = gate._route_scores(scores[:t], t)
         return weights.contiguous(), indices.contiguous()
     pad = torch.zeros((m_full, x.shape[1]), dtype=x.dtype, device=x.device)
@@ -156,14 +187,8 @@ def _require_supported(gate, x, cp):
             "DSV41_CP_LOCAL_ROUTER requires the V4.1 FP32 non-hash gate"
         )
     if getattr(cp, "kv_cache_sharded", False) or int(cp.cp_size) != 4:
-        raise NotImplementedError(
-            "DSV41_CP_LOCAL_ROUTER requires eager unsharded CP4"
-        )
-    if (
-        x.device.type != "cuda"
-        or x.dtype != torch.bfloat16
-        or not x.is_contiguous()
-    ):
+        raise NotImplementedError("DSV41_CP_LOCAL_ROUTER requires eager unsharded CP4")
+    if x.device.type != "cuda" or x.dtype != torch.bfloat16 or not x.is_contiguous():
         raise NotImplementedError(
             "DSV41_CP_LOCAL_ROUTER requires contiguous CUDA BF16 x"
         )

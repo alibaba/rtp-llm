@@ -1,13 +1,22 @@
-"""Tensor-core router GEMM for V4.1 (R5-a), default off.
+"""Tensor-core router GEMM for V4.1 (R5-a; DEFAULT tf32 since the R24
+adoption — user decision 2026-10-30 14:02 UTC+8).
 
 Production runs the router as an FP32 SIMT sgemm (~1 ms/layer on 8192x5120
-x384, ~21 ms/chunk). Under ``DSV41_ROUTER_TENSORCORE=tf32`` the same FP32
-operands run with TF32 tensor-core math for the single ``F.linear`` call
-(restored immediately afterwards; the module-level TF32-disabled guard in
-V41Router stays authoritative). Both operands are BF16-derived — hidden
-states arrive BF16 and the checkpoint weight is promoted from BF16 — so they
-are exactly representable in TF32 (10-bit mantissa superset of BF16's) and
-the only deviation from the SIMT path is FP32 accumulation order.
+x384, ~21 ms/chunk). Under ``DSV41_ROUTER_TENSORCORE=tf32`` (now the
+absent-env default) the same FP32 operands run with TF32 tensor-core math
+for the single ``F.linear`` call (restored immediately afterwards; the
+module-level TF32-disabled guard in V41Router stays authoritative). Both
+operands are BF16-derived — hidden states arrive BF16 and the checkpoint
+weight is promoted from BF16 — so they are exactly representable in TF32
+(10-bit mantissa superset of BF16's) and the only deviation from the SIMT
+path is FP32 accumulation order.
+
+R23 evidence (A/B pool): median −64.7 ms, 3/3 pairs; top-k flips
+1035-1587 per 11.30M live rows (0.012%) with worst_flip_margin 0.0 on
+7/8 ranks (exact-tie, order-only rows; 1.9e-6 on one); tokens 64/64 +
+4/4 warmup, every argmax matched; ON sha deterministic across 5
+sessions. Escape hatch: ``DSV41_ROUTER_TENSORCORE=0`` restores the SIMT
+path (parity sha preserved); unrecognized values fail safe to "0".
 
 ``bf16`` rounds the GEMM output to BF16 before promotion: measurably
 coarser (microbench: 11% of rows flip top-6 on synthetic near-ties); kept
@@ -15,8 +24,9 @@ for comparison only.
 
 ``DSV41_ROUTER_TC_VERIFY=1`` additionally recomputes the FP32 reference and
 compares the full gate epilogue's top-k ids on live rows, accumulating flip
-counts and margins and logging ``[V41ROUTERVERIFY]`` lines. Verification
-only: it doubles the router epilogue and adds host syncs.
+counts and margins and logging ``[V41ROUTERVERIFY]`` lines (wired into the
+E2 CP-local path since R23 step-0). Verification only: it doubles the
+router epilogue and adds host syncs.
 """
 
 import os
@@ -37,9 +47,30 @@ VERIFY_STATE = {
     "worst_flip_margin": None,
 }
 
+# R22/a: one-shot engagement proof (stderr -> native-rank*.log). The verify
+# path has [V41ROUTERVERIFY], but the bare tf32/bf16 modes had no marker and
+# inert flags must be caught at the parity gate, not after pairs (R19).
+_RTC_ANNOUNCED = False
+
+
+def _rtc_announce(mode: str) -> None:
+    global _RTC_ANNOUNCED
+    if not _RTC_ANNOUNCED:
+        _RTC_ANNOUNCED = True
+        import sys
+
+        print(
+            f"[RTCTC] mode={mode} engaged ({ROUTER_TC_FLAG})",
+            file=sys.stderr,
+            flush=True,
+        )
+
 
 def router_tc_mode() -> str:
-    mode = os.environ.get(ROUTER_TC_FLAG, "0")
+    # R24 adoption: absent env selects "tf32" (tie-flip-class tensor-core
+    # router, median −64.7 ms 3/3 in R23); "0" is the escape hatch back to
+    # the bitwise SIMT path and unrecognized values fail safe to "0".
+    mode = os.environ.get(ROUTER_TC_FLAG, "tf32")
     return mode if mode in MODES else "0"
 
 
@@ -50,6 +81,7 @@ def router_verify_enabled() -> bool:
 def router_linear(clean: torch.Tensor, weight: torch.Tensor, mode: str) -> torch.Tensor:
     """FP32 [rows,dim] x [experts,dim]^T router GEMM, optionally tensor-core."""
     if mode == "tf32" and clean.is_cuda:
+        _rtc_announce(mode)
         prev = torch.backends.cuda.matmul.allow_tf32
         torch.backends.cuda.matmul.allow_tf32 = True
         try:
@@ -57,6 +89,7 @@ def router_linear(clean: torch.Tensor, weight: torch.Tensor, mode: str) -> torch
         finally:
             torch.backends.cuda.matmul.allow_tf32 = prev
     if mode == "bf16" and clean.is_cuda:
+        _rtc_announce(mode)
         return torch.matmul(clean.bfloat16(), weight.bfloat16().transpose(0, 1)).float()
     return F.linear(clean, weight)
 

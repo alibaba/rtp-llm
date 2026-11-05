@@ -616,6 +616,35 @@ def _prefill_sparse_plan(shared, key, candidates, visible, key_count, block_size
     return plan
 
 
+_WOA_FP8_ANNOUNCED = [False]  # R22/b: one-shot engagement proof state
+# R23/B: cumulative op-level numerics of the FP8 einsum vs the BF16
+# reference einsum (the KDA ~3.8% rel_l2 estimate, re-measured in situ).
+# Verify-only (DSV41_WOA_FP8_VERIFY=1); timed arms run without it.
+_WOA_VERIFY_STATE = {"calls": 0, "sq_err": 0.0, "sq_ref": 0.0, "max_abs": 0.0}
+
+
+def _woa_fp8_verify(grouped, wo_a_bf16, out):
+    import sys
+
+    ref = torch.einsum("tgd,grd->tgr", grouped, wo_a_bf16)
+    a = out.float()
+    b = ref.float()
+    d = a - b
+    st = _WOA_VERIFY_STATE
+    st["calls"] += 1
+    st["sq_err"] += float((d * d).sum())
+    st["sq_ref"] += float((b * b).sum())
+    st["max_abs"] = max(st["max_abs"], float(d.abs().max()))
+    if st["calls"] == 1 or st["calls"] % 21 == 0:
+        rel = (st["sq_err"] ** 0.5) / max(st["sq_ref"] ** 0.5, 1e-30)
+        print(
+            "[WOAVERIFY] calls=%d op_rel_l2=%.6f op_max_abs=%.6e"
+            % (st["calls"], rel, st["max_abs"]),
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def _woa_fp8_project_or_bf16(grouped, wo_a_bf16, stk_w, stk_s):
     """R6-2: flag-gated FP8 batched wo_a projection on the live prefill path.
 
@@ -640,7 +669,22 @@ def _woa_fp8_project_or_bf16(grouped, wo_a_bf16, stk_w, stk_s):
         and grouped.dtype == torch.bfloat16
         and grouped.is_cuda
     ):
-        return woa_fp8_forward(grouped, stk_w, stk_s)
+        # R22/b: one-shot engagement proof — the fallbacks below are silent,
+        # so an inert flag (e.g. missing stacked weights) must be visible at
+        # the parity gate instead of after the pairs (R19 lesson).
+        if not _WOA_FP8_ANNOUNCED[0]:
+            _WOA_FP8_ANNOUNCED[0] = True
+            import sys
+
+            print(
+                "[WOAFP8] engaged (DSV41_WOA_FP8_EINSUM=1, deep_gemm fp8_einsum)",
+                file=sys.stderr,
+                flush=True,
+            )
+        out = woa_fp8_forward(grouped, stk_w, stk_s)
+        if os.environ.get("DSV41_WOA_FP8_VERIFY", "0") == "1":
+            _woa_fp8_verify(grouped, wo_a_bf16, out)
+        return out
     return torch.einsum("tgd,grd->tgr", grouped, wo_a_bf16)
 
 

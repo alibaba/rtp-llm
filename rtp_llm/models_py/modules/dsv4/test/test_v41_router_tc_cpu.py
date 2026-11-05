@@ -1,9 +1,9 @@
 """CPU tests for the R5-a tensor-core router helpers (flag parsing, dispatch,
 verify-mode parity counters). Hermetic namespace-stub loading."""
 
+import contextlib
 import importlib
 import io
-import contextlib
 import os
 import sys
 import types
@@ -29,12 +29,19 @@ rtc = importlib.import_module("rtp_llm.models_py.modules.dsv4._v41_router_tc")
 
 
 class RouterTcModeTest(unittest.TestCase):
-    def test_default_off(self):
+    def test_default_tf32(self):
+        # R24 adoption: absent env selects the tensor-core router; the
+        # verify instrumentation stays opt-in.
         env = dict(os.environ)
         env.pop("DSV41_ROUTER_TENSORCORE", None)
         with mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(rtc.router_tc_mode(), "0")
+            self.assertEqual(rtc.router_tc_mode(), "tf32")
             self.assertFalse(rtc.router_verify_enabled())
+
+    def test_escape_hatch_zero(self):
+        # R24: explicit "0" restores the bitwise SIMT path.
+        with mock.patch.dict(os.environ, {"DSV41_ROUTER_TENSORCORE": "0"}):
+            self.assertEqual(rtc.router_tc_mode(), "0")
 
     def test_modes_and_invalid(self):
         for mode in ("tf32", "bf16", "0"):
@@ -66,7 +73,10 @@ class RouterLinearTest(unittest.TestCase):
 class VerifyParityTest(unittest.TestCase):
     def setUp(self):
         rtc.VERIFY_STATE.update(
-            calls=0, live_rows=0, flip_rows=0, max_logit_absdiff=0.0,
+            calls=0,
+            live_rows=0,
+            flip_rows=0,
+            max_logit_absdiff=0.0,
             worst_flip_margin=None,
         )
         self.bias = torch.zeros(8)

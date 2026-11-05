@@ -29,10 +29,21 @@ v2 = importlib.import_module(
 
 
 class SparsePrefillV2ModeTest(unittest.TestCase):
-    def test_default_off(self):
+    def test_default_qt64(self):
+        # R24 adoption: absent env selects qt64 (1-ULP flip class); s2 and
+        # the legacy launch are the escape hatches.
         env = dict(os.environ)
         env.pop("DSV41_SPARSE_PREFILL_V2", None)
         with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(v2.sparse_prefill_v2_mode(), "qt64")
+
+    def test_escape_hatch_s2(self):
+        # R21 byte-exact pipelined launch, kept as an escape hatch.
+        with mock.patch.dict(os.environ, {"DSV41_SPARSE_PREFILL_V2": "s2"}):
+            self.assertEqual(v2.sparse_prefill_v2_mode(), "s2")
+
+    def test_escape_hatch_zero(self):
+        with mock.patch.dict(os.environ, {"DSV41_SPARSE_PREFILL_V2": "0"}):
             self.assertEqual(v2.sparse_prefill_v2_mode(), "0")
 
     def test_known_modes(self):
