@@ -12,6 +12,7 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.layered_prefill_cache import (
     ContiguousPrefillCache,
+    _PrefillStaging,
     chunk_runs,
     contiguous_runs,
 )
@@ -48,6 +49,9 @@ class LayeredPrefillCacheTest(unittest.TestCase):
             block_table=table.cuda(),
             kv_cache_sharded=sharded,
             sharded_slot_mapping=slots,
+            prefill_cp_size=1,
+            prefill_cp_rank=0,
+            kv_owner_tokens_per_block=64,
             write_cache_store_impl=None,
         )
         return SimpleNamespace(
@@ -56,8 +60,13 @@ class LayeredPrefillCacheTest(unittest.TestCase):
                 cache_store_inputs=None,
                 kv_cache_kernel_block_id_host=table,
                 kv_cache_block_id_host=table,
+                input_lengths=torch.tensor([256, 256]),
+                prefix_lengths=torch.zeros(2, dtype=torch.int32),
             ),
             fmha_impl=op,
+            fmha_params=SimpleNamespace(
+                prefill_ragged_kv_len_indptr_h=torch.tensor([0, 256, 512])
+            ),
             rope_params=SimpleNamespace(slot_mapping=slots),
             write_cache_store_impl=None,
         )
@@ -140,6 +149,9 @@ class LayeredPrefillCacheTest(unittest.TestCase):
         fmha = self.make_fmha(True)
         table = torch.arange(0, 1024, 2, dtype=torch.int32).reshape(1, -1)
         fmha.attn_inputs.kv_cache_kernel_block_id_host = table
+        fmha.attn_inputs.input_lengths = torch.tensor([512 * 64])
+        fmha.attn_inputs.prefix_lengths = torch.tensor([0])
+        fmha.fmha_params.prefill_ragged_kv_len_indptr_h = torch.tensor([0, 512 * 64])
         fmha.fmha_impl.block_table = table.cuda()
         fmha.fmha_impl.sharded_slot_mapping = torch.tensor([0], device="cuda")
         # Resolve the binding before measuring the first-forward submissions.
@@ -787,6 +799,11 @@ class LayeredPrefillCacheTest(unittest.TestCase):
                 # Duplicates must not incorrectly mark page 2 as overwritten.
                 slots = torch.cat((slots, torch.full((80,), 2 * 64, device="cuda")))
             fmha.attn_inputs.kv_cache_kernel_block_id_host = table
+            fmha.attn_inputs.input_lengths = torch.tensor([table.numel() * 64])
+            fmha.attn_inputs.prefix_lengths = torch.tensor([0])
+            fmha.fmha_params.prefill_ragged_kv_len_indptr_h = torch.tensor(
+                [0, table.numel() * 64]
+            )
             fmha.fmha_impl.block_table = table.cuda()
             fmha.fmha_impl.sharded_slot_mapping = slots
             expected = [tensor.cpu().clone() for tensor in cache.backing]
@@ -877,6 +894,9 @@ class LayeredPrefillCacheTest(unittest.TestCase):
         fmha = self.make_fmha(True)
         table = torch.arange(9, dtype=torch.int32).reshape(1, -1)
         fmha.attn_inputs.kv_cache_kernel_block_id_host = table
+        fmha.attn_inputs.input_lengths = torch.tensor([9 * 64])
+        fmha.attn_inputs.prefix_lengths = torch.tensor([0])
+        fmha.fmha_params.prefill_ragged_kv_len_indptr_h = torch.tensor([0, 9 * 64])
         fmha.fmha_impl.block_table = table.cuda()
         with self.assertRaisesRegex(ValueError, "capacity"):
             cache.begin_forward(fmha)
@@ -885,6 +905,142 @@ class LayeredPrefillCacheTest(unittest.TestCase):
         cache.capacity = 16
         with self.assertRaisesRegex(ValueError, "logical cache capacity"):
             cache.begin_forward(fmha)
+
+    def test_chunk_progress_preserves_history_and_future_pages(self):
+        for sharded in (False, True):
+            cache = self.make_contiguous_cache(prefix=1, layers=3, slots=2)
+            cache.capacity = 4
+            fmha = self.make_fmha(sharded)
+            table = torch.tensor([[7, 2, 9, 12, 13, 14]], dtype=torch.int32)
+            fmha.attn_inputs.kv_cache_kernel_block_id_host = table
+            fmha.fmha_impl.block_table = table.cuda()
+            original = fmha.fmha_impl.block_table
+            expected = [tensor.cpu().clone() for tensor in cache.backing]
+            prefix = 0
+            for total in (65, 129, 193):
+                fmha.attn_inputs.input_lengths = torch.tensor([total - prefix])
+                fmha.attn_inputs.prefix_lengths = torch.tensor([prefix])
+                fmha.fmha_params.prefill_ragged_kv_len_indptr_h = torch.tensor(
+                    [0, total]
+                )
+                positions = torch.arange(prefix, total)
+                slots = (table[0, positions // 64] * 64 + positions % 64).cuda()
+                fmha.fmha_impl.sharded_slot_mapping = slots
+                fmha.rope_params.slot_mapping = slots.clone()
+                cache.begin_forward(fmha)
+                live_pages = (total + 63) // 64
+                self.assertTrue((cache.block_table[0, live_pages:] == -1).all())
+                for layer in range(3):
+                    cache.before_layer(layer)
+                    view = LayerKVCache()
+                    view.kv_cache_base = cache.backing[layer]
+                    with cache.attention(layer, fmha, view) as target:
+                        write_slots = (
+                            fmha.fmha_impl.sharded_slot_mapping
+                            if sharded
+                            else fmha.rope_params.slot_mapping
+                        )
+                        target.kv_cache_base.flatten(0, 1)[write_slots] = 70 + layer
+                    expected[layer].flatten(0, 1)[slots.cpu()] = 70 + layer
+                cache.end_forward()
+                torch.cuda.synchronize()
+                for actual, reference in zip(cache.backing, expected):
+                    torch.testing.assert_close(actual.cpu(), reference, rtol=0, atol=0)
+                self.assertIs(fmha.fmha_impl.block_table, original)
+                torch.testing.assert_close(original.cpu(), table, rtol=0, atol=0)
+                prefix = total
+
+    def test_production_chunk_staging_budget(self):
+        # Full allocations need 4632 pages including padding, but this legal
+        # prefix + chunk batch only needs 4193 pages on CP rank zero.
+        table = torch.zeros((3, 1954), dtype=torch.int32)
+        offset = 1
+        for row, count in enumerate((1954, 1954, 723)):
+            table[row, :count] = torch.arange(offset, offset + count)
+            offset += count
+        backing = [
+            torch.zeros((offset, 64, 1), device="cuda"),
+            torch.zeros((offset, 64, 1), pin_memory=True),
+        ]
+        cache = ContiguousPrefillCache(backing, [0, 0], 4447 * 64, 1, 1)
+        fmha = self.make_fmha(True)
+        fmha.attn_inputs.kv_cache_kernel_block_id_host = table
+        # Serving keeps these inputs on CUDA; staging must use the existing
+        # host KV indptr instead of relying on CPU prefix/query tensors.
+        fmha.attn_inputs.prefix_lengths = torch.tensor(
+            [950016, 950016, 0], device="cuda"
+        )
+        fmha.attn_inputs.input_lengths = torch.tensor(
+            [49984, 49984, 145728], device="cuda"
+        )
+        fmha.fmha_params.prefill_ragged_kv_len_indptr_h = torch.tensor(
+            [0, 1000000, 2000000, 2145728]
+        )
+        op = fmha.fmha_impl
+        op.block_table = table.cuda()
+        op.prefill_cp_size = 8
+        op.sharded_slot_mapping = torch.tensor([4631 * 64], device="cuda")
+        # Writes into a future chunk must still be rejected.
+        with self.assertRaisesRegex(ValueError, "KV write slots"):
+            cache.begin_forward(fmha)
+        op.sharded_slot_mapping = torch.tensor([4193 * 64], device="cuda")
+        cache.begin_forward(fmha)
+        self.assertEqual(sum(n for _, _, n in cache.fetch_runs), 4193)
+        self.assertTrue((cache.block_table[2, 285:] == -1).all())
+        cache.end_forward()
+        torch.testing.assert_close(op.block_table.cpu(), table, rtol=0, atol=0)
+        fmha.attn_inputs.input_lengths[2] = 370112
+        fmha.fmha_params.prefill_ragged_kv_len_indptr_h[-1] = 2370112
+        with self.assertRaisesRegex(ValueError, "capacity=4447"):
+            cache.begin_forward(fmha)
+
+
+class PrefillStagingLivePagesTest(unittest.TestCase):
+    def test_cp_ownership_and_actual_lengths(self):
+        cache = _PrefillStaging.__new__(_PrefillStaging)
+        cache.page_size = 64
+        lengths = torch.tensor([0, 1, 63, 64, 65, 127, 129, 511, 512, 513, 1025])
+        table = torch.arange(1, 19).repeat(len(lengths), 1)
+        for cp_size in (1, 2, 8):
+            for owner in (64, 128, 256):
+                for rank in range(cp_size):
+                    with self.subTest(cp_size=cp_size, owner=owner, rank=rank):
+                        prefix = lengths // 2
+                        fmha = SimpleNamespace(
+                            attn_inputs=SimpleNamespace(
+                                # CP padding must not expand the live KV view.
+                                input_lengths=torch.full_like(lengths, 2048),
+                                prefix_lengths=prefix,
+                                context_parallel_info=SimpleNamespace(
+                                    prefill_actual_input_lengths_cpu=lengths - prefix
+                                ),
+                            ),
+                            fmha_impl=SimpleNamespace(
+                                kv_cache_sharded=True,
+                                prefill_cp_size=cp_size,
+                                prefill_cp_rank=rank,
+                                kv_owner_tokens_per_block=owner,
+                            ),
+                            fmha_params=SimpleNamespace(
+                                prefill_ragged_kv_len_indptr_h=torch.cat(
+                                    (
+                                        torch.zeros(1, dtype=torch.int64),
+                                        lengths.cumsum(0),
+                                    )
+                                )
+                            ),
+                        )
+                        live = cache._live_block_table(fmha, table)
+                        for row, length in enumerate(lengths.tolist()):
+                            owned_pages = {
+                                position // 64
+                                for position in range(length)
+                                if (position // owner) % cp_size == rank
+                            }
+                            n = len(owned_pages)
+                            torch.testing.assert_close(live[row, :n], table[row, :n])
+                            self.assertTrue((live[row, n:] == -1).all())
+                        self.assertTrue((table > 0).all())
 
 
 if __name__ == "__main__":

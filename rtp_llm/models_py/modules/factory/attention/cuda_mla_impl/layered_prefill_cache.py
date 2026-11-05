@@ -80,6 +80,26 @@ class _PrefillStaging:
         self.ready = tuple(torch.cuda.Event() for _ in range(staging_layers))
         self.active = False
 
+    def _live_block_table(self, fmha, table):
+        # fill_params already records prefix + actual query lengths on CPU,
+        # including CP's unpadded lengths. Do not copy CUDA prefixes back.
+        indptr = fmha.fmha_params.prefill_ragged_kv_len_indptr_h[: table.shape[0] + 1]
+        lengths = indptr[1:].to(torch.int64) - indptr[:-1]
+        op = fmha.fmha_impl
+        if getattr(op, "kv_cache_sharded", False):
+            # Ownership is round-robin at physical-block granularity, which
+            # may contain several kernel pages. Exclude CP gather padding.
+            owner = op.kv_owner_tokens_per_block
+            cycle = owner * op.prefill_cp_size
+            lengths = (lengths // cycle) * owner + (
+                lengths.remainder(cycle) - op.prefill_cp_rank * owner
+            ).clamp(0, owner)
+        pages = (lengths + self.page_size - 1) // self.page_size
+        # FULL/MLA allocations retain pages for later chunks. Only the current
+        # prefix + query is staged; leave the allocator's table untouched.
+        columns = torch.arange(table.shape[1], device="cpu")
+        return table.to(torch.int64).masked_fill(columns >= pages.reshape(-1, 1), -1)
+
     def begin_forward(self, fmha) -> None:
         if self.active:
             raise RuntimeError("layered prefill forwards must be serialized")
@@ -111,7 +131,7 @@ class _PrefillStaging:
             slots_cpu = slots_host.to(torch.int64)
         else:
             slots_cpu = self.original_slots.detach().cpu().to(torch.int64)
-        table_cpu = table.to(torch.int64)
+        table_cpu = self._live_block_table(fmha, table)
         pages = torch.unique(table_cpu[table_cpu >= 0], sorted=True)
         if pages.numel() > self.capacity:
             raise ValueError(
@@ -276,7 +296,7 @@ class _PrefillStaging:
             # Plan once per batch. No per-layer index D2H or allocator-generation
             # cache: every forward reloads the live pages, including reused IDs.
             slots_cpu = self.original_slots.detach().cpu().to(torch.int64)
-            table_cpu = table.to(torch.int64)
+            table_cpu = self._live_block_table(fmha, table)
             pages = torch.unique(table_cpu[table_cpu >= 0], sorted=True)
             if pages.numel() > self.capacity:
                 raise ValueError(

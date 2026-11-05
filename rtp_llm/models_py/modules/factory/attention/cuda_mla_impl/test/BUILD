@@ -78,6 +78,32 @@ py_test(
 )
 
 py_test(
+    name = "layered_prefill_cache_sm103_test",
+    srcs = ["layered_prefill_cache_test.py"],
+    main = "layered_prefill_cache_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "layered_prefill_chunk_compat_sm103_test",
+    srcs = ["layered_prefill_cache_test.py"],
+    main = "layered_prefill_cache_test.py",
+    args = [
+        "PrefillStagingLivePagesTest",
+        "LayeredPrefillCacheTest.test_production_chunk_staging_budget",
+        "LayeredPrefillCacheTest.test_chunk_progress_preserves_history_and_future_pages",
+        "LayeredPrefillCacheTest.test_rejects_overflow_and_out_of_range_before_transfer",
+        "LayeredPrefillCacheTest.test_partial_pages_slot_reuse_and_recycled_ids",
+    ],
+    env = {"RTP_LLM_CP_PREFILL_PIPELINE_OPT": "0"},
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "pinned_mla_cache_test",
     srcs = ["pinned_mla_cache_test.py"],
     deps = [
