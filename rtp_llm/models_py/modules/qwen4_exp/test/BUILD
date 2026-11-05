@@ -174,6 +174,15 @@ qwen4_test(
 )
 
 qwen4_test(
+    name = "marlin_admission_test",
+    src = "moe/marlin_admission_test.py",
+    data = [
+        "moe/marlin_large_decode_test.py",
+        "moe/marlin_nvfp4_test.py",
+    ],
+)
+
+qwen4_test(
     name = "marlin_nvfp4_test",
     src = "moe/marlin_nvfp4_test.py",
     args = [
@@ -194,7 +203,7 @@ qwen4_test(
 qwen4_test(
     name = "marlin_nvfp4_hopper_test",
     src = "moe/marlin_nvfp4_test.py",
-    args = ["MarlinNvfp4Test.test_hopper_strategy_uses_prepared_weights"],
+    args = ["MarlinNvfp4Test.test_explicit_strategy_uses_prepared_weights"],
     gpu = "H20_CU13",
     deps = [
         ":math_references",

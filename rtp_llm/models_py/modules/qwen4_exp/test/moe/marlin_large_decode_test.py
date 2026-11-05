@@ -3,17 +3,19 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.modules.qwen4_exp.moe.marlin_nvfp4 import Nvfp4MarlinMoE
+from rtp_llm.models_py.kernels.cuda.marlin_nvfp4.marlin_nvfp4 import Nvfp4MarlinMoE
 
 
 class MarlinLargeDecodeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (
+        if not Nvfp4MarlinMoE.is_supported() or torch.cuda.get_device_capability() != (
             12,
             0,
         ):
-            raise unittest.SkipTest("SM120 is required")
+            raise unittest.SkipTest(
+                "a supported NVFP4 Marlin runtime and SM120 are required"
+            )
 
     def test_actual_ep2_expert_count_top10_target_rows_and_live_graph(self):
         torch.manual_seed(1807)

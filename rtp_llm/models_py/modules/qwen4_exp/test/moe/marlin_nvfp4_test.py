@@ -4,23 +4,24 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.marlin_nvfp4.marlin_nvfp4 import (
+    Nvfp4MarlinMoE,
+    align,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertForwardPayload,
 )
-from rtp_llm.models_py.modules.qwen4_exp.moe.marlin_nvfp4 import (
-    Nvfp4MarlinMoE,
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.marlin_nvfp4_executor import (
     Qwen4DecodeMarlinExecutor,
     _linear_scales,
-    align,
 )
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import PreparedWeightDict
 from rtp_llm.utils.model_weight import W
 
 
 @unittest.skipUnless(
-    torch.cuda.is_available()
-    and torch.cuda.get_device_capability() in ((9, 0), (12, 0)),
-    "requires SM90 or SM120",
+    Nvfp4MarlinMoE.is_supported(),
+    "requires a supported NVFP4 Marlin runtime and GPU",
 )
 class MarlinNvfp4Test(unittest.TestCase):
     @classmethod

@@ -152,11 +152,11 @@ class CudaNvfp4MarlinStrategy(CudaNvfp4CutlassStrategy):
         checker.check(config.moe_strategy == "nvfp4_marlin")
 
     def get_attributes(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.marlin_nvfp4_executor import (
+            Qwen4MarlinExecutor,
+        )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
             PureTpRouterNvfp4Cutlass,
-        )
-        from rtp_llm.models_py.modules.qwen4_exp.moe.marlin_nvfp4 import (
-            Qwen4MarlinExecutor,
         )
 
         return StrategyAttributes(

@@ -1,5 +1,6 @@
 """Public CPU contracts independent of model registration."""
 
+import importlib
 import sys
 import unittest
 
@@ -56,6 +57,18 @@ class CommonComponentsTest(unittest.TestCase):
         # Run this target in a fresh process; the wrappers must not need model setup.
         loaded = [name for name in sys.modules if ".qwen4_exp" in name]
         self.assertEqual(loaded, [])
+
+        importlib.import_module(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp4"
+        )
+        # ModelConfig loads model configs; strategy import must leave the model
+        # implementation and Marlin execution dependencies unloaded.
+        for name in (
+            "rtp_llm.models_py.modules.qwen4_exp",
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.marlin_nvfp4_executor",
+            "rtp_llm.models_py.kernels.cuda.marlin_nvfp4.marlin_nvfp4",
+        ):
+            self.assertNotIn(name, sys.modules)
 
 
 if __name__ == "__main__":
