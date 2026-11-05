@@ -211,9 +211,6 @@ std::string PyWrappedModel::prepareSpeculativeTargetCommit(const torch::Tensor& 
     try {
         py_model_.attr("prepare_speculative_target_commit")(accept_len);
         return {};
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python speculative target commit prepare failed: %s", e.what());
-        return e.what();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("Speculative target commit prepare failed: %s", e.what());
         return e.what();
@@ -231,9 +228,6 @@ std::string PyWrappedModel::finishSpeculativeTargetCommit(bool commit) {
     try {
         py_model_.attr("finish_speculative_target_commit")(commit);
         return {};
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python speculative target commit finish failed (commit=%d): %s", commit, e.what());
-        return e.what();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("Speculative target commit finish failed (commit=%d): %s", commit, e.what());
         return e.what();
@@ -251,9 +245,6 @@ std::string PyWrappedModel::finalizeSpeculativeTargetCommit() {
     try {
         py_model_.attr("finalize_speculative_target_commit")();
         return {};
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python speculative target commit finalize failed: %s", e.what());
-        return e.what();
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("Speculative target commit finalize failed: %s", e.what());
         return e.what();

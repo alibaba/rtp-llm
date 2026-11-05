@@ -4,6 +4,7 @@ from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime import qsa_prefill
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
@@ -426,6 +427,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
         cases = (
             (
                 "explicit MTP draft",
+                RuntimeError,
                 self._draft_incremental_context(
                     self.kv_base,
                     self.state_base,
@@ -438,6 +440,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             ),
             (
                 r"max\(input_lengths\).*<= compress_ratio",
+                RuntimeError,
                 self._draft_incremental_context(
                     self.kv_base,
                     self.state_base,
@@ -449,6 +452,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             ),
             (
                 "logical cache positions",
+                ValueError,
                 self._draft_incremental_context(
                     self.kv_base,
                     self.state_base,
@@ -461,6 +465,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             ),
             (
                 "unallocated",
+                RuntimeError,
                 self._draft_incremental_context(
                     self.kv_base,
                     self.state_base,
@@ -472,7 +477,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
                 raw,
             ),
         )
-        for expected, context, case_q, case_raw in cases:
+        for expected, error_type, context, case_q, case_raw in cases:
             with (
                 self.subTest(expected=expected),
                 patch(
@@ -482,7 +487,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             ):
                 kv_before = context.indexer_kv_cache.kv_cache_base.clone()
                 state_before = context.indexer_state_cache.kv_cache_base.clone()
-                with self.assertRaisesRegex(RuntimeError, expected):
+                with self.assertRaisesRegex(error_type, expected):
                     context.select_draft_incremental_prefill_tokens(
                         case_q,
                         case_raw,
@@ -807,11 +812,11 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
         raw = torch.randn(1, self.D, dtype=torch.bfloat16)
         indexer = self._decode_indexer()
         cases = (
-            ("target-verify", dict(target_verify=True)),
-            ("prefix reuse", dict(prefix_length=1)),
-            ("text-only MRoPE", dict(position_ids=[[7, 8, 7]])),
+            ("target-verify", RuntimeError, dict(target_verify=True)),
+            ("prefix reuse", RuntimeError, dict(prefix_length=1)),
+            ("text-only MRoPE", ValueError, dict(position_ids=[[7, 8, 7]])),
         )
-        for expected, overrides in cases:
+        for expected, error_type, overrides in cases:
             values = dict(
                 is_prefill=False,
                 input_length=7,
@@ -820,7 +825,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             )
             values.update(overrides)
             with self.subTest(expected=expected):
-                with self.assertRaisesRegex(RuntimeError, expected):
+                with self.assertRaisesRegex(error_type, expected):
                     self._single_request_context(
                         self.kv_base, self.state_base, **values
                     ).select_decode_tokens(

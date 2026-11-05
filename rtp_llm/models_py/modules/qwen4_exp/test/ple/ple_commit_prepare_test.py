@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -256,6 +257,38 @@ class PLECommitPrepareTest(unittest.TestCase):
             self.assertTrue(torch.equal(stage.state_pool, before[0]))
             self.assertTrue(torch.equal(stage.ctx_pool, before[1]))
             owner.finish_speculative_target_commit(False)
+
+    def test_invalid_table_layout_never_writes_pools(self):
+        for fused in (True, False):
+            for region in ("state", "ctx"):
+                with self.subTest(fused=fused, region=region):
+                    owner, stage, accepted, _, _ = self.transaction_fixture()
+                    before = stage.state_pool.clone(), stage.ctx_pool.clone()
+                    inputs = getattr(stage, region + "_inputs")
+                    inputs.kv_cache_block_id_device = (
+                        inputs.kv_cache_block_id_device.long()
+                    )
+                    resolution = (
+                        nullcontext()
+                        if fused
+                        else patch(
+                            "rtp_llm.models_py.modules.qwen4_exp.ple."
+                            "ple_commit_metadata_triton.begin_accepted_pair_resolution",
+                            return_value=None,
+                        )
+                    )
+                    with resolution, self.assertRaisesRegex(
+                        RuntimeError, "must be int32"
+                    ):
+                        owner.prepare_speculative_target_commit(accepted.int())
+                    self.assertIsNone(owner.active_transaction.prepared_writes)
+                    torch.testing.assert_close(
+                        stage.state_pool, before[0], atol=0, rtol=0
+                    )
+                    torch.testing.assert_close(
+                        stage.ctx_pool, before[1], atol=0, rtol=0
+                    )
+                    owner.finish_speculative_target_commit(False)
 
     def test_rollback_retry_refreshes_distinct_boundary_and_final_pages(self):
         owner, stage, _, _, _ = self.transaction_fixture(batch=3)

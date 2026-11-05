@@ -289,29 +289,7 @@ def validate_qsa_before_side_write(
     if qsa_runtime.main_cache is None:
         raise RuntimeError("qwen4_exp QSA paged attention requires the main KV cache")
     if qsa_runtime.main_inputs is not self.attn_inputs:
-
-        def _inputs_brief(inputs) -> str:
-            try:
-                prefixes = inputs.prefix_lengths
-                prefix_head = prefixes[:4].tolist() if prefixes is not None else None
-            except Exception as error:  # pragma: no cover - diagnostics only
-                prefix_head = f"unavailable({error!r})"
-            return (
-                f"id={id(inputs)}"
-                f" is_prefill={getattr(inputs, 'is_prefill', None)}"
-                f" is_target_verify={getattr(inputs, 'is_target_verify', None)}"
-                f" prefix_head={prefix_head}"
-            )
-
-        raise RuntimeError(
-            "qwen4_exp QSA paged main attention inputs are inconsistent"
-            f" [runtime {_inputs_brief(qsa_runtime.main_inputs)} |"
-            f" impl {_inputs_brief(self.attn_inputs)} |"
-            f" impl_flags prefill={self.is_prefill}"
-            f" verify={self.is_target_verify}"
-            f" mtp_draft={self._is_mtp_draft}"
-            f" incremental={is_incremental_prefill}]"
-        )
+        raise RuntimeError("qwen4_exp QSA paged main attention inputs are inconsistent")
     if hidden_states.dtype != torch.bfloat16:
         raise RuntimeError(
             "qwen4_exp QSA paged attention currently requires BF16 hidden states"

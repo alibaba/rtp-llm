@@ -298,7 +298,6 @@ def build_qsa_rope(
     target MRoPE prefill intentionally omits that check so its existing
     multimodal position behavior is unchanged.
     """
-    _validate_indexer_rope_layout(rope_config)
     if is_qsa_rope_style(rope_config, "Base"):
         return build_base_rope(
             position_ids,

@@ -117,53 +117,50 @@ def select_decode_tokens(
         prepared = try_prepare_decode_positions(
             sequence_lengths, position_ids, frequency, rope_config
         )
-    try:
-        if prepared is not None:
-            (
-                current_cos,
-                current_sin,
-                rope_cos,
-                rope_sin,
-                visible_token_lengths,
-                compressed_lengths,
-            ) = prepared
-        elif graph_decode and self.is_mtp_draft:
-            if not is_qsa_rope_style(rope_config, "Base"):
-                raise RuntimeError("qwen4_exp draft Graph requires text-only Base RoPE")
-            # MTP's text position generator repeats one scalar across its
-            # axes. Eager checks equality; Graph capture cannot synchronize.
-            current_cos, current_sin = build_base_rope(
-                position_ids,
-                rope_config,
-                token_count=batch_size,
-                dtype=raw_keys.dtype,
-                device=raw_keys.device,
-                validate_position_axes=False,
-                inv_freq=frequency,
-            )
-        elif graph_decode:
-            # Graph capture uses the engine's canonical text
-            # positions. The C++ graph owner refreshes lengths before replay.
-            current_cos, current_sin = build_qsa_rope_from_logical_positions(
-                sequence_lengths,
-                rope_config,
-                token_count=batch_size,
-                dtype=raw_keys.dtype,
-                device=raw_keys.device,
-                inv_freq=frequency,
-            )
-        else:
-            current_cos, current_sin = build_qsa_rope(
-                position_ids,
-                rope_config,
-                token_count=batch_size,
-                dtype=raw_keys.dtype,
-                device=raw_keys.device,
-                logical_positions=decode_logical_positions,
-                checks=checks,
-            )
-    except ValueError as error:
-        raise RuntimeError(f"qwen4_exp QSA ordinary decode {error}") from error
+    if prepared is not None:
+        (
+            current_cos,
+            current_sin,
+            rope_cos,
+            rope_sin,
+            visible_token_lengths,
+            compressed_lengths,
+        ) = prepared
+    elif graph_decode and self.is_mtp_draft:
+        if not is_qsa_rope_style(rope_config, "Base"):
+            raise RuntimeError("qwen4_exp draft Graph requires text-only Base RoPE")
+        # MTP's text position generator repeats one scalar across its
+        # axes. Eager checks equality; Graph capture cannot synchronize.
+        current_cos, current_sin = build_base_rope(
+            position_ids,
+            rope_config,
+            token_count=batch_size,
+            dtype=raw_keys.dtype,
+            device=raw_keys.device,
+            validate_position_axes=False,
+            inv_freq=frequency,
+        )
+    elif graph_decode:
+        # Graph capture uses the engine's canonical text
+        # positions. The C++ graph owner refreshes lengths before replay.
+        current_cos, current_sin = build_qsa_rope_from_logical_positions(
+            sequence_lengths,
+            rope_config,
+            token_count=batch_size,
+            dtype=raw_keys.dtype,
+            device=raw_keys.device,
+            inv_freq=frequency,
+        )
+    else:
+        current_cos, current_sin = build_qsa_rope(
+            position_ids,
+            rope_config,
+            token_count=batch_size,
+            dtype=raw_keys.dtype,
+            device=raw_keys.device,
+            logical_positions=decode_logical_positions,
+            checks=checks,
+        )
 
     kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
     if kv_tokens_per_block <= 0 or kv_tokens_per_block % ratio:
@@ -233,10 +230,7 @@ def select_decode_tokens(
             tag=INDEXER_KV_TAG,
             checks=checks,
         )
-        try:
-            checks.verify()
-        except ValueError as error:
-            raise RuntimeError(f"qwen4_exp QSA ordinary decode {error}") from error
+        checks.verify()
 
     # Only rows that close a compression group consume these values. Build
     # one block-start RoPE row per request instead of [0, context_len).

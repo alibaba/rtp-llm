@@ -231,50 +231,36 @@ def validate_qwen4_runtime(config, parallelism):
         raise RuntimeError(
             "qwen4_exp BF16 execution requires an unquantized checkpoint"
         )
-    if getattr(config, "enable_qwen4_qsa", False):
-        gamma = int(getattr(config, "gen_num_per_cycle", 0))
-        ratio = int(getattr(config, "_qwen4_indexer_compress_ratio", 0))
-        if gamma > 0 and ratio > 0 and gamma + 1 > ratio:
-            raise RuntimeError(
-                "qwen4_exp QSA target verify requires gen_num_per_cycle + 1 "
-                f"<= indexer_compress_ratio; got {gamma} + 1 > {ratio}"
-            )
-        if getattr(config, "data_type", None) != DataType.TYPE_BF16:
-            raise RuntimeError(
-                "qwen4_exp QSA currently requires act_type=BF16; refusing "
-                "before indexer weights are loaded"
-            )
-        attn_config = getattr(config, "attn_config", None)
-        if not bool(getattr(attn_config, "is_sparse", False)) or not bool(
-            getattr(attn_config, "use_sparse_gqa_fmha", False)
-        ):
-            raise RuntimeError(
-                "qwen4_exp QSA routing flags are inconsistent; dense fallback "
-                "is forbidden"
-            )
-        kv_cache_dtype = getattr(attn_config, "kv_cache_dtype", KvCacheDataType.BASE)
-        if kv_cache_dtype not in (KvCacheDataType.BASE, KvCacheDataType.FP8):
-            raise RuntimeError("qwen4_exp QSA requires BF16 or scaled FP8 KV cache")
-        cp = getattr(parallelism, "prefill_cp_config", None)
-        if cp is not None and (cp.is_enabled() or cp.is_prefill_enabled()):
-            raise RuntimeError(
-                "qwen4_exp QSA does not support context/prefill parallelism; "
-                "refusing before indexer weights are loaded"
-            )
-    if getattr(config, "enable_qwen4_ple", False) and (
-        getattr(config, "data_type", None) != DataType.TYPE_BF16
+    gamma = int(getattr(config, "gen_num_per_cycle", 0))
+    ratio = int(getattr(config, "_qwen4_indexer_compress_ratio", 0))
+    if gamma > 0 and ratio > 0 and gamma + 1 > ratio:
+        raise RuntimeError(
+            "qwen4_exp QSA target verify requires gen_num_per_cycle + 1 "
+            f"<= indexer_compress_ratio; got {gamma} + 1 > {ratio}"
+        )
+    if getattr(config, "data_type", None) != DataType.TYPE_BF16:
+        raise RuntimeError(
+            "qwen4_exp PLE/QSA currently requires act_type=BF16; refusing "
+            "before indexer weights are loaded"
+        )
+    attn_config = getattr(config, "attn_config", None)
+    if not bool(getattr(attn_config, "is_sparse", False)) or not bool(
+        getattr(attn_config, "use_sparse_gqa_fmha", False)
     ):
         raise RuntimeError(
-            "qwen4_exp PLE currently requires act_type=BF16; refusing to "
-            "load its rank-local n-gram table for an incompatible dtype"
+            "qwen4_exp QSA routing flags are inconsistent; dense fallback "
+            "is forbidden"
+        )
+    kv_cache_dtype = getattr(attn_config, "kv_cache_dtype", KvCacheDataType.BASE)
+    if kv_cache_dtype not in (KvCacheDataType.BASE, KvCacheDataType.FP8):
+        raise RuntimeError("qwen4_exp QSA requires BF16 or scaled FP8 KV cache")
+    cp = getattr(parallelism, "prefill_cp_config", None)
+    if cp is not None and (cp.is_enabled() or cp.is_prefill_enabled()):
+        raise RuntimeError(
+            "qwen4_exp PLE/QSA does not support context/prefill parallelism; "
+            "refusing before indexer weights are loaded"
         )
     if getattr(config, "enable_qwen4_ple", False):
-        cp = getattr(parallelism, "prefill_cp_config", None)
-        if cp is not None and (cp.is_enabled() or cp.is_prefill_enabled()):
-            raise RuntimeError(
-                "qwen4_exp PLE does not support context/prefill parallelism; "
-                "refusing before its rank-local n-gram table is loaded"
-            )
         # Match ModelDeployWeightInfo/LoadConfig exactly. In particular,
         # ALL_GATHER context parallelism changes attention TP to one; using
         # raw tp_size here would let the 102-GB table start loading before

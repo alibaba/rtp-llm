@@ -186,20 +186,15 @@ def _draft_incremental_prefill_geometry(
             f"match index_factor={index_factor}: got {actual} values for "
             f"{token_count} tokens"
         )
-    try:
-        current_cos, current_sin = build_qsa_rope(
-            position_ids,
-            rope_config,
-            token_count=token_count,
-            dtype=torch.bfloat16,
-            device=device,
-            logical_positions=logical_positions,
-            checks=checks,
-        )
-    except ValueError as error:
-        raise RuntimeError(
-            f"qwen4_exp QSA draft incremental prefill {error}"
-        ) from error
+    current_cos, current_sin = build_qsa_rope(
+        position_ids,
+        rope_config,
+        token_count=token_count,
+        dtype=torch.bfloat16,
+        device=device,
+        logical_positions=logical_positions,
+        checks=checks,
+    )
 
     kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
     state_tokens_per_block = int(self.indexer_state_cache.seq_size_per_block)
@@ -309,25 +304,15 @@ def _draft_incremental_prefill_geometry(
     )
 
     block_starts = logical_positions - logical_positions.remainder(ratio)
-    try:
-        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
-            block_starts,
-            rope_config,
-            token_count=token_count,
-            dtype=torch.bfloat16,
-            device=device,
-        )
-    except ValueError as error:
-        raise RuntimeError(
-            f"qwen4_exp QSA draft incremental prefill {error}"
-        ) from error
+    rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
+        block_starts,
+        rope_config,
+        token_count=token_count,
+        dtype=torch.bfloat16,
+        device=device,
+    )
 
-    try:
-        checks.verify()
-    except ValueError as error:
-        raise RuntimeError(
-            f"qwen4_exp QSA draft incremental prefill {error}"
-        ) from error
+    checks.verify()
     return IncrementalPrefillPlan(
         **{
             "lengths": lengths,

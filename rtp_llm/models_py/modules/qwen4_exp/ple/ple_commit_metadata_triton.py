@@ -194,13 +194,10 @@ def begin_accepted_pair_resolution(transaction, accept_len):
         return None
     stage = next(iter(transaction.stages.values()))
     tags = (PLE_STATE_TAG, PLE_NGRAM_CTX_TAG)
-    try:
-        tables = [
-            PLECacheViews._resolve_block_table(inputs, tag)
-            for inputs, tag in zip((stage.state_inputs, stage.ctx_inputs), tags)
-        ]
-    except RuntimeError:
-        return None
+    tables = [
+        PLECacheViews._resolve_block_table(inputs, tag)
+        for inputs, tag in zip((stage.state_inputs, stage.ctx_inputs), tags)
+    ]
     prefix = stage.prefixes
     if not (
         prefix.is_cuda

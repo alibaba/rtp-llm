@@ -73,30 +73,44 @@ class PLEExecution:
         if bool(ctx_inputs.is_cuda_graph):
             return {}
         ids = self._ple_input_ids(inputs).reshape(-1).long()
+        self._validate_ple_mode(ctx_inputs, allow_target_verify=True)
+        if ctx_inputs.is_prefill:
+            lengths = [int(x) for x in ctx_inputs.input_lengths.tolist()]
+            raw_prefixes = ctx_inputs.prefix_lengths
+            prefixes = (
+                [int(x) for x in raw_prefixes.tolist()]
+                if raw_prefixes is not None and raw_prefixes.numel()
+                else [0] * len(lengths)
+            )
+            if (
+                not lengths
+                or any(length <= 0 for length in lengths)
+                or sum(lengths) != ids.numel()
+                or len(prefixes) != len(lengths)
+                or any(prefix < 0 for prefix in prefixes)
+            ):
+                raise RuntimeError("PLE prefetch prefill metadata is inconsistent")
+            if len(lengths) > 128:
+                return {}
+            if ctx_inputs.is_target_verify and any(
+                length != lengths[0] for length in lengths
+            ):
+                raise RuntimeError("PLE target prefetch requires uniform query rows")
+        else:
+            lengths = ctx_inputs.sequence_lengths.to(
+                device=ids.device, dtype=torch.long
+            )
+            padded = bool(ctx_inputs.is_s_padded)
+            if ids.numel() != lengths.numel() or bool(
+                (lengths < (0 if padded else 1)).any().item()
+            ):
+                raise RuntimeError("PLE decode prefetch metadata is inconsistent")
         plans = {}
         for layer_idx, ple in enabled:
             embedding = ple.ple_embedding
-            self._validate_ple_mode(ctx_inputs, allow_target_verify=True)
             cache = self.kv_cache.get_layer_cache(layer_idx, PLE_NGRAM_CTX_TAG)
             page_size = int(cache.seq_size_per_block)
             if ctx_inputs.is_prefill:
-                lengths = [int(x) for x in ctx_inputs.input_lengths.tolist()]
-                raw_prefixes = ctx_inputs.prefix_lengths
-                prefixes = (
-                    [int(x) for x in raw_prefixes.tolist()]
-                    if raw_prefixes is not None and raw_prefixes.numel()
-                    else [0] * len(lengths)
-                )
-                if (
-                    not lengths
-                    or any(length <= 0 for length in lengths)
-                    or sum(lengths) != ids.numel()
-                    or len(prefixes) != len(lengths)
-                    or any(prefix < 0 for prefix in prefixes)
-                ):
-                    raise RuntimeError("PLE prefetch prefill metadata is inconsistent")
-                if len(lengths) > 128:
-                    continue
                 contexts = ids.new_full(
                     (len(lengths), embedding.context_len), embedding.eos_token_id
                 )
@@ -123,10 +137,6 @@ class PLEExecution:
                     contexts = torch.where(mask, cached, contexts)
                 if ctx_inputs.is_target_verify:
                     width = lengths[0]
-                    if any(length != width for length in lengths):
-                        raise RuntimeError(
-                            "PLE target prefetch requires uniform query rows"
-                        )
                     history = torch.cat(
                         (contexts, ids.view(len(lengths), width)), dim=1
                     )
@@ -152,14 +162,6 @@ class PLEExecution:
                         offset += length
                     plans[layer_idx] = handles
             else:
-                lengths = ctx_inputs.sequence_lengths.to(
-                    device=ids.device, dtype=torch.long
-                )
-                padded = bool(ctx_inputs.is_s_padded)
-                if ids.numel() != lengths.numel() or bool(
-                    (lengths < (0 if padded else 1)).any().item()
-                ):
-                    raise RuntimeError("PLE decode prefetch metadata is inconsistent")
                 pool = self._fixed_state_pool(
                     cache, torch.int64, embedding.context_len, 1
                 ).squeeze(-1)

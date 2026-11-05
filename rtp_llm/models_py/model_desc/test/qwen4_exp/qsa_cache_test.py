@@ -101,7 +101,11 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
                         )
                         context.finalize_side_cache()
                     else:
-                        with self.assertRaises(RuntimeError):
+                        with self.assertRaises(
+                            ValueError
+                            if corruption in ("axes", "logical")
+                            else RuntimeError
+                        ):
                             context.select_decode_tokens(
                                 q, raw, indexer=indexer, rope_config=rope
                             )
@@ -497,7 +501,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
                         (self.rope_config, True),
                     ):
                         with self.assertRaisesRegex(
-                            RuntimeError,
+                            ValueError,
                             "positions must equal the logical cache positions",
                         ):
                             context._draft_incremental_prefill_geometry(
@@ -658,7 +662,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         with patch(
             "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context.write_indexer_cache"
         ) as writer:
-            with self.assertRaisesRegex(RuntimeError, "logical cache positions"):
+            with self.assertRaisesRegex(ValueError, "logical cache positions"):
                 context.select_decode_tokens(
                     q,
                     raw,

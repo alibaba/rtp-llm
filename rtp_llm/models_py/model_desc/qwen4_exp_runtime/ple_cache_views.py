@@ -196,11 +196,7 @@ class PLECacheViews:
 
     @classmethod
     def _commit_physical_block_pair(cls, stage, accepted):
-        """Fast path only when both tables have valid structural metadata.
-
-        Malformed metadata falls back to the original sequential validation;
-        valid metadata retains the state-before-context error precedence.
-        """
+        """Try fused resolution after validating both table layouts."""
         from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
             PLE_NGRAM_CTX_TAG,
             PLE_STATE_TAG,
@@ -214,10 +210,7 @@ class PLECacheViews:
             (stage.state_inputs, PLE_STATE_TAG),
             (stage.ctx_inputs, PLE_NGRAM_CTX_TAG),
         ):
-            try:
-                tables.append(cls._resolve_block_table(inputs, tag))
-            except RuntimeError:
-                return None
+            tables.append(cls._resolve_block_table(inputs, tag))
         if (
             stage.state_pool.device != accepted.device
             or stage.ctx_pool.device != accepted.device
