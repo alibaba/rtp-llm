@@ -289,8 +289,7 @@ public:
                           std::vector<MasterBatchReservation::Request> requests,
                           const NaviSchedCachePolicy *cachePolicy = nullptr,
                           bool *pendingCacheTracked = nullptr,
-                          double *queueLatencyMs = nullptr, int64_t predictionTimeUs = 0,
-                          double timeCompression = 1.0, ReservationPtr *reserved = nullptr,
+                          ReservationPtr *reserved = nullptr,
                           ReservationTiming *timing = nullptr);
         bool registerDispatchWaiter(int64_t batchId, uint64_t requestId,
                                     const navi::AsyncPipePtr &pipe, bool &acknowledged);

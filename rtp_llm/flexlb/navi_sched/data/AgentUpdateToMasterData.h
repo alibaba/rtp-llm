@@ -14,10 +14,10 @@
 
 namespace navi_sched {
 
-static const int32_t NAVI_SCHED_AGENT_UPDATE_VERSION = 24;
-static const int32_t NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION = 24;
+static const int32_t NAVI_SCHED_AGENT_UPDATE_VERSION = 26;
+static const int32_t NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION = 26;
 // The collector graph selects the ordered envelope format.
-static const int32_t NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION = 25;
+static const int32_t NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION = 27;
 static const int32_t NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION = 13;
 static const size_t NAVI_SCHED_AGENT_UPDATE_MAX_BATCH_SIZE = 8;
 static const std::string AGENT_UPDATE_TO_MASTER_TYPE_ID = "NaviSchedAgentUpdateType";

@@ -25,7 +25,7 @@ class DataBuffer;
 
 namespace navi_sched {
 
-static const int32_t NAVI_SCHED_DATA_VERSION = 17;
+static const int32_t NAVI_SCHED_DATA_VERSION = 18;
 static const int32_t NAVI_SCHED_LATENCY_RESIDUAL_VERSION = 2;
 static const size_t NAVI_SCHED_LATENCY_RESIDUAL_PARAMETER_COUNT = 19;
 NAVI_SCHED_API int64_t getNaviSchedRpcTimeoutMs(int64_t entryTimeoutMs);

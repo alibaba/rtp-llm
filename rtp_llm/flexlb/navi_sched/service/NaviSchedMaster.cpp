@@ -213,7 +213,6 @@ NaviSchedMasterNodeSummary NaviSchedMaster::makeNodeSummary(
         sentBatchCount > 0 ? static_cast<double>(sentRequestCount) / sentBatchCount : 0.0;
     summary.lastRequestLatencyMs = node.lastRequestLatencyMs;
     summary.queueTotalPredictedLatencyMs = node.queueTotalPredictedLatencyMs;
-    summary.queueRawDecayFactor = node.queueModel.rawDecayFactor;
     summary.queueReportReceiveTimeUs = node.queueReportReceiveTimeUs;
     summary.workload = node.workload;
     summary.workloadReportReceiveTimeUs = node.workloadReportReceiveTimeUs;

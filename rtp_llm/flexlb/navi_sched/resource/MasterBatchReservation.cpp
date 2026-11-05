@@ -686,37 +686,6 @@ bool MasterBatchReservation::setPredictedLatencyMs(double predictedLatencyMs)
     return true;
 }
 
-bool MasterBatchReservation::adjustInitialRequestLatencyMs(double deltaMs)
-{
-    if (!std::isfinite(deltaMs) || _requests.empty() ||
-        _waitingRequestCount != _requests.size() ||
-        _acknowledgedWaitingRequestCount != 0 ||
-        _unreportedStats.requestCount != _requests.size()) {
-        return false;
-    }
-    long double sum = 0.0;
-    for (const auto &entry : _requests) {
-        const auto latencyMs = entry.request.predictedLatencyMs + deltaMs;
-        if (entry.state != RequestState::WAITING || entry.dispatchAcknowledged ||
-            entry.awaitingBatchReady || !entry.unreportedInflight ||
-            !std::isfinite(latencyMs) || latencyMs < 0.0) {
-            return false;
-        }
-        sum += static_cast<long double>(latencyMs);
-        if (!std::isfinite(sum) || sum > std::numeric_limits<double>::max()) {
-            return false;
-        }
-    }
-    // Validation precedes mutation. Match init's sum of rounded per-request doubles.
-    for (size_t index = 0; index < _requests.size(); ++index) {
-        auto &entry = _requests.writable(index);
-        entry.request.predictedLatencyMs += deltaMs;
-        entry.unreportedLatencyMs = entry.request.predictedLatencyMs;
-    }
-    _unreportedLatencySumMs = sum;
-    return true;
-}
-
 bool MasterBatchReservation::sameDefinition(const MasterBatchReservation &other) const
 {
     if (_batchId != other._batchId || _scheduleTimeUs != other._scheduleTimeUs ||

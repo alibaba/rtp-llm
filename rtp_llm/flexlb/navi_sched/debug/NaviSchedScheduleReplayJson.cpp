@@ -384,7 +384,6 @@ struct ReplayNodeInfoJson : public autil::legacy::Jsonizable {
                      value.queueModel.cacheMemberWeightMs);
         json.Jsonize("queue_lookup_member_weight_ms",
                      value.queueModel.lookupMemberWeightMs);
-        json.Jsonize("queue_raw_decay_factor", value.queueModel.rawDecayFactor);
         json.Jsonize("queue_report_receive_time_us", value.queueReportReceiveTimeUs);
         json.Jsonize("online", value.online);
         json.Jsonize("last_event_type", value.lastEventType);

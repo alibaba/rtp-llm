@@ -82,7 +82,6 @@ public:
     size_t liveDispatchWaiterCount = 0;
     double lastRequestLatencyMs = 0.0;
     double queueTotalPredictedLatencyMs = 0.0;
-    double queueRawDecayFactor = 1.0;
     int64_t queueReportReceiveTimeUs = 0;
     NaviSchedWorkloadSnapshot workload;
     double workloadEffectiveRunningElapsedTimeMs = 0.0;

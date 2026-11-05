@@ -668,7 +668,6 @@ bool MasterStateR::NodeState::reserveBatch(
     int64_t batchId, int64_t scheduleTimeUs, double predictedLatencyMs,
     std::vector<MasterBatchReservation::Request> requests,
     const NaviSchedCachePolicy *cachePolicy, bool *pendingCacheTracked,
-    double *queueLatencyMs, int64_t predictionTimeUs, double timeCompression,
     ReservationPtr *reserved, ReservationTiming *timing)
 {
     ReservationTiming localTiming;
@@ -704,15 +703,6 @@ bool MasterStateR::NodeState::reserveBatch(
     NaviSchedCachePolicy externalPolicy;
     const bool hasExternalPolicy =
         getCachePolicy(externalPolicy, NaviSchedCacheKeyType::V6D);
-    size_t hitMembers = 0;
-    std::vector<int64_t> requestTokenCounts;
-    if (queueLatencyMs) {
-        requestTokenCounts.reserve(requests.size());
-        for (const auto &request : requests) {
-            hitMembers += request.predictedCacheHitTokenCount > 0;
-            requestTokenCounts.push_back(request.totalTokenCount);
-        }
-    }
     auto reservation = std::make_shared<PendingBatchReservation>();
     if (!reservation->batch.init(batchId, scheduleTimeUs, predictedLatencyMs,
                                  std::move(requests), cachePolicy)) {
@@ -740,44 +730,6 @@ bool MasterStateR::NodeState::reserveBatch(
     if (!_acceptReservations) {
         timing->failureReason = "reservations_disabled";
         return false;
-    }
-    if (queueLatencyMs && !findReservationLocked(batchId)) {
-        // Reports retire admitted reservation work under this same lock. Read
-        // their combined queue before inserting this batch, excluding retries.
-        auto load = _runtimeState.load;
-        const auto elapsedMs =
-            load.queueReportReceiveTimeUs > 0
-                ? std::max<int64_t>(0, predictionTimeUs - load.queueReportReceiveTimeUs) /
-                      1000.0 * timeCompression
-                : 0.0;
-        double baseQueue = load.queueModel.decayedBaseMs(
-            load.queueTotalPredictedLatencyMs,
-            std::min(load.queueDecayHeadRemainingMs, elapsedMs));
-        for (const auto &existing : _pendingBatchReservations) {
-            if (existing->batch.getBatchId() != batchId) {
-                baseQueue += existing->batch.getPredictedLatencyMs();
-            }
-        }
-        const auto published =
-            std::atomic_load_explicit(&_publishedSnapshot, std::memory_order_acquire);
-        size_t lookupMembers = 0;
-        if (published && published->prefillExecutionPolicy) {
-            for (const auto tokenCount : requestTokenCounts) {
-                lookupMembers += TPUPrefillExecutionPolicy::hasAsyncLookupOpportunity(
-                    tokenCount, *published->prefillExecutionPolicy);
-            }
-        }
-        double queue = _runtimeState.unifiedLatencyPrediction
-                           ? 0.0
-                           : NaviSchedQueueModel::predictMs(
-                                 baseQueue, load.queueModel.cacheMemberWeightMs,
-                                 load.queueModel.lookupMemberWeightMs, hitMembers,
-                                 lookupMembers, requestCountBeforeMove);
-        if (!reservation->batch.adjustInitialRequestLatencyMs(queue - *queueLatencyMs)) {
-            timing->failureReason = "invalid_refreshed_queue_prediction";
-            return false;
-        }
-        *queueLatencyMs = queue;
     }
     if (_runtimeState.unifiedLatencyPrediction &&
         !reservation->batch.setPredictedLatencyMs(0.0)) {
@@ -3863,7 +3815,6 @@ void MasterStateR::reserveScheduleNodeBatch(NaviSchedScheduleContext &context,
         return;
     }
     bool pendingCacheTracked = false;
-    double queueLatencyMs = decision.predictedQueueLatencyMs;
     NodeState::ReservationPtr reserved;
     stageEndUs = autil::TimeUtility::monotonicTimeUs();
     policyUs = stageEndUs - stageBeginUs;
@@ -3878,8 +3829,7 @@ void MasterStateR::reserveScheduleNodeBatch(NaviSchedScheduleContext &context,
     stageBeginUs = stageEndUs;
     if (!state->reserveBatch(decision.batchId, context._scheduleTimeUs,
                              predictedLatencyMs, std::move(reservationRequests),
-                             &cachePolicy, &pendingCacheTracked, &queueLatencyMs,
-                             context._queuePredictionTimeUs, context._timeCompression,
+                             &cachePolicy, &pendingCacheTracked,
                              &reserved, &reservationTiming)) {
         NAVI_KERNEL_LOG(ERROR,
                         "failed to reserve scheduled batch, agentId [%s], "
@@ -3895,16 +3845,6 @@ void MasterStateR::reserveScheduleNodeBatch(NaviSchedScheduleContext &context,
     reserveCpuUs = autil::TimeUtility::cpuThreadTimeUs() - estimateEndCpuUs;
     reserveUs = stageEndUs - stageBeginUs;
     stageBeginUs = stageEndUs;
-    for (auto requestIndex : requestIndexes) {
-        auto &requestDecision = context._decisions[requestIndex];
-        if (requestDecision.latencyPrediction) {
-            auto prediction = std::make_shared<NaviSchedLatencyPrediction>(
-                *requestDecision.latencyPrediction);
-            prediction->fixedLatencyMs += queueLatencyMs - requestDecision.predictedQueueLatencyMs;
-            requestDecision.latencyPrediction = std::move(prediction);
-        }
-        requestDecision.predictedQueueLatencyMs = queueLatencyMs;
-    }
     auto handleState = std::make_shared<MasterDispatchHandle::State>();
     handleState->node = state;
     handleState->reservation = reserved;

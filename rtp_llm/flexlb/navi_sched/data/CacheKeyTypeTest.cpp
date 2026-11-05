@@ -9,7 +9,7 @@ TEST_F(CacheKeyTypeTest, testBusinessDefaultIsBlockPool)
     ASSERT_EQ(NaviSchedCacheKeyType::BLOCK_POOL, AgentCacheToMasterData().cacheKeyType);
     ASSERT_EQ(NaviSchedCacheKeyType::BLOCK_POOL,
               AgentPendingCacheToMasterData().cacheKeyType);
-    ASSERT_EQ(24, AgentUpdateToMasterData().version);
+    ASSERT_EQ(26, AgentUpdateToMasterData().version);
 }
 
 TEST_F(CacheKeyTypeTest, testCacheRoundtripPreservesTypeAndOriginalState)

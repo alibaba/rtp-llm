@@ -231,7 +231,6 @@ AgentLatencyKernel::QueueLoadPrediction AgentLatencyKernel::getQueueLoadPredicti
         prediction.totalLatencyMs);
     prediction.model.cacheMemberWeightMs = _queueWeights[3];
     prediction.model.lookupMemberWeightMs = _queueWeights[4];
-    prediction.model.rawDecayFactor = 1.0 + _queueWeights[1] / QUEUE_RAW_LATENCY_SCALE_MS;
     int64_t headRemainingUs = 0;
     int64_t earliestStartTimeUs = std::numeric_limits<int64_t>::max();
     int64_t earliestBatchId = std::numeric_limits<int64_t>::max();

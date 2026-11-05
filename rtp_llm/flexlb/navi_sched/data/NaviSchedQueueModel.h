@@ -11,7 +11,6 @@ struct NaviSchedQueueModelState {
     double baseClipAdjustmentMs = 0.0;
     double cacheMemberWeightMs = 0.0;
     double lookupMemberWeightMs = 0.0;
-    double rawDecayFactor = 1.0;
 
     bool valid(double totalMs) const
     {
@@ -19,14 +18,14 @@ struct NaviSchedQueueModelState {
                std::isfinite(baseClipAdjustmentMs) && baseClipAdjustmentMs <= 0.0 &&
                (baseClipAdjustmentMs == 0.0 || totalMs == 0.0) &&
                std::isfinite(cacheMemberWeightMs) &&
-               std::isfinite(lookupMemberWeightMs) && std::isfinite(rawDecayFactor);
+               std::isfinite(lookupMemberWeightMs);
     }
 
     double baseMs(double totalMs) const { return totalMs + baseClipAdjustmentMs; }
 
     double decayedBaseMs(double totalMs, double rawElapsedMs) const
     {
-        return baseMs(totalMs) - rawDecayFactor * rawElapsedMs;
+        return baseMs(totalMs) - rawElapsedMs;
     }
 
     void setBaseMs(double base, double &totalMs)
@@ -40,7 +39,6 @@ struct NaviSchedQueueModelState {
         buffer.write(baseClipAdjustmentMs);
         buffer.write(cacheMemberWeightMs);
         buffer.write(lookupMemberWeightMs);
-        buffer.write(rawDecayFactor);
     }
 
     void deserialize(autil::DataBuffer &buffer)
@@ -48,7 +46,6 @@ struct NaviSchedQueueModelState {
         buffer.read(baseClipAdjustmentMs);
         buffer.read(cacheMemberWeightMs);
         buffer.read(lookupMemberWeightMs);
-        buffer.read(rawDecayFactor);
     }
 };
 

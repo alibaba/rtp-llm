@@ -71,8 +71,6 @@ public:
                                        int32_t maxRunningRequestCount,
                                        int32_t &runningCapacitySlotCount) const;
     bool setPredictedLatencyMs(double predictedLatencyMs);
-    // Before publication only: refresh queue without rebuilding cache promises.
-    bool adjustInitialRequestLatencyMs(double deltaMs);
     bool sameDefinition(const MasterBatchReservation &other) const;
 
     int64_t getBatchId() const;

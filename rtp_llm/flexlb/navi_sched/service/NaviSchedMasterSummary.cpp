@@ -75,7 +75,6 @@ void NaviSchedMasterNodeSummary::Jsonize(JsonWrapper &json)
     json.Jsonize("live_dispatch_waiter_count", liveDispatchWaiterCount);
     json.Jsonize("last_request_latency_ms", lastRequestLatencyMs);
     json.Jsonize("queue_total_predicted_latency_ms", queueTotalPredictedLatencyMs);
-    json.Jsonize("queue_raw_decay_factor", queueRawDecayFactor);
     json.Jsonize("queue_report_receive_time_us", queueReportReceiveTimeUs);
     json.Jsonize("workload_revision", workload.revision);
     json.Jsonize("workload_event_time_us", workload.eventTimeUs);
@@ -305,7 +304,6 @@ std::string NaviSchedMasterNodeSummary::format() const
         << "    abnormal_batch_finish_count: " << abnormalBatchFinishCount << "\n"
         << std::fixed << std::setprecision(3)
         << "    queue_predicted_ms: " << queueTotalPredictedLatencyMs << "\n"
-        << "    queue_raw_decay_factor: " << queueRawDecayFactor << "\n"
         << "    last_request_latency_ms: " << lastRequestLatencyMs << "\n"
         << "    workload: revision=" << workload.revision
         << ", request_count=" << workload.requestCount
