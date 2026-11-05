@@ -850,6 +850,74 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
         EXPECT_TRUE(token_ids_ok) << "draft tokens out of vocabulary at batch " << batch;
     }
 
+    // Draft-phase kernel breakdown: mirror of the target trace below, so the
+    // remaining draft cost can be attributed per kernel instead of guessed from
+    // the phase total (the draft must replay the captured graph here, otherwise
+    // the trace would show the eager fallback the served path no longer uses).
+    {
+        // Gated by its own switch, not by TEST_UNDECLARED_OUTPUTS_DIR: bazel
+        // always sets that directory, and profiling the draft phase ahead of the
+        // target phase perturbs the target numbers measured afterwards.
+        const char* draft_trace = std::getenv("SAMPLING_BENCH_DRAFT_TRACE");
+        const char* trace_dir   = std::getenv("TEST_UNDECLARED_OUTPUTS_DIR");
+        if (draft_trace != nullptr && *draft_trace == '1' && trace_dir != nullptr && *trace_dir != '\0') {
+            namespace tap = torch::autograd::profiler;
+            namespace tpi = torch::profiler::impl;
+            reseedFixtureRng();
+            auto anchors      = torch::arange(kBatch, i32);
+            auto temperatures = torch::full({kBatch}, kTemperature, fp32);
+            auto top_p        = torch::full({kBatch}, kTopP, fp32);
+            auto logits       = torch::randn({kBatch * kGamma, kVocab}, fp32);
+            sampler.prepareDSparkDraftGraphs(logits,
+                                             markov_w1,
+                                             markov_w2,
+                                             static_cast<size_t>(kVocab),
+                                             {static_cast<int>(kBatch)});
+            auto draft_call = [&]() {
+                sampler.sampleDSparkDraft(logits,
+                                          anchors,
+                                          temperatures,
+                                          torch::Tensor(),
+                                          top_p,
+                                          markov_w1,
+                                          markov_w2,
+                                          static_cast<size_t>(kVocab),
+                                          /*batch_all_greedy=*/false,
+                                          /*force_topk=*/draftCandidateWidth(),
+                                          /*joint_max_top_k=*/0,
+                                          /*copy_token_ids=*/false);
+            };
+            tpi::ProfilerConfig               config(tpi::ProfilerState::KINETO, /*report_input_shapes=*/true);
+            const std::set<tpi::ActivityType> activities{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
+            tap::prepareProfiler(config, activities);
+            tap::enableProfiler(config, activities);
+            try {
+                for (int call = 0; call < 5; ++call) {
+                    RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                        "sampling_draft_phase(call=%d,batch=%d,gamma=%d,force_topk=%d,vocab=%d)",
+                        call,
+                        static_cast<int>(kBatch),
+                        static_cast<int>(kGamma),
+                        draftCandidateWidth(),
+                        static_cast<int>(kVocab));
+                    draft_call();
+                }
+                at::cuda::getCurrentCUDAStream().synchronize();
+            } catch (...) {
+                tap::disableProfiler();
+                throw;
+            }
+            auto trace = tap::disableProfiler();
+            if (trace != nullptr) {
+                const std::string path = std::string(trace_dir) + "/draft_phase_trace.json";
+                trace->save(path);
+                std::cout << "SAMPLING_DRAFT_TRACE path=" << path << " calls=5 batch=" << kBatch
+                          << " gamma=" << kGamma << " force_topk=" << draftCandidateWidth()
+                          << " vocab=" << kVocab << std::endl;
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
     // 2. Target: production compact-K4096 sampling, plus the temperature
     //    kernel measured alone for attribution.

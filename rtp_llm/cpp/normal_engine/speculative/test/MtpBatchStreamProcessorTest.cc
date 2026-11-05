@@ -1073,6 +1073,128 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputDeadHistoryGateFli
         /*expect_all_probs=*/false);
 }
 
+// The four per-row penalty arrays are only materialized when some stream can
+// actually run a penalty kernel. An all-default batch leaves them undefined, so
+// Sampler::forward narrows them to std::nullopt and processLogits neither scans
+// them for activity nor launches the repetition/presence/frequency/ngram
+// kernels. Undefined is the "every row is default" contract the dead-history
+// elision relies on, so that gate must keep firing in this state.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputLeavesDefaultPenaltyArraysUndefined) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    sp_config.type              = SP_TYPE_DSPARK;
+
+    ResourceContext resource_context;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    for (auto& stream : {stream1, stream2}) {
+        stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    }
+
+    auto processor = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({8, 7}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto draft          = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
+
+    auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft);
+    ASSERT_TRUE(status.ok());
+    const auto& sampler_inputs = status.value();
+
+    // Nothing is allocated for a penalty path that cannot run.
+    EXPECT_FALSE(sampler_inputs.repetition_penalty.defined());
+    EXPECT_FALSE(sampler_inputs.presence_penalty.defined());
+    EXPECT_FALSE(sampler_inputs.frequency_penalty.defined());
+    EXPECT_FALSE(sampler_inputs.no_repeat_ngram_size.defined());
+    // Undefined reads as "all rows default", not as "reader active".
+    EXPECT_FALSE(NormalSamplerInputGatherer::anyPenaltyRowActive(sampler_inputs));
+
+    // The dead-history elision still fires: no pinned history snapshot and no
+    // copy stream are created for this round.
+#if USING_CUDA
+    EXPECT_FALSE(processor.sampler_input_copy_stream_.has_value());
+#endif
+}
+
+// One non-default penalty anywhere in the batch enables the batch-wide penalty
+// path: all four arrays are materialized and every row of every stream is
+// filled. The kernels consume one row per request, so a partially filled array
+// would read garbage for the rows that did not trigger the allocation.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputMaterializesPenaltyArraysBatchWide) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 3;
+    sp_config.type              = SP_TYPE_DSPARK;
+
+    ResourceContext resource_context;
+
+    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {5}, 1);
+    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
+    for (auto& stream : {stream1, stream2}) {
+        stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+    }
+    // Only this stream carries a non-default penalty; the other keeps defaults.
+    stream1->generateConfig()->repetition_penalty = 1.05f;
+
+    auto processor = MtpBatchStreamProcessor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({8, 7}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    auto draft          = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
+
+    auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft);
+    ASSERT_TRUE(status.ok());
+    const auto& sampler_inputs = status.value();
+
+    ASSERT_TRUE(sampler_inputs.repetition_penalty.defined());
+    ASSERT_TRUE(sampler_inputs.presence_penalty.defined());
+    ASSERT_TRUE(sampler_inputs.frequency_penalty.defined());
+    ASSERT_TRUE(sampler_inputs.no_repeat_ngram_size.defined());
+
+    // Both streams contribute score_len rows (4 each); the array is batch-wide.
+    const int64_t expected_rows = 8;
+    EXPECT_EQ(sampler_inputs.repetition_penalty.numel(), expected_rows);
+    EXPECT_EQ(sampler_inputs.presence_penalty.numel(), expected_rows);
+    EXPECT_EQ(sampler_inputs.frequency_penalty.numel(), expected_rows);
+    EXPECT_EQ(sampler_inputs.no_repeat_ngram_size.numel(), expected_rows);
+    EXPECT_TRUE(sampler_inputs.repetition_penalty.device().is_cpu());
+
+    // Every row is filled: the triggering stream keeps its value and the
+    // default stream keeps the identity value (no untouched/garbage rows).
+    EXPECT_EQ((sampler_inputs.repetition_penalty == 1.05f).sum().item<int64_t>(), 4);
+    EXPECT_EQ((sampler_inputs.repetition_penalty == 1.0f).sum().item<int64_t>(), 4);
+    EXPECT_TRUE(sampler_inputs.presence_penalty.eq(0.0f).all().item<bool>());
+    EXPECT_TRUE(sampler_inputs.frequency_penalty.eq(0.0f).all().item<bool>());
+    EXPECT_TRUE(sampler_inputs.no_repeat_ngram_size.eq(0).all().item<bool>());
+    EXPECT_TRUE(NormalSamplerInputGatherer::anyPenaltyRowActive(sampler_inputs));
+
+    // The penalty kernel reads the token history, so the elision flips off and
+    // the copy stream that uploads the history is created.
+#if USING_CUDA
+    EXPECT_TRUE(processor.sampler_input_copy_stream_.has_value());
+#endif
+}
+
 // Re-enabling a history reader must upload the current host history in full,
 // including commits made during elided rounds and replacement requests.
 TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputHistoryResumesAfterDeadHistoryRounds) {

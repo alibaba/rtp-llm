@@ -1613,20 +1613,17 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     bool sampler_token_matrix_dead = false;
 #if USING_CUDA
     {
-        auto*      repetition_ptr = sampler_inputs.repetition_penalty.data_ptr<float>();
-        auto*      presence_ptr   = sampler_inputs.presence_penalty.data_ptr<float>();
-        auto*      frequency_ptr  = sampler_inputs.frequency_penalty.data_ptr<float>();
-        auto*      ngram_ptr      = sampler_inputs.no_repeat_ngram_size.data_ptr<int32_t>();
-        auto*      beams_in_ptr   = sampler_inputs.num_beams_in.data_ptr<int64_t>();
-        auto*      beams_out_ptr  = sampler_inputs.num_beams_out.data_ptr<int64_t>();
-        const auto count          = static_cast<int64_t>(total_batch_size);
+        auto*      beams_in_ptr  = sampler_inputs.num_beams_in.data_ptr<int64_t>();
+        auto*      beams_out_ptr = sampler_inputs.num_beams_out.data_ptr<int64_t>();
+        const auto count         = static_cast<int64_t>(total_batch_size);
+        // The four penalty arrays are undefined when no stream can run a penalty
+        // kernel (see NormalSamplerInputGatherer::allocateSamplerInputs). That is
+        // the all-default state and counts as "no history reader", exactly like
+        // the per-row identity values the arrays used to hold.
         sampler_token_matrix_dead =
             return_all_probs != ReturnAllProbsMode::NONE && !spec_logits_result.has_active_processor
             && sampler_inputs.logits_processor_states_ptr == nullptr
-            && std::all_of(repetition_ptr, repetition_ptr + count, [](float v) { return v == 1.0f; })
-            && std::all_of(presence_ptr, presence_ptr + count, [](float v) { return v == 0.0f; })
-            && std::all_of(frequency_ptr, frequency_ptr + count, [](float v) { return v == 0.0f; })
-            && std::all_of(ngram_ptr, ngram_ptr + count, [](int32_t v) { return v == 0; })
+            && !NormalSamplerInputGatherer::anyPenaltyRowActive(sampler_inputs)
             && std::all_of(beams_in_ptr, beams_in_ptr + count, [](int64_t n) { return n == 1; })
             && std::all_of(beams_out_ptr, beams_out_ptr + count, [](int64_t n) { return n == 1; });
     }
@@ -1858,20 +1855,14 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 #if USING_CUDA
     {
         auto*      temperature_ptr = sampler_inputs.temperature.data_ptr<float>();
-        auto*      repetition_ptr  = sampler_inputs.repetition_penalty.data_ptr<float>();
-        auto*      presence_ptr    = sampler_inputs.presence_penalty.data_ptr<float>();
-        auto*      frequency_ptr   = sampler_inputs.frequency_penalty.data_ptr<float>();
-        auto*      ngram_ptr       = sampler_inputs.no_repeat_ngram_size.data_ptr<int32_t>();
         auto*      beams_in_ptr    = sampler_inputs.num_beams_in.data_ptr<int64_t>();
         auto*      beams_out_ptr   = sampler_inputs.num_beams_out.data_ptr<int64_t>();
         const auto count           = static_cast<int64_t>(total_batch_size);
         // Writers 2 + 3 of needsPrivateLogits (repetition/presence/frequency and
-        // no-repeat-ngram), shared by both elision gates below.
-        const bool penalties_active =
-            std::any_of(repetition_ptr, repetition_ptr + count, [](float v) { return v != 1.0f; })
-            || std::any_of(presence_ptr, presence_ptr + count, [](float v) { return v != 0.0f; })
-            || std::any_of(frequency_ptr, frequency_ptr + count, [](float v) { return v != 0.0f; })
-            || std::any_of(ngram_ptr, ngram_ptr + count, [](int32_t v) { return v != 0; });
+        // no-repeat-ngram), shared by both elision gates below. Undefined arrays
+        // mean the whole batch uses default penalties, i.e. neither writer can
+        // run (see NormalSamplerInputGatherer::anyPenaltyRowActive).
+        const bool penalties_active = NormalSamplerInputGatherer::anyPenaltyRowActive(sampler_inputs);
         // Beam slices take Sampler::forward's beam-search branch, which rewrites
         // the logits slice in place ("logits is modified inplace" in
         // BeamSearchParams) and never reaches the greedy sampler at all. Keep
