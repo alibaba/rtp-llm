@@ -1,6 +1,7 @@
 package org.flexlb.dao.loadbalance;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
@@ -34,6 +35,12 @@ public class Response {
     @JsonProperty("enqueued_by_master")
     private boolean enqueuedByMaster = false;
 
+    @JsonProperty("prefill_delegation")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private PrefillDelegation prefillDelegation;
+
+    public record PrefillDelegation(@JsonProperty("master_biz_name") String masterBizName) {}
+
     @JsonProperty("worker_summary")
     private Map<String, WorkerRoleSummary> workerSummary;
 
@@ -61,6 +68,7 @@ public class Response {
         copy.realMasterHost = source.realMasterHost;
         copy.queueLength = source.queueLength;
         copy.enqueuedByMaster = source.enqueuedByMaster;
+        copy.prefillDelegation = source.prefillDelegation;
         if (source.workerSummary != null) {
             copy.workerSummary = new LinkedHashMap<>();
             source.workerSummary.forEach(

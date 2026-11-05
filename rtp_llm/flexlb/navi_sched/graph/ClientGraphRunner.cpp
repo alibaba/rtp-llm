@@ -2,6 +2,7 @@
 #include "aios/navi_sched/graph/GraphVisRecorder.h"
 #include "aios/navi_sched/resource/ClientResponseR.h"
 #include "autil/TimeUtility.h"
+#include "autil/StringUtil.h"
 #include "navi/builder/GraphBuilder.h"
 #include <algorithm>
 
@@ -88,16 +89,28 @@ private:
 std::unique_ptr<navi::GraphDef> ClientGraphRunner::buildScheduleGraph(
     const std::string &clientBizName, const std::string &masterBizName,
     bool collectReplay, int64_t entryTimeoutMs,
-    navi::GraphId &clientGraphId, navi::GraphId &masterGraphId)
+    navi::GraphId &clientGraphId, navi::GraphId &masterGraphId,
+    const std::string &masterAddress)
 {
     const auto rpcTimeoutMs = getNaviSchedRpcTimeoutMs(entryTimeoutMs);
     auto graphDef = std::make_unique<navi::GraphDef>();
     navi::GraphBuilder builder(graphDef.get());
     masterGraphId = builder.newSubGraph(masterBizName);
-    builder.subGraph(masterGraphId)
-        .location(masterBizName, 1, 0)
-        .inlineMode(true)
-        .subGraphTimeoutMs(rpcTimeoutMs);
+    builder.subGraph(masterGraphId).inlineMode(true).subGraphTimeoutMs(rpcTimeoutMs);
+    if (masterAddress.empty()) {
+        builder.subGraph(masterGraphId).location(masterBizName, 1, 0);
+    } else {
+        const auto separator = masterAddress.rfind(':');
+        int32_t port = 0;
+        if (separator == std::string::npos || separator == 0 ||
+            masterAddress.find(':') != separator ||
+            !autil::StringUtil::fromString(masterAddress.substr(separator + 1), port) ||
+            port <= 0 || port > 65535) {
+            return nullptr;
+        }
+        builder.subGraph(masterGraphId).directLocation(
+            masterBizName, masterAddress.substr(0, separator), port);
+    }
     builder.subGraph(masterGraphId).gigProbe(false);
     auto scheduleNode = builder.node(SCHEDULE_NODE)
                             .kernel("navi_sched.schedule_k")
@@ -194,7 +207,7 @@ void ClientGraphRunner::setClientBizName(const std::string &clientBizName)
 
 ClientGraphRunResult ClientGraphRunner::schedule(
     const ClientRequestToMasterDataConstPtr &request, const std::string &masterBizName,
-    int64_t timeoutMs, bool expectResponseStream)
+    int64_t timeoutMs, bool expectResponseStream, const std::string &masterAddress)
 {
     ClientGraphRunResult result;
     if (!_navi || !request || 0 == request->requestId || request->bizName.empty() ||
@@ -203,7 +216,8 @@ ClientGraphRunResult ClientGraphRunner::schedule(
         result.errorMessage = "invalid navi sched client runner state";
         return result;
     }
-    return runRequest(request, masterBizName, timeoutMs, expectResponseStream);
+    return runRequest(request, masterBizName, timeoutMs, expectResponseStream, {},
+                      masterAddress);
 }
 
 ClientGraphRunResult ClientGraphRunner::scheduleDetached(
@@ -226,7 +240,7 @@ ClientGraphRunResult ClientGraphRunner::scheduleDetached(
 ClientGraphRunResult ClientGraphRunner::runRequest(
     const ClientRequestToMasterDataConstPtr &request, const std::string &masterBizName,
     int64_t timeoutMs, bool expectResponseStream,
-    DecisionCallback decisionCallback) const
+    DecisionCallback decisionCallback, const std::string &masterAddress) const
 {
     ClientGraphRunResult result;
     auto beginTimeUs = autil::TimeUtility::currentTime();
@@ -235,7 +249,7 @@ ClientGraphRunResult ClientGraphRunner::runRequest(
     navi::GraphId clientGraphId = navi::INVALID_GRAPH_ID;
     auto graphDef =
         buildScheduleGraph(_clientBizName, masterBizName, request->collectReplay,
-                           timeoutMs, clientGraphId, masterGraphId);
+                           timeoutMs, clientGraphId, masterGraphId, masterAddress);
     navi::RunGraphParams params;
     params.setResourceBuildMode(navi::RBM_PARALLEL);
     params.setMaxInline(20);

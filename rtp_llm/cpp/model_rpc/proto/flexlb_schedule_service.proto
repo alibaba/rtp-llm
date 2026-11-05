@@ -101,6 +101,7 @@ message FlexlbScheduleRequestPB {
         int64 encoder_cache_hit_len = 20;
     }
     string request_id_str = 21;
+    bool skip_prefill = 22;
 }
 
 message FlexlbServerStatusPB {
@@ -132,6 +133,10 @@ enum ScheduleFailureReasonPB {
     RESOURCE_EXHAUSTED = 3;
 }
 
+message PrefillDelegationPB {
+    string master_biz_name = 2;
+}
+
 message FlexlbScheduleResponsePB {
     bool success = 1;
     int32 code = 2;
@@ -142,6 +147,7 @@ message FlexlbScheduleResponsePB {
     bool enqueued_by_master = 7;
     RequestLifecyclePB lifecycle = 8;
     ScheduleFailureReasonPB admission_reject_reason = 9;
+    PrefillDelegationPB prefill_delegation = 10;
 }
 
 message FlexlbCancelRequestPB {

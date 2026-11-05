@@ -3,6 +3,7 @@ package org.flexlb.httpserver;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.service.grace.ApplicationLifecycle;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
+import org.flexlb.service.grace.NaviSchedMasterRuntime;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.event.EventListener;
@@ -24,6 +25,7 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 public class AppStateHookServer {
 
     private final ApplicationLifecycle applicationLifecycle;
+    private final NaviSchedMasterRuntime prefillMasterRuntime;
     private final GracefulLifecycleReporter lifecycleReporter;
 
     private volatile boolean processReady = false;
@@ -32,9 +34,11 @@ public class AppStateHookServer {
 
     public AppStateHookServer(
             ApplicationLifecycle applicationLifecycle,
-            GracefulLifecycleReporter lifecycleReporter) {
+            GracefulLifecycleReporter lifecycleReporter,
+            NaviSchedMasterRuntime prefillMasterRuntime) {
         this.applicationLifecycle = applicationLifecycle;
         this.lifecycleReporter = lifecycleReporter;
+        this.prefillMasterRuntime = prefillMasterRuntime;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -60,7 +64,7 @@ public class AppStateHookServer {
         if (isNonLocalRequest(request)) {
             return buildErrorResponse("handleProcessOk");
         }
-        if (processReady) {
+        if (processReady && prefillMasterRuntime.isReady()) {
             log.info("handleProcessOk success.");
             lifecycleReporter.reportProcessOk();
             return ServerResponse.ok().body(Mono.just("ok"), String.class);

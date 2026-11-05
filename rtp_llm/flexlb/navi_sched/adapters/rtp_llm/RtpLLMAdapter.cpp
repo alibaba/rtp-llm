@@ -268,9 +268,15 @@ bool deriveAgentBizName(std::string &bizName, std::string &errorMessage)
     return true;
 }
 
+struct RetainedRtpBatch {
+    NaviSchedBatchPtr nativeBatch;
+    std::vector<uint64_t> engineRequestIds;
+    std::unordered_map<uint64_t, uint64_t> nativeRequestIdByEngineId;
+};
+
 struct RetainedBatchRegistry {
     std::mutex mutex;
-    std::unordered_map<uint64_t, NaviSchedBatchPtr> batches;
+    std::unordered_map<uint64_t, std::shared_ptr<RetainedRtpBatch>> batches;
 };
 
 RetainedBatchRegistry &retainedBatchRegistry()
@@ -281,7 +287,8 @@ RetainedBatchRegistry &retainedBatchRegistry()
 
 using ReporterRequests =
     std::unordered_map<const NaviSchedBatchFinishReporter *,
-                       std::pair<NaviSchedBatchFinishReporterPtr, std::vector<uint64_t>>>;
+                       std::pair<NaviSchedBatchFinishReporterPtr,
+                                 std::vector<std::pair<uint64_t, uint64_t>>>>;
 
 ReporterRequests getRetainedReporterRequests(
     const std::vector<NaviSchedLatencyQuery> &queries, bool erase)
@@ -294,14 +301,16 @@ ReporterRequests getRetainedReporterRequests(
         if (it == registry.batches.end()) {
             continue;
         }
-        auto batch = it->second;
+        const auto retained = it->second;
+        auto batch = retained ? retained->nativeBatch : nullptr;
         if (!batch || !batch->finishReporter) {
             registry.batches.erase(it);
             continue;
         }
         auto &entry = grouped[batch->finishReporter.get()];
         entry.first = batch->finishReporter;
-        entry.second.emplace_back(query.requestId);
+        entry.second.emplace_back(
+            query.requestId, retained->nativeRequestIdByEngineId.at(query.requestId));
         if (erase) {
             registry.batches.erase(it);
         }
@@ -650,23 +659,42 @@ bool retainRtpLLMReadyBatch(const NaviSchedBatchPtr &batch)
 RtpLLMReadyBatchRetainResult retainRtpLLMReadyBatchWithResult(
     const NaviSchedBatchPtr &batch)
 {
-    if (!batch || !batch->finishReporter || batch->requestIds.empty()) {
+    return retainRtpLLMForwardBatchWithResult(
+        batch, batch ? batch->requestIds : std::vector<uint64_t>());
+}
+
+RtpLLMReadyBatchRetainResult retainRtpLLMForwardBatchWithResult(
+    const NaviSchedBatchPtr &batch, const std::vector<uint64_t> &engineRequestIds)
+{
+    if (!batch || !batch->finishReporter || batch->requestIds.empty() ||
+        batch->requestIds.size() != engineRequestIds.size()) {
         return {RtpLLMReadyBatchRetainStatus::INVALID_BATCH, 0, 0};
+    }
+    auto retained = std::make_shared<RetainedRtpBatch>();
+    retained->nativeBatch = batch;
+    retained->engineRequestIds = engineRequestIds;
+    std::unordered_set<uint64_t> nativeIds;
+    for (size_t index = 0; index < engineRequestIds.size(); ++index) {
+        const auto engineId = engineRequestIds[index];
+        const auto nativeId = batch->requestIds[index];
+        if (engineId == 0 || nativeId == 0) {
+            return {RtpLLMReadyBatchRetainStatus::ZERO_REQUEST_ID, engineId, 0};
+        }
+        if (!nativeIds.emplace(nativeId).second ||
+            !retained->nativeRequestIdByEngineId.emplace(engineId, nativeId).second) {
+            return {RtpLLMReadyBatchRetainStatus::DUPLICATE_REQUEST_ID, engineId, 0};
+        }
     }
     auto &registry = retainedBatchRegistry();
     std::lock_guard<std::mutex> lock(registry.mutex);
-    for (auto requestId : batch->requestIds) {
-        if (requestId == 0) {
-            return {RtpLLMReadyBatchRetainStatus::ZERO_REQUEST_ID, requestId,
-                    registry.batches.size()};
-        }
-        if (registry.batches.count(requestId) != 0) {
-            return {RtpLLMReadyBatchRetainStatus::DUPLICATE_REQUEST_ID, requestId,
+    for (auto engineId : engineRequestIds) {
+        if (registry.batches.count(engineId) != 0) {
+            return {RtpLLMReadyBatchRetainStatus::DUPLICATE_REQUEST_ID, engineId,
                     registry.batches.size()};
         }
     }
-    for (auto requestId : batch->requestIds) {
-        registry.batches.emplace(requestId, batch);
+    for (auto engineId : engineRequestIds) {
+        registry.batches.emplace(engineId, retained);
     }
     return {RtpLLMReadyBatchRetainStatus::OK, 0, registry.batches.size()};
 }
@@ -703,7 +731,7 @@ RtpLLMRetainedBatchLeasePtr acquireRtpLLMRetainedBatchLease(uint64_t requestId)
 
 bool abortRetainedRtpLLMBatch(uint64_t requestId)
 {
-    NaviSchedBatchPtr batch;
+    std::shared_ptr<RetainedRtpBatch> retained;
     auto &registry = retainedBatchRegistry();
     {
         std::lock_guard<std::mutex> lock(registry.mutex);
@@ -711,19 +739,19 @@ bool abortRetainedRtpLLMBatch(uint64_t requestId)
         if (registry.batches.end() == it) {
             return false;
         }
-        batch = it->second;
-        if (!batch) {
+        retained = it->second;
+        if (!retained || !retained->nativeBatch) {
             registry.batches.erase(it);
             return false;
         }
-        for (auto batchRequestId : batch->requestIds) {
-            auto current = registry.batches.find(batchRequestId);
-            if (registry.batches.end() != current && current->second == batch) {
+        for (auto engineId : retained->engineRequestIds) {
+            auto current = registry.batches.find(engineId);
+            if (registry.batches.end() != current && current->second == retained) {
                 registry.batches.erase(current);
             }
         }
     }
-    batch->finishReporter.reset();
+    retained->nativeBatch->finishReporter.reset();
     return true;
 }
 
@@ -737,7 +765,12 @@ bool startRetainedRtpLLMBatches(const std::vector<NaviSchedLatencyQuery> &querie
 {
     auto grouped = getRetainedReporterRequests(queries, false);
     for (const auto &entry : grouped) {
-        if (!entry.second.first->startBatch(entry.second.second, executionStartTimeUs)) {
+        std::vector<uint64_t> nativeIds;
+        nativeIds.reserve(entry.second.second.size());
+        for (const auto &ids : entry.second.second) {
+            nativeIds.emplace_back(ids.second);
+        }
+        if (!entry.second.first->startBatch(nativeIds, executionStartTimeUs)) {
             return false;
         }
     }
@@ -798,9 +831,13 @@ void recordRtpLLMPrefillBatch(
         for (auto &request : requests) {
             for (const auto &entry : retained) {
                 const auto &requestIds = entry.second.second;
-                if (std::find(requestIds.begin(), requestIds.end(), request.requestId) !=
-                    requestIds.end()) {
-                    groupedRequests[entry.first].emplace_back(request);
+                const auto ids = std::find_if(
+                    requestIds.begin(), requestIds.end(),
+                    [&request](const auto &value) { return value.first == request.requestId; });
+                if (ids != requestIds.end()) {
+                    auto nativeRequest = request;
+                    nativeRequest.requestId = ids->second;
+                    groupedRequests[entry.first].emplace_back(std::move(nativeRequest));
                     break;
                 }
             }

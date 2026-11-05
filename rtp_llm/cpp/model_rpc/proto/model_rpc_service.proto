@@ -316,6 +316,7 @@ message GenerateInputPB {
     // token_ids are already expanded when this field is present.
     MultimodalTokenLayoutPB multimodal_token_layout = 11;
     V41RequestInputsPB v41_inputs = 12;
+    bytes flexlb_schedule_response = 13;
 }
 
 message AuxInfoPB {

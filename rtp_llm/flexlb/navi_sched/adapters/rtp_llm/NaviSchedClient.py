@@ -41,12 +41,14 @@ class NaviSchedClient:
         native_client=None,
         navi_sched_module=None,
         enable_agent_forward=False,
+        deferred_master=False,
     ):
         self.config = config or NaviSchedAdapterConfig.from_env()
         self.config.validate_client()
         self._host_service = host_service
         self._module = navi_sched_module
         self._enable_agent_forward = enable_agent_forward
+        self._deferred_master = deferred_master
         self._client = native_client
         self._schedule_sequence = 0
         if self._client is None:
@@ -70,6 +72,9 @@ class NaviSchedClient:
     def _init_client(self) -> None:
         master_vip = getattr(self._host_service, "master_vip", None)
         module = self._module or __import__("navi_sched")
+        if self._deferred_master:
+            self._client = self._make_native_client(module, "", {})
+            return
         if self.config.master_address:
             master_domain = self.config.master_address
             master_biz_name = self.config.master_biz_name
@@ -141,6 +146,41 @@ class NaviSchedClient:
                 sort_keys=True,
             ),
         )
+
+    async def schedule_flexlb(self, target, request, timeout_s, metadata):
+        import grpc
+        from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+            FlexlbScheduleResponsePB,
+        )
+
+        timeout_ms = int(timeout_s * 1000)
+        if timeout_ms <= 0:
+            raise grpc.aio.AioRpcError(
+                grpc.StatusCode.DEADLINE_EXCEEDED, (), (),
+                details="FlexLB scheduling deadline exceeded")
+        task = asyncio.create_task(asyncio.to_thread(
+            self._client.schedule_flexlb, int(request.request_id), target,
+            request.SerializeToString(), timeout_ms, metadata or (),
+        ))
+        try:
+            response = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.to_thread(
+                self._client.abort_forward_request, int(request.request_id))
+            try:
+                await task
+            except Exception:
+                pass
+            raise
+        except Exception as error:
+            status = getattr(error, "status_code", None)
+            if status is None:
+                raise
+            code = next(
+                code for code in grpc.StatusCode if code.value[0] == status)
+            raise grpc.aio.AioRpcError(
+                code, (), (), details=error.details) from error
+        return FlexlbScheduleResponsePB.FromString(response)
 
     async def close(self) -> None:
         clients = [self._client]
@@ -292,6 +332,35 @@ class NaviSchedClient:
         )
         os.replace(temporary_path, output_path)
 
+    async def _schedule_in_worker(self, call, request_id, timed=False):
+        task = asyncio.create_task(asyncio.to_thread(call))
+        if not self._enable_agent_forward:
+            return await task
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.to_thread(self._client.abort_forward_request, int(request_id))
+            try:
+                result = await task
+                decision = result[2] if timed else result
+                if decision.target is not None and decision.target.address:
+                    await self._cancel_forwarded_request(decision.target.address, request_id)
+            except Exception:
+                logging.warning("NaviSched cancellation cleanup failed, request_id=%s",
+                                request_id, exc_info=True)
+            raise
+
+    @staticmethod
+    async def _cancel_forwarded_request(address, request_id):
+        import grpc
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import CancelRequestPB
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
+
+        async with grpc.aio.insecure_channel(address) as channel:
+            await RpcServiceStub(channel).Cancel(
+                CancelRequestPB(request_id=int(request_id)), timeout=1.0
+            )
+
     async def get_backend_role_addrs(
         self,
         block_cache_keys,
@@ -299,19 +368,36 @@ class NaviSchedClient:
         input,
         request_id,
         input_pb=None,
+        *,
+        prompt_token_count=None,
+        timeout_ms=None,
+        master_address=None,
+        master_biz_name=None,
+        flexlb_info=None,
     ) -> FlexlbResponse:
+        if flexlb_info is not None:
+            from .flexlb_info import schedule_with_flexlb
+            return await schedule_with_flexlb(
+                self, flexlb_info, block_cache_keys=block_cache_keys,
+                cache_key_block_size=cache_key_block_size,
+                input=input, request_id=request_id, input_pb=input_pb,
+            )
         token_ids = input.token_ids
-        prompt_token_count = (
+        prompt_token_count = prompt_token_count if prompt_token_count is not None else (
             int(token_ids.numel())
             if hasattr(token_ids, "numel")
             else len(token_ids)
         )
         schedule_options = {
             "target_biz_name": self.config.biz_name,
-            "timeout_ms": get_schedule_timeout_ms(input.generate_config),
+            "timeout_ms": timeout_ms if timeout_ms is not None else get_schedule_timeout_ms(input.generate_config),
             "request_id": int(request_id),
             "block_size": int(cache_key_block_size),
         }
+        if master_address is not None:
+            schedule_options["master_address"] = master_address
+        if master_biz_name is not None:
+            schedule_options["master_biz_name"] = master_biz_name
         native_block_hashes = [
             int(value) & ((1 << 64) - 1) for value in block_cache_keys
         ]
@@ -341,17 +427,19 @@ class NaviSchedClient:
                 )
                 return worker_start, time.time_ns(), worker_decision
 
-            worker_start_ns, worker_return_ns, decision = await asyncio.to_thread(
-                schedule_with_timestamp
+            worker_start_ns, worker_return_ns, decision = await self._schedule_in_worker(
+                schedule_with_timestamp, request_id, timed=True
             )
         else:
-            decision = await asyncio.to_thread(
-                client.schedule,
-                prompt_token_count,
-                block_hashes=native_block_hashes,
-                collect_replay=collect_replay,
-                forward_payload=forward_payload,
-                **schedule_options,
+            decision = await self._schedule_in_worker(
+                lambda: client.schedule(
+                    prompt_token_count,
+                    block_hashes=native_block_hashes,
+                    collect_replay=collect_replay,
+                    forward_payload=forward_payload,
+                    **schedule_options,
+                ),
+                request_id,
             )
             worker_return_ns = time.time_ns()
         schedule_return_ns = time.time_ns()

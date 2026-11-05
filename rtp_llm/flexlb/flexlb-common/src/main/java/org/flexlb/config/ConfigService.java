@@ -232,6 +232,15 @@ public class ConfigService {
                             source.name());
                     return;
                 }
+                if (startupDecisionTopology != null
+                        && !startupDecisionTopology
+                                .prefillScheduler()
+                                .equals(
+                                        JsonUtils.strictValueToTree(
+                                                updated.getPrefillScheduler()))) {
+                    throw new ConfigValidationException(
+                            "prefillScheduler", "is fixed at startup; restart FlexLB to change it");
+                }
                 currentFlexlbConfig.set(updated);
                 configSchemaVersion = normalized.sourceSchemaVersion();
                 notifyUpdateListeners(updated);
@@ -342,7 +351,8 @@ public class ConfigService {
     private record StartupDecisionTopology(
             SchedulerConfig.Type schedulerType,
             DispatcherConfig.Type dispatcherType,
-            DecisionPolicyConfig.Type decisionType) {
+            DecisionPolicyConfig.Type decisionType,
+            JsonNode prefillScheduler) {
 
         /**
          * Captures the scheduling modes selected when the application starts.
@@ -352,7 +362,8 @@ public class ConfigService {
             return new StartupDecisionTopology(
                     scheduler.getType(),
                     config.getDispatcher().getType(),
-                    scheduler.getDecision().getType());
+                    scheduler.getDecision().getType(),
+                    JsonUtils.strictValueToTree(config.getPrefillScheduler()));
         }
     }
 

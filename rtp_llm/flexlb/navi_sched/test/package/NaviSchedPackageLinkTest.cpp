@@ -15,5 +15,6 @@ int main()
     agent.stop();
     navi_sched::abortRetainedRtpLLMBatch(1);
     navi_sched::recordRtpLLMObservedPrefillBatch(nullptr, {}, 0, 0);
-    return 0;
+    const auto retained = navi_sched::retainRtpLLMForwardBatchWithResult(nullptr, {1});
+    return retained.status == navi_sched::RtpLLMReadyBatchRetainStatus::INVALID_BATCH ? 0 : 1;
 }

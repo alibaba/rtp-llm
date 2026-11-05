@@ -375,7 +375,7 @@ public final class WorkerBatcher {
                 config.getDispatcher().getType() == DispatcherConfig.Type.BATCH
                         ? 0L
                         : config.getDispatcher().getMaxInflightPerPrefillWorker();
-        this.queueScheduling = config.isQueue();
+        this.queueScheduling = config.isQueue() && !config.isNaviSchedPrefill();
         this.singleDecision = config.isSingleDecision();
         DecisionPolicyConfig resolvedDecision = queueScheduling ? config.decisionPolicy() : null;
         this.fixedWindowDecision =
@@ -442,7 +442,10 @@ public final class WorkerBatcher {
 
     public boolean offer(ScheduledRequest exactItem) {
         if (!queueScheduling) {
-            throw new IllegalStateException("DIRECT Prefill generation cannot accept queued work");
+            throw new IllegalStateException(
+                    config.isNaviSchedPrefill()
+                            ? "NaviSched owns Prefill scheduling"
+                            : "DIRECT Prefill generation cannot accept queued work");
         }
         ScheduledRequest item = exactItem;
         requireExactEndpoint(item, "incoming item");

@@ -121,6 +121,8 @@ def make_rtp_llm_master_options(config, environ):
         port_diff,
         environ,
     )
+    for node in discovery.get("local_nodes", []):
+        node["support_heartbeat"] = True
     runtime_config.pop("local_nodes", None)
     runtime_config.pop("vip_subscription", None)
     runtime_config.update(discovery)

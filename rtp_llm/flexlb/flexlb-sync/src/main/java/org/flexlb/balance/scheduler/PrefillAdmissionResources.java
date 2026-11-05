@@ -169,6 +169,31 @@ final class PrefillAdmissionResources {
         return priorFailure;
     }
 
+    static boolean transferToEndpoint(Member member) {
+        if (member.ownership != MemberOwnership.ADMISSION_OWNED) {
+            throw new IllegalStateException("admission member was already transferred");
+        }
+        if (member.decode == null) {
+            member.ownership = MemberOwnership.ENDPOINT_OWNED;
+            return true;
+        }
+        DecodeEndpoint.EngineDispatchPermitTransferStatus transfer = member.decode.dispatch();
+        return switch (transfer) {
+            case TRANSFERRED -> {
+                member.ownership = MemberOwnership.ENDPOINT_OWNED;
+                yield true;
+            }
+            case OWNERSHIP_LOST -> {
+                member.ownership = MemberOwnership.OWNERSHIP_LOST;
+                yield false;
+            }
+            case ENDPOINT_RETIRED -> {
+                member.ownership = MemberOwnership.OWNERSHIP_LOST;
+                throw retired("Decode", member.item);
+            }
+        };
+    }
+
     static Throwable rollbackMember(Member member, Throwable priorFailure) {
         if (member == null || member.ownership != MemberOwnership.ADMISSION_OWNED) {
             return priorFailure;
@@ -279,25 +304,7 @@ final class PrefillAdmissionResources {
             if (member.ownership != MemberOwnership.ADMISSION_OWNED) {
                 throw new IllegalStateException("committed item was already transferred");
             }
-            if (member.decode == null) {
-                member.ownership = MemberOwnership.ENDPOINT_OWNED;
-                return true;
-            }
-            DecodeEndpoint.EngineDispatchPermitTransferStatus transfer = member.decode.dispatch();
-            return switch (transfer) {
-                case TRANSFERRED -> {
-                    member.ownership = MemberOwnership.ENDPOINT_OWNED;
-                    yield true;
-                }
-                case OWNERSHIP_LOST -> {
-                    member.ownership = MemberOwnership.OWNERSHIP_LOST;
-                    yield false;
-                }
-                case ENDPOINT_RETIRED -> {
-                    member.ownership = MemberOwnership.OWNERSHIP_LOST;
-                    throw retired("Decode", member.item);
-                }
-            };
+            return PrefillAdmissionResources.transferToEndpoint(member);
         }
 
         public void close() {

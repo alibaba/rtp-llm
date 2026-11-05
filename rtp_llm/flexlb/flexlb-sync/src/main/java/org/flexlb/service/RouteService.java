@@ -73,7 +73,9 @@ public class RouteService {
                     }
                     try {
                         balanceContext.setResponse(result);
-                        if (result != null && result.isSuccess()) {
+                        if (result != null
+                                && result.isSuccess()
+                                && result.getPrefillDelegation() == null) {
                             theoryCacheHitReporter.report(balanceContext);
                         }
                     } catch (RuntimeException completionSideEffectFailure) {
@@ -93,6 +95,7 @@ public class RouteService {
                             "RequestScheduler is required for the configured scheduling path"));
         }
         if (balanceContext.getRequestPhase() != RequestPhase.ENCODER
+                && !balanceContext.getConfig().isNaviSchedPrefill()
                 && balanceContext.getConfig().getDispatcher().requiresGenerateInput()
                 && !hasValidGenerateInput(balanceContext)) {
             Logger.warn(

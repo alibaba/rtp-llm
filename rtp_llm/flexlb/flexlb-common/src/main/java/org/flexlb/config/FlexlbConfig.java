@@ -17,6 +17,7 @@ public final class FlexlbConfig {
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
     private SchedulerConfig scheduler = new SchedulerConfig();
+    private PrefillSchedulerConfig prefillScheduler = new FlexlbPrefillSchedulerConfig();
     private DispatcherConfig dispatcher = new DispatcherConfig();
     private RequestLifecycleConfig requestLifecycle = new RequestLifecycleConfig();
     private RoutingConfig router = new RoutingConfig();
@@ -32,6 +33,11 @@ public final class FlexlbConfig {
 
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();
+
+    @JsonIgnore
+    public boolean isNaviSchedPrefill() {
+        return prefillScheduler instanceof NaviSchedPrefillSchedulerConfig;
+    }
 
     @JsonIgnore
     public boolean isDirect() {

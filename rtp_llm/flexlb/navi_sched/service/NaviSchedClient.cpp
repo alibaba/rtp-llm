@@ -2,6 +2,7 @@
 #include "aios/navi_sched/config/NaviSchedConfigBuilder.h"
 #include "aios/navi_sched/data/ClientRequestToMasterData.h"
 #include "aios/navi_sched/graph/ClientGraphRunner.h"
+#include "aios/navi_sched/graph/FlexlbScheduleGraph.h"
 #include "aios/navi_sched/graph/ReplayControlGraph.h"
 #include "aios/navi_sched/kernel/ReplayClientControlKernel.h"
 #include "aios/navi_sched/resource/ReplayClientR.h"
@@ -178,7 +179,7 @@ NaviSchedScheduleResult NaviSchedClient::makeScheduleResult(
 
 NaviSchedScheduleResult NaviSchedClient::scheduleRequest(
     const ClientRequestToMasterDataConstPtr &request, const std::string &masterBizName,
-    int64_t timeoutMs, bool expectResponseStream)
+    int64_t timeoutMs, bool expectResponseStream, const std::string &masterAddress)
 {
     if (!_runner) {
         _stoppedRequestCount.fetch_add(1, std::memory_order_relaxed);
@@ -193,7 +194,8 @@ NaviSchedScheduleResult NaviSchedClient::scheduleRequest(
     _scheduleCount.fetch_add(1, std::memory_order_relaxed);
     const auto beginTimeUs = autil::TimeUtility::monotonicTimeUs();
     auto result =
-        _runner->schedule(request, masterBizName, timeoutMs, expectResponseStream);
+        _runner->schedule(request, masterBizName, timeoutMs, expectResponseStream,
+                          masterAddress);
     const auto masterRequestLatencyUs =
         autil::TimeUtility::monotonicTimeUs() - beginTimeUs;
     recordScheduleResult(request, masterBizName, result, masterRequestLatencyUs);
@@ -358,7 +360,8 @@ bool NaviSchedClient::init()
         scheduleReplayRequest(replay, _defaultMasterBizName, request.timeoutMs);
     });
     NaviSchedConfigBuilder::NamedConfigs kernelConfigs;
-    std::vector<std::string> kernels = {"navi_sched.replay_client_control_k"};
+    std::vector<std::string> kernels = {"navi_sched.replay_client_control_k",
+                                        "navi_sched.client_flexlb_k"};
     if (_enableAgentForward) {
         kernels.emplace_back("^navi_sched\\.client_.*_k$");
         autil::legacy::json::JsonMap forwardConfig;
@@ -393,6 +396,10 @@ bool NaviSchedClient::init()
         std::lock_guard<std::mutex> lock(_masterSearchServiceMutex);
         _masterSearchService = std::move(searchService);
     }
+    {
+        std::lock_guard<std::mutex> lock(_flexlbGraphMutex);
+        _flexlbGraph = std::make_shared<FlexlbScheduleGraph>(getNavi(), config.bizName);
+    }
     _runner->setClientBizName(_enableAgentForward ? config.bizName : "");
     _replayControlGraph = std::make_shared<ReplayControlGraph>(
         getNavi(), _replayClientR, config.bizName, _defaultMasterBizName);
@@ -415,11 +422,32 @@ NaviSchedClient::takeNextForwardResponse(int64_t timeoutMs)
 
 bool NaviSchedClient::abortForwardRequest(uint64_t requestId)
 {
+    std::shared_ptr<FlexlbScheduleGraph> flexlb;
+    {
+        std::lock_guard<std::mutex> lock(_flexlbGraphMutex);
+        flexlb = _flexlbGraph;
+    }
+    const bool abortedFlexlb = flexlb && flexlb->abort(requestId);
     const bool didAbort =
-        _enableAgentForward && _responseR && _responseR->abort(requestId);
+        (_enableAgentForward && _responseR && _responseR->abort(requestId)) || abortedFlexlb;
     AUTIL_LOG(INFO, "abort forward graph, request_id [%lu], aborted [%d]",
               requestId, didAbort);
     return didAbort;
+}
+
+std::tuple<int32_t, std::string, std::string> NaviSchedClient::scheduleFlexlb(
+    uint64_t requestId, const std::string &address, const std::string &payload,
+    int64_t timeoutMs, const std::vector<std::pair<std::string, std::string>> &metadata)
+{
+    std::shared_ptr<FlexlbScheduleGraph> graph;
+    {
+        std::lock_guard<std::mutex> lock(_flexlbGraphMutex);
+        graph = _flexlbGraph;
+    }
+    if (!graph) {
+        throw std::runtime_error("NaviSched FlexLB client is not initialized");
+    }
+    return graph->schedule(requestId, address, payload, timeoutMs, metadata);
 }
 
 uint64_t NaviSchedClient::allocateRequestId()
@@ -465,7 +493,8 @@ uint64_t NaviSchedClient::getRequestReceivedCount() const
 
 NaviSchedScheduleResult NaviSchedClient::schedule(const NaviSchedScheduleRequest &input,
                                                   const std::string &masterBizName,
-                                                  bool collectReplay)
+                                                  bool collectReplay,
+                                                  const std::string &masterAddress)
 {
     _requestReceivedCount.fetch_add(1, std::memory_order_relaxed);
     const auto &effectiveMasterBizName =
@@ -492,11 +521,20 @@ NaviSchedScheduleResult NaviSchedClient::schedule(const NaviSchedScheduleRequest
         _replayClientR->enqueueNormalQuery(
             request, autil::TimeUtility::currentTimeInMicroSeconds());
     }
-    return scheduleRequest(request, effectiveMasterBizName, input.timeoutMs);
+    return scheduleRequest(request, effectiveMasterBizName, input.timeoutMs, true,
+                           masterAddress);
 }
 
 void NaviSchedClient::stop()
 {
+    std::shared_ptr<FlexlbScheduleGraph> flexlb;
+    {
+        std::lock_guard<std::mutex> lock(_flexlbGraphMutex);
+        flexlb = std::move(_flexlbGraph);
+    }
+    if (flexlb) {
+        flexlb->stop();
+    }
     stopSnapshot();
     if (_replayControlGraph) {
         _replayControlGraph->stop();

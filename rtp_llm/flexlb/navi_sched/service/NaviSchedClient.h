@@ -9,6 +9,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 #include <unordered_set>
 
 namespace multi_call {
@@ -18,6 +21,7 @@ class SearchService;
 namespace navi_sched {
 
 class ClientGraphRunner;
+class FlexlbScheduleGraph;
 class ReplayControlGraph;
 class ClientResponseR;
 class ReplayClientR;
@@ -35,10 +39,14 @@ public:
     bool init();
     NaviSchedScheduleResult schedule(const NaviSchedScheduleRequest &request,
                                      const std::string &masterBizName,
-                                     bool collectReplay = false);
+                                     bool collectReplay = false,
+                                     const std::string &masterAddress = "");
     std::shared_ptr<AgentResponseToClientData> takeNextForwardResponse(
         int64_t timeoutMs);
     bool abortForwardRequest(uint64_t requestId);
+    std::tuple<int32_t, std::string, std::string> scheduleFlexlb(
+        uint64_t requestId, const std::string &address, const std::string &payload,
+        int64_t timeoutMs, const std::vector<std::pair<std::string, std::string>> &metadata);
     uint64_t allocateRequestId();
     bool hasMasterBiz(const std::string &masterBizName = "") const;
     void reportLocalFallback();
@@ -67,7 +75,7 @@ private:
     NaviSchedScheduleResult scheduleRequest(
         const std::shared_ptr<const ClientRequestToMasterData> &request,
         const std::string &masterBizName, int64_t timeoutMs,
-        bool expectResponseStream = true);
+        bool expectResponseStream = true, const std::string &masterAddress = "");
     void scheduleReplayRequest(
         const std::shared_ptr<const ClientRequestToMasterData> &request,
         const std::string &masterBizName, int64_t timeoutMs);
@@ -102,6 +110,8 @@ private:
     std::shared_ptr<ClientResponseR> _responseR;
     std::shared_ptr<ReplayClientR> _replayClientR;
     std::shared_ptr<ClientGraphRunner> _runner;
+    std::mutex _flexlbGraphMutex;
+    std::shared_ptr<FlexlbScheduleGraph> _flexlbGraph;
     std::shared_ptr<ReplayControlGraph> _replayControlGraph;
     mutable std::mutex _masterSearchServiceMutex;
     std::shared_ptr<multi_call::SearchService> _masterSearchService;

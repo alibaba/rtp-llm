@@ -26,7 +26,8 @@ public:
 public:
     ClientGraphRunResult schedule(const ClientRequestToMasterDataConstPtr &request,
                                   const std::string &masterBizName, int64_t timeoutMs,
-                                  bool expectResponseStream = true);
+                                  bool expectResponseStream = true,
+                                  const std::string &masterAddress = "");
     ClientGraphRunResult scheduleDetached(
         const ClientRequestToMasterDataConstPtr &request,
         const std::string &masterBizName, int64_t timeoutMs,
@@ -38,14 +39,16 @@ private:
     static std::unique_ptr<navi::GraphDef> buildScheduleGraph(
         const std::string &clientBizName, const std::string &masterBizName,
         bool collectReplay, int64_t entryTimeoutMs,
-        navi::GraphId &clientGraphId, navi::GraphId &masterGraphId);
+        navi::GraphId &clientGraphId, navi::GraphId &masterGraphId,
+        const std::string &masterAddress = "");
     static bool addScheduleRequest(navi::RunGraphParams &params, navi::GraphId graphId,
                                    const ClientRequestToMasterDataConstPtr &request);
     ClientGraphRunResult runRequest(const ClientRequestToMasterDataConstPtr &request,
                                     const std::string &masterBizName,
                                     int64_t timeoutMs,
                                     bool expectResponseStream,
-                                    DecisionCallback decisionCallback = {}) const;
+                                    DecisionCallback decisionCallback = {},
+                                    const std::string &masterAddress = "") const;
     ClientGraphRunResult collectResult(const navi::NaviUserResultPtr &userResult,
                                        uint64_t requestId) const;
 

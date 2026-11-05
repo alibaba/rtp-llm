@@ -7,6 +7,7 @@ import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.NaviSchedPrefillSchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -37,6 +38,7 @@ public final class RequestScheduler {
     private final RequestRegistry requestRegistry;
     private final GlobalQueueCoordinator globalQueue;
     private final EncoderQueueCoordinator encoderQueue;
+    private final Response.PrefillDelegation prefillDelegation;
 
     @Autowired
     RequestScheduler(
@@ -52,6 +54,12 @@ public final class RequestScheduler {
         this.endpointRegistry = Objects.requireNonNull(endpointRegistry, "endpointRegistry");
         this.requestRegistry = Objects.requireNonNull(requestRegistry, "lifecycle");
         FlexlbConfig startupConfig = configService.loadBalanceConfig();
+        this.prefillDelegation =
+                startupConfig != null
+                                && startupConfig.getPrefillScheduler()
+                                        instanceof NaviSchedPrefillSchedulerConfig navi
+                        ? new Response.PrefillDelegation(navi.getMasterBizName())
+                        : null;
         this.globalQueue =
                 startupConfig != null && startupConfig.isQueue()
                         ? new GlobalQueueCoordinator(
@@ -97,6 +105,19 @@ public final class RequestScheduler {
             context.setRequestPhase(RequestPhase.ENCODER);
         }
         FlexlbConfig requestConfig = context.getConfig();
+        if (requestConfig.isNaviSchedPrefill() != (prefillDelegation != null)) {
+            return CompletableFuture.completedFuture(
+                    error(
+                            StrategyErrorType.DISPATCH_FAILED,
+                            "Prefill scheduler changed after startup"));
+        }
+        boolean delegatesPrefill = !encoderOnly && prefillDelegation != null;
+        if (context.getRequest().isSkipPrefill() != delegatesPrefill) {
+            return CompletableFuture.completedFuture(
+                    error(
+                            StrategyErrorType.INVALID_REQUEST,
+                            "skip_prefill must match the configured Prefill scheduler"));
+        }
         if (requestConfig.isQueue() && (encoderOnly ? encoderQueue == null : globalQueue == null)) {
             return CompletableFuture.completedFuture(
                     error(
@@ -123,7 +144,11 @@ public final class RequestScheduler {
                 selectAndPublishEncoder(context);
             }
         } else if (requestConfig.isDirect()) {
-            submitDirect(context);
+            if (prefillDelegation != null) {
+                submitExternalPrefill(context);
+            } else {
+                submitDirect(context);
+            }
         } else {
             enqueueGenerationRequest(context, future);
         }
@@ -204,6 +229,57 @@ public final class RequestScheduler {
             if (failure != null) {
                 requestRegistry.publishDecisionResponseAsync(
                         context.getRequestId(), context.getFuture(), failure, RequestPhase.ENCODER);
+            }
+        }
+    }
+
+    private void submitExternalPrefill(BalanceContext context) {
+        Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
+        try {
+            var selection = router.selectForExternalPrefill(context);
+            context.setSchedulingDiagnostics(selection.diagnostics());
+            switch (selection.status()) {
+                case SUCCESS -> {
+                    try (var route = selection.value()) {
+                        route.response().setPrefillDelegation(prefillDelegation);
+                        try (var admission = route.prepareAdmission(context)) {
+                            var committed =
+                                    admission.tryCommitExternalPrefillRoute(
+                                            context, requestRegistry);
+                            failure =
+                                    switch (committed.status()) {
+                                        case SUCCESS -> {
+                                            requestRegistry.publishExternalPrefillRoute(
+                                                    committed.value());
+                                            yield null;
+                                        }
+                                        case REJECTED -> committed.failure();
+                                        case CLOSED ->
+                                                Response.error(StrategyErrorType.REQUEST_CANCELLED);
+                                        case BLOCKED ->
+                                                Response.error(
+                                                        StrategyErrorType.RESOURCE_EXHAUSTED);
+                                    };
+                        }
+                    }
+                }
+                case BLOCKED ->
+                        failure =
+                                selection.failure() != null
+                                        ? selection.failure()
+                                        : Response.error(selection.blocker().role().getErrorType());
+                case REJECTED -> failure = selection.failure();
+                case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
+            }
+        } catch (RuntimeException selectionFailure) {
+            Logger.warn(
+                    "External Prefill admission failed: request_id={}",
+                    context.getRequestId(),
+                    selectionFailure);
+        } finally {
+            if (failure != null) {
+                requestRegistry.publishDecisionResponseAsync(
+                        context.getRequestId(), context.getFuture(), failure);
             }
         }
     }

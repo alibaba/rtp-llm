@@ -219,6 +219,7 @@ class MasterClient:
         request_pb: "FlexlbScheduleRequestPB",
         timeout_s: Optional[float],
         request_id: int,
+        schedule_rpc=None,
     ):
         """Send gRPC schedule request. Returns proto response on success, None on transport failure."""
         target = self._get_grpc_target(addr)
@@ -240,11 +241,16 @@ class MasterClient:
                 # Same contract as the generate_stream_call / fetch_response spans.
                 client_span.set_attribute(trace_attrs.REQUEST_ID, str(request_id))
             try:
-                response = await stub.Schedule(
-                    request_pb,
-                    timeout=timeout_s,
-                    metadata=trace_metadata or None,
-                )
+                if schedule_rpc is None:
+                    response = await stub.Schedule(
+                        request_pb,
+                        timeout=timeout_s,
+                        metadata=trace_metadata or None,
+                    )
+                else:
+                    response = await schedule_rpc(
+                        target, request_pb, timeout_s, trace_metadata
+                    )
             except BaseException as error:
                 if client_span is not None:
                     if isinstance(error, grpc.aio.AioRpcError):
@@ -301,6 +307,8 @@ class MasterClient:
                     message=f"FlexLB schedule deadline exceeded for request {request_id}",
                 ) from e
             await self._close_channel(target)
+            if schedule_rpc is not None:
+                raise
             return None
         except asyncio.CancelledError:
             if "stub" in locals() and not request_pb.vit_route_only:
@@ -317,6 +325,8 @@ class MasterClient:
                 elapsed,
             )
             await self._close_channel(target)
+            if schedule_rpc is not None:
+                raise
             return None
 
     @staticmethod
@@ -351,6 +361,8 @@ class MasterClient:
         seq_len: Optional[int] = None,
         vit_only: bool = False,
         timeout_s: Optional[float] = None,
+        skip_prefill: bool = False,
+        schedule_rpc=None,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -397,6 +409,7 @@ class MasterClient:
         )
         request_pb.cache_affinity_keys.extend(cache_affinity_keys or [])
         request_pb.vit_route_only = vit_only
+        request_pb.skip_prefill = skip_prefill
         if selected_vit is not None:
             for name in (
                 "role",
@@ -411,11 +424,12 @@ class MasterClient:
                     setattr(request_pb.selected_vit, name, value)
         if vit_only:
             timeout_s = min(timeout_s, 0.5) if timeout_s is not None else 0.5
-        if input_pb is not None and not vit_only:
+        if input_pb is not None and not vit_only and not skip_prefill:
             request_pb.generate_input = input_pb.SerializeToString()
 
+        transport_options = {} if schedule_rpc is None else {"schedule_rpc": schedule_rpc}
         response = await self._send_schedule_request(
-            master_addr, request_pb, timeout_s, request_id
+            master_addr, request_pb, timeout_s, request_id, **transport_options
         )
 
         if response is None and slave_addr:
@@ -425,7 +439,7 @@ class MasterClient:
                 request_id,
             )
             response = await self._send_schedule_request(
-                slave_addr, request_pb, timeout_s, request_id
+                slave_addr, request_pb, timeout_s, request_id, **transport_options
             )
 
         if response is None:
