@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "navi_sched/NaviSchedCommon.h"
+#include "rtp_llm/flexlb/navi_sched/common/NaviSchedCommon.h"
 
 namespace navi_sched {
 

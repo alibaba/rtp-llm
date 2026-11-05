@@ -161,7 +161,8 @@ while IFS= read -r header; do
     copy_header "${header}"
 done < <(sed ':next; /\\$/ { N; s/\\\n/ /; b next; }' \
     "${PUBLIC_API_DEPFILE}" | tr ' ' '\n' |
-    sed 's/:$//' | grep -E '^(aios|bazel-out/.*/bin/aios)/.*\.h$' |
+    sed 's/:$//' |
+    grep -E '^(aios|rtp_llm|bazel-out/.*/bin/(aios|rtp_llm))/.*\.h$' |
     grep -Ev '(^|/)(test|testdata)/|Test(Kernel|Resource)|Simulated' |
     sort -u)
 copy_header "rtp_llm/flexlb/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"
