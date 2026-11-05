@@ -53,6 +53,11 @@ torch::Tensor normalizeInvariantLogprobs(const torch::Tensor& values, const torc
 
 }  // namespace
 
+torch::Tensor computeSelectedTokenRawLogprobs(const torch::Tensor& raw_logits, const torch::Tensor& selected_ids) {
+    auto raw_fp32 = raw_logits.to(torch::kFloat32);
+    return raw_fp32.gather(1, selected_ids) - raw_fp32.logsumexp(-1, /*keepdim=*/true);
+}
+
 std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
                                                    const torch::Tensor& success_cpu,
                                                    int                  batch_idx_in,
@@ -181,20 +186,13 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
             selected_logprobs_cpu = copyToPinnedCpuAsync(selected, need_d2h_sync);
             selected_probs_cpu    = copyToPinnedCpuAsync(selected.exp(), need_d2h_sync);
         } else {
-            auto probabilities = raw_logits.to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true).contiguous();
-#if USING_CUDA
-            if (probabilities.is_cuda()) {
-                cudaSoftmaxInplace(probabilities, at::cuda::getCurrentCUDAStream().stream());
-            } else {
-                probabilities = torch::softmax(probabilities, -1);
-            }
-#else
-            probabilities = torch::softmax(probabilities, -1);
-#endif
-            // A failed sampler can leave an invalid token. Its stream still gets
-            // the original failure below; avoid a device-side gather assertion
-            // while collecting successful peers' probabilities.
-            selected_probs_cpu = copyToPinnedCpuAsync(probabilities.gather(1, selected_ids), need_d2h_sync);
+            // The sampler receives its own clone whenever selected-token scores
+            // are requested. These are original model logits, before temperature,
+            // penalties and top-k/top-p. Compute log probabilities directly in
+            // FP32 so tiny policy probabilities never round-trip through exp/log.
+            auto selected = computeSelectedTokenRawLogprobs(raw_logits, selected_ids);
+            selected_logprobs_cpu = copyToPinnedCpuAsync(selected, need_d2h_sync);
+            selected_probs_cpu = copyToPinnedCpuAsync(selected.exp(), need_d2h_sync);
         }
     }
     syncPinnedCpuCopies(need_d2h_sync);

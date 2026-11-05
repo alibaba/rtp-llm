@@ -11,6 +11,8 @@
 
 namespace rtp_llm {
 
+torch::Tensor computeSelectedTokenRawLogprobs(const torch::Tensor& raw_logits, const torch::Tensor& selected_ids);
+
 std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
                                                    const torch::Tensor& success_cpu,
                                                    int                  batch_idx_in,
