@@ -5,20 +5,13 @@ import os
 from typing import Optional
 
 import torch
-
+from flashinfer import fp4_quantize, mm_fp4
+from rtp_llm.models_py.kernels.cuda.fp4_b12x import create_b12x_min_m_plan
+from rtp_llm.models_py.kernels.cuda.fp4_kernel import cutlass_scaled_fp4_mm_wrapper
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-
-logger = logging.getLogger(__name__)
-
-from rtp_llm.models_py.kernels.cuda.fp4_kernel import (
-    cutlass_scaled_fp4_mm_wrapper,
-)
 from rtp_llm.ops import HWKernelConfig
 
-from flashinfer import (
-    mm_fp4,
-    fp4_quantize,
-)
+logger = logging.getLogger(__name__)
 
 
 class CudaFp4GEMMLinear(LinearBase):
@@ -69,8 +62,17 @@ class CudaFp4GEMMLinear(LinearBase):
         self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cutlass")
         self.alpha = self.weight_scale_2 * self.input_scale
         self.input_scale_inv = 1 / self.input_scale
+        self._b12x_min_m_plan = (
+            create_b12x_min_m_plan(self.weight, self.weight_scales, self.alpha)
+            if self.backend == "b12x"
+            else None
+        )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if input.ndim != 2 or input.shape[1] != self.hidden_size:
+            raise ValueError(
+                f"CudaFp4GEMMLinear expects [M, {self.hidden_size}], got {tuple(input.shape)}"
+            )
         # Get input dimensions
         input_m = input.shape[0]
         output_n = self.output_size
@@ -106,6 +108,19 @@ class CudaFp4GEMMLinear(LinearBase):
                 self.weight_scales.view(torch.float8_e4m3fn),
                 self.alpha,
                 output_dtype
+            ).view(*output_shape)
+        elif (
+            self._b12x_min_m_plan is not None
+            and output_dtype == torch.bfloat16
+            and 0 < input_m < self._b12x_min_m_plan.min_m
+        ):
+            output = self._b12x_min_m_plan(
+                input_fp4,
+                self.weight.T,
+                input_scale_interleaved,
+                self.weight_scales.T,
+                self.alpha,
+                out_dtype=output_dtype,
             ).view(*output_shape)
         else:
             output = mm_fp4(

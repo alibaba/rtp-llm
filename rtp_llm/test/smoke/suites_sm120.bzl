@@ -1,5 +1,19 @@
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 
+def _nvfp4_sm120_tests():
+    # Qualified against the unchanged CUTLASS baseline on SM120/CUDA13.
+    tests = []
+    for backend in ["cutlass", "b12x"]:
+        for graph in [False, True]:
+            tests.append(smoke_test(
+                name = "nvfp4_" + backend + ("_cuda_graph" if graph else "") + "_sm120",
+                task_info = "data/model/qwen3/q_r_sm120_fp4_tp1_py.json",
+                envs = ["LOAD_PYTHON_MODEL=1", "RTP_LLM_FP4_GEMM_BACKEND=" + backend],
+                smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --world_size 1 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 4 --blockwise_use_fp8_kv_cache 1" + (" --enable_cuda_graph 1 --decode_capture_config '1,2,4'" if graph else ""),
+                gpu_type = ["RTX_5000_PRO_CU13"],
+            ))
+    return tests
+
 def _mtp_sm120_tests():
     tests = []
     for async_prepare in ["1", "0"]:
@@ -115,7 +129,7 @@ def sm120_suites():
     # SM120 dense FP8; FP8_PER_BLOCK is routed through the shared DeepGEMM path.
     native.test_suite(
         name = "smoke_sm120_dense",
-        tests = [
+        tests = _nvfp4_sm120_tests() + [
             smoke_test(
                 name = "dense_fp8pb_dynamic_sm120",
                 task_info = "data/model/qwen3/q_r_fp8pb_sm120.json",
