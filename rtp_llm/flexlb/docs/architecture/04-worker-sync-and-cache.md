@@ -147,8 +147,10 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 
 `GrpcCacheStatusCheckRunner`：挂在 20ms 同步 tick 上，但 PREFILL/PDFUSION 按
 `DynamicCacheIntervalService.getCurrentIntervalMs()` 降频（跳 tick 实现）。请求携带当前
-cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `cached_keys`（block hash 集合）
-经 `CacheAwareService.updateFromWorkerStatus()` 喂给本地索引（仅 PREFILL/PDFUSION）。
+已成功应用到索引的 cache 版本；尚未初始化索引时发送 `-1` 请求全量。版本不变时复用原快照，
+版本变化时解析 `cached_keys`（block hash 全量集合），经 `CacheAwareService.updateFromWorkerStatus()`
+更新本地索引（仅 PREFILL/PDFUSION）。RPC 使用异步回调，轮询 lease 在处理完成后释放，
+同一 worker generation 不会重叠执行 cache 轮询。
 
 **动态间隔**：`DefaultDynamicCacheIntervalService` 维护 30 样本滚动平均 diff 大小，目标
 `CACHE_STATUS_DIFF_SIZE(30)`；偏差 >10% 时按 ±30% 调整间隔，钳制在
@@ -159,13 +161,16 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 
 ### LOCAL_SYNC 两级索引
 
-- **大表** `GlobalCacheIndex`：`ConcurrentHashMap<Long blockHash, Set<String engineIpPort>>`，
-  变更加单把 `ReentrantLock`。`batchCalculatePrefixMatchLength`：按序遍历请求 block 链，
-  用候选集过滤 + 首个未命中即淘汰该引擎（早停），返回每引擎的前缀匹配块数。
-- **小表** `EngineLocalView`：`ConcurrentHashMap<String engineIpPort, Set<Long>>`。
-  `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
-- `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
-  `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
+- **大表** `GlobalCacheIndex`：primitive long key 的 `LongObjectMap`，分为 256 个 shard。
+  每个 block 的 owner 集合读写在所属 shard 内完成；读取会复制集合，不暴露可变 owner 集合。
+  `batchCalculatePrefixMatchLength` 按序遍历请求 block 链，过滤候选并在首次未命中时淘汰该引擎。
+  多个 block 的读取不是整轮快照事务，可能跨越一次更新；匹配结果用于预测，实际派发仍检查 worker 状态。
+- **小表** `EngineLocalView`：逻辑 worker 地址到 primitive `LongKeySet` 的映射。
+  `calculateDiff` 在延迟创建的专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
+  diff 的两个任务都结束后才允许释放 worker 的 cache 锁，包括其中一个任务异常的情况。
+- `KvCacheManager`：管理查询、diff 应用和清理。一个 worker generation 的更新与清理共用
+  `cacheMutationLock`；不同 worker 可并行。清理按精确的 `WorkerStatus` 实例核对 generation，
+  旧 generation 的迟到清理不会删除替代实例的索引。清理后使 indexed version 失效，下次重新取全量。
 - `LocalSyncCacheMatchProvider` 仅在 LOCAL_SYNC 模式订阅 `EngineAddressResolver`，按最新
   `WorkerHost` 集合清理已下线 frontend 的本地 cache；KVCM 模式不注册该 listener。
 

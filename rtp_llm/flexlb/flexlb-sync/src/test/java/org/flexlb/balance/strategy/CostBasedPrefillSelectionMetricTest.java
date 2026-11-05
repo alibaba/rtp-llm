@@ -4,6 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -14,17 +15,19 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.RoutingConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -161,14 +164,14 @@ class CostBasedPrefillSelectionMetricTest {
 
     @ParameterizedTest
     @CsvSource({
-        "5,1,false,BLOCKED",
-        "50,1,false,BLOCKED",
+        "5,1,false,SUCCESS",
+        "50,1,false,SUCCESS",
         "5,2,false,SUCCESS",
         "50,1,true,SUCCESS",
-        "10,1,true,BLOCKED",
-        "5,1,true,BLOCKED"
+        "10,1,true,SUCCESS",
+        "5,1,true,SUCCESS"
     })
-    void fullRequestCapacityIsSelectableOnlyWithEligibleQueuedPreemption(
+    void queuedNonBatchRemainsSelectableRegardlessOfDispatchLimitOrPreemption(
             int incomingPriority,
             int requestLimit,
             boolean preemptQueued,
@@ -216,7 +219,7 @@ class CostBasedPrefillSelectionMetricTest {
                 SchedulingMetadata.explicit(
                         incomingPriority, System.currentTimeMillis() + 120_000L));
 
-        PlacementResult<SelectedRole, RoleType> result =
+        PlacementResult<SelectedRole, PlacementKey> result =
                 strategy.select(context, RoleType.PREFILL, null);
 
         assertEquals(expectedStatus, result.status());
@@ -276,6 +279,216 @@ class CostBasedPrefillSelectionMetricTest {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
             verify(reporter)
                     .reportCacheAffinityDecision(RoleType.PREFILL, "10.0.0.2:8080", "CACHE_LEADER");
+        }
+    }
+
+    @Test
+    void cacheLeaderWithAllDispatchSlotsOccupiedStillWins() {
+        configureAffinity(600L, 5.0);
+        PrefillEndpoint endpoint =
+                (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
+        var reservations =
+                new java.util.ArrayList<
+                        org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+        var occupants = new java.util.ArrayList<ScheduledRequest>();
+        try {
+            for (long id = 31_001L; id <= 31_002L; id++) {
+                Request request = new Request();
+                request.setRequestId(String.valueOf(id));
+                request.setSeqLen(10L);
+                BalanceContext ctx = new BalanceContext(config);
+                ctx.setRequest(request);
+                ScheduledRequest item =
+                        new ScheduledRequest(
+                                ctx,
+                                new CompletableFuture<>(),
+                                null,
+                                null,
+                                null,
+                                endpoint,
+                                null,
+                                null,
+                                System.currentTimeMillis());
+                try (var pin = endpoint.tryPinGeneration()) {
+                    var result = endpoint.reserveUnqueuedRoute(pin, item, 10L);
+                    assertEquals(
+                            org.flexlb.balance.endpoint.PrefillState.CapacityStatus.ACQUIRED,
+                            result.status());
+                    reservations.add(result.reservation());
+                    occupants.add(item);
+                }
+            }
+            try (var commit = endpoint.tryBeginRouteCommitAdmission();
+                    var handoff = commit.commit(occupants, reservations)) {}
+            org.junit.jupiter.api.Assertions.assertFalse(
+                    endpoint.routeAdmissionAvailability().isAvailable());
+            try (SelectedRole selected = select()) {
+                assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+            }
+        } finally {
+            occupants.forEach(item -> endpoint.releaseCommittedItem(item.execution()));
+            reservations.forEach(org.flexlb.balance.endpoint.PrefillState.RouteReservation::close);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cacheLookupCannotCommitARetiredOrReplacedPrefillGeneration(boolean replace) {
+        configureAffinity(600L, 5.0);
+        PrefillEndpoint old = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
+        when(cache.findMatchingEngines(any()))
+                .thenAnswer(
+                        invocation -> {
+                            EndpointRegistry.DetachedGeneration detached;
+                            WorkerStatus status = old.getStatus();
+                            status.lock.lock();
+                            try {
+                                detached =
+                                        registry.detachAndBeginRetirement(
+                                                RoleType.PREFILL, old.ipPort(), status);
+                            } finally {
+                                status.lock.unlock();
+                            }
+                            detached.retireAndAwait();
+                            if (replace) {
+                                publish("10.0.0.2", 8080);
+                            }
+                            return new CacheMatchResult(
+                                    Map.of("10.0.0.2:8080", HostCacheMatch.local(5)),
+                                    CacheMatchSource.KVCM,
+                                    0L,
+                                    100L);
+                        });
+
+        var stale = strategy.select(context, RoleType.PREFILL, null);
+        if (stale.value() != null) {
+            stale.value().close();
+        }
+        assertEquals(
+                PlacementResult.Status.BLOCKED,
+                stale.status(),
+                "a cache lookup must not transfer ownership to a different endpoint generation");
+        // A stale cache entry must not revive a removed worker on the next snapshot.
+        org.mockito.Mockito.doReturn(
+                        new CacheMatchResult(
+                                Map.of("10.0.0.2:8080", HostCacheMatch.local(5)),
+                                CacheMatchSource.KVCM,
+                                0L,
+                                100L))
+                .when(cache)
+                .findMatchingEngines(any());
+        try (SelectedRole selected = select()) {
+            assertEquals(replace ? "10.0.0.2" : "10.0.0.1", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @Test
+    void cacheMatchingQueriesTheRouteGroupAndIgnoresIncompatibleMatches() {
+        WorkerStatus target =
+                StrategyTestSupport.workerStatus(
+                        RoleType.PREFILL,
+                        "target",
+                        "10.0.0.2",
+                        8080,
+                        8081,
+                        true,
+                        1_000_000L,
+                        1_000_000L);
+        StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, "10.0.0.2:8080@0", target);
+        context.getRequest().setCacheKeyBlockSize(100L);
+        context.getRequest().setBlockCacheKeys(List.of(1L));
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(
+                        new CacheMatchResult(
+                                Map.of(
+                                        "10.0.0.1:8080",
+                                        HostCacheMatch.local(9),
+                                        "10.0.0.2:8080",
+                                        HostCacheMatch.local(1)),
+                                CacheMatchSource.KVCM,
+                                0L,
+                                100L));
+
+        var result = strategy.select(context, RoleType.PREFILL, "target");
+        assertEquals(PlacementResult.Status.SUCCESS, result.status());
+        try (var selected = result.value()) {
+            assertEquals("target", selected.serverStatus().getGroup());
+        }
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<org.flexlb.cache.domain.CacheMatchQuery> candidates =
+                ArgumentCaptor.forClass(org.flexlb.cache.domain.CacheMatchQuery.class);
+        verify(cache).findMatchingEngines(candidates.capture());
+        assertEquals("target", candidates.getValue().group());
+    }
+
+    @Test
+    void directCacheMatchingIncludesBusyAlivePrefillAndRejectsItsFullWinner() {
+        registry.close();
+        config.getScheduler().setType(SchedulerConfig.Type.DIRECT);
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        registry = StrategyTestSupport.endpointRegistry(service);
+        publish("10.0.0.1", 8080);
+        strategy = new CostBasedPrefillStrategy(new WorkerDirectory(registry), cache, reporter);
+        configureAffinity(600L, 5.0);
+        PrefillEndpoint endpoint =
+                (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080@0");
+        var reservations =
+                new java.util.ArrayList<
+                        org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+        var occupants = new java.util.ArrayList<ScheduledRequest>();
+        try {
+            for (long id = 32_001L; id <= 32_002L; id++) {
+                Request request = new Request();
+                request.setRequestId(String.valueOf(id));
+                request.setSeqLen(10L);
+                BalanceContext ctx = new BalanceContext(config);
+                ctx.setRequest(request);
+                ScheduledRequest item =
+                        new ScheduledRequest(
+                                ctx,
+                                new CompletableFuture<>(),
+                                null,
+                                null,
+                                null,
+                                endpoint,
+                                null,
+                                null,
+                                System.currentTimeMillis());
+                try (var pin = endpoint.tryPinGeneration()) {
+                    var result = endpoint.reserveUnqueuedRoute(pin, item, 10L);
+                    assertEquals(
+                            org.flexlb.balance.endpoint.PrefillState.CapacityStatus.ACQUIRED,
+                            result.status());
+                    reservations.add(result.reservation());
+                    occupants.add(item);
+                }
+            }
+            try (var commit = endpoint.tryBeginRouteCommitAdmission();
+                    var handoff = commit.commit(occupants, reservations)) {}
+            org.junit.jupiter.api.Assertions.assertFalse(endpoint.canAcceptRequest());
+            var result = strategy.select(context, RoleType.PREFILL, null);
+            if (result.value() != null) {
+                result.value().close();
+            }
+            @SuppressWarnings("unchecked")
+            ArgumentCaptor<org.flexlb.cache.domain.CacheMatchQuery> candidates =
+                    ArgumentCaptor.forClass(org.flexlb.cache.domain.CacheMatchQuery.class);
+            verify(cache).findMatchingEngines(candidates.capture());
+            org.junit.jupiter.api.Assertions.assertNull(
+                    candidates.getValue().group(),
+                    "alive P must reach cache matching even when immediate dispatch is full");
+            assertEquals(
+                    PlacementResult.Status.BLOCKED,
+                    result.status(),
+                    "do not fall back to the colder idle P");
+            assertEquals("10.0.0.2:8080@0", result.diagnostics().get("selectedEndpoint"));
+        } finally {
+            occupants.forEach(item -> endpoint.releaseCommittedItem(item.execution()));
+            reservations.forEach(org.flexlb.balance.endpoint.PrefillState.RouteReservation::close);
+        }
+        try (SelectedRole recovered = select()) {
+            assertEquals("10.0.0.2", recovered.serverStatus().getServerIp());
         }
     }
 
@@ -376,6 +589,43 @@ class CostBasedPrefillSelectionMetricTest {
                 .reportCacheAffinityDecision(RoleType.PREFILL, "10.1.0.2:8080", "CACHE_LEADER");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void equalTtftPrefersCacheOnlyWhenAffinityEnabled(boolean affinityEnabled) {
+        if (affinityEnabled) {
+            configureFocusedAffinity();
+        } else {
+            config.getRouter().getRoles().getPrefill().setCacheAffinity(null);
+        }
+        PrefillCandidateSet candidates =
+                candidates(new long[] {100L, 100L, 105L}, new long[] {100L, 900L, 900L});
+
+        Set<Integer> selected = new HashSet<>();
+        for (int attempt = 0; attempt < 6; attempt++) {
+            selected.add(
+                    strategy.selectBestCandidate(
+                            candidates, 100L, RoleType.PREFILL, null, 1_000L, config));
+        }
+
+        assertEquals(affinityEnabled ? Set.of(1) : Set.of(0, 1), selected);
+    }
+
+    @Test
+    void equalTtftAndCacheHitRotateAmongBestCandidates() {
+        configureFocusedAffinity();
+        PrefillCandidateSet candidates =
+                candidates(new long[] {100L, 100L, 100L}, new long[] {900L, 100L, 900L});
+
+        Set<Integer> selected = new HashSet<>();
+        for (int attempt = 0; attempt < 6; attempt++) {
+            selected.add(
+                    strategy.selectBestCandidate(
+                            candidates, 100L, RoleType.PREFILL, null, 1_000L, config));
+        }
+
+        assertEquals(Set.of(0, 2), selected);
+    }
+
     @Test
     void cacheLeaderRemainsPreferredAcrossRepeatedSelections() {
         configureAffinity(600L, 5.0);
@@ -393,9 +643,14 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void unknownEngineTokenDemandDoesNotPreventCountBasedAdmission(boolean missingTokenDemand) {
-        var endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080@0");
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void unknownEngineWorkDoesNotHideThePreferredPrefill(
+            boolean missingTokenDemand, boolean preferCacheLeader) {
+        if (preferCacheLeader) {
+            configureAffinity(600L, 5.0);
+        }
+        String expectedIp = preferCacheLeader ? "10.0.0.2" : "10.0.0.1";
+        var endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, expectedIp + ":8080@0");
         var status = endpoint.getStatus();
         var response =
                 StrategyTestSupport.response(
@@ -413,7 +668,9 @@ class CostBasedPrefillSelectionMetricTest {
         status.lock.lock();
         try {
             endpoint.applyPreparedStatus(
-                            status, status.prepareNewStatus(status.freezeStatusResponse(response)))
+                            status,
+                            WorkerStatusTestFixtures.prepare(
+                                    status, WorkerStatusTestFixtures.observation(status, response)))
                     .run();
         } finally {
             status.lock.unlock();
@@ -424,12 +681,12 @@ class CostBasedPrefillSelectionMetricTest {
         var result = strategy.select(context, RoleType.PREFILL, null);
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
         try (SelectedRole selected = result.value()) {
-            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals(expectedIp, selected.serverStatus().getServerIp());
         }
     }
 
     private SelectedRole select() {
-        PlacementResult<SelectedRole, RoleType> result =
+        PlacementResult<SelectedRole, PlacementKey> result =
                 strategy.select(context, RoleType.PREFILL, null);
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
         return result.value();
@@ -457,12 +714,10 @@ class CostBasedPrefillSelectionMetricTest {
                     ip + ":8080",
                     endpoint,
                     new RouteProjection.Candidate(
-                            RouteProjection.Candidate.State.MODELED,
                             ttftMs[i],
                             ttftMs[i],
                             RouteProjection.Candidate.InitialHeadDisposition.NONE,
                             "",
-                            null,
                             hitTokens[i],
                             hitTokens[i]),
                     i + 1L);

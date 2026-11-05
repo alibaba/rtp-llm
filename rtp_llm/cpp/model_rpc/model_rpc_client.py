@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import time
+import uuid
 from dataclasses import replace
 from typing import Any, AsyncGenerator, Dict, Optional, Union
 
@@ -26,6 +27,9 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
     RoleAddrPB,
+    V41InputUploadPB,
+    V41InputRefPB,
+    V41RequestInputsPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
@@ -35,6 +39,7 @@ from rtp_llm.server.request_headers import (
     dashscope_greennet_metadata,
     extract_correlation_request_id,
     extract_trace_id,
+    extract_qos_priority,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -629,9 +634,40 @@ def _trans_jsonable_options(
     )
 
 
+def trans_master_input(input_py: GenerateInput):
+    prepared = getattr(input_py, "v41_inputs", None)
+    if prepared is not None and prepared.images and not input_py.v41_payload_id:
+        raise FtRuntimeException(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+            "V4.1 batch scheduling requires direct patch upload to a remote ViT",
+        )
+    return trans_input(input_py)
+
+
+def trans_v41_inputs(prepared, payload_id=""):
+    typed = V41RequestInputsPB(payload_id=payload_id)
+    typed.schema_version = 1
+    typed.token_types.extend(prepared.token_types)
+    typed.image_mask.extend(prepared.image_mask.tolist())
+    for image in prepared.images:
+        target = typed.images.add()
+        target.start, target.n_vit_h, target.n_vit_w = (
+            image.start,
+            image.n_vit_h,
+            image.n_vit_w,
+        )
+        target.types.extend(image.types.tolist())
+        if not payload_id:
+            target.patches.CopyFrom(trans_from_tensor(image.patches))
+        target.content_sha256 = image.content_sha256
+        target.processor_identity = image.processor_identity
+    return typed
+
+
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
+    input_pb.priority = extract_qos_priority(input_py)
     expansion = input_py.mm_token_expansion
     if expansion is not None:
         input_pb.token_ids.extend(expansion.token_ids)
@@ -642,21 +678,9 @@ def trans_input(input_py: GenerateInput):
         input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     prepared = getattr(input_py, "v41_inputs", None)
     if prepared is not None:
-        typed = input_pb.v41_inputs
-        typed.schema_version = 1
-        typed.token_types.extend(prepared.token_types)
-        typed.image_mask.extend(prepared.image_mask.tolist())
-        for image in prepared.images:
-            target = typed.images.add()
-            target.start, target.n_vit_h, target.n_vit_w = (
-                image.start,
-                image.n_vit_h,
-                image.n_vit_w,
-            )
-            target.types.extend(image.types.tolist())
-            target.patches.CopyFrom(trans_from_tensor(image.patches))
-            target.content_sha256 = image.content_sha256
-            target.processor_identity = image.processor_identity
+        input_pb.v41_inputs.CopyFrom(
+            trans_v41_inputs(prepared, getattr(input_py, "v41_payload_id", ""))
+        )
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
     if hasattr(input_py, "group_id") and input_py.group_id != -1:
@@ -1210,6 +1234,53 @@ class ModelRpcClient(object):
         )
         logging.info(f"addresses: {self._addresses}")
 
+    async def upload_v41_inputs(self, input_py, vit, timeout_s):
+        # Set the receipt before sending so a lost ACK/cancellation can release it.
+        input_py.v41_payload_id = uuid.uuid4().hex
+        input_py.v41_payload_vit = vit
+        channel = await self._channel_pool.get(f"{vit.ip}:{vit.grpc_port}")
+        try:
+            await MultimodalRpcServiceStub(channel).UploadV41Inputs(
+                V41InputUploadPB(
+                    request_id=input_py.request_id,
+                    payload_id=input_py.v41_payload_id,
+                    inputs=trans_v41_inputs(input_py.v41_inputs),
+                    ttl_ms=min(600000, max(1, int(timeout_s * 1000))),
+                ),
+                timeout=timeout_s,
+            )
+        except grpc.RpcError as error:
+            if error.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
+                raise FtRuntimeException(
+                    ExceptionType.CONCURRENCY_LIMIT_ERROR,
+                    "V4.1 upload budget exhausted",
+                ) from error
+            if error.code() == grpc.StatusCode.UNIMPLEMENTED:
+                raise FtRuntimeException(
+                    ExceptionType.MM_NOT_SUPPORTED_ERROR,
+                    "selected ViT does not support direct V4.1 uploads",
+                ) from error
+            self._handle_grpc_error(
+                error, f"V4.1 upload request [{input_py.request_id}]"
+            )
+
+    async def release_v41_inputs(self, input_py):
+        payload_id = getattr(input_py, "v41_payload_id", "")
+        vit = getattr(input_py, "v41_payload_vit", None)
+        if not payload_id or vit is None:
+            return
+        input_py.v41_payload_id = ""
+        input_py.v41_payload_vit = None
+        try:
+            channel = await self._channel_pool.get(f"{vit.ip}:{vit.grpc_port}")
+            await MultimodalRpcServiceStub(channel).ReleaseV41Inputs(
+                V41InputRefPB(request_id=input_py.request_id, payload_id=payload_id),
+                timeout=1.0,
+            )
+        except Exception as error:
+            # The worker TTL also frees uploads after frontend loss or a lost ACK.
+            logging.warning("V4.1 upload release failed: %s", error)
+
     async def close(self) -> None:
         await self._channel_pool.close()
 
@@ -1393,6 +1464,10 @@ class ModelRpcClient(object):
                 response_iterator = stub.FetchResponse(
                     FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
                 )
+                # EnqueueBatch ACK follows successful multimodalProcess. Fetch
+                # only attaches to that prepared context; patches can be freed now.
+                if getattr(input_py, "v41_payload_id", ""):
+                    await self.release_v41_inputs(input_py)
             else:
                 response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
@@ -1405,6 +1480,10 @@ class ModelRpcClient(object):
                     terminal_read_task = None
                 if response is None:
                     break
+                # A generation result also proves the direct (non-batch) route
+                # finished image processing; do not retain patches through decode.
+                if getattr(input_py, "v41_payload_id", ""):
+                    await self.release_v41_inputs(input_py)
                 output_py = trans_output(input_py, response, stream_state)
                 last_output = output_py
                 if use_fetch_response and _is_finished_response(response):
@@ -1625,7 +1704,11 @@ class ModelRpcClient(object):
             if effective_ms > 0:
                 config.timeout_ms = int(effective_ms)
                 effective_timeouts_ms.append(int(effective_ms))
-            batch_inputs.append(replace(inp, generate_config=config))
+            copied = replace(inp, generate_config=config)
+            # This copy is the same request, unlike a route retry with a new ID.
+            copied.v41_payload_id = getattr(inp, "v41_payload_id", "")
+            copied.v41_payload_vit = getattr(inp, "v41_payload_vit", None)
+            batch_inputs.append(copied)
 
         # A mixed batch with no service fallback has no safe finite batch deadline:
         # the finite item must not terminate the unlimited item.

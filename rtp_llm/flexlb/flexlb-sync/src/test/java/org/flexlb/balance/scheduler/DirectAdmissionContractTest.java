@@ -21,13 +21,15 @@ import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -217,7 +219,8 @@ class DirectAdmissionContractTest {
                                         acquired.status());
                                 assertNotNull(
                                         acquired.permit(),
-                                        "accepted preparation must retain an exact handoff capability");
+                                        "accepted preparation must retain an exact handoff"
+                                                + " capability");
                                 fixture.observe(
                                         fixture.decode,
                                         Map.of(),
@@ -281,7 +284,7 @@ class DirectAdmissionContractTest {
             var reporter = mock(BatchSchedulerReporter.class);
             var requestReporter = mock(RequestSchedulerReporter.class);
             requests = spy(new RequestRegistry(service, reporter, requestReporter));
-            var projector = new EndpointEventProjector(requests);
+            var projector = new EndpointEventProjector(requests, mock(StatusFailureReporter.class));
             var placement = new PlacementAvailability();
             queuedDelivery =
                     spy(new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)));
@@ -297,8 +300,10 @@ class DirectAdmissionContractTest {
                                         .publishPreparedEndpoint(
                                                 worker.getIpPort(),
                                                 worker,
-                                                worker.prepareNewStatus(
-                                                        worker.freezeStatusResponse(response)))
+                                                WorkerStatusTestFixtures.prepare(
+                                                        worker,
+                                                        WorkerStatusTestFixtures.observation(
+                                                                worker, response)))
                                         .endpoint();
             } finally {
                 worker.lock.unlock();
@@ -395,7 +400,9 @@ class DirectAdmissionContractTest {
                 projection =
                         endpoint.applyPreparedStatus(
                                 worker,
-                                worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+                                WorkerStatusTestFixtures.prepare(
+                                        worker,
+                                        WorkerStatusTestFixtures.observation(worker, response)));
             } finally {
                 worker.lock.unlock();
             }
@@ -412,7 +419,8 @@ class DirectAdmissionContractTest {
         }
 
         private static WorkerStatus worker(RoleType role, String ip) {
-            return WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
+            return WorkerStatusTestFixtures.readyForScheduling(
+                    WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test"));
         }
 
         private static WorkerStatusResponse status(

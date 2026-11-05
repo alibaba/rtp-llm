@@ -100,7 +100,7 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(
                 PlacementResult.Status.CLOSED,
                 lifecycle.commitRoute(registered.item(), () -> true));
-        assertSame(registered.item(), activeItem(3L));
+        assertSame(registered.item().execution(), activeItem(3L));
         verify(registered.item().decodeEp(), never())
                 .release(any(), eq(DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED));
         lifecycle.cancelRequest("3", 0L, CancelReason.CLIENT_CANCELLED);
@@ -192,15 +192,15 @@ class RequestAdmissionResourceLeakTest {
     }
 
     @Test
-    void queuedPrefillPreemptionReturnsPreemptedAndReleasesDecodeOnce() throws Exception {
+    void yieldedVictimReturnsPreemptedAndReleasesDecodeOnce() throws Exception {
         Registered victim = registerItem(61L);
         Registered incoming = registerItem(62L);
         RequestLifecycleTestSupport.bindRoute(lifecycle, victim);
-        lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
+        lifecycle.finishYielded(victim.item(), "preempted by higher-priority request 62");
         Response response = victim.future().get(5, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(), response.getCode());
         assertEquals("preempted by higher-priority request 62", response.getErrorMessage());
-        lifecycle.onQueuedItemPreempted(victim.item(), incoming.item());
+        lifecycle.finishYielded(victim.item(), "preempted by higher-priority request 62");
         lifecycle.cancelRequest("61", 0L, CancelReason.CLIENT_CANCELLED);
         verify(victim.item().decodeEp(), times(1))
                 .release(
@@ -209,7 +209,7 @@ class RequestAdmissionResourceLeakTest {
         assertTrue(lifecycle.isAdmissionOpen("62", incoming.future()));
     }
 
-    private ScheduledRequest activeItem(long requestId) {
+    private RequestExecution activeItem(long requestId) {
         RequestSlot slot = lifecycle.requestSlot(Long.toString(requestId));
         synchronized (slot) {
             return slot.activeItem();

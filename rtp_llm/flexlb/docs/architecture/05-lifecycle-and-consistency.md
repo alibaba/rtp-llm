@@ -55,6 +55,9 @@ KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 g
 `GET /health` 通过 `ApplicationLifecycle.isHealthy()` 判断状态：
 预热完成且未收到下线信号时返回 200，否则返回 404。
 
+向 frontend 同步的 Master serving readiness 独立判断：应用已收到 `ApplicationReadyEvent`、
+未开始下线、且 gRPC 服务正在接收请求。它不以等待 Worker 预热作为本进程可接收请求的条件。
+
 ### 指标
 
 `GracefulLifecycleReporter`：gauge `graceful.lifecycle.event`，tag `type`

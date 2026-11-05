@@ -4,8 +4,11 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.GrpcFailure;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -21,9 +24,12 @@ import java.util.Objects;
 public final class EndpointEventProjector {
 
     private final RequestRegistry scheduler;
+    private final StatusFailureReporter failureReporter;
 
-    public EndpointEventProjector(RequestRegistry scheduler) {
+    public EndpointEventProjector(
+            RequestRegistry scheduler, StatusFailureReporter failureReporter) {
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
+        this.failureReporter = Objects.requireNonNull(failureReporter, "failureReporter");
     }
 
     public void onPrefillStatus(
@@ -84,7 +90,7 @@ public final class EndpointEventProjector {
     }
 
     public void onPrefillGenerationRetired(
-            PrefillEndpoint endpoint, List<ScheduledRequest> ownedItems) {
+            PrefillEndpoint endpoint, List<RequestExecution> ownedItems) {
         if (endpoint == null || ownedItems == null) {
             return;
         }
@@ -113,17 +119,6 @@ public final class EndpointEventProjector {
         scheduler.onQueuedItemExpired(exactItem);
     }
 
-    public void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        try {
-            scheduler.onQueuedItemPreempted(victim, incoming);
-        } catch (Throwable failure) {
-            logErrorNoFail(
-                    "Queued preemption projection failed: request_id={}",
-                    victim.requestId(),
-                    failure);
-        }
-    }
-
     public void onQueueOfferFailure(ScheduledRequest exactItem, Throwable cause) {
         scheduler.onQueueOfferFailure(exactItem, cause);
     }
@@ -138,6 +133,7 @@ public final class EndpointEventProjector {
             try {
                 scheduler.processPrefillStatus(source, role, fact);
             } catch (Throwable failure) {
+                reportStatusFailure(role, failure);
                 logErrorNoFail(
                         "Prefill status fact projection isolated: request_id={} engine={}",
                         fact.item().requestId(),
@@ -153,6 +149,7 @@ public final class EndpointEventProjector {
             try {
                 scheduler.processDecodeStatus(source, fact);
             } catch (Throwable failure) {
+                reportStatusFailure(RoleType.DECODE, failure);
                 logErrorNoFail(
                         "Decode status fact projection isolated: request_id={} engine={}",
                         fact.reservation().requestId(),
@@ -162,10 +159,26 @@ public final class EndpointEventProjector {
         }
     }
 
+    private void reportStatusFailure(RoleType role, Throwable failure) {
+        try {
+            GrpcFailure.Analysis analysis = GrpcFailure.analyze(failure);
+            failureReporter.report(
+                    role,
+                    "worker_status",
+                    Stage.STATUS_PROJECTION_FAILED,
+                    analysis.confirmedLocalFailure()
+                            ? analysis.kind().name()
+                            : "STATUS_PROJECTION_FAILED",
+                    analysis);
+        } catch (RuntimeException | Error ignoredDiagnosticFailure) {
+            // Continue projecting the remaining exact facts.
+        }
+    }
+
     private void projectPrefillRetirementFacts(
-            PrefillEndpoint retiredEndpoint, List<ScheduledRequest> ownedItems) {
+            PrefillEndpoint retiredEndpoint, List<RequestExecution> ownedItems) {
         for (int index = 0; index < ownedItems.size(); index++) {
-            ScheduledRequest exactItem = ownedItems.get(index);
+            RequestExecution exactItem = ownedItems.get(index);
             try {
                 scheduler.projectPrefillRetirementItem(retiredEndpoint, exactItem);
             } catch (Throwable failure) {

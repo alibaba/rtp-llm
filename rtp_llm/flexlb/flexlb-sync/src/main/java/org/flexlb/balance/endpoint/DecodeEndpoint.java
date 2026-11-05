@@ -164,10 +164,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
             ReservationHandle reservation, AdmissionCapacity capacity) {
         java.util.Objects.requireNonNull(reservation, "reservation");
         java.util.Objects.requireNonNull(capacity, "capacity");
+        if (!hasAvailableSchedulingStatus() && !isRetired()) {
+            return new EngineDispatchPermitAcquisition(
+                    EngineDispatchPermitAcquireStatus.CAPACITY_FULL, null);
+        }
         GenerationPin pin = tryPinGeneration();
         if (pin == null) {
             return new EngineDispatchPermitAcquisition(
-                    EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED, null);
+                    isRetired()
+                            ? EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED
+                            : EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
+                    null);
         }
         try (pin) {
             DecodeState.DispatchAcquisition acquired =
@@ -211,9 +218,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    /** Lock-free waiter hint, including retirement or lost ownership. Acquisition still rechecks capacity. */
+    /** Retry available capacity, or finish waiting after retirement or lost ownership. */
     public boolean shouldRetryDispatch(String requestId, AdmissionCapacity capacity) {
-        return isRetired() || state.shouldRetryDispatch(requestId, capacity);
+        return isRetired()
+                || state.shouldRetryDispatch(requestId, capacity, hasAvailableSchedulingStatus());
     }
 
     public static final class EngineDispatchPermit {
@@ -295,7 +303,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                             || status == EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED;
             if (ownsHandoff != (permit != null)) {
                 throw new IllegalArgumentException(
-                        "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch permit");
+                        "only ACQUIRED or ALREADY_ACCEPTED results carry an engine dispatch"
+                                + " permit");
             }
         }
     }

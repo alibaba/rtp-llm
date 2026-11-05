@@ -78,6 +78,17 @@ py_test(
     tags = ["manual"],
 )
 py_test(
+    name = "master_client_test",
+    srcs = ["master_client_test.py"],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
     name = "master_client_trace_test",
     srcs = ["master_client_trace_test.py"],
     deps = [
@@ -106,4 +117,14 @@ py_test(
     srcs = ["real_vit_routing_integration_test.py"],
     deps = ["//rtp_llm:testlib"],
     tags = ["manual"],
+)
+
+py_test(
+    name = "v41_input_transfer_test",
+    srcs = ["v41_input_transfer_test.py"],
+    deps = [
+        "//rtp_llm:grpcio",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/server:server",
+    ],
 )

@@ -10,6 +10,7 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.DispatcherConfig;
@@ -30,7 +31,7 @@ import java.util.function.Supplier;
 public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
-     * Short-lived generation capability for committing one NON_BATCH route
+     * Generation capability for preparing and committing one NON_BATCH route
      * group. Queued requests keep their canonical identity without keeping an
      * endpoint generation alive while waiting for delivery.
      */
@@ -39,6 +40,15 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
         private RouteCommitAdmission(EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
             this.generationHandoff = generationHandoff;
+        }
+
+        /** Reserve one send slot while this transaction pins the worker generation. */
+        public PrefillState.ReservationResult<PrefillState.RouteReservation> reserve(
+                ScheduledRequest item, long predictedMs) {
+            if (generationHandoff == null) {
+                throw new IllegalStateException("route admission is already closed or committed");
+            }
+            return prefillState.reserveRoute(item, predictedMs, inflightRequestLimit);
         }
 
         public PrefillState.CommittedHandoff commit(
@@ -251,6 +261,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public PrefillState.ReservationResult<PrefillState.BatchReservation> reserveBatch(
             ScheduledRequest exactHead, long batchId, int maximumInflightBatches) {
+        if (!hasAvailableSchedulingStatus()) {
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.CAPACITY_FULL, null);
+        }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit = tryAcquireGenerationHandoff();
         if (handoffPermit == null) {
             return new PrefillState.ReservationResult<>(
@@ -271,28 +285,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return result;
     }
 
-    /**
-     * Bind exact NON_BATCH ownership inside the caller's pinned placement
-     * transaction.
-     */
-    public PrefillState.ReservationResult<PrefillState.RouteReservation> reserveRouteOwnership(
-            ScheduledRequest exactItem, long predictedMs) {
-        if (isGenerationRetiringOrRetired()) {
-            return new PrefillState.ReservationResult<>(
-                    PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
-        }
-        return prefillState.reserveRoute(exactItem, predictedMs);
-    }
-
-    /** Acquire the generation capability only for the final route commit. */
+    /** Pin the generation through route preparation, commit, or rollback. */
     public RouteCommitAdmission tryBeginRouteCommitAdmission() {
+        if (!hasAvailableSchedulingStatus()) {
+            return null;
+        }
         EndpointGenerationLifecycle.HandoffPermit handoffPermit = tryAcquireGenerationHandoff();
         return handoffPermit == null ? null : new RouteCommitAdmission(handoffPermit);
     }
 
     /** Exact wake source for this generation's batch admission capacity. */
     public CapacityBoundary.Availability batchAdmissionAvailability(int maximumInflightBatches) {
-        return prefillState.batchAvailability(maximumInflightBatches);
+        return prefillState.batchAvailability(maximumInflightBatches, getStatus());
     }
 
     /** Explain a failed admission using the current owner-priority summary. */
@@ -300,13 +304,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.admissionRejectReason(priority, inflightRequestLimit);
     }
 
-    /** Advisory capacity; publication repeats the count check under the ownership lock. */
+    /** Advisory immediate-send capacity; reservation repeats the check under the ownership lock. */
     public boolean canAcceptRequest() {
-        return inflightRequestLimit == 0L || prefillState.canAcceptRequest(inflightRequestLimit);
+        return prefillState.canDispatchRoute(inflightRequestLimit);
     }
 
-    public boolean canPreemptQueuedRequest(int priority) {
-        return prefillState.canPreemptQueuedRequest(priority, inflightRequestLimit);
+    public CapacityBoundary.Availability routeAdmissionAvailability() {
+        return prefillState.routeAvailability(inflightRequestLimit, getStatus());
     }
 
     /** Advisory endpoint ownership revision captured by queue placement. */
@@ -326,18 +330,17 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Exact counterpart cleanup; stale item generations are a no-op. */
-    public boolean releaseCommittedItem(ScheduledRequest exactItem) {
+    public boolean releaseCommittedItem(RequestExecution exactItem) {
         return prefillState.terminalizeCommittedItem(exactItem);
     }
 
-    /** End the exact failed member, whether still queued or committed to a batch. */
-    public void settleFailedRequest(ScheduledRequest exactItem) {
-        removeQueued(exactItem, "REQUEST_FAILED");
+    /** End the exact failed committed member; queued items are removed by their scheduler owner. */
+    public void settleFailedRequest(RequestExecution exactItem) {
         releaseCommittedItem(exactItem);
     }
 
     /** Expire an exact local committed lease without claiming Engine completion. */
-    public boolean expireCommittedItem(ScheduledRequest exactItem) {
+    public boolean expireCommittedItem(RequestExecution exactItem) {
         return prefillState.terminalizeCommittedItem(exactItem);
     }
 
@@ -443,7 +446,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /** Re-estimate surviving members, using the default formula if the configured predictor fails. */
-    private long predictRepackedBatchMs(List<ScheduledRequest> survivingRequests) {
+    private long predictRepackedBatchMs(List<RequestExecution> survivingRequests) {
         PrefillBatchFeatures features =
                 PrefillBatchFeatures.from(
                         survivingRequests,
@@ -567,7 +570,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         long predictedMs = completion.predictedWorkMs();
         long gapMs = actualMs - predictedMs;
         org.flexlb.util.Logger.debug(
-                "flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={} batch_size={} engine={}",
+                "flexlb_batch_complete batch_id={} predicted_ms={} actual_ms={} gap_ms={}"
+                        + " batch_size={} engine={}",
                 batchId,
                 predictedMs,
                 actualMs,

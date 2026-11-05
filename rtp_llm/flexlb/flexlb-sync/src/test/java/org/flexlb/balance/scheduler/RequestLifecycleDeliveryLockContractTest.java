@@ -15,6 +15,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -118,7 +119,7 @@ class RequestLifecycleDeliveryLockContractTest {
                     contenderEntered.await(5, TimeUnit.SECONDS),
                     "slot operations must proceed during endpoint publication");
             synchronized (slot) {
-                assertSame(registered.item(), slot.activeItem());
+                assertSame(registered.item().execution(), slot.activeItem());
             }
             assertTrue(
                     RequestLifecycleTestSupport.prepareMember(lifecycle, registered.item()),
@@ -450,13 +451,13 @@ class RequestLifecycleDeliveryLockContractTest {
         assertNotNull(claim);
         RequestSlot original = lifecycle.requestSlot("207");
 
-        new EndpointEventProjector(lifecycle)
+        new EndpointEventProjector(lifecycle, mock(StatusFailureReporter.class))
                 .onPrefillStatus(
                         endpoint,
                         RoleType.PDFUSION,
                         List.of(
                                 PrefillState.WorkerStatusFact.terminal(
-                                        registered.item(),
+                                        registered.item().execution(),
                                         PrefillState.WorkerStatusFact.Kind.COMPLETED,
                                         0L)));
         Response terminal = registered.future().get(5L, TimeUnit.SECONDS);

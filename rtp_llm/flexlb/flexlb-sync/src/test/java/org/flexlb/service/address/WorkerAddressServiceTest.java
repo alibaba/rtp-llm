@@ -292,7 +292,8 @@ class WorkerAddressServiceTest {
             assertEquals(
                     2L,
                     events.list.stream().filter(event -> event.getLevel() == Level.WARN).count(),
-                    "recovering another endpoint must not reset an empty endpoint's warning deadline");
+                    "recovering another endpoint must not reset an empty endpoint's warning"
+                            + " deadline");
             assertEquals(
                     List.of("group-b"),
                     events.list.stream()

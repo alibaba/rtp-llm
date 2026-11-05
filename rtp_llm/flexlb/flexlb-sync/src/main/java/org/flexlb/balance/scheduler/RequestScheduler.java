@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -210,8 +211,15 @@ public final class RequestScheduler {
 
     private void submitDirect(BalanceContext context) {
         Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
+        long decisionStartedNanos = System.nanoTime();
         try {
             PlacementResult<RouteAdmission, PlacementKey> selection = router.select(context);
+            FlexlbTrace.recordPlacement(
+                    context.getTraceContext(),
+                    decisionStartedNanos,
+                    selection.status().name(),
+                    selection.diagnostics(),
+                    null);
             context.setSchedulingDiagnostics(selection.diagnostics());
             switch (selection.status()) {
                 case SUCCESS -> {
@@ -244,6 +252,12 @@ public final class RequestScheduler {
                 case CLOSED -> failure = Response.error(StrategyErrorType.REQUEST_CANCELLED);
             }
         } catch (RuntimeException selectionFailure) {
+            FlexlbTrace.recordPlacement(
+                    context.getTraceContext(),
+                    decisionStartedNanos,
+                    "ERROR",
+                    null,
+                    selectionFailure);
             Logger.warn(
                     "DIRECT admission failed: request_id={}",
                     context.getRequestId(),

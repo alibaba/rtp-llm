@@ -81,10 +81,10 @@ class CacheAwareServiceTest {
     void delegatesWorkerStatusUpdates() {
         WorkerStatus workerStatus = workerStatus("127.0.0.1", 8080, RoleType.PREFILL);
         WorkerCacheUpdateResult expected = WorkerCacheUpdateResult.builder().success(true).build();
-        when(updateOrchestrator.updateFromWorkerStatus(workerStatus)).thenReturn(expected);
+        when(updateOrchestrator.updateFromWorkerStatus(workerStatus, null)).thenReturn(expected);
 
         assertSame(expected, service.updateFromWorkerStatus(workerStatus));
-        verify(updateOrchestrator).updateFromWorkerStatus(workerStatus);
+        verify(updateOrchestrator).updateFromWorkerStatus(workerStatus, null);
     }
 
     @Test

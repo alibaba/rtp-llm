@@ -19,10 +19,12 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -55,7 +57,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             BatchSchedulerReporter batchReporter,
             RequestSchedulerReporter requestReporter) {
         this.lifecycle = new RequestRegistry(configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
+        this.endpointEvents =
+                new EndpointEventProjector(
+                        lifecycle, org.mockito.Mockito.mock(StatusFailureReporter.class));
         DispatcherConfig dispatcher =
                 Objects.requireNonNull(
                         configService.loadBalanceConfig().getDispatcher(), "dispatcher");
@@ -137,11 +141,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     }
 
     /** Return the exact item currently owned by a fixture request slot. */
-    public ScheduledRequest activeItem(long requestId) {
+    public RequestExecution activeItem(long requestId) {
         return activeItem(Long.toString(requestId));
     }
 
-    public ScheduledRequest activeItem(String requestId) {
+    public RequestExecution activeItem(String requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         if (slot == null) {
             return null;
@@ -165,7 +169,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     public void applyStatus(WorkerStatus status, WorkerStatusResponse response) {
         Objects.requireNonNull(status, "status");
         Objects.requireNonNull(response, "response");
-        applyStatus(status, status.freezeStatusResponse(response));
+        applyStatus(status, WorkerStatusTestFixtures.observation(status, response));
     }
 
     /** Apply an immutable protocol observation without a mutable DTO hop. */
@@ -198,7 +202,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             if (responseVersion == committedVersion) {
                 projection = endpoint.observeStatusHeartbeat(status, observation);
             } else {
-                WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
+                WorkerStatus.PreparedStatus prepared =
+                        WorkerStatusTestFixtures.prepare(status, observation);
                 projection = endpoint.applyPreparedStatus(status, prepared);
             }
         } finally {

@@ -10,13 +10,15 @@ import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -45,7 +47,7 @@ class PrefillCompletionProjectionTest {
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
-        var projector = new EndpointEventProjector(requests);
+        var projector = new EndpointEventProjector(requests, mock(StatusFailureReporter.class));
         var endpoints =
                 new EndpointRegistry(
                         service,
@@ -56,8 +58,9 @@ class PrefillCompletionProjectionTest {
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
         try {
             WorkerStatus worker =
-                    WorkerStatus.createDiscovered(
-                            RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test");
+                    WorkerStatusTestFixtures.readyForScheduling(
+                            WorkerStatus.createDiscovered(
+                                    RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test"));
             PrefillEndpoint prefill;
             worker.lock.lock();
             try {
@@ -67,16 +70,19 @@ class PrefillCompletionProjectionTest {
                                         .publishPreparedEndpoint(
                                                 worker.getIpPort(),
                                                 worker,
-                                                worker.prepareNewStatus(
-                                                        worker.freezeStatusResponse(
+                                                WorkerStatusTestFixtures.prepare(
+                                                        worker,
+                                                        WorkerStatusTestFixtures.observation(
+                                                                worker,
                                                                 status(1L, Map.of(), Map.of()))))
                                         .endpoint();
             } finally {
                 worker.lock.unlock();
             }
             WorkerStatus decodeWorker =
-                    WorkerStatus.createDiscovered(
-                            RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test");
+                    WorkerStatusTestFixtures.readyForScheduling(
+                            WorkerStatus.createDiscovered(
+                                    RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test"));
             DecodeEndpoint decode = new DecodeEndpoint(decodeWorker, projector);
             applyStatus(decode, decodeStatus(1L, Map.of()));
             DecodeEndpoint.ReservationHandle reservation;
@@ -227,7 +233,10 @@ class PrefillCompletionProjectionTest {
         try {
             projection =
                     endpoint.applyPreparedStatus(
-                            worker, worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+                            worker,
+                            WorkerStatusTestFixtures.prepare(
+                                    worker,
+                                    WorkerStatusTestFixtures.observation(worker, response)));
         } finally {
             worker.lock.unlock();
         }

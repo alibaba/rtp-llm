@@ -166,6 +166,9 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
 
 ErrorResult<MultimodalOutput> MultimodalProcessor::V41MultimodalEmbedding(
     const V41RequestInputs& inputs, const std::string&, int64_t timeout_ms, int64_t, grpc::ServerContext*) {
+    if (!inputs.payload_id.empty()) {
+        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "V4.1 direct-upload reference requires remote ViT processing");
+    }
     py::gil_scoped_acquire acquire;
     if (mm_process_engine_.is_none()) {
         return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "V4.1 prepared images require a local ViT engine");

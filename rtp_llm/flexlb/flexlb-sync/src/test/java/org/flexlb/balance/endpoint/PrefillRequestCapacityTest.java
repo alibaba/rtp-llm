@@ -1,9 +1,11 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -26,6 +28,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class PrefillRequestCapacityTest {
+    private final WorkerStatus schedulingWorker = mock(WorkerStatus.class);
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillState state =
             new PrefillState(
@@ -34,27 +37,82 @@ class PrefillRequestCapacityTest {
                             16, Comparator.comparing(ScheduledRequest::requestId)),
                     () -> {});
 
+    @BeforeEach
+    void workerIsAvailable() {
+        when(schedulingWorker.isAvailableForScheduling()).thenReturn(true);
+    }
+
     @Test
-    void waitingPreparedAndCommittedRequestsShareOneCount() {
-        ScheduledRequest queued = item(1), immediate = item(2);
-        assertTrue(enqueue(queued, 2L));
-        var registration = reserve(immediate, 2L).reservation();
-        assertNotNull(registration);
-        assertEquals(2L, state.observedRequestCount());
-        assertFalse(enqueue(item(3), 2L));
-        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(3), 2L).status());
-        try (var handoff = commit(immediate, registration)) {
-            assertEquals(2L, state.observedRequestCount());
-        }
-        registration.close();
+    void waitingDoesNotConsumeSlotsButPreparedAndCommittedRoutesDo() {
+        ScheduledRequest queued = item(1), immediate = item(2), next = item(3);
+        assertTrue(enqueue(queued, 0L));
+        assertTrue(enqueue(next, 0L));
+        var immediateLease = reserve(immediate, 2L).reservation();
+        assertNotNull(immediateLease);
+        var queuedLease = state.reserveRoute(queued, 10L, 2L).reservation();
+        assertNotNull(queuedLease);
+        assertFalse(state.routeAvailability(2L, schedulingWorker).isAvailable());
         assertEquals(
-                2L,
-                state.observedRequestCount(),
-                "ACK and capability closure cannot release Engine ownership");
-        assertTrue(state.terminalizeCommittedItem(immediate));
-        assertFalse(state.terminalizeCommittedItem(immediate));
-        assertTrue(enqueue(item(3), 2L));
-        assertEquals(2L, state.observedRequestCount());
+                PrefillState.CapacityStatus.CAPACITY_FULL,
+                state.reserveRoute(next, 10L, 2L).status());
+        assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, reserve(item(4), 2L).status());
+        try (var handoff = commit(immediate, immediateLease)) {}
+        immediateLease.close();
+        assertFalse(
+                state.routeAvailability(2L, schedulingWorker).isAvailable(),
+                "handoff/ACK cannot release inflight work");
+        assertTrue(state.terminalizeCommittedItem(immediate.execution()));
+        assertFalse(state.terminalizeCommittedItem(immediate.execution()));
+        assertTrue(state.routeAvailability(2L, schedulingWorker).isAvailable());
+        var nextLease = state.reserveRoute(next, 10L, 2L).reservation();
+        assertNotNull(nextLease);
+        queuedLease.close();
+        queuedLease.close();
+        assertTrue(state.routeAvailability(2L, schedulingWorker).isAvailable());
+        assertEquals(2L, state.observedRequestCount(), "rollback preserves queued ownership");
+        try (var retry = state.reserveRoute(queued, 10L, 2L).reservation()) {
+            assertNotNull(retry);
+            queuedLease.close();
+            assertFalse(
+                    state.routeAvailability(2L, schedulingWorker).isAvailable(),
+                    "stale lease cannot release the retry");
+        }
+        nextLease.close();
+    }
+
+    @Test
+    void concurrentQueuedPreparationsCannotOversellOneSendSlot() throws Exception {
+        var queued = new ArrayList<ScheduledRequest>();
+        var leases = new ArrayList<PrefillState.RouteReservation>();
+        for (int id = 1; id <= 32; id++) {
+            ScheduledRequest request = item(id);
+            assertTrue(enqueue(request, 0L));
+            queued.add(request);
+        }
+        try (var executor = Executors.newFixedThreadPool(8)) {
+            var attempts =
+                    new ArrayList<
+                            Future<
+                                    PrefillState.ReservationResult<
+                                            PrefillState.RouteReservation>>>();
+            for (ScheduledRequest request : queued) {
+                attempts.add(executor.submit(() -> state.reserveRoute(request, 10L, 1L)));
+            }
+            for (var attempt : attempts) {
+                var result = attempt.get(5, TimeUnit.SECONDS);
+                if (result.status() == PrefillState.CapacityStatus.ACQUIRED) {
+                    leases.add(result.reservation());
+                } else {
+                    assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL, result.status());
+                }
+            }
+            assertEquals(1, leases.size());
+            assertEquals(32L, state.observedRequestCount());
+            leases.forEach(PrefillState.RouteReservation::close);
+            assertTrue(state.routeAvailability(1L, schedulingWorker).isAvailable());
+        } finally {
+            leases.forEach(PrefillState.RouteReservation::close);
+        }
     }
 
     @Test
@@ -115,14 +173,14 @@ class PrefillRequestCapacityTest {
         var reservation =
                 state.reserveBatch(first, 10L, 1, generation.tryAcquireHandoff()).reservation();
         try (var handoff = reservation.commit(List.of(first, second), 0L)) {}
-        assertFalse(state.batchAvailability(1).isAvailable());
+        assertFalse(state.batchAvailability(1, schedulingWorker).isAvailable());
         assertTrue(enqueue(item(3), 0L));
-        assertTrue(state.terminalizeCommittedItem(first));
+        assertTrue(state.terminalizeCommittedItem(first.execution()));
         assertEquals(2L, state.observedRequestCount());
-        assertFalse(state.batchAvailability(1).isAvailable());
-        assertTrue(state.terminalizeCommittedItem(second));
+        assertFalse(state.batchAvailability(1, schedulingWorker).isAvailable());
+        assertTrue(state.terminalizeCommittedItem(second.execution()));
         assertEquals(1L, state.observedRequestCount());
-        assertTrue(state.batchAvailability(1).isAvailable());
+        assertTrue(state.batchAvailability(1, schedulingWorker).isAvailable());
     }
 
     @Test
@@ -132,7 +190,7 @@ class PrefillRequestCapacityTest {
         old.close();
         var current = reserve(item(1), 1L).reservation();
         old.close();
-        assertFalse(state.terminalizeCommittedItem(previous));
+        assertFalse(state.terminalizeCommittedItem(previous.execution()));
         assertEquals(1L, state.observedRequestCount());
         current.close();
         assertEquals(0L, state.observedRequestCount());
@@ -141,7 +199,7 @@ class PrefillRequestCapacityTest {
     @Test
     void immediateAdmissionChecksCurrentCapacityAfterOtherOwnershipChanges() {
         assertTrue(state.canAcceptRequest(2L));
-        assertTrue(enqueue(item(1), 2L));
+        assertNotNull(reserve(item(1), 2L).reservation());
         assertNotNull(
                 reserve(item(2), 2L).reservation(),
                 "an intervening ownership mutation does not invalidate remaining capacity");
@@ -318,6 +376,9 @@ class PrefillRequestCapacityTest {
     private static ScheduledRequest item(long id) {
         ScheduledRequest item = mock(ScheduledRequest.class);
         when(item.requestId()).thenReturn(Long.toString(id));
+        RequestExecution execution = mock(RequestExecution.class);
+        when(execution.requestId()).thenReturn(Long.toString(id));
+        when(item.execution()).thenReturn(execution);
         return item;
     }
 }

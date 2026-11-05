@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.Comparator;
@@ -87,7 +88,11 @@ public final class PrefillCleanupDeadlockFixture {
     private static ScheduledRequest item(long id) {
         ScheduledRequest item = mock(ScheduledRequest.class);
         when(item.requestId()).thenReturn(Long.toString(id));
+        RequestExecution execution = mock(RequestExecution.class);
+        when(execution.requestId()).thenReturn(Long.toString(id));
+        when(item.execution()).thenReturn(execution);
         when(item.seqLen()).thenReturn(100L);
+        when(execution.seqLen()).thenReturn(100L);
         return item;
     }
 }

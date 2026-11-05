@@ -1,10 +1,11 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.util.Comparator;
 import java.util.List;
@@ -71,8 +72,9 @@ public final class DeliverySettlementTestSupport {
         response.setRunningTaskInfo(Map.of());
         response.setFinishedTaskInfo(Map.of(item.requestId(), finished));
         var observation =
-                EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090)
-                        .freezeStatusResponse(response);
+                WorkerStatusTestFixtures.observation(
+                        EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090),
+                        response);
         var result =
                 prefill.reconcileWorkerStatus(observation, ignored -> 100L, () -> {}, () -> {});
         assertNull(result.publicationFailure());
