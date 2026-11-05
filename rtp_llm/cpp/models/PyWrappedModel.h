@@ -36,8 +36,10 @@
 #if USING_ASCEND
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wpedantic"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #pragma GCC diagnostic pop
+#include "rtp_llm/cpp/ascend_graph/ascend_graph_runner.h"
 #endif
 
 namespace py = pybind11;
@@ -583,6 +585,84 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                     throw;
                 }
             }
+        }
+#elif USING_ASCEND
+        // Ascend ACL Graph: decode-only. Prefill graph mode is rejected in the
+        // runner constructor — fall back to eager forward in that case.
+        if (is_prefill_cuda_graph_mode) {
+            RTP_LLM_LOG_WARNING(
+                "Ascend ACL Graph does not support prefill cuda graph mode; "
+                "graph_runner_ will not be created, falling back to eager forward.");
+            enable_cuda_graph_ = false;
+        } else {
+            c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
+            GraphParams      graph_params;
+            graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
+            graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
+            graph_params.is_prefill_cuda_graph_mode   = false;  // ACL Graph is decode-only
+            graph_params.max_seq_len                  = params.max_seq_len;
+            graph_params.hidden_size                  = params.hidden_size;
+            graph_params.model_data_type              = dtype;
+            graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
+            graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
+
+            // Derive hybrid KV cache geometry from the layer layout topology:
+            // Page geometry from the first group, layer->group index from tags.
+            // All capture buffers (default + per-tag block tables) are sized
+            // from a single group's geometry, so hybrid layouts with
+            // non-uniform page sizes across groups would silently truncate the
+            // wider groups' tables at replay. Fail fast instead (uniform
+            // geometries — including every validated config — are unaffected).
+            if (params.kv_cache_layer_layout.has_value()) {
+                const auto& topology = params.kv_cache_layer_layout->topology();
+                const auto& tags     = topology.groupTags();
+                graph_params.kv_cache_group_num = static_cast<int32_t>(tags.size());
+                graph_params.kv_cache_group_tags = tags;
+                if (!topology.groups().empty()) {
+                    const auto& first = topology.groups().front();
+                    for (const auto& group : topology.groups()) {
+                        RTP_LLM_CHECK_WITH_INFO(
+                            group.seqSizePerBlock() == first.seqSizePerBlock()
+                                && group.kernelSeqSizePerBlock() == first.kernelSeqSizePerBlock(),
+                            "AscendGraphRunner: hybrid kv cache with non-uniform page geometry across groups "
+                            "(seq=%u/kernel=%u vs first group seq=%u/kernel=%u) is not supported by aclgraph capture; "
+                            "use uniform seq/kernel block sizes (see Known Limitations).",
+                            group.seqSizePerBlock(), group.kernelSeqSizePerBlock(),
+                            first.seqSizePerBlock(), first.kernelSeqSizePerBlock());
+                    }
+                    graph_params.tokens_per_block        = static_cast<int>(first.seqSizePerBlock());
+                    graph_params.kernel_tokens_per_block = static_cast<int>(first.kernelSeqSizePerBlock());
+                }
+                std::vector<int32_t> layer_to_group;
+                for (const auto& layer : topology.layers()) {
+                    int32_t group_idx = -1;
+                    if (!layer.group_tags.empty()) {
+                        auto it = std::find(tags.begin(), tags.end(), layer.group_tags.front());
+                        if (it != tags.end()) {
+                            group_idx = static_cast<int32_t>(std::distance(tags.begin(), it));
+                        }
+                    }
+                    layer_to_group.push_back(group_idx);
+                }
+                graph_params.kv_cache_layer_to_group = std::move(layer_to_group);
+            }
+
+            graph_params.is_target_verify = use_spec_decoding;
+            if (params.sp_config.type != SP_TYPE_NONE) {
+                graph_params.sp_steps          = params.sp_config.gen_num_per_cycle;
+                graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
+            } else {
+                graph_params.num_tokens_per_bs = 1;
+            }
+
+            graph_runner_.reset(new AscendGraphRunner(graph_params, py_instance));
+            RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper (Ascend)");
+            // Mirror the CUDA path: run the Python model initialize (prepares
+            // capture-time model state) and capture the decode graphs now —
+            // without initCapture every forward falls back to eager.
+            auto py_initialize_method = py_instance.attr("initialize");
+            py_init_result = py_initialize_method(init_resources);
+            graph_runner_->initCapture();
         }
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");

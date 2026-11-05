@@ -6,6 +6,7 @@ import torch
 from rtp_llm.device.device_type import (
     DeviceType,
     get_device_type,
+    is_ascend,
     is_cuda,
     is_hip,
     is_ppu,

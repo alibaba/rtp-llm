@@ -8,3 +8,12 @@ py_test(
         "//rtp_llm/models_py:modules",
     ],
 )
+
+py_test(
+    name = "test_ascend_mrope_interleaved",
+    srcs = ["test_ascend_mrope_interleaved.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)

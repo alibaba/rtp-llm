@@ -14,6 +14,7 @@ from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
 from rtp_llm.ops import RoleType, TaskType, VitSeparation
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.time_util import timer_wrapper
+from rtp_llm.device.device_type import device_name
 
 
 class LanguageCppEngine(BaseEngine):
@@ -57,7 +58,7 @@ class LanguageCppEngine(BaseEngine):
                     model_config=self.model.model_config,
                     engine_config=engine_config,
                     vit_config=self.model.vit_config,
-                    device=f"cuda:{engine_config.parallelism_config.local_rank}",
+                    device=f"{device_name()}:{engine_config.parallelism_config.local_rank}",
                 )
             )
         self.rtp_llm_op_ = RtpLLMOp(
