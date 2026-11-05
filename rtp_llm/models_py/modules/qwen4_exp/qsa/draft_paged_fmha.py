@@ -16,7 +16,7 @@ def _merge_draft_metadata_splits(
     CU,
     GATE,
     OUT,
-    BATCH: tl.constexpr,
+    BATCH,
     RB: tl.constexpr,
     SPLITS: tl.constexpr,
     WITH_GATE: tl.constexpr,

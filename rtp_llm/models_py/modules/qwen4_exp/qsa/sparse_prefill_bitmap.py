@@ -12,10 +12,10 @@ def _membership_words(
     byte_mask,
     ends,
     duplicates,
-    T: tl.constexpr,
-    K: tl.constexpr,
+    T,
+    K,
     BK: tl.constexpr,
-    WORDS: tl.constexpr,
+    WORDS,
 ):
     row = tl.program_id(0)
     slots = tl.arange(0, BK)

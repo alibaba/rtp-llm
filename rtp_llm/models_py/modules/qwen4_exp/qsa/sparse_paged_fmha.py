@@ -180,13 +180,15 @@ def _sparse_paged_online_split_kernel(
     FP8_CACHE: tl.constexpr,
     H_Q: tl.constexpr,
     H_KV: tl.constexpr,
-    QUERY_LEN: tl.constexpr,
+    # QUERY_LEN/BLOCKS_PER_SPLIT stay runtime args: making them constexpr
+    # recompiles the kernel for every new request length.
+    QUERY_LEN,
     PAGE_SIZE: tl.constexpr,
     D: tl.constexpr,
     SCALE: tl.constexpr,
     BLOCK_K: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
-    BLOCKS_PER_SPLIT: tl.constexpr,
+    BLOCKS_PER_SPLIT,
 ):
     partition = tl.program_id(0)
     batch = partition // (QUERY_LEN * NUM_SPLITS)
@@ -378,12 +380,14 @@ def _sparse_paged_grouped_split_kernel(
     FP8_CACHE: tl.constexpr,
     H_Q: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
-    QUERY_LEN: tl.constexpr,
+    # QUERY_LEN/NUM_TILES stay runtime args: they vary with every request
+    # length, and constexpr keys recompile the kernel per new length.
+    QUERY_LEN,
     PAGE_SIZE: tl.constexpr,
     D: tl.constexpr,
     SCALE: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
-    NUM_TILES: tl.constexpr,
+    NUM_TILES,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ):
@@ -540,9 +544,11 @@ def _merge_sparse_paged_splits_kernel(
     out_ptr,
     gate_ptr,
     D: tl.constexpr,
+    # NUM_SPLITS indexes tl.arange so it must stay constexpr (bounded
+    # power-of-two set); QUERIES varies per request and stays runtime.
     NUM_SPLITS: tl.constexpr,
     HEADS: tl.constexpr,
-    QUERIES: tl.constexpr,
+    QUERIES,
     WITH_GATE: tl.constexpr,
 ):
     row = tl.program_id(0)

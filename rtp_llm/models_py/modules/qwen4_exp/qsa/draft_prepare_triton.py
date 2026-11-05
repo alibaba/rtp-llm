@@ -33,7 +33,7 @@ def _prepare_draft_qsa(
     ROW_LENGTHS=None,
     PREFIX=None,
     CU=None,
-    BATCH: tl.constexpr = 0,
+    BATCH = 0,
     RB: tl.constexpr = 1,
     RAW_QUERY: tl.constexpr = False,
     QG=None,

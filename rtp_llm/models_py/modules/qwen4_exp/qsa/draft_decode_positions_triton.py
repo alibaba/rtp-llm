@@ -23,7 +23,7 @@ def _draft_decode_positions(
     BLOCK_SIN,
     VISIBLE,
     COMPRESSED,
-    ROWS: tl.constexpr,
+    ROWS,
     FACTOR: tl.constexpr,
     INV_SCALE: tl.constexpr,
     BLOCK: tl.constexpr,
