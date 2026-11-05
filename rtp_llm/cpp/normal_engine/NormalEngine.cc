@@ -169,7 +169,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     kv_cache_config(params.kv_cache_config),
     cache_store_config(params.cache_store_config),
     ffn_disaggregate_config(params.ffn_disaggregate_config),
-    model_specific_config(params.model_specific_config),
     sp_config(params.sp_config),
     metrics_reporter_(params.metrics_reporter),
     propose_params_(std::move(propose_params)),
@@ -328,7 +327,6 @@ void NormalEngine::initScheduler() {
                                                     model_config_,
                                                     pd_sep_config,
                                                     parallelism_config,
-                                                    model_specific_config,
                                                     resource_context_.cache_manager,
                                                     metrics_reporter_));
         RTP_LLM_LOG_INFO("create pdfusion ratio scheduler done");
@@ -341,7 +339,6 @@ void NormalEngine::initScheduler() {
                                            model_config_,
                                            pd_sep_config,
                                            parallelism_config,
-                                           model_specific_config,
                                            resource_context_.cache_manager,
                                            metrics_reporter_));
         RTP_LLM_LOG_INFO("create fifo scheduler done");

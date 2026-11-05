@@ -22,7 +22,6 @@ from rtp_llm.ops import (
     GrpcConfig,
     HWKernelConfig,
     MiscellaneousConfig,
-    ModelSpecificConfig,
     MoeConfig,
     ParallelismConfig,
     PDSepConfig,
@@ -725,7 +724,6 @@ class PyEnvConfigs:
         self.pd_separation_config: PDSepConfig = PDSepConfig()
         self.parallelism_config: ParallelismConfig = ParallelismConfig()
         self.ffn_disaggregate_config: FfnDisAggregateConfig = FfnDisAggregateConfig()
-        self.model_specific_config = ModelSpecificConfig()
         self.fmha_config = FMHAConfig()
         self.misc_config = PyMiscellaneousConfig()
         self.concurrency_config = ConcurrencyConfig()
@@ -769,9 +767,6 @@ class PyEnvConfigs:
             "[pd_separation_config]\n" + self.pd_separation_config.to_string() + "\n\n"
             "[parallelism_distributed_config]\n"
             + self.parallelism_distributed_config.to_string()
-            + "\n\n"
-            "[model_specific_config]\n"
-            + self.model_specific_config.to_string()
             + "\n\n"
             "[fmha_config]\n" + self.fmha_config.to_string() + "\n\n"
             "[misc_config]\n" + self.misc_config.to_string() + "\n\n"

@@ -95,7 +95,6 @@ public:
                                                      params.model_config_,
                                                      params.pd_sep_config,
                                                      params.parallelism_config,
-                                                     params.model_specific_config,
                                                      resource_context_.cache_manager);
     }
 

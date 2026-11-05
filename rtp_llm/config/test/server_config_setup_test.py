@@ -698,7 +698,6 @@ class GenerateConfigTest(TestCase):
             ),
             hw_kernel_config=py_env_configs.py_hw_kernel_config,
             moe_config=py_env_configs.moe_config,
-            model_specific_config=py_env_configs.model_specific_config,
             sp_config=py_env_configs.sp_config,
             cache_store_config=py_env_configs.cache_store_config,
             misc_config=py_env_configs.misc_config.misc_config,

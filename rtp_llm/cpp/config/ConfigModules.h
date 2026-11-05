@@ -328,10 +328,6 @@ struct MoeConfig {
     std::string to_string() const;
 };
 
-struct ModelSpecificConfig {
-    std::string to_string() const;
-};
-
 enum SpeculativeType {
     SP_TYPE_NONE          = 0,  // Not enabled (empty string or "none")
     SP_TYPE_VANILLA       = 1,  // Classic speculative sampling

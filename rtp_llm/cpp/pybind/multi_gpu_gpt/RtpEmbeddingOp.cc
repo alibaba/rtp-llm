@@ -39,7 +39,6 @@ void RtpEmbeddingOp::init(py::object model,
             engine_config.attr("profiling_debug_logging_config").cast<ProfilingDebugLoggingConfig>();
         auto hw_kernel_config       = engine_config.attr("hw_kernel_config").cast<HWKernelConfig>();
         auto moe_config             = engine_config.attr("moe_config").cast<MoeConfig>();
-        auto model_specific_config  = engine_config.attr("model_specific_config").cast<ModelSpecificConfig>();
         auto sp_config              = engine_config.attr("sp_config").cast<SpeculativeExecutionConfig>();
         auto cache_store_config     = engine_config.attr("cache_store_config").cast<CacheStoreConfig>();
         auto misc_config            = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
@@ -70,7 +69,6 @@ void RtpEmbeddingOp::init(py::object model,
                                 profiling_debug_logging_config,
                                 hw_kernel_config,
                                 moe_config,
-                                model_specific_config,
                                 sp_config,
                                 cache_store_config,
                                 misc_config,

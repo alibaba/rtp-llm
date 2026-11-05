@@ -85,7 +85,6 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                           base_params.profiling_debug_logging_config,
                                                                           base_params.hw_kernel_config,
                                                                           base_params.moe_config,
-                                                                          base_params.model_specific_config,
                                                                           base_params.sp_config,
                                                                           base_params.cache_store_config,
                                                                           base_params.misc_config,
@@ -132,7 +131,6 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.profiling_debug_logging_config,
                                                                            base_params.hw_kernel_config,
                                                                            base_params.moe_config,
-                                                                           base_params.model_specific_config,
                                                                            base_params.sp_config,
                                                                            base_params.cache_store_config,
                                                                            base_params.misc_config,
@@ -244,7 +242,6 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
             engine_config.attr("profiling_debug_logging_config").cast<ProfilingDebugLoggingConfig>();
         auto hw_kernel_config       = engine_config.attr("hw_kernel_config").cast<HWKernelConfig>();
         auto moe_config             = engine_config.attr("moe_config").cast<MoeConfig>();
-        auto model_specific_config  = engine_config.attr("model_specific_config").cast<ModelSpecificConfig>();
         auto sp_config              = engine_config.attr("sp_config").cast<SpeculativeExecutionConfig>();
         auto cache_store_config     = engine_config.attr("cache_store_config").cast<CacheStoreConfig>();
         auto misc_config            = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
@@ -282,7 +279,6 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 profiling_debug_logging_config,
                                 hw_kernel_config,
                                 moe_config,
-                                model_specific_config,
                                 sp_config,
                                 cache_store_config,
                                 misc_config,
