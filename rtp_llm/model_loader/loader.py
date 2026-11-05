@@ -525,6 +525,32 @@ class ModelLoader:
             for name, tensor in weights.items():
                 yield (None, name, tensor)
 
+    def _get_rl_group_source_names(self, group) -> set[str]:
+        """Expose physical HF inputs rather than fast-loader expert aliases.
+
+        MoeAtomicWeight already expands packed inputs through its normal
+        StackSplitTensorSource. Giving that loader the packed source preserves
+        the initial-load processing, TP slicing and device-specific shuffle.
+        """
+        names = set(group.weight.get_tensor_names(group.layer_id, self._load_config))
+        for weight in iter_stacked_moe_weights(group.weight):
+            names.difference_update(weight.get_tensor_names(group.layer_id, self._load_config))
+            names.update(info.tensor_name(group.layer_id) for info in weight.weights)
+        return names
+
+    def get_rl_hf_source_names(self) -> Tuple[str, ...]:
+        """Return actual checkpoint-loader inputs, excluding vision/MTP extras."""
+        _, groups = self._generate_weight_info()
+        try:
+            return tuple(sorted({
+                name
+                for group in groups
+                for name in self._get_rl_group_source_names(group)
+            }))
+        finally:
+            for group in groups:
+                group.collector.clear()
+
     def prepare_weights_from_tensors(
         self,
         named_tensors: Iterable[Tuple[str, torch.Tensor]],
@@ -532,37 +558,32 @@ class ModelLoader:
         *,
         max_buffer_bytes: int,
     ) -> Iterator[Tuple[Optional[int], str, torch.Tensor]]:
-        """Convert a complete HF tensor stream using the checkpoint load path.
+        """Stream HF inputs through the normal loader, including shared sources.
 
-        The producer must make inputs ready on the consuming CUDA stream.
-        Input buffers may be reused when the iterator requests the next tensor.
-        Collectors own copies until a full parameter group can be transformed.
-        The byte limit bounds these pending copies, not conversion workspace or
-        yielded output tensors. Send complete groups together to limit memory.
-        Descriptor-generated weights are emitted after source coverage checks.
-
-        This only converts tensors: it does not pause inference, update storage,
-        or commit a model version. A caller applying outputs in place must keep
-        inference quiescent, exhaust this iterator before committing, and fail
-        the job on any error (earlier groups may already have been applied).
+        A single owned clone is shared by all consumers of each HF source, then
+        released when its last descriptor completes. The bound counts unique
+        pending input bytes, not temporary conversion/output tensors. Inference
+        must remain paused until this iterator and the native transaction finish.
         """
         if max_buffer_bytes <= 0:
             raise ValueError("max_buffer_bytes must be positive")
         if self._load_config.is_ft_style_weight or self._load_config.merge_lora:
             raise NotImplementedError("tensor streaming requires unmerged HF weights")
-
-        # New collectors for every update; clear() retains completion history.
-        tensor_map, groups = self._generate_weight_info()
-        group_names = [
-            group.weight.get_tensor_names(group.layer_id, self._load_config)
-            for group in groups
-        ]
-        if sum(len(names) for names in group_names) != len(tensor_map):
-            raise NotImplementedError(
-                "shared HF inputs across weight groups are unsupported"
-            )
-        expected = set(tensor_map)
+        _, groups = self._generate_weight_info()
+        group_names = [self._get_rl_group_source_names(group) for group in groups]
+        # The ordinary fast-loader collectors expect per-expert logical keys.
+        # Streaming refit receives one real packed tensor per HF parameter;
+        # reconstruct only these transaction-local collectors with real keys.
+        groups = [group._replace(collector=TensorCollector(names, self._load_config.database))
+                  for group, names in zip(groups, group_names)]
+        consumers = {}
+        for index, names in enumerate(group_names):
+            for name in names:
+                consumers.setdefault(name, []).append(index)
+        expected = set(consumers)
         seen = set()
+        emitted = set()
+        remaining = {name: len(indices) for name, indices in consumers.items()}
         pending_bytes = 0
         sizes = {}
         try:
@@ -579,43 +600,49 @@ class ModelLoader:
                         f"HF tensor buffer exceeds {max_buffer_bytes} bytes at {name}; "
                         "send complete weight groups together or increase the limit"
                     )
-                group = tensor_map[name]
                 owned_tensor = tensor.detach().clone()
                 if tensor.is_cuda:
-                    # A transport may reuse its buffer on another stream/process.
                     torch.cuda.current_stream(tensor.device).synchronize()
-                complete = group.collector.store_tensor(name, owned_tensor)
+                ready = []
+                for index in consumers[name]:
+                    if groups[index].collector.store_tensor(name, owned_tensor):
+                        ready.append(index)
                 del owned_tensor
                 seen.add(name)
                 sizes[name] = size
                 pending_bytes += size
-                if not complete:
-                    continue
-                converted = group.weight.load(
-                    group.collector, group.layer_id, device, self._load_config
-                )
-                for key in group.weight.get_tensor_names(
-                    group.layer_id, self._load_config
-                ):
-                    pending_bytes -= sizes.pop(key)
-                group.collector.clear()
-                for key, value in converted.items():
-                    yield group.layer_id, key, value
-                del converted
+                for index in ready:
+                    if index in emitted:
+                        raise RuntimeError("repeated completed weight group")
+                    group = groups[index]
+                    converted = group.weight.load(
+                        group.collector, group.layer_id, device, self._load_config
+                    )
+                    for key in group_names[index]:
+                        remaining[key] -= 1
+                        if remaining[key] == 0:
+                            pending_bytes -= sizes.pop(key)
+                    group.collector.clear()
+                    emitted.add(index)
+                    for key, value in converted.items():
+                        yield group.layer_id, key, value
+                    del converted
             missing = expected - seen
             if missing:
                 raise ValueError(f"missing HF tensors: {sorted(missing)}")
-            # The checkpoint loader also synthesizes weights such as Qwen3's
-            # zero final-layernorm bias, which have no HF source tensors.
-            for group, names in zip(groups, group_names):
+            for index, names in enumerate(group_names):
                 if names:
                     continue
+                group = groups[index]
                 converted = group.weight.load(
                     group.collector, group.layer_id, device, self._load_config
                 )
+                emitted.add(index)
                 for key, value in converted.items():
                     yield group.layer_id, key, value
                 del converted
+            if len(emitted) != len(groups) or pending_bytes or sizes:
+                raise RuntimeError("incomplete or unbalanced HF weight conversion")
         finally:
             for group in groups:
                 group.collector.clear()

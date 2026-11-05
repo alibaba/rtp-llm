@@ -57,8 +57,8 @@ class RlWeightUpdate:
                 raise ValueError(f"duplicate HF parameter: {name}")
             if tuple(tensor.shape) != tuple(self.source_shapes[name]):
                 raise ValueError(f"HF shape mismatch for {name}: {tuple(tensor.shape)}")
-            if tensor.dtype != torch.bfloat16 or tensor.device != self.device:
-                raise ValueError(f"HF parameter must be BF16 on {self.device}: {name}")
+            if tensor.dtype not in (torch.bfloat16, torch.float32) or tensor.device != self.device:
+                raise ValueError(f"HF parameter must be BF16 or FP32 on {self.device}: {name}")
             yield name, tensor
             # The loader owns pending group tensors. All reads and in-place
             # writes on our stream are complete before the producer gets ACK.

@@ -65,7 +65,7 @@ class RlWeightUpdateTest(unittest.TestCase):
         for label, source_name, tensor, pattern in (
             ("unknown", "unknown.weight", value, "unknown HF"),
             ("shape", name, value.flatten(), "shape mismatch"),
-            ("dtype", name, value.float(), "must be BF16"),
+            ("dtype", name, value.double(), "must be BF16 or FP32"),
         ):
             with self.subTest(label=label):
                 session = self.transaction()
@@ -81,6 +81,26 @@ class RlWeightUpdateTest(unittest.TestCase):
             session.push(*self.sources[0], timeout=2)
         with self.assertRaisesRegex(ValueError, "duplicate HF"):
             session.finish(timeout=2)
+
+    def test_fp32_sources_can_update_bf16_targets_without_replacing_storage(self):
+        # GDN A_log/dt_bias are supplied in FP32 by the policy exporter. The
+        # normal descriptor, rather than the transport, owns the target dtype.
+        session = self.transaction()
+        sources = [(name, value.float()) for name, value in self.sources]
+        expected = {
+            (layer, name): value.clone()
+            for layer, name, value in self.loader.prepare_weights_from_tensors(
+                sources, "cpu", max_buffer_bytes=4096
+            )
+        }
+        pointers = {key: tensor.data_ptr() for key, tensor in session.targets.items()}
+        for name, value in sources:
+            session.push(name, value, timeout=2)
+            value.fill_(-999)
+        self.assertEqual(session.finish(timeout=2)["hf_sources"], len(sources))
+        for key, tensor in session.targets.items():
+            torch.testing.assert_close(tensor, expected[key], rtol=0, atol=0)
+            self.assertEqual(tensor.data_ptr(), pointers[key])
 
     def test_missing_internal_target_cannot_commit(self):
         session = self.transaction()

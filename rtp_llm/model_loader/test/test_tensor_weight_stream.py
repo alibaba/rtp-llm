@@ -210,13 +210,37 @@ class TensorWeightStreamTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be positive"):
             convert(make_loader(), source, 0)
 
-    def test_rejects_ambiguous_shared_input_before_conversion(self):
+    def test_shared_source_is_loaded_for_all_consumers_and_counted_once(self):
         loader = make_loader()
-        loader._model_weights_info.weights.append(
-            AtomicWeight(W.lm_head, [CkptWeightInfo("model.norm.weight", identity)])
+        loader._model_weights_info.layer_weights = []
+        loader._model_weights_info.weights = [
+            AtomicWeight(W.final_ln_gamma, [CkptWeightInfo("shared.weight", identity)]),
+            AtomicWeight(
+                W.final_ln_beta,
+                [CkptWeightInfo("shared.weight", identity), CkptWeightInfo("other.weight", identity)],
+                lambda values: values[0] + values[1],
+            ),
+        ]
+        shared = torch.arange(4, dtype=torch.float32)
+        other = torch.full((4,), 2.0)
+        source = [("shared.weight", shared), ("other.weight", other)]
+        self.assertEqual(loader.get_rl_hf_source_names(), ("other.weight", "shared.weight"))
+        # One source serves two descriptors. It consumes 16 pending bytes once,
+        # and must survive the caller reusing its input before the second group.
+        def reused_inputs():
+            for name, value in source:
+                yield name, value
+                value.fill_(-999)
+
+        actual = convert(loader, reused_inputs(), limit=32)
+        torch.testing.assert_close(
+            actual[(None, W.final_ln_gamma)], torch.arange(4).bfloat16(), rtol=0, atol=0
         )
-        with self.assertRaisesRegex(NotImplementedError, "shared HF inputs"):
-            convert(loader, inputs())
+        torch.testing.assert_close(
+            actual[(None, W.final_ln_beta)], (torch.arange(4) + 2).bfloat16(), rtol=0, atol=0
+        )
+        with self.assertRaisesRegex(ValueError, "buffer exceeds"):
+            convert(loader, [("shared.weight", torch.zeros(4)), ("other.weight", torch.zeros(4))], limit=31)
 
     def test_rejects_non_hf_or_merged_lora(self):
         for name in ("is_ft_style_weight", "merge_lora"):
@@ -224,6 +248,25 @@ class TensorWeightStreamTest(unittest.TestCase):
             setattr(loader._load_config, name, True)
             with self.assertRaises(NotImplementedError):
                 convert(loader, inputs())
+
+    def test_explicit_fp32_descriptor_preserves_source_precision(self):
+        loader = make_loader()
+        # An explicitly configured generic descriptor fixture, not a claim
+        # that actual Qwen GDN descriptors already select FP32 by default.
+        name = "model.layers.0.keep_fp32.weight"
+        loader._model_weights_info.weights = []
+        loader._model_weights_info.layer_weights = [[
+            AtomicWeight(
+                W.final_ln_beta,
+                [CkptWeightInfo("model.layers.{i}.keep_fp32.weight", identity)],
+                data_type=torch.float32,
+            )
+        ]]
+        source = torch.tensor([0.1234567, -2.7182818], dtype=torch.float32)
+        self.assertFalse(torch.equal(source, source.bfloat16().float()))
+        actual = convert(loader, [(name, source)])[(0, W.final_ln_beta)]
+        self.assertEqual(actual.dtype, torch.float32)
+        torch.testing.assert_close(actual, source, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

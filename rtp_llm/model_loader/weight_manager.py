@@ -129,8 +129,38 @@ class WeightManager:
         self._rl_source_shapes = None
         if os.environ.get("RTP_LLM_RL_MODE") == "1":
             config = self._weights_loader.model_config
-            if config.model_type != "qwen_3" or config.enable_fp32_lm_head:
-                raise ValueError("RL mode requires Qwen3 dense with a BF16 LM head")
+            if config.model_type not in {"qwen_3", "qwen35_moe_text", "qwen36_moe_text"} or config.enable_fp32_lm_head:
+                raise ValueError("RL mode requires a supported text model with a BF16 LM head")
+            self._rl_required_names = self._weights_loader.get_rl_hf_source_names()
+            directory = os.environ.get("RTP_WEIGHT_MANIFEST_DIR")
+            if directory:
+                import hashlib
+                import json
+                from pathlib import Path
+                load = self._weights_loader.get_load_config()
+                tp_rank = int(load.tp_rank)
+                dp_rank = int(getattr(load, "dp_rank", 0))
+                world_rank = dp_rank * int(load.tp_size) + tp_rank
+                record = {
+                    "schema": "qwen36-rtp-required-hf-v1",
+                    "model_type": config.model_type,
+                    "pid": os.getpid(),
+                    "device": str(self._device),
+                    "gpu_uuid": str(getattr(torch.cuda.get_device_properties(self._device), "uuid", "")),
+                    "world_rank": world_rank,
+                    "tp_rank": tp_rank, "tp_size": int(load.tp_size),
+                    "dp_size": int(getattr(load, "dp_size", 1)),
+                    "ep_size": int(getattr(load, "ep_size", 1)),
+                    "ffn_tp_size": int(getattr(load, "ffn_tp_size", load.tp_size)),
+                    "names": list(self._rl_required_names),
+                    "names_sha256": hashlib.sha256("\n".join(self._rl_required_names).encode()).hexdigest(),
+                }
+                folder = Path(directory)
+                folder.mkdir(parents=True, exist_ok=True)
+                output = folder / f"rank-{world_rank:05d}.json"
+                temporary = output.with_name(output.name + f".writing-{os.getpid()}")
+                temporary.write_text(json.dumps(record, indent=2) + "\n")
+                temporary.replace(output)
 
     def rl_begin(self, max_buffer_bytes: int) -> None:
         """Called only by the native RL control RPC after TP quiescence."""
@@ -144,9 +174,9 @@ class WeightManager:
         if self._rl_update is not None:
             raise RuntimeError("another RL weight transaction is active")
         config = self._weights_loader.model_config
-        if config.model_type != "qwen_3" or config.enable_fp32_lm_head:
+        if config.model_type not in {"qwen_3", "qwen35_moe_text", "qwen36_moe_text"} or config.enable_fp32_lm_head:
             raise ValueError(
-                "RL updates currently require Qwen3 dense with a BF16 LM head"
+                "RL updates require a supported text model with a BF16 LM head"
             )
         if (
             self._non_owned_global_weights
@@ -160,16 +190,18 @@ class WeightManager:
             index = json.loads(
                 (checkpoint / "model.safetensors.index.json").read_text()
             )["weight_map"]
+            required = set(self._weights_loader.get_rl_hf_source_names())
+            missing_sources = required - set(index)
+            if missing_sources:
+                raise ValueError(f"RL source keys missing from checkpoint index: {sorted(missing_sources)}")
             shapes = {}
-            for filename in sorted(set(index.values())):
-                with safe_open(
-                    checkpoint / filename, framework="pt", device="cpu"
-                ) as handle:
+            for filename in sorted({index[name] for name in required}):
+                with safe_open(checkpoint / filename, framework="pt", device="cpu") as handle:
                     for name in handle.keys():
-                        if index.get(name) == filename:
+                        if name in required and index.get(name) == filename:
                             shapes[name] = tuple(handle.get_slice(name).get_shape())
-            if set(shapes) != set(index):
-                raise ValueError("checkpoint HF shape manifest is incomplete")
+            if set(shapes) != required:
+                raise ValueError("checkpoint HF shape manifest is incomplete for required text weights")
             self._rl_source_shapes = shapes
         self._rl_update = RlWeightUpdate(
             self._weights_loader,

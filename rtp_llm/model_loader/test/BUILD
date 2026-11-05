@@ -75,3 +75,14 @@ py_test(
     deps = py_test_deps,
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
+
+py_test(
+    name = "test_packed_moe_rl_stream",
+    srcs = [
+        "test_packed_moe_rl_stream.py",
+        "test_pure_tp_preshard.py",
+        "test_tensor_weight_stream.py",
+    ],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
