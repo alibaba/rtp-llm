@@ -749,7 +749,8 @@ public final class WorkerBatcher {
             }
         } finally {
             try {
-                if (capacityWait) {
+                // Once stop claims cleanup, it owns listener removal and its failure result.
+                if (capacityWait && !drainClaimed) {
                     setCapacityBlockedHeadLocked(null);
                 }
             } finally {
