@@ -134,6 +134,35 @@ class FullK31SmokeTest(unittest.TestCase):
         for index in range(3):
             self.assertNotIn(f'cancel{index}', device)
 
+    def test_pressure_scales_to_a_larger_prefill_pool(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(namespace='large-pool', block_size=1024,
+                                      reuse_unit_tokens=8192)
+        runner._memory_candidates = [0, 1, 2]
+        runner._cancel_host_candidates = [0, 1, 2]
+        runner._orthogonal_device_blocks = lambda: 216
+        runner.fit_prompt = lambda head, tail, length: (str(length), [])
+        probes = []
+        runner._required_stage = lambda name, cases: probes.extend(cases)
+        runner._orthogonal_bounded_cache_pressure()
+        self.assertEqual(len(probes), 31)
+        self.assertTrue(all(case.preparation_only for case in probes))
+        self.assertTrue(all(int(case.prompt) <= 65536 for case in probes))
+        self.assertGreater(sum((int(case.prompt) - 1) // 8192 for case in probes), 216)
+
+    def test_prefill_admission_checks_linear_pool_independently(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(decode_batch_profile='smoke', reuse_unit_tokens=8192)
+        pools = {'full': 104, 'linear': 81}
+        runner._orthogonal_device_blocks = lambda tag='full': pools[tag]
+        with self.assertRaisesRegex(legacy.SmokeFailure, 'LINEAR 81/82, FULL 104/82'):
+            runner.validate_prefill_capacity()
+        pools['linear'] = 104
+        runner.validate_prefill_capacity()
+        runner.args.decode_batch_profile = 'capacity'
+        pools['full'] = 64
+        runner.validate_prefill_capacity()
+
     def test_default_decode_inventory_uses_short_63_and_both_owners(self):
         runner = object.__new__(K31FullRunner)
         runner.args = SimpleNamespace(decode_batch_profile='smoke')
@@ -154,6 +183,19 @@ class FullK31SmokeTest(unittest.TestCase):
         self.assertEqual(runner.max_grouped_prefill_requests(), 63)
         shared = object.__new__(legacy.Runner)
         self.assertEqual(shared.max_grouped_prefill_requests(), 16)
+
+    def test_large_single_owner_cases_can_overlap_after_rdma_load(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(decode_batch_profile='smoke', namespace='rdma', max_tokens=128)
+        runner.decode_role_addrs = ['owner0']
+        stages = []
+        runner._required_stage = lambda name, cases, **kw: stages.append(cases)
+        runner._orthogonal_decode_batches()
+        self.assertTrue(all(len(c.expected_json['value'].split()) == 1
+                            for cases in stages[:-1] for c in cases))
+        self.assertEqual(len(stages[-1]), 63)
+        self.assertTrue(all(len(c.expected_json['value'].split()) == 8
+                            and c.max_tokens == 160 for c in stages[-1]))
 
     def test_capacity_suite_only_runs_64_and_cannot_claim_complete_smoke(self):
         runner = object.__new__(K31FullRunner)

@@ -940,13 +940,13 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     auto stream = createStream(input);
     // DecodeRpcServer allocates the destination KV table before enqueue/P-D handoff.
-    stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
+    setStreamReserveSteps(*stream);
     (void)validateStreamForScheduling(stream);
     return stream;
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
-    stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
+    setStreamReserveSteps(*stream);
     if (!validateStreamForScheduling(stream)) {
         return;
     }
@@ -969,7 +969,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     schedulable_indexes.reserve(inputs.size());
     for (auto& inp : inputs) {
         auto stream = createStream(inp);
-        stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
+        setStreamReserveSteps(*stream);
         streams.push_back(stream);
     }
 
@@ -1104,6 +1104,16 @@ bool NormalEngine::isDSpark() {
 
 size_t NormalEngine::reserveStepForStream(size_t configured_reserve_step, bool is_prefill_only) {
     return is_prefill_only ? 0 : configured_reserve_step;
+}
+
+void NormalEngine::setStreamReserveSteps(GenerateStream& stream) const {
+    const bool pd_mtp_prefill = pd_sep_config.role_type == RoleType::PREFILL && stream.queryPdSep()
+                                && sp_config.type == SP_TYPE_MTP && model_config_.model_type == "kimi_k31";
+    const auto reserve = reserveStepForStream(reserve_step_, stream.generateConfig()->isPrefillOnly());
+    // Prefill commits one target token, then Decode uses its own proposal
+    // slots. Preserve the generation reserve for the model length limit.
+    const auto kv_reserve = pd_mtp_prefill ? std::min(reserve, size_t{1}) : reserve;
+    stream.setReserveStep(reserve, kv_reserve);
 }
 
 bool NormalEngine::shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate) {

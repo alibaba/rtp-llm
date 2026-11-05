@@ -41,6 +41,7 @@ class DsaPageRRParams:
             )
         self.query_cp = bool(workspace_owner and workspace_owner.prefill_query_cp)
         self.query_layout = None
+        self.producer_layout = None
         self.ingress_plans = {}
         if parallelism.prefill_cp_config.is_enabled() and not self.query_cp:
             raise ValueError(
@@ -174,6 +175,8 @@ class DsaPageRRParams:
         if layout is None:
             raise ValueError("DSA query CP requires original zigzag positions")
         self.query_layout = layout
+        producer = getattr(self.workspace_owner, "producer_layout", None)
+        self.producer_layout = producer = layout if producer is None else producer
         self.positions_d = self.query_positions = layout.local_positions
         self.batch_indice_d = self.query_requests = layout.local_requests
         self.query_indices = torch.arange(layout.local_rows, dtype=torch.int64,
@@ -183,6 +186,14 @@ class DsaPageRRParams:
         self.slot_mapping = self.cache_adapter.slot_mapping(
             self.positions_d, self.batch_indice_d, self.block_table,
             valid_token_mask=layout.local_valid,
+            allow_reserved_block_zero=self.is_warmup,
+        )
+        self.producer_positions = producer.local_positions
+        self.producer_requests = producer.local_requests
+        self.producer_valid = producer.local_valid
+        self.producer_slot_mapping = self.slot_mapping if producer is layout else self.cache_adapter.slot_mapping(
+            self.producer_positions, self.producer_requests, self.block_table,
+            valid_token_mask=self.producer_valid,
             allow_reserved_block_zero=self.is_warmup,
         )
         offsets = [0]

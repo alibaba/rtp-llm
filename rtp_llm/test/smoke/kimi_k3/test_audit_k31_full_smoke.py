@@ -4,6 +4,7 @@ import unittest
 
 from audit_k31_full_smoke import (IndexedEvents, audit, group_evidence, replay_evidence,
                                  host_cancel_evidence, large_batch_evidence)
+from k31_full_smoke import cache_pressure_plan
 from smoke_request_identity import resolve
 
 
@@ -81,6 +82,11 @@ class MtpExecutionAuditTest(unittest.TestCase):
     def test_incomplete_or_target_only_result_cannot_pass(self):
         with self.assertRaisesRegex(ValueError,"smoke MTP"):
             audit(dict(passed=True,target_only=True,cases=[]),{}, {},8)
+
+    def test_pressure_plan_must_match_native_full_pool_capacity(self):
+        result = dict(reuse_unit_tokens=8192, cache_pressure_plan=cache_pressure_plan(216, 8192))
+        with self.assertRaisesRegex(ValueError, 'does not match the runtime pool'):
+            audit(result, {}, {}, 8, prefill_full_pages=217)
 
     def test_indexed_snapshot_preserves_duplicates_and_graph_window_checks(self):
         events, root = self.group()

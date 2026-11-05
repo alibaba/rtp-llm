@@ -87,6 +87,12 @@ class DsaKVExecution:
             owner.native_exact_topk,
             owner.indexer_use_fp8,
             owner.sfa_use_fp8,
+            owner.layout_bytes,
+            owner.routing_plan is not None,
+            owner.route_bytes,
+            owner.route_capacity,
+            owner.route_chunk_rows,
+            owner.route_allocation_granularity,
         )
 
     def __init__(self, params, name):
@@ -146,11 +152,13 @@ class DsaKVExecution:
         # These buffers are allocated by existing kernels/collectives, rather
         # than incorrectly counted as caller-owned workspace.
         if name == "indexer":
-            external += capacity_rows * owner.index_heads * (owner.index_dim * 2 + 4)
+            if owner.routing_plan is None:
+                external += capacity_rows * owner.index_heads * (owner.index_dim * 2 + 4)
             if self.fp8_indexer:
                 # BF16 projection source, new E4M3 Q, packed/unpacked scales
                 # and folded FP32 head weights coexist until QK completion.
-                external += capacity_rows * owner.index_heads * (owner.index_dim + 16)
+                if owner.routing_plan is None:
+                    external += capacity_rows * owner.index_heads * (owner.index_dim + 16)
                 if not self.prefill:
                     if params.kernel_page_size % 64 or params.page_size % 64:
                         raise ValueError("FP8 paged Indexer needs whole native64 subpages")

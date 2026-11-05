@@ -31,10 +31,23 @@ def decode_batch_sizes(profile):
     raise ValueError(f'unknown Decode batch profile: {profile}')
 
 
-def request_budget(profile):
+def request_budget(profile, pressure_requests=15):
     decode_batch_sizes(profile)  # Reject an unsupported contract.
-    return (dict(total=304, formal=267, preparation=37) if profile == 'smoke'
+    return (dict(total=289 + pressure_requests, formal=267,
+                 preparation=22 + pressure_requests) if profile == 'smoke'
             else dict(total=64, formal=64, preparation=0))
+
+
+def cache_pressure_plan(device_pages, reuse_unit_tokens):
+    if type(device_pages) is not int or device_pages <= 0:
+        raise ValueError('Prefill Device/full capacity must be positive')
+    if type(reuse_unit_tokens) is not int or not 0 < reuse_unit_tokens < 65536:
+        raise ValueError('Prefill checkpoint must fit in the 64K query limit')
+    # One suffix token lets the complete checkpoints be published as prefixes.
+    pages = min((device_pages + 15) // 15, (65536 - 1) // reuse_unit_tokens)
+    return dict(device_pages=device_pages, pages_per_probe=pages,
+                input_tokens=pages * reuse_unit_tokens + 1,
+                requests=max(15, (device_pages + pages) // pages))
 
 
 def pending_host_load(path, request_id, *, timeout=5.0, clock=time.monotonic,
@@ -115,6 +128,19 @@ class K31FullRunner(legacy.Runner):
         return max(decode_batch_sizes(
             getattr(getattr(self, 'args', None), 'decode_batch_profile', 'smoke')))
 
+    def _request_cases_group(self, cases, *, decode_relay_port=None):
+        if len(cases) < 63 or len(self.decode_role_addrs) != 1:
+            return super()._request_cases_group(cases, decode_relay_port=decode_relay_port)
+        if __package__:
+            from .pd_group_relay import PdGroupRelay
+        else:
+            from pd_group_relay import PdGroupRelay
+        role = self.decode_role_addrs[0]
+        endpoint = f"{role['ip']}:{role['grpc_port']}"
+        artifact = self.args.output.parent / f'pd-group-relay-{time.time_ns()}.jsonl'
+        with PdGroupRelay(endpoint, len(cases), artifact) as relay:
+            return super()._request_cases_group(cases, decode_relay_port=relay.port)
+
     def record_case(self, name, owner, *, words=1):
         # Batch transitions test membership and state, not long copying.
         structural_batch = name.startswith('batch-shape-')
@@ -194,30 +220,35 @@ class K31FullRunner(legacy.Runner):
         return target
 
     def _orthogonal_bounded_cache_pressure(self):
-        # Keep the reference15 requests, using the observed K3.1 checkpoint
-        # and bounded pool. Fresh seeds plus the probes must exceed Device,
-        # while fitting Device+Host. Long-history allocation runs afterwards:
-        # it may legitimately drop unrelated small-prefix checkpoints.
-        blocks = self._orthogonal_device_blocks()
-        if blocks != 95:
-            raise legacy.SmokeFailure('service smoke pressure plan requires the audited95-page pool')
-        # Fill more than the entire Device pool with newer, distinct prefixes.
-        # Subtracting the seeds only demotes the oldest few candidates and
-        # leaves the later witness/cancel prefixes resident on Device.
-        pages = max(1, (blocks + 1 + 14) // 15)
-        tokens = pages * self.reuse_unit_tokens + 1
-        if tokens > 65536:
-            raise legacy.SmokeFailure('bounded cache pressure exceeds64K current-Q limit')
-        self._cache_pressure_requests = 15
-        seeds = len(self._memory_candidates) + 1 + len(self._cancel_host_candidates)
-        self._cache_pressure_plan = dict(seed_pages=seeds, pages_per_probe=pages,
-                                        input_tokens=tokens, device_pages=blocks)
-        for index in range(15):
+        # Demote the witness and all cancellation seeds by filling the observed
+        # Device pool with newer prefixes. Larger pools need more preparations.
+        plan = cache_pressure_plan(self._orthogonal_device_blocks(), self.reuse_unit_tokens)
+        self._cache_pressure_plan = plan
+        self._cache_pressure_requests = plan['requests']
+        for index in range(plan['requests']):
             prompt, _ = self.fit_prompt(f'CACHE-PRESSURE:{self.args.namespace}:{index}\n',
-                                       '\nReply 1.', tokens)
+                                       '\nReply 1.', plan['input_tokens'])
             self._required_stage(f'tier-pressure-{index:02d}', [legacy.Case(
                 f'tier-pressure-{index:02d}', prompt, r'.', 'miss',
-                max_tokens=8, preparation_only=True)])
+                max_tokens=8, preparation_only=True,
+                expected_input_len=plan['input_tokens'])])
+
+    def validate_prefill_capacity(self):
+        largest_batch = max(decode_batch_sizes(self.args.decode_batch_profile))
+        # These short grouped requests each use one Prefill state slot.
+        # Pure PD Prefill reserves one target token; proposal slots live on Decode.
+        linear_required = largest_batch + 4
+        linear = self._orthogonal_device_blocks('linear')
+        full = self._orthogonal_device_blocks()
+        full_required = largest_batch
+        if self.args.decode_batch_profile == 'smoke':
+            full_required = max(full_required, 655360 // self.reuse_unit_tokens + 2)
+            linear_required = max(linear_required, full_required)
+        if linear < linear_required or full < full_required:
+            raise legacy.SmokeFailure(
+                f'Prefill cache capacity is too small before smoke admission: '
+                f'LINEAR {linear}/{linear_required}, FULL {full}/{full_required} '
+                f'(usable/required). Increase the Prefill KV budget while reserving activation memory.')
 
     def _seed_cancel_candidates(self):
         # Keep three reference seeds. A real64K cached prefix makes Host DMA
@@ -268,10 +299,12 @@ class K31FullRunner(legacy.Runner):
         profile = getattr(self.args, 'decode_batch_profile', 'smoke')
         for stage_index, size in enumerate(decode_batch_sizes(profile)):
             name = f'orthogonal_decode_{stage_index:02d}_batch_{size}'
+            # Allow the whole cohort to overlap after the paced PD handoff.
+            large_single_owner = size >= 63 and owners == 1
             cases = [replace(
                 self.record_case(f'{name}_{index:02d}', index % owners,
-                                 words=1),
-                max_tokens=64,
+                                 words=8 if large_single_owner else 1),
+                max_tokens=160 if large_single_owner else 64,
                 require_mtp_draft=True, thinking_disabled=True)
                 for index in range(size)]
             self._required_stage(name, cases, concurrent=size > 1, grouped_pd=size > 1)
@@ -294,7 +327,7 @@ class K31FullRunner(legacy.Runner):
         formal = sum(row.get('phase') == 'formal' for row in self.records)
         preparation = sum(row.get('phase') == 'preparation' for row in self.records)
         profile = getattr(self.args, 'decode_batch_profile', 'smoke')
-        budget = request_budget(profile)
+        budget = request_budget(profile, getattr(self, '_cache_pressure_requests', 15))
         complete_count = formal == budget['formal'] and preparation == budget['preparation']
         requested_pass = passed
         if passed and not complete_count:
@@ -376,6 +409,7 @@ def main(argv=None):
     args = parse_args(argv)
     runner = K31FullRunner(args)
     try:
+        runner.validate_prefill_capacity()
         runner.run_k3_full()
         runner.save(True)
         return 0

@@ -9,6 +9,7 @@ py_library(
         "k31_chunk_fixture.py",
         "logprobs_smoke.py",
         "mtp_contract.py",
+        "pd_group_relay.py",
         "k31_full_smoke.py",
         "k31_structural_smoke.py",
         "audit_k31_full_smoke.py",

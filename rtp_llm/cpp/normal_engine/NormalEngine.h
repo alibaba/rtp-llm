@@ -85,6 +85,8 @@ private:
     bool isDSpark() override;
 
 private:
+    void setStreamReserveSteps(GenerateStream& stream) const;
+
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
     std::unique_ptr<Executor>                     executor_;

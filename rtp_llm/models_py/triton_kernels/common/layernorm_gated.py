@@ -649,3 +649,57 @@ def grouped_q_kv_rmsnorm(q, kv, q_weight, kv_weight, eps, *, kv_suffix=None):
         _supports_pdl(q.device.index), num_warps=8,
     )
     return q_out, kv_out
+
+
+@triton.jit
+def _independent_q_kv_rmsnorm_kernel(
+    X, W, OUT, SUFFIX, N: tl.constexpr, WIDTH: tl.constexpr,
+    XS: tl.constexpr, OS: tl.constexpr, SS: tl.constexpr,
+    SUFFIX_DIM: tl.constexpr, EPS: tl.constexpr, ROWS: tl.constexpr,
+    BLOCK: tl.constexpr, PDL: tl.constexpr,
+):
+    rows = (tl.program_id(0) * ROWS + tl.arange(0, ROWS)).to(tl.int64)
+    cols = tl.arange(0, BLOCK)
+    weight = tl.load(W + cols, cols < WIDTH, other=0).to(tl.float32)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
+    x = tl.load(X + rows[:, None] * XS + cols[None, :],
+                (rows[:, None] < N) & (cols[None, :] < WIDTH), other=0).to(tl.float32)
+    y = x * tl.rsqrt(tl.sum(x * x, 1) / WIDTH + EPS)[:, None] * weight[None, :]
+    tl.store(OUT + rows[:, None] * OS + cols[None, :], y,
+             (rows[:, None] < N) & (cols[None, :] < WIDTH))
+    if SUFFIX_DIM:
+        suffix = tl.load(SUFFIX + rows[:, None] * SS + cols[None, :],
+                         (rows[:, None] < N) & (cols[None, :] < SUFFIX_DIM), other=0)
+        tl.store(OUT + rows[:, None] * OS + WIDTH + cols[None, :], suffix,
+                 (rows[:, None] < N) & (cols[None, :] < SUFFIX_DIM))
+
+
+def independent_q_kv_rmsnorm(x, weight, eps, *, q_width, kv_width, full_rows, suffix=None):
+    """One Q or KV branch using the original full-extent reduction policy."""
+    if (x.ndim != 2 or not x.is_cuda or x.dtype != torch.bfloat16
+            or weight.dtype != torch.bfloat16 or weight.device != x.device
+            or weight.shape != (x.shape[1],) or not weight.is_contiguous()
+            or x.stride(-1) != 1 or x.shape[1] not in (q_width, kv_width)
+            or not 0 <= x.shape[0] <= full_rows):
+        raise ValueError("independent MLA norm requires BF16 Q/KV and original full row extent")
+    if suffix is not None and (
+        suffix.ndim != 2 or suffix.shape[0] != x.shape[0]
+        or suffix.dtype != x.dtype or suffix.device != x.device or suffix.stride(-1) != 1
+        or x.shape[1] != kv_width or suffix.shape[1] > kv_width
+    ):
+        raise ValueError("packed independent KV norm suffix mismatch")
+    grouped = full_rows >= 128 and (q_width, kv_width) == (1536, 512)
+    rows = 4 if grouped else 1
+    block = triton.next_power_of_2(x.shape[1] if grouped else max(q_width, kv_width))
+    suffix_width = 0 if suffix is None else suffix.shape[1]
+    storage = torch.empty((x.shape[0], x.shape[1] + suffix_width), dtype=x.dtype, device=x.device)
+    if x.shape[0]:
+        _independent_q_kv_rmsnorm_kernel[(triton.cdiv(x.shape[0], rows),)](
+            x, weight, storage, x if suffix is None else suffix,
+            x.shape[0], x.shape[1], x.stride(0), storage.stride(0),
+            0 if suffix is None else suffix.stride(0), suffix_width, eps, rows, block,
+            _supports_pdl(x.device.index), num_warps=8 if grouped or block >= 2048 else 4,
+        )
+    return storage[:, :x.shape[1]]

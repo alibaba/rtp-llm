@@ -36,8 +36,9 @@ class ChunkFixtureTest(unittest.TestCase):
 
     def test_padded_cp_rows_use_real_chunks_with_original_budget(self):
         module=self.module();fixture.install(module)
-        for rows in (1024,1025,1026,1058):
-            params=self.params(rows)
+        for fp8, rows in ((True, 1024), (True, 1025), (True, 1026),
+                          (True, 1058), (False, 8192)):
+            params=self.params(rows, fp8=fp8)
             execution=module.DsaKVExecution(params,'sfa')
             self.assertGreaterEqual(len(execution.plan.blocks),2)
             self.assertEqual(sum(block.tokens for block in execution.plan.blocks),655363)
@@ -47,7 +48,7 @@ class ChunkFixtureTest(unittest.TestCase):
     def test_other_phases_shapes_and_exception_do_not_inherit_cap(self):
         module=self.module();fixture.install(module);fixture.install(module)
         for params,name in ((self.params(),'indexer'),(self.params(prefill=False),'sfa'),
-                            (self.params(fp8=False),'sfa'),(self.params(rows=8192),'sfa'),
+                            (self.params(rows=8192),'sfa'),
                             (self.params(length=65536),'sfa')):
             self.assertEqual(len(module.DsaKVExecution(params,name).plan.blocks),1)
         with self.assertRaisesRegex(ValueError,'descriptor failed'):

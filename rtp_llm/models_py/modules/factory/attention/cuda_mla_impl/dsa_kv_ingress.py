@@ -10,7 +10,7 @@ from rtp_llm.models_py.utils.module_profiler import profile_scope
 class DsaKVIngress:
     def __init__(self, params, phase, features):
         self.params, self.phase, self.features = params, phase, features
-        owner, layout = params.workspace_owner, params.query_layout
+        owner, layout = params.workspace_owner, params.producer_layout
         self.workspace = owner.phase(phase + "_ingress")
         rows, shards = layout.local_rows, params.shard_size
         fixed = owner.external_projection_bytes(rows, indexer=phase == "indexer")
@@ -52,8 +52,8 @@ class DsaKVIngress:
         self.ready.record(torch.cuda.current_stream(owner.device))
 
     def run(self, values, writer):
-        if values.shape != (self.params.query_layout.local_rows, self.features):
-            raise ValueError("DSA ingress requires complete local query KV values")
+        if values.shape != (self.params.producer_layout.local_rows, self.features):
+            raise ValueError("DSA ingress requires complete local producer KV values")
         stream = torch.cuda.current_stream(values.device)
         stream.wait_event(self.ready)
         self.workspace.reserve(self.shapes)

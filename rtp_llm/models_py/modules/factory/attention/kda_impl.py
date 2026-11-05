@@ -31,12 +31,14 @@ class KdaMetadata(object):
         is_target_verify: bool = False,
         prefill_paged_conv_meta=None,
         query_layout=None,
+        outer_layout=None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
         self.prefill_paged_conv_meta = prefill_paged_conv_meta
         self.prefill_cuda_inputs = {}
         self.query_layout = query_layout
+        self.outer_layout = outer_layout
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta

@@ -370,7 +370,7 @@ public:
     ErrorInfo    statusInfo();
     std::string  stopReason();
 
-    void   setReserveStep(size_t reserve_step);
+    void   setReserveStep(size_t reserve_step, std::optional<size_t> cache_reserve_step = std::nullopt);
     size_t reserveStep() const {
         return reserve_step_;
     }

@@ -944,11 +944,11 @@ bool GenerateStream::finishOrCancel(int64_t wait_timeout_ms, const std::string& 
     return finished;
 }
 
-void GenerateStream::setReserveStep(size_t reserve_step) {
-    // Keep GenerateStream as the only entry point for setting reserve_step.
+void GenerateStream::setReserveStep(size_t reserve_step, std::optional<size_t> cache_reserve_step) {
     reserve_step_ = reserve_step;
-    generate_status_->setReserveStep(reserve_step);
-    complete_token_ids_->setReserveStep(static_cast<int>(reserve_step));
+    const auto kv_reserve = cache_reserve_step.value_or(reserve_step);
+    generate_status_->setReserveStep(kv_reserve);
+    complete_token_ids_->setReserveStep(static_cast<int>(kv_reserve));
 }
 
 StreamState GenerateStream::moveToNext() {
@@ -1018,8 +1018,8 @@ bool GenerateStream::prepareMtpCacheForNextStep() {
         || maxBatchSize() != 1 || hasNumBeams()) {
         return false;
     }
-    if (stream_cache_resource_->singleBatchNeedBlocks(state.next_seq_len_upper_bound, static_cast<int>(reserve_step_))
-        == 0) {
+    if (stream_cache_resource_->singleBatchNeedBlocks(state.next_seq_len_upper_bound,
+                                                      complete_token_ids_->getReserveStep()) == 0) {
         return true;
     }
 

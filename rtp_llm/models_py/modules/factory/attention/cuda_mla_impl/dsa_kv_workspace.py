@@ -225,6 +225,13 @@ class DsaWorkspaceOwner:
         self.value_weights = {}
         self.prefill_query_cp = False
         self.query_layout = None
+        self.producer_layout = None
+        self.routing_plan = None
+        self.row_exchange = None
+        self.route_bytes = 0
+        self.route_capacity = 0
+        self.route_chunk_rows = 0
+        self.route_allocation_granularity = 0
         self.layout_bytes = 0
         self.graph_max_requests = 0
         self.graph_max_queries = 1
@@ -289,6 +296,31 @@ class DsaWorkspaceOwner:
                 phase.release()
 
     def external_projection_bytes(self, tokens, *, indexer=False):
+        if self.routing_plan is not None:
+            # Conservative simultaneous envelope. Q/gate and producer KV
+            # remain complete, only temporary Q-latent/Indexer projections
+            # are chunked. Residual, normalized H, O and reverse destination
+            # are charged separately from the persistent published source.
+            rows = tokens
+            chunk = min(rows, self.route_chunk_rows)
+            full = rows * (
+                4 * self.hidden_dim * 2
+                + 2 * (self.latent_dim + self.suffix_dim) * 2
+                + self.heads * (self.nope_dim + self.suffix_dim) * 2
+                + 2 * self.heads * self.value_dim * 2
+                + self.index_dim * 2
+                + self.index_heads * (self.index_dim + 4)
+            )
+            temporary = chunk * (
+                2 * self.q_rank * 2
+                + self.heads * (self.nope_dim + self.suffix_dim + self.value_dim) * 2
+                + self.index_heads * (3 * self.index_dim + 16)
+            )
+            anchors = rows * self.attn_res_blocks * self.hidden_dim * 2
+            # TopK running arrays belong to Indexer phase specifications;
+            # SFA's incoming TopK and absorbed/padded Q belong to its execution
+            # planner. Shared projection weights are model storage, not scratch.
+            return full + temporary + anchors + self.layout_bytes + self.route_bytes
         # Gathered hidden (or subsequent O-projection), fused QKV/gate, Q
         # latent/norm and unabsorbed Q survive the phase boundary. Include
         # them before choosing KV capacity; they are never Q-chunked here.
@@ -312,7 +344,7 @@ class DsaWorkspaceOwner:
         # 93-layer capacity must not reuse the four-layer activation estimate.
         local_rows = tokens if self.prefill_query_cp else tokens // self.tp_size
         anchors = local_rows * self.attn_res_blocks * self.hidden_dim * 2
-        return tokens * features * 2 + anchors + self.layout_bytes
+        return tokens * features * 2 + anchors + self.layout_bytes + self.route_bytes
 
     def bind_value_weights(self, layers):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather

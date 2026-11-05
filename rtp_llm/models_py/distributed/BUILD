@@ -5,6 +5,7 @@ py_library(
         "flashinfer_all_reduce.py",
         "rocm_rccl.py",
         "symm_mem.py",
+        "zigzag_row_exchange.py",
     ],
     deps = [
         "//rtp_llm:torch",

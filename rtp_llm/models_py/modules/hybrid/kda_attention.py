@@ -127,7 +127,8 @@ class KdaAttention(nn.Module):
                 f"expected at least {logical_width}"
             )
         fused = fused[..., :logical_width]
-        layout = getattr(metadata, "query_layout", None)
+        outer_layout = getattr(metadata, "outer_layout", None)
+        layout = outer_layout if outer_layout is not None else getattr(metadata, "query_layout", None)
         if layout is not None:
             with profile_scope("RTP::attention.kda.zigzag_to_natural"):
                 fused = layout.gather_natural(fused)
@@ -169,17 +170,18 @@ class KdaAttention(nn.Module):
                     self.norm.eps,
                 )
             else:
+                scatter_layout = None if outer_layout is not None and outer_layout.all_valid else layout
                 output = self.norm(
                     output.reshape(-1, self.heads, self.dim),
                     gate.reshape(-1, self.heads, self.dim),
                     row_indices=(
-                        layout.rankmajor_to_natural if layout is not None else None
+                        scatter_layout.rankmajor_to_natural if scatter_layout is not None else None
                     ),
                     out=(
-                        layout.reserve(
-                            "output", layout.physical_rows, self.width, output.dtype
+                        scatter_layout.reserve(
+                            "output", scatter_layout.physical_rows, self.width, output.dtype
                         ).view(-1, self.heads, self.dim)
-                        if layout is not None
+                        if scatter_layout is not None
                         else None
                     ),
                 )

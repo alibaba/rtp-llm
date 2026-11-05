@@ -1142,6 +1142,9 @@ class Runner:
         runfiles = self.args.prefill_rpc_runfiles
         roots = [runfiles / "rtp_llm", *sorted(runfiles.glob("pip*/site-packages"))]
         sys.path[:0] = [str(root) for root in roots]
+        return self._request_cases_group(cases)
+
+    def _request_cases_group(self, cases, *, decode_relay_port=None):
         try:
             import grpc
             import torch
@@ -1165,7 +1168,7 @@ class Runner:
             from transformers import AutoTokenizer
         except ImportError as exc:
             raise SmokeFailure(
-                f"PD group RPC dependencies are missing from {runfiles}: {exc}"
+                f"PD group RPC dependencies are missing from {self.args.prefill_rpc_runfiles}: {exc}"
             ) from exc
 
         rpc_timeout = self.args.timeout
@@ -1201,9 +1204,9 @@ class Runner:
                 role_addrs=[
                     RoleAddr(
                         role=RoleType.DECODE,
-                        ip=role["ip"],
+                        ip="127.0.0.1" if decode_relay_port is not None else role["ip"],
                         http_port=role["http_port"],
-                        grpc_port=role["grpc_port"],
+                        grpc_port=decode_relay_port if decode_relay_port is not None else role["grpc_port"],
                     )
                 ],
             )
@@ -2242,7 +2245,7 @@ class Runner:
         if not self.stages[-1]["passed"]:
             raise SmokeFailure(f"{name}: required orthogonal stage was skipped")
 
-    def _orthogonal_device_blocks(self) -> int | None:
+    def _orthogonal_device_blocks(self, tag: str = "full") -> int | None:
         engine_log = getattr(self.args, "prefill_engine_log", None)
         if engine_log is None:
             return None
@@ -2252,10 +2255,12 @@ class Runner:
             stream.seek(0, 2)
             stream.seek(max(0, stream.tell() - 16 * 1024 * 1024))
             tail = stream.read()
-        matches = re.findall(r"kvc raw pool\[DEVICE/full\]:[^\n]*?\btotal=(\d+)", tail)
+        matches = re.findall(
+            rf"kvc raw pool\[DEVICE/{re.escape(tag)}\]:[^\n]*?\btotal=(\d+)", tail
+        )
         if not matches:
             raise SmokeFailure(
-                "Prefill Device/full pool capacity is missing from engine log"
+                f"Prefill Device/{tag} pool capacity is missing from engine log"
             )
         return int(matches[-1])
 

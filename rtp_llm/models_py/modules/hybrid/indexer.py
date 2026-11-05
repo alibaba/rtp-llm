@@ -124,8 +124,36 @@ class Indexer(nn.Module):
         return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
 
     # TODO: fuse kernel here
+    def project_key(self, hidden):
+        if self.rope_head_dim or self.dsa_config is None:
+            raise ValueError("independent Indexer key projection requires NoRoPE DSA")
+        return self.k_norm(self.wk(hidden))
+
+    def project_query(self, q_lora, *, original_rows=None):
+        if self.rope_head_dim or self.dsa_config is None:
+            raise ValueError("independent Indexer query projection requires NoRoPE DSA")
+        if original_rows is not None:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import CudaFp8GEMMLinear
+
+            if original_rows < q_lora.shape[0]:
+                raise ValueError("original Indexer row extent cannot be smaller than the chunk")
+            if (isinstance(self.wq_b, CudaFp8GEMMLinear)
+                    and original_rows >= self.wq_b.FLASHINFER_M_THRESHOLD):
+                # An out buffer selects the wrapper's existing DeepGEMM path.
+                # A short receive tail must not select FlashInfer when the
+                # original complete projection would have used DeepGEMM.
+                output = q_lora.new_empty((q_lora.shape[0], self.index_n_heads * self.index_head_dim))
+                self.wq_b(q_lora, out=output)
+                return output.view(-1, self.index_n_heads, self.index_head_dim)
+        return self.wq_b(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
+
+    def project_head_weights(self, hidden, q_scale, *, is_prefill=False, original_rows=None):
+        return self._get_logits_head_gate(hidden, q_scale, is_prefill=is_prefill,
+                                          original_rows=original_rows)
+
     def _get_logits_head_gate(
-        self, x: torch.Tensor, q_scale: torch.Tensor, *, is_prefill: bool = False
+        self, x: torch.Tensor, q_scale: torch.Tensor, *, is_prefill: bool = False,
+        original_rows=None,
     ) -> torch.Tensor:
         if is_prefill and self._fp32_head_weight is not None:
             from rtp_llm.models_py.kernels.cuda.dsa_head_weights_fp32 import fused_logits_head_gate
@@ -134,6 +162,7 @@ class Indexer(nn.Module):
                 x, q_scale, self._fp32_head_weight,
                 self.softmax_scale * self.weights_scale,
                 fallback_proj=self.weights_proj,
+                original_rows=original_rows,
             )
         x = x.float()
         weights = self.weights_proj(x)
@@ -148,6 +177,8 @@ class Indexer(nn.Module):
         flashmla_params: Any,
         cp_params: Optional[Any],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.rope_head_dim == 0 and self.dsa_config is not None:
+            return self.project_query(q_lora), self.project_key(x)
         q = self.wq_b(q_lora)
         q = q.view(-1, self.index_n_heads, self.index_head_dim)
 

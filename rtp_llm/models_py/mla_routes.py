@@ -30,7 +30,27 @@ def run_sparse_indexer(indexer, hidden, query_latent, cache, fmha):
         use_fast_path=not fmha.is_sparse(),
         cp_params=fmha.cp_params,
     )
-    inputs = fmha.attn_inputs
+    _publish_indexer_cache(fmha.attn_inputs, cache)
+    return topk
+
+
+def _publish_indexer_cache(inputs, cache):
     if inputs.is_prefill and inputs.cache_store_inputs is not None and inputs.cache_store_writer is not None:
         inputs.cache_store_writer.write(inputs.cache_store_inputs, cache)
+
+
+def run_prepared_sparse_indexer(indexer, query, weights, cache, fmha):
+    """Complete history once after natural K ingress and all query chunks.
+
+    The caller has already written K. Warmup/non-sparse routes still publish
+    their cache exactly once, matching run_sparse_indexer's fast path.
+    """
+    if indexer is None or cache is None:
+        return None
+    topk = None
+    if fmha.is_sparse():
+        topk = indexer._compute_topk(
+            query, weights, cache, fmha.fmha_params, fmha.attn_inputs, fmha.cp_params,
+        )
+    _publish_indexer_cache(fmha.attn_inputs, cache)
     return topk

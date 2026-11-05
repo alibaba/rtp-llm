@@ -169,6 +169,33 @@ TEST(NormalEnginePolicyTest, testPrefillOnlyStreamDoesNotReserveSpeculativeSteps
     EXPECT_EQ(NormalEngine::reserveStepForStream(/*configured_reserve_step=*/0, /*is_prefill_only=*/true), 0);
 }
 
+TEST_F(NormalEngineTest, testK31PdPrefillReservesOnlyTheFirstToken) {
+    CustomConfig config;
+    config.role_type        = RoleType::PREFILL;
+    config.tokens_per_block = 8;
+    auto engine             = createMockEngine(config);
+    ASSERT_TRUE(engine->stop().ok());
+    engine->model_config_.model_type = "kimi_k31";
+    engine->sp_config.type           = SP_TYPE_MTP;
+    engine->reserve_step_            = 4;
+
+    for (const bool pd : {true, false}) {
+        auto query                             = make_shared<GenerateInput>();
+        query->input_ids                       = torch::arange(1, 8, torch::kInt32);
+        query->generate_config                 = make_shared<GenerateConfig>();
+        query->generate_config->max_new_tokens = 16;
+        query->generate_config->pd_separation  = pd;
+        const auto stream                      = engine->makeStream(query);
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_EQ(stream->reserveStep(), 4);
+        EXPECT_EQ(stream->maxTokenNum(), 16u);
+        EXPECT_EQ(stream->completeTokenIdsPtr()->getReserveStep(), pd ? 1 : 4);
+        const auto status = stream->streamCacheResource().initKVBlock();
+        ASSERT_TRUE(status.ok()) << status.ToString();
+        EXPECT_EQ(stream->curBlocksNum(), pd ? 1u : 2u);
+    }
+}
+
 TEST_F(NormalEngineTest, testMakeStreamReservesKVBeforeEnqueue) {
     struct ReserveCase {
         const char* name;

@@ -286,7 +286,7 @@ def serve(config, role):
         prefill_source_tp_size=8, peer_ip=peer["ip"], peer_port=peer["port"], start_port=host["port"],
         orthogonal_smoke=True, warm_up=config.get("check_jit_warmup", False),
         model_warm_up=config.get("check_jit_warmup", False),
-        execution_evidence=True, reserve_runtime_mem_mb=host.get("reserve_runtime_mem_mb",14336),
+        execution_evidence=True, reserve_runtime_mem_mb=host.get("reserve_runtime_mem_mb"),
         kv_cache_mem_mb=host.get("kv_cache_mem_mb"), memory_cache_size_mb=host.get("memory_cache_size_mb",32768),
         test_block_num=host.get("test_block_num"),
         prefill_token_capacity=host.get("prefill_token_capacity"),
@@ -311,7 +311,7 @@ def serve(config, role):
     (directory / "logs").mkdir()
     explicit["LOG_PATH"] = str(directory / "logs")
     env = runtime_environment(source, binary); env.update(explicit)
-    if explicit["QUANTIZATION"] == "FP8_PER_BLOCK" and role == "prefill":
+    if role == "prefill":
         fixture = fixture_environment(directory, env)
         env.update(fixture); explicit.update(fixture)
     stop = False

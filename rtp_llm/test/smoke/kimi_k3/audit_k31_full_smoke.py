@@ -8,11 +8,11 @@ import re
 
 if __package__:
     from . import result_check
-    from .k31_full_smoke import decode_batch_sizes, request_budget
+    from .k31_full_smoke import cache_pressure_plan, decode_batch_sizes, request_budget
     from .smoke_request_identity import resolve as resolve_request_identity
 else:
     import result_check
-    from k31_full_smoke import decode_batch_sizes, request_budget
+    from k31_full_smoke import cache_pressure_plan, decode_batch_sizes, request_budget
     from smoke_request_identity import resolve as resolve_request_identity
 
 
@@ -167,11 +167,22 @@ def large_batch_evidence(stages, case_ids, decode, tp_size):
     return proofs
 
 
-def audit(result, prefill, decode, tp_size):
+def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None):
     errors, proofs = [], {}
     profile = result.get("validation_profile", "smoke")
-    budget = request_budget(profile)
     rows = result.get("cases", [])
+    plan = result.get("cache_pressure_plan")
+    if profile == "smoke" and plan is not None and "requests" in plan:
+        expected = cache_pressure_plan(prefill_full_pages, result["reuse_unit_tokens"])
+        if plan != expected:
+            raise ValueError("cache pressure plan does not match the runtime pool")
+        probes = [row for row in rows if row["name"].startswith("tier-pressure-")]
+        if ({row["name"] for row in probes} !=
+                {f"tier-pressure-{i:02d}" for i in range(plan["requests"])}
+                or any(row.get("phase") != "preparation"
+                       or row.get("input_len") != plan["input_tokens"] for row in probes)):
+            raise ValueError("cache pressure preparation coverage differs from its plan")
+    budget = request_budget(profile, plan.get("requests", 15) if plan else 15)
     counts = {"formal": sum(row.get("phase") == "formal" for row in rows),
               "preparation": sum(row.get("phase") == "preparation" for row in rows)}
     if (not result.get("passed") or result.get("target_only") is not False
@@ -305,12 +316,22 @@ def main():
     args = parser.parse_args()
     try:
         result = json.loads(args.result.read_text())
+        plan = result.get("cache_pressure_plan") or {}
+        prefill_full_pages = None
+        if "requests" in plan:
+            with args.prefill_engine.open(errors="replace") as engine:
+                for line in engine:
+                    match = re.search(r"kvc raw pool\[DEVICE/full\]:[^\n]*?\btotal=(\d+)", line)
+                    if match:
+                        prefill_full_pages = int(match[1])
         proof = audit(result, read_events(args.prefill_logs,args.prefill_engine),
-                      read_events(args.decode_logs,args.decode_engine), args.decode_tp)
+                      read_events(args.decode_logs,args.decode_engine), args.decode_tp,
+                      prefill_full_pages=prefill_full_pages)
         rows = {row["name"]:row for row in result["cases"]}
         proof["errors"].extend(result_check.audit_raw_answers(args.result.parent/"requests",rows))
         proof["errors"].extend(result_check._raw_consistency(args.result.parent/"requests",rows))
         proof["passed"] = not proof["errors"]
+        proof["complete_smoke_passed"] = proof["passed"] and proof["validation_profile"] == "smoke"
     except (OSError, ValueError, KeyError, TypeError) as error:
         proof = {"passed": False, "errors": [f"{type(error).__name__}: {error}"]}
     with args.output.open("x") as output:

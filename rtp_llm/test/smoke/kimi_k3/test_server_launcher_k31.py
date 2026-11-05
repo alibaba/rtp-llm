@@ -51,6 +51,9 @@ class K31LaunchContract(unittest.TestCase):
                         self.assertEqual(options['--enable_memory_cache'],str(int(role=='PREFILL')))
                         self.assertEqual(options['--reuse_cache'],str(int(role=='PREFILL')))
                         self.assertEqual(options['--load_method'],'fastsafetensors')
+                        self.assertEqual(options['--reserver_runtime_mem_mb'],
+                                         '28672' if role=='PREFILL' else '14336')
+                        self.assertNotIn('--kv_cache_mem_mb', options)
                         self.assertEqual(options['--enable_cuda_graph'],str(int(role=='DECODE')))
                         if role=='PREFILL':
                             self.assertEqual(env['PREFILL_CHUNK_SIZE'],'65536')

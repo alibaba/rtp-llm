@@ -337,6 +337,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
     def initialize(self, init_resource) -> bool:
         ready = super().initialize(init_resource)
         self._initialize_mtp_hidden_handoff(init_resource)
+        self._initialize_natural_outer(init_resource)
         self._initialize_fp8_collective()
         self._initialize_bf16_collective(init_resource)
         from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
@@ -548,12 +549,18 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             hidden = hidden.narrow(
                 0, self.tp_rank * local_rows, local_rows
             ).contiguous()
+        outer_layout = self._outer_layout
+        if outer_layout is not None:
+            # _embed_inputs has already injected multimodal features. All
+            # residuals/anchors and layer inputs become natural at this point.
+            with profile_scope("RTP::decoder.zigzag_to_natural"):
+                hidden = self._row_exchange.exchange(hidden, self._routing_plan, "to_natural")
         primary = get_primary_attention_inputs(inputs, self.kv_cache)
         # A device mask must be refreshed at replay; Python logical row counts
         # cannot be captured into the graph. The runner owns this metadata.
         valid_mask = primary.valid_token_mask
         if layout is not None:
-            valid_mask = layout.local_valid
+            valid_mask = (outer_layout if outer_layout is not None else layout).local_valid
         elif valid_mask is not None:
             valid_mask = valid_mask.narrow(0, self.tp_rank * local_rows, local_rows)
         paged_conv_meta = None
@@ -573,6 +580,7 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             is_target_verify=primary.is_target_verify,
             prefill_paged_conv_meta=paged_conv_meta,
             query_layout=layout,
+            outer_layout=outer_layout,
         )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
@@ -599,6 +607,11 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             )
         if self.num_blocks:
             hidden = self.final_residual(hidden, anchors)
+        if outer_layout is not None:
+            # Target MTP publication and the public final-norm/last-row ABI
+            # consume the complete original Zigzag shard, including padding.
+            with profile_scope("RTP::decoder.natural_to_zigzag"):
+                hidden = self._row_exchange.exchange(hidden, self._routing_plan, "to_zigzag")
         hidden = self._publish_mtp_prefill_hidden(hidden)
         return (
             all_gather(hidden, Group.TP)

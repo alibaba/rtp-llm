@@ -85,7 +85,13 @@ def launch_config(args):
     for port in (args.start_port, args.peer_port):
         if port < 1024 or port + world_size * 9 > 65535:
             raise ValueError("Invalid service port range")
-    reserve_runtime_mem_mb = getattr(args, "reserve_runtime_mem_mb", 14336)
+    reserve_runtime_mem_mb = getattr(args, "reserve_runtime_mem_mb", None)
+    if reserve_runtime_mem_mb is None:
+        # Auto-size KV after weight loading, leaving room for the 64K Q fixture.
+        reserve_runtime_mem_mb = (
+            28672 if model_type == "kimi_k31" and orthogonal_smoke
+            and args.role == "PREFILL" else 14336
+        )
     if reserve_runtime_mem_mb <= 0:
         raise ValueError("Runtime memory reserve must be positive")
     kv_cache_mem_mb = getattr(args, "kv_cache_mem_mb", None)
@@ -618,8 +624,7 @@ def main():
     parser.add_argument(
         "--reserve-runtime-mem-mb",
         type=int,
-        default=14336,
-        help="Per-rank runtime memory reserve in MiB",
+        help="Per-rank runtime reserve in MiB (K3.1 PD Prefill 28672, other roles 14336)",
     )
     parser.add_argument(
         "--run-dir",
@@ -727,8 +732,7 @@ def main():
     inherited = os.environ.copy()
     inherited.update(environment)
     if (args.model_type == "kimi_k31" and args.role == "PREFILL"
-            and args.orthogonal_smoke and args.execution_evidence
-            and environment["QUANTIZATION"] == "FP8_PER_BLOCK"):
+            and args.orthogonal_smoke and args.execution_evidence):
         from rtp_llm.test.smoke.kimi_k3.k31_chunk_fixture import fixture_environment
         fixture = fixture_environment(run, inherited)
         environment.update(fixture); inherited.update(fixture)

@@ -5,15 +5,15 @@ import torch
 from rtp_llm.models_py.distributed.collective_torch import (
     Group, all_gather, reduce_scatter_bf16,
 )
-from rtp_llm.models_py.mla_routes import resolve_mla_routes, run_sparse_indexer
+from rtp_llm.models_py.mla_routes import resolve_mla_routes, run_sparse_indexer, run_prepared_sparse_indexer
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.models_py.modules.kimi_k3.attention import KimiK3MLA
 from rtp_llm.models_py.triton_kernels.common.activation import gate_sigmoid_mul
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
-    fused_q_kv_rmsnorm, grouped_q_kv_rmsnorm,
+    fused_q_kv_rmsnorm, grouped_q_kv_rmsnorm, independent_q_kv_rmsnorm,
 )
 from rtp_llm.models_py.utils.module_profiler import profile_scope
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import KvCacheDataType, RoleType
 
 
 class KimiK31DSA(KimiK3MLA):
@@ -65,6 +65,35 @@ class KimiK31DSA(KimiK3MLA):
         self._qkv_norm = (
             grouped_q_kv_rmsnorm if self.prefill_query_cp else fused_q_kv_rmsnorm
         )
+        from .natural_dsa import outer_natural_enabled
+
+        if outer_natural_enabled() and self.prefill_query_cp and not config.is_mtp:
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
+            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import CudaFp8GEMMLinear
+
+            projections = (self.input, self.q_b, self.output)
+            if (not policy.indexer_use_fp8
+                    or config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
+                    or any(
+                not isinstance(p, CudaF16Linear) or p.weight.dtype != torch.bfloat16
+                or p.bias is not None for p in projections
+            ) or not isinstance(self.indexer.weights_proj, CudaF16Linear)
+                    or self.indexer.weights_proj.weight.dtype != torch.float32
+                    or self.indexer.weights_proj.bias is not None
+                    or any(not isinstance(p, CudaFp8GEMMLinear) for p in (self.indexer.wk, self.indexer.wq_b))):
+                raise ValueError("natural outer DSA requires bias-free CUDA BF16 SFA and FP8 Indexer with FP32 head weights")
+            width = self.q_rank + self.kv_rank + self.suffix_dim + self.heads * self.v_dim
+            if (self.input.weight.ndim != 2 or self.input.weight.shape != (width, config.hidden_size)
+                    or self.q_b.weight.shape != (self.heads * self.q_dim, self.q_rank)
+                    or self.output.weight.shape != (config.hidden_size, self.heads * self.v_dim)):
+                raise ValueError("natural outer DSA fused input must contain the complete full-head gate")
+            # CudaF16Linear accepts [in,out], stores [out,in]. Each persistent
+            # slice shares the original storage; no concatenation/repack/copy.
+            w = self.input.weight
+            kv_end = self.q_rank + self.kv_rank + self.suffix_dim
+            self.natural_q_input = CudaF16Linear(w[:self.q_rank].T)
+            self.natural_kv_input = CudaF16Linear(w[self.q_rank:kv_end].T)
+            self.natural_gate_input = CudaF16Linear(w[kv_end:].T)
 
     def _attend(self, qkv, fmha, cache, hidden):
         sfa, sfa_cache, indexer, indexer_cache = resolve_mla_routes(
@@ -97,7 +126,104 @@ class KimiK31DSA(KimiK3MLA):
             raise RuntimeError("K3.1 sparse attention returned no output")
         return output.reshape(-1, self.heads * self.v_dim)
 
+    def _forward_natural(self, hidden, fmha, cache, metadata):
+        sfa, sfa_cache, index_fmha, index_cache = resolve_mla_routes(
+            fmha, cache, sparse=True, attention_tag="full",
+        )
+        owner, layout = sfa.workspace_owner, metadata.query_layout
+        rows = layout.local_rows
+        with profile_scope("RTP::attention.dsa.natural_kv"):
+            packed = self.natural_kv_input(hidden)
+            latent, suffix = packed.split([self.kv_rank, self.suffix_dim], -1)
+            latent = independent_q_kv_rmsnorm(
+                latent, self.kv_norm.weight, self.kv_norm.variance_epsilon,
+                q_width=self.q_rank, kv_width=self.kv_rank, full_rows=rows, suffix=suffix,
+            )
+            suffix = latent.as_strided(
+                (rows, self.suffix_dim), (latent.stride(0), 1),
+                latent.storage_offset() + self.kv_rank,
+            )
+            del packed
+            if index_cache is not None:
+                key = self.indexer.project_key(hidden)
+                self.indexer.indexer_op.write_key(key, index_cache, index_fmha.fmha_params)
+                del key
+        # A complete chunk can retain the projection/encoding outputs directly:
+        # they own storage independent of the recyclable received H slot.
+        single_chunk = 0 < rows <= owner.route_chunk_rows
+        query = gate = None
+        if not single_chunk:
+            query = hidden.new_empty((rows, self.heads, self.q_dim))
+            gate = hidden.new_empty((rows, self.heads * self.v_dim))
+        prepare_index_query = index_cache is not None and index_fmha.is_sparse()
+        index_query = head_weights = None
+        if prepare_index_query and not single_chunk:
+            index_shape = (rows, self.indexer.index_n_heads, self.indexer.index_head_dim)
+            index_query = torch.empty(index_shape, dtype=torch.float8_e4m3fn, device=hidden.device)
+            head_weights = torch.empty((*index_shape[:2], 1), dtype=torch.float32, device=hidden.device)
+
+        def receive(start, chunk):
+            nonlocal query, gate, index_query, head_weights
+            end = start + chunk.shape[0]
+            if single_chunk and (start != 0 or end != rows):
+                raise RuntimeError("single-chunk query route must cover all local rows")
+            q = independent_q_kv_rmsnorm(
+                self.natural_q_input(chunk), self.q_norm.weight, self.q_norm.variance_epsilon,
+                q_width=self.q_rank, kv_width=self.kv_rank, full_rows=rows,
+            )
+            projected = self.q_b(q).reshape(-1, self.heads, self.q_dim)
+            if single_chunk:
+                query = projected
+            else:
+                query[start:end].copy_(projected)
+            del projected
+            if prepare_index_query:
+                encoded, scale = self.indexer.indexer_op.encode_query(
+                    self.indexer.project_query(q, original_rows=rows))
+                weights = self.indexer.project_head_weights(
+                    chunk, scale, is_prefill=True, original_rows=rows)
+                if single_chunk:
+                    index_query, head_weights = encoded, weights
+                else:
+                    index_query[start:end].copy_(encoded)
+                    head_weights[start:end].copy_(weights)
+                del encoded, scale, weights
+            projected_gate = self.natural_gate_input(chunk)
+            if single_chunk:
+                gate = projected_gate
+            else:
+                gate[start:end].copy_(projected_gate)
+
+        with profile_scope("RTP::attention.dsa.natural_h_to_zigzag"):
+            owner.row_exchange.consume_chunks(
+                hidden, owner.routing_plan, "to_zigzag",
+                chunk_rows=owner.route_chunk_rows, consumer=receive,
+            )
+        with profile_scope("RTP::attention.dsa.indexer"):
+            indices = run_prepared_sparse_indexer(
+                self.indexer, index_query, head_weights, index_cache, index_fmha,
+            )
+        del index_query, head_weights
+        with profile_scope("RTP::attention.mla.core"):
+            output = sfa.forward(query, latent, suffix, sfa_cache, self.layer_idx, indices)
+        if output is None:
+            raise RuntimeError("K3.1 sparse attention returned no output")
+        del query, latent, suffix, indices
+        mask = None if layout.all_valid else layout.local_valid
+        with profile_scope("RTP::attention.mla.output_gate_quant"):
+            output = gate_sigmoid_mul(output.reshape(rows, self.heads * self.v_dim), gate, mask)
+        del gate
+        with profile_scope("RTP::attention.mla.output_proj"):
+            output = self.output(output)
+        # Full O is complete before publication. No reverse-route overlap or RS.
+        with profile_scope("RTP::attention.dsa.zigzag_o_to_natural"):
+            return owner.row_exchange.exchange(output, owner.routing_plan, "to_natural")
+
     def forward(self, hidden, fmha, cache, attention_inputs=None, metadata=None):
+        if getattr(metadata, "outer_layout", None) is not None:
+            output = self._forward_natural(hidden, fmha, cache, metadata)
+            next(iter(fmha.values())).workspace_owner.release_eager_buffers()
+            return output
         local_query = (
             self.prefill_query_cp
             and getattr(metadata, "query_layout", None) is not None

@@ -54,10 +54,13 @@ def _baseline_logits_head_gate(x: torch.Tensor, q_scale: torch.Tensor, weights_p
         q_scale_b = q_scale
     return w.unsqueeze(-1) * q_scale_b * scale_const
 
-def fused_logits_head_gate(x: torch.Tensor, q_scale: torch.Tensor, weight: torch.Tensor, scale_const: float, fallback_proj: Optional[torch.nn.Module]=None) -> torch.Tensor:
+def fused_logits_head_gate(x: torch.Tensor, q_scale: torch.Tensor, weight: torch.Tensor, scale_const: float, fallback_proj: Optional[torch.nn.Module]=None, *, original_rows: Optional[int]=None) -> torch.Tensor:
     assert x.dim() == 2
     assert weight.dim() == 2
     (T, K) = x.shape
+    policy_rows = T if original_rows is None else original_rows
+    if policy_rows < T:
+        raise ValueError('original head-weight row extent cannot be smaller than the chunk')
     (N, K_w) = weight.shape
     assert K == K_w, f'x.shape[1]={K} but weight.shape[1]={K_w}'
     if q_scale.dim() == 3:
@@ -77,7 +80,7 @@ def fused_logits_head_gate(x: torch.Tensor, q_scale: torch.Tensor, weight: torch
     if T == 0:
         return out_2d.unsqueeze(-1)
     w_is_transposed = weight.stride(0) < weight.stride(1)
-    if T <= 32:
+    if policy_rows <= 32:
         BLOCK_K = triton.next_power_of_2(K)
         num_warps = 4 if K >= 4096 else 2
         _fused_logits_head_gate_small_t_kernel[T, N](x, weight, qs_2d, out_2d, float(scale_const), K, x.stride(0), weight.stride(0), weight.stride(1), qs_2d.stride(0), out_2d.stride(0), BLOCK_K=BLOCK_K, num_warps=num_warps)

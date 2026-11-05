@@ -35,6 +35,12 @@ class Fp8IndexerOp(IndexerKVOp):
     def encode_q_k(self, query, key, cache, params, inputs, cp_params):
         if query.dtype != torch.bfloat16 or key.dtype != torch.bfloat16:
             raise ValueError("FP8 Indexer projections and K LayerNorm must output BF16")
+        self.write_key(key, cache, params)
+        return self.encode_query(query)
+
+    def write_key(self, key, cache, params):
+        if key.dtype != torch.bfloat16:
+            raise ValueError("FP8 Indexer K LayerNorm must output BF16")
 
         def write(values, slots):
             rtp_llm_ops.indexer_k_quant_and_cache(
@@ -47,6 +53,10 @@ class Fp8IndexerOp(IndexerKVOp):
             params.ingress_plans["indexer"].run(key, write)
         else:
             write(key, params.slot_mapping)
+
+    def encode_query(self, query):
+        if query.dtype != torch.bfloat16:
+            raise ValueError("FP8 Indexer query projection must output BF16")
         q, scales = sgl_per_token_group_quant_fp8(
             query.reshape(-1, 128).contiguous(), group_size=128, eps=1e-4,
             column_major_scales=True, scale_tma_aligned=True, scale_ue8m0=True,
