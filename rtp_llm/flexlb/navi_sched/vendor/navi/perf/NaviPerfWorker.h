@@ -30,13 +30,12 @@ public:
         _attr.disabled = 1;
         _attr.watermark = 1;
         _attr.wakeup_watermark = 1;
-        _attr.use_clockid = 1;
-        _attr.clockid = CLOCK_MONOTONIC;
         _attr.exclude_callchain_kernel = 1;
         _attr.exclude_guest = 1;
         _attr.sample_id_all = 1;
     }
-    virtual ~NaviPerfWorkerBase() {
+    virtual ~NaviPerfWorkerBase()
+    {
         if (-1 != _fd) {
             ::close(_fd);
         }
@@ -44,28 +43,28 @@ public:
             munmap(_mem, _mmapSize);
         }
     }
+
 public:
     bool init(const NaviLoggerPtr &logger);
-    int getFd() const {
-        return _fd;
-    }
-    virtual bool enable() {
-        return doEnable();
-    }
-    bool isEnabled() const {
-        return _enabled;
-    }
+    int getFd() const { return _fd; }
+    virtual bool enable() { return doEnable(); }
+    bool isEnabled() const { return _enabled; }
     bool disable();
+
 public:
     virtual void doInit() = 0;
     virtual void sample() = 0;
+
 protected:
     bool doEnable();
     void doSample(bool branchStack, int pageFaultType);
+
 protected:
-    virtual int perf_event_open(int cpu, int groupFd, unsigned long flags) {
+    virtual int perf_event_open(int cpu, int groupFd, unsigned long flags)
+    {
         return syscall(__NR_perf_event_open, &_attr, _pid, cpu, groupFd, flags);
     }
+
 protected:
     DECLARE_LOGGER();
     pid_t _pid;
@@ -84,10 +83,13 @@ public:
     void doInit() override;
     bool enable() override;
     void sample() override;
+
 private:
     int perf_event_open(int cpu, int groupFd, unsigned long flags) override;
+
 private:
     void __attribute__((noinline)) flushLBR(int32_t depth);
+
 private:
     bool _lbrEnabled = false;
 };
