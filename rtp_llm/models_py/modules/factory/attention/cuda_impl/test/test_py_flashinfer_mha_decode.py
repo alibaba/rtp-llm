@@ -868,7 +868,11 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
                 attn_op, fmha_params, graph_buffer_pointers
             )
             attn_op.prepare_for_cuda_graph_replay(run_inputs)
-            self.assertEqual(plan_mock.call_count, 2)
+            if attn_op._decode_plan_cache:
+                # plan cache on: identical page indptr -> cache hit, no replan
+                self.assertEqual(plan_mock.call_count, 1)
+            else:
+                self.assertEqual(plan_mock.call_count, 2)
 
         self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
 
@@ -2414,6 +2418,122 @@ class TestPyFlashinferDecodeCudaGraphFP8(TestPyFlashinferDecodeCudaGraph):
     rtol = 4e-2
     atol = 4e-2
     max_mismatch_rate = 1e-5
+
+    def test_tensor_core_replay_plan_cache_exact(self):
+        """RTP_LLM_DECODE_GRAPH_PLAN_CACHE=1: within a page the tensor-core decode plan
+        is skipped (the split-kv partition is invariant to last-page length) and the
+        replayed output stays byte-identical to the always-replan path; a page-boundary
+        crossing still replans. Validates the cache is exact on the real graph path."""
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.FP8
+        config.attn_configs.fp8_kv_cache_mode = 2
+        config.attn_configs.need_rope_kv_cache = False
+        page = config.seq_size_per_block
+        capture_bs = 2
+        local_head_num = config.head_num // config.tp_size
+        local_kv_head_num = config.head_num_kv // config.tp_size
+
+        def new_impl(cache_on):
+            # capture at the LARGEST page count used below so the graph-bound
+            # page-indices buffer has capacity for every replay step.
+            inputs = _DecodeGraphInputs(
+                self._create_cuda_graph_inputs(
+                    capture_bs, [4 * page + 2, 4 * page + 2], page
+                )
+            )
+            impl = PyFlashinferDecodeImpl(config.attn_configs, inputs)
+            impl.fmha_impl._decode_plan_cache = cache_on
+            return impl, inputs
+
+        def new_cache():
+            cache = LayerKVCache()
+            cache.kv_cache_base = torch.zeros(
+                64,
+                2,
+                local_kv_head_num,
+                page,
+                config.size_per_head,
+                device="cuda",
+                dtype=torch.float8_e4m3fn,
+            )
+            cache.kv_scale_base = torch.ones(
+                64, 2 * local_kv_head_num * page, device="cuda", dtype=torch.float32
+            )
+            return cache
+
+        torch.manual_seed(0)
+        qkv = torch.randn(
+            capture_bs,
+            (local_head_num + 2 * local_kv_head_num) * config.size_per_head,
+            device="cuda",
+            dtype=config.attn_configs.dtype,
+        )
+
+        impl_on, cap_on = new_impl(True)
+        impl_off, cap_off = new_impl(False)
+        cache_on = new_cache()
+        cache_off = new_cache()
+        graph_on = torch.cuda.CUDAGraph()
+        graph_off = torch.cuda.CUDAGraph()
+        torch.cuda.synchronize()
+        with torch.cuda.graph(graph_on):
+            out_on = impl_on.forward(qkv, cache_on)
+        with torch.cuda.graph(graph_off):
+            out_off = impl_off.forward(qkv, cache_off)
+        torch.cuda.synchronize()
+
+        plan_mock = mock.patch.object(
+            impl_on.fmha_impl.decode_wrapper,
+            "plan",
+            wraps=impl_on.fmha_impl.decode_wrapper.plan,
+        )
+        with plan_mock as pm:
+            # replay steps within a page and across one page boundary; all <= capture
+            # page count (5 pages). indptr per step: 254->4p,255->4p,256->4p,257->5p,258->5p
+            for step, seq_len in enumerate(
+                [4 * page - 2, 4 * page - 1, 4 * page, 4 * page + 1, 4 * page + 2]
+            ):
+                replay_inputs = self._create_cuda_graph_inputs(
+                    capture_bs, [seq_len, seq_len], page
+                )
+                impl_on.prepare_cuda_graph(replay_inputs)
+                cap_on.input_lengths_device.copy_(
+                    replay_inputs.input_lengths, non_blocking=True
+                )
+                graph_on.replay()
+
+                impl_off.prepare_cuda_graph(replay_inputs)
+                cap_off.input_lengths_device.copy_(
+                    replay_inputs.input_lengths, non_blocking=True
+                )
+                graph_off.replay()
+                torch.cuda.synchronize()
+
+                self.assertTrue(
+                    torch.equal(out_on, out_off),
+                    f"cache-on output != always-replan output at seq_len={seq_len}",
+                )
+
+                plans_this_step = pm.call_count
+                boundary = (seq_len % page) == 1  # just crossed into a new page
+                if step == 0:
+                    # first replay after enabling the cache: no snapshot yet -> replan
+                    self.assertEqual(pm.call_count, 1, "first replay should replan")
+                elif boundary:
+                    self.assertEqual(
+                        pm.call_count, 1, f"page boundary at {seq_len} must replan"
+                    )
+                else:
+                    self.assertEqual(
+                        pm.call_count, 0, f"within-page step {seq_len} should skip plan"
+                    )
+                pm.reset_mock()
 
 
 if __name__ == "__main__":
