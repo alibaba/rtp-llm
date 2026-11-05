@@ -250,10 +250,10 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DecodePageRRAllocatesCompactOwnerTables) 
             par.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
             par.prefill_cp_config.kv_cache_sharded = true;
             par.prefill_cp_config.prefill_cp_size = 8;
-            par.prefill_cp_config.decode_kv_cache_sharded = true;
             PDSepConfig pd;
             pd.role_type = RoleType::DECODE;
             auto config = makeTestConfig(20, page);
+            config.local_kv_cache_sharded = true;
             auto manager = std::make_shared<KVCacheManager>(
                 config, false, nullptr, KVCacheConfig{}, par, RuntimeConfig{}, SpeculativeExecutionConfig{}, pd);
             ASSERT_TRUE(manager->init());
