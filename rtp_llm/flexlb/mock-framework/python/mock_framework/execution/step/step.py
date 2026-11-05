@@ -73,7 +73,12 @@ class Step(ABC):
             expected = resolve_refs(self.expect.comparisons, results, context.globals()) if self.expect else None
             if expected is not None:
                 for op, value in expected.items():
-                    validate(value, {'type': 'integer', 'minimum': 0} if op == 'count' else interface.returns, 'expect.' + op)
+                    expected_type = interface.returns
+                    if op == 'count':
+                        expected_type = {'type': 'integer', 'minimum': 0}
+                    elif op in ('gte', 'lte'):
+                        expected_type = {'type': 'number'}
+                    validate(value, expected_type, 'expect.' + op)
                 gate = {'step': self.id, 'interface': self.interface, 'args': args,
                         'query_time': context.query_time, 'expect': expected}
             budget = context.timeout

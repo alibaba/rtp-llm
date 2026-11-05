@@ -1,0 +1,24 @@
+max_seq_len: 1048576
+tp_size: 1
+dp_size: 1
+seq_size_per_block: 128
+reuse_cache: true
+enable_device_cache: true
+enable_disk_cache: false
+reserve_block_ratio: 8
+# 异步队列背压未模拟，以下 real 参数忽略。
+block_tree_business_queue_max_size: 10000
+block_tree_transfer_queue_max_size: 10000
+concurrency_limit: 128
+max_batch_tokens_size: 1048576
+load_cache_timeout_ms: 5000
+max_rpc_timeout_ms: 7200000
+test_block_num: 221485
+mock.compute:
+  forward:
+    expression: 19.5 + 0.175 * batchSize
+  decode:
+    tokens.per.step: 2.6
+  eos:
+    probability: 0.0025
+    seed: 20260922

@@ -5,9 +5,11 @@ def matches_expectation(actual, expected):
         elif operator == 'count':
             good = len(actual) == target
         elif operator == 'gte':
-            good = actual >= target
+            values = actual if isinstance(actual, list) else [actual]
+            good = bool(values) and all(value >= target for value in values)
         else:
-            good = actual <= target
+            values = actual if isinstance(actual, list) else [actual]
+            good = bool(values) and all(value <= target for value in values)
         if not good:
             return False
     return True

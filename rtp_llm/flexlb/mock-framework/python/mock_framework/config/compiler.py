@@ -87,8 +87,11 @@ def _expectation(raw, interface, previous):
                 raise ConfigError('count requires a list result')
             expected = {'type': 'integer', 'minimum': 0}
         elif op in ('gte', 'lte'):
-            if output['type'] not in ('integer', 'number'):
+            variants = output.get('variants', [output])
+            if not all(v['type'] in ('integer', 'number') or
+                       v['type'] == 'array' and v['items']['type'] in ('integer', 'number') for v in variants):
                 raise ConfigError(f'{op} requires numeric output')
+            expected = {'type': 'number'}
         if isinstance(value, str) and interface.unit == 's' and op != 'count':
             value = float(duration(value))
         result[op] = _argument(value, expected, previous, 'expect.' + op)
@@ -136,7 +139,10 @@ def _compile_step(raw, registry, ids, previous):
     background = raw.get('background', False)
     if type(background) is not bool:
         raise ConfigError(f'{step_id}.background: expected a boolean')
-    previous[step_id] = None if background else interface.returns
+    result_type = interface.returns
+    if result_type.get('variants') == [{'type': 'number'}, {'type': 'array', 'items': {'type': 'number'}}]:
+        result_type = result_type['variants'][1 if args.get('mode', 'interval') == 'series' else 0]
+    previous[step_id] = None if background else result_type
     return interface.step_type(step_id, description, interface.name, args, expect, within, wait_after, background)
 
 

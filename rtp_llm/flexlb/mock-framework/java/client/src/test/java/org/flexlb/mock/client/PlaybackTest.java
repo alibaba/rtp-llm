@@ -27,6 +27,14 @@ class PlaybackTest {
         while (!condition.getAsBoolean() && System.nanoTime() < deadline) Thread.sleep(10);
         assertTrue(condition.getAsBoolean(), "Condition did not become true");
     }
+    @Test void ttftHistogramDistinguishesSlowCallsAboveThirtySeconds() {
+        var metrics = new ClientMetrics();
+        metrics.finished(new NativeClient.Result(1, java.time.Instant.now(), TimeUnit.SECONDS.toNanos(45),
+            TimeUnit.SECONDS.toNanos(46), 2, NativeClient.Outcome.success, "OK", 0, "", TimeUnit.SECONDS.toNanos(1)));
+        var scrape = metrics.scrape();
+        assertTrue(scrape.contains("mock_client_ttft_seconds_bucket{role=\"client\",le=\"30.0\",} 0.0"));
+        assertTrue(scrape.contains("mock_client_ttft_seconds_bucket{role=\"client\",le=\"60.0\",} 1.0"));
+    }
     @Test void naturalEndDrainsQueueAndConsumesRealNativeResponses() throws Exception {
         try (var h = new NativeClientTest.Harness(); var load = new LoadClient(shard(master(h), 3, 10, 2, 4), new ClientMetrics(), topology(h), directory.resolve(UUID.randomUUID() + ".jsonl"), "client-0")) {
             load.begin(System.currentTimeMillis() + 30);
@@ -118,12 +126,13 @@ class PlaybackTest {
                  var one = new ClientNode("client-1", topology, directory.resolve("one-" + early))) {
                 new ObjectMapper().writeValue(topology.toFile(), List.of(h.endpoint(),
                     Map.of("role", "client", "control", zero.url()), Map.of("role", "client", "control", one.url())));
-                zero.start(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000));
+                zero.start(new Start(List.of(master(h)), source.toString(), null, 5.0, 4, 8, 3000, 1000, true));
                 assertTrue(h.scheduleEntered.await(3, TimeUnit.SECONDS));
                 if (!early) eventually(() -> zero.state(new Sequence(1)).done() && one.state(new Sequence(1)).done());
                 var result = zero.stop(new Empty());
                 assertTrue(result.errors().isEmpty(), result.toString());
                 assertEquals(early ? 1 : 6, result.clients().values().stream().mapToLong(State::issued).sum());
+                assertTrue(h.generated.get().getGenerateConfig().getReuseCache());
                 assertEquals(early ? 5 : 0, result.clients().values().stream().mapToLong(State::unsent).sum());
                 assertTrue(result.clients().values().stream().allMatch(State::done));
             }
