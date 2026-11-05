@@ -35,7 +35,7 @@ def ppu_suites():
                 name="cache_status",
                 task_info="data/model/qwen25/cache_status_ppu.json",
                 # use scratch to avoid fastsafetensors pread failure on PPU NAS (errno 103 on 2GB blocks)
-                smoke_args="--warm_up 0 --max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle --gen_num_per_cycle 4 --seq_size_per_block 256 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --tp_size 1 --load_method scratch",
+                smoke_args="--warm_up 0 --max_seq_len 16384 --sp_type eagle --gen_num_per_cycle 4 --seq_size_per_block 256 --act_type FP16 --sp_model_type qwen_2-mtp --sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/ --tp_size 1 --load_method scratch",
                 gpu_type=["PPU-ZW810E"],
             ),
             smoke_test(

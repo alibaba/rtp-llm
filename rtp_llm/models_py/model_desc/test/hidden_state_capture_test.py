@@ -216,12 +216,11 @@ def _make_disaggregate_attention_model() -> Qwen3AttnModel:
 
 
 def _make_disaggregate_control_receiver(
-    attn_dp_rank: tuple[int, ...] = (0, 1), micro_batch_size: int = 2
+    attn_dp_rank: tuple[int, ...] = (0, 1),
 ) -> Qwen3GemmModel:
     model = Qwen3GemmModel.__new__(Qwen3GemmModel)
     nn.Module.__init__(model)
     model.attn_dp_rank = list(attn_dp_rank)
-    model.micro_batch_size = micro_batch_size
     model.device = "cpu"
     model.capture_hidden_states = False
     return model
@@ -230,7 +229,7 @@ def _make_disaggregate_control_receiver(
 def _make_disaggregate_gemm_model(
     attn_dp_rank: tuple[int, ...] = (0,),
 ) -> Qwen3GemmModel:
-    model = _make_disaggregate_control_receiver(attn_dp_rank, micro_batch_size=1)
+    model = _make_disaggregate_control_receiver(attn_dp_rank)
     model.config = SimpleNamespace(hidden_state_capture_layer_ids=[1, 0])
     model.layer_num = 2
     model.pre_layer = _DisaggregatePreLayer()
@@ -266,7 +265,7 @@ def _run_disaggregate_final_output(
         side_effect=_copy_recv_payloads(
             [
                 torch.tensor(
-                    [input_ids.numel(), int(capture_hidden_states)],
+                    [input_ids.numel(), 0, int(capture_hidden_states)],
                     dtype=torch.int64,
                 ),
                 input_ids,
@@ -528,7 +527,11 @@ class HiddenStateCaptureTest(unittest.TestCase):
                 torch.testing.assert_close(
                     output,
                     torch.cat(
-                        [hidden + 2 + residual, hidden + residual, hidden + 10 + residual],
+                        [
+                            hidden + 2 + residual,
+                            hidden + residual,
+                            hidden + 10 + residual,
+                        ],
                         dim=-1,
                     ),
                 )
@@ -538,16 +541,16 @@ class HiddenStateCaptureTest(unittest.TestCase):
         plan = CaptureContext.configured([0], lambda h, r: h, lambda h, r: h)
         record_range = Mock(side_effect=lambda name: nullcontext())
         profiler = SimpleNamespace(_RecordFunctionFast=record_range)
-        with patch.object(
-            torch._C, "_profiler", profiler, create=True
-        ), patch.object(
+        with patch.object(torch._C, "_profiler", profiler, create=True), patch.object(
             torch.autograd, "_profiler_enabled", return_value=True, create=True
         ) as profiler_enabled:
             capture = plan.for_forward(True)
             self.assertIs(capture._profile_enabled, True)
             self.assertIs(capture._record_function_fast, record_range)
             profiler_enabled.assert_called_once_with()
-            profiler_enabled.side_effect = AssertionError("profiler state was rechecked")
+            profiler_enabled.side_effect = AssertionError(
+                "profiler state was rechecked"
+            )
             with disable_record_function_ranges(), patch.object(
                 profiler,
                 "_RecordFunctionFast",
@@ -1237,10 +1240,11 @@ class HiddenStateCaptureTest(unittest.TestCase):
 
     def test_disaggregate_ffn_skips_zero_token_real_and_fake_lanes(self) -> None:
         model = _make_disaggregate_control_receiver()
-        model.micro_batch_size = 4
+        # Two-lane contract: lane 0 is the (fake) zero lane, lane 1 carries
+        # the real tokens split across both attention dp ranks.
         payloads = [
-            torch.tensor([0, 2, 0, 0, 0], dtype=torch.int64),
-            torch.tensor([0, 0, 0, 1, 0], dtype=torch.int64),
+            torch.tensor([0, 2, 0], dtype=torch.int64),
+            torch.tensor([0, 1, 0], dtype=torch.int64),
             torch.tensor([10, 11], dtype=torch.int32),
             torch.tensor([20], dtype=torch.int32),
         ]
@@ -1254,16 +1258,12 @@ class HiddenStateCaptureTest(unittest.TestCase):
         self.assertEqual(recv_mock.call_count, len(payloads))
         self.assertEqual(
             split_info,
-            BatchSplitInfo([0, 2, 0, 1], [[0, 0], [2, 0], [0, 0], [0, 1]]),
+            BatchSplitInfo([0, 3], [[0, 0], [2, 1]]),
         )
-        self.assertEqual(
-            [input_ids.numel() for input_ids in input_ids_list], [0, 2, 0, 1]
-        )
+        self.assertEqual([input_ids.numel() for input_ids in input_ids_list], [0, 3])
+        self.assertEqual(input_ids_list[0].numel(), 0)
         torch.testing.assert_close(
-            input_ids_list[1], torch.tensor([10, 11], dtype=torch.int32)
-        )
-        torch.testing.assert_close(
-            input_ids_list[3], torch.tensor([20], dtype=torch.int32)
+            input_ids_list[1], torch.tensor([10, 11, 20], dtype=torch.int32)
         )
         payload_recv_calls = recv_mock.call_args_list[2:]
         self.assertEqual(
@@ -1360,8 +1360,8 @@ class HiddenStateCaptureTest(unittest.TestCase):
             "rtp_llm.models_py.model_desc.disaggregate_qwen3.recv",
             side_effect=_copy_recv_payloads(
                 [
-                    torch.tensor([2, 0], dtype=torch.int64),
-                    torch.tensor([2, 1], dtype=torch.int64),
+                    torch.tensor([2, 0, 0], dtype=torch.int64),
+                    torch.tensor([2, 0, 1], dtype=torch.int64),
                     torch.tensor([1, 2], dtype=torch.int32),
                     torch.tensor([3, 4], dtype=torch.int32),
                 ]
@@ -1374,9 +1374,12 @@ class HiddenStateCaptureTest(unittest.TestCase):
 
         self.assertTrue(model.capture_hidden_states)
         self.assertEqual(model.capture_hidden_states_by_attn_rank, [False, True])
-        self.assertEqual(len(sent), 6)
-        false_rank, false_payload = sent[-2]
-        true_rank, true_payload = sent[-1]
+        # The fake (empty) second lane also flows through the pipeline; the
+        # per-rank final payloads below come from the real lane only.
+        real_lane_sends = [item for item in sent if item[1].shape[0] > 0]
+        self.assertEqual(len(real_lane_sends), 6)
+        false_rank, false_payload = real_lane_sends[-2]
+        true_rank, true_payload = real_lane_sends[-1]
         self.assertEqual((false_rank, true_rank), (0, 1))
 
         embedded = _Embedding()(torch.tensor([1, 2, 3, 4], dtype=torch.int64))
@@ -1415,7 +1418,8 @@ class HiddenStateCaptureTest(unittest.TestCase):
                 sent = _run_disaggregate_final_output(
                     model, input_ids, capture_hidden_states
                 )
-                outputs.append(sent[-1])
+                # The fake (empty) second lane trails the real lane's sends.
+                outputs.append([tensor for tensor in sent if tensor.shape[0] > 0][-1])
         capture_off, capture_on = outputs
         capture_on_final = capture_on[..., -capture_off.shape[-1] :]
 
@@ -1433,12 +1437,15 @@ class HiddenStateCaptureTest(unittest.TestCase):
         )
 
         self.assertTrue(model.capture_hidden_states)
-        self.assertEqual([tensor.shape[-1] for tensor in sent], [2, 2, 6])
+        # Sends group by stage: both lanes' per-stage sends interleave, the
+        # fake lane trailing the real one inside each group; the real lane's
+        # packed final is the first [.., 6] send.
+        self.assertEqual([tensor.shape[-1] for tensor in sent], [2, 2, 2, 2, 6, 6])
         embedded = _Embedding()(input_ids)
         layer0 = embedded + 1
         layer1 = layer0 + 2
         expected = torch.cat((layer1, layer0, layer1 * 10), dim=-1)
-        torch.testing.assert_close(sent[-1], expected)
+        torch.testing.assert_close(sent[4], expected)
 
     def test_generic_moe_positive_path_keeps_ordinary_hidden_shape(self) -> None:
         model = _make_moe_model([1, 0])

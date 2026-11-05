@@ -27,6 +27,14 @@ from rtp_llm.ops.compute_ops import (
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import check_with_info
 
+# The FFN-service (attention/FFN disaggregation) receive side must match the
+# C++ micro-batch contract exactly: PyWrappedModel::planMicroBatches always
+# emits exactly two lanes (a fake lane is appended when planning is disabled
+# to keep the two-lane shape; see the MAX_FUSED_D2D_COPIES comment there).
+# If planMicroBatches ever produces more lanes, this constant and the receive
+# buffer layout must change together.
+_MICRO_BATCH_LANE_NUM = 2
+
 
 class CausalAttentionPure(nn.Module):
     def __init__(
@@ -315,7 +323,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
     def recv_micro_batch_split_info(self) -> Tuple[List[torch.Tensor], BatchSplitInfo]:
         dp_num = len(self.attn_dp_rank)
         micro_batch_split_info = torch.empty(
-            [dp_num, self.micro_batch_size + 1],
+            [dp_num, _MICRO_BATCH_LANE_NUM + 1],
             dtype=torch.int64,
             device=self.device,
         )
@@ -338,7 +346,7 @@ class Qwen3GemmModel(DisaggregateModelBase):
             for size in total_micro_batch_sizes
         ]
 
-        for idx in range(self.micro_batch_size):
+        for idx in range(_MICRO_BATCH_LANE_NUM):
             input_ids: torch.Tensor = input_ids_list[idx]
             offset = 0
             for rank_idx, rank in enumerate(self.attn_dp_rank):
@@ -599,14 +607,14 @@ class Qwen3DisaggregateModel(GptModelBase):
                 parallelism_config,
                 weights,
                 max_generate_batch_size=max_generate_batch_size,
-                )
+            )
         else:
             self.model = Qwen3AttnModel(
                 config,
                 parallelism_config,
                 weights,
                 max_generate_batch_size=max_generate_batch_size,
-                )
+            )
         self._init_capture_passthrough()
 
         self.norm = RMSNorm(

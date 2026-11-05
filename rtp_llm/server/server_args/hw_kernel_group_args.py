@@ -165,17 +165,6 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         ),
     )
 
-    # FT_DISABLE_CUSTOM_AR feeds the Python-side custom-AllReduce override
-    # (py_env_configs.ft_disable_custom_ar_override); the legacy C++
-    # HWKernelConfig mirror field has been removed.
-    hw_kernel_group.add_argument(
-        "--ft_disable_custom_ar",
-        env_name="FT_DISABLE_CUSTOM_AR",
-        type=str2bool,
-        default=None,
-        help="设置为 `True` 时，禁用自定义的 AllReduce (AR) 实现，可能回退到标准库（如 NCCL）的 AllReduce。",
-    )
-
     hw_kernel_group.add_argument(
         "--use_swizzleA",
         env_name="USE_SWIZZLEA",

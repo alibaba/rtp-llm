@@ -43,11 +43,6 @@ class GptModelBase(nn.Module):
         self.weight = weight
         self.fmha_config = fmha_config
         self.py_hw_kernel_config = py_hw_kernel_config
-        # AF-disagg FFN-service receive side expects the C++ two-lane
-        # micro-batch contract (planMicroBatches always emits 2 lanes); the
-        # derived attribute previously collapsed to 1 and desynced the
-        # [dp_num, lanes + 1] receive buffer.
-        self.micro_batch_size: int = 2
         self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
 
@@ -56,9 +51,7 @@ class GptModelBase(nn.Module):
         self._mtp_aux_capture_layer_ids = tuple(
             config.capture_aux_hidden_layer_ids or ()
         )
-        self._mtp_aux_capture_layer_id_set = frozenset(
-            self._mtp_aux_capture_layer_ids
-        )
+        self._mtp_aux_capture_layer_id_set = frozenset(self._mtp_aux_capture_layer_ids)
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None
         self._mtp_target_graph_buffer: Optional[torch.Tensor] = None
         self._mtp_target_prompt_buffer: Optional[torch.Tensor] = None
@@ -238,9 +231,7 @@ class GptModelBase(nn.Module):
             : self._mtp_aux_capture_rows
         ]
 
-    def get_mtp_target_hidden_states(
-        self, num_tokens: int
-    ) -> Optional[torch.Tensor]:
+    def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         hidden = self._mtp_target_hidden_states
         if hidden is None:
             return None

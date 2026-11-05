@@ -108,7 +108,6 @@ build_code() {
 
 configure_env() {
   # Configure fixed environment variables
-  export FT_DISABLE_CUSTOM_AR=1;
   export PYTHONPATH="./";
   export PYTHON_BIN="/opt/conda310/bin/python";
   export FT_CORE_DUMP_ON_EXCEPTION=1;
