@@ -40,9 +40,7 @@ def _make_route_rejection(decision: Any) -> Exception:
     if reason == "master_restarting":
         return ConcurrencyException("NaviSched master is restarting")
     detail = reason or "missing target"
-    return ConcurrencyException(
-        f"NaviSched scheduling rejected request: {detail}"
-    )
+    return ConcurrencyException(f"NaviSched scheduling rejected request: {detail}")
 
 
 def _make_route_failure(error: Exception) -> Exception:
@@ -67,7 +65,6 @@ class VLLMEngineTransport:
 
     def __init__(self, vllm_config: Any, engine_core: Any):
         import msgspec
-
         from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, FinishReason
         from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
@@ -120,7 +117,9 @@ class VLLMEngineTransport:
             raise ValueError(f"duplicate NaviSched VLLM request: {external_request_id}")
         request.navi_sched_local_fallback = False
         if not self._client.has_master_biz():
-            await self._submit_local_fallback(request, "Master biz absent from discovery")
+            await self._submit_local_fallback(
+                request, "Master biz absent from discovery"
+            )
             return
         request_id = self._allocate_graph_request_id()
         self._ensure_remote_output_task()
@@ -187,7 +186,7 @@ class VLLMEngineTransport:
         if local_request_ids:
             await self._engine_core.abort_requests_async(local_request_ids)
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout: float | None = None) -> None:
         if self._closed:
             return
         self._closed = True
@@ -202,7 +201,10 @@ class VLLMEngineTransport:
         continuation = getattr(self, "_render_continuation", None)
         if continuation is not None:
             continuation.close()
-        self._engine_core.shutdown()
+        if timeout is None:
+            self._engine_core.shutdown()
+        else:
+            self._engine_core.shutdown(timeout=timeout)
 
     def _abort_request(self, external_request_id: str) -> bool:
         request_id = self._request_ids.get(external_request_id)
@@ -240,11 +242,14 @@ class VLLMEngineTransport:
                     if self._closed:
                         raise RuntimeError("NaviSched VLLM transport is closed")
                     self._render_continuation = NativeRenderContinuation(
-                        self._render_config, tasks,
+                        self._render_config,
+                        tasks,
                     )
         return self._render_continuation
 
-    async def _submit_local_fallback(self, request: Any, error: Exception | str) -> None:
+    async def _submit_local_fallback(
+        self, request: Any, error: Exception | str
+    ) -> None:
         if getattr(request, "navi_sched_render_call", None) is not None:
             continuation = await self.get_native_render_continuation()
             await continuation.resume_async([request])
@@ -314,9 +319,7 @@ class VLLMEngineTransport:
                     )
                     continue
                 try:
-                    output = self._decode_remote_response(
-                        response, external_request_id
-                    )
+                    output = self._decode_remote_response(response, external_request_id)
                 except Exception:
                     logger.exception(
                         "invalid NaviSched VLLM response: request_id=%s",
@@ -353,19 +356,21 @@ class VLLMEngineTransport:
                 "external_request_id=%s category=%s",
                 response.request_id,
                 external_request_id,
-                "media_preprocessing"
-                if error_message.startswith(NAVI_SCHED_MEDIA_ERROR_PREFIX)
-                else "remote_execution",
+                (
+                    "media_preprocessing"
+                    if error_message.startswith(NAVI_SCHED_MEDIA_ERROR_PREFIX)
+                    else "remote_execution"
+                ),
             )
-            return self._make_error_output(
-                external_request_id, error_message
-            )
+            return self._make_error_output(external_request_id, error_message)
         if response.kind != self._response_kind.OUTPUT or not response.frames:
             raise ValueError(f"unexpected NaviSched response kind: {response.kind}")
 
         output = self._decoder.decode([bytes(frame) for frame in response.frames])
         output_request_ids = {str(value.request_id) for value in output.outputs}
-        output_request_ids.update(str(value) for value in output.finished_requests or ())
+        output_request_ids.update(
+            str(value) for value in output.finished_requests or ()
+        )
         if len(output_request_ids) > 1:
             raise ValueError("NaviSched response contains another request")
         terminal = bool(output.finished_requests) or any(
