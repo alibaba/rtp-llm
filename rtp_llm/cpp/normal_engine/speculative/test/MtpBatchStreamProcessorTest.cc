@@ -2642,6 +2642,67 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyMatchesPlannerAndPack
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkCapacityBudgetKeepsFullGammaPackedAndCommitGeometry) {
+    const c10::cuda::CUDAGuard  guard(0);
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    auto                        cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 5;
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    const auto              ints = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    for (int64_t batch : {3, 5, 9}) {
+        const int64_t                             rows   = batch == 3 ? 16 : batch == 5 ? 30 : 54;
+        const int64_t                             budget = rows - batch;
+        MtpBatchStreamProcessor::DSparkRoundState round;
+        round.anchors                  = torch::arange(batch, ints) + 10;
+        round.committed_ends           = torch::arange(batch, ints) * 512 + 127;
+        round.position_bases           = torch::arange(batch * 3, ints).reshape({batch, 3}) * 7;
+        round.engram_windows           = round.anchors.unsqueeze(1) - torch::arange(4, ints).unsqueeze(0);
+        auto                 proposals = torch::arange(batch * 5, ints).reshape({batch, 5}) + 100;
+        auto                 rates     = torch::ones({batch, 5}, ints.dtype(torch::kFloat32));
+        std::vector<int64_t> order;
+        for (int64_t row = batch - 1; row >= 0; --row) {
+            order.push_back(row);
+        }
+        auto expected_lengths = speculative::SpeculativeSampler::buildValidDraftLengths(
+            rates, torch::tensor(order, ints.dtype(torch::kInt64)), budget);
+        TensorHolder   holder;
+        GptModelInputs expected, actual;
+        auto           expected_layout = processor.prepareDSparkPackedTargetVerifyModelInput(
+            round, expected, proposals, expected_lengths, budget, holder, nullptr, true);
+        torch::Tensor lengths, owned;
+        auto          layout = processor.prepareDSparkBoundedTargetVerifyModelInput(
+            round, actual, proposals, rates, order, budget, holder, lengths, &owned, true);
+        ASSERT_TRUE(layout.packed_to_dense.defined());
+        EXPECT_EQ(actual.combo_tokens.numel(), rows);
+        EXPECT_EQ(lengths.sum().item<int64_t>(), budget);
+        EXPECT_TRUE(torch::equal(lengths, expected_lengths));
+        expectDSparkBoundedVerifyInputsEqual(actual, layout, expected, expected_layout);
+        if (batch == 5) {
+            EXPECT_TRUE(torch::equal(layout.packed_to_dense, torch::arange(rows, ints.dtype(torch::kInt64))));
+            GptModelInputs legacy;
+            auto           legacy_layout =
+                processor.prepareDSparkPackedTargetVerifyModelInput(round, legacy, proposals, lengths, budget, holder);
+            EXPECT_FALSE(legacy_layout.packed_to_dense.defined());
+        }
+        actual.is_packed_target_verify = true;
+        const auto target_lengths      = actual.input_lengths;
+        const auto target_positions    = actual.combo_position_ids;
+        auto       features            = torch::arange(rows * 3, ints.dtype(torch::kFloat32)).reshape({rows, 3});
+        processor.updateDecodePostDSparkCommitInput(actual, features, batch);
+        EXPECT_TRUE(actual.is_packed_target_verify);
+        EXPECT_EQ(actual.input_lengths.data_ptr(), target_lengths.data_ptr());
+        EXPECT_EQ(actual.combo_position_ids.data_ptr(), target_positions.data_ptr());
+        EXPECT_EQ(actual.last_hidden_states.data_ptr(), features.data_ptr());
+        auto snapshot = owned.clone();
+        proposals.fill_(-1);
+        EXPECT_TRUE(torch::equal(owned, snapshot));
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyRetainsRoundsAcrossReorderAndShrink) {
     const c10::cuda::CUDAGuard  guard(0);
     ModelConfig                 model_config;

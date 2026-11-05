@@ -270,7 +270,8 @@ public:
                                                                        const torch::Tensor&    valid_draft_lengths,
                                                                        int64_t                 total_draft_budget,
                                                                        TensorHolder&           host_holder,
-                                                                       torch::Tensor* owned_proposals = nullptr);
+                                                                       torch::Tensor* owned_proposals     = nullptr,
+                                                                       bool           force_packed_layout = false);
 
     // Plan confidence prefixes and materialize packed verification inputs
     // together. The host-known budget fixes every output shape; the identity
@@ -284,7 +285,8 @@ public:
                                                                         int64_t                     total_draft_budget,
                                                                         TensorHolder&               host_holder,
                                                                         torch::Tensor&              valid_draft_lengths,
-                                                                        torch::Tensor* owned_proposals = nullptr);
+                                                                        torch::Tensor* owned_proposals     = nullptr,
+                                                                        bool           force_packed_layout = false);
 
     // Async target preparation runs before proposal sampling completes. Build
     // its verify-width positions locally from the TP-synchronized proposal

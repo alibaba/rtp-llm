@@ -53,7 +53,200 @@ def _fixture(device, lengths=(1, 2, 6)):
     return meta, inputs, tables, entries, spans
 
 
+_CAPACITY_CASES = {
+    4: (
+        (4, [1, 3, 6, 6]),
+        (3, [6, 6, 4, 0]),
+        (3, [4, 6, 6, 0]),
+        (1, [6, 4, 4, 2]),
+        (3, [2, 4, 6, 4]),  # Legacy fixed3 fake geometry remains valid.
+        (4, [6, 6, 3, 1]),
+    ),
+    8: (
+        (8, [4] * 8),
+        (5, [6, 6, 6, 6, 6, 2, 0, 0]),
+        (8, [1, 1, 3, 5, 6, 6, 4, 6]),
+    ),
+    16: ((9, [6] * 9 + [4, 4, 2, 0, 0, 0, 0]),),
+}
+
+
+def _capacity_fixture(device, batch, width=4):
+    specs = {SWA_KV: (256, 128, 5), DECODER_SWA_KV: (140, 128, 5)}
+    meta = allocate_packed_decode_metadata(
+        max_batch_size=batch,
+        q_len=width,
+        window_size=128,
+        head_dim=512,
+        max_seq_len=640,
+        compress_ratios=[0],
+        index_topk=512,
+        device=torch.device(device),
+        paged_pool_specs=specs,
+    )
+    inputs = SimpleNamespace(
+        input_lengths_device=torch.full(
+            (batch,), width, dtype=torch.int32, device=device
+        ),
+        prefix_lengths_device=torch.zeros(batch, dtype=torch.int32, device=device),
+        cu_seqlens_device=torch.arange(batch + 1, dtype=torch.int32, device=device)
+        * width,
+    )
+    tables = {
+        tag: torch.zeros((batch, 5), dtype=torch.int32, device=device) for tag in specs
+    }
+    return meta, inputs, tables, specs
+
+
+def _set_capacity_case(inputs, tables, live, lengths, step):
+    device = inputs.input_lengths_device.device
+    batch = len(lengths)
+    prefixes = [7 + 3 * request + 5 * step for request in range(live)]
+    prefixes += [0] * (batch - live)
+    inputs.input_lengths_device.copy_(torch.tensor(lengths, device=device))
+    inputs.prefix_lengths_device.copy_(torch.tensor(prefixes, device=device))
+    inputs.cu_seqlens_device.copy_(
+        torch.tensor([0, *itertools.accumulate(lengths)], device=device)
+    )
+    for tag_index, table in enumerate(tables.values()):
+        blocks = (torch.arange(batch, device=device) + step).remainder(batch) + 1
+        blocks += tag_index * batch
+        table.copy_(blocks[:, None].expand_as(table))
+        table[live:].zero_()
+    return prefixes
+
+
+def _capacity_oracle(lengths, prefixes, tables, entries, spans, live):
+    # Explicit request-major enumeration is independent of device prefix-search.
+    return [
+        [
+            request,
+            prefix + offset,
+            int(request < live),
+            (
+                int(tables[SWA_KV][request, (prefix + offset) // spans[SWA_KV]])
+                * entries[SWA_KV]
+                + (prefix + offset) % entries[SWA_KV]
+                if request < live
+                else -1
+            ),
+        ]
+        for request, (length, prefix) in enumerate(zip(lengths, prefixes))
+        for offset in range(length)
+    ]
+
+
 class PackedVerifyCPU(unittest.TestCase):
+    def test_capacity_commit_maps_real_rows_and_skips_partial_zero_ghosts(self):
+        from rtp_llm.models_py.model_desc.deepseek_v41_base_dspark_model import (
+            DeepSeekV4DSparkModel,
+        )
+        from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
+
+        for live, lengths in (
+            (3, [6, 6, 4, 0]),
+            (5, [6, 6, 6, 6, 6, 2, 0, 0]),
+            (9, [6] * 9 + [4, 4, 2, 0, 0, 0, 0]),
+        ):
+            with self.subTest(live=live, graph_batch=len(lengths)):
+                lens = torch.tensor(lengths, dtype=torch.int32)
+                starts = lens.cumsum(0).int() - lens
+                prefixes = [11 + 7 * request for request in range(live)]
+                ends = torch.tensor(
+                    [prefix + length for prefix, length in zip(prefixes, lengths)]
+                    + [0] * (len(lengths) - live),
+                    dtype=torch.int32,
+                )
+                real_rows = sum(lengths[:live])
+                req, positions = map_context_rows(starts, lens, ends, sum(lengths))
+                expected = [
+                    (request, prefix + offset)
+                    for request, (prefix, length) in enumerate(zip(prefixes, lengths))
+                    for offset in range(length)
+                ]
+                self.assertEqual(
+                    list(zip(req[:real_rows].tolist(), positions[:real_rows].tolist())),
+                    expected,
+                )
+                table = torch.arange(1, len(lengths) + 1, dtype=torch.int32)[:, None]
+                table[live:].zero_()
+                slots = DeepSeekV4DSparkModel._global_pool_slots(
+                    table, req, positions, 134, 256
+                )
+                self.assertEqual(
+                    slots[:real_rows].tolist(),
+                    [
+                        (request + 1) * 134 + position % 134
+                        for request, position in expected
+                    ],
+                )
+                # Positive physical ghost lengths have negative committed
+                # positions; zero ghosts map no rows. Neither may write KV.
+                self.assertTrue(positions[real_rows:].lt(0).all())
+                self.assertTrue(slots[real_rows:].eq(-1).all())
+
+    def test_capacity_metadata_also_accepts_zero_and_one_budget_banks(self):
+        for width, lengths in ((1, [2, 1, 1, 0]), (2, [3, 3, 2, 0])):
+            meta, inputs, tables, specs = _capacity_fixture("cpu", 4, width)
+            prefixes = _set_capacity_case(inputs, tables, 3, lengths, 0)
+            entries = {tag: spec[0] for tag, spec in specs.items()}
+            spans = {tag: spec[1] for tag, spec in specs.items()}
+            update_packed_decode_metadata(
+                meta, inputs, tables, entries, spans, valid_request_count=3
+            )
+            expected = _capacity_oracle(lengths, prefixes, tables, entries, spans, 3)
+            self.assertEqual(meta.total_tokens, 4 * width)
+            self.assertEqual(
+                meta.req_id_per_token.tolist(), [row[0] for row in expected]
+            )
+            self.assertEqual(meta.position_ids.tolist(), [row[1] for row in expected])
+            self.assertEqual(meta.valid_requests.tolist(), [True, True, True, False])
+
+    def test_capacity_reuse_keeps_partial_and_zero_ghosts_unallocated(self):
+        for batch, cases in _CAPACITY_CASES.items():
+            meta, inputs, tables, specs = _capacity_fixture("cpu", batch)
+            entries = {tag: spec[0] for tag, spec in specs.items()}
+            spans = {tag: spec[1] for tag, spec in specs.items()}
+            pointers = [meta.position_ids.data_ptr(), meta.req_id_per_token.data_ptr()]
+            for step, (live, lengths) in enumerate(cases):
+                with self.subTest(batch=batch, live=live, lengths=lengths):
+                    self.assertEqual(sum(lengths), batch * 4)
+                    prefixes = _set_capacity_case(inputs, tables, live, lengths, step)
+                    update_packed_decode_metadata(
+                        meta, inputs, tables, entries, spans, valid_request_count=live
+                    )
+                    expected = _capacity_oracle(
+                        lengths, prefixes, tables, entries, spans, live
+                    )
+                    actual = torch.stack(
+                        (
+                            meta.req_id_per_token,
+                            meta.position_ids,
+                            meta.valid_requests[meta.req_id_per_token.long()].int(),
+                            meta.pool_write_slot_mappings[SWA_KV].int(),
+                        ),
+                        dim=1,
+                    )
+                    torch.testing.assert_close(
+                        actual.long(), torch.tensor(expected), rtol=0, atol=0
+                    )
+                    self.assertEqual(meta.total_tokens, batch * 4)
+                    self.assertEqual(meta.q_len_per_req, 4)
+                    self.assertEqual(
+                        pointers,
+                        [
+                            meta.position_ids.data_ptr(),
+                            meta.req_id_per_token.data_ptr(),
+                        ],
+                    )
+                    real_q = sum(lengths[:live])
+                    for writes in meta.pool_write_slot_mappings.values():
+                        self.assertTrue(writes[real_q:].eq(-1).all())
+                    self.assertTrue(meta.swa_global_slots[real_q:].eq(-1).all())
+                    self.assertTrue(
+                        meta.decoder_swa_metadata.swa_global_slots[real_q:].eq(-1).all()
+                    )
+
     def test_device_live_count_updates_padding_without_scalar_readback(self):
         meta, inputs, tables, entries, spans = _fixture("cpu")
         live = torch.tensor(3, dtype=torch.int32)
@@ -871,6 +1064,110 @@ class PackedVerifyCUDA(unittest.TestCase):
             self.skipTest("SM10x CUDA required")
 
     @torch.inference_mode()
+    def test_capacity_replay_matches_eager_metadata_and_fp8_kv_bytes(self):
+        from rtp_llm.models_py.modules.dsv41.fp8.decode.write_swa import (
+            decode_write_swa_fp8,
+        )
+
+        for batch, cases in _CAPACITY_CASES.items():
+            with self.subTest(captured_batch=batch):
+                meta, inputs, tables, specs = _capacity_fixture("cuda", batch)
+                eager, _, _, _ = _capacity_fixture("cuda", batch)
+                entries = {tag: spec[0] for tag, spec in specs.items()}
+                spans = {tag: spec[1] for tag, spec in specs.items()}
+                live_count = torch.tensor(batch, dtype=torch.int32, device="cuda")
+                kv = torch.zeros((batch * 4, 512), dtype=torch.bfloat16, device="cuda")
+                pools = {
+                    tag: torch.full(
+                        (2 * batch + 1, count, 584),
+                        165,
+                        dtype=torch.uint8,
+                        device="cuda",
+                    )
+                    for tag, count in entries.items()
+                }
+                eager_pools = {tag: pool.clone() for tag, pool in pools.items()}
+
+                def execute(selected, selected_pools):
+                    update_packed_decode_metadata(
+                        selected,
+                        inputs,
+                        tables,
+                        entries,
+                        spans,
+                        valid_request_count=live_count,
+                    )
+                    for tag, pool in selected_pools.items():
+                        decode_write_swa_fp8(
+                            kv,
+                            selected.pool_write_slot_mappings[tag],
+                            pool,
+                            batch,
+                            4,
+                            512,
+                        )
+                    return torch.stack(
+                        (
+                            selected.req_id_per_token,
+                            selected.position_ids,
+                            selected.valid_requests[
+                                selected.req_id_per_token.long()
+                            ].int(),
+                            selected.pool_write_slot_mappings[SWA_KV].int(),
+                        ),
+                        dim=1,
+                    )
+
+                _set_capacity_case(inputs, tables, batch, [4] * batch, 0)
+                execute(meta, pools)  # Compile before capture.
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = execute(meta, pools)
+                for pool in pools.values():
+                    pool.fill_(165)
+                pointers = (meta.position_ids.data_ptr(), output.data_ptr())
+                for step, (live, lengths) in enumerate(cases):
+                    prefixes = _set_capacity_case(inputs, tables, live, lengths, step)
+                    live_count.fill_(live)
+                    kv.copy_(
+                        (
+                            torch.arange(batch * 4 * 512, device="cuda").reshape_as(kv)
+                            % 97
+                            + 1
+                            + step
+                        )
+                        .to(torch.bfloat16)
+                        .div_(32)
+                    )
+                    graph.replay()
+                    expected_output = execute(eager, eager_pools)
+                    torch.testing.assert_close(output, expected_output, rtol=0, atol=0)
+                    oracle = _capacity_oracle(
+                        lengths,
+                        prefixes,
+                        {tag: table.cpu() for tag, table in tables.items()},
+                        entries,
+                        spans,
+                        live,
+                    )
+                    torch.testing.assert_close(
+                        output.long().cpu(), torch.tensor(oracle), rtol=0, atol=0
+                    )
+                    self.assertEqual(
+                        pointers, (meta.position_ids.data_ptr(), output.data_ptr())
+                    )
+                    for tag, pool in pools.items():
+                        # Compare every byte, including untouched blocks and the
+                        # reserved block0; same-slot rewrites must stay idempotent.
+                        torch.testing.assert_close(
+                            pool, eager_pools[tag], rtol=0, atol=0
+                        )
+                        self.assertTrue(pool[0].eq(165).all().item())
+                    real_q = sum(lengths[:live])
+                    for writes in meta.pool_write_slot_mappings.values():
+                        self.assertTrue(writes[real_q:].eq(-1).all().item())
+
+    @torch.inference_mode()
     def test_packed_preparation_captures_device_live_count(self):
         meta, inputs, tables, entries, spans = _fixture("cuda")
         live = torch.tensor(3, dtype=torch.int32, device="cuda")
@@ -1099,6 +1396,41 @@ class PackedVerifyCUDA(unittest.TestCase):
                 rtol=0,
                 atol=0,
             )
+
+    def test_capacity_sparse_plan_masks_by_owner_instead_of_fixed_width_tile(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_sparse_decode as sparse
+
+        for batch, live, lengths in (
+            (4, 1, [6, 4, 4, 2]),
+            (4, 3, [6, 6, 4, 0]),
+            (8, 5, [6, 6, 6, 6, 6, 2, 0, 0]),
+        ):
+            meta, inputs, tables, specs = _capacity_fixture("cuda", batch)
+            _set_capacity_case(inputs, tables, live, lengths, 0)
+            update_packed_decode_metadata(
+                meta,
+                inputs,
+                tables,
+                {tag: spec[0] for tag, spec in specs.items()},
+                {tag: spec[1] for tag, spec in specs.items()},
+                valid_request_count=live,
+            )
+            candidates = torch.full(
+                (batch * 4, 512), -1, dtype=torch.int32, device="cuda"
+            )
+            candidates[:, 0] = 0
+            plan = sparse.make_plan(
+                candidates,
+                torch.ones(batch * 4, dtype=torch.int32, device="cuda"),
+                tables[SWA_KV],
+                query_len=4,
+                request_ids=meta.req_id_per_token,
+                valid_requests=meta.valid_requests,
+            )
+            real_q = sum(lengths[:live])
+            expected = torch.zeros(batch * 4, dtype=torch.int32, device="cuda")
+            expected[:real_q] = 1
+            torch.testing.assert_close(plan.compact_lengths, expected, rtol=0, atol=0)
 
 
 class PackedFusedMetadataEquivalence(unittest.TestCase):

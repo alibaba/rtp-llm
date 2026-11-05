@@ -164,6 +164,7 @@ cc_library(
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/cuda_graph:dspark_cuda_graph_budget",
         "//rtp_llm/cpp/models/models_weight:weights_define",
         "//rtp_llm/models_py/bindings/core:tensor_holder",
     ],

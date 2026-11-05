@@ -876,6 +876,44 @@ TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyCaptureOwnsOrderAndReplayRefreshes
     EXPECT_TRUE(torch::equal(captured.packed.proposals, saved_proposals));
 }
 
+TEST_F(MtpRoundHeadPrepareTest, FullBudgetPackedIdentityCaptureRefreshesAllLiveInputsInOneKernel) {
+    const auto                 i32   = cudaInt32();
+    const int64_t              batch = 5, gamma = 5, budget = 25;
+    const std::vector<int64_t> order{4, 3, 2, 1, 0};
+    auto                       rates     = torch::ones({batch, gamma}, i32.dtype(torch::kFloat32));
+    auto                       anchors   = torch::arange(batch, i32);
+    auto                       proposals = torch::arange(batch * gamma, i32).reshape({batch, gamma});
+    auto                       history   = torch::arange(batch * 4, i32).reshape({batch, 4});
+    auto                       bases     = torch::arange(batch * 3, i32).reshape({batch, 3});
+    auto                       prefixes  = torch::arange(batch, i32) + 127;
+    auto                       warm      = tryMtpDSparkBudgetedVerifyPrepare(
+        rates, order, anchors, proposals, history, bases, prefixes, budget, stream_, true, true);
+    ASSERT_TRUE(warm.packed.tokens.defined());
+    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+    at::cuda::CUDAGraph           graph(true);
+    MtpDSparkBudgetedVerifyInputs captured;
+    graph.capture_begin();
+    captured = tryMtpDSparkBudgetedVerifyPrepare(
+        rates, order, anchors, proposals, history, bases, prefixes, budget, stream_, true, true);
+    graph.capture_end();
+    size_t nodes = 0;
+    ASSERT_EQ(cudaGraphGetNodes(graph.raw_cuda_graph(), nullptr, &nodes), cudaSuccess);
+    EXPECT_EQ(nodes, 1);
+    for (int replay = 0; replay < 2; ++replay) {
+        anchors.add_(13);
+        proposals.add_(17);
+        history.add_(19);
+        bases.add_(23);
+        prefixes.add_(512);
+        rates.fill_(replay == 0 ? 0.0f : std::numeric_limits<float>::quiet_NaN());
+        graph.replay();
+        auto expected = oldBudgetedVerify(rates, order, anchors, proposals, history, bases, prefixes, budget, stream_);
+        expectBudgetedVerifyEqual(captured, expected);
+        EXPECT_TRUE(
+            torch::equal(captured.packed_to_dense, torch::arange(batch * (gamma + 1), i32.dtype(torch::kInt64))));
+    }
+}
+
 TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyCleanMicrobenchmarkAndOptionalTrace) {
     const auto           i32   = cudaInt32();
     constexpr int64_t    batch = 48, gamma = 5, budget = batch * 3;

@@ -578,6 +578,19 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
     const int  selected_graph_batch_size =
         is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
     const bool has_padded_rows = state.current_batch_size < selected_graph_batch_size;
+    // Capacity reuse changes only ownership inside the already captured C rows.
+    // Generic target verification keeps its fixed-width dummy requests.
+    const int64_t dummy_tokens =
+        dspark_capacity_query_width_ != 0 ?
+            py_model_inputs_.input_ids.numel() - state.seq_len_sum :
+            static_cast<int64_t>(selected_graph_batch_size - state.current_batch_size) * num_tokens_per_bs_;
+    if (dspark_capacity_query_width_ != 0) {
+        RTP_LLM_CHECK_WITH_INFO(is_target_verify_ && dummy_tokens >= 0
+                                    && dummy_tokens
+                                           <= static_cast<int64_t>(selected_graph_batch_size - state.current_batch_size)
+                                                  * num_tokens_per_bs_,
+                                "DSpARK real rows exceed captured request/token capacity");
+    }
 
     // These values are ordinary host scalars, not captured tensor storage. A
     // replay can keep the same graph shape while prefix reuse changes the total
@@ -715,42 +728,51 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
             }
         }
         if (is_target_verify_ && has_padded_rows) {
-            // Multi-token graphs capture a fixed number of Q/K/V rows per
-            // batch. Their replay metadata must describe the same geometry:
-            // KVCacheWriteOp consumes the static K/V tensor size and cannot
-            // represent a zero-token tail. Execute rounded rows as deterministic
-            // dummy requests against reserved cache block 0; their outputs are
-            // discarded. This keeps attention, KV write and recurrent-state
-            // kernels on one coherent contract after a batch shrinks.
+            // Fixed-width graphs keep positive dummy rows. V41 capacity reuse
+            // spends some of those rows on real requests, leaving full/partial/
+            // zero ghosts. Both cumulative tails must still end at captured C.
+            const int64_t full_end   = state.current_batch_size + dummy_tokens / num_tokens_per_bs_;
+            const int32_t partial    = dummy_tokens % num_tokens_per_bs_;
+            const int64_t zero_start = full_end + (partial != 0);
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.prefix_lengths_device,
                                           state.current_batch_size,
                                           selected_graph_batch_size,
                                           0);
-            addCudaGraphPrepareFillRegion(fill_params,
-                                          py_model_inputs_.attention_inputs.input_lengths_device,
-                                          state.current_batch_size,
-                                          selected_graph_batch_size,
-                                          num_tokens_per_bs_);
+            auto fill_lengths = [&](torch::Tensor& tensor) {
+                addCudaGraphPrepareFillRegion(
+                    fill_params, tensor, state.current_batch_size, full_end, num_tokens_per_bs_);
+                addCudaGraphPrepareFillRegion(fill_params, tensor, full_end, zero_start, partial);
+                addCudaGraphPrepareFillRegion(fill_params, tensor, zero_start, selected_graph_batch_size, 0);
+            };
+            fill_lengths(py_model_inputs_.attention_inputs.input_lengths_device);
+            fill_lengths(py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device);
             addCudaGraphPrepareIotaRegion(fill_params,
                                           py_model_inputs_.attention_inputs.cu_seqlens_device,
                                           state.current_batch_size + 1,
-                                          selected_graph_batch_size + 1,
+                                          full_end + 1,
                                           state.seq_len_sum + num_tokens_per_bs_,
                                           num_tokens_per_bs_);
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.cu_seqlens_device,
+                                          full_end + 1,
+                                          selected_graph_batch_size + 1,
+                                          state.seq_len_sum + dummy_tokens);
             addCudaGraphPrepareFillRegionFromDevice(fill_params,
                                                     py_model_inputs_.attention_inputs.cu_kv_seqlens_device,
                                                     state.current_batch_size + 1,
-                                                    selected_graph_batch_size + 1,
+                                                    full_end + 1,
                                                     inputs.attention_inputs.cu_kv_seqlens_device,
                                                     state.current_batch_size,
                                                     num_tokens_per_bs_,
                                                     num_tokens_per_bs_);
-            addCudaGraphPrepareFillRegion(fill_params,
-                                          py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device,
-                                          state.current_batch_size,
-                                          selected_graph_batch_size,
-                                          num_tokens_per_bs_);
+            addCudaGraphPrepareFillRegionFromDevice(fill_params,
+                                                    py_model_inputs_.attention_inputs.cu_kv_seqlens_device,
+                                                    full_end + 1,
+                                                    selected_graph_batch_size + 1,
+                                                    inputs.attention_inputs.cu_kv_seqlens_device,
+                                                    state.current_batch_size,
+                                                    dummy_tokens);
         } else if (is_prefill_cuda_graph_mode_ && !isGenerationPrefillCudaGraph()) {
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.prefix_lengths_device,
@@ -1135,18 +1157,18 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
         }
     }
 
-    auto fillCumulativeDummyRows = [](torch::Tensor& tensor,
-                                      int            live_batch_size,
-                                      int            graph_batch_size,
-                                      int32_t        live_total,
-                                      int32_t        tokens_per_row) {
+    auto fillCumulativeDummyRows = [dummy_tokens](torch::Tensor& tensor,
+                                                  int            live_batch_size,
+                                                  int            graph_batch_size,
+                                                  int32_t        live_total,
+                                                  int32_t        tokens_per_row) {
         if (!tensor.defined() || tensor.numel() < graph_batch_size + 1 || tensor.is_cuda()
             || tensor.scalar_type() != torch::kInt32) {
             return;
         }
         auto* values = tensor.data_ptr<int32_t>();
         for (int row = live_batch_size + 1; row <= graph_batch_size; ++row) {
-            values[row] = live_total + (row - live_batch_size) * tokens_per_row;
+            values[row] = live_total + std::min<int64_t>((row - live_batch_size) * tokens_per_row, dummy_tokens);
         }
     };
 
@@ -1155,8 +1177,11 @@ void CudaGraphRunner::prepareAttentionInputsImpl(const PyModelInputs&           
     if (!uses_device_metadata && has_padded_rows && is_target_verify_) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
-        py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
-            .fill_(num_tokens_per_bs_);
+        auto* host_lengths = py_model_inputs_.attention_inputs.input_lengths.data_ptr<int32_t>();
+        for (int row = state.current_batch_size; row < selected_graph_batch_size; ++row) {
+            host_lengths[row] =
+                dsparkDummyQueryLength(0, dummy_tokens, row - state.current_batch_size, num_tokens_per_bs_);
+        }
         fillCumulativeDummyRows(py_model_inputs_.attention_inputs.cu_seqlens,
                                 state.current_batch_size,
                                 selected_graph_batch_size,
@@ -1447,6 +1472,23 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs,
         state.captured_backend_batch_size = static_cast<int>(max_bs_);
     }
     return true;
+}
+
+std::optional<DSparkCapturedCapacity> CudaGraphRunner::capturedDSparkCapacity(int64_t batch) const {
+    if (!enable_cuda_graph_ || !is_target_verify_ || !is_packed_target_verify_
+        || dspark_capacity_query_width_ <= num_tokens_per_bs_ || num_tokens_per_bs_ <= 0 || batch <= 0
+        || batch > std::numeric_limits<int>::max()) {
+        return std::nullopt;
+    }
+    const auto key = std::lower_bound(capture_range_.begin(), capture_range_.end(), batch);
+    if (key == capture_range_.end() || graph_instances_.find(*key) == graph_instances_.end()) {
+        return std::nullopt;
+    }
+    const auto& captured = graph_instances_.at(*key).mem_hold_.py_model_inputs_.input_ids;
+    if (!captured.defined() || captured.numel() != static_cast<int64_t>(*key) * num_tokens_per_bs_) {
+        return std::nullopt;
+    }
+    return DSparkCapturedCapacity{*key, captured.numel(), num_tokens_per_bs_ - 1};
 }
 
 bool CudaGraphRunner::tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs,
@@ -1773,6 +1815,20 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
             return false;
         }
         const int expected_tokens = state.current_batch_size * num_tokens_per_bs_;
+        if (dspark_capacity_query_width_ != 0) {
+            const auto geometry = capturedDSparkCapacity(state.current_batch_size);
+            const auto plan =
+                geometry ?
+                    makeDSparkCapacityPlan(*geometry, state.current_batch_size, dspark_capacity_query_width_ - 1) :
+                    std::nullopt;
+            if (!plan || !isDSparkCapacityShape(*plan, state.seq_len_sum)
+                || state.current_real_graph_bs != geometry->graph_batch
+                || (inputs.input_hiddens.defined() && inputs.input_hiddens.numel() > 0
+                    && inputs.input_hiddens.size(0) != state.seq_len_sum)) {
+                return false;
+            }
+            return canReplaySelectedGraph(inputs, state, mode);
+        }
         if (is_packed_target_verify_ && state.seq_len_sum != expected_tokens) {
             // Never reinterpret captured row strides as another budget. The
             // multi-budget wrapper treats a miss as an error for served decode.

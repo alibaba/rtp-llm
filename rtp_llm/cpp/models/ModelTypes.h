@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/cuda_graph/dspark_cuda_graph_budget.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
@@ -202,10 +203,13 @@ struct TokenSliceInfo {
 
 class ModelBase {
 public:
-    virtual ~ModelBase()                                          = default;
-    virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
-    virtual void            releaseBuffers() {}
-    virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual ~ModelBase()                                                                = default;
+    virtual GptModelOutputs                       forward(const GptModelInputs& inputs) = 0;
+    virtual void                                  releaseBuffers() {}
+    virtual std::optional<DSparkCapturedCapacity> capturedDSparkCapacity(int64_t /*batch*/) const {
+        return std::nullopt;
+    }
+    virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         return std::nullopt;
     }

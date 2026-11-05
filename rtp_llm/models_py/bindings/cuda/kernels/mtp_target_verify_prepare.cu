@@ -565,14 +565,16 @@ MtpDSparkBudgetedVerifyInputs tryMtpDSparkBudgetedVerifyPrepare(const torch::Ten
                                                                 const torch::Tensor&        prefix_lengths,
                                                                 int64_t                     total_draft_budget,
                                                                 cudaStream_t                stream,
-                                                                bool                        copy_proposals) {
+                                                                bool                        copy_proposals,
+                                                                bool                        allow_full_budget) {
     if (!rates.defined() || !rates.is_cuda() || rates.scalar_type() != torch::kFloat32 || rates.dim() != 2
         || !rates.is_contiguous()) {
         return {};
     }
     const int64_t batch = rates.size(0), gamma = rates.size(1);
     if (batch < 2 || batch > kBudgetMaxBatch || gamma < 1 || gamma > kBudgetMaxGamma || batch * gamma > kBudgetCapacity
-        || total_draft_budget < 0 || total_draft_budget >= batch * gamma) {
+        || total_draft_budget < 0 || total_draft_budget > batch * gamma
+        || (total_draft_budget == batch * gamma && !allow_full_budget)) {
         return {};
     }
     auto eligible = [&](const torch::Tensor& tensor) {

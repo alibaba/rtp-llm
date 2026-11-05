@@ -3865,6 +3865,68 @@ TEST_F(MtpExecutorTest, testDSparkBoundedPlanUsesStableIdentitiesAndKeepsSeededB
     }
 }
 
+TEST_F(MtpExecutorTest, testDSparkCapacityPlanFreezesActualTargetAndCommitBeforeProposal) {
+    class CapacityModel: public FakeModel {
+    public:
+        std::optional<DSparkCapturedCapacity> capacity;
+        std::optional<DSparkCapturedCapacity> capturedDSparkCapacity(int64_t batch) const override {
+            return capacity && batch <= capacity->graph_batch ? capacity : std::nullopt;
+        }
+    };
+    MtpExecutorTestConfig config;
+    config.sp_type                   = SP_TYPE_DSPARK;
+    config.dspark_mask_token_id      = 0;
+    config.gen_num_per_cycle         = 5;
+    auto  components                 = createMtpExecutorComponents(config);
+    auto& executor                   = *components.executor;
+    executor.dspark_confidence_mode_ = "bounded";
+    executor.dspark_verify_budget_   = 3;
+    executor.dspark_packed_verify_   = true;
+    auto  target                     = std::make_unique<CapacityModel>();
+    auto  commit                     = std::make_unique<CapacityModel>();
+    auto* target_ptr                 = target.get();
+    auto* commit_ptr                 = commit.get();
+    executor.setTargetModel(std::move(target));
+    executor.setDraftPrefillModel(std::move(commit));
+    std::vector<GenerateStreamPtr> streams;
+    for (int row = 0; row < 9; ++row) {
+        auto stream = createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1});
+        stream->generateInput()->request_id = 100 - row;
+        streams.push_back(stream);
+    }
+    for (int batch : {3, 5, 9, 4}) {
+        const int64_t graph_batch = batch <= 4 ? 4 : batch <= 8 ? 8 : 16;
+        target_ptr->capacity      = DSparkCapturedCapacity{graph_batch, graph_batch * 4, 3};
+        commit_ptr->capacity      = target_ptr->capacity;
+        auto plan                 = executor.prepareDSparkVerifyPlan(
+            StreamGroups(std::list<GenerateStreamPtr>(streams.begin(), streams.begin() + batch)));
+        ASSERT_TRUE(plan.capacity);
+        EXPECT_EQ(plan.capacity->graph.graph_batch, graph_batch);
+        EXPECT_EQ(plan.capacity->query_rows, std::min<int64_t>(graph_batch * 4, batch * 6));
+        EXPECT_EQ(plan.draft_budget, plan.capacity->query_rows - batch);
+        EXPECT_EQ(plan.budget_per_request, 3);  // bank remains distinct from actual real V/B
+        EXPECT_EQ(plan.stable_order.front(), batch - 1);
+        auto frozen = plan;
+        target_ptr->capacity.reset();
+        commit_ptr->capacity.reset();
+        EXPECT_EQ(frozen.draft_budget, plan.draft_budget);
+        EXPECT_EQ(frozen.capacity->graph.graph_batch, graph_batch);
+    }
+    StreamGroups groups({streams[0], streams[1], streams[2]});
+    target_ptr->capacity = DSparkCapturedCapacity{4, 16, 3};
+    commit_ptr->capacity = DSparkCapturedCapacity{8, 32, 3};
+    EXPECT_ANY_THROW(executor.prepareDSparkVerifyPlan(groups));
+    commit_ptr->capacity.reset();
+    EXPECT_ANY_THROW(executor.prepareDSparkVerifyPlan(groups));
+    executor.sp_prefill_draft_model_.reset();
+    EXPECT_ANY_THROW(executor.prepareDSparkVerifyPlan(groups));
+    target_ptr->capacity.reset();
+    auto legacy = executor.prepareDSparkVerifyPlan(groups);
+    EXPECT_FALSE(legacy.capacity);
+    EXPECT_EQ(legacy.draft_budget, 9);  // graph-disabled/unavailable keeps existing policy
+}
+
 TEST_F(MtpExecutorTest, testDSparkAdaptivePlanUsesHistoricalConfidenceCostsAndSeededBatchesShareThePolicy) {
     constexpr int         gamma = 3;
     MtpExecutorTestConfig config;
