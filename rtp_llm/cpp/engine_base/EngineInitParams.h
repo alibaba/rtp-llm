@@ -45,7 +45,6 @@ struct EngineInitParams {
                      const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                      const HWKernelConfig&              hw_kernel_config,
                      const MoeConfig&                   moe_config,
-                     const ModelSpecificConfig&         model_specific_config,
                      const SpeculativeExecutionConfig&  sp_config,
                      const CacheStoreConfig&            cache_store_config,
                      const MiscellaneousConfig&         misc_config,
@@ -70,7 +69,6 @@ struct EngineInitParams {
         profiling_debug_logging_config(profiling_debug_logging_config),
         hw_kernel_config(hw_kernel_config),
         moe_config(moe_config),
-        model_specific_config(model_specific_config),
         sp_config(sp_config),
         cache_store_config(cache_store_config),
         misc_config(misc_config),
@@ -111,7 +109,6 @@ struct EngineInitParams {
     ProfilingDebugLoggingConfig  profiling_debug_logging_config;
     HWKernelConfig               hw_kernel_config;
     MoeConfig                    moe_config;
-    ModelSpecificConfig          model_specific_config;
     SpeculativeExecutionConfig   sp_config;
     CacheStoreConfig             cache_store_config;
     MiscellaneousConfig          misc_config;

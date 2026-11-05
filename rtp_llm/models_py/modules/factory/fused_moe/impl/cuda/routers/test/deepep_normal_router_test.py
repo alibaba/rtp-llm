@@ -86,7 +86,6 @@ def init_router(
         profiling_debug_logging_config=py_env.profiling_debug_logging_config,
         hw_kernel_config=py_env.py_hw_kernel_config,
         moe_config=py_env.moe_config,
-        model_specific_config=py_env.model_specific_config,
         sp_config=py_env.sp_config,
         cache_store_config=py_env.cache_store_config,
         misc_config=py_env.misc_config.misc_config,

@@ -958,16 +958,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
-    // Register ModelSpecificConfig
-    py::class_<ModelSpecificConfig>(m, "ModelSpecificConfig", py::dynamic_attr())
-        .def(py::init<>())
-        .def("to_string", &ModelSpecificConfig::to_string)
-        .def(py::pickle([](const ModelSpecificConfig& self) { return py::make_tuple(); },
-                        [](py::tuple t) {
-                            ModelSpecificConfig c;
-                            return c;
-                        }));
-
     // HybridAttentionConfig
     py::enum_<HybridAttentionType>(m, "HybridAttentionType")
         .value("NONE", HybridAttentionType::NONE)

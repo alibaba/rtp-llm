@@ -48,7 +48,6 @@ EngineInitParams createMockEngineInitParams() {
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     HWKernelConfig              hw_kernel_config;
     MoeConfig                   moe_config;
-    ModelSpecificConfig         model_specific_config;
     SpeculativeExecutionConfig  sp_config;
     CacheStoreConfig            cache_store_config;
     MiscellaneousConfig         misc_config;
@@ -104,7 +103,6 @@ EngineInitParams createMockEngineInitParams() {
         profiling_debug_logging_config,
         hw_kernel_config,
         moe_config,
-        model_specific_config,
         sp_config,
         cache_store_config,
         misc_config,

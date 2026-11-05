@@ -238,13 +238,6 @@ std::string MoeConfig::to_string() const {
     return oss.str();
 }
 
-// ModelSpecificConfig
-std::string ModelSpecificConfig::to_string() const {
-    std::ostringstream oss;
-    // Empty struct — no fields remaining.
-    return oss.str();
-}
-
 // SpeculativeExecutionConfig
 size_t SpeculativeExecutionConfig::speculativeReserveStep() const {
     if (type == SP_TYPE_NONE) {

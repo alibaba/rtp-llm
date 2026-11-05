@@ -98,7 +98,6 @@ private:
     KVCacheConfig                                 kv_cache_config;
     CacheStoreConfig                              cache_store_config;
     FfnDisAggregateConfig                         ffn_disaggregate_config;
-    ModelSpecificConfig                           model_specific_config;
     SpeculativeExecutionConfig                    sp_config;
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;

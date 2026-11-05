@@ -181,7 +181,6 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
     rtp_llm::HWKernelConfig              hw_kernel_config;
     rtp_llm::MoeConfig                   moe_config;
-    rtp_llm::ModelSpecificConfig         model_specific_config;
     rtp_llm::SpeculativeExecutionConfig  sp_config;
     sp_config.type                   = config.speculative_enabled ? SP_TYPE_VANILLA : SP_TYPE_NONE;
     runtime_config.warm_up_with_loss = config.warm_up_with_loss;
@@ -205,7 +204,6 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
                                              profiling_debug_logging_config,
                                              hw_kernel_config,
                                              moe_config,
-                                             model_specific_config,
                                              sp_config,
                                              cache_store_config,
                                              misc_config,

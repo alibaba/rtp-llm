@@ -154,7 +154,6 @@ try:
         LinearAttentionConfig,
         MiscellaneousConfig,
         ModelConfig,
-        ModelSpecificConfig,
         MoeConfig,
         NcclCommConfig,
         OpaqueBlockEntryCountMode,
