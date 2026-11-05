@@ -77,9 +77,14 @@ class FakeRawRequest(object):
 
     def __init__(self, headers: dict[str, str] | None = None):
         self.headers = headers or {}
+        self.disconnected = asyncio.Event()
 
     async def is_disconnected(self):
-        return False
+        return self.disconnected.is_set()
+
+    async def receive(self):
+        await self.disconnected.wait()
+        return {"type": "http.disconnect"}
 
 
 class FrontendServerTest(TestCase):
@@ -270,6 +275,66 @@ class FrontendServerTest(TestCase):
         self.assertEqual(len(set(ids)), len(ids))
         self.assertNotIn(single_id, ids)
         self.assertEqual(controller.current_concurrency.value, 0)
+
+    def test_disconnect_cancels_non_streaming_requests_before_backend_output(self):
+        async def run_case(route, payload):
+            raw_request = FakeRawRequest()
+            started = asyncio.Event()
+            cancelled = asyncio.Event()
+
+            async def blocked_backend(*args, **kwargs):
+                started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+            async def blocked_outputs():
+                yield await blocked_backend()
+
+            server = self.frontend_server
+            worker = MagicMock(wraps=FakeFrontendWorker())
+            worker.inference.return_value = CompleteResponseAsyncGenerator(
+                blocked_outputs(), CompleteResponseAsyncGenerator.get_last_value
+            )
+            worker.batch_infer = AsyncMock(side_effect=blocked_backend)
+            server._frontend_worker = worker
+            server._openai_endpoint = MagicMock(
+                batch_chat_completion=AsyncMock(side_effect=blocked_backend)
+            )
+            handler = getattr(server, route)
+            request_task = asyncio.create_task(handler(payload, raw_request))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=2)
+                raw_request.disconnected.set()
+                result = asyncio.wait_for(asyncio.shield(request_task), timeout=2)
+                if route == "inference":
+                    response = await result
+                    self.assertEqual(
+                        json.loads(response.body)["error_code_str"],
+                        "499_CANCELLED_ERROR",
+                    )
+                else:
+                    with self.assertRaises(asyncio.CancelledError):
+                        await result
+                self.assertTrue(cancelled.is_set())
+                self.assertEqual(server._global_controller.current_concurrency.value, 0)
+            finally:
+                if not request_task.done():
+                    request_task.cancel()
+                    await asyncio.gather(request_task, return_exceptions=True)
+
+        for route, payload in (
+            ("inference", {"prompt": "hello"}),
+            ("batch_infer", {"prompt_batch": ["hello"]}),
+            (
+                "batch_chat_completion",
+                SimpleNamespace(requests=[{}], model_dump=lambda **kwargs: {}),
+            ),
+        ):
+            with self.subTest(route=route):
+                asyncio.run(run_case(route, payload))
 
     def test_simple(self):
         loop = asyncio.new_event_loop()
@@ -530,10 +595,15 @@ class FrontendServerTest(TestCase):
                         else:
                             visitor.model_rpc_client.batch_enqueue.side_effect = rpc
                             if failure == "disconnect":
+
+                                async def receive_disconnect():
+                                    await entered.wait()
+                                    return {"type": "http.disconnect"}
+
                                 with patch.object(
                                     FakeRawRequest,
-                                    "is_disconnected",
-                                    new=AsyncMock(side_effect=[False, True]),
+                                    "receive",
+                                    new=AsyncMock(side_effect=receive_disconnect),
                                 ):
                                     with self.assertRaises(asyncio.CancelledError):
                                         await call()

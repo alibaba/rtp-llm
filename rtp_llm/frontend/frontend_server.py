@@ -4,7 +4,8 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Awaitable, Callable, Dict, Union
+from contextlib import aclosing
+from typing import Any, Awaitable, Callable, Coroutine, Dict, TypeVar, Union
 
 import anyio
 from fastapi import Request
@@ -55,6 +56,32 @@ from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import check_with_info
 
 USAGE_HEADER = "USAGE"
+_T = TypeVar("_T")
+
+
+async def _run_until_disconnect(
+    request: RawRequest, operation: Coroutine[Any, Any, _T]
+) -> _T:
+    async def wait_for_disconnect() -> None:
+        # FastAPI has already parsed the request body for these endpoints.
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+
+    disconnect = asyncio.create_task(wait_for_disconnect())
+    result = asyncio.create_task(operation)
+    try:
+        done, _ = await asyncio.wait(
+            (disconnect, result), return_when=asyncio.FIRST_COMPLETED
+        )
+        if result in done:
+            return result.result()
+        disconnect.result()
+        raise asyncio.CancelledError("client disconnects")
+    finally:
+        for task in (disconnect, result):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(disconnect, result, return_exceptions=True)
 
 
 class _ClosingStreamingResponse(StreamingResponse):
@@ -857,36 +884,18 @@ class FrontendServer(object):
             request_metrics.observe_tps(frame)
             request_metrics.observe(frame)
 
-        batch_task = None
         try:
             if await raw_request.is_disconnected():
                 raise asyncio.CancelledError("client disconnects")
-            batch_task = asyncio.create_task(
+            return await _run_until_disconnect(
+                raw_request,
                 generate_call(
                     metric_tags if request_metrics.enabled else {},
                     observe_batch_item if request_metrics.enabled else None,
-                )
+                ),
             )
-            # A unary RPC has no intermediate business frames at which to
-            # detect a disconnect. Cancel the same native RPC while waiting.
-            while not batch_task.done():
-                await asyncio.wait({batch_task}, timeout=0.1)
-                if await raw_request.is_disconnected():
-                    raise asyncio.CancelledError("client disconnects")
-            return await batch_task
         finally:
-            try:
-                if batch_task is not None:
-                    if not batch_task.done():
-                        batch_task.cancel()
-                    try:
-                        await batch_task
-                    except BaseException:
-                        # Preserve the original cancellation/error after the
-                        # downstream coroutine has run its cleanup.
-                        pass
-            finally:
-                request_metrics.finish()
+            request_metrics.finish()
 
     async def chat_render(self, request: ChatCompletionRequest, raw_request: Request):
         try:
@@ -1157,12 +1166,13 @@ class FrontendServer(object):
                 close=close_stream,
                 media_type="text/event-stream",
             )
-        async for x in res:
-            if await raw_request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await res.aclose()
-                raise asyncio.CancelledError("client disconnects")
 
+        async def consume_response() -> None:
+            async with aclosing(res):
+                async for _ in res:
+                    pass
+
+        await _run_until_disconnect(raw_request, consume_response())
         complete_response = await self._collect_complete_response_and_record_access_log(
             req, res
         )
