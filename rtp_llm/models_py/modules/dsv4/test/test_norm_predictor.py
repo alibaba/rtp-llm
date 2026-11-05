@@ -8,9 +8,26 @@ import torch
 from rtp_llm.models_py.modules.dsv4.norm_predictor import (
     Dsv4NormTopP,
     NormPredictor,
+    dsv4_norm_predictor_dtype,
     select_norm_top_p,
     validate_predictor_config,
 )
+
+
+def _save_predictor(directory, layer_id=3, hidden_size=4):
+    """Save a predictor with fan-in scaled weights so raw outputs stay O(1)."""
+
+    gen = torch.Generator().manual_seed(layer_id)
+    torch.save(
+        {
+            "fc1.weight": torch.randn((1024, hidden_size), generator=gen)
+            / hidden_size**0.5,
+            "fc1.bias": torch.randn(1024, generator=gen) * 0.1,
+            "fc2.weight": torch.randn((256, 1024), generator=gen) / 1024**0.5 * 2.0,
+            "fc2.bias": torch.randn(256, generator=gen) * 0.1,
+        },
+        os.path.join(directory, f"norm_predictor_layer_{layer_id}.pt"),
+    )
 
 
 class NormPredictorTopPTest(unittest.TestCase):
@@ -65,6 +82,55 @@ class NormPredictorTopPTest(unittest.TestCase):
             output = predictor(torch.ones((2, 4)))
             self.assertEqual(tuple(output.shape), (2, 256))
             self.assertTrue(torch.isfinite(output).all())
+
+    def test_predictor_dtype_defaults_to_bf16(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for name in (
+                "VLLM_DSV4_NORM_PREDICTOR_DTYPE",
+                "RTP_DSV4_NORM_PREDICTOR_DTYPE",
+                "DSV4_NORM_PREDICTOR_DTYPE",
+            ):
+                os.environ.pop(name, None)
+            self.assertEqual(dsv4_norm_predictor_dtype(), torch.bfloat16)
+        with mock.patch.dict(
+            os.environ, {"RTP_DSV4_NORM_PREDICTOR_DTYPE": "fp32"}, clear=False
+        ):
+            self.assertEqual(dsv4_norm_predictor_dtype(), torch.float32)
+        with mock.patch.dict(
+            os.environ, {"RTP_DSV4_NORM_PREDICTOR_DTYPE": "bogus"}, clear=False
+        ):
+            with self.assertRaisesRegex(ValueError, "dtype"):
+                dsv4_norm_predictor_dtype()
+
+    def test_predictor_bf16_weights_and_fp32_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _save_predictor(directory)
+            predictor = NormPredictor(directory, layer_id=3, hidden_size=4)
+            output = predictor(torch.randn(8, 4))
+            self.assertEqual(output.dtype, torch.float32)
+            self.assertTrue(torch.isfinite(output).all())
+            self.assertTrue(
+                all(t.dtype == torch.bfloat16 for t in predictor._weights)
+            )
+            self.assertTrue((output > 0).all())
+
+    def test_predictor_bf16_tracks_fp32_reference(self):
+        x = torch.randn(64, 4096)
+        with tempfile.TemporaryDirectory() as directory:
+            _save_predictor(directory, hidden_size=4096)
+            with mock.patch.dict(
+                os.environ, {"RTP_DSV4_NORM_PREDICTOR_DTYPE": "fp32"}, clear=False
+            ):
+                reference = NormPredictor(directory, layer_id=3, hidden_size=4096)(x)
+            with mock.patch.dict(
+                os.environ, {"RTP_DSV4_NORM_PREDICTOR_DTYPE": "bf16"}, clear=False
+            ):
+                fast = NormPredictor(directory, layer_id=3, hidden_size=4096)(x)
+        self.assertTrue(torch.isfinite(fast).all())
+        self.assertTrue(
+            torch.allclose(fast, reference, rtol=0.15, atol=0.05),
+            f"max abs diff {(fast - reference).abs().max()}",
+        )
 
     def test_predictor_config_validation(self):
         config = {

@@ -59,6 +59,31 @@ def dsv4_norm_top_p() -> Optional[float]:
     return value
 
 
+def dsv4_norm_predictor_dtype() -> torch.dtype:
+    """Compute dtype for predictor weights/GEMMs.
+
+    ``bf16`` (default) stores the fc1/fc2 tensors in bfloat16 and runs the
+    two linears on bf16 tensor cores (cuBLAS accumulates in fp32).  The
+    softplus runs on bf16 I/O with fp32 internal math and the returned
+    norms are fp32, so ``select_norm_top_p`` stays an all-fp32 computation.
+    Set ``RTP_DSV4_NORM_PREDICTOR_DTYPE=fp32`` to restore the exact fp32
+    reference path.
+    """
+
+    raw = _first_env(
+        "VLLM_DSV4_NORM_PREDICTOR_DTYPE",
+        "RTP_DSV4_NORM_PREDICTOR_DTYPE",
+        "DSV4_NORM_PREDICTOR_DTYPE",
+    ).lower()
+    if not raw:
+        return torch.bfloat16
+    if raw in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    if raw in ("fp32", "float32"):
+        return torch.float32
+    raise ValueError(f"Invalid DSV4 norm predictor dtype: {raw!r} (use bf16 or fp32)")
+
+
 class NormPredictor(nn.Module):
     """Lazy loader for one ``norm_predictor_layer_{layer_id}.pt`` file."""
 
@@ -105,25 +130,30 @@ class NormPredictor(nn.Module):
                 f"Unexpected bias shapes for layer {self.layer_id}: "
                 f"fc1={tuple(fc1_b.shape)} fc2={tuple(fc2_b.shape)}"
             )
+        dtype = dsv4_norm_predictor_dtype()
         self._weights = tuple(
-            t.to(device=device, dtype=torch.float32)
+            t.to(device=device, dtype=dtype)
             for t in (fc1_w, fc1_b, fc2_w, fc2_b)
         )
         self._device = device
         logger.info(
-            "Loaded DeepSeek-V4 norm predictor: layer=%d path=%s",
+            "Loaded DeepSeek-V4 norm predictor: layer=%d path=%s dtype=%s",
             self.layer_id,
             path,
+            dtype,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self._weights is None or self._device != x.device:
             self.preload(x.device)
         fc1_w, fc1_b, fc2_w, fc2_b = self._weights
-        hidden = F.linear(x.float(), fc1_w, fc1_b)
+        # bf16 path: tensor-core GEMMs with fp32 accumulation; softplus uses
+        # fp32 internal math. The returned norms are fp32 so the downstream
+        # Top-p selection contract is unchanged.
+        hidden = F.linear(x.to(fc1_w.dtype), fc1_w, fc1_b)
         hidden = F.relu(hidden)
         raw = F.linear(hidden, fc2_w, fc2_b)
-        return F.softplus(raw) + 1.0e-6
+        return F.softplus(raw).float() + 1.0e-6
 
     def preload(self, device: torch.device | str) -> None:
         device = torch.device(device)
