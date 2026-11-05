@@ -32,6 +32,7 @@ def build_v41_kv_cache_spec_descs(
     head_dim,
     *,
     bounded_replay=False,
+    encoder_replay=False,
     draft=False,
     fixed_pool_use_host_memory=False,
 ):
@@ -65,6 +66,12 @@ def build_v41_kv_cache_spec_descs(
     reuse = CacheReusePolicyDesc()
     reuse.enable_prefix_reuse = False
     decoder_swa.reuse = reuse
+    if encoder_replay:
+        # Cached Global/indexer prefixes remain reusable without a matching
+        # encoder SWA/CSA tail. The PPU runner rebuilds private state from
+        # complete token history and appends only new global entries.
+        swa.reuse = reuse
+        state.reuse = reuse
     if fixed_pool_use_host_memory:
         for desc in (state, swa, decoder_swa):
             _use_host_pinned_memory(desc)
@@ -103,6 +110,15 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
             attn.kernel_tokens_per_block = promoted
         attn.tokens_per_block = promoted
     bounded = enabled()
+    from rtp_llm.config.v41_runtime import v41_backend_for_config
+
+    backend = v41_backend_for_config()
+    encoder_replay = False
+    if backend == "ppu":
+        from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
+
+        policy = PrefillPolicy.from_config()
+        bounded, encoder_replay = policy.bounded_replay, policy.encoder_replay
     draft = bool(model_config.is_mtp)
     model_config.hybrid_attention_config.hybrid_attention_types = [
         HybridAttentionType.NONE
@@ -113,6 +129,7 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         list(attn.v41_kv_source_layer_ids),
         int(attn.size_per_head),
         bounded_replay=bounded,
+        encoder_replay=encoder_replay,
         draft=draft,
         fixed_pool_use_host_memory=bool(
             kv_cache_config and kv_cache_config.dsv4_fixed_pool_use_memory
@@ -149,12 +166,10 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
     model_config.cache_key_hash_seed = (
         0x4453563431494231 if bounded else 0x4453563431494631
     )
-    from rtp_llm.config.v41_runtime import v41_backend_for_config
-
-    if v41_backend_for_config() == "ppu":
+    if backend == "ppu":
         from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import (
-            NATIVE_CACHE_KEY_HASH_SEED,
+            native_cache_key_hash_seed,
         )
 
         # PPU logical/planar bytes and NV token-interleaved bytes cannot share keys.
-        model_config.cache_key_hash_seed = NATIVE_CACHE_KEY_HASH_SEED
+        model_config.cache_key_hash_seed = native_cache_key_hash_seed()

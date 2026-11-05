@@ -25,7 +25,6 @@ preconditions; the V41CacheView -> paged-metadata mapping is L3's wiring.
 from __future__ import annotations
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.chunk_env import FLASH_MLA_SPARSE_Q_CHUNK
 from rtp_llm.models_py.modules.dsv41.ppu import _quant, kv_codec
 
@@ -182,6 +181,7 @@ def build_sparse_workspace(
     window: int = SWA_WINDOW,
     global_pool_tag: str | None = None,
     ratio: int | None = None,
+    swa_starts: dict | None = None,
 ):
     """Assemble the bounded sparse-attention workspace.
 
@@ -248,7 +248,8 @@ def build_sparse_workspace(
         # (wave2-fix: the old tail-only span broke rank-local CP query rows).
         min_pos = int(positions[row_indices].min())
         max_pos = seq_len - 1
-        swa_start = max(0, min_pos - (window - 1))
+        replay_start = int((swa_starts or {}).get(request, 0))
+        swa_start = max(0, replay_start, min_pos - (window - 1))
         tail = max_pos + 1 - swa_start
         if tail > 0:
             tail_positions = torch.arange(swa_start, seq_len, device=positions.device)
@@ -281,7 +282,7 @@ def build_sparse_workspace(
                     ).to(torch.int32)
                     written += int(keep.numel())
             # SWA part: positions [pos - swa_len + 1, pos].
-            swa_len = min(pos + 1, window)
+            swa_len = max(0, min(pos + 1, window, pos - replay_start + 1))
             if swa_len > 0:
                 first = pos - swa_len + 1
                 offsets = torch.arange(first, pos + 1, device=positions.device)
@@ -312,6 +313,7 @@ def sparse_attention(
     sm_scale: float = SM_SCALE,
     window: int = SWA_WINDOW,
     ratio: int | None = None,
+    swa_starts: dict | None = None,
 ):
     """Sparse prefill attention over the V41CacheView pools.
 
@@ -328,6 +330,7 @@ def sparse_attention(
         context=context,
         window=window,
         ratio=ratio,
+        swa_starts=swa_starts,
     )
     outputs = []
     rows = q.shape[0]

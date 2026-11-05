@@ -76,6 +76,7 @@ class V41RuntimeConfig:
     low_latency: bool = False
     ced: bool = False
     bounded_replay: bool = False
+    encoder_replay: bool = False
     redundant_experts: int = 0
     normal_ep: bool = True
     all_gather_moe: bool = False
@@ -111,12 +112,14 @@ class V41RuntimeConfig:
             )
         if (self.world_size, self.ep, self.enp) != (8, 8, 8):
             errors.append("world_size=EP=ENP=8 (separate P/D worlds)")
-        if not 0 < self.max_seq_len <= 32768:
-            errors.append("input + output must fit max_seq_len in [1, 32768]")
-        if self.kv_sharded or self.low_latency or self.ced or self.bounded_replay:
-            errors.append(
-                "KV sharding, low-latency EP, CED and bounded replay must be disabled"
-            )
+        if self.max_seq_len <= 0:
+            errors.append("max_seq_len must be positive and cover input + output")
+        if self.kv_sharded or self.low_latency:
+            errors.append("KV sharding and low-latency EP must be disabled")
+        if self.bounded_replay and not self.ced:
+            errors.append("DSV41_SWA_BOUNDED_REPLAY requires DSV41_CED=1")
+        if self.encoder_replay and not self.bounded_replay:
+            errors.append("encoder SWA recovery requires decoder bounded replay")
         if self.cuda_graph and (
             self.role != "DECODE"
             or self.moe_backend != "megamoe"
@@ -170,6 +173,7 @@ class V41RuntimeConfig:
             low_latency=env_bool(env, "USE_DEEPEP_LOW_LATENCY"),
             ced=env_bool(env, "DSV41_CED"),
             bounded_replay=env_bool(env, "DSV41_SWA_BOUNDED_REPLAY"),
+            encoder_replay=env_bool(env, "DSV41_ENCODER_SWA_REPLAY"),
             redundant_experts=int(env.get("REDUNDANT_EXPERT", "0")),
             normal_ep=env_bool(env, "USE_DEEPEP_MOE", default=True),
             all_gather_moe=env_bool(env, "USE_ALL_GATHER"),
@@ -189,7 +193,7 @@ class V41RuntimeConfig:
         cp = p.prefill_cp_config
         env = os.environ
         if config.model_args.max_seq_len is None:
-            raise ValueError("V4.1 PPU requires explicit --max_seq_len <= 32768")
+            raise ValueError("V4.1 PPU requires explicit positive --max_seq_len")
         if p.local_world_size != 8:
             raise ValueError("V4.1 PPU requires local_world_size=8 for each role")
         return cls(
@@ -209,6 +213,7 @@ class V41RuntimeConfig:
             low_latency=config.moe_config.use_deepep_low_latency,
             ced=env_bool(env, "DSV41_CED"),
             bounded_replay=env_bool(env, "DSV41_SWA_BOUNDED_REPLAY"),
+            encoder_replay=env_bool(env, "DSV41_ENCODER_SWA_REPLAY"),
             redundant_experts=config.eplb_config.redundant_expert,
             normal_ep=config.moe_config.use_deepep_moe,
             all_gather_moe=config.moe_config.use_all_gather,

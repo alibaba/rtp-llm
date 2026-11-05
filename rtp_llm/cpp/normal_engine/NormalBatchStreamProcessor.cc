@@ -1,4 +1,8 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include <cstdlib>
+#include <string>
+#include <algorithm>
+#include <cctype>
 
 namespace rtp_llm {
 
@@ -15,6 +19,21 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.has_positional_encoding = model_config.has_positional_encoding;
     model_input_gatherer_config_.is_multimodal           = model_config.mm_model_config.is_multimodal;
     model_input_gatherer_config_.has_engram              = !model_config.attn_config.v41_kv_source_layer_ids.empty();
+    auto lower                                           = [](std::string value) {
+        std::transform(
+            value.begin(), value.end(), value.begin(), [](unsigned char character) { return std::tolower(character); });
+        return value;
+    };
+    const char* backend       = std::getenv("RTP_V41_BACKEND");
+    const char* replay        = std::getenv("DSV41_ENCODER_SWA_REPLAY");
+    const auto  backend_value = lower(backend != nullptr ? backend : "auto");
+    const auto  replay_value  = lower(replay != nullptr ? replay : "0");
+    bool        ppu_backend   = backend_value == "ppu";
+#if USE_PPU
+    ppu_backend = ppu_backend || backend_value == "auto";
+#endif
+    model_input_gatherer_config_.prefill_replay_history =
+        ppu_backend && (replay_value == "1" || replay_value == "true" || replay_value == "yes" || replay_value == "on");
     model_input_gatherer_config_.mm_position_ids_style =
         static_cast<PositionIdsStyle>(model_config.mm_model_config.mm_position_ids_style);
     model_input_gatherer_config_.position_id_len_factor     = model_config.attn_config.rope_config.index_factor;

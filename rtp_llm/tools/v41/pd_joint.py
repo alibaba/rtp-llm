@@ -53,8 +53,6 @@ def main(argv=None):
         parser.error("--checkpoint-path or --synthetic is required")
     if not 0 < args.tokens or not 0 < args.requests or not 0 < args.steps:
         parser.error("tokens, requests and steps must be positive")
-    if args.tokens + args.steps + 1 > 32768:
-        parser.error("input + generated output must fit 32K")
     if not 0 <= args.fixture_steps <= args.steps:
         parser.error("fixture steps must be in [0, steps]")
     if not 1024 <= args.base_port <= 65528:

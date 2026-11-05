@@ -26,14 +26,11 @@ import logging
 from typing import Callable, Optional
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache
 from rtp_llm.models_py.modules.dsv41.ppu.ops import PPUOps
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import PrefillResult, run_prefill
-from rtp_llm.models_py.modules.dsv41.ppu.weight import (
-    PPUWeightBundle,
-    V41Geometry,
-)
+from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
+from rtp_llm.models_py.modules.dsv41.ppu.weight import PPUWeightBundle, V41Geometry
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +49,8 @@ class PPUModelCore:
         cache: Optional[PPUKVCache] = None,
         device=None,
     ):
-        self.config = dict(config)
+        self.prefill_policy = PrefillPolicy.from_config(config)
+        self.config = self.prefill_policy.freeze(config)
         self.weights = weights
         self.ops = ops
         self.geometry: V41Geometry = weights.geometry
@@ -78,6 +76,8 @@ class PPUModelCore:
         cache: Optional[PPUKVCache] = None,
         apply_lm_head: bool = False,
         parallel_context: Optional[object] = None,
+        allow_ced: bool = True,
+        replay_prefix_lengths=None,
     ) -> PrefillResult:
         """Single-rank prefill (see ``prefill.run_prefill``)."""
         return run_prefill(
@@ -91,6 +91,9 @@ class PPUModelCore:
             lookback_token_ids=lookback_token_ids,
             apply_lm_head=apply_lm_head,
             parallel_context=parallel_context,
+            policy=self.prefill_policy,
+            allow_ced=allow_ced,
+            replay_prefix_lengths=replay_prefix_lengths,
         )
 
     # ---------------------------------------------------------------- decode
@@ -154,6 +157,7 @@ class DeepSeekV41PPUModel(torch.nn.Module):
         if "engram_token_map" not in config:
             import os
             from pathlib import Path
+
             from rtp_llm.models_py.modules.dsv41.ppu.tools.driver_prefill import (
                 _load_token_map,
             )
@@ -216,7 +220,7 @@ class DeepSeekV41PPUModel(torch.nn.Module):
         self._decode_graph_enabled = bool(
             getattr(py_hw_kernel_config, "enable_cuda_graph", False)
         )
-        self._decode_graph_config = dict(config)
+        self._decode_graph_config = dict(self.core.config)
         runtime_max_seq_len = int(getattr(model_config, "max_seq_len", 0) or 0)
         if runtime_max_seq_len > 0:
             self._decode_graph_config["max_position_embeddings"] = min(
@@ -280,7 +284,9 @@ class DeepSeekV41PPUModel(torch.nn.Module):
 
     def _graph_runner(self):
         if self._decode_graph_runner is None:
-            from rtp_llm.models_py.modules.dsv41.ppu.graph_decode import GraphDecodeRunner
+            from rtp_llm.models_py.modules.dsv41.ppu.graph_decode import (
+                GraphDecodeRunner,
+            )
 
             self._decode_graph_runner = GraphDecodeRunner(
                 self.core,

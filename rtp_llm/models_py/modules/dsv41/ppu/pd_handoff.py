@@ -123,7 +123,7 @@ def validate_handoff(manifest, *, identity, model_signature, run_id, owner, worl
     if not (lengths.keys() == histories.keys() == seeds.keys() == owners.keys()):
         raise ValueError("PD request/history/first-token/owner sets differ")
     for rid, length in lengths.items():
-        if len(histories[rid]) != length or not 0 < length <= 32768:
+        if len(histories[rid]) != length or length <= 0:
             raise ValueError(f"PD history length mismatch: {rid}")
         if owners[rid] != owner:
             raise ValueError(f"PD request {rid} belongs to a different D owner")

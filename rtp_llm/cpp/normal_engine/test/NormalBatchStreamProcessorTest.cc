@@ -1452,6 +1452,50 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, EncoderReplayHistoryDoesNotChangeSchedulerQueries) {
+    ModelConfig model;
+    model.max_seq_len      = 128;
+    model.vocab_size       = 128;
+    model.input_vocab_size = 128;
+    model.num_layers       = 1;
+    CacheConfig cache_config;
+    initFullCacheConfig(cache_config, 1);
+    rtp_llm::test::setGroupBlockLayout(cache_config, {"default"}, {64}, {4096}, {256});
+    auto make_stream = [&](std::vector<int32_t> tokens, int prefix, int block) {
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = hostIntBuffer(std::move(tokens));
+        query->generate_config = std::make_shared<GenerateConfig>();
+        auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+        BatchKVCacheResource cache;
+        cache.resetBatchSize(1);
+        cache.initGroups(cache_config.topologyPtr());
+        cache.setBatchBlocks(0, "default", {block});
+        stream->setKVCache(cache);
+        stream->setReuseLength(prefix);
+        stream->setIsContextStream(true);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+    auto                       first  = make_stream({1, 2, 3, 4, 5, 6}, 2, 1);
+    auto                       second = make_stream({7, 8, 9}, 0, 2);
+    StreamGroups               groups(std::list<GenerateStreamPtr>{first, second});
+    NormalBatchStreamProcessor processor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config, false);
+    auto                       config = processor.model_input_gatherer_config_;
+    config.prefill_replay_history     = true;
+    NormalModelInputGatherer gatherer(config);
+    TensorHolder             holder;
+    auto                     result = gatherer.gather(groups, holder);
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(toVec<int32_t>(result->combo_tokens.cpu()), (std::vector<int32_t>{3, 4, 5, 6, 7, 8, 9}));
+    EXPECT_EQ(toVec<int32_t>(result->input_lengths.cpu()), (std::vector<int32_t>{4, 3}));
+    EXPECT_EQ(toVec<int32_t>(result->prefix_lengths.cpu()), (std::vector<int32_t>{2, 0}));
+    ASSERT_TRUE(result->prefill_replay_token_ids.defined());
+    EXPECT_TRUE(result->prefill_replay_token_ids.device().is_cpu());
+    EXPECT_EQ(toVec<int32_t>(result->prefill_replay_token_ids), (std::vector<int32_t>{1, 2, 3, 4, 5, 6, 7, 8, 9}));
+    first->completeTokenIds().fill_(99);
+    EXPECT_EQ(toVec<int32_t>(result->prefill_replay_token_ids), (std::vector<int32_t>{1, 2, 3, 4, 5, 6, 7, 8, 9}));
+}
+
 TEST_F(NormalBatchStreamProcessorTest, EngramDeviceHistoryAdvancesWithoutHostBookkeeping) {
     ModelConfig model_config;
     model_config.max_seq_len                         = 128;

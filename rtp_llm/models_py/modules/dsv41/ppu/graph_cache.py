@@ -6,7 +6,6 @@ import math
 from dataclasses import dataclass
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     as_attention_inputs_by_tag,
     primary_attention_inputs,
@@ -17,7 +16,8 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import (
     read_packed_rows,
     write_packed_rows,
 )
-from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import FRAMEWORK_POOL_TAGS
+from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import framework_pool_tag
+from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 
 _FULL = frozenset(("global_kv_1", "global_kv_2", "indexer_kv"))
 _WIDTH = {
@@ -53,41 +53,62 @@ class NativeGraphCache:
             raise ValueError("PPU decode Graph requires framework-owned cache pools")
         self.config = dict(config)
         self.geometry = CacheGeometry.from_config(config)
+        self.policy = PrefillPolicy.from_config(config)
         self.max_seq_len = int(config.get("max_position_embeddings", 32768))
         self.device = torch.device(device)
         self.native = kv_cache
         self.entries, self.spans, self.tables = {}, {}, {}
         self._pools, self._handles, self._pool_identity = {}, {}, {}
         self._table_fields, self._table_identity = {}, {}
+        self._framework_tags, self._table_framework_tags = {}, {}
         by_tag = as_attention_inputs_by_tag(attention_inputs, kv_cache)
         for owner, tag in self.geometry.pool_keys():
-            framework_tag = FRAMEWORK_POOL_TAGS[tag]
+            framework_tag = framework_pool_tag(
+                owner, tag, geometry=self.geometry, policy=self.policy
+            )
+            self._framework_tags[(owner, tag)] = framework_tag
+            table_tag = self._table_tag(owner, tag)
             if framework_tag not in by_tag:
-                raise ValueError(f"missing Graph attention inputs for pool {framework_tag}")
+                raise ValueError(
+                    f"missing Graph attention inputs for pool {framework_tag}"
+                )
             handle = kv_cache.get_layer_cache(owner, framework_tag)
             tensor = handle.kv_cache_base
-            if tensor.ndim < 2 or not tensor.is_contiguous() or tensor.device != self.device:
-                raise ValueError(f"Graph pool {(owner, tag)} must be contiguous on {self.device}")
+            if (
+                tensor.ndim < 2
+                or not tensor.is_contiguous()
+                or tensor.device != self.device
+            ):
+                raise ValueError(
+                    f"Graph pool {(owner, tag)} must be contiguous on {self.device}"
+                )
             tensor = tensor.view(tensor.shape[0], math.prod(tensor.shape[1:]))
             entries = int(kv_cache.get_entries_per_block(framework_tag))
             span = int(
                 kv_cache.get_kernel_seq_size_per_block(framework_tag)
-                if tag in _FULL else kv_cache.get_seq_size_per_block(framework_tag)
+                if tag in _FULL
+                else kv_cache.get_seq_size_per_block(framework_tag)
             )
             dtype = torch.float32 if tag == "csa_state" else torch.uint8
             if entries <= 0 or span <= 0 or tensor.dtype != dtype:
-                raise ValueError(f"invalid Graph pool dtype/geometry for {(owner, tag)}")
+                raise ValueError(
+                    f"invalid Graph pool dtype/geometry for {(owner, tag)}"
+                )
             if tensor.shape[1] < entries * _WIDTH[tag] or tensor.shape[0] < 1:
-                raise ValueError(f"Graph pool {(owner, tag)} has insufficient physical capacity")
+                raise ValueError(
+                    f"Graph pool {(owner, tag)} has insufficient physical capacity"
+                )
             if tag == "swa_kv" and entries < self.geometry.window:
-                raise ValueError("SWA native ring cannot hold the complete attention window")
+                raise ValueError(
+                    "SWA native ring cannot hold the complete attention window"
+                )
             if tag == "csa_state" and entries < 2:
                 raise ValueError("CSA native ring cannot hold a ratio-2 boundary")
             self._pools[(owner, tag)] = tensor
             self._handles[(owner, tag)] = handle
             self._pool_identity[(owner, tag)] = _identity(tensor)
-            self.entries[tag], self.spans[tag] = entries, span
-            if tag in self.tables:
+            self.entries[table_tag], self.spans[table_tag] = entries, span
+            if table_tag in self.tables:
                 continue
             field = (
                 "kv_cache_kernel_block_id_device"
@@ -96,14 +117,21 @@ class NativeGraphCache:
             )
             table = getattr(by_tag[framework_tag], field, None)
             if table is None or not table.numel():
-                table = getattr(by_tag[framework_tag], field.removesuffix("_device"), None)
+                table = getattr(
+                    by_tag[framework_tag], field.removesuffix("_device"), None
+                )
             if table is None or table.ndim != 2 or table.shape[1] == 0:
                 raise ValueError(
                     f"Graph pool {framework_tag} requires its own nonempty block table"
                 )
-            self.tables[tag] = table.to(device=self.device)
-            self._table_fields[tag] = field
-            self._table_identity[tag] = _identity(self.tables[tag])
+            self.tables[table_tag] = table.to(device=self.device)
+            self._table_fields[table_tag] = field
+            self._table_identity[table_tag] = _identity(self.tables[table_tag])
+            self._table_framework_tags[table_tag] = framework_tag
+
+    def _table_tag(self, owner, tag):
+        framework_tag = self._framework_tags[(int(owner), tag)]
+        return "decoder_swa_kv" if framework_tag == "decoder_swa_kv" else tag
 
     def pool(self, owner, tag):
         return self._pools[(int(owner), tag)]
@@ -113,54 +141,77 @@ class NativeGraphCache:
         if raw_positions.device != self.device:
             raise ValueError("Graph positions must already reside on the cache device")
         full = tag in _FULL
+        table_tag = self._table_tag(owner, tag)
         ratio = self.geometry.ratio(int(owner)) if full else 1
         if ratio <= 0:
             raise ValueError("Global/indexer Graph cache owner must have ratio 1 or 2")
         return position_slots(
-            raw_positions, self.tables[tag], span=self.spans[tag],
-            entries=self.entries[tag], ratio=ratio, full=full,
+            raw_positions,
+            self.tables[table_tag],
+            span=self.spans[table_tag],
+            entries=self.entries[table_tag],
+            ratio=ratio,
+            full=full,
             pool_blocks=self.pool(owner, tag).shape[0],
         )
 
     def read_rows(self, owner, tag, slots):
         return read_packed_rows(
-            self.pool(owner, tag), slots, width=_WIDTH[tag],
-            entries=self.entries[tag], planar=tag == "indexer_kv",
+            self.pool(owner, tag),
+            slots,
+            width=_WIDTH[tag],
+            entries=self.entries[self._table_tag(owner, tag)],
+            planar=tag == "indexer_kv",
         )
 
     def write_rows(self, owner, tag, slots, rows):
         write_packed_rows(
-            self.pool(owner, tag), slots, rows, width=_WIDTH[tag],
-            entries=self.entries[tag], planar=tag == "indexer_kv",
+            self.pool(owner, tag),
+            slots,
+            rows,
+            width=_WIDTH[tag],
+            entries=self.entries[self._table_tag(owner, tag)],
+            planar=tag == "indexer_kv",
         )
 
     def prepare(self, attention_inputs):
         """Refresh owned host-fallback tables outside capture, retaining storage."""
         by_tag = as_attention_inputs_by_tag(attention_inputs, self.native)
         for tag, destination in self.tables.items():
-            framework_tag = FRAMEWORK_POOL_TAGS[tag]
+            framework_tag = self._table_framework_tags[tag]
             if framework_tag not in by_tag:
-                raise ValueError(f"missing Graph attention inputs for pool {framework_tag}")
+                raise ValueError(
+                    f"missing Graph attention inputs for pool {framework_tag}"
+                )
             field = self._table_fields[tag]
             source = getattr(by_tag[framework_tag], field, None)
             if source is None or not source.numel():
-                source = getattr(by_tag[framework_tag], field.removesuffix("_device"), None)
+                source = getattr(
+                    by_tag[framework_tag], field.removesuffix("_device"), None
+                )
             if source is None or tuple(source.shape) != tuple(destination.shape):
-                raise ValueError(f"Graph block-table geometry changed for {framework_tag}")
+                raise ValueError(
+                    f"Graph block-table geometry changed for {framework_tag}"
+                )
             if _identity(destination) != self._table_identity[tag]:
                 raise RuntimeError("Graph cache table allocation changed after capture")
-            if source.device != destination.device or source.data_ptr() != destination.data_ptr():
+            if (
+                source.device != destination.device
+                or source.data_ptr() != destination.data_ptr()
+            ):
                 destination.copy_(source, non_blocking=True)
         for key, pool in self._pools.items():
             current = self.native.get_layer_cache(
-                key[0], FRAMEWORK_POOL_TAGS[key[1]]
+                key[0], self._framework_tags[key]
             ).kv_cache_base
             current = current.view(current.shape[0], math.prod(current.shape[1:]))
             if (
                 _identity(current) != self._pool_identity[key]
                 or _identity(pool) != self._pool_identity[key]
             ):
-                raise RuntimeError("Framework cache allocation changed after Graph binding")
+                raise RuntimeError(
+                    "Framework cache allocation changed after Graph binding"
+                )
 
 
 @dataclass
@@ -199,9 +250,15 @@ class PPUDecodeGraphImpl:
             (), self.batch_size, dtype=torch.int32, device=self.device
         )
         self.metadata = DecodeGraphMetadata(
-            positions=torch.zeros(self.batch_size, dtype=torch.int64, device=self.device),
-            valid_mask=torch.ones(self.batch_size, dtype=torch.bool, device=self.device),
-            request_ids=torch.arange(self.batch_size, dtype=torch.int64, device=self.device),
+            positions=torch.zeros(
+                self.batch_size, dtype=torch.int64, device=self.device
+            ),
+            valid_mask=torch.ones(
+                self.batch_size, dtype=torch.bool, device=self.device
+            ),
+            request_ids=torch.arange(
+                self.batch_size, dtype=torch.int64, device=self.device
+            ),
             batch_size=self.batch_size,
         )
         self._metadata_in_graph = False
@@ -224,7 +281,9 @@ class PPUDecodeGraphImpl:
         if not plus_one:
             source = getattr(primary, "sequence_lengths", None)
         if source is None or source.numel() < self.batch_size:
-            raise ValueError("PPU Graph decode requires current per-request sequence lengths")
+            raise ValueError(
+                "PPU Graph decode requires current per-request sequence lengths"
+            )
         if source.device != self.device:
             if not allow_host:
                 raise ValueError("PPU Graph metadata requires device sequence lengths")
@@ -254,7 +313,9 @@ class PPUDecodeGraphImpl:
                 or valid_request_count.device != self.device
                 or valid_request_count.dtype != torch.int32
             ):
-                raise ValueError("PPU Graph live request count must be one device int32")
+                raise ValueError(
+                    "PPU Graph live request count must be one device int32"
+                )
             if valid_request_count.data_ptr() != destination.data_ptr():
                 destination.copy_(valid_request_count.reshape(()))
         else:

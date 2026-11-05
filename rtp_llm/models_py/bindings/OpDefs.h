@@ -361,6 +361,7 @@ struct PyModelInputs {
     torch::Tensor        engram_token_windows;
     // CP-local CPU history owned by normal prefill; undefined for decode and graphs.
     torch::Tensor engram_token_windows_host;
+    torch::Tensor prefill_replay_token_ids;
     bool          need_all_logits        = true;
     bool          need_all_hidden_states = true;
 

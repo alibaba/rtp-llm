@@ -153,7 +153,8 @@ TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
     inputs.lm_output_indexes        = torch::zeros({7}, torch::kInt32).cuda();
     // This is the exact mixed-device DSpARK TP2 case that previously made
     // rank 0 send 1504 CPU bytes while rank 1 waited for 1600.
-    inputs.combo_position_ids = torch::zeros({24}, torch::kInt32).cuda();
+    inputs.combo_position_ids       = torch::zeros({24}, torch::kInt32).cuda();
+    inputs.prefill_replay_token_ids = torch::arange(17, torch::kInt32);
 
     const auto hints     = getModelInputShapeHints(inputs);
     const auto map       = static_cast<uint32_t>(hints[GptModelInputIndex::tensorDeviceMap]);
@@ -171,6 +172,8 @@ TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
     EXPECT_FALSE(is_device(GptModelInputDeviceBit::kDeviceBitRequestPdSeparation));
     EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
     EXPECT_TRUE(is_device(GptModelInputDeviceBit::kDeviceBitComboPositionIds));
+    EXPECT_FALSE(is_device(GptModelInputDeviceBit::kDeviceBitPrefillReplayTokens));
+    EXPECT_EQ(hints[GptModelInputIndex::prefillReplayTokens], 17);
 }
 
 TEST_F(ModelDataTest, testTpSyncBlockTableShapesPreserve2DAnd3D) {
@@ -296,6 +299,8 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
         inputs.kv_cache_kernel_block_id = kernel.clone();
         inputs.kv_cache_group_types     = types.clone();
         inputs.kv_cache_update_mapping  = copies.clone();
+        inputs.prefill_replay_token_ids =
+            empty_tables ? torch::Tensor() : torch::tensor({1, 2, 3, 7, 8}, torch::kInt32);
     }
     const auto        original_physical = inputs.kv_cache_block_id;
     const auto        original_kernel   = inputs.kv_cache_kernel_block_id;
@@ -331,6 +336,11 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
         expectIntTensor(inputs.kv_cache_update_mapping, expected_copies.to(inputs.kv_cache_update_mapping.device()));
     }
     expectIntTensor(inputs.combo_tokens, torch::tensor({7, 8}, torch::kInt32));
+    if (empty_tables) {
+        EXPECT_TRUE(!inputs.prefill_replay_token_ids.defined() || inputs.prefill_replay_token_ids.numel() == 0);
+    } else {
+        expectIntTensor(inputs.prefill_replay_token_ids, torch::tensor({1, 2, 3, 7, 8}, torch::kInt32));
+    }
     if (rank == 0) {
         EXPECT_TRUE(inputs.kv_cache_block_id.is_same(original_physical));
         EXPECT_TRUE(inputs.kv_cache_kernel_block_id.is_same(original_kernel));

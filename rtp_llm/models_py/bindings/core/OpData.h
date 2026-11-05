@@ -31,6 +31,9 @@ enum class ParallelMode {
 // ids and lengths are int32_t
 struct GptModelInputs {
     torch::Tensor engram_token_windows;
+    // Complete context histories, concatenated in request order. PPU encoder
+    // SWA recovery uses these without changing scheduler query accounting.
+    torch::Tensor prefill_replay_token_ids;
     torch::Tensor mm_features_spans;
     // input_lengths holds original input length for requests,
     // shape [decoder_batch_size + context_batch_size], int32

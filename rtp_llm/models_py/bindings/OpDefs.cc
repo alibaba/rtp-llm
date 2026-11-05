@@ -260,6 +260,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("is_fake_stream", &PyModelInputs::is_fake_stream)
         .def_readwrite("warmup", &PyModelInputs::warmup)
         .def_readwrite("engram_token_windows", &PyModelInputs::engram_token_windows)
+        .def_readwrite("prefill_replay_token_ids", &PyModelInputs::prefill_replay_token_ids)
         .def_readwrite("engram_token_windows_host",
                        &PyModelInputs::engram_token_windows_host,
                        "CP-local host history retained only for normal prefill")

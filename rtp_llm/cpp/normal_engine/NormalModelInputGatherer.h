@@ -23,6 +23,7 @@ struct NormalModelInputGathererConfig {
     bool                        has_positional_encoding{};
     bool                        is_multimodal{};
     bool                        has_engram{};
+    bool                        prefill_replay_history{};
     PositionIdsStyle            mm_position_ids_style{};
     size_t                      position_id_len_factor{};
     RoleType                    role_type{};

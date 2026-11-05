@@ -663,7 +663,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         torch::empty({context_batch_size}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
     auto ctx                = createGatherContext(config_, model_input, stream_groups, GatherContextMode::CONTEXT);
     ctx.prefix_lengths_host = prefix_lengths_host.data_ptr<int32_t>();
-    int custom_output_count = 0;
+    int                        custom_output_count = 0;
+    std::vector<torch::Tensor> replay_histories;
     if (config_.enable_model_inputs_log && context_batch_size > 0 && !model_input.is_fake_stream) {
         model_input.all_input_token_ids.emplace();
         model_input.all_input_token_ids->reserve(context_batch_size);
@@ -688,7 +689,11 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         for (auto i = 0; i < current_batch_size; ++i) {
             const auto prefill_batch_idx = ctx.batch_idx - ctx.total_decode_batch_size;
             model_input.trace_ids.push_back(stream->traceId());
-            auto      input_tokens = stream->currentExecuteTokens(i);
+            auto input_tokens = stream->currentExecuteTokens(i);
+            if (config_.prefill_replay_history && !model_input.is_fake_stream) {
+                const int replay_length = stream->prefixLength() + static_cast<int>(input_tokens.size());
+                replay_histories.push_back(stream->completeTokenIds().select(0, i).narrow(0, 0, replay_length).clone());
+            }
             auto      input_masks  = stream->textTokensMask();
             const int position     = stream->generateInput()->custom_output_token_position;
             // Return sequences occupy separate context rows; preserve one selected
@@ -766,6 +771,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         stream->step();
     }
 
+    if (!replay_histories.empty()) {
+        model_input.prefill_replay_token_ids = torch::cat(replay_histories, 0).to(torch::kInt32).contiguous();
+    }
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }

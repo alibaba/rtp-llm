@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--max-new-tokens", type=int, default=3)
     parser.add_argument("--requests", type=int, default=1)
     parser.add_argument("--expected-input-tokens", type=int)
+    parser.add_argument("--reuse-cache", action="store_true")
     parser.add_argument("--timeout", type=float, default=1800)
     args = parser.parse_args()
     if args.max_new_tokens < 2 or args.requests < 1 or args.timeout <= 0:
@@ -38,7 +39,7 @@ def main():
             "top_k": 1,
             "top_p": 1.0,
             "random_seed": 42,
-            "reuse_cache": False,
+            "reuse_cache": args.reuse_cache,
             "can_use_pd_separation": True,
             "return_input_ids": True,
             "return_output_ids": True,

@@ -134,6 +134,7 @@ enum GptModelInputIndex : size_t {
     mmFeaturesSpans,
     engramTokenWindowRows,
     engramTokenWindowWidth,
+    prefillReplayTokens,
     gptModelInputLength,
 };
 
@@ -163,6 +164,7 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitMmFeaturesLocs      = 1u << 14,
     kDeviceBitEngramWindows       = 1u << 15,
     kDeviceBitMmFeaturesSpans     = 1u << 16,
+    kDeviceBitPrefillReplayTokens = 1u << 17,
 };
 
 enum GptModelInputControlFlag : uint32_t {

@@ -23,6 +23,7 @@ py_library(
         "modules/dsv41/ppu/moe_precision.py",
         "modules/dsv41/ppu/native_protocol.py",
         "modules/dsv41/ppu/pd_handoff.py",
+        "modules/dsv41/ppu/replay_policy.py",
     ],
     visibility = ["//visibility:public"],
 )

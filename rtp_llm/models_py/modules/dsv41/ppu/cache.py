@@ -47,7 +47,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.ppu import kv_codec
 from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import PoolDescriptor
 
@@ -240,6 +239,9 @@ class PPUKVCache:
                 raise ValueError("provide a config dict or a CacheGeometry")
             geometry = CacheGeometry.from_config(config)
         self.geometry = geometry
+        from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
+
+        self.prefill_policy = PrefillPolicy.from_config(config)
         self.device = torch.device(device) if device is not None else None
         self._pools: Dict[PoolKey, torch.Tensor] = {}
         self._allocators: Dict[PoolKey, _BlockAllocator] = {}

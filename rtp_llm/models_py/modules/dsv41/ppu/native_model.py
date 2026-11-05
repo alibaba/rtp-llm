@@ -6,7 +6,6 @@ import logging
 import weakref
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import primary_attention_inputs
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache
 from rtp_llm.models_py.modules.dsv41.ppu.cp import (
@@ -16,6 +15,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.cp import (
 )
 from rtp_llm.models_py.modules.dsv41.ppu.decode import DecodeStepOrchestrator
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache import NativeCacheBridge
+from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 
 logger = logging.getLogger(__name__)
 _SHUTDOWN_GROUP = None
@@ -52,6 +52,7 @@ def _write_perf_evidence():
         return
     import json
     from pathlib import Path
+
     import torch.distributed as dist
     from rtp_llm.models_py.modules.dsv41.ppu.moe import PPUMoE
 
@@ -64,7 +65,9 @@ def _write_perf_evidence():
                 "rank": dist.get_rank(),
                 "world_size": dist.get_world_size(),
                 "decode_graph_replays": sum(r.graph_replays for r in _NATIVE_RUNNERS),
-                "model_layers": sorted({r.core.geometry.num_layers for r in _NATIVE_RUNNERS}),
+                "model_layers": sorted(
+                    {r.core.geometry.num_layers for r in _NATIVE_RUNNERS}
+                ),
                 "engines": [
                     {"layers": len(engine._weights), **engine.execution_stats()}
                     for engine in engines
@@ -79,6 +82,7 @@ def _write_perf_evidence():
 def shutdown_native_parallel():
     """Release role communication before Python interpreter finalization."""
     import gc
+
     import torch.distributed as dist
 
     if not dist.is_initialized():
@@ -326,6 +330,51 @@ class NativeModelRunner:
                 torch.arange(len(lengths)), torch.tensor(lengths)
             ).to(ids.device)
             cu_local = cu.to(ids.device)
+        replaying = PrefillPolicy.from_config(self.core.config).encoder_replay and any(
+            prefixes
+        )
+        if replaying:
+            history = getattr(inputs, "prefill_replay_token_ids", None)
+            totals = [prefix + length for prefix, length in zip(prefixes, lengths)]
+            if history is None or history.numel() != sum(totals):
+                raise ValueError(
+                    "encoder SWA recovery needs complete scheduler token history"
+                )
+            history = history.reshape(-1).cpu().long()
+            if bool(((history < 0) | (history >= self.core.geometry.vocab_size)).any()):
+                raise ValueError("encoder replay history contains invalid token ids")
+            replay_cu = torch.tensor(
+                [0] + list(torch.tensor(totals).cumsum(0).tolist())
+            )
+            for row, prefix in enumerate(prefixes):
+                actual = history[int(replay_cu[row]) + prefix : int(replay_cu[row + 1])]
+                expected = full_ids[int(cu[row]) : int(cu[row + 1])].cpu().long()
+                if not torch.equal(actual, expected):
+                    raise ValueError(
+                        "encoder replay history disagrees with the fresh query"
+                    )
+            lookback = None  # Complete histories start at token zero.
+            if group is not None:
+                replay_plan = build_zigzag_plan(
+                    history,
+                    replay_cu,
+                    cp_size=self.cp_size,
+                    cp_rank=self.cp_rank,
+                )
+                context = CPPrefillContext(replay_plan, group, simulate_moe=False)
+                ids = replay_plan.local_input_ids.to(self.core.device)
+                positions = replay_plan.local_positions.to(self.core.device)
+                requests = replay_plan.local_request_ids.to(self.core.device)
+                cu_local = replay_plan.cu_local.to(self.core.device)
+            else:
+                ids = history.to(self.core.device)
+                positions = torch.cat([torch.arange(total) for total in totals]).to(
+                    ids.device
+                )
+                requests = torch.repeat_interleave(
+                    torch.arange(len(totals)), torch.tensor(totals)
+                ).to(ids.device)
+                cu_local = replay_cu.to(ids.device)
         bridge = None
         if self.kv_cache is None:
             if any(prefixes):
@@ -338,7 +387,7 @@ class NativeModelRunner:
                 inputs.attention_inputs,
                 device=self.core.device,
             )
-            cache = bridge.import_requests(prefixes)
+            cache = bridge.import_requests(prefixes, prefill=True)
         result = self.core.prefill(
             ids,
             positions=positions,
@@ -347,6 +396,11 @@ class NativeModelRunner:
             lookback_token_ids=lookback,
             cache=cache,
             parallel_context=context,
+            allow_ced=(
+                getattr(inputs, "need_all_logits", None) is False
+                and getattr(inputs, "need_all_hidden_states", None) is False
+            ),
+            replay_prefix_lengths=prefixes if replaying else None,
         )
         if bridge is not None:
             bridge.export_requests(
@@ -355,6 +409,22 @@ class NativeModelRunner:
                 publish=not bool(inputs.warmup),
             )
         hidden = result.hidden
+        if replaying:
+            hidden = torch.cat(
+                [
+                    hidden[int(replay_cu[row]) + prefix : int(replay_cu[row + 1])]
+                    for row, prefix in enumerate(prefixes)
+                ]
+            )
+            logger.info(
+                "PPU encoder SWA rebuilt cp=%d/%d prefix=%s query_rows=%s "
+                "append_rows=%s global_prefix_readonly=true",
+                self.cp_rank,
+                self.cp_size,
+                prefixes,
+                totals,
+                lengths,
+            )
         if context is not None:
             # C++ owns the final CP output gather. Return this rank's rows,
             # including harmless padding, rather than a duplicate full batch.

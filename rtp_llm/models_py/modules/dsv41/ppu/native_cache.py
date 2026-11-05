@@ -8,14 +8,14 @@ through their own block tables. No fixture or private network transport is used.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_attention_inputs_by_tag
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache
-from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import FRAMEWORK_POOL_TAGS
+from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import framework_pool_tag
+from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 
 _FULL = {"global_kv_1", "global_kv_2", "indexer_kv"}
 _WIDTH = {
@@ -42,6 +42,7 @@ class NativeCacheBridge:
 
     def __init__(self, config, kv_cache, attention_inputs, *, device=None):
         self.config = config
+        self.policy = PrefillPolicy.from_config(config)
         self.device = device
         self.native = kv_cache
         self.inputs = as_attention_inputs_by_tag(attention_inputs, kv_cache)
@@ -51,7 +52,9 @@ class NativeCacheBridge:
             raise ValueError("native V4.1 forward requires framework KVCache resources")
         for key in self.logical.pool_keys():
             owner, tag = key
-            framework_tag = FRAMEWORK_POOL_TAGS[tag]
+            framework_tag = framework_pool_tag(
+                owner, tag, geometry=self.logical.geometry, policy=self.policy
+            )
             if framework_tag not in self.inputs:
                 raise ValueError(
                     f"missing native attention inputs for pool {framework_tag} "
@@ -172,11 +175,25 @@ class NativeCacheBridge:
             else torch.empty(0, dtype=torch.int64)
         )
 
-    def import_requests(self, lengths):
+    def import_requests(self, lengths, *, prefill=False):
         """Restore already-cached prefixes; cold prefill uses zero lengths."""
         for row, length in enumerate(lengths):
             self.logical.alloc(row, int(length))
             for key in self.logical.pool_keys():
+                if prefill and self.policy.encoder_replay and key[1] not in _FULL:
+                    # Encoder history is replayed from token zero. Global KV
+                    # and indexer prefixes are authoritative; private SWA/CSA
+                    # storage can be freshly allocated or contain stale bytes.
+                    continue
+                if (
+                    prefill
+                    and self.policy.bounded_replay
+                    and key[1] == "swa_kv"
+                    and key[0] >= self.policy.decoder_start(self.logical.geometry)
+                ):
+                    # Approximate decoder state belongs only to the live
+                    # request. A new prefill reconstructs it from fresh rows.
+                    continue
                 positions = self._positions(key, int(length))
                 if not positions.numel():
                     continue

@@ -329,9 +329,12 @@ def worker_main(args: argparse.Namespace) -> int:
             if core.cache.state_checksum() != pd["state_checksum"]:
                 raise ValueError("D loaded cache differs from the P logical state")
             if any(
-                len(history) + args.steps + 1 > 32768 for history in histories.values()
+                len(history) + args.steps + 1 > geometry.max_seq_len
+                for history in histories.values()
             ):
-                raise ValueError("PD input + output exceeds 32K")
+                raise ValueError(
+                    "PD input + output exceeds checkpoint position capacity"
+                )
             pd_report = {
                 "identity": identity,
                 "run_id": args.pd_run_id,

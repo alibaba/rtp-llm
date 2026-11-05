@@ -23,11 +23,18 @@ def preset_env(
     decode_address=None,
     start_port=None,
     prefill_parallel="cp",
+    ced_mode="off",
+    encoder_swa_replay=False,
+    max_seq_len=None,
 ):
     if role not in ("prefill", "decode"):
         raise ValueError("role must be prefill or decode")
     if prefill_parallel not in ("cp", "dp"):
         raise ValueError("prefill_parallel must be cp or dp")
+    if ced_mode not in ("off", "exact", "bounded"):
+        raise ValueError("ced_mode must be off, exact or bounded")
+    if encoder_swa_replay and ced_mode != "bounded":
+        raise ValueError("encoder SWA recovery requires --ced-mode bounded")
     cp_prefill = prefill_parallel == "cp"
     env = dict(os.environ if parent is None else parent)
     env.update(
@@ -54,16 +61,21 @@ def preset_env(
             ),
             "PREFILL_CP_SIZE": "8" if cp_prefill else "1",
             "PREFILL_CP_KV_CACHE_SHARDED": "0",
-            "MAX_SEQ_LEN": "32768",
+            "MAX_SEQ_LEN": str(
+                max_seq_len
+                if max_seq_len is not None
+                else env.get("MAX_SEQ_LEN", "32768")
+            ),
             "LOAD_PYTHON_MODEL": "1",
             "ACT_TYPE": "bf16",
             "ENABLE_CUDA_GRAPH": "0",
             "SP_TYPE": "",
             "SP_MODEL_TYPE": "",
             "EPLB_MODE": "NONE",
-            "REUSE_CACHE": "0",
-            "DSV41_CED": "0",
-            "DSV41_SWA_BOUNDED_REPLAY": "0",
+            "REUSE_CACHE": "1" if encoder_swa_replay else "0",
+            "DSV41_CED": "0" if ced_mode == "off" else "1",
+            "DSV41_SWA_BOUNDED_REPLAY": "1" if ced_mode == "bounded" else "0",
+            "DSV41_ENCODER_SWA_REPLAY": "1" if encoder_swa_replay else "0",
             "USE_DEEPEP_MOE": "1",
             "USE_DEEPEP_LOW_LATENCY": "0",
             "USE_DEEPEP_INTERNODE": "0",
@@ -163,6 +175,23 @@ def main():
     )
     parser.add_argument("--start-port", type=int)
     parser.add_argument(
+        "--ced-mode",
+        choices=("off", "exact", "bounded"),
+        default="off",
+        help="PPU consumer prefill mode; use the same cache mode on P and D",
+    )
+    parser.add_argument(
+        "--encoder-swa-replay",
+        action="store_true",
+        help="Reuse Global KV prefixes and rebuild private encoder SWA from full history",
+    )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=os.environ.get("MAX_SEQ_LEN", "32768"),
+        help="Per-request input + output capacity; defaults to MAX_SEQ_LEN or 32768",
+    )
+    parser.add_argument(
         "--prefill-parallel",
         choices=("cp", "dp"),
         default="cp",
@@ -188,6 +217,9 @@ def main():
         decode_address=args.decode_address,
         start_port=args.start_port,
         prefill_parallel=args.prefill_parallel,
+        ced_mode=args.ced_mode,
+        encoder_swa_replay=args.encoder_swa_replay,
+        max_seq_len=args.max_seq_len,
     )
     env = preset_env(args.role, args.checkpoint_path, **options)
     if args.token_map_cache:

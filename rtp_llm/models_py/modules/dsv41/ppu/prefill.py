@@ -55,19 +55,17 @@ hidden is restored to logical token order on every rank.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-
-from rtp_llm.models_py.modules.dsv41.backend import (
-    V41QuantizedTensor,
-    V41StepContext,
-)
+from rtp_llm.models_py.modules.dsv41.backend import V41QuantizedTensor, V41StepContext
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu.attention import COMBINED_WIDTH
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache, PPURequestSlots
+from rtp_llm.models_py.modules.dsv41.ppu.ced import PPUCEDPlan, decoder_replay_starts
 from rtp_llm.models_py.modules.dsv41.ppu.cp import CPPrefillContext, cp_context_of
 from rtp_llm.models_py.modules.dsv41.ppu.engram import (
     build_token_windows,
@@ -81,6 +79,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.moe import (
     shared_expert_forward,
     sqrtsoftplus_gate,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 from rtp_llm.models_py.modules.dsv41.ppu.weight import PPUWeightBundle, V41Geometry
 
 __all__ = ["PrefillResult", "run_prefill", "build_step_context"]
@@ -94,6 +93,7 @@ class PrefillResult:
     logits: Optional[torch.Tensor]  # [T, vocab] when apply_lm_head
     cache: PPUKVCache
     slots: Dict[int, PPURequestSlots]  # request id -> handles
+    ced_info: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +257,7 @@ def _build_reference_workspace(
     context: V41StepContext,
     selected_blocks: Optional[torch.Tensor],
     window: int,
+    swa_starts: Optional[dict] = None,
 ):
     """CPU reference workspace: global rows + the queries' full SWA range.
 
@@ -302,7 +303,8 @@ def _build_reference_workspace(
         kv_rows.append(decoded)
         min_pos = int(min(int(positions[row]) for row in row_indices))
         max_pos = int(max(int(positions[row]) for row in row_indices))
-        swa_first = max(0, min_pos - (window - 1))
+        replay_start = int((swa_starts or {}).get(rid, 0))
+        swa_first = max(0, replay_start, min_pos - (window - 1))
         swa_positions = torch.arange(
             swa_first, max_pos + 1, dtype=torch.int64, device=device
         )
@@ -345,7 +347,8 @@ def _build_reference_workspace(
                             gbase + keep
                         ).to(torch.int32)
                         written += int(keep.numel())
-            swa_len = min(pos + 1, window)
+            replay_start = int((swa_starts or {}).get(rid, 0))
+            swa_len = max(0, min(pos + 1, window, pos - replay_start + 1))
             if swa_len > 0:
                 first = pos - swa_len + 1
                 local = torch.arange(first, pos + 1, device=device)
@@ -368,6 +371,7 @@ def _layer_attention(
     context: V41StepContext,
     attn_sink: Optional[torch.Tensor],
     window: int,
+    swa_starts: Optional[dict] = None,
 ) -> torch.Tensor:
     """Sparse attention for one layer (contract op on device, reference on CPU).
 
@@ -390,6 +394,7 @@ def _layer_attention(
             attn_sink=attn_sink,
             ratio=ratio,
             window=window,
+            swa_starts=swa_starts,
         )
     # CPU reference path (and ratio-0 everywhere: those layers have no global
     # pool to feed the contract op — see the wave-2 TODO above).
@@ -401,6 +406,7 @@ def _layer_attention(
         context=context,
         selected_blocks=selected_blocks,
         window=window,
+        swa_starts=swa_starts,
     )
     return _torch_sparse_attention(
         q, kv, indices, lengths, geometry.sm_scale(), attn_sink
@@ -436,6 +442,7 @@ def _produce_global(
     cache: PPUKVCache,
     slots: Dict[int, PPURequestSlots],
     layer_id: int,
+    append_starts: Optional[dict] = None,
 ) -> None:
     """Produce + write global KV, indexer K and CSA states for one layer.
 
@@ -519,8 +526,13 @@ def _produce_global(
         safe_positions = entry_positions.clamp_max(freqs.shape[0] - 1)
         global_keys = _rope_tail(latent, freqs[safe_positions])
         packed_global = ops.encode_kv(global_keys, pool_tag=tag)
+        first_write = max(begin, int((append_starts or {}).get(rid, start)) // ratio)
+        write_offset = first_write - begin
         cache.insert_rows(
-            layer_id, tag, handle.global_slots[layer_id][begin:stop], packed_global
+            layer_id,
+            tag,
+            handle.global_slots[layer_id][first_write:stop],
+            packed_global[write_offset:],
         )
         # Indexer K comes from the same latents.
         projected = F.linear(latent, layer.index_wk.weight)
@@ -530,20 +542,27 @@ def _produce_global(
         cache.insert_rows(
             layer_id,
             "indexer_kv",
-            handle.indexer_slots[layer_id][begin:stop],
-            packed_index,
+            handle.indexer_slots[layer_id][first_write:stop],
+            packed_index[write_offset:],
         )
         if ratio == 2:
             # CSA states at RAW positions: [values | scores] fp32.
+            state_indices = [
+                row
+                for row in row_indices
+                if int(positions[row]) >= int((append_starts or {}).get(rid, start))
+            ]
+            if not state_indices:
+                continue
             state = torch.cat(
                 (
-                    values[list(row_indices)],
-                    scores[list(row_indices)],
+                    values[state_indices],
+                    scores[state_indices],
                 ),
                 dim=-1,
             ).float()
             state_slots = cache.slots_at_positions(
-                layer_id, "csa_state", rid, positions[list(row_indices)]
+                layer_id, "csa_state", rid, positions[state_indices]
             )
             cache.insert_rows(layer_id, "csa_state", state_slots, state)
 
@@ -674,6 +693,10 @@ def run_prefill(
     lookback_token_ids: Optional[torch.Tensor] = None,
     apply_lm_head: bool = False,
     parallel_context: Optional[object] = None,
+    policy: Optional[PrefillPolicy] = None,
+    allow_ced: bool = True,
+    compact_ced: bool = True,
+    replay_prefix_lengths=None,
 ) -> PrefillResult:
     """Run the full single-rank prefill over one flat token batch.
 
@@ -702,6 +725,7 @@ def run_prefill(
             on every rank).
     """
     geometry = bundle.geometry
+    policy = (policy or cache.prefill_policy).validate()
     cp_ctx: Optional[CPPrefillContext] = cp_context_of(parallel_context)
     input_ids = input_ids.reshape(-1)
     tokens = int(input_ids.numel())
@@ -735,11 +759,48 @@ def run_prefill(
         positions = torch.empty(tokens, dtype=torch.int64, device=device)
         for index, rid in enumerate(request_id_list):
             start_row, end_row = int(cu[index]), int(cu[index + 1])
-            base = cache.request_length(rid)
+            base = 0 if replay_prefix_lengths is not None else cache.request_length(rid)
             positions[start_row:end_row] = base + torch.arange(
                 end_row - start_row, dtype=torch.int64, device=device
             )
     positions = positions.to(device=device, dtype=torch.int64).reshape(-1)
+    append_starts = None
+    if replay_prefix_lengths is not None:
+        if not policy.encoder_replay:
+            raise ValueError("query replay requires encoder SWA recovery policy")
+        if len(replay_prefix_lengths) != len(request_id_list):
+            raise ValueError("one replay prefix length is required per request")
+        append_starts = dict(zip(request_id_list, map(int, replay_prefix_lengths)))
+        for index, rid in enumerate(request_id_list):
+            prefix = append_starts[rid]
+            if prefix < 0 or prefix != cache.request_length(rid):
+                raise ValueError(
+                    "replay prefix differs from the restored Global KV prefix"
+                )
+            if cp_ctx is None:
+                begin, end = int(cu[index]), int(cu[index + 1])
+                query_start, query_length = int(positions[begin]), end - begin
+            else:
+                split = cp_ctx.plan.requests[index]
+                query_start, query_length = split.prefix, split.length
+            if query_start != 0 or query_length < prefix:
+                raise ValueError(
+                    "encoder recovery requires complete history from token zero"
+                )
+
+    if policy.bounded_replay:
+        for index, rid in enumerate(request_id_list):
+            if cp_ctx is None:
+                begin, end = int(cu[index]), int(cu[index + 1])
+                prefix, fresh = int(positions[begin]), end - begin
+            else:
+                split = cp_ctx.plan.requests[index]
+                prefix, fresh = split.prefix, split.length
+            if prefix > 0 and fresh < geometry.window:
+                raise ValueError(
+                    f"request {rid} needs at least {geometry.window} replay tokens "
+                    "when decoder SWA is not restored; reduce the reused prefix"
+                )
 
     # Allocate pool space per request and validate position bookkeeping.
     # Under CP8 the cache holds the FULL request (v1: no CP KV sharding); the
@@ -756,16 +817,18 @@ def run_prefill(
                     f"plan's request id {split.request_id}; the zigzag plan "
                     "owns the request ids under CP"
                 )
-            slots[rid] = cache.alloc(rid, split.length)
+            slots[rid] = cache.alloc(
+                rid, split.length - (append_starts or {}).get(rid, 0)
+            )
             continue
         expected_start = cache.request_length(rid)
         actual_start = int(positions[start_row])
-        if actual_start != expected_start:
+        if actual_start != (0 if append_starts is not None else expected_start):
             raise ValueError(
                 f"request {rid} positions start at {actual_start} but the cache "
                 f"tracks {expected_start} existing tokens"
             )
-        slots[rid] = cache.alloc(rid, n_new)
+        slots[rid] = cache.alloc(rid, n_new - (append_starts or {}).get(rid, 0))
         if slots[rid].total_tokens != int(positions[end_row - 1]) + 1:
             raise ValueError(
                 f"request {rid} positions are inconsistent with its length"
@@ -850,8 +913,52 @@ def run_prefill(
     )  # [T, hc, dim]
     prev_mix = None  # delayed-mHC chain state (sublayer N's pre result)
     shared_topk: Dict[int, torch.Tensor] = {}
+    decoder_start = policy.decoder_start(geometry)
+    if cp_ctx is None:
+        lengths = [int(cu[i + 1] - cu[i]) for i in range(cu.numel() - 1)]
+        prefixes = [int(positions[int(cu[i])]) for i in range(cu.numel() - 1)]
+    else:
+        lengths = [split.length for split in cp_ctx.plan.requests]
+        prefixes = [split.prefix for split in cp_ctx.plan.requests]
+    swa_starts = None
+    if policy.bounded_replay:
+        swa_starts = (
+            decoder_replay_starts(request_id_list, lengths, prefixes, geometry.window)
+            if allow_ced
+            else dict(zip(request_id_list, prefixes))
+        )
+    ced = (
+        PPUCEDPlan.create(
+            geometry, policy, input_ids, positions, request_ids, cu, cp_ctx
+        )
+        if allow_ced
+        else None
+    )
+    compacted = ced is not None and compact_ced
 
     for layer_id in range(geometry.num_layers):
+        if layer_id == decoder_start and compacted:
+            h = ced.compact(h)
+            prev_mix = ced.compact_mix(prev_mix)
+            source = geometry.index_source_for(layer_id)
+            if source in shared_topk:
+                shared_topk = {source: ced.compact(shared_topk[source])}
+            input_ids, positions = ced.input_ids, ced.positions
+            request_ids, cu = ced.request_ids, ced.cu_seqlens
+            cp_ctx = ced.context
+            tokens = int(input_ids.numel())
+            context = build_step_context(
+                positions,
+                request_ids,
+                cu,
+                cp_ctx,
+                valid_mask=(
+                    cp_ctx.plan.local_is_real.to(positions.device)
+                    if cp_ctx is not None
+                    else None
+                ),
+            )
+            logging.getLogger(__name__).info("PPU CED compacted %s", ced.info)
         layer = bundle.layers[layer_id]
         freqs = bundle.freqs_for(layer_id)
         rope_positions = positions.clamp_max(freqs.shape[0] - 1)
@@ -951,6 +1058,7 @@ def run_prefill(
                 cache=cache,
                 slots=slots,
                 layer_id=layer_id,
+                append_starts=append_starts,
             )
 
         # Indexer top-k: sources compute, consumers reuse (no copy); SWA-only
@@ -992,6 +1100,7 @@ def run_prefill(
             context=context,
             attn_sink=layer.attn_sink,
             window=geometry.window,
+            swa_starts=swa_starts if layer_id >= decoder_start else None,
         )  # [T, n_heads, head_dim]
 
         # Output projection: inverse RoPE tail, grouped wo_a, wo_b.
@@ -1071,9 +1180,24 @@ def run_prefill(
     hidden = _rms_norm(step_head.hidden, bundle.final_norm, geometry.norm_eps)
     if cp_ctx is not None:
         hidden = cp_ctx.all_gather_restore(hidden)
+    if compacted:
+        hidden = ced.restore_global(hidden)
     logits = None
     if apply_lm_head:
         if bundle.lm_head is None:
             raise ValueError("apply_lm_head requires the lm_head weight")
         logits = F.linear(hidden, bundle.lm_head).float()
-    return PrefillResult(hidden=hidden, logits=logits, cache=cache, slots=slots)
+    info = (
+        dict(ced.info, compacted=compacted)
+        if ced is not None
+        else {
+            "compacted": False,
+            "bounded_replay": policy.bounded_replay,
+            "original_rows": sum(lengths),
+            "query_rows": sum(lengths),
+            "first_decoder_layer": decoder_start,
+        }
+    )
+    return PrefillResult(
+        hidden=hidden, logits=logits, cache=cache, slots=slots, ced_info=info
+    )

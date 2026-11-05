@@ -3,12 +3,14 @@
 import copy
 import dataclasses
 import hashlib
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -25,6 +27,25 @@ from rtp_llm.tools.v41.preflight import (
 
 
 class IntegrationTest(unittest.TestCase):
+    def test_encoder_recovery_is_explicit_and_requires_bounded_decoder_replay(self):
+        with self.assertRaisesRegex(ValueError, "requires --ced-mode bounded"):
+            preset_env("prefill", "/checkpoint", parent={}, encoder_swa_replay=True)
+        for role in ("prefill", "decode"):
+            env = preset_env(
+                role,
+                "/checkpoint",
+                parent={},
+                ced_mode="bounded",
+                encoder_swa_replay=True,
+            )
+            runtime = V41RuntimeConfig.from_env(env)
+            self.assertTrue(runtime.encoder_replay)
+            self.assertTrue(runtime.bounded_replay)
+            self.assertEqual(env["REUSE_CACHE"], "1")
+            env["DSV41_SWA_BOUNDED_REPLAY"] = "0"
+            with self.assertRaisesRegex(ValueError, "encoder SWA recovery requires"):
+                V41RuntimeConfig.from_env(env)
+
     def test_offline_dependency_checks_pin_template_and_all_files(self):
         from rtp_llm.tools.v41.native_build_precheck import staged_vipserver
 
@@ -159,7 +180,7 @@ class IntegrationTest(unittest.TestCase):
             {"attention_dp": 1},
             {"ep": 1},
             {"enp": 1},
-            {"max_seq_len": 32769},
+            {"max_seq_len": -1},
             {"max_seq_len": 0},
             {"kv_sharded": True},
             {"cuda_graph": True},
@@ -167,7 +188,6 @@ class IntegrationTest(unittest.TestCase):
             {"eplb": "DYNAMIC"},
             {"low_latency": True},
             {"bounded_replay": True},
-            {"ced": True},
             {"cp_method": "ALL_GATHER"},
             {"strategy": "mega"},
             {"redundant_experts": 1},
@@ -177,6 +197,118 @@ class IntegrationTest(unittest.TestCase):
         for mutation in mutations:
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 dataclasses.replace(runtime, **mutation).validate()
+
+    def test_long_context_runtime_accepts_explicit_and_inherited_lengths(self):
+        for role in ("prefill", "decode"):
+            for parallel in ("cp", "dp"):
+                for length in (32769, 65536, 131072, 262144):
+                    with self.subTest(role=role, parallel=parallel, length=length):
+                        options = dict(prefill_parallel=parallel)
+                        inherited = preset_env(
+                            role,
+                            "/weights",
+                            parent={"MAX_SEQ_LEN": str(length)},
+                            **options,
+                        )
+                        explicit = preset_env(
+                            role,
+                            "/weights",
+                            parent={"MAX_SEQ_LEN": "2048"},
+                            max_seq_len=length,
+                            **options,
+                        )
+                        self.assertEqual(
+                            V41RuntimeConfig.from_env(inherited).max_seq_len, length
+                        )
+                        self.assertEqual(
+                            V41RuntimeConfig.from_env(explicit).max_seq_len, length
+                        )
+
+    def test_launcher_prints_the_effective_long_context_capacity(self):
+        from rtp_llm.tools.v41.launch import main
+
+        common = [
+            "launch",
+            "prefill",
+            "--checkpoint-path",
+            "/weights",
+            "--print-command",
+        ]
+        for extra, expected in (([], "65536"), (["--max-seq-len", "131072"], "131072")):
+            with self.subTest(extra=extra), patch.dict(
+                os.environ, {"MAX_SEQ_LEN": "65536"}, clear=True
+            ), patch.object(sys, "argv", common + extra), redirect_stdout(
+                io.StringIO()
+            ) as stream:
+                self.assertEqual(main(), 0)
+            self.assertIn(f"MAX_SEQ_LEN={expected}", stream.getvalue())
+
+    def test_pd_handoff_accepts_long_matching_history_and_rejects_invalid_lengths(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.pd_handoff import (
+            PROTOCOL,
+            validate_handoff,
+        )
+
+        identity = {"snapshot_id": "long-context-test"}
+        pd = {
+            "protocol": PROTOCOL,
+            "identity": identity,
+            "model_signature": "model",
+            "run_id": "run",
+            "owner": 0,
+            "target_dp": 8,
+            "target_tp": 1,
+            "source_layout": "replicated-logical-cp-cache",
+            "histories": {"0": [2] * 131072},
+            "seed_tokens": {"0": 3},
+            "owner_map": {"0": 0},
+        }
+        manifest = {
+            "pool_layouts": {"pool": {}},
+            "meta": {"pd": pd},
+            "source_cp": 8,
+            "producer_snapshot": {"snapshot": identity["snapshot_id"]},
+            "lengths": {"0": 131072},
+        }
+        options = dict(
+            identity=identity, model_signature="model", run_id="run", owner=0, world=8
+        )
+        self.assertIs(validate_handoff(manifest, **options), pd)
+        for length in (131071, 0, -1):
+            manifest["lengths"]["0"] = length
+            with self.subTest(length=length), self.assertRaisesRegex(
+                ValueError, "history length"
+            ):
+                validate_handoff(manifest, **options)
+
+    def test_pd_check_only_accepts_long_context_arguments(self):
+        from rtp_llm.tools.v41.pd_joint import main
+
+        with tempfile.TemporaryDirectory() as root, patch(
+            "rtp_llm.models_py.modules.dsv41.ppu.pd_handoff.runtime_identity",
+            return_value={"snapshot_id": "context-check"},
+        ), redirect_stdout(io.StringIO()) as stream:
+            self.assertEqual(
+                main(
+                    [
+                        "prefill",
+                        "--run-id",
+                        "long-context",
+                        "--synthetic",
+                        "--tokens",
+                        "131072",
+                        "--steps",
+                        "129",
+                        "--run-root",
+                        root,
+                        "--check-only",
+                    ]
+                ),
+                0,
+            )
+        report = json.loads(stream.getvalue())
+        self.assertEqual(report["input_tokens_per_request"], 131072)
+        self.assertEqual(report["generated_tokens_per_request"], 130)
 
     def test_dp8_prefill_and_decode_use_unsharded_cp1_source(self):
         for role in ("prefill", "decode"):

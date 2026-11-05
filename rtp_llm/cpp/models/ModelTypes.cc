@@ -165,6 +165,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.engram_token_windows.defined() ? inputs.engram_token_windows.size(0) : 0;
     shape_hints[GptModelInputIndex::engramTokenWindowWidth] =
         inputs.engram_token_windows.defined() ? inputs.engram_token_windows.size(1) : 0;
+    shape_hints[GptModelInputIndex::prefillReplayTokens] =
+        inputs.prefill_replay_token_ids.defined() ? inputs.prefill_replay_token_ids.numel() : 0;
 
     uint32_t control_flags = 0;
     auto     encode_flag   = [&](bool enabled, GptModelInputControlFlag flag) {
@@ -201,6 +203,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     };
     encode_device(inputs.combo_tokens, GptModelInputDeviceBit::kDeviceBitComboTokens);
     encode_device(inputs.engram_token_windows, GptModelInputDeviceBit::kDeviceBitEngramWindows);
+    encode_device(inputs.prefill_replay_token_ids, GptModelInputDeviceBit::kDeviceBitPrefillReplayTokens);
     encode_device(inputs.mm_features_spans, GptModelInputDeviceBit::kDeviceBitMmFeaturesSpans);
     encode_device(inputs.input_lengths, GptModelInputDeviceBit::kDeviceBitInputLengths);
     encode_device(inputs.sequence_lengths, GptModelInputDeviceBit::kDeviceBitSequenceLengths);
@@ -356,6 +359,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto mm_spans        = checkedHint(GptModelInputIndex::mmFeaturesSpans, "mmFeaturesSpans");
     const auto engram_rows     = checkedHint(GptModelInputIndex::engramTokenWindowRows, "engramTokenWindowRows");
     const auto engram_width    = checkedHint(GptModelInputIndex::engramTokenWindowWidth, "engramTokenWindowWidth");
+    const auto replay_tokens   = checkedHint(GptModelInputIndex::prefillReplayTokens, "prefillReplayTokens");
     const auto mm_features_num = checkedHint(GptModelInputIndex::mmFeaturesNum, "mmFeaturesNum");
     if (mm_features_num) {
         mm_features_shape_t   = torch::empty({mm_features_num}, torch::kInt64).pin_memory();
@@ -463,6 +467,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                                    {engram_rows, engram_width},
                                                    pickAlloc(GptModelInputDeviceBit::kDeviceBitEngramWindows)) :
                                           torch::Tensor();
+        inputs.prefill_replay_token_ids =
+            replay_tokens ? allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                     {replay_tokens},
+                                     pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefillReplayTokens)) :
+                            torch::Tensor();
         inputs.input_lengths        = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
@@ -603,6 +612,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     if (engram_rows) {
         collect(inputs.engram_token_windows);
+    }
+    if (replay_tokens) {
+        collect(inputs.prefill_replay_token_ids);
     }
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);

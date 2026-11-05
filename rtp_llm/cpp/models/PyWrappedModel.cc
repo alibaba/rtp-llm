@@ -1232,6 +1232,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
         py_model_inputs.expert_token_counts    = expert_balancer_.stable_expert_token_counts();
+        if (inputs.prefill_replay_token_ids.defined()) {
+            buffer_holder_.hold_host(inputs.prefill_replay_token_ids);
+            py_model_inputs.prefill_replay_token_ids = inputs.prefill_replay_token_ids;
+        }
         if (inputs.engram_token_windows.defined()) {
             buffer_holder_.hold_host(inputs.engram_token_windows);
             py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, /*non_blocking=*/true);
