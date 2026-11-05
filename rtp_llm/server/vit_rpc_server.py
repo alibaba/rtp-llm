@@ -182,7 +182,14 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         except OverflowError as error:
             context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
         except ValueError as error:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+            # Preserve the client-error classification across the RPC boundary.
+            # A bare INVALID_ARGUMENT abort carries no error details, so the
+            # client falls back to UNKNOWN_ERROR and DashSc reports 500 instead
+            # of 400 for invalid media.
+            _abort_ft_runtime(
+                context,
+                FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, str(error)),
+            )
         except TimeoutError as error:
             if inputs is not None:
                 self.engine.cancel_queued_request(inputs.request_id)

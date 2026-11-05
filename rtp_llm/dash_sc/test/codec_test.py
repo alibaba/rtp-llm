@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import struct
+import time
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -1274,6 +1276,110 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
+
+    def _tpm_request(self, attrs):
+        req = predict_v2_pb2.ModelInferRequest()
+        req.parameters["ds_header_attributes"].string_param = json.dumps(attrs)
+        return req
+
+    def test_parse_tpm_recheck_user_meta_priority(self) -> None:
+        req = self._tpm_request(
+            {
+                "x-dashscope-inner-requestreadytime": "1793759509454",
+                "x-dashscope-inner-model-meta": json.dumps(
+                    {"enable_tpm_recheck_interval": 500}
+                ),
+                "x-dashscope-inner-user-meta": json.dumps(
+                    {"enable_tpm_recheck_interval": 300}
+                ),
+                "x-dashscope-inner-usage-callback": "http://callback.local/limits",
+            }
+        )
+        op = parse_request_controls(req)
+        self.assertIsNotNone(op.tpm_recheck)
+        self.assertEqual(op.tpm_recheck.request_ready_time_ms, 1793759509454)
+        self.assertEqual(op.tpm_recheck.interval_ms, 300)
+        self.assertEqual(op.tpm_recheck.callback_url, "http://callback.local/limits")
+
+    def test_parse_tpm_recheck_nested_interval_and_metadata_fallback(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        op = parse_request_controls(
+            req,
+            ds_attrs={
+                "x-dashscope-inner-requestreadytime": "1000",
+                "x-dashscope-inner-model-meta": json.dumps(
+                    {"incr_rate_limit": {"enable_tpm_recheck_interval": 700}}
+                ),
+            },
+            invocation_metadata=(
+                (
+                    "X-DashScope-Inner-Usage-Callback",
+                    "https://callback.local/limits",
+                ),
+            ),
+        )
+        self.assertIsNotNone(op.tpm_recheck)
+        self.assertEqual(op.tpm_recheck.interval_ms, 700)
+        self.assertEqual(op.tpm_recheck.callback_url, "https://callback.local/limits")
+
+    def test_parse_tpm_recheck_requires_callback_and_interval(self) -> None:
+        base = {
+            "x-dashscope-inner-requestreadytime": "1000",
+            "x-dashscope-inner-user-meta": json.dumps(
+                {"enable_tpm_recheck_interval": 300}
+            ),
+            "x-dashscope-inner-usage-callback": "http://callback.local/limits",
+        }
+        for missing in (
+            "x-dashscope-inner-user-meta",
+            "x-dashscope-inner-usage-callback",
+        ):
+            attrs = dict(base)
+            attrs.pop(missing)
+            op = parse_request_controls(self._tpm_request(attrs))
+            self.assertIsNone(op.tpm_recheck, missing)
+
+        invalid_url = dict(base)
+        invalid_url["x-dashscope-inner-usage-callback"] = "file:///etc/passwd"
+        self.assertIsNone(
+            parse_request_controls(self._tpm_request(invalid_url)).tpm_recheck
+        )
+
+        invalid_interval = dict(base)
+        invalid_interval["x-dashscope-inner-user-meta"] = json.dumps(
+            {"enable_tpm_recheck_interval": 0}
+        )
+        self.assertIsNone(
+            parse_request_controls(self._tpm_request(invalid_interval)).tpm_recheck
+        )
+
+    def test_parse_tpm_recheck_empty_user_meta_falls_back_to_model_meta(
+        self,
+    ) -> None:
+        attrs = {
+            "x-dashscope-inner-requestreadytime": "1000",
+            "x-dashscope-inner-user-meta": "",
+            "x-dashscope-inner-model-meta": json.dumps(
+                {"enable_tpm_recheck_interval": 500}
+            ),
+            "x-dashscope-inner-usage-callback": "http://callback.local/limits",
+        }
+        op = parse_request_controls(self._tpm_request(attrs))
+        self.assertIsNotNone(op.tpm_recheck)
+        self.assertEqual(op.tpm_recheck.interval_ms, 500)
+
+    def test_parse_tpm_recheck_uses_default_interval_and_parse_time(self) -> None:
+        attrs = {
+            "x-dashscope-inner-usage-callback": "http://callback.local/limits",
+        }
+        before = int(time.time() * 1000)
+        with patch.dict(os.environ, {"DASHSC_TPM_RECHECK_DEFAULT_INTERVAL_MS": "250"}):
+            op = parse_request_controls(self._tpm_request(attrs))
+        after = int(time.time() * 1000)
+        self.assertIsNotNone(op.tpm_recheck)
+        self.assertEqual(op.tpm_recheck.interval_ms, 250)
+        self.assertGreaterEqual(op.tpm_recheck.request_ready_time_ms, before)
+        self.assertLessEqual(op.tpm_recheck.request_ready_time_ms, after)
 
     def test_request_identity_survives_empty_case_aliases(self) -> None:
         for empty in ("", None, " \t "):
@@ -2828,6 +2934,84 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [2])
+
+
+class FakeFirstPacketTest(TestCase):
+    def _builder(self, **overrides):
+        static = {
+            "dash_sc_request_id": "fake-1",
+            "model_name": "default",
+            "request_log_tag": "fake-1",
+        }
+        static.update(overrides)
+        return StreamResponseBuilder(**static)
+
+    def test_multimodal_metadata_and_accounting(self) -> None:
+        response = self._builder().build_fake_first_packet(
+            prompt_token_num=1200,
+            split_sizes=(600, 400),
+            feature_hashes=tuple(range(1000)),
+        )
+        infer = response.infer_response
+        self.assertEqual(infer.id, "fake-1")
+        self.assertEqual(infer.model_name, "default")
+        self.assertTrue(infer.parameters["estimated_usage"].bool_param)
+        self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 1200)
+        self.assertEqual(infer.parameters["image_tokens"].int64_param, 1000)
+        self.assertEqual(infer.parameters["incremental_output"].int64_param, 1)
+        metadata = json.loads(infer.parameters["multimodal_metadata"].string_param)
+        self.assertEqual(metadata["version"], 1)
+        self.assertEqual([item["item_id"] for item in metadata["items"]], ["m0", "m1"])
+        self.assertEqual(
+            [item["llm_sequence_length"] for item in metadata["items"]], [600, 400]
+        )
+        self.assertTrue(all(len(item["mm_key"]) == 32 for item in metadata["items"]))
+        self.assertNotEqual(
+            metadata["items"][0]["mm_key"], metadata["items"][1]["mm_key"]
+        )
+        by_name = {
+            output.name: raw
+            for output, raw in zip(infer.outputs, infer.raw_output_contents)
+        }
+        generated = next(out for out in infer.outputs if out.name == "generated_ids")
+        self.assertEqual(list(generated.shape), [1, 0])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_token_num"]), [1200])
+        self.assertEqual(_unpack_int32_le(by_name["prompt_cached_token_num"]), [0])
+        self.assertEqual(
+            _unpack_int64_le(by_name["finish_reason"]),
+            [int(LLMFinishReason.STREAMING)],
+        )
+        self.assertEqual(by_name["finished"], b"\x00")
+
+    def test_text_only_metadata_is_empty(self) -> None:
+        response = self._builder(is_streaming=False).build_fake_first_packet(
+            prompt_token_num=7
+        )
+        infer = response.infer_response
+        self.assertEqual(infer.parameters["image_tokens"].int64_param, 0)
+        self.assertEqual(infer.parameters["incremental_output"].int64_param, 0)
+        metadata = json.loads(infer.parameters["multimodal_metadata"].string_param)
+        self.assertEqual(metadata, {"version": 1, "items": []})
+
+    def test_fake_packet_does_not_initialize_template(self) -> None:
+        builder = self._builder()
+        builder.build_fake_first_packet(
+            prompt_token_num=3, split_sizes=(2,), feature_hashes=(1, 2)
+        )
+        self.assertIsNone(builder._template)
+        go = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([9]),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=3, reuse_len=0),
+                )
+            ]
+        )
+        response = builder.build(go)
+        self.assertEqual(
+            response.infer_response.parameters["prompt_token_num"].int64_param, 3
+        )
 
 
 class PrependToGeneratedIdsTensorTest(TestCase):

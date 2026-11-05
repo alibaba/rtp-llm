@@ -17,9 +17,11 @@ struct BatchDecodeSchedulerConfigLocal: public autil::legacy::Jsonizable {
     void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
         json.Jsonize("batch_size", batch_size_);
         json.Jsonize("mode", mode_, "decode");
+        json.Jsonize("force_perf_test", force_perf_test_, force_perf_test_);
     }
     uint32_t    batch_size_;
     std::string mode_;
+    bool        force_perf_test_ = true;
 };
 class BatchDecodeScheduler: public SchedulerBase {
 public:
@@ -119,15 +121,25 @@ public:
     }
 
     void updateSchedulerInfo(const std::string& scheduler_info) override {
-        BatchDecodeSchedulerConfigLocal config;
-        autil::legacy::FromJsonString(config, scheduler_info);
-        batch_size_ = config.batch_size_;
-        if (config.mode_ == "decode") {
-            scheduler_type_ = SchedulerType::kBatchDecode;
-        } else if (config.mode_ == "prefill") {
-            scheduler_type_ = SchedulerType::kBatchPrefill;
+        {
+            std::lock_guard<std::mutex>     lock(lock_);
+            BatchDecodeSchedulerConfigLocal config;
+            // Ordinary batch-size updates preserve a previously selected real-token policy.
+            config.force_perf_test_ = force_perf_test_;
+            autil::legacy::FromJsonString(config, scheduler_info);
+            batch_size_      = config.batch_size_;
+            force_perf_test_ = config.force_perf_test_;
+            if (config.mode_ == "decode") {
+                scheduler_type_ = SchedulerType::kBatchDecode;
+            } else if (config.mode_ == "prefill") {
+                scheduler_type_ = SchedulerType::kBatchPrefill;
+            }
+            RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d, force_perf_test=%d",
+                             batch_size_,
+                             int(scheduler_type_),
+                             int(force_perf_test_));
         }
-        RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
+        cond_.notify_all();
     }
 
     // 根据状态机转移后的目标状态，将 stream 路由到对应的队列
@@ -232,7 +244,9 @@ public:
     void initRunningStreams() {
         // set kvcache block
         for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
-            (*it)->setPerfTest(true);
+            if (force_perf_test_) {
+                (*it)->setPerfTest(true);
+            }
             // reset start time，to get more accurate avg token time
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
             // only set gen_timeline = True for first rank
@@ -341,6 +355,7 @@ private:
     bool                         reorder_request_;
     uint32_t                     current_step_         = 0;
     bool                         draining_mixed_modes_ = false;
+    bool                         force_perf_test_      = true;
 
     std::shared_ptr<KVCacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;

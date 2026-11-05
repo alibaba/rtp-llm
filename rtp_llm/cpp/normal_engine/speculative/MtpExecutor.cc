@@ -260,6 +260,14 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
 
     output.accept_tokens_cpu = output.accept_tokens.to(torch::kCPU, /*non_blocking=*/true);
     output.accept_len_cpu    = output.accept_len.to(torch::kCPU, /*non_blocking=*/true);
+    if (output.graph_buffers) {
+        // Graph results originally transfer on their copy stream. This legacy
+        // cap path re-records the public event on the sampling stream; it does
+        // not prove completion of that original verified-length host view.
+        // Preserve known dense gamma, otherwise report unknown without a new
+        // transfer or synchronization. The cap never reduces target-verified L.
+        output.verified_draft_lengths_cpu = torch::Tensor();
+    }
     output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
     // The spec artifact is read by logits masking before sampling and by cap
     // application here. Recording after cap keeps future artifact pools from
@@ -2157,7 +2165,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                         dspark_verify_plan.draft_budget,
                         buffer_holder_,
                         draft_sampler_output.valid_draft_lengths,
-                        &draft_sampler_output.token_ids);
+                        &draft_sampler_output.token_ids,
+                        dspark_verify_plan.capacity.has_value());
                 } else if (dspark_packed_verify_ && draft_sampler_output.valid_draft_lengths.defined()) {
                     packed_target_layout = batch_stream_processor_->prepareDSparkPackedTargetVerifyModelInput(
                         dspark_round_state,
@@ -2166,7 +2175,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                         draft_sampler_output.valid_draft_lengths,
                         dspark_verify_plan.draft_budget,
                         buffer_holder_,
-                        &draft_sampler_output.token_ids);
+                        &draft_sampler_output.token_ids,
+                        dspark_verify_plan.capacity.has_value());
                 } else {
                     batch_stream_processor_->prepareDSparkTargetVerifyModelInput(dspark_round_state,
                                                                                  model_input,
@@ -2175,6 +2185,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                                                  &draft_sampler_output.token_ids);
                 }
                 model_input.is_packed_target_verify = packed_target_layout.packed_to_dense.defined();
+                if (dspark_verify_plan.capacity) {
+                    RTP_LLM_CHECK_WITH_INFO(
+                        model_input.is_packed_target_verify
+                            && model_input.input_lengths.numel() == dspark_verify_plan.capacity->real_batch
+                            && model_input.combo_tokens.numel() == dspark_verify_plan.capacity->query_rows,
+                        "DSpARK real target rows must match the plan frozen before proposal");
+                }
                 // Logits processors and rejection sampling retain the physical
                 // gamma stride. Only the model/feature-commit rows are packed.
                 draft_token_ids_t = packed_target_layout.dense_tokens.defined() ?
@@ -3223,6 +3240,19 @@ MtpExecutor::DSparkVerifyPlan MtpExecutor::prepareDSparkVerifyPlan(const StreamG
     plan.draft_budget = plan.budget_per_request == static_cast<int64_t>(propose_step_) ?
                             -1 :
                             static_cast<int64_t>(stream_groups.size()) * plan.budget_per_request;
+    if (dspark_packed_verify_ && !dspark_adaptive_budget_) {
+        const auto target = model_->capturedDSparkCapacity(stream_groups.size());
+        const auto commit = sp_prefill_draft_model_ ?
+                                sp_prefill_draft_model_->capturedDSparkCapacity(stream_groups.size()) :
+                                std::nullopt;
+        if (target || commit) {
+            RTP_LLM_CHECK_WITH_INFO(target && commit && *target == *commit,
+                                    "DSpARK target/commit captured capacity must agree before proposal");
+            plan.capacity = makeDSparkCapacityPlan(*target, stream_groups.size(), propose_step_);
+            RTP_LLM_CHECK_WITH_INFO(plan.capacity.has_value(), "DSpARK captured capacity is invalid");
+            plan.draft_budget = plan.capacity->draftBudget();
+        }
+    }
     return plan;
 }
 

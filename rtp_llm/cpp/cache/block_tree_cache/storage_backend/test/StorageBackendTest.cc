@@ -1095,10 +1095,28 @@ TEST(StorageBackendTest, TimelineSeparatesPrepareQueueIoSettlementAndCallback) {
     write_request.request_id = 44;
     EXPECT_TRUE(backend.write(backend.prepareWrite(std::move(write_request))));
     EXPECT_EQ(callbacks, 0u);
-    EXPECT_EQ(executor->runAll(), 3u);
+    int64_t     worker_tid = 0;
+    const auto  caller_tid = asyncProfileThreadId();
+    std::thread worker([&] {
+        worker_tid = asyncProfileThreadId();
+        EXPECT_EQ(executor->runAll(), 3u);
+    });
+    worker.join();
     EXPECT_EQ(callbacks, 2u);
     auto events = session->finish();
     EXPECT_EQ(events.size(), 15u);
+    for (const auto& event : events) {
+        const std::string stage(event.record.stage);
+        if (stage.find("queue_wait") != std::string::npos) {
+            EXPECT_EQ(event.record.kind, AsyncProfileKind::Wait);
+        } else if (stage.find("total") != std::string::npos) {
+            EXPECT_EQ(event.record.kind, AsyncProfileKind::Lifecycle);
+        } else {
+            EXPECT_EQ(event.record.kind, AsyncProfileKind::Execution);
+            EXPECT_EQ(event.record.start_tid, stage.find("prepare") != std::string::npos ? caller_tid : worker_tid);
+            EXPECT_EQ(event.record.start_tid, event.end_tid);
+        }
+    }
     for (const auto* stage : {"match_total",
                               "match_queue_wait",
                               "match_io",

@@ -42,7 +42,8 @@ MtpDSparkBudgetedVerifyInputs tryMtpDSparkBudgetedVerifyPrepare(const torch::Ten
                                                                 const torch::Tensor&        prefix_lengths,
                                                                 int64_t                     total_draft_budget,
                                                                 cudaStream_t                stream,
-                                                                bool                        copy_proposals = false);
+                                                                bool                        copy_proposals    = false,
+                                                                bool                        allow_full_budget = false);
 
 // Assemble both page tables directly from device snapshots and pinned host
 // suffixes. Returns false without launching for unsupported layouts/devices.

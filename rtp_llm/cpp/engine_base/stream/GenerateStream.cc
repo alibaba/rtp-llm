@@ -6,6 +6,7 @@
 #include <cstring>
 #include <memory>
 #include <map>
+#include <limits>
 #include <typeinfo>
 #include <ATen/Generator.h>
 #if defined(USING_CUDA) || defined(USING_ROCM)
@@ -88,6 +89,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     dtype_(model_config.data_type),
     hidden_size_(model_config.hidden_size) {
     RTP_LLM_PROFILE_FUNCTION();
+    request_profile_.begin(input->request_id, input->begin_time_us, input->generate_config->global_request_id);
     stream_async_reserve_ = useStreamAsyncReserveTokens();
     generate_input_->generate_config->validatePrefillOnly();
     if (!updatePrefix(resource_context.system_prompt)) {
@@ -931,9 +933,17 @@ StreamState GenerateStream::moveToNext() {
     {
         std::lock_guard<std::mutex> lock(*mutex_);
         checkTimeoutWithoutLock();
-        const auto old_status = getStatus();
-        state                 = generate_status_->moveToNext();
-        const auto new_status = getStatus();
+        const auto old_status  = getStatus();
+        state                  = generate_status_->moveToNext();
+        const auto  new_status = getStatus();
+        const char* phase      = new_status == StreamState::RUNNING       ? "running" :
+                                 new_status == StreamState::LOADING_CACHE ? "loading_cache" :
+                                                                            "waiting";
+        const char* terminal   = new_status != StreamState::FINISHED                         ? nullptr :
+                                 generate_status_->error_info.ok()                           ? "finished" :
+                                 generate_status_->error_info.code() == ErrorCode::CANCELLED ? "cancelled" :
+                                                                                               "error";
+        request_profile_.observe(phase, terminal);
 
         if ((old_status == StreamState::WAITING && new_status != StreamState::WAITING)
             || (old_status != StreamState::RUNNING && new_status == StreamState::RUNNING && !running_started_)) {
@@ -1400,6 +1410,17 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     if (update_info.speculative_propose_step > 0) {
         sp_iter_count_++;
+        // Match the A/R publication point exactly: stale/error updates above
+        // contribute neither numerator nor denominator. Unknown is sticky.
+        if (speculative_verified_draft_tokens_ >= 0) {
+            const auto verified = update_info.verified_draft_tokens;
+            if (verified < 0 || verified > update_info.speculative_propose_step
+                || speculative_verified_draft_tokens_ > std::numeric_limits<int64_t>::max() - verified) {
+                speculative_verified_draft_tokens_ = -1;
+            } else {
+                speculative_verified_draft_tokens_ += verified;
+            }
+        }
         speculative_accepted_tokens_per_pos_.resize(update_info.speculative_propose_step, 0);
         const int accepted_draft_tokens =
             std::clamp(update_info.accepted_draft_tokens, 0, update_info.speculative_propose_step);

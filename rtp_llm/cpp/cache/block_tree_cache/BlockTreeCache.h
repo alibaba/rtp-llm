@@ -54,7 +54,7 @@ struct BlockTreeCacheConfig {
     // ---- Per-tier eviction policy ----
     EvictionPolicy device_eviction_policy{EvictionPolicy::LRU};
     EvictionPolicy host_eviction_policy{EvictionPolicy::LRU};
-    EvictionPolicy disk_eviction_policy{EvictionPolicy::FIFO};
+    EvictionPolicy disk_eviction_policy{EvictionPolicy::LRU};
 
     // ---- Shared Store/Load/Evict task pool ----
     int    task_pool_size{4};
@@ -76,7 +76,7 @@ struct BlockTreeCacheConfig {
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.
-    int64_t full_prefix_scan_interval_ms{0};  // 0 = disabled, no thread
+    int64_t full_prefix_scan_interval_ms{30000};  // 30 seconds; 0 = disabled, no thread
 
     // ---- Query helpers ----
     bool isTierEnabled(Tier tier) const {
@@ -153,7 +153,9 @@ public:
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
                   bool                                              is_resident,
-                  std::optional<int64_t>                            request_id = {});
+                  std::optional<int64_t>                            request_id = {},
+                  size_t                                            remote_reuse_begin = 0,
+                  size_t                                            remote_reuse_end = 0);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Skips plans containing device blocks that would remain referenced after dropping.

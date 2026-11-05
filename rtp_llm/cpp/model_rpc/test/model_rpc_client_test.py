@@ -113,6 +113,7 @@ class FakeStub:
         aux_info2.iter_count = 2
         aux_info2.output_len = 2
         aux_info2.speculative_draft_rounds = 4
+        aux_info2.speculative_verified_draft_tokens = 11
         aux_info2.speculative_accepted_tokens_per_pos.extend([3, 2, 1])
         output_pb2.logits.data_type = TensorPB.DataType.FP32
         output_pb2.logits.shape.extend([1, 1, 2])
@@ -415,6 +416,24 @@ class ModelRpcClientTest(TestCase):
         async for res in client.enqueue(input):
             responses.extend(res.generate_outputs)
         return responses
+
+    def test_trans_input_preserves_qos_priority(self):
+        cases = [
+            ({"x-dashscope-inner-qos-level": "40"}, 50, 40),
+            ({"x-dashscope-inner-qos-level": "50"}, 40, 50),
+            ({}, 40, 40),
+            ({"x-dashscope-inner-qos-level": "invalid"}, 50, 50),
+            ({}, None, 50),
+        ]
+        for headers, configured, expected in cases:
+            with self.subTest(headers=headers, configured=configured):
+                input_py = self._make_generate_input(
+                    GenerateConfig(qos_priority=configured)
+                )
+                input_py.headers = headers
+                wire = trans_input(input_py)
+                restored = type(wire).FromString(wire.SerializeToString())
+                self.assertEqual(restored.priority, expected)
 
     def test_trans_input_serializes_typed_request_info(self):
         input_py = GenerateInput(
@@ -1301,6 +1320,29 @@ class ModelRpcClientTest(TestCase):
         actual = outputs.generate_outputs[0].aux_info
         self.assertEqual(actual.speculative_draft_rounds, 7)
         self.assertEqual(actual.speculative_accepted_tokens_per_pos, [6, 4, 2])
+        self.assertEqual(actual.speculative_verified_draft_tokens, -1)
+
+    def test_verified_draft_counter_presence_distinguishes_zero_unknown_and_int64(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2], dtype=torch.int32),
+            generate_config=GenerateConfig(aux_info=True),
+            request_id=1,
+            mm_inputs=[],
+        )
+        for value in (None, 0, -1, 2**40):
+            with self.subTest(value=value):
+                output = GenerateOutputsPB()
+                output.flatten_output.finished.append(False)
+                aux = output.flatten_output.aux_info.add()
+                if value is not None:
+                    aux.speculative_verified_draft_tokens = value
+                decoded = trans_output(input_py, output, StreamState())
+                self.assertEqual(
+                    decoded.generate_outputs[
+                        0
+                    ].aux_info.speculative_verified_draft_tokens,
+                    -1 if value is None else value,
+                )
 
     def test_trans_output_preserves_prefill_reuse_and_decode_diagnostics(self):
         for prefill_reuse in (343040, 0):
@@ -1487,6 +1529,7 @@ class ModelRpcClientTest(TestCase):
         self.assertAlmostEqual(logits_1[0][0], 0.1, places=6)
         self.assertAlmostEqual(logits_1[0][1], 0.2, places=6)
         self.assertEqual(res[1].aux_info.speculative_draft_rounds, 4)
+        self.assertEqual(res[1].aux_info.speculative_verified_draft_tokens, 11)
         self.assertEqual(res[1].aux_info.speculative_accepted_tokens_per_pos, [3, 2, 1])
 
         # res[2] 是完成标记，包含指定位置token的logits

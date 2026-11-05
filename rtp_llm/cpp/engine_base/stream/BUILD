@@ -61,6 +61,7 @@ cc_library(
         "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:synchronized_queue",
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:async_profiling_scope",
         "//rtp_llm/cpp/utils:linear_blocks_util",
         "//rtp_llm/cpp/utils:core_utils",
     ],

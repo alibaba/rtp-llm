@@ -1374,10 +1374,11 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     auto stream_groups = StreamGroups({stream1, stream2});
 
     speculative::SpeculativeSamplerOutput spec_decode_output;
-    spec_decode_output.accept_len_cpu    = torch::tensor({5, 1}, torch::kInt32);
-    spec_decode_output.accept_tokens_cpu = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
-    spec_decode_output.accept_len        = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
-    spec_decode_output.accept_tokens     = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
+    spec_decode_output.accept_len_cpu             = torch::tensor({5, 1}, torch::kInt32);
+    spec_decode_output.verified_draft_lengths_cpu = torch::tensor({4, 0}, torch::kInt32);
+    spec_decode_output.accept_tokens_cpu          = torch::tensor({{2, 3, 1, 3, 2}, {2, 0, 0, 0, 0}}, torch::kInt32);
+    spec_decode_output.accept_len                 = spec_decode_output.accept_len_cpu.to(torch::kCUDA);
+    spec_decode_output.accept_tokens              = spec_decode_output.accept_tokens_cpu.to(torch::kCUDA);
 
     MergedOutput draft_prefill_output;
     draft_prefill_output.model_output.all_hidden_states =
@@ -1396,9 +1397,41 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
     EXPECT_EQ(logits_processor->accepted_tokens, 5);
+    EXPECT_EQ(stream1->speculativeVerifiedDraftTokens(), 4);
+    EXPECT_EQ(stream2->speculativeVerifiedDraftTokens(), 0);
     // Device-state real_seq_len publication moved to the executor layer
     // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
     // performs host bookkeeping now, so no device-state asserts here.
+}
+
+TEST_F(MtpBatchStreamProcessorTest, DecodeVerifiedDraftLengthsRequireHostPayloadOrKnownDenseWidth) {
+    ModelConfig model;
+    model.max_seq_len = 128;
+    model.vocab_size  = 8;
+    model.num_layers  = 1;
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_DSPARK;
+    sp.gen_num_per_cycle = 5;
+    MtpBatchStreamProcessor processor(model, {}, {}, makeProcessorCacheConfig(), sp, false);
+    auto                    stream = createContextStream(model, RuntimeConfig{}, ResourceContext{}, {2}, 1);
+    StreamGroups            groups({stream});
+    speculative::SpeculativeSamplerOutput result;
+    result.accept_len_cpu    = torch::ones({1}, torch::kInt32);
+    result.accept_tokens_cpu = torch::zeros({1, 6}, torch::kInt32);
+    MergedOutput      draft;
+    MtpTargetLogprobs logprobs;
+    for (const int known_width : {-1, 5}) {
+        result.verified_draft_length = known_width;
+        std::vector<StreamSpecUpdateInfo> updates;
+        processor.prepareDecodeSpecUpdateInfo(groups, result, draft, logprobs, updates);
+        ASSERT_EQ(updates.size(), 1);
+        EXPECT_EQ(updates[0].verified_draft_tokens, known_width);
+    }
+    result.verified_draft_lengths_cpu = torch::zeros({1}, torch::kInt32);
+    std::vector<StreamSpecUpdateInfo> updates;
+    processor.prepareDecodeSpecUpdateInfo(groups, result, draft, logprobs, updates);
+    ASSERT_EQ(updates.size(), 1);
+    EXPECT_EQ(updates[0].verified_draft_tokens, 0);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, EmptyDSpARKDecodeRoundPreservesEmptyEngramHistory) {
@@ -2606,6 +2639,67 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyMatchesPlannerAndPack
                 }
             }
         }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkCapacityBudgetKeepsFullGammaPackedAndCommitGeometry) {
+    const c10::cuda::CUDAGuard  guard(0);
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_config;
+    auto                        cache_config = makeProcessorCacheConfig();
+    SpeculativeExecutionConfig  sp_config;
+    sp_config.type              = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle = 5;
+    MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
+    const auto              ints = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    for (int64_t batch : {3, 5, 9}) {
+        const int64_t                             rows   = batch == 3 ? 16 : batch == 5 ? 30 : 54;
+        const int64_t                             budget = rows - batch;
+        MtpBatchStreamProcessor::DSparkRoundState round;
+        round.anchors                  = torch::arange(batch, ints) + 10;
+        round.committed_ends           = torch::arange(batch, ints) * 512 + 127;
+        round.position_bases           = torch::arange(batch * 3, ints).reshape({batch, 3}) * 7;
+        round.engram_windows           = round.anchors.unsqueeze(1) - torch::arange(4, ints).unsqueeze(0);
+        auto                 proposals = torch::arange(batch * 5, ints).reshape({batch, 5}) + 100;
+        auto                 rates     = torch::ones({batch, 5}, ints.dtype(torch::kFloat32));
+        std::vector<int64_t> order;
+        for (int64_t row = batch - 1; row >= 0; --row) {
+            order.push_back(row);
+        }
+        auto expected_lengths = speculative::SpeculativeSampler::buildValidDraftLengths(
+            rates, torch::tensor(order, ints.dtype(torch::kInt64)), budget);
+        TensorHolder   holder;
+        GptModelInputs expected, actual;
+        auto           expected_layout = processor.prepareDSparkPackedTargetVerifyModelInput(
+            round, expected, proposals, expected_lengths, budget, holder, nullptr, true);
+        torch::Tensor lengths, owned;
+        auto          layout = processor.prepareDSparkBoundedTargetVerifyModelInput(
+            round, actual, proposals, rates, order, budget, holder, lengths, &owned, true);
+        ASSERT_TRUE(layout.packed_to_dense.defined());
+        EXPECT_EQ(actual.combo_tokens.numel(), rows);
+        EXPECT_EQ(lengths.sum().item<int64_t>(), budget);
+        EXPECT_TRUE(torch::equal(lengths, expected_lengths));
+        expectDSparkBoundedVerifyInputsEqual(actual, layout, expected, expected_layout);
+        if (batch == 5) {
+            EXPECT_TRUE(torch::equal(layout.packed_to_dense, torch::arange(rows, ints.dtype(torch::kInt64))));
+            GptModelInputs legacy;
+            auto           legacy_layout =
+                processor.prepareDSparkPackedTargetVerifyModelInput(round, legacy, proposals, lengths, budget, holder);
+            EXPECT_FALSE(legacy_layout.packed_to_dense.defined());
+        }
+        actual.is_packed_target_verify = true;
+        const auto target_lengths      = actual.input_lengths;
+        const auto target_positions    = actual.combo_position_ids;
+        auto       features            = torch::arange(rows * 3, ints.dtype(torch::kFloat32)).reshape({rows, 3});
+        processor.updateDecodePostDSparkCommitInput(actual, features, batch);
+        EXPECT_TRUE(actual.is_packed_target_verify);
+        EXPECT_EQ(actual.input_lengths.data_ptr(), target_lengths.data_ptr());
+        EXPECT_EQ(actual.combo_position_ids.data_ptr(), target_positions.data_ptr());
+        EXPECT_EQ(actual.last_hidden_states.data_ptr(), features.data_ptr());
+        auto snapshot = owned.clone();
+        proposals.fill_(-1);
+        EXPECT_TRUE(torch::equal(owned, snapshot));
     }
 }
 

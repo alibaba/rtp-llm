@@ -159,8 +159,9 @@ protected:
                                     const torch::Tensor& confidence_hidden_logits = torch::Tensor());
     struct DSparkVerifyPlan {
         // -1 means the original full-width path (full budget, or no plan).
-        int64_t              draft_budget = -1;
-        std::vector<int64_t> stable_order;
+        int64_t                           draft_budget = -1;
+        std::optional<DSparkCapacityPlan> capacity;
+        std::vector<int64_t>              stable_order;
         // Adaptive observations preserve proposal row identities even if the
         // scheduler reorders or retires streams before the D2H copy completes.
         std::vector<int64_t>          request_ids;

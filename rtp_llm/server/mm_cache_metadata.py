@@ -2,6 +2,8 @@
 
 import sys
 from array import array
+from dataclasses import dataclass
+from typing import Optional, Sequence
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalHashResponsePB
@@ -13,6 +15,51 @@ MAX_METADATA_BYTES = 16 * 1024 * 1024
 
 MM_CACHE_SNAPSHOT_MAX_KEYS = 100000
 MM_CACHE_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class MMRoutingSnapshot:
+    """Frontend-side ViT expansion result for an early first packet.
+
+    ``prompt_token_num`` is the expanded prompt length (text + media tokens);
+    ``split_sizes`` holds each media item's token count and ``feature_hashes``
+    is the flattened per-token hash tensor, so ``sum(split_sizes)`` must equal
+    ``len(feature_hashes)``.
+    """
+
+    prompt_token_num: int
+    split_sizes: tuple[int, ...]
+    feature_hashes: tuple[int, ...]
+
+
+def snapshot_from_metadata(
+    keys: Sequence[str],
+    metadata: Optional[dict],
+    prompt_token_num: int,
+) -> Optional[MMRoutingSnapshot]:
+    """Build a snapshot only when every requested key has complete hashes."""
+    if metadata is None:
+        return None
+    entries = {entry["key"]: entry for entry in metadata.get("entries", [])}
+    split_sizes: list[int] = []
+    feature_hashes: list[int] = []
+    for key in keys:
+        entry = entries.get(key)
+        if entry is None or not entry.get("hash_hit", entry.get("hit", False)):
+            return None
+        sizes = entry.get("split_size") or []
+        hashes = entry.get("feature_hashes") or []
+        if not sizes or sum(sizes) != len(hashes):
+            return None
+        split_sizes.extend(int(size) for size in sizes)
+        feature_hashes.extend(int(value) for value in hashes)
+    if not split_sizes:
+        return None
+    return MMRoutingSnapshot(
+        prompt_token_num=int(prompt_token_num),
+        split_sizes=tuple(split_sizes),
+        feature_hashes=tuple(feature_hashes),
+    )
 
 
 def get_mm_cache_keys(engine, max_keys=MM_CACHE_SNAPSHOT_MAX_KEYS):

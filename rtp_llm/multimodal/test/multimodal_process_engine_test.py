@@ -383,6 +383,13 @@ class MMProcessEngineTest(TestCase):
         ]
         self.assertEqual(lengths, [3])
 
+        tps_lengths = [
+            call.args[1]
+            for call in report.call_args_list
+            if call.args and call.args[0] == AccMetrics.VIT_EMBEDDING_TPS_METRIC
+        ]
+        self.assertEqual(tps_lengths, [3])
+
         image_counts = [
             call.args[1]
             for call in report.call_args_list

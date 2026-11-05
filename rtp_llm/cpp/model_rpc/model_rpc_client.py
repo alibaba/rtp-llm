@@ -35,6 +35,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.server.request_headers import (
     dashscope_greennet_metadata,
     extract_correlation_request_id,
+    extract_qos_priority,
     extract_trace_id,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
@@ -524,6 +525,7 @@ def _trans_jsonable_options(
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
+    input_pb.priority = extract_qos_priority(input_py)
     # The frontend forwards only the tokenizer output and generic media
     # descriptors. ViT output shape and model-specific token expansion are
     # backend responsibilities and must never cross this RPC boundary.
@@ -1028,6 +1030,11 @@ def trans_output(
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
                 decode_disk_reuse_len=aux_info_pb.decode_disk_reuse_len,
                 speculative_draft_rounds=aux_info_pb.speculative_draft_rounds,
+                speculative_verified_draft_tokens=(
+                    aux_info_pb.speculative_verified_draft_tokens
+                    if aux_info_pb.HasField("speculative_verified_draft_tokens")
+                    else -1
+                ),
                 speculative_accepted_tokens_per_pos=list(
                     aux_info_pb.speculative_accepted_tokens_per_pos
                 ),

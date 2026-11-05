@@ -238,7 +238,8 @@ private:
                                           end_us - skew_us,
                                           -1,
                                           transfer_id_,
-                                          identity_.path);
+                                          identity_.path,
+                                          AsyncProfileKind::Derived);
                     span.finish(end_us);
                 }
             } catch (...) {
@@ -310,7 +311,8 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
                                                                                   -1,
                                                                                   "coordinator",
                                                                                   task.traceId(),
-                                                                                  identity) :
+                                                                                  identity,
+                                                                                  AsyncProfileKind::Wait) :
                                                        SharedTransferStageTimer{};
     const size_t block_count       = task.descriptors().size();
     const auto   deadline_exceeded = [block_count]() {

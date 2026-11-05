@@ -608,6 +608,7 @@ class OpenaiComparer(BaseComparer):
         for spec_field in (
             "speculative_draft_rounds",
             "speculative_accepted_tokens_per_pos",
+            "speculative_verified_draft_tokens",
         ):
             if not isinstance(raw_aux, dict) or spec_field not in raw_aux:
                 ignore_fields.add(spec_field)

@@ -2339,7 +2339,8 @@ MtpBatchStreamProcessor::prepareDSparkPackedTargetVerifyModelInput(const DSparkR
                                                                    const torch::Tensor&    valid_draft_lengths,
                                                                    int64_t                 total_draft_budget,
                                                                    TensorHolder&           host_holder,
-                                                                   torch::Tensor*          owned_proposals) {
+                                                                   torch::Tensor*          owned_proposals,
+                                                                   bool                    force_packed_layout) {
     RTP_LLM_CHECK_WITH_INFO(round_state.anchors.defined() && round_state.anchors.numel() > 0,
                             "dspark packed verify: a nonempty round is required");
     const int64_t batch_size   = round_state.anchors.numel();
@@ -2361,7 +2362,7 @@ MtpBatchStreamProcessor::prepareDSparkPackedTargetVerifyModelInput(const DSparkR
     DSparkPackedTargetLayout result;
     result.dense_tokens       = model_input.combo_tokens.reshape({batch_size, verify_width});
     result.dense_position_ids = model_input.combo_position_ids;
-    if (total_draft_budget == batch_size * propose_step_) {
+    if (total_draft_budget == batch_size * propose_step_ && !force_packed_layout) {
         return result;
     }
 
@@ -2403,7 +2404,8 @@ MtpBatchStreamProcessor::prepareDSparkBoundedTargetVerifyModelInput(const DSpark
                                                                     int64_t                     total_draft_budget,
                                                                     TensorHolder&               host_holder,
                                                                     torch::Tensor&              valid_draft_lengths,
-                                                                    torch::Tensor*              owned_proposals) {
+                                                                    torch::Tensor*              owned_proposals,
+                                                                    bool                        force_packed_layout) {
     RTP_LLM_PROFILE_SCOPE("mtp.prepare_dspark_bounded_target");
     RTP_LLM_CHECK_WITH_INFO(round_state.anchors.defined() && round_state.anchors.numel() > 0,
                             "dspark bounded verify: a nonempty round is required");
@@ -2427,7 +2429,7 @@ MtpBatchStreamProcessor::prepareDSparkBoundedTargetVerifyModelInput(const DSpark
 #if USING_CUDA
     // The target consumes contiguous prefixes. Strided inputs retain the
     // existing conversion path instead of introducing another copy launch.
-    if (total_draft_budget < confidence_rates.numel() && round_state.committed_ends.defined()
+    if ((total_draft_budget < confidence_rates.numel() || force_packed_layout) && round_state.committed_ends.defined()
         && round_state.committed_ends.is_contiguous()) {
         auto fused = tryMtpDSparkBudgetedVerifyPrepare(confidence_rates,
                                                        stable_order,
@@ -2438,7 +2440,8 @@ MtpBatchStreamProcessor::prepareDSparkBoundedTargetVerifyModelInput(const DSpark
                                                        round_state.committed_ends,
                                                        total_draft_budget,
                                                        at::cuda::getCurrentCUDAStream().stream(),
-                                                       owned_proposals != nullptr);
+                                                       owned_proposals != nullptr,
+                                                       force_packed_layout);
         if (fused.packed.tokens.defined()) {
             DSparkPackedTargetLayout result;
             result.packed_to_dense              = std::move(fused.packed_to_dense);
@@ -2470,8 +2473,14 @@ MtpBatchStreamProcessor::prepareDSparkBoundedTargetVerifyModelInput(const DSpark
     auto order = order_cpu.to(confidence_rates.device(), /*non_blocking=*/true);
     valid_draft_lengths =
         speculative::SpeculativeSampler::buildValidDraftLengths(confidence_rates, order, total_draft_budget);
-    return prepareDSparkPackedTargetVerifyModelInput(
-        round_state, model_input, proposals, valid_draft_lengths, total_draft_budget, host_holder, owned_proposals);
+    return prepareDSparkPackedTargetVerifyModelInput(round_state,
+                                                     model_input,
+                                                     proposals,
+                                                     valid_draft_lengths,
+                                                     total_draft_budget,
+                                                     host_holder,
+                                                     owned_proposals,
+                                                     force_packed_layout);
 }
 
 void MtpBatchStreamProcessor::expandDSparkTargetVerifyPositionIdsFromProposal(GptModelInputs& model_input) const {
@@ -2813,8 +2822,15 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         spec_decode_output.transfer_done_event->synchronize();
     }
 
-    const auto& accept_len    = spec_decode_output.accept_len_cpu;
-    const auto& accept_tokens = spec_decode_output.accept_tokens_cpu;
+    const auto&    accept_len       = spec_decode_output.accept_len_cpu;
+    const auto&    accept_tokens    = spec_decode_output.accept_tokens_cpu;
+    const auto&    verified_lengths = spec_decode_output.verified_draft_lengths_cpu;
+    const int32_t* verified         = verified_lengths.defined() && !verified_lengths.is_cuda()
+                                      && verified_lengths.scalar_type() == torch::kInt32 && verified_lengths.dim() == 1
+                                      && verified_lengths.is_contiguous()
+                                      && verified_lengths.numel() >= static_cast<int64_t>(stream_groups.size()) ?
+                                          verified_lengths.data_ptr<int32_t>() :
+                                          nullptr;
 
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
@@ -2860,6 +2876,9 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
             accept_tokens_tensor, cur_accept_len, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
         spec_update_info.speculative_propose_step = propose_step_;
         spec_update_info.accepted_draft_tokens    = std::max(0, cur_accept_len - 1);
+        spec_update_info.verified_draft_tokens    = verified && batch_idx_out < verified_lengths.numel() ?
+                                                        verified[batch_idx_out] :
+                                                        spec_decode_output.verified_draft_length;
         // Per-stream verify errors from SpecLogitsVerifyRunner ride the update
         // path so grammar/think mask failures reach the stream (main #1006).
         const size_t stream_idx = spec_update_infos.size();

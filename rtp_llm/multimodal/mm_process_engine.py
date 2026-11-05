@@ -548,9 +548,10 @@ class MMProcessEngine:
                 service_name=service_name,
                 external_request_id=external_request_id,
             )
+            embedding_length = _embedding_token_length(result.embeddings)
             _report_vit_metric(
                 GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
-                _embedding_token_length(result.embeddings),
+                embedding_length,
             )
             if not self.is_proxy_mode:
                 _report_vit_metric(AccMetrics.VIT_SUCCESS_QPS_METRIC, 1)
@@ -935,9 +936,10 @@ class MMProcessEngine:
                         work_items, deadline=deadline, scheduled=scheduled
                     )
                     if report_embedding_length:
+                        embedding_length = _embedding_token_length(emb_res)
                         _report_vit_metric(
                             GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
-                            _embedding_token_length(emb_res),
+                            embedding_length,
                         )
 
                 with torch.profiler.record_function("postprocess"):
@@ -1096,6 +1098,10 @@ class MMProcessEngine:
             for wi in work_items
             if wi.embedding_result is None and not wi.waiting_for_cache
         ]
+        # Only items actually computed here contribute to ViT throughput; cache
+        # hits and followers of another request's in-flight compute must not be
+        # counted as new tokens.
+        pending_ids = {id(wi) for wi in pending_items}
 
         if scheduled is not None:
             for receipt in scheduled:
@@ -1104,6 +1110,7 @@ class MMProcessEngine:
             self._scheduler.submit_and_wait(pending_items, deadline=deadline)
 
         emb_res, pos_res, tensor_res = [], [], []
+        computed_embedding_length = 0
         local_producers = {
             wi.cache_entry: wi
             for wi in work_items
@@ -1146,13 +1153,21 @@ class MMProcessEngine:
                         wi.cache_entry,
                         self._embedding_cache,
                     )
-            emb_res.extend(maybe_tensor_to_list(result[0], ndim_threshold=2))
+            wi_embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
+            emb_res.extend(wi_embeddings)
+            if id(wi) in pending_ids:
+                computed_embedding_length += _embedding_token_length(wi_embeddings)
             pos_res.extend(maybe_tensor_to_list(result[1], ndim_threshold=2))
             if len(result) > 2:
                 tensor_res.extend(maybe_tensor_to_list(result[2], ndim_threshold=1))
             # Forward completion owns the H2D/consumer lifetime. The request
             # awaiting its verdict only needs the resulting embedding now.
             wi.preprocess_result = None
+        if computed_embedding_length and not self.is_proxy_mode:
+            _report_vit_metric(
+                AccMetrics.VIT_EMBEDDING_TPS_METRIC,
+                computed_embedding_length,
+            )
         return emb_res, pos_res, tensor_res
 
     @staticmethod
@@ -1314,16 +1329,17 @@ class MMProcessEngine:
                     )
                 del raw_result
 
+            embedding_length = sum(
+                (
+                    sum(h.numel() for h in result.feature_hashes)
+                    if hashes_only
+                    else _embedding_token_length(result.embeddings)
+                )
+                for result in results
+            )
             _report_vit_metric(
                 GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
-                sum(
-                    (
-                        sum(h.numel() for h in result.feature_hashes)
-                        if hashes_only
-                        else _embedding_token_length(result.embeddings)
-                    )
-                    for result in results
-                ),
+                embedding_length,
             )
             return results
         except Exception as error:

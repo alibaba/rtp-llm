@@ -1,8 +1,11 @@
 import copy
 import gc
+import json
 import os
+import statistics
 import unittest
 import weakref
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
@@ -266,6 +269,39 @@ class PackedMetadataPrepareModel:
     def forward(self, inputs, fmha_impl=None):
         return PyModelOutputs(
             inputs.input_hiddens + fmha_impl.signature, fmha_impl.features
+        )
+
+
+class CapacityKVModel(PackedMetadataPrepareModel):
+    """Exercise real graph staging and the V4.1 FP8 writer with visible owners."""
+
+    def __init__(self, graph_batch):
+        self.pool = torch.full(
+            (2 * graph_batch + 1, 32, 584), 165, dtype=torch.uint8, device="cuda"
+        )
+        self.columns = torch.arange(512, dtype=torch.bfloat16, device="cuda") / 512
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        assert all(a.is_packed_target_verify for a in inputs.attention_inputs.values())
+        return super().prepare_fmha_impl(inputs, is_cuda_graph)
+
+    def forward(self, inputs, fmha_impl=None):
+        from rtp_llm.models_py.modules.dsv41.fp8.decode.write_swa import (
+            decode_write_swa_fp8,
+        )
+
+        signature = fmha_impl.signature
+        blocks = fmha_impl.features[:, 0].long()
+        slots = torch.where(
+            blocks > 0,
+            blocks * 32 + signature[:, 1].long().remainder(32),
+            torch.full_like(blocks, -1),
+        )
+        token_values = inputs.input_ids.to(torch.bfloat16).unsqueeze(1)
+        kv = (token_values + self.columns).contiguous()
+        decode_write_swa_fp8(kv, slots, self.pool, kv.shape[0], 1, 512)
+        return PyModelOutputs(
+            inputs.input_hiddens + signature + token_values, fmha_impl.features
         )
 
 
@@ -739,7 +775,272 @@ def _build_packed_verify_inputs(lengths, prefixes, block_ids):
     return inputs, block_count
 
 
+def _build_capacity_eager_reference(lengths, prefixes, block_ids):
+    inputs, block_count = _build_packed_verify_inputs(lengths, prefixes, block_ids)
+    tagged = {}
+    for tag, attention in inputs.attention_inputs.items():
+        # PyWrappedModel/test-runner supplies the two read-only device mirrors
+        # before prepare. A direct Python eager call must supply the same real
+        # CUDA tensors explicitly; it does not pass through that C++ builder.
+        values = {
+            "input_lengths_device": attention.input_lengths,
+            "prefix_lengths_device": attention.prefix_lengths,
+            "cu_seqlens_device": attention.cu_seqlens_device,
+            "cu_kv_seqlens_device": attention.cu_kv_seqlens_device,
+            "kv_cache_kernel_block_id_device": attention.kv_cache_kernel_block_id_device,
+        }
+        for name, value in values.items():
+            assert isinstance(value, torch.Tensor) and value.is_cuda, (tag, name)
+            assert value.dtype == torch.int32 and value.is_contiguous(), (tag, name)
+        assert values["input_lengths_device"].shape == (len(lengths),)
+        assert values["prefix_lengths_device"].shape == (len(lengths),)
+        assert values["cu_seqlens_device"].shape == (len(lengths) + 1,)
+        assert values["cu_kv_seqlens_device"].shape == (len(lengths) + 1,)
+        tagged[tag] = SimpleNamespace(
+            **values,
+            is_target_verify=attention.is_target_verify,
+            is_packed_target_verify=attention.is_packed_target_verify,
+        )
+    return (
+        SimpleNamespace(
+            input_ids=inputs.input_ids,
+            input_hiddens=inputs.input_hiddens,
+            attention_inputs=tagged,
+        ),
+        block_count,
+    )
+
+
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_capacity_reuses_fixed_bank_and_replays_changed_live_requests_and_kv(self):
+        if torch.version.hip:
+            self.skipTest("V4.1 capacity reuse and FP8 writer are CUDA-only")
+        cases = {
+            4: (
+                (4, [1, 3, 6, 6]),
+                (3, [6, 6, 4, 0]),
+                (3, [4, 6, 6, 0]),
+                (1, [6, 4, 4, 2]),
+                (3, [2, 4, 6, 4]),  # Unchanged fixed3 fake geometry.
+                (4, [6, 6, 3, 1]),
+            ),
+            8: (
+                (8, [4] * 8),
+                (5, [6, 6, 6, 6, 6, 2, 0, 0]),
+                (8, [1, 1, 3, 5, 6, 6, 4, 6]),
+            ),
+            16: ((9, [6] * 9 + [4, 4, 2, 0, 0, 0, 0]),),
+        }
+        for graph_batch, layouts in cases.items():
+            with self.subTest(graph_batch=graph_batch):
+                captured = CapacityKVModel(graph_batch)
+                eager = CapacityKVModel(graph_batch)
+                runner = CudaGraphRunner()
+                runner.init_dspark_budgets(
+                    captured,
+                    HIDDEN_SIZE,
+                    64,
+                    KERNEL_BLOCK_TABLE_WIDTH,
+                    [graph_batch],
+                    GROUP_TAGS,
+                    5,
+                    3,
+                    False,
+                    capacity_query_width=6,
+                )
+                self.assertEqual(runner.capturedBudgets(), [3])
+                captured.pool.fill_(165)
+                for step, (live, padded_lengths) in enumerate(layouts):
+                    real_lengths = padded_lengths[:live]
+                    real_q = sum(real_lengths)
+                    self.assertEqual(sum(padded_lengths), 4 * graph_batch)
+                    prefixes = [3 + 3 * request + step for request in range(live)]
+                    blocks = [
+                        (request + step) % graph_batch + 1 for request in range(live)
+                    ]
+                    inputs, _ = _build_packed_verify_inputs(
+                        real_lengths, prefixes, blocks
+                    )
+                    inputs.input_ids.add_(step * 17 + 1)
+                    inputs.input_hiddens.fill_(step + 1)
+                    reference, _ = _build_capacity_eager_reference(
+                        padded_lengths,
+                        prefixes + [0] * (graph_batch - live),
+                        blocks + [0] * (graph_batch - live),
+                    )
+                    reference.input_ids.zero_()
+                    reference.input_ids[:real_q].copy_(inputs.input_ids)
+                    reference.input_hiddens.zero_()
+                    reference.input_hiddens[:real_q].copy_(inputs.input_hiddens)
+                    eager_impl = eager.prepare_fmha_impl(reference)
+                    eager_impl.prepare_cuda_graph(reference.attention_inputs, live)
+                    expected = eager.forward(reference, eager_impl)
+                    self.assertTrue(runner.canPrepare(inputs))
+                    self.assertTrue(
+                        runner.prepare(inputs, skip_forward_event_sync=True)
+                    )
+                    self.assertTrue(runner.canRun(inputs))
+                    self.assertEqual(runner.getCurrentRealGraphSize(), graph_batch)
+                    self.assertEqual(runner.selectedBudget(), 3)
+                    actual = runner.forward(inputs)
+                    self.assertEqual(actual.hidden_states.shape[0], real_q)
+                    torch.testing.assert_close(
+                        actual.hidden_states,
+                        expected.hidden_states[:real_q],
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(
+                        actual.mtp_target_hidden_states,
+                        expected.mtp_target_hidden_states[:real_q],
+                        rtol=0,
+                        atol=0,
+                    )
+                    torch.testing.assert_close(
+                        captured.pool, eager.pool, rtol=0, atol=0
+                    )
+                    self.assertTrue(captured.pool[0].eq(165).all().item())
+                    # Zero-length ghosts repeat the cumulative boundary; the
+                    # real rows must still identify the original request.
+                    oracle = [
+                        [request, prefix + offset, length, graph_batch * 4]
+                        for request, (length, prefix) in enumerate(
+                            zip(real_lengths, prefixes)
+                        )
+                        for offset in range(length)
+                    ]
+                    token_bias = inputs.input_ids[:, None] + step + 1
+                    torch.testing.assert_close(
+                        actual.hidden_states.float() - token_bias,
+                        torch.tensor(oracle, dtype=torch.float32, device="cuda"),
+                        rtol=0,
+                        atol=0,
+                    )
+
+    def test_capacity_reuse_prepare_replay_fixture_timing(self):
+        if torch.version.hip:
+            self.skipTest("V4.1 capacity reuse and FP8 writer are CUDA-only")
+        results = []
+        for live, graph_batch, expanded, ghosts in (
+            (3, 4, [6, 6, 4], [0]),
+            (5, 8, [6] * 5, [2, 0, 0]),
+        ):
+            captured = CapacityKVModel(graph_batch)
+            eager = CapacityKVModel(graph_batch)
+            runner = CudaGraphRunner()
+            runner.init_dspark_budgets(
+                captured,
+                HIDDEN_SIZE,
+                64,
+                KERNEL_BLOCK_TABLE_WIDTH,
+                [graph_batch],
+                GROUP_TAGS,
+                5,
+                3,
+                False,
+                capacity_query_width=6,
+            )
+            captured.pool.fill_(165)
+            prefixes, blocks = [7 + 3 * i for i in range(live)], list(
+                range(1, live + 1)
+            )
+            variants = {}
+            for name, lengths, tail in (
+                ("legacy_fixed3", [4] * live, [4] * (graph_batch - live)),
+                ("capacity_reuse", expanded, ghosts),
+            ):
+                inputs, _ = _build_packed_verify_inputs(lengths, prefixes, blocks)
+                reference, _ = _build_capacity_eager_reference(
+                    lengths + tail,
+                    prefixes + [0] * len(tail),
+                    blocks + [0] * len(tail),
+                )
+                reference.input_ids[sum(lengths) :].zero_()
+                eager_impl = eager.prepare_fmha_impl(reference)
+                eager_impl.prepare_cuda_graph(reference.attention_inputs, live)
+                expected = eager.forward(reference, eager_impl)
+                self.assertTrue(runner.prepare(inputs, skip_forward_event_sync=True))
+                actual = runner.forward(inputs)
+                torch.testing.assert_close(
+                    actual.hidden_states,
+                    expected.hidden_states[: sum(lengths)],
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    actual.mtp_target_hidden_states,
+                    expected.mtp_target_hidden_states[: sum(lengths)],
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(captured.pool, eager.pool, rtol=0, atol=0)
+                variants[name] = (inputs, lengths, tail)
+
+            def run(inputs):
+                self.assertTrue(runner.prepare(inputs, skip_forward_event_sync=True))
+                runner.forward(inputs)
+
+            for inputs, _, _ in variants.values():
+                for _ in range(30):
+                    run(inputs)
+            torch.cuda.synchronize()
+            samples = {name: [] for name in variants}
+            for sample in range(5):
+                order = list(variants) if sample % 2 == 0 else list(reversed(variants))
+                for name in order:
+                    inputs, _, _ = variants[name]
+                    start, stop = torch.cuda.Event(
+                        enable_timing=True
+                    ), torch.cuda.Event(enable_timing=True)
+                    start.record()
+                    for _ in range(100):
+                        run(inputs)
+                    stop.record()
+                    stop.synchronize()
+                    elapsed = start.elapsed_time(stop) / 100
+                    self.assertGreater(elapsed, 0)
+                    samples[name].append(elapsed)
+            results.append(
+                {
+                    "real_batch": live,
+                    "graph_batch": graph_batch,
+                    "physical_token_capacity": graph_batch * 4,
+                    "variants": {
+                        name: {
+                            "real_query_rows": sum(lengths),
+                            "verified_candidates": sum(lengths) - live,
+                            "ghost_lengths": tail,
+                            "milliseconds_per_prepare_replay": samples[name],
+                            "median_milliseconds": statistics.median(samples[name]),
+                        }
+                        for name, (_, lengths, tail) in variants.items()
+                    },
+                }
+            )
+        report = {
+            "scope": "Small metadata/FP8-KV fixture using the real C++ CUDAgraph runner; not a model round or model speedup",
+            "timing_boundary": "CUDA events around100 calls of prepare+replay on the current stream, includes enqueue gaps; not pure kernel timing",
+            "correctness": "Both variants first match eager outputs and every FP8 KV byte at the same physical capacity",
+            "warmup_calls_per_variant": 30,
+            "measure_calls_per_sample": 100,
+            "samples": 5,
+            "input_allocation": "All variant request inputs allocated before warmup/measurement",
+            "device": torch.cuda.get_device_name(),
+            "torch": torch.__version__,
+            "kernel_profiler": "NOT_RUN; clean event samples only",
+            "results": results,
+        }
+        output = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+        if output:
+            Path(output).mkdir(parents=True, exist_ok=True)
+            (Path(output) / "dspark_capacity_prepare_replay_fixture.json").write_text(
+                json.dumps(report, indent=2) + "\n"
+            )
+        print(
+            "CAPACITY_REUSE_GRAPH_FIXTURE_BENCHMARK "
+            + json.dumps(report, sort_keys=True)
+        )
+
     def test_fixed_budget_bank_captures_one_and_rejects_fullwidth_seed_geometry(self):
         runner = CudaGraphRunner()
         runner.init_dspark_budgets(

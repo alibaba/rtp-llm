@@ -445,6 +445,9 @@ struct RejectionSamplingParams {
     // When draft indices are absent, draft_probs_d is dense [B, steps, V].
     torch::Tensor draft_probs_indices_d;
     torch::Tensor target_probs_indices_d;
+    // Optional CUDA int32 [batch], written by the same rejection kernel.
+    // Counts target-verified candidates L (or full gamma), before output clipping.
+    torch::Tensor output_verified_draft_lengths_d;
 };
 
 // One DSpARK draft step's fused distribution build:

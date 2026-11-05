@@ -162,30 +162,35 @@ void SpeculativeSampler::prepareRejectionGraphs(const torch::Device&    device,
             e->draft    = torch::zeros({batch, static_cast<int64_t>(propose_step_)}, ints);
             e->target   = torch::zeros({batch * static_cast<int64_t>(propose_step_ + 1), 1}, ints);
             e->uniform  = torch::zeros({batch, static_cast<int64_t>(propose_step_ + 1)}, ints.dtype(torch::kFloat32));
-            e->result_d = torch::empty({batch * static_cast<int64_t>(propose_step_ + 2)}, ints);
+            e->result_d = torch::empty({batch * static_cast<int64_t>(propose_step_ + 3)}, ints);
             e->result_h = torch::empty(e->result_d.sizes(), host.dtype(torch::kInt32));
             auto run    = [&]() {
                 // Both probability distributions are point masses. Keep the
                 // original rejection kernel, with its exact acceptance and
                 // force-override rules; dense/mixed sampling stays eager.
-                const auto status = invokeRejectionSampling<float, int32_t>(nullptr,
-                                                                            e->draft.data_ptr<int32_t>(),
-                                                                            e->uniform.data_ptr<float>(),
-                                                                            nullptr,
-                                                                            e->target.data_ptr<int32_t>(),
-                                                                            1,
-                                                                            e->result_d.data_ptr<int32_t>(),
-                                                                            e->result_d.data_ptr<int32_t>()
-                                                                                + batch * (propose_step_ + 1),
-                                                                            e->masks_d.data_ptr<bool>(),
-                                                                            batch,
-                                                                            propose_step_,
-                                                                            vocab,
-                                                                            stream.stream(),
-                                                                            true,
-                                                                            true,
-                                                                            e->masks_d.data_ptr<bool>() + batch,
-                                                                            true);
+                const auto status = invokeRejectionSampling<float, int32_t>(
+                    nullptr,
+                    e->draft.data_ptr<int32_t>(),
+                    e->uniform.data_ptr<float>(),
+                    nullptr,
+                    e->target.data_ptr<int32_t>(),
+                    1,
+                    e->result_d.data_ptr<int32_t>(),
+                    e->result_d.data_ptr<int32_t>() + batch * (propose_step_ + 1),
+                    e->masks_d.data_ptr<bool>(),
+                    batch,
+                    propose_step_,
+                    vocab,
+                    stream.stream(),
+                    true,
+                    true,
+                    e->masks_d.data_ptr<bool>() + batch,
+                    true,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    nullptr,
+                    e->result_d.data_ptr<int32_t>() + batch * (propose_step_ + 2));
                 C10_CUDA_CHECK(status);
             };
             C10_CUDA_CHECK(cudaMemcpyAsync(e->masks_d.data_ptr(),
@@ -262,7 +267,7 @@ bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
         auto       copy_stream = graphs->copy_stream;
         while (copy_stream == main_stream)
             copy_stream = at::cuda::getStreamFromPool();
-        auto result = torch::empty({batch * static_cast<int64_t>(propose_step_ + 2)}, entry->result_d.options());
+        auto result = torch::empty({batch * static_cast<int64_t>(propose_step_ + 3)}, entry->result_d.options());
         C10_CUDA_CHECK(cudaMemcpyAsync(entry->masks_d.data_ptr(),
                                        entry->masks_h.data_ptr(),
                                        entry->masks_d.nbytes(),
@@ -273,15 +278,16 @@ bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
         // Patch node arguments to this call's tensors. The original kernel
         // reads the last history column directly; no staging or output clone
         // is needed, and every GPU result owns independent storage.
-        float*         draft_probs    = nullptr;
-        float*         target_probs   = nullptr;
-        auto*          draft_ids      = draft.data_ptr<int32_t>();
-        auto*          target_ids     = target.data_ptr<int32_t>();
-        auto*          samples        = uniform.data_ptr<float>();
-        auto*          output_ids     = result.data_ptr<int32_t>();
-        auto*          output_lengths = output_ids + token_count;
-        auto*          do_sample      = entry->masks_d.data_ptr<bool>();
-        auto*          force          = do_sample + found->first;
+        float*         draft_probs      = nullptr;
+        float*         target_probs     = nullptr;
+        auto*          draft_ids        = draft.data_ptr<int32_t>();
+        auto*          target_ids       = target.data_ptr<int32_t>();
+        auto*          samples          = uniform.data_ptr<float>();
+        auto*          output_ids       = result.data_ptr<int32_t>();
+        auto*          output_lengths   = output_ids + token_count;
+        auto*          verified_lengths = output_lengths + batch;
+        auto*          do_sample        = entry->masks_d.data_ptr<bool>();
+        auto*          force            = do_sample + found->first;
         int            rows = batch, steps = propose_step_, vocab = graphs->vocab, stride = target.size(1);
         bool           draft_point_mass = true, target_point_mass = true, finalize = true;
         const int32_t* valid_lengths =
@@ -289,14 +295,30 @@ bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
         const int32_t* target_candidate_ids = nullptr;
         const float*   accept_target_probs  = nullptr;
         const float*   accept_draft_probs   = nullptr;
-        void*          args[]               = {
-            &draft_probs,         &draft_ids,         &samples,   &target_probs, &target_ids,    &stride,
-            &output_ids,          &output_lengths,    &do_sample, &rows,         &steps,         &vocab,
-            &draft_point_mass,    &target_point_mass, &force,     &finalize,     &valid_lengths, &target_candidate_ids,
-            &accept_target_probs, &accept_draft_probs};
-        auto params         = entry->kernel_params;
-        params.gridDim.x    = rows;
-        params.kernelParams = args;
+        void*          args[]               = {&draft_probs,
+                                               &draft_ids,
+                                               &samples,
+                                               &target_probs,
+                                               &target_ids,
+                                               &stride,
+                                               &output_ids,
+                                               &output_lengths,
+                                               &do_sample,
+                                               &rows,
+                                               &steps,
+                                               &vocab,
+                                               &draft_point_mass,
+                                               &target_point_mass,
+                                               &force,
+                                               &finalize,
+                                               &valid_lengths,
+                                               &target_candidate_ids,
+                                               &accept_target_probs,
+                                               &accept_draft_probs,
+                                               &verified_lengths};
+        auto           params               = entry->kernel_params;
+        params.gridDim.x                    = rows;
+        params.kernelParams                 = args;
         C10_CUDA_CHECK(cudaGraphExecKernelNodeSetParams(entry->executable, entry->kernel, &params));
         C10_CUDA_CHECK(cudaGraphLaunch(entry->executable, main_stream.stream()));
         entry->computed.record(main_stream);
@@ -311,6 +333,8 @@ bool SpeculativeSampler::replayRejectionGraph(SpeculativeSamplerOutput& output,
         output.accept_len    = result.narrow(0, token_count, batch);
         output.accept_tokens_cpu = entry->result_h.narrow(0, 0, token_count).view(output.accept_tokens.sizes());
         output.accept_len_cpu    = entry->result_h.narrow(0, token_count, batch);
+        output.verified_draft_lengths_cpu = entry->result_h.narrow(0, token_count + batch, batch);
+        output.verified_draft_length      = valid_draft_lengths.defined() ? -1 : static_cast<int32_t>(propose_step_);
         entry->ready->record(copy_stream);
         entry->submitted = true;
         // A later logits cap may re-record the public completion event.
@@ -949,7 +973,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     int batch_size = streams.size();
 
-    const auto& valid_draft_lengths = draft_sampler_output.valid_draft_lengths;
+    const auto& valid_draft_lengths     = draft_sampler_output.valid_draft_lengths;
+    sample_output.verified_draft_length = valid_draft_lengths.defined() ? -1 : static_cast<int32_t>(propose_step_);
     if (valid_draft_lengths.defined()) {
         RTP_LLM_CHECK_WITH_INFO(
             valid_draft_lengths.is_cuda()
@@ -1100,12 +1125,19 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     // With the folded finalize the kernel writes every element of both output
     // buffers on every path (forced rows included), so the zero inits are dead
     // stores; without it the legacy kernels/ops keep their zero-init contract.
-    auto int_out_options = torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false);
-    torch::Tensor output_token_ids_d          = finalize_in_kernel ?
-                                                    torch::empty({(long)batch_size, (long)propose_step_ + 1}, int_out_options) :
-                                                    torch::zeros({(long)batch_size, (long)propose_step_ + 1}, int_out_options);
-    torch::Tensor output_accepted_token_num_d = finalize_in_kernel ? torch::empty({(long)batch_size}, int_out_options) :
-                                                                     torch::zeros({(long)batch_size}, int_out_options);
+    auto int_out_options      = torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false);
+    const int64_t token_count = static_cast<int64_t>(batch_size) * (propose_step_ + 1);
+    auto          result_d    = finalize_in_kernel ?
+                                    torch::empty({static_cast<int64_t>(batch_size) * (propose_step_ + 3)}, int_out_options) :
+                                    torch::Tensor();
+    auto          output_token_ids_d =
+        finalize_in_kernel ?
+                     result_d.narrow(0, 0, token_count).view({batch_size, static_cast<int64_t>(propose_step_ + 1)}) :
+                     torch::zeros({batch_size, static_cast<int64_t>(propose_step_ + 1)}, int_out_options);
+    auto output_accepted_token_num_d =
+        finalize_in_kernel ? result_d.narrow(0, token_count, batch_size) : torch::zeros({batch_size}, int_out_options);
+    auto verified_lengths_d =
+        finalize_in_kernel ? result_d.narrow(0, token_count + batch_size, batch_size) : torch::Tensor();
 
     RTP_LLM_CHECK_WITH_INFO(draft_probs_point_mass
                                 || (draft_token_probs_d_t.defined() && draft_token_probs_d_t.dim() == 3),
@@ -1158,6 +1190,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             valid_draft_lengths,
             draft_candidate_ids,
             target_candidate_ids,
+            verified_lengths_d,
         });
     }
 
@@ -1199,8 +1232,19 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
 
-    sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
-    sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+    if (finalize_in_kernel) {
+        // One existing result transfer carries tokens, acceptance and verified
+        // lengths together. The worker may consume every view after one event.
+        auto result_h = torch::empty(
+            result_d.sizes(), torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true));
+        result_h.copy_(result_d, /*non_blocking=*/true);
+        sample_output.accept_tokens_cpu = result_h.narrow(0, 0, token_count).view(sample_output.accept_tokens.sizes());
+        sample_output.accept_len_cpu    = result_h.narrow(0, token_count, batch_size);
+        sample_output.verified_draft_lengths_cpu = result_h.narrow(0, token_count + batch_size, batch_size);
+    } else {
+        sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
+        sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+    }
     sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 

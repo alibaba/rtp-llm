@@ -26,6 +26,10 @@ public:
 
     torch::Tensor accept_tokens_cpu;
     torch::Tensor accept_len_cpu;
+    // Same result payload and completion event as accept tokens/lengths.
+    torch::Tensor verified_draft_lengths_cpu;
+    // Host-known full width for legacy paths without a per-row payload; -1 is unknown.
+    int32_t verified_draft_length = -1;
 
     std::shared_ptr<torch::Event> transfer_done_event;
     // Retain graph-owned pinned results until asynchronous bookkeeping ends.

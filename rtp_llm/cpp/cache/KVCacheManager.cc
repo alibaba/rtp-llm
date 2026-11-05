@@ -319,6 +319,8 @@ bool KVCacheManager::init() {
     }
 
     coordinator_manager_->setCPSlotMapper(cp_slot_mapper_);
+    coordinator_manager_->setSkipRemoteReusedWrite(pd_sep_config_.role_type == RoleType::PREFILL
+                                                  && kv_cache_config_.kvcm_min_replica_count <= 1);
     RTP_LLM_CHECK_WITH_INFO(coordinator_manager_->init(), "CoordinatorCacheManager init failed");
     // Observe real pool capacity, including asynchronous eviction and lease release.
     const auto capacity_changed = allocationChangeCallback();
@@ -800,6 +802,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
                                    std::optional<int64_t>(request.mem_request().transfer_request_id()) :
                                    std::nullopt);
     transfer_task.setTraceId(request.mem_request().transfer_trace_id());
+    transfer_task.setWorkflow(request.mem_request().transfer_workflow_id(), request.mem_request().transfer_parent_id());
     const auto status = block_tree_cache_->executeTransfer(std::move(transfer_task));
     BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);
     if (!status.ok()) {

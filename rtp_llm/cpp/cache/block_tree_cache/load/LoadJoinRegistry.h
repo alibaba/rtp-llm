@@ -45,6 +45,7 @@ private:
 
         std::vector<BlockIdxType> target_blocks;
         uint64_t                  owner_context_id{0};
+        uint64_t                  owner_workflow_id{0};
         ContextMap                joined_contexts;
     };
 

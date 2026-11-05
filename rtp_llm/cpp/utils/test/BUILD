@@ -11,6 +11,16 @@ google_test_deps = [
 ]
 
 cc_test(
+    name = "async_profile_trace_test",
+    srcs = ["AsyncProfileTraceTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + [
+        "//rtp_llm/cpp/utils:async_profile_trace",
+        "@havenask//aios/autil:json",
+    ],
+)
+
+cc_test(
     name = "async_profiling_scope_test",
     srcs = ["AsyncProfilingScopeTest.cc"],
     copts = copts(),
