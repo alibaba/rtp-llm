@@ -14,8 +14,6 @@ class BaseTokenizer:
         self.init_tokenizer(tokenizer_path, self.config_json)
 
     def init_tokenizer(self, tokenizer_path: str, config_json: Dict[str, Any]):
-        from transformers import AutoTokenizer
-
         tokenizer_json_path = os.path.join(tokenizer_path, "tokenizer.json")
         tokenizer_obj = None
         if os.path.exists(tokenizer_json_path):
@@ -27,7 +25,9 @@ class BaseTokenizer:
         extra_kwargs = self._transformers_v5_kwargs(tokenizer_config, tokenizer_obj)
         extra_kwargs.update(self._additional_kwargs(tokenizer_config))
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer = self._get_tokenizer_class(
+                tokenizer_config
+            ).from_pretrained(
                 tokenizer_path,
                 trust_remote_code=True,
                 verbose=False,
@@ -41,6 +41,11 @@ class BaseTokenizer:
             )
             raise
         self._fix_post_processor(tokenizer_obj, extra_kwargs)
+
+    def _get_tokenizer_class(self, tokenizer_config: Dict[str, Any]):
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer
 
     def _additional_kwargs(self, tokenizer_config: Dict[str, Any]) -> Dict[str, Any]:
         """Hook for subclasses to inject extra kwargs before from_pretrained."""
