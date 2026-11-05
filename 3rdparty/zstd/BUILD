@@ -5,4 +5,5 @@ cc_library(
     srcs = glob(["lib/*.c", "lib/common/*.c", "lib/compress/*.c", "lib/decompress/*.c", "lib/dict/*.c"]),
     hdrs = glob(["lib/*.h", "lib/common/*.h", "lib/compress/*.h", "lib/decompress/*.h", "lib/dict/*.h"]),
     includes = ["lib"],
+    copts = ["-fPIC"],
 )

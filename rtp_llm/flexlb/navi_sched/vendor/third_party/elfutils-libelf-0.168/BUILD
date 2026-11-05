@@ -1,7 +1,7 @@
-cc_library(
+cc_import(
     name = "elfutils-libelf",
     hdrs = ["gelf.h", "libelf.h"],
     includes = ["."],
-    linkopts = ["-lelf"],
+    shared_library = "libelf.so",
     visibility = ["//visibility:public"],
 )

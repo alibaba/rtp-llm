@@ -1,8 +1,7 @@
-cc_library(
+cc_import(
     name = "libev",
     hdrs = ["ev.h"],
     includes = ["."],
-    linkopts = ["-lev"],
-    alwayslink = True,
+    shared_library = "libev.so",
     visibility = ["//visibility:public"],
 )

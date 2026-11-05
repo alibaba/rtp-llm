@@ -1,8 +1,7 @@
-cc_library(
+cc_import(
     name = "tbb",
     hdrs = glob(["tbb/**/*.h", "tbb/**/*"]),
     includes = ["."],
-    linkopts = ["-ltbb"],
-    alwayslink = True,
+    shared_library = "libtbb.so",
     visibility = ["//visibility:public"],
 )
