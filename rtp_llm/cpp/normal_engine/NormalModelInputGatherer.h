@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
@@ -37,8 +38,11 @@ struct NormalModelInputGathererConfig {
     std::vector<CacheGroupType> kv_cache_group_types;
     std::vector<std::string>    kv_cache_group_tags;
     bool                        warm_up{};
+    bool                        enable_hidden_state_capture{};
     bool                        enable_detail_log{};
     bool                        enable_model_inputs_log{};
+    // Supplied only by the target TP0 executor, never by warmup/proposal workers.
+    kmonitor::MetricsReporterPtr capture_metrics_reporter;
 };
 
 class NormalModelInputGatherer {

@@ -26,6 +26,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
     RoleAddrPB,
+    TensorPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
@@ -501,13 +502,43 @@ class StreamState:
         self.prefill_aux_info_observed = False
 
 
+_TENSOR_PAYLOAD_FIELDS = tuple(
+    (dtype, f"{name.lower()}_data") for name, dtype in TensorPB.DataType.items()
+)
+
+
 def _validate_prefill_only_response(
     input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
 ) -> None:
     if not input_py.generate_config.is_prefill_only():
         return
 
-    aux_infos = outputs_pb.flatten_output.aux_info
+    output_pb = outputs_pb.flatten_output
+    if output_pb.HasField("output_ids"):
+        # Validate raw tensors before trans_output skips scalar/empty frames.
+        # Reuse normal tensor decoding, including the legacy empty sentinel.
+        tensor = output_pb.output_ids
+        try:
+            # trans_tensor only reads the payload selected by data_type.
+            for dtype, field in _TENSOR_PAYLOAD_FIELDS:
+                if tensor.data_type != dtype and getattr(tensor, field):
+                    raise ValueError(f"unexpected non-empty {field} for data_type={tensor.data_type}")
+            token_count = trans_tensor(tensor).numel()
+            violation = f"output_ids contains {token_count} tokens" if token_count else None
+        except (ValueError, RuntimeError) as error:
+            violation = f"invalid output_ids: {error}"
+        if violation is not None:
+            logger.error(
+                "prefill-only response contract violation: request_id=%s, %s",
+                input_py.request_id,
+                violation,
+            )
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                f"prefill-only request [{input_py.request_id}] received {violation}",
+            )
+
+    aux_infos = output_pb.aux_info
     if not aux_infos:
         return
 
@@ -771,6 +802,9 @@ def trans_input(input_py: GenerateInput):
     )
     generate_config_pb.return_all_hidden_states = (
         input_py.generate_config.return_all_hidden_states
+    )
+    generate_config_pb.capture_hidden_states = (
+        input_py.generate_config.capture_hidden_states
     )
     generate_config_pb.hidden_states_cut_dim = (
         input_py.generate_config.hidden_states_cut_dim
@@ -1474,9 +1508,14 @@ class ModelRpcClient(object):
                     terminal_read_task = None
                 if response is None:
                     break
+                if response.frontend_metric_only:
+                    # Only the opted-in frontend consumes progress. Even a marker
+                    # with per-sequence fields is not a generation/Fetch terminal.
+                    if input_py.generate_config.frontend_metric_streaming:
+                        yield trans_output(input_py, response, stream_state)
+                    continue
                 output_py = trans_output(input_py, response, stream_state)
-                if not output_py.frontend_metric_only:
-                    last_output = output_py
+                last_output = output_py
                 if use_fetch_response and _is_finished_response(response):
                     terminal_seen = True
                 if terminal_seen:
@@ -1668,13 +1707,20 @@ class ModelRpcClient(object):
                 response_iterator.cancel()
 
     async def batch_generate(
-        self, inputs: list[GenerateInput]
-    ) -> list[GenerateOutputs]:
-        """Run BatchGenerateCall with atomic batch failure semantics.
+        self, inputs: list[GenerateInput],
+        *,
+        preserve_capture_backpressure: bool = False,
+    ) -> list[GenerateOutputs | FtRuntimeException]:
+        """Run BatchGenerateCall with atomic failure semantics by default.
 
-        The service must return one result per input. Any item-level error, result
-        cardinality mismatch, transport error, or conversion failure fails the
-        entire batch; partial successes are never returned to the caller.
+        Opt-in preservation requires every input to be strict zero-token capture
+        with reuse_cache=False. Only HIDDEN_STATE_CAPTURE_BACKPRESSURE is returned
+        as an FtRuntimeException at its input position, alongside later successes.
+        It certifies rejection before any capture reservation/publication.
+
+        All other item errors, cardinality mismatches, transport errors, and
+        conversion failures still raise for the whole call, returning no partial
+        results. Such failures do not establish retry safety for sibling inputs.
         """
         if not inputs:
             return []
@@ -1724,6 +1770,21 @@ class ModelRpcClient(object):
                 span, item_metadata = start_batch_item_span(inp.request_id, i)
                 item_spans.append(span)
                 input_pb = trans_input(inp)
+                if preserve_capture_backpressure:
+                    config_pb = input_pb.generate_config
+                    if not (
+                        config_pb.max_new_tokens == 0
+                        and config_pb.prefill_only
+                        and config_pb.capture_hidden_states
+                        and not config_pb.reuse_cache
+                    ):
+                        raise FtRuntimeException(
+                            ExceptionType.INVALID_PARAMS,
+                            "preserve_capture_backpressure requires every input to "
+                            "use effective max_new_tokens == 0, "
+                            "capture_hidden_states=True, and reuse_cache=False "
+                            f"(invalid batch item {i})",
+                        )
                 carrier = dict(item_metadata)
                 if carrier.get("traceparent"):
                     input_pb.request_info.trace_context.traceparent = carrier[
@@ -1795,11 +1856,23 @@ class ModelRpcClient(object):
                             result_pb.error_info.error_message
                             or _rpc_error_code_name(result_pb.error_info.error_code)
                         )
-                        raise FtRuntimeException(
+                        error = FtRuntimeException(
                             exception_type,
                             f"batch item {i} failed: {error_message}",
                         )
+                        if preserve_capture_backpressure and (
+                            result_pb.error_info.error_code
+                            == ErrorCodePB.HIDDEN_STATE_CAPTURE_BACKPRESSURE
+                        ):
+                            results.append(error)
+                            continue
+                        raise error
                     conversion_index = i
+                    if result_pb.final_output.frontend_metric_only:
+                        raise FtRuntimeException(
+                            ExceptionType.EXECUTION_EXCEPTION,
+                            f"batch item {i} returned a metric-only frame as final_output",
+                        )
                     stream_state = StreamState()
                     output = trans_output(
                         batch_inputs[i], result_pb.final_output, stream_state

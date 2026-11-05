@@ -49,6 +49,8 @@ enum class ErrorCode {
     OUTPUT_QUEUE_NO_UPDATE = 8105,
     // Retryable grammar resource failure. 8105 is already occupied by OUTPUT_QUEUE_NO_UPDATE.
     GRAMMAR_COMPILE_OVERLOADED = 8106,
+    // Transient strict capture admission rejection, before any reservation or publication is possible.
+    HIDDEN_STATE_CAPTURE_BACKPRESSURE = 8107,
 
     // rpc error
     GET_HOST_FAILED                       = 8200,
@@ -150,6 +152,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "OUTPUT_QUEUE_NO_UPDATE";
         case ErrorCode::GRAMMAR_COMPILE_OVERLOADED:
             return "GRAMMAR_COMPILE_OVERLOADED";
+        case ErrorCode::HIDDEN_STATE_CAPTURE_BACKPRESSURE:
+            return "HIDDEN_STATE_CAPTURE_BACKPRESSURE";
         case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
             return "EXCEEDS_KV_CACHE_MAX_LEN";
         case ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN:

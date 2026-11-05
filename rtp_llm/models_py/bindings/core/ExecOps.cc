@@ -749,8 +749,8 @@ std::unique_ptr<P2PWork> runP2PCallback(const torch::Tensor& tensor,
 }  // anonymous namespace
 
 void execBroadcast(const BroadcastParams& params) {
-    py::function           fn;
     py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         if (g_broadcast_fn != nullptr) {
@@ -796,8 +796,8 @@ bool isCpuTpBroadcasterInitialized() {
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
-    py::function           fn;
     py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         if (g_allreduce_fn != nullptr) {

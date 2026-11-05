@@ -350,18 +350,16 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     // queues. group_id/group_size on a stream in waiting_streams are status metadata;
     // they must not delay or isolate ordinary FIFO admission.
 
-    bool       has_execution_mode      = false;
-    bool       scheduling_prefill_only = false;
+    GenerateStreamPtr scheduling_stream;
     const auto capture_execution_mode  = [&](const list<GenerateStreamPtr>& streams) {
-        if (has_execution_mode) {
+        if (scheduling_stream) {
             return;
         }
         const auto it = std::find_if(streams.begin(), streams.end(), [](const auto& stream) {
             return stream && stream->getStatus() == StreamState::RUNNING;
         });
         if (it != streams.end()) {
-            has_execution_mode      = true;
-            scheduling_prefill_only = isPrefillOnly(*it);
+            scheduling_stream = *it;
         }
     };
     capture_execution_mode(running_streams_);
@@ -398,8 +396,7 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             continue;
         }
 
-        const bool prefill_only = isPrefillOnly(stream);
-        if (has_execution_mode && scheduling_prefill_only != prefill_only) {
+        if (scheduling_stream && !areStreamsBatchCompatible(scheduling_stream, stream)) {
             continue;
         }
 
@@ -441,9 +438,8 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
 
         if (scheduling_progress) {
             // A failed KV allocation owns no work this round and must not pin its execution mode.
-            if (!has_execution_mode) {
-                has_execution_mode      = true;
-                scheduling_prefill_only = prefill_only;
+            if (!scheduling_stream) {
+                scheduling_stream = stream;
             }
             // Admission limits cover every stream that made progress in this
             // round, including an async cache load. Otherwise multiple pending
@@ -567,6 +563,9 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     for (auto it = group.begin(); it != group.end();) {
         auto       current           = it++;
         auto&      stream            = *current;
+        if (!admitted_streams.empty() && !areStreamsBatchCompatible(admitted_streams.front(), stream)) {
+            continue;
+        }
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
             && inited_kv_streams + newly_inited_kv_streams >= max_inited_kv_cache_streams_) {

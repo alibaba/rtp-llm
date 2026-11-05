@@ -49,6 +49,8 @@ public:
 
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
+    HiddenStateCaptureAdmissionResult tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override;
+    ServingDeviceHealthPtr servingDeviceHealth() const override;
 
     void setModelForwardCallbacks(std::function<void()> before, std::function<void()> after) {
         before_model_forward_ = std::move(before);

@@ -230,7 +230,7 @@ class MixedLayerCacheStoreOrderTest(unittest.TestCase):
                 attention_inputs=tagged_inputs,
             )
 
-        self.assertEqual(tuple(out.shape), (4, 4))
+        self.assertEqual(tuple(out.hidden_states.shape), (4, 4))
         for layer in v4.layers:
             self.assertTrue(layer.attn.freqs_bound)
             self.assertIsNone(layer.attn._prefill_meta_shared)

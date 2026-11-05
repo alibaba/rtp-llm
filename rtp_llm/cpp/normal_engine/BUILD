@@ -60,6 +60,7 @@ cc_library(
         "//rtp_llm/cpp/observability:execution_recorder",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/utils:device_pin",
+        "//rtp_llm/cpp/utils:serving_device_health",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/engine_base:worker_status_info",

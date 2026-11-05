@@ -14,6 +14,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
 
@@ -61,6 +62,10 @@ public:
     virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
 
     virtual absl::Status stop() = 0;
+
+    virtual ErrorInfo checkHealth() const {
+        return ErrorInfo::OkStatus();
+    }
 
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                      preRunMode                            mode) = 0;
