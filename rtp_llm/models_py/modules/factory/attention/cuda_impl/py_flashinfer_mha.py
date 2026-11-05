@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -1785,6 +1786,14 @@ class PyFlashinferDecodeAttnOp(object):
         # Snapshot of the page indptr used by the last CUDA-core graph plan.
         # Dtype, head counts, and page size are fixed for this op's lifetime.
         self._cuda_core_plan_page_indptr_h: Optional[torch.Tensor] = None
+        # Tensor-core decode graph plan cache: snapshot of the page indptr used by
+        # the last plan. The split-kv partition is invariant to the last-page length
+        # within a page (the kernel reads it from its device buffer at runtime), so
+        # the plan can be skipped while the page indptr is unchanged. Default off.
+        self._tc_plan_page_indptr_h: Optional[torch.Tensor] = None
+        self._decode_plan_cache = (
+            os.environ.get("RTP_LLM_DECODE_GRAPH_PLAN_CACHE", "0") == "1"
+        )
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -1799,13 +1808,24 @@ class PyFlashinferDecodeAttnOp(object):
             )
         self.fmha_params = params
         self._cuda_core_plan_page_indptr_h = None
+        self._tc_plan_page_indptr_h = None
 
     def _tensor_core_cuda_graph_needs_replan(self) -> bool:
         # FlashInfer BatchDecode routes tensor-core decode through BatchPrefill.
-        # Its plan derives kv_lens from both page indptr and last-page lengths,
-        # so the pinned 0.2.5/0.6.9/0.6.15.post1 implementations must replan
-        # every replay.
-        return self.enable_cuda_graph and self.use_tensor_core
+        # The split-kv work partition depends only on the page indptr (page counts);
+        # the last-page length is read by the kernel from its device buffer at
+        # runtime and does not change the partition within a page (verified
+        # byte-exact: identical plan workspace and attention output). With the
+        # cache flag on, replan only when the page indptr changes (page boundary).
+        # Default off preserves the original replan-every-replay behavior.
+        if not (self.enable_cuda_graph and self.use_tensor_core):
+            return False
+        if not self._decode_plan_cache:
+            return True
+        current_page_indptr = self.fmha_params.decode_page_indptr_h
+        return self._tc_plan_page_indptr_h is None or not torch.equal(
+            self._tc_plan_page_indptr_h, current_page_indptr
+        )
 
     def _uses_cuda_core_graph_plan_cache(self) -> bool:
         return self.enable_cuda_graph and not self.use_tensor_core
@@ -1888,6 +1908,8 @@ class PyFlashinferDecodeAttnOp(object):
             self._cuda_core_plan_page_indptr_h = (
                 self.fmha_params.decode_page_indptr_h.clone()
             )
+        if self.use_tensor_core and self.enable_cuda_graph and self._decode_plan_cache:
+            self._tc_plan_page_indptr_h = self.fmha_params.decode_page_indptr_h.clone()
 
     def prepare(
         self,
@@ -2000,6 +2022,11 @@ class PyFlashinferDecodeAttnOp(object):
             )
             if self._cuda_graph_replay_needs_replan():
                 self._plan_decode_wrapper(attn_inputs)
+            # When the tensor-core plan cache hits (page indptr unchanged within a
+            # page), the plan is skipped entirely: the runtime buffers the captured
+            # kernel reads (page indptr / page indices / last-page length) alias the
+            # fmha_params device buffers refreshed by fill_params() above, and the
+            # split-kv workspace is byte-identical within a page (verified exact).
             return
 
         # Per-token FP8 graph planning requires host metadata mirrors.
