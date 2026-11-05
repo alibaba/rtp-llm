@@ -48,6 +48,29 @@ _ATTN_PARTS = frozenset(
 _STATS = {}
 _ANNOUNCED = [False]
 
+# R58: replay suspension for the decoder-trim/CED compacted region. A captured
+# boundary graph bakes the predecessor's ``pre_mix_out`` ADDRESS in at capture
+# time; the compact path (a) re-points L20's ``pre_mix_out`` to a fresh
+# gathered tensor every compacted forward and (b) oscillates the per-unit
+# pinned premix buffers between the full (1024-row) and compact (36-row)
+# shapes, so any boundary graph captured on the compact shape replays stale
+# addresses (the R58 debug-cluster corruption: L21 rel_l2 0.57). Suspension forces
+# the eager (correct) path for exactly the compacted layer sequence.
+_REPLAY_SUSPENDED = [0]
+
+
+def suspend_graph_replay() -> None:
+    _REPLAY_SUSPENDED[0] += 1
+
+
+def resume_graph_replay() -> None:
+    _REPLAY_SUSPENDED[0] -= 1
+
+
+def graph_replay_suspended() -> bool:
+    return _REPLAY_SUSPENDED[0] > 0
+
+
 def graph_probe_enabled() -> bool:
     return _ENABLED
 
@@ -130,8 +153,8 @@ class GraphReplay:
 
     def __init__(self, name):
         self.name = name
-        self.graphs = {}       # key -> (graph, outputs, side_effect)
-        self.pending = {}      # key -> sightings
+        self.graphs = {}  # key -> (graph, outputs, side_effect)
+        self.pending = {}  # key -> sightings
         self.failed_keys = set()
         self.static_bufs = {}  # copy_in index -> static staging buffer
         self.permanently_off = False
@@ -146,7 +169,7 @@ class GraphReplay:
         in before every capture and every replay); ``fn`` receives the
         staged input list.
         """
-        if self.permanently_off:
+        if self.permanently_off or graph_replay_suspended():
             _note(self.name, "fallback")
             return fn(inputs), "fallback"
         key = tuple(
@@ -175,9 +198,7 @@ class GraphReplay:
             return fn(inputs), "fallback"
         try:
             if copy_in and not self.static_bufs:
-                self.static_bufs = {
-                    i: inputs[i].clone() for i in copy_in
-                }
+                self.static_bufs = {i: inputs[i].clone() for i in copy_in}
             for i in copy_in:
                 self.static_bufs[i].copy_(inputs[i])
                 staged[i] = self.static_bufs[i]

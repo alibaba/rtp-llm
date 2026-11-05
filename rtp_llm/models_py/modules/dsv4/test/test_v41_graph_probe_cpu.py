@@ -132,6 +132,32 @@ class FallbackTest(unittest.TestCase):
         self.assertEqual(len(probe.failed_keys), 2)
         self.assertEqual(len(probe.graphs), 0)
 
+    def test_replay_suspension_forces_eager_without_capture(self):
+        # R58: the decoder-trim/CED compacted region suspends replay (stale
+        # baked pre_mix_out addresses). Suspended runs must stay eager WITHOUT
+        # recording sightings (the compact shape must never capture).
+        module = _load(flag="1")
+        probe = module.GraphReplay("test")
+        calls = []
+        t = _FakeTensor(0x1000)
+        module.suspend_graph_replay()
+        try:
+            self.assertTrue(module.graph_replay_suspended())
+            for _ in range(3):
+                out, kind = probe.run([t], lambda _s: calls.append(1) or "eager")
+                self.assertEqual((out, kind), ("eager", "fallback"))
+        finally:
+            module.resume_graph_replay()
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(probe.pending), 0)
+        self.assertEqual(len(probe.failed_keys), 0)
+        self.assertFalse(module.graph_replay_suspended())
+        # after resume the normal path is restored (2nd sighting attempts
+        # capture and blacklists the key on CPU)
+        probe.run([t], lambda _s: "eager1")
+        probe.run([t], lambda _s: "eager2")
+        self.assertEqual(len(probe.failed_keys), 1)
+
     def test_not_implemented_error_is_permanent(self):
         module = _load(flag="1")
         probe = module.GraphReplay("test")
@@ -163,9 +189,13 @@ class FallbackTest(unittest.TestCase):
                 raise NotImplementedError("contract refusal")
             return calls.append("eager-after-failed-capture") or "out"
 
-        with mock.patch.object(torch.cuda, "synchronize", lambda: None, create=True), \
-             mock.patch.object(torch.cuda, "CUDAGraph", _FakeGraph, create=True), \
-             mock.patch.object(torch.cuda, "graph", _FakeGraphCtx, create=True):
+        with mock.patch.object(
+            torch.cuda, "synchronize", lambda: None, create=True
+        ), mock.patch.object(
+            torch.cuda, "CUDAGraph", _FakeGraph, create=True
+        ), mock.patch.object(
+            torch.cuda, "graph", _FakeGraphCtx, create=True
+        ):
             # first sighting: eager fallback
             out, kind = probe.run([a], fn_ok)
             self.assertEqual((out, kind), ("out", "fallback"))
@@ -194,7 +224,6 @@ class FallbackTest(unittest.TestCase):
         )
         self.assertEqual(len(probe.graphs), 0)
 
-
     def test_premix_pin_default(self):
         # boundary + attn probes are adopted default-on (R28/R29) => pin on
         self.assertTrue(_load(flag=None).premix_pin_enabled())
@@ -204,13 +233,17 @@ class FallbackTest(unittest.TestCase):
             {"DSV41_GRAPH_PROBE_ROUTER": "0", "DSV41_GRAPH_ATTN": "0"},
             clear=True,
         ):
-            spec = importlib.util.spec_from_file_location("dsv4_graph_probe_pin_off", HELPER)
+            spec = importlib.util.spec_from_file_location(
+                "dsv4_graph_probe_pin_off", HELPER
+            )
             m = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(m)
         self.assertFalse(m.premix_pin_enabled())
         attn_only = _load(flag="0")
         with mock.patch.dict(os.environ, {"DSV41_GRAPH_ATTN": "1"}, clear=True):
-            spec = importlib.util.spec_from_file_location("dsv4_graph_probe_pin", HELPER)
+            spec = importlib.util.spec_from_file_location(
+                "dsv4_graph_probe_pin", HELPER
+            )
             m = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(m)
         self.assertTrue(m.premix_pin_enabled())

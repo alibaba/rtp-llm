@@ -106,6 +106,13 @@ from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4._nvtx_phases import nvtx_phase
+
+# R58c: MOEDBG_ONLY_STEPS="8,16" -> record/dump only those forward steps
+# (counted from v4._dbg_step at forward start, every forward counted). Keeps
+# per-layer MOEDBG=2 dumps tiny for the decoder-trim divergence analysis.
+_MOEDBG_ONLY_STEPS = frozenset(
+    int(s) for s in os.environ.get("MOEDBG_ONLY_STEPS", "").split(",") if s.strip()
+)
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_context_for_forward,
     cp_gather_last_by_request,
@@ -432,6 +439,13 @@ def forward_layers(
     # smoke / production prefill path produces the same per-layer dump
     # consumed by /tmp/moedbg_runs diff scripts).  Read once per forward.
     _rt_on = _rt.ENABLED
+    if _rt_on and _MOEDBG_ONLY_STEPS:
+        # R58c step filter: count EVERY forward (deterministic across arms),
+        # record only the listed steps (keeps dump volume tiny).
+        _step_now = getattr(v4, "_dbg_step", 0)
+        v4._dbg_step = _step_now + 1
+        if _step_now not in _MOEDBG_ONLY_STEPS:
+            _rt_on = False
     if _rt_on:
         _rt.begin(seqlen=int(input_ids.size(0)))
         if _rt._get_buf() is None:
@@ -663,6 +677,57 @@ def forward_layers(
             after_layers_fn=after_layers_fn,
         )
 
+    # R48d decoder trim (DSV41_DECODER_TRIM_KEEP, default off): compact the
+    # decoder layers L21-39 to the final chunk's tail (precision class).
+    # Mutually exclusive with CED (both hook the same post-L20 point) and with
+    # the R58 mask-mode reference arm (DSV41_DECODER_TRIM_MASK), which limits the
+    # decoder SWA visibility to the tail WITHOUT compacting.
+    decoder_trim_plan = None
+    decoder_trim_mask_floor = None
+    if ced_plan is None and v4.fp8_kv_cache:
+        from rtp_llm.models_py.modules.dsv4._v41_decoder_trim import (
+            decoder_trim_enabled,
+            decoder_trim_mask_keep,
+        )
+
+        # The mask-mode reference arm gates the compact arm off (they are two
+        # implementations of the same trim semantics; mask = full compute +
+        # visibility masking, compact = truncation + CP redistribution). Both
+        # arms share the _evaluate_trim engagement decision (same chunks).
+        if decoder_trim_mask_keep() > 0:
+            from rtp_llm.models_py.modules.dsv4._v41_decoder_trim_plan import (
+                plan_decoder_trim_mask,
+            )
+
+            decoder_trim_mask_floor = plan_decoder_trim_mask(
+                v4,
+                cp_ctx,
+                attn_inputs,
+                capture_aux=capture_aux,
+                cache_store_active=(
+                    write_cache_store_impl is not None or bool(writers_by_tag)
+                ),
+                after_layers_fn=after_layers_fn,
+            )
+        elif decoder_trim_enabled():
+            from rtp_llm.models_py.modules.dsv4._v41_decoder_trim_plan import (
+                plan_decoder_trim_chunk,
+            )
+
+            decoder_trim_plan = plan_decoder_trim_chunk(
+                v4,
+                cp_ctx,
+                attn_inputs,
+                capture_aux=capture_aux,
+                cache_store_active=(
+                    write_cache_store_impl is not None or bool(writers_by_tag)
+                ),
+                after_layers_fn=after_layers_fn,
+            )
+    # Unified handle: the post-L20 compact hook + the restore path are shared
+    # between CED and the decoder trim (same compact/restore_rows/context API).
+    trim_plan = ced_plan if ced_plan is not None else decoder_trim_plan
+
     try:
         with (
             record_range_ctx(),
@@ -679,7 +744,7 @@ def forward_layers(
                 else v4.layers
             )
             for layer_idx, layer_call in enumerate(layer_calls):
-                if ced_plan is not None and layer_idx == 1:
+                if trim_plan is not None and layer_idx == 1:
                     # Reference CED integration contract: after the COMPLETE
                     # L20 block, before L21. This tree's clear_prefill_meta_
                     # shared_fp8 also triggers _begin_forward's shared-state
@@ -691,7 +756,7 @@ def forward_layers(
                     # kv_workspace/index_plan) MUST stay dropped: they are
                     # rebuilt against the tail geometry.
                     ced_shared = v4.layers[0].attn._shared_attention
-                    h, input_ids = ced_plan.compact(v4, h, input_ids, ced_shared)
+                    h, input_ids = trim_plan.compact(v4, h, input_ids, ced_shared)
                     _CED_KEEP = (
                         "global",
                         "topk",
@@ -701,17 +766,28 @@ def forward_layers(
                     ced_saved = {
                         key: ced_shared[key] for key in _CED_KEEP if key in ced_shared
                     }
-                    cp_ctx = ced_plan.context
+                    cp_ctx = trim_plan.context
                     positions = cp_ctx.global_positions.to(
                         device=positions.device, dtype=torch.long
                     )
-                    cu_seqlens = ced_plan.cu_seqlens
+                    cu_seqlens = trim_plan.cu_seqlens
                     clear_prefill_meta_shared_fp8(v4)
                     ced_shared.update(ced_saved)
                     v4._propagate_cp_ctx(cp_ctx)
                     if os.environ.get("DSV41_CED_NO_SWA_OVERRIDE", "0") != "1":
                         ced_shared["ced_swa_start"] = cp_ctx.prefix_length
-                    ced_shared["ced_indexer_projection"] = ced_plan.indexer_projection
+                    ced_shared["ced_indexer_projection"] = trim_plan.indexer_projection
+                    # R58: CUDA-graph boundary probes bake the predecessor
+                    # pre_mix_out ADDRESS in at capture time; the compact path
+                    # re-points/reshapes those buffers every compacted forward,
+                    # so replay would read stale rows (the L21 corruption
+                    # seen on the debug pool). Suspend replay for the compacted layer
+                    # sequence (resumed in the finally below).
+                    from rtp_llm.models_py.modules.dsv4 import (
+                        _v41_graph_probe as _graph_probe,
+                    )
+
+                    _graph_probe.suspend_graph_replay()
                     build_and_propagate_prefill_meta_fp8(
                         v4,
                         h,
@@ -728,6 +804,14 @@ def forward_layers(
                         max_seqlen_q=cp_ctx.chunk_length,
                         workspace=ws,
                     )
+                if decoder_trim_mask_floor is not None and layer_idx == 1:
+                    # R58 mask arm: publish the SWA visibility floor for the
+                    # decoder layers L21+ (L20 — the KV source — has already
+                    # run the full-length compute). Read by
+                    # _prefill_query/_swa index build via the shared dict.
+                    v4.layers[0].attn._shared_attention[
+                        "dtrim_mask_swa_start"
+                    ] = decoder_trim_mask_floor
                 with nvtx_phase("v41.layer"):
                     h = layer_call(
                         h,  # [T, hc, dim]
@@ -807,14 +891,22 @@ def forward_layers(
         # on a near-full card. ``clear`` is idempotent (sets None per layer).
         if v4.fp8_kv_cache:
             clear_prefill_meta_shared_fp8(v4)
-        if ced_plan is not None:
-            # CED keys live in the worker-persistent shared dict; drop them
+        if trim_plan is not None or decoder_trim_mask_floor is not None:
+            # Trim keys live in the worker-persistent shared dict; drop them
             # and restore the original CP context (reference contract: main
             # restores plan.original_context and removes its marker).
+            if trim_plan is not None and trim_plan.compacted:
+                from rtp_llm.models_py.modules.dsv4 import (
+                    _v41_graph_probe as _graph_probe,
+                )
+
+                _graph_probe.resume_graph_replay()
             ced_shared = v4.layers[0].attn._shared_attention
             ced_shared.pop("ced_swa_start", None)
             ced_shared.pop("ced_indexer_projection", None)
-            v4._propagate_cp_ctx(ced_original_ctx)
+            ced_shared.pop("dtrim_mask_swa_start", None)
+            if trim_plan is not None:
+                v4._propagate_cp_ctx(ced_original_ctx)
         if _fs_prof is not None:
             # __exit__ synchronises, so every kernel the loop launched is
             # captured even though the launches themselves are async.
@@ -859,11 +951,16 @@ def forward_layers(
         if _rt_on:
             _rt.record("prefill_hc_reduced", h)
         h = v4.norm(h)  # [T, dim]
-    if ced_plan is not None and ced_plan.compacted:
+    if trim_plan is not None and trim_plan.compacted:
         # Reference contract: restore AFTER the compact final HC reduction
         # and norm. Rows outside the exact tail are zero-filled; the engine
         # only reads this chunk's last-row logits/hidden (inside the tail).
-        h = ced_plan.restore_rows(h)
+        h = trim_plan.restore_rows(h)
+        # Keep the local ctx in the same row layout as the restored h: the
+        # remaining uses are the debug-record masks below (MOEDBG/_fwd_dbg),
+        # which index h with cp_ctx.global_positions. The model-level ctx is
+        # restored in the `finally` above. Output-inert (h is already final).
+        cp_ctx = trim_plan.original_context
     if _rt_on:
         _rt.record("prefill_final_norm", h)
         if cp_ctx is None:
@@ -921,9 +1018,12 @@ def forward_layers(
                 value = getattr(attn_inputs, name, None)
                 if value is not None and value.numel() > 0:
                     extra[name] = value.detach().cpu()
-        step = getattr(v4, "_dbg_step", 0)
+        if _MOEDBG_ONLY_STEPS:
+            step = getattr(v4, "_dbg_step", 1) - 1  # incremented at forward start
+        else:
+            step = getattr(v4, "_dbg_step", 0)
+            v4._dbg_step = step + 1
         _rt.dump(step=step, extra=extra)
-        v4._dbg_step = step + 1
     if _fwd_dbg.enabled():
         _fwd_dbg.print_prefill(
             hidden=h,

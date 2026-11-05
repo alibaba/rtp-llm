@@ -431,10 +431,7 @@ class MoE(nn.Module):
 
         with record_function_range("dsv4.moe.shared_expert_finish"):
             shared = self._shared_executor.finish()
-        from .strategies.v41_nccl_ep import (
-            DeferredMXFP8PeerSum,
-            run_deferred_combine,
-        )
+        from .strategies.v41_nccl_ep import DeferredMXFP8PeerSum, run_deferred_combine
 
         if os.environ.get("DSV41_EP_TAIL_DEBUG", "0") == "1":
             from .strategies.v41_nccl_ep import _eptail_debug_once
@@ -450,7 +447,9 @@ class MoE(nn.Module):
                 if isinstance(routed, DeferredMXFP8PeerSum):
                     combined = run_deferred_combine(routed, shared, x.dtype, out)
                 else:
-                    combined = combine_routed_and_shared(routed, shared, x.dtype, out=out)
+                    combined = combine_routed_and_shared(
+                        routed, shared, x.dtype, out=out
+                    )
             if combined.data_ptr() != out.data_ptr():
                 out.copy_(combined)
 
@@ -661,9 +660,7 @@ class MoE(nn.Module):
                         and x.is_cuda
                         and claim_one_layer(("gate", x.device))
                     ):
-                        self._gate_probe = GraphReplay(
-                            f"v41.gate.l{self.layer_id:02d}"
-                        )
+                        self._gate_probe = GraphReplay(f"v41.gate.l{self.layer_id:02d}")
                 if self._gate_probe is None:
                     weights, indices = self.gate(x, input_ids_flat)
                 else:
@@ -674,6 +671,14 @@ class MoE(nn.Module):
             finally:
                 if _dbg:
                     self.gate._dbg_prefix = None
+        # R58c routing replay (churn-removal experiment): on the compact decoder
+        # geometry, substitute the mask arm's recorded tail-row routing so the
+        # residual compact-vs-mask diff is pure continuous noise.
+        from rtp_llm.models_py.modules.dsv4 import _v41_r58c_replay as _replay
+
+        _ovr = _replay.override_moe_routing(self.layer_id, x, weights, indices)
+        if _ovr is not None:
+            weights, indices = _ovr
         if _dbg:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_weights", weights)
             _rt.record_if_level(2, f"L{self.layer_id:02d}_moe_topk_indices", indices)

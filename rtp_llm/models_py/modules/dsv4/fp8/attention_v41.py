@@ -20,25 +20,37 @@ from rtp_llm.config.dsv41_config import (
     v41_sparse_attention_mode,
 )
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv4._v41_deferred_checks import (
     add_check as _add_deferred_check,
+)
+from rtp_llm.models_py.modules.dsv4._v41_deferred_checks import (
     grouped_asserts_enabled as _grouped_asserts_enabled,
 )
 from rtp_llm.models_py.modules.dsv4._v41_expected_lengths import (
     expected_chunk_lengths as _expected_chunk_lengths,
 )
-from rtp_llm.models_py.modules.dsv4._v41_qualify_once import (
-    hoist_active as _qp_hoist_active,
-    lookup_meta as _qp_lookup_meta,
-    meta_key as _qp_meta_key,
-    store_meta as _qp_store_meta,
-    tables_key as _qp_tables_key,
-    tables_mark as _qp_tables_mark,
-    tables_seen as _qp_tables_seen,
-)
-from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv4._v41_inv_rope_triton import (
     apply_inverse_rope_output as _e5b_apply,
+)
+from rtp_llm.models_py.modules.dsv4._v41_qualify_once import (
+    hoist_active as _qp_hoist_active,
+)
+from rtp_llm.models_py.modules.dsv4._v41_qualify_once import (
+    lookup_meta as _qp_lookup_meta,
+)
+from rtp_llm.models_py.modules.dsv4._v41_qualify_once import meta_key as _qp_meta_key
+from rtp_llm.models_py.modules.dsv4._v41_qualify_once import (
+    store_meta as _qp_store_meta,
+)
+from rtp_llm.models_py.modules.dsv4._v41_qualify_once import (
+    tables_key as _qp_tables_key,
+)
+from rtp_llm.models_py.modules.dsv4._v41_qualify_once import (
+    tables_mark as _qp_tables_mark,
+)
+from rtp_llm.models_py.modules.dsv4._v41_qualify_once import (
+    tables_seen as _qp_tables_seen,
 )
 from rtp_llm.models_py.modules.dsv4.bounded_replay import (
     enabled as bounded_replay_enabled,
@@ -937,9 +949,10 @@ class AttentionV41FP8(AttentionFP8):
                 woa_strided_quant_enabled,
             )
 
-            if woa_strided_quant_enabled() and getattr(
-                self.wo_b, "_sm120_linear", None
-            ) is not None:
+            if (
+                woa_strided_quant_enabled()
+                and getattr(self.wo_b, "_sm120_linear", None) is not None
+            ):
                 # E5a: quantize straight from the permuted einsum result —
                 # the flatten(1) bf16 copy exists only to feed the sgl
                 # quantizer, which the strided kernel replaces byte-for-byte.
@@ -1248,6 +1261,8 @@ class AttentionV41FP8(AttentionFP8):
                         # must not skip the eager rope in those modes).
                         from ._v41_prefill_attention_v2 import (
                             inv_rope_fold_enabled as _rope_fold_on,
+                        )
+                        from ._v41_prefill_attention_v2 import (
                             sparse_prefill_v2_mode as _spv2_mode,
                         )
 
@@ -2510,9 +2525,7 @@ class AttentionV41FP8(AttentionFP8):
                 )
             prefixes_host = self._host_prefill_prefixes(common)
             if len(prefixes_host) != 1 or int(prefixes_host[0]) != int(ced_start):
-                raise ValueError(
-                    "CED SWA override prefix disagrees with ced_swa_start"
-                )
+                raise ValueError("CED SWA override prefix disagrees with ced_swa_start")
             buf = self._swa_prefill_concat(
                 qkv, common, fuse_cache_write=fuse_cache_write
             )
@@ -2814,9 +2827,7 @@ class AttentionV41FP8(AttentionFP8):
             if qp_hoist:
                 _qp_store_meta(
                     self._cp_ctx,
-                    _qp_meta_key(
-                        input_lengths, prefix_lengths, self._rope_max_seq_len
-                    ),
+                    _qp_meta_key(input_lengths, prefix_lengths, self._rope_max_seq_len),
                     lengths,
                     ends,
                 )
@@ -3255,10 +3266,7 @@ class AttentionV41FP8(AttentionFP8):
                         x.device,
                         starts,
                         lengths,
-                        [
-                            span.start + span.count
-                            for span in compact.dispatch.spans
-                        ],
+                        [span.start + span.count for span in compact.dispatch.spans],
                         prefill=True,
                     )
                     return common, qkv, swa, swa_starts, swa_only_workspace
@@ -3390,6 +3398,18 @@ class AttentionV41FP8(AttentionFP8):
             req_ids,
             request_row_slices=getattr(common, "request_row_slices", None),
         )
+        # R58c: dump the sparse/indexer selection per consuming layer for the
+        # compact-vs-mask churn analysis (level 2; tail-trimmed by the recorder).
+        # The replay override (when armed) applies BEFORE the record so the dump
+        # shows the effective (overridden) selection.
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+        from rtp_llm.models_py.modules.dsv4 import _v41_r58c_replay as _replay
+
+        _sov = _replay.override_sparse_topk(self.layer_id, x, selected)
+        if _sov is not None:
+            selected = _sov
+        if _rt.should_record_layer(self.layer_id):
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_sparse_topk", selected)
         globals_by_req = self._shared_attention["global"][self.kv_source_layer_id]
         offsets, ns, swstart = self._prefill_chunk_meta(
             globals_by_req, swa, swa_starts, req_ids, x.device, common=common
@@ -3402,16 +3422,40 @@ class AttentionV41FP8(AttentionFP8):
         # reuse — the argsort/cat/pad chain drops from once per layer to once
         # per group. Dropped with the rest of the per-forward shared state in
         # ``_begin_forward``.
+        # R58 mask mode (the reference arm of DSV41_DECODER_TRIM_KEEP): the
+        # forward loop publishes ``dtrim_mask_swa_start`` (the absolute SWA
+        # visibility floor = the trim-tail start/floor) after L20 when the
+        # final chunk engages (engagement decision = _evaluate_trim, shared
+        # with the compact arm, so both arms engage on exactly the same
+        # chunks). Only the mask condition changes (swpos >= mask_start); the
+        # buffer index (swpos - swstart) is unchanged, so the tail rows read
+        # the same K/V bytes as the compact arm — full compute, masking only,
+        # no compaction/padding/CP redistribution. Force the plain (uncached,
+        # non-fused) visibility path so the override applies per-layer.
+        mask_start = self._shared_attention.get("dtrim_mask_swa_start")
+        if mask_start is not None and self.layer_id < 21:
+            # Published strictly after L20 (the forward loop's layer_idx==1
+            # hook); reaching a non-decoder layer would be a wiring bug.
+            raise ValueError(
+                "decoder-trim mask floor reached a non-decoder layer "
+                f"(layer_id={self.layer_id})"
+            )
+
         plan = self._shared_attention.get("prefill_index_plan")
+        if mask_start is not None:
+            plan = None
         if plan is not None and plan[0] is selected:
             indices, lens = plan[1], plan[2]
         else:
-            fused_plan = prefill_index_plan.try_build_index_plan(
-                selected, positions, offsets, ns, swstart, self.window_size
-            )
+            fused_plan = None
+            if mask_start is None:
+                fused_plan = prefill_index_plan.try_build_index_plan(
+                    selected, positions, offsets, ns, swstart, self.window_size
+                )
             if fused_plan is not None:
                 indices, lens = fused_plan
             else:
+                vis_start = swstart if mask_start is None else max(swstart, mask_start)
                 swpos = (
                     positions[:, None]
                     - self.window_size
@@ -3419,7 +3463,7 @@ class AttentionV41FP8(AttentionFP8):
                     + torch.arange(self.window_size, device=x.device)[None]
                 )
                 swidx = torch.where(
-                    swpos >= swstart, offsets + ns + swpos - swstart, -1
+                    swpos >= vis_start, offsets + ns + swpos - swstart, -1
                 )
                 ordered = selected.sort(dim=-1).values
                 global_idx = torch.where(ordered >= 0, offsets + ordered, -1)
