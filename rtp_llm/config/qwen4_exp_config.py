@@ -24,7 +24,7 @@ def ple_eos_token_id(config):
 
 @dataclass(frozen=True)
 class Qwen4Options:
-    ple_prefetch_mb: int
+    ple_prefetch_mb: int = 256
 
     def __post_init__(self):
         if type(self.ple_prefetch_mb) is not int or self.ple_prefetch_mb <= 0:

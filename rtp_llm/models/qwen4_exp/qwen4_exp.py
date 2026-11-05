@@ -218,11 +218,6 @@ class Qwen4Exp(Qwen35Moe):
         cls._configure_precision_recipe(model_config)
         if not model_config.is_mtp:
             cls._set_ple_weight_size_estimate(model_config)
-        if (
-            type(model_config.qwen4_ple_prefetch_mb) is not int
-            or model_config.qwen4_ple_prefetch_mb <= 0
-        ):
-            raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
         ple_layer_ids = (
             getattr(model_config, "_qwen4_ple_layer_ids", [])
             if model_config.enable_qwen4_ple

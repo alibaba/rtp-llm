@@ -17,6 +17,7 @@ from rtp_llm.config.quant_config import (
     W4a8Int4PerChannelQuantConfig,
     init_quant_config,
 )
+from rtp_llm.config.qwen4_exp_config import Qwen4Options
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
 from rtp_llm.ops import DataType, HiddenStateCaptureDtype, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
@@ -60,9 +61,7 @@ def apply_quant_scope_to_pricing(model_config: "ModelConfig", quant_config) -> N
             # Online NVFP4 (--quantization MODELOPT_FP4 on a BF16 MoE
             # checkpoint): experts are quantized to FP4 in flight (resident
             # ~0.53 B/param) while the dense slice stays BF16.
-            model_config.dense_weight_dtype = (
-                "fp8" if quant_config.model_recipe == QWEN4_FP8_NVFP4_RECIPE else "bf16"
-            )
+            model_config.dense_weight_dtype = "bf16"
             if not (model_config.expert_weight_dtype or "").strip():
                 model_config.expert_weight_dtype = "fp4"
         elif quant_config.mixed_attention:
@@ -142,14 +141,13 @@ class ModelConfig(CppModelConfig):
         snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
         if snapshot is not None:
             return snapshot.options.ple_prefetch_mb
-        return getattr(self, "_qwen4_ple_prefetch_mb", 256)
+        return getattr(self, "_qwen4_ple_prefetch_mb", Qwen4Options.ple_prefetch_mb)
 
     @qwen4_ple_prefetch_mb.setter
     def qwen4_ple_prefetch_mb(self, value: int) -> None:
-        if type(value) is not int or value <= 0:
-            raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
+        options = Qwen4Options(value)
         snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
-        if snapshot is not None and value != snapshot.options.ple_prefetch_mb:
+        if snapshot is not None and options != snapshot.options:
             raise RuntimeError(
                 "qwen4_exp resource options are frozen after model loading"
             )
@@ -865,18 +863,15 @@ class ModelConfig(CppModelConfig):
                 )
             capture_dtype = capture_dtype_by_name[capture_dtype_name]
 
-        # Apply only after all capture overrides have been validated so an
-        # invalid later field cannot leave an earlier field partially updated.
+        # Validate capture overrides before applying the budget; a rejected or
+        # frozen budget must also leave capture and rope settings unchanged.
+        if "qwen4_ple_prefetch_mb" in model_override_args:
+            self.qwen4_ple_prefetch_mb = model_override_args["qwen4_ple_prefetch_mb"]
         self.apply_rope_scaling_override(model_override_args)
         if layer_ids is not None:
             self.hidden_state_capture_layer_ids = layer_ids
         if capture_dtype is not None:
             self.hidden_state_capture_dtype = capture_dtype
-        if "qwen4_ple_prefetch_mb" in model_override_args:
-            budget = model_override_args["qwen4_ple_prefetch_mb"]
-            if type(budget) is not int or budget <= 0:
-                raise ValueError("qwen4_ple_prefetch_mb must be a positive integer")
-            self.qwen4_ple_prefetch_mb = budget
 
     def init_precision_config(
         self, kv_cache_config: Optional[Any], act_type: Optional[str]
@@ -910,11 +905,9 @@ class ModelConfig(CppModelConfig):
                 or self.model_type not in ("qwen4_exp", "qwen4_exp_mtp")
             ):
                 raise ValueError("QWEN4_FP8_NVFP4 is only valid for qwen4_exp models")
-        # Load quant_config
-        if not quant_config:
-            if requested is not None:
-                quant_config = requested
-                logging.info(f"need_load_quant by {quant_config.get_method()}")
+        if not quant_config and requested is not None:
+            quant_config = requested
+            logging.info(f"need_load_quant by {quant_config.get_method()}")
 
         # Set quant_algo if quant_config exists
         if quant_config:

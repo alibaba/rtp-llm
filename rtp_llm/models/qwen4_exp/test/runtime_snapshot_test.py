@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.qwen4_exp_config import freeze_runtime_config
+from rtp_llm.ops import HiddenStateCaptureDtype
 
 
 class RuntimeSnapshotTest(unittest.TestCase):
@@ -37,6 +38,23 @@ class RuntimeSnapshotTest(unittest.TestCase):
             spawned.options.ple_prefetch_mb = 128
         with self.assertRaisesRegex(RuntimeError, "frozen"):
             config.qwen4_ple_prefetch_mb = 128
+
+    def test_frozen_budget_override_leaves_capture_settings_unchanged(self):
+        config = self.config()
+        config.num_layers = 8
+        config.hidden_state_capture_layer_ids = [7]
+        freeze_runtime_config(config, SimpleNamespace(get_attn_tp_size=lambda: 2))
+        with self.assertRaisesRegex(RuntimeError, "frozen"):
+            config.apply_override_args(
+                '{"hidden_state_capture_layer_ids":[1,3],'
+                '"hidden_state_capture_dtype":"fp8_e4m3",'
+                '"qwen4_ple_prefetch_mb":64}'
+            )
+        self.assertEqual(config.hidden_state_capture_layer_ids, [7])
+        self.assertEqual(
+            config.hidden_state_capture_dtype, HiddenStateCaptureDtype.BF16
+        )
+        self.assertEqual(config.qwen4_ple_prefetch_mb, 256)
 
     def test_draft_snapshot_has_independent_geometry_and_role(self):
         target = self.config()
