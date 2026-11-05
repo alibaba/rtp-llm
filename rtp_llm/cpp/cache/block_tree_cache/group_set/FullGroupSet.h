@@ -15,6 +15,9 @@ public:
 class FullMatchValidator: public MatchValidator {
 public:
     bool validate(const GroupSetResource& resource) override;
+    std::unique_ptr<MatchValidator> clone() const override {
+        return std::make_unique<FullMatchValidator>(*this);
+    }
 
 private:
     bool prefix_valid_{true};

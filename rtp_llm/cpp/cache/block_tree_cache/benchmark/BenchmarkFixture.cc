@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::benchmark {
@@ -228,6 +229,11 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
     config.enable_host_cache   = enable_host;
     config.enable_disk_cache   = enable_disk;
     config.task_pool_size      = static_cast<int>(task_pool_size);
+    config.enable_prefix_cache_observability =
+        autil::EnvUtil::getEnv("RTP_LLM_PREFIX_CACHE_OBSERVABILITY", false);
+    if (config.enable_prefix_cache_observability) {
+        config.prefix_observability_instance = "benchmark";
+    }
     // Event-driven eviction: insert commits trigger checkWatermark, which
     // demotes overflow down to the per-tier ratio watermark (0.0 = disabled).
     if (device_watermark_ratio > 0.0) {
@@ -250,7 +256,10 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
         std::make_unique<BlockTransferDispatcher>(engine, nullptr, config.max_descriptors_per_transfer_batch);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(config.task_pool_size, 1000, "BlockTreeCacheBenchmarkTaskPool");
-    auto tree = std::make_unique<BlockTree>(group_sets);
+    auto tree = std::make_unique<BlockTree>(group_sets,
+                                             1,
+                                             config.enable_prefix_cache_observability,
+                                             config.prefix_observability_instance);
 
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   config,

@@ -33,9 +33,13 @@ public:
 
         Task(Tier target,
              CacheKeysType keys,
-             std::chrono::milliseconds timeout):
+             std::chrono::milliseconds timeout,
+             std::vector<std::vector<int>> tokens = {},
+             std::vector<PrefixCachePlanPoint> plan_points = {}):
             target_tier(target),
             cache_keys(std::move(keys)),
+            token_segments(std::move(tokens)),
+            plan_points(std::move(plan_points)),
             transfer_task({}, timeout) {}
 
         const std::vector<TransferDescriptor>& descriptors() const {
@@ -44,6 +48,10 @@ public:
 
         Tier          target_tier{Tier::NONE};
         CacheKeysType cache_keys;
+        std::vector<std::vector<int>> token_segments;
+        std::vector<PrefixCachePlanPoint> plan_points;
+        std::optional<int64_t> observation_request_id{std::nullopt};
+        ErrorInfo     error;
         TransferTask  transfer_task;
         bool markTransferring() {
             Phase expected = Phase::CREATED;

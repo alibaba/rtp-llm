@@ -92,6 +92,16 @@ bool LoadAsyncContext::needBackendMatch() const {
     return need_backend_match_;
 }
 
+PrefixCacheRemoteObservation LoadAsyncContext::remoteObservation(size_t reuse_unit_tokens) const {
+    std::lock_guard<std::mutex> lock(backend_match_mutex_);
+    PrefixCacheRemoteObservation observation;
+    observation.query_status = remote_query_status_;
+    if (remote_query_status_ == PrefixCacheRemoteQueryStatus::HIT) {
+        observation.candidate_pos = remote_candidate_blocks_ * reuse_unit_tokens;
+    }
+    return observation;
+}
+
 void LoadAsyncContext::setMatchCallback(MatchCallback callback) {
     RTP_LLM_CHECK(need_backend_match_ && callback && !match_callback_ && !backend_started_);
     match_callback_ = std::move(callback);
@@ -107,13 +117,16 @@ void LoadAsyncContext::startBackendMatch() {
     RTP_LLM_CHECK(need_backend_match_ && match_callback_ && !backend_started_);
     backend_started_                     = true;
     std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
-    storage_backend_->match(
-        storage_request_,
-        [weak](size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success) {
-            if (auto context = weak.lock()) {
-                context->onBackendMatch(matched_blocks_num, std::move(match_meta), success);
-            }
-        });
+    storage_backend_->match(storage_request_,
+                             [weak](size_t matched_blocks_num,
+                                    std::shared_ptr<StorageBackendMatchMeta> match_meta,
+                                    bool success,
+                                    PrefixCacheRemoteQueryStatus query_status) {
+                                 if (auto context = weak.lock()) {
+                                     context->onBackendMatch(
+                                         matched_blocks_num, std::move(match_meta), success, query_status);
+                                 }
+                             });
 }
 
 void LoadAsyncContext::setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks) {
@@ -138,7 +151,8 @@ const std::vector<std::vector<StorageBlockHandle>>& LoadAsyncContext::backendHan
 
 void LoadAsyncContext::onBackendMatch(size_t                                   matched_blocks_num,
                                       std::shared_ptr<StorageBackendMatchMeta> match_meta,
-                                      bool                                     success) {
+                                      bool                                     success,
+                                      PrefixCacheRemoteQueryStatus             query_status) {
     if (!coordinator_->beginActiveCallback()) {
         return;
     }
@@ -148,6 +162,8 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
     if (state_.load() != State::PENDING) {
         return;
     }
+    remote_query_status_       = success ? query_status : PrefixCacheRemoteQueryStatus::ERROR;
+    remote_candidate_blocks_   = success ? matched_blocks_num : 0;
     if (!success) {
         malloc_status_.store(MallocStatus::INTERNAL_ERROR, std::memory_order_release);
         failBeforeCommit();

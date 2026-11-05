@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -20,6 +22,14 @@ struct TreeNode {
     TreeNode*                                   parent{nullptr};
     std::vector<GroupSetResource>               group_set_resources;
     bool                                        is_resident{false};  // Must never change from true to false.
+    // Prefix-observability intervals. A negative value means the interval is inactive;
+    // zero is a valid first-microsecond start.
+    struct Observation {
+        int64_t                     content_since_us{-1};
+        int64_t                     recovery_since_us{-1};
+        std::array<int64_t, 3>      tier_since_us{-1, -1, -1};
+    };
+    Observation                                 observation;
 };
 
 }  // namespace rtp_llm
