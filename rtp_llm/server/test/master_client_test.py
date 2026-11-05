@@ -1,5 +1,8 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
+
+import grpc
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -11,8 +14,14 @@ from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     RESOURCE_EXHAUSTED,
     SAME_PRIORITY_AHEAD,
     SCHEDULE_FAILURE_REASON_UNSPECIFIED,
+    FlexlbCancelResponsePB,
+    FlexlbScheduleRequestPB,
     FlexlbScheduleResponsePB,
     FlexlbServerStatusPB,
+)
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
+    FlexlbServiceServicer,
+    add_FlexlbServiceServicer_to_server,
 )
 from rtp_llm.server.master_client import MasterClient
 
@@ -342,6 +351,89 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             AdmissionRejectReason.INVALID,
             raised.exception.admission_reject_reason,
         )
+
+
+class MasterClientConcurrentFailureTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.waiting = asyncio.Event()
+        self.release = asyncio.Event()
+        self.failure = grpc.StatusCode.UNAVAILABLE
+        owner = self
+
+        class Scheduler(FlexlbServiceServicer):
+            async def Schedule(self, request, context):
+                if request.request_id == 1:
+                    owner.waiting.set()
+                    await owner.release.wait()
+                    return FlexlbScheduleResponsePB(success=True, code=200)
+                if owner.failure == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    await asyncio.Event().wait()
+                await context.abort(owner.failure, "injected schedule failure")
+
+            async def Cancel(self, request, context):
+                return FlexlbCancelResponsePB()
+
+        self.server = grpc.aio.server()
+        add_FlexlbServiceServicer_to_server(Scheduler(), self.server)
+        port = self.server.add_insecure_port("127.0.0.1:0")
+        self.assertGreater(port, 2)
+        await self.server.start()
+        self.address = f"127.0.0.1:{port - 2}"
+        self.client = MasterClient()
+
+    async def asyncTearDown(self):
+        self.release.set()
+        await self.client.close()
+        await self.server.stop(0)
+
+    async def _assert_other_request_survives(self, failure):
+        self.failure = failure
+        waiting = asyncio.create_task(
+            self.client._send_schedule_request(
+                self.address, FlexlbScheduleRequestPB(request_id=1), 5, 1
+            )
+        )
+        await asyncio.wait_for(self.waiting.wait(), 2)
+        try:
+            if failure == grpc.StatusCode.DEADLINE_EXCEEDED:
+                with self.assertRaises(FtRuntimeException) as raised:
+                    await self.client._send_schedule_request(
+                        self.address, FlexlbScheduleRequestPB(request_id=2), 0.05, 2
+                    )
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.DEADLINE_EXCEEDED
+                )
+            else:
+                result = await self.client._send_schedule_request(
+                    self.address, FlexlbScheduleRequestPB(request_id=2), 2, 2
+                )
+                self.assertIsNone(result)
+            self.release.set()
+            result = await asyncio.wait_for(waiting, 2)
+            self.assertTrue(result.success)
+        finally:
+            self.release.set()
+            if not waiting.done():
+                waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+
+    async def test_unavailable_does_not_cancel_another_schedule(self):
+        await self._assert_other_request_survives(grpc.StatusCode.UNAVAILABLE)
+
+    async def test_deadline_does_not_cancel_another_schedule(self):
+        await self._assert_other_request_survives(grpc.StatusCode.DEADLINE_EXCEEDED)
+
+    async def test_close_still_cancels_outstanding_schedules(self):
+        waiting = asyncio.create_task(
+            self.client._send_schedule_request(
+                self.address, FlexlbScheduleRequestPB(request_id=1), 5, 1
+            )
+        )
+        await asyncio.wait_for(self.waiting.wait(), 2)
+        await self.client.close()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiting
+        self.assertEqual(self.client._channels, {})
 
 
 if __name__ == "__main__":

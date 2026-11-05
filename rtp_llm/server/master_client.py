@@ -160,6 +160,9 @@ class MasterClient:
 
     def _get_channel(self, target: str) -> grpc.aio.Channel:
         if target not in self._channels:
+            # Concurrent schedules share this channel. gRPC reconnects after
+            # transport failures; closing it for one failed RPC would cancel
+            # unrelated requests. Its lifetime belongs to close().
             self._channels[target] = grpc.aio.insecure_channel(
                 target,
                 options=[
@@ -170,11 +173,6 @@ class MasterClient:
                 ],
             )
         return self._channels[target]
-
-    async def _close_channel(self, target: str) -> None:
-        channel = self._channels.pop(target, None)
-        if channel is not None:
-            await channel.close()
 
     async def close(self) -> None:
         for channel in self._channels.values():
@@ -218,12 +216,10 @@ class MasterClient:
                 await self._best_effort_cancel(
                     stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED
                 )
-                await self._close_channel(target)
                 raise FtRuntimeException(
                     exception_type=ExceptionType.DEADLINE_EXCEEDED,
                     message=f"FlexLB schedule deadline exceeded for request {request_id}",
                 ) from e
-            await self._close_channel(target)
             return None
         except asyncio.CancelledError:
             if "stub" in locals():
@@ -239,7 +235,6 @@ class MasterClient:
                 request_id,
                 elapsed,
             )
-            await self._close_channel(target)
             return None
 
     @staticmethod

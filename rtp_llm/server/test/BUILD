@@ -54,6 +54,16 @@ py_test(
 )
 
 py_test(
+    name = "master_client_test",
+    srcs = ["master_client_test.py"],
+    deps = [
+        "//rtp_llm/server:server",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["manual"],
+)
+
+py_test(
     name = "vit_proxy_server_test",
     srcs = ["vit_proxy_server_test.py"],
     deps = [
