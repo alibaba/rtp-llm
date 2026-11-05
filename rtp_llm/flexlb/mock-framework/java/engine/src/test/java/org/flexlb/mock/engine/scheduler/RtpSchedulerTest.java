@@ -25,9 +25,12 @@ class RtpSchedulerTest {
         return config(role, expression, batchSize, 0);
     }
     private RtpConfig config(String role, String expression, int batchSize, int tokenBudget) throws Exception {
+        return config(role, expression, batchSize, tokenBudget, false);
+    }
+    private RtpConfig config(String role, String expression, int batchSize, int tokenBudget, boolean reuse) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
         var config = (ObjectNode) root.path("component").path("config");
-        config.put("seq_size_per_block", 2).put("concurrency_limit", batchSize).put("max_batch_tokens_size", tokenBudget);
+        config.put("seq_size_per_block", 2).put("concurrency_limit", batchSize).put("max_batch_tokens_size", tokenBudget).put("reuse_cache", reuse);
         ((ObjectNode) config.path("mock.compute").path("forward")).put("expression", expression);
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
     }
@@ -356,6 +359,47 @@ class RtpSchedulerTest {
             assertEquals(7, cache.snapshot(0, false).freeBlocks());
             assertTrue(scheduler.requests().isEmpty());
             assertEquals(3, finishedLog.snapshot(0, List.of(), 0, 0).finished().size());
+        }
+    }
+
+    @Test void asynchronousKvPreparationWakesEngineAndCancellationReleasesLease() throws Exception {
+        for (boolean cancel : List.of(false, true)) {
+            var config = config("prefill", "1", 2, 0, true);
+            var remote = new CompletableFuture<Integer>();
+            var started = new CompletableFuture<List<Long>>();
+            try (var cache = new KvCache(2, 8, 0, true, keys -> {
+                     started.complete(keys);
+                     return remote;
+                 });
+                 var engine = new RtpEngineLoop(new Object(), AbstractRtpScheduler.factory(config), new TaskHistory(),
+                     cache, config.compute(), config.role(), config.id())) {
+                var listener = new Listener();
+                var sequence = new CacheSequence(2, List.of(1, 2, 3, 4, 5), List.of());
+                var request = engine.input(new EngineScheduler.Input("restore", 1, 0, 5, 1, 0, System.nanoTime(),
+                    Long.MAX_VALUE, sequence, true, false, 0, false), listener);
+                assertEquals(sequence.keys(), started.get(2, TimeUnit.SECONDS));
+                assertFalse(listener.output.isDone());
+                assertEquals(0, request.reused());
+                if (cancel) {
+                    engine.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test"));
+                    assertEquals(RequestFailure.Reason.CANCELLED, listener.terminal.get(2, TimeUnit.SECONDS).reason());
+                    assertTrue(remote.isCancelled());
+                    assertFalse(remote.complete(1));
+                    assertFalse(listener.output.isDone());
+                    assertTrue(cache.snapshot(-1, true).keys().isEmpty());
+                } else {
+                    // An unrelated local request can run while the first waits for KV.
+                    var local = new Listener();
+                    engine.input(input(2, false), local);
+                    assertNull(local.terminal.get(2, TimeUnit.SECONDS));
+                    remote.complete(1);
+                    assertNull(listener.terminal.get(2, TimeUnit.SECONDS));
+                    assertEquals(2, request.reused());
+                    assertEquals(2, request.remoteReused());
+                    assertTrue(listener.output.isDone());
+                }
+                assertEquals(8, cache.snapshot(0, false).availableBlocks());
+            }
         }
     }
 

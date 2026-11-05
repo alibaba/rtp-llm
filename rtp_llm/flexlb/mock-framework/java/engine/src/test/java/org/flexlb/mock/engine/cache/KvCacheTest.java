@@ -6,6 +6,27 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 
 class KvCacheTest {
+    @Test void preparationFallsBackToLocalPrefixAfterRemoteFailure() {
+        var remote = new CompletableFuture<Integer>();
+        try (var cache = new KvCache(2, 8, 0, true, keys -> {
+            assertEquals(List.of(2L), keys);
+            return remote;
+        })) {
+            try (var seed = cache.acquire(2, List.of()).lease()) {
+                assertTrue(seed.publish(List.of(1L), 2));
+            }
+            var loading = assertInstanceOf(KvCache.Loading.class, cache.prepare(5, List.of(1L, 2L), true));
+            assertSame(loading, loading.poll());
+            remote.completeExceptionally(new IllegalStateException("remote read failed"));
+            var ready = assertInstanceOf(KvCache.Ready.class, loading.poll());
+            try (var lease = ready.lease()) {
+                assertEquals(2, lease.reusedTokens());
+                assertEquals(5, cache.snapshot(0, false).availableBlocks());
+            }
+            assertEquals(8, cache.snapshot(0, false).availableBlocks());
+        }
+    }
+
     @Test void releaseIsIdempotentAndCannotPublishAfterCancellation() {
         try (var cache = new KvCache(1, 8, 0)) {
             var lease = cache.acquire(2, List.of()).lease();

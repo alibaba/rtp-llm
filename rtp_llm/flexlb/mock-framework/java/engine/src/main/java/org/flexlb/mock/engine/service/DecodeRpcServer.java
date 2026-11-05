@@ -67,7 +67,7 @@ final class DecodeRpcServer implements AutoCloseable {
         @Override public boolean cancelled() { return response.isCancelled(); }
         @Override public void allocated(EngineScheduler.Request request) { acknowledge(this); }
         @Override public void output(EngineScheduler.Request request, EngineScheduler.Output progress) {
-            var output = RpcMessages.token(input, token, progress.generated(), progress.committed(), request.reused(),
+            var output = RpcMessages.token(input, token, progress.generated(), progress.committed(), request.reused(), request.remoteReused(),
                 System.nanoTime() - started, progress.finished(), true).toBuilder();
             output.getFlattenOutputBuilder().getAuxInfoBuilder(0).setIterCount(progress.iterations() + 1);
             send(this, output.build());
