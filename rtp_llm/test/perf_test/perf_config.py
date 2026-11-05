@@ -301,6 +301,12 @@ def prepare_config(args: argparse.Namespace, remaining: List[str]) -> PerfTestCo
         batch_size_list = auto_generate_bs_list(args.concurrency_limit)
 
     effective_max_concurrency = max(batch_size_list)
+    if os.environ.get("PERF_GLOBAL_BATCH") == "1":
+        if args.target_tpot > 0 or args.partial != 1:
+            raise ValueError("PERF_GLOBAL_BATCH supports decode grid enumeration only")
+        effective_max_concurrency = (
+            effective_max_concurrency + args.dp_size - 1
+        ) // args.dp_size
     if args.target_tpot > 0:
         effective_max_concurrency = max(
             effective_max_concurrency, args.concurrency_limit

@@ -441,6 +441,8 @@ def _run_decode(
         if engine_status
         else float("inf")
     )
+    if os.environ.get("PERF_GLOBAL_BATCH") == "1":
+        max_kv *= dp_size
 
     if args.target_tpot > 0:
         runner = TpsBinarySearchRunner(
@@ -512,6 +514,10 @@ def main() -> str:
         remaining.extend(["--use_batch_decode_scheduler", "1"])
     generate_config = json.loads(args.generate_config)
     os.makedirs(args.result_dir, exist_ok=True)
+    if os.environ.get("PERF_DETAILED_LATENCIES") == "1":
+        os.environ["PERF_RAW_OUTPUT_DIR"] = os.path.join(
+            args.result_dir, "raw_latencies"
+        )
     EngineServer.propagate_engine_env(remaining)
 
     logging.info(f"Result directory: {args.result_dir}")

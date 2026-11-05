@@ -38,7 +38,38 @@ def drain_native_parallel():
     if dist.is_initialized():
         torch.cuda.synchronize()
         dist.barrier(group=_native_shutdown_group())
+        _write_perf_evidence()
         logger.info("V4.1 native role engine device work drained")
+
+
+def _write_perf_evidence():
+    import os
+
+    evidence = os.environ.get("RTP_V41_PERF_EVIDENCE_DIR")
+    if not evidence:
+        return
+    import json
+    from pathlib import Path
+    import torch.distributed as dist
+    from rtp_llm.models_py.modules.dsv41.ppu.moe import PPUMoE
+
+    directory = Path(evidence)
+    directory.mkdir(parents=True, exist_ok=True)
+    engines = list(PPUMoE._MEGA_ENGINES)
+    (directory / f"moe-rank{dist.get_rank()}.json").write_text(
+        json.dumps(
+            {
+                "rank": dist.get_rank(),
+                "world_size": dist.get_world_size(),
+                "engines": [
+                    {"layers": len(engine._weights), **engine.execution_stats()}
+                    for engine in engines
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def shutdown_native_parallel():

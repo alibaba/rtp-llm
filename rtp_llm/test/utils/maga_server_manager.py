@@ -285,6 +285,24 @@ class MagaServerManager(object):
                 # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
                 logging.info("stop server and children: %d", server_process.pid)
                 parent = psutil.Process(server_process.pid)
+                grace = int(os.environ.get("RTP_TEST_GRACEFUL_STOP_TIMEOUT", "0"))
+                if grace > 0:
+                    # Let ProcessManager coordinate multi-rank shutdown before
+                    # considering the existing descendant cleanup fallback.
+                    parent.terminate()
+                    try:
+                        self._exit_code = server_process.wait(timeout=grace)
+                    except subprocess.TimeoutExpired:
+                        logging.warning("Graceful launcher stop timed out after %ds", grace)
+                    else:
+                        logging.info("Server launcher exited with code %d", self._exit_code)
+                        with self._state_lock:
+                            if self._server_process is server_process:
+                                self._server_process = None
+                        if self._file_stream is not None:
+                            self._file_stream.close()
+                            self._file_stream = None
+                        return self._exit_code == 0
                 children = list(
                     parent.children(recursive=True)
                 )  # 获取所有子进程（递归）

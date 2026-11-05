@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Union
 
@@ -13,6 +14,35 @@ from rtp_llm.test.perf_test.dataclass import (
     analyze_results,
 )
 from rtp_llm.utils.util import check_with_info
+
+
+def _read_token_stream(response, expected_tokens: int) -> ResponseInfo:
+    """Keep engine cumulative times and client arrival times without trimming."""
+    events = []
+    final = {}
+    response.encoding = "utf-8"
+    for line in response.iter_lines(chunk_size=1, decode_unicode=True):
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload.lower() == "[done]":
+            break
+        final = json.loads(payload)
+        aux = final.get("aux_info", {})
+        events.append(
+            {
+                "arrival_ns": time.monotonic_ns(),
+                "aux_info": aux,
+                "finished": final.get("finished", False),
+            }
+        )
+    ok = (
+        bool(final.get("finished"))
+        and int(final.get("aux_info", {}).get("output_len", 0)) == expected_tokens
+    )
+    result = ResponseInfo(final, ok)
+    result.raw_measurement = {"events": events, "final": final, "success": ok}
+    return result
 
 
 def _effective_profile_steps(is_decode: bool, decode_test_length: int) -> int:
@@ -92,6 +122,11 @@ def _curl_server_single_worker(
     if "top_k" not in req:
         req["top_k"] = 1
 
+    detailed = is_decode and os.environ.get("PERF_DETAILED_LATENCIES") == "1"
+    if detailed:
+        req["yield_generator"] = True
+        gen_config["is_streaming"] = True
+
     profile_step = _effective_profile_steps(is_decode, decode_test_length)
     if profile:
         # Mirror the profiler switches into generate_config as well: depending on
@@ -105,11 +140,19 @@ def _curl_server_single_worker(
             gen_config["profile_trace_name"] = profile_trace_name
     try:
         response = requests.post(
-            f"http://127.0.0.1:{base_port}", json=req, timeout=wait_time
+            f"http://127.0.0.1:{base_port}",
+            json=req,
+            timeout=wait_time,
+            stream=detailed,
         )
         if response.status_code != 200:
             logging.warning(f"request failed: {response.content}")
             return ResponseInfo({}, False)
+        if detailed:
+            try:
+                return _read_token_stream(response, decode_test_length)
+            finally:
+                response.close()
         logging.debug(response.text)
         return ResponseInfo(response.json())
     except Exception as e:
@@ -238,14 +281,19 @@ class BatchPerfImpl(object):
                 self.warmup_runs,
                 self.profile_trace_name,
             )
-            _ = self._curl_server()
+            warmup = self._curl_server()
+            if os.environ.get("PERF_DETAILED_LATENCIES") == "1":
+                check_with_info(warmup.fail_requests == 0, "perf warmup failed")
 
         measure_runs = self._effective_measure_runs(num_measures)
         key = "avg_decode_time" if self.is_decode else "avg_prefill_time"
         measurements: List[TestResultMetrics] = []
         all_measure_responses: List[ResponseInfo] = []
+        raw_runs = []
         for i in range(measure_runs):
+            started_ns = time.monotonic_ns()
             responses = self._curl_server_responses()
+            ended_ns = time.monotonic_ns()
             metric = analyze_results(responses)
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
@@ -261,6 +309,36 @@ class BatchPerfImpl(object):
             )
             measurements.append(metric)
             all_measure_responses.extend(responses)
+            if os.environ.get("PERF_DETAILED_LATENCIES") == "1":
+                raw_runs.append(
+                    {
+                        "run": i,
+                        "started_ns": started_ns,
+                        "ended_ns": ended_ns,
+                        "responses": [
+                            getattr(r, "raw_measurement", {"success": False, "events": []})
+                            for r in responses
+                        ],
+                    }
+                )
+                directory = Path(os.environ["PERF_RAW_OUTPUT_DIR"])
+                directory.mkdir(parents=True, exist_ok=True)
+                label = self.profile_trace_name or f"warmup_global{self.batch_size}"
+                (directory / f"{label}.json").write_text(
+                    json.dumps(
+                        {
+                            "global_batch_size": self.batch_size,
+                            "dp_size": self.dp_size,
+                            "decode_test_length": self.decode_test_length,
+                            "warmup_runs": self.warmup_runs,
+                            "measurement_runs": raw_runs,
+                            "timing": "engine aux_info cumulative ms and client monotonic ns",
+                            "trimmed": False,
+                        },
+                        indent=2,
+                    )
+                    + "\n"
+                )
 
         if measure_runs >= 3:
             # Trim min and max, average the rest
@@ -326,10 +404,11 @@ class BatchPerfImpl(object):
 
     def _set_concurrency(self):
         check_with_info(
-            self.batch_size % self.dp_size == 0,
+            self.batch_size % self.dp_size == 0
+            or os.environ.get("PERF_GLOBAL_BATCH") == "1",
             f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",
         )
-        local_batch_size = self.batch_size // self.dp_size
+        local_batch_size = (self.batch_size + self.dp_size - 1) // self.dp_size
         payload = {
             "batch_size": local_batch_size,
             "mode": "decode" if self.is_decode else "prefill",

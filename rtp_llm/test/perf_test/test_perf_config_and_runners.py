@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from rtp_llm.test.perf_test.batch_decode_test import _run_decode, _run_prefill
+from rtp_llm.test.perf_test.batch_perf_impl import _read_token_stream
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
 from rtp_llm.test.perf_test.perf_config import prepare_config as _prepare_config
 from rtp_llm.test.perf_test.perf_utils import (
@@ -54,6 +55,39 @@ def _make_args(**overrides):
 # ---------------------------------------------------------------------------
 class TestPrepareConfig(unittest.TestCase):
     """Test _prepare_config for grid and distribution modes."""
+
+    def test_global_grid_batch_keeps_idle_dp_owners(self):
+        args = _make_args(
+            batch_size="1,8,16,32", partial=1, dp_size=8, batch_size_explicit=True
+        )
+        with patch.dict(os.environ, {"PERF_GLOBAL_BATCH": "1"}):
+            config = _prepare_config(args, [])
+        self.assertEqual(config.batch_size_list, [1, 8, 16, 32])
+        self.assertEqual(config.max_concurrency, 4)
+
+    def test_token_stream_keeps_all_samples_and_lowercase_done(self):
+        response = MagicMock()
+        response.iter_lines.return_value = [
+            'data:{"finished":false,"aux_info":{"output_len":1,"cost_time":10,"first_token_cost_time":10}}',
+            'data:{"finished":false,"aux_info":{"output_len":2,"cost_time":14,"first_token_cost_time":10}}',
+            'data:{"finished":true,"aux_info":{"output_len":3,"cost_time":23,"first_token_cost_time":10}}',
+            "data:[done]",
+        ]
+        result = _read_token_stream(response, 3)
+        self.assertTrue(result.success)
+        self.assertEqual(result.decode_time_per_token, 6.5)
+        self.assertEqual(len(result.raw_measurement["events"]), 3)
+        self.assertEqual(
+            result.raw_measurement["events"][-1]["aux_info"]["cost_time"], 23
+        )
+
+    def test_token_stream_missing_tokens_fails(self):
+        response = MagicMock()
+        response.iter_lines.return_value = [
+            'data:{"finished":true,"aux_info":{"output_len":2}}',
+            "data:[done]",
+        ]
+        self.assertFalse(_read_token_stream(response, 3).success)
 
     def test_grid_mode_explicit_bs(self):
         with patch.object(sys, "argv", ["prog", "--batch_size", "1,4,8"]):
