@@ -403,9 +403,11 @@ def maybe_fused_qk_norm_rope_cache(qkv, norm, impl, kv_cache):
     ):
         return None
     # A missing CUDA mirror must fall back before any normalization/cache writes.
-    cu = inputs.cu_seqlens_device
-    prefix = inputs.prefix_lengths_device
     decode = bool(params.decode_plan)
+    # Native decode carries token boundaries separately; its context CU array
+    # is intentionally zero-filled and would suppress every cache append.
+    cu = inputs.decode_cu_seqlens_device if decode else inputs.cu_seqlens_device
+    prefix = inputs.prefix_lengths_device
     lengths = (
         getattr(inputs, "sequence_lengths_plus_1_device", None) if decode else None
     )

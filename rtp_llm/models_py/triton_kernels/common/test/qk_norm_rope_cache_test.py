@@ -192,6 +192,58 @@ class QKNormRopeCacheTest(unittest.TestCase):
         self.assertIsNone(maybe_fused_qk_norm_rope_cache(c.qkv, norm, impl, c.cache))
         self.assert_bytes(c.cache, before)
 
+    def test_decode_dispatch_uses_decode_boundaries_and_appends_real_cache(self):
+        from rtp_llm.ops import RopeStyle
+
+        c = self.make_case()
+        rope = SimpleNamespace(
+            style=RopeStyle.Mrope, mrope_interleaved=True, index_factor=1,
+            scale=1.0, offset=0, base=10000.0, dim=64,
+            mrope_dim1=11, mrope_dim2=11, mrope_dim3=10,
+        )
+        inputs = SimpleNamespace(
+            context_parallel_info=None,
+            # This is the actual native decode convention that used to suppress
+            # every append: context boundaries are zero, decode boundaries live.
+            cu_seqlens_device=torch.zeros_like(c.cu),
+            decode_cu_seqlens_device=c.cu,
+            prefix_lengths_device=c.prefix,
+            sequence_lengths_plus_1_device=c.prefix + 1,
+        )
+        params = SimpleNamespace(
+            decode_plan=True, position_ids=c.pos, kv_cache_offset=c.offsets
+        )
+        impl = SimpleNamespace(
+            attn_configs=SimpleNamespace(
+                need_rope_kv_cache=True, size_per_head=c.d, head_num=c.qh,
+                kv_head_num=c.kh, use_logn_attn=False, rope_config=rope,
+                max_seq_len=256, kernel_tokens_per_block=c.page,
+            ),
+            rope_params=params, attn_inputs=inputs,
+        )
+        norm = SimpleNamespace(
+            zero_centered=True, q_weight=c.qw, k_weight=c.kw, eps=1e-6
+        )
+        cache = SimpleNamespace(kv_cache_base=c.cache, kv_scale_base=c.scales)
+        expected_q, expected_cache, _ = self.reference(c)
+        actual = maybe_fused_qk_norm_rope_cache(c.qkv, norm, impl, cache)
+        self.assertIsNotNone(actual)
+        self.assert_bytes(actual, expected_q)
+        self.assert_bytes(c.cache, expected_cache)
+
+        # Prefill continues to use its own context boundaries, not decode CU.
+        params.decode_plan = False
+        c.cache.fill_(0.125)
+        before = c.cache.clone()
+        prefill = maybe_fused_qk_norm_rope_cache(c.qkv, norm, impl, cache)
+        self.assert_bytes(prefill, torch.zeros_like(prefill))
+        self.assert_bytes(c.cache, before)
+
+        params.decode_plan = True
+        inputs.decode_cu_seqlens_device = None
+        self.assertIsNone(maybe_fused_qk_norm_rope_cache(c.qkv, norm, impl, cache))
+        self.assert_bytes(c.cache, before)
+
     def test_query_output_cannot_alias_raw_projection(self):
         c = self.make_case()
         out = c.qkv.flatten()[: 3 * c.qh * c.d].view(3, c.qh, c.d)
