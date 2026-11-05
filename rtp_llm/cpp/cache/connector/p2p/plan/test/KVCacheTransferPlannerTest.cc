@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 
 #include <gtest/gtest.h>
@@ -1067,7 +1068,7 @@ TEST(PlannerGroupD, FactoryMirrorsCpStatePayloadFromRealSpecs) {
                     SpecBuildContext ctx;
                     ctx.seq_size_per_block = kSeqSizePerBlock;
                     ctx.parallelism_config = &pc;
-                    auto spec = FixedStateCacheSpec::build(desc, ctx);
+                    auto spec = SpecBuilder::build(desc, ctx);
                     GroupBase group;
                     group.tag                       = kFixedTag;
                     group.spec                      = spec;
@@ -1124,7 +1125,7 @@ TEST(PlannerGroupD, FactoryMirrorsReplicatedMhaHeadShards) {
         ctx.attn_config        = &attention;
         GroupBase group;
         group.tag       = desc.tag;
-        group.spec      = MHAKVCacheSpec::build(desc, ctx);
+        group.spec      = SpecBuilder::build(desc, ctx);
         group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
         group.block_num = 8;
         auto topology   = CacheTopology::create({group}, {{0, {kFullTag}}});

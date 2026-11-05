@@ -10,10 +10,12 @@ import torch
 
 import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_module
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
+from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.decode import forward as decode_forward
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+from rtp_llm.models_py.utils import profiler as generic_profiler
 
 
 def _logging_layer_range(events):
@@ -49,6 +51,35 @@ class _PrefillLayer:
 
 
 class LayerProfilerRangeTest(unittest.TestCase):
+    def test_prefill_disables_generic_ranges_through_forward(self):
+        model = object.__new__(DeepSeekV4Model)
+        model.__dict__.update(
+            kv_cache=object(),
+            v4=object(),
+            parallelism_config=object(),
+        )
+        capture = object()
+        expected = object()
+        inputs = SimpleNamespace(attention_inputs=object(), capture_hidden_states=True)
+
+        def forward_prefill(_v4, _cache, _parallelism, _inputs, **kwargs):
+            self.assertFalse(generic_profiler.record_function_ranges_enabled())
+            self.assertIs(kwargs["capture_context"], capture)
+            return expected
+
+        self.assertTrue(generic_profiler.record_function_ranges_enabled())
+        with patch.object(_profiler, "_RANGES_ENABLED", False), patch(
+            "rtp_llm.models_py.model_desc.deepseek_v4_model.primary_attention_inputs",
+            return_value=SimpleNamespace(is_prefill=True, is_target_verify=False),
+        ), patch(
+            "rtp_llm.models_py.model_desc.deepseek_v4_model.forward_prefill",
+            side_effect=forward_prefill,
+        ), patch.object(
+            DeepSeekV4Model, "capture_context", return_value=capture
+        ):
+            self.assertIs(model.forward(inputs), expected)
+        self.assertTrue(generic_profiler.record_function_ranges_enabled())
+
     def test_factory_is_noop_without_active_profiler(self):
         with patch.object(_profiler, "_RANGES_ENABLED", True), patch.object(
             torch.autograd, "_profiler_enabled", return_value=False

@@ -52,6 +52,10 @@ int64_t getDeviceId();
 
 void runtimeSyncAndCheck();
 void cudaSyncAndCheck();
+// Wait for this rank's queued cache work, then require exactly one participant
+// for every configured TP rank. A missing TP process group or WORLD fallback
+// cannot silently turn a local result into a successful CP completion.
+void confirmTpCacheWorkCompletion(int tp_size, int tp_rank);
 void cudaCheckLastError();
 
 // ===================================================================

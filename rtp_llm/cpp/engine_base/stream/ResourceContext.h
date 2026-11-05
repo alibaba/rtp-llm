@@ -21,6 +21,7 @@ struct ResourceContext {
     bool defer_grammar_to_pp_tail{false};
 
     bool reuse_cache{false};
+    bool enable_prefill_partial_tail_reuse{false};
     bool enable_device_cache{true};
     bool enable_memory_cache{false};
     bool enable_disk_cache{false};

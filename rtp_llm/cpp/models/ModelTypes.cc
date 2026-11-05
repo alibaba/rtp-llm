@@ -100,6 +100,29 @@ PPIntermediateTensors ModelBase::makePPWarmUpInputTensors(const GptModelInputs&,
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
+    RTP_LLM_CHECK_WITH_INFO(!inputs.cache_save_positions.defined()
+                                || (inputs.cache_save_positions.dim() == 2
+                                    && inputs.cache_save_positions.scalar_type() == torch::kInt64
+                                    && inputs.cache_save_positions.is_contiguous()),
+                            "cache save positions must be contiguous int64 [context, S]");
+    RTP_LLM_CHECK_WITH_INFO(!inputs.cache_save_block_ids.defined()
+                                || (inputs.cache_save_block_ids.dim() == 3
+                                    && inputs.cache_save_block_ids.scalar_type() == torch::kInt32
+                                    && inputs.cache_save_block_ids.is_contiguous()),
+                            "cache save block IDs must be contiguous int32 [tag, context, S]");
+    const int64_t save_points = inputs.cache_save_positions.defined() ? inputs.cache_save_positions.size(1) : 0;
+    RTP_LLM_CHECK_WITH_INFO((!inputs.cache_save_positions.defined() && !inputs.cache_save_block_ids.defined())
+                                || (inputs.cache_save_positions.defined() && inputs.cache_save_block_ids.defined()
+                                    && inputs.cache_save_block_ids.size(0)
+                                           == static_cast<int64_t>(inputs.kv_cache_group_tags.size())
+                                    && inputs.cache_save_positions.size(0)
+                                           == inputs.cache_save_block_ids.size(1)
+                                    && save_points == inputs.cache_save_block_ids.size(2)),
+                            "cache save positions and destination IDs must have matching tag/context/S dimensions");
+    RTP_LLM_CHECK_WITH_INFO(!inputs.cache_save_positions.defined()
+                                || (inputs.prefix_lengths.defined()
+                                    && inputs.cache_save_positions.size(0) == inputs.prefix_lengths.numel()),
+                            "cache save context rows must match prefill prefix lengths");
     const auto kernel_block_table = inspectKvBlockTable(inputs.kv_cache_kernel_block_id, "kv_cache_kernel_block_id");
     const auto block_table        = inspectKvBlockTable(inputs.kv_cache_block_id, "kv_cache_block_id");
     shape_hints[GptModelInputIndex::comboTokens]  = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
@@ -184,6 +207,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.engram_token_windows.defined() ? inputs.engram_token_windows.size(0) : 0;
     shape_hints[GptModelInputIndex::engramTokenWindowWidth] =
         inputs.engram_token_windows.defined() ? inputs.engram_token_windows.size(1) : 0;
+    shape_hints[GptModelInputIndex::cacheSavePointCount] = save_points;
 
     uint32_t control_flags = 0;
     auto     encode_flag   = [&](bool enabled, GptModelInputControlFlag flag) {
@@ -204,6 +228,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
     encode_flag(inputs.decode_entrance, GptModelInputControlFlag::kControlDecodeEntrance);
     encode_flag(inputs.use_opaque_kv_cache_store, GptModelInputControlFlag::kControlOpaqueKvCacheStore);
+    encode_flag(inputs.require_complete_cache_copy, GptModelInputControlFlag::kControlCompleteCacheCopy);
     shape_hints[GptModelInputIndex::modelControlFlags]     = static_cast<int64_t>(control_flags);
     shape_hints[GptModelInputIndex::kvBlockStrideBytes]    = static_cast<int64_t>(inputs.kv_block_stride_bytes);
     shape_hints[GptModelInputIndex::kvScaleStrideBytes]    = static_cast<int64_t>(inputs.kv_scale_stride_bytes);
@@ -231,6 +256,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_device(inputs.kv_cache_group_types, GptModelInputDeviceBit::kDeviceBitCacheGroupTypes);
     encode_device(inputs.cache_keys, GptModelInputDeviceBit::kDeviceBitCacheKeys);
     encode_device(inputs.kv_cache_update_mapping, GptModelInputDeviceBit::kDeviceBitCacheUpdateMapping);
+    encode_device(inputs.cache_save_positions, GptModelInputDeviceBit::kDeviceBitCacheSavePositions);
+    encode_device(inputs.cache_save_block_ids, GptModelInputDeviceBit::kDeviceBitCacheSaveBlockIds);
     encode_device(inputs.request_id, GptModelInputDeviceBit::kDeviceBitRequestId);
     encode_device(inputs.request_pd_separation, GptModelInputDeviceBit::kDeviceBitRequestPdSeparation);
     encode_device(inputs.lm_output_indexes, GptModelInputDeviceBit::kDeviceBitLmOutputIndexes);
@@ -297,7 +324,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     for (size_t i = 0; i < sorted_rows.size(); ++i) {
         local_rows[sorted_rows[i]] = static_cast<int64_t>(i);
     }
-    torch::Tensor wire_blocks, wire_kernel_blocks, wire_group_types, wire_copy_mapping;
+    torch::Tensor wire_blocks, wire_kernel_blocks, wire_group_types, wire_copy_mapping, wire_save_block_ids;
     if (parallelism_config.tp_rank == 0 && !inputs.skip_run) {
         if (legacy_untagged_cache) {
             RTP_LLM_CHECK_WITH_INFO(
@@ -315,6 +342,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                     && inputs.kv_cache_update_mapping.numel() == 0 ?
                                  inputs.kv_cache_update_mapping :
                                  reorderCacheCopyRows(inputs.kv_cache_update_mapping, local_rows);
+        wire_save_block_ids = reorderCacheRows(inputs.cache_save_block_ids, sorted_rows, true);
     }
 
     // The UDS-backed CPU broadcaster (used by execBroadcastCpu below) is
@@ -361,6 +389,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
     inputs.decode_entrance           = has_flag(GptModelInputControlFlag::kControlDecodeEntrance);
     inputs.use_opaque_kv_cache_store = has_flag(GptModelInputControlFlag::kControlOpaqueKvCacheStore);
+    inputs.require_complete_cache_copy = has_flag(GptModelInputControlFlag::kControlCompleteCacheCopy);
     inputs.kv_block_stride_bytes =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kvBlockStrideBytes, "kvBlockStrideBytes"));
     inputs.kv_scale_stride_bytes =
@@ -372,11 +401,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.record_execution_id = shape_hints_ptr[GptModelInputIndex::recordExecutionId];
     if (inputs.skip_run) {
         inputs.kv_cache_group_tags.clear();
-        inputs.kv_cache_block_id           = torch::Tensor();
-        inputs.kv_cache_kernel_block_id    = torch::Tensor();
-        inputs.kv_cache_group_types        = torch::Tensor();
-        inputs.kv_cache_update_mapping     = torch::Tensor();
+        inputs.kv_cache_block_id        = torch::Tensor();
+        inputs.kv_cache_kernel_block_id = torch::Tensor();
+        inputs.kv_cache_group_types     = torch::Tensor();
+        inputs.kv_cache_update_mapping  = torch::Tensor();
         inputs.kv_cache_copy_token_lengths = torch::Tensor();
+        inputs.cache_save_positions     = torch::Tensor();
+        inputs.cache_save_block_ids     = torch::Tensor();
         return;
     }
 
@@ -530,6 +561,17 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                                       {copy_count, 3},
                                                       pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheUpdateMapping)) :
                                              torch::Tensor();
+        const auto save_points = checkedHint(GptModelInputIndex::cacheSavePointCount, "cacheSavePointCount");
+        inputs.cache_save_positions = save_points ?
+                                          allocBuf(rtp_llm::DataType::TYPE_INT64,
+                                                   {context_batch_size, save_points},
+                                                   pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheSavePositions)) :
+                                          torch::Tensor();
+        inputs.cache_save_block_ids = save_points ?
+                                          allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                   {kv_cache_group_num, context_batch_size, save_points},
+                                                   pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheSaveBlockIds)) :
+                                          torch::Tensor();
         if (max_blocks != 0) {
             inputs.kv_cache_block_id =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
@@ -623,6 +665,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         wire_kernel_blocks = inputs.kv_cache_kernel_block_id;
         wire_group_types   = inputs.kv_cache_group_types;
         wire_copy_mapping  = inputs.kv_cache_update_mapping;
+        wire_save_block_ids = inputs.cache_save_block_ids;
     }
 
     // Collect all tensors that participate in broadcast.
@@ -657,6 +700,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     collect(wire_copy_mapping);
     collect(inputs.kv_cache_copy_token_lengths);
+    collect(inputs.cache_save_positions);
+    collect(wire_save_block_ids);
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
     collect(inputs.lm_output_indexes);
@@ -815,14 +860,17 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 
     // Receiver checks happen only after all agreed collectives have finished.
     const bool has_cache_payload =
-        max_blocks || max_kernel_blocks || group_types_len || shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum];
+        max_blocks || max_kernel_blocks || group_types_len || shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum]
+        || shape_hints_ptr[GptModelInputIndex::cacheSavePointCount];
     if (!has_cache_payload) {
         inputs.kv_cache_group_tags.clear();
-        inputs.kv_cache_block_id           = torch::Tensor();
-        inputs.kv_cache_kernel_block_id    = torch::Tensor();
-        inputs.kv_cache_group_types        = torch::Tensor();
-        inputs.kv_cache_update_mapping     = torch::Tensor();
+        inputs.kv_cache_block_id        = torch::Tensor();
+        inputs.kv_cache_kernel_block_id = torch::Tensor();
+        inputs.kv_cache_group_types     = torch::Tensor();
+        inputs.kv_cache_update_mapping  = torch::Tensor();
         inputs.kv_cache_copy_token_lengths = torch::Tensor();
+        inputs.cache_save_positions     = torch::Tensor();
+        inputs.cache_save_block_ids     = torch::Tensor();
     } else {
         RTP_LLM_CHECK_WITH_INFO(legacy_untagged_cache || kv_cache_group_num == static_cast<int64_t>(sorted_rows.size()),
                                 "TP cache payload group count differs from configured identities (groups)");
@@ -831,6 +879,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             inputs.kv_cache_kernel_block_id = reorderCacheRows(wire_kernel_blocks, local_rows, true);
             inputs.kv_cache_group_types     = reorderCacheRows(wire_group_types, local_rows, false);
             inputs.kv_cache_update_mapping  = reorderCacheCopyRows(wire_copy_mapping, sorted_rows);
+            inputs.cache_save_block_ids     = reorderCacheRows(wire_save_block_ids, local_rows, true);
         }
     }
 }

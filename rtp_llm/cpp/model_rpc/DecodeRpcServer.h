@@ -38,7 +38,8 @@ public:
                            int                         partition_id,
                            grpc::ServerContext*        server_context,
                            int32_t                     prefill_cp_size          = 1,
-                           std::vector<StagePeerGroup> remote_stage_peer_groups = {}):
+                           std::vector<StagePeerGroup> remote_stage_peer_groups = {},
+                           size_t                      input_token_count = 0):
             request_id(request_id),
             request_key(std::move(request_key)),
             peer_addrs(std::move(peer_addrs)),
@@ -50,6 +51,7 @@ public:
             server_context(server_context),
             prefill_cp_size(prefill_cp_size),
             remote_stage_peer_groups(std::move(remote_stage_peer_groups)),
+            input_token_count(input_token_count),
             group_block_ids_(std::move(group_block_ids)) {
             group_block_ids_.validate();
         }
@@ -75,6 +77,7 @@ public:
         int32_t              prefill_cp_size;
         /** Own source-stage metadata for asynchronous loads; empty groups mean pp_P=1 with flat peers. */
         std::vector<StagePeerGroup> remote_stage_peer_groups;
+        size_t               input_token_count;
 
     private:
         GroupBlockIds group_block_ids_;

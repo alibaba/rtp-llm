@@ -150,6 +150,7 @@ enum GptModelInputIndex : size_t {
     engramTokenWindowWidth,
     kvCacheCopyTokenLengths,
     recordExecutionId,
+    cacheSavePointCount,
     gptModelInputLength,
 };
 
@@ -178,6 +179,8 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitMmFeaturesLocs      = 1u << 14,
     kDeviceBitEngramWindows       = 1u << 15,
     kDeviceBitMmFeaturesSpans     = 1u << 16,
+    kDeviceBitCacheSavePositions  = 1u << 17,
+    kDeviceBitCacheSaveBlockIds   = 1u << 18,
 };
 
 enum GptModelInputControlFlag : uint32_t {
@@ -194,6 +197,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlShutdown            = 1u << 10,
     kControlMiddleChunkOnly     = 1u << 11,
     kControlDraftExtend         = 1u << 12,
+    kControlCompleteCacheCopy   = 1u << 13,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -210,6 +214,11 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     /** Builds rank-local PP warmup activations from full model inputs, applying CP padding when enabled. */
     virtual PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
+    // Explicit sparse save destinations require a model writer. Legacy models
+    // fail closed until their precise-state writer opts in.
+    virtual bool supportsSparseCacheSave() const {
+        return false;
+    }
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {

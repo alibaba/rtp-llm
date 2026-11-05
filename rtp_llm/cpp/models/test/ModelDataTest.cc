@@ -178,6 +178,19 @@ TEST_F(ModelDataTest, testShapeHintsCarryExactPackedBroadcastPlacement) {
     EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
 }
 
+TEST_F(ModelDataTest, testSparseSaveContextRowsMatchPrefillRowsBeforeBroadcast) {
+    GptModelInputs inputs;
+    inputs.kv_cache_group_tags   = {"full"};
+    inputs.prefix_lengths        = torch::zeros({2}, torch::kInt32);
+    inputs.cache_save_positions  = torch::zeros({1, 1}, torch::kInt64);
+    inputs.cache_save_block_ids  = torch::zeros({1, 1, 1}, torch::kInt32);
+    EXPECT_THROW((void)getModelInputShapeHints(inputs), RTPException);
+
+    inputs.cache_save_positions = torch::zeros({2, 1}, torch::kInt64);
+    inputs.cache_save_block_ids = torch::zeros({1, 2, 1}, torch::kInt32);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::cacheSavePointCount], 1);
+}
+
 TEST_F(ModelDataTest, testTpSyncBlockTableShapesPreserve2DAnd3D) {
     GptModelInputs inputs;
     inputs.input_lengths            = torch::zeros({2}, torch::kInt32);
@@ -323,6 +336,7 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
         inputs.cache_store_publish_start_tokens = torch::tensor({0, 8}, torch::kInt32);
         // Exercise both setting and clearing the flag on the reused non-root inputs.
         inputs.is_middle_chunk_only = !empty_tables;
+        inputs.require_complete_cache_copy = !empty_tables;
     }
     const auto        original_physical = inputs.kv_cache_block_id;
     const auto        original_kernel   = inputs.kv_cache_kernel_block_id;
@@ -365,6 +379,7 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     expectIntTensor(inputs.combo_tokens, torch::tensor({7, 8}, torch::kInt32));
     expectIntTensor(inputs.cache_store_publish_start_tokens, torch::tensor({0, 8}, torch::kInt32));
     EXPECT_EQ(inputs.is_middle_chunk_only, !empty_tables);
+    EXPECT_EQ(inputs.require_complete_cache_copy, !empty_tables);
     if (rank == 0) {
         EXPECT_TRUE(inputs.kv_cache_block_id.is_same(original_physical));
         EXPECT_TRUE(inputs.kv_cache_kernel_block_id.is_same(original_kernel));

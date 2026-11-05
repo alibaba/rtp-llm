@@ -126,6 +126,17 @@ void GenerateStateMachine::handleLoading() {
 }
 
 void GenerateStateMachine::transitionToRunning() {
+    const auto continuation_status = stream_cache_resource_->prepareRequiredContinuation();
+    if (!continuation_status.ok()) {
+        if (absl::IsUnavailable(continuation_status)) {
+            stream_cache_resource_->reportMallocRetry();
+            return;
+        }
+        error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
+        status.store(StreamState::FINISHED, std::memory_order_release);
+        releaseResource();
+        return;
+    }
     auto stream = stream_cache_resource_->stream();
     if (stream != nullptr) {
         stream->recordRunningTime();

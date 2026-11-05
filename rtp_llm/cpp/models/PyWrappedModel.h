@@ -95,6 +95,7 @@ public:
     py::object&           getPyModel() {
         return py_model_;
     }
+    bool supportsSparseCacheSave() const override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
     bool                       hasMtpTargetHiddenBuffer() const override;

@@ -309,6 +309,7 @@ TEST(CacheKeyLayoutTest, WarmupKeepsBaseKeyStrideWithLargerPhysicalGroup) {
     parallelism.tp_size                            = 4;
     parallelism.tp_rank                            = 3;
     parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     config.finalizeStorageLayout(parallelism, /*warmup=*/true);
 
     EXPECT_FALSE(config.request_projection_required);
@@ -320,6 +321,7 @@ TEST(CacheKeyLayoutTest, WarmupKeepsBaseKeyStrideWithLargerPhysicalGroup) {
     EXPECT_FALSE(config.supportsCanonicalReuse());
     EXPECT_EQ(config.canonicalCacheKeys({100, 101, 102}), (CacheKeysType{100, 101, 102}));
     EXPECT_EQ(config.localAllocTokens("full", 29), 29);
+    EXPECT_EQ(config.endpointBlockPosition("full", 29), 1u);
 }
 
 TEST_F(KVCacheManagerCPLayoutTest, GlobalSpanCapacityTracksAllocationAndRecomputeReferences) {
@@ -386,12 +388,14 @@ TEST(CacheKeyLayoutTest, GlobalSpanRejectsInvalidScaleAndOverflowWithoutChanging
     ParallelismConfig par;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
     resolveManagerCpLayout(config, par);
     config.cache_cp_size = 0;
     EXPECT_ANY_THROW(config.globalSizePerBlock("default"));
     const size_t max     = std::numeric_limits<size_t>::max();
     config.cache_cp_size = max / 8 + 1;
     EXPECT_ANY_THROW(config.globalSizePerBlock("default"));
+    EXPECT_EQ(config.endpointBlockPosition("default", max), 0u);
     EXPECT_ANY_THROW(config.globalSizePerBlock("missing"));
     config.cache_cp_size                                                                   = 1;
     std::const_pointer_cast<KVCacheSpec>(config.group("default").spec)->seq_size_per_block = 0;
@@ -487,10 +491,9 @@ TEST_F(KVCacheManagerCPLayoutTest, TheoryWindowSnapshotPreservesPerBatchTailAndC
     }
 }
 
-// Partial tails may be allocated as live KV blocks before they become cacheable
-// full blocks. CP invariants must therefore be based on logical sequence length,
-// not cacheKeys().size().
-TEST_F(KVCacheManagerCPLayoutTest, CPShardedMallocAllowsPartialTailWithoutCacheKey) {
+// Partial tails retain a runtime key for P/D handoff, but are not cacheable
+// full blocks. CP allocation follows logical sequence length, not key count.
+TEST_F(KVCacheManagerCPLayoutTest, CPShardedMallocTracksPartialTailKeyWithoutExtraBlock) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
@@ -519,7 +522,8 @@ TEST_F(KVCacheManagerCPLayoutTest, CPShardedMallocAllowsPartialTailWithoutCacheK
     result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(resource->blocksNum(0, "default"), 1);
-    EXPECT_EQ(resource->cacheKeys(0).size(), 0);
+    EXPECT_EQ(resource->cacheKeys(0).size(), 1);
+    EXPECT_FALSE(resource->lastBlockAligned());
 }
 
 // malloc() uses the immutable global request snapshot and cache-owned storage mapping.

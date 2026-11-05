@@ -13,12 +13,19 @@ Correctness is verified against an independent reference implementation
 that computes zigzag positions from first principles.
 """
 
+import math
 import unittest
 from types import SimpleNamespace
 from typing import List, Set, Tuple
 from unittest.mock import patch
 
 import torch
+from flashinfer import (
+    BatchPrefillWithPagedKVCacheWrapper,
+    BatchPrefillWithRaggedKVCacheWrapper,
+)
+from flashinfer.cascade import merge_state
+from flashinfer.page import append_paged_kv_cache
 
 from rtp_llm.models_py.modules.factory.attention import common as attention_common
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
@@ -27,9 +34,211 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_half_q_indices,
     generate_nonlocal_causal_kv_indices,
     generate_q_indices,
+    plan_cp_attention,
+    plan_prefix_paged_attention,
 )
 from rtp_llm.ops.attention_input_utils import select_prefill_position_ids
-from rtp_llm.ops.compute_ops import PyAttentionInputs, PyContextParallelParams
+from rtp_llm.ops.compute_ops import (
+    PyAttentionInputs,
+    PyContextParallelParams,
+    fill_mla_params,
+)
+
+
+class QwenCPRaggedWorkspaceTest(unittest.TestCase):
+    def test_qwen_full_layer_suffix_geometry(self):
+        torch.manual_seed(109)
+        device = torch.device("cuda")
+        q_len, heads, kv_heads, dim = 175, 16, 2, 256
+        for kv_len in (175, 350, 525, 700):
+            with self.subTest(kv_len=kv_len):
+                workspace = torch.empty(1, dtype=torch.uint8, device=device)
+                wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+                    workspace, kv_layout="NHD", backend="fa2"
+                )
+                plan_cp_attention(
+                    wrapper,
+                    qo_indptr=torch.tensor(
+                        [0, q_len], dtype=torch.int32, device=device
+                    ),
+                    kv_indptr=torch.tensor(
+                        [0, kv_len], dtype=torch.int32, device=device
+                    ),
+                    num_qo_heads=heads,
+                    num_kv_heads=kv_heads,
+                    head_dim_qk=dim,
+                    causal=True,
+                    q_data_type=torch.bfloat16,
+                )
+                q = torch.randn(q_len, heads, dim, device=device, dtype=torch.bfloat16)
+                k = torch.randn(
+                    kv_len, kv_heads, dim, device=device, dtype=torch.bfloat16
+                )
+                v = torch.randn_like(k)
+                out = wrapper.run(q, k, v)
+                keys = (
+                    k.float()
+                    .repeat_interleave(heads // kv_heads, dim=1)
+                    .transpose(0, 1)
+                )
+                values = (
+                    v.float()
+                    .repeat_interleave(heads // kv_heads, dim=1)
+                    .transpose(0, 1)
+                )
+                scores = q.float().transpose(0, 1) @ keys.transpose(-1, -2) / dim**0.5
+                counts = torch.arange(q_len, device=device) + kv_len - q_len + 1
+                invalid = (
+                    torch.arange(kv_len, device=device)[None, :] >= counts[:, None]
+                )
+                scores.masked_fill_(invalid, float("-inf"))
+                expected = (scores.softmax(-1) @ values).transpose(0, 1)
+                torch.testing.assert_close(out.float(), expected, rtol=1e-2, atol=1e-2)
+                _, lse = wrapper.run(torch.zeros_like(q), k, v, return_lse=True)
+                expected_lse = counts.float().log2()[:, None].expand(-1, heads)
+                torch.testing.assert_close(lse, expected_lse, rtol=1e-5, atol=1e-5)
+
+
+class PrefixPagedAttentionTailTest(unittest.TestCase):
+    def test_short_prefix_excludes_appended_suffix_and_unused_tail(self):
+        # Exercise actual planning, append and attention kernels. A permuted
+        # block table ensures batch offsets cannot be mistaken for page IDs.
+        torch.manual_seed(108)
+        device = torch.device("cuda")
+        page_size, heads, dim = 16, 2, 64
+        prefixes = [0, 1, 16, 17, 1300]
+        suffixes = [8, 8, 8, 8, 8]
+        lengths = [p + n for p, n in zip(prefixes, suffixes)]
+        pages = [(n + page_size - 1) // page_size for n in lengths]
+        block_ids = torch.full((len(prefixes), max(pages)), -1, dtype=torch.int32)
+        permutation = torch.randperm(sum(pages), dtype=torch.int32)
+        offset = 0
+        for i, count in enumerate(pages):
+            block_ids[i, :count] = permutation[offset : offset + count]
+            offset += count
+        cache = torch.full(
+            (sum(pages), 2, heads, page_size, dim),
+            64.0,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        prefix_kv = []
+        for i, count in enumerate(prefixes):
+            kv = torch.randn(count, 2, heads, dim, device=device, dtype=torch.bfloat16)
+            prefix_kv.append(kv)
+            for pos in range(count):
+                cache[block_ids[i, pos // page_size].item(), :, :, pos % page_size] = (
+                    kv[pos]
+                )
+        params = fill_mla_params(
+            torch.tensor(prefixes, dtype=torch.int32),
+            torch.tensor(lengths, dtype=torch.int32),
+            torch.tensor(suffixes, dtype=torch.int32),
+            block_ids,
+            page_size,
+        )
+        suffix_kv = torch.randn(
+            sum(suffixes), 2, heads, dim, device=device, dtype=torch.bfloat16
+        )
+        append_paged_kv_cache(
+            suffix_kv[:, 0].contiguous(),
+            suffix_kv[:, 1].contiguous(),
+            params.batch_indice_d,
+            params.positions_d,
+            cache,
+            params.page_indice_d,
+            params.decode_page_indptr_d,
+            params.paged_kv_last_page_len_d,
+            kv_layout="HND",
+        )
+        offset = 0
+        for i, (prefix, suffix) in enumerate(zip(prefixes, suffixes)):
+            expected = torch.cat((prefix_kv[i], suffix_kv[offset : offset + suffix]))
+            actual = torch.stack(
+                [
+                    cache[block_ids[i, pos // page_size].item(), :, :, pos % page_size]
+                    for pos in range(prefix + suffix)
+                ]
+            )
+            self.assertTrue(torch.equal(actual, expected))
+            offset += suffix
+        qo_indptr = (
+            torch.arange(len(prefixes) + 1, dtype=torch.int32, device=device) * 2
+        )
+        q = torch.randn(
+            len(prefixes) * 2, heads, dim, device=device, dtype=torch.bfloat16
+        )
+        shared_workspace = torch.empty(1, dtype=torch.uint8, device=device)
+        other_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            shared_workspace, kv_layout="HND", backend="fa2"
+        )
+        wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            shared_workspace,
+            kv_layout="HND",
+            backend="fa2",
+        )
+        integer_workspace = wrapper._int_workspace_buffer
+        plan_prefix_paged_attention(
+            wrapper,
+            qo_indptr,
+            torch.tensor(prefixes, dtype=torch.int32),
+            params,
+            num_qo_heads=heads,
+            num_kv_heads=heads,
+            head_dim=dim,
+            page_size=page_size,
+            device=device,
+        )
+        self.assertIs(wrapper._int_workspace_buffer, integer_workspace)
+        self.assertIs(other_wrapper._float_workspace_buffer, shared_workspace)
+        self.assertEqual(shared_workspace.numel(), 1)
+        self.assertGreater(wrapper._float_workspace_buffer.numel(), 1)
+        output, lse = wrapper.run(q, cache, return_lse=True)
+        self.assertTrue(torch.equal(output[:2], torch.zeros_like(output[:2])))
+        # FlashInfer represents empty attention with its finite -math::inf
+        # sentinel and base-2 LSE. Its contract is a neutral merge state.
+        other = torch.randn_like(output[:2])
+        other_lse = torch.zeros_like(lse[:2])
+        merged, merged_lse = merge_state(output[:2], lse[:2], other, other_lse)
+        self.assertTrue(torch.equal(merged, other))
+        self.assertTrue(torch.equal(merged_lse, other_lse))
+        for i, prefix in enumerate(prefixes):
+            if not prefix:
+                continue
+            queries = q[i * 2 : (i + 1) * 2].float().transpose(0, 1)
+            keys = prefix_kv[i][:, 0].float().transpose(0, 1)
+            values = prefix_kv[i][:, 1].float().transpose(0, 1)
+            scores = queries @ keys.transpose(-1, -2) / dim**0.5
+            expected = (scores.softmax(-1) @ values).transpose(0, 1)
+            torch.testing.assert_close(
+                output[i * 2 : (i + 1) * 2].float(), expected, rtol=1e-2, atol=1e-2
+            )
+        # FA2 accumulates its denominator from BF16-rounded exponentials
+        # (compute_sfm_v), so random FP32 logsumexp is not a 1e-5 oracle.
+        # Zero Q makes every valid exponential exactly one: the independent
+        # analytical LSE now measures the precise number of admitted tokens.
+        uniform_output, uniform_lse = wrapper.run(
+            torch.zeros_like(q), cache, return_lse=True
+        )
+        for i, prefix in enumerate(prefixes):
+            if not prefix:
+                continue
+            expected_lse = torch.full_like(
+                uniform_lse[i * 2 : (i + 1) * 2], math.log2(prefix)
+            )
+            torch.testing.assert_close(
+                uniform_lse[i * 2 : (i + 1) * 2],
+                expected_lse,
+                rtol=1e-5,
+                atol=1e-5,
+            )
+            expected_mean = prefix_kv[i][:, 1].float().mean(0).expand(2, -1, -1)
+            torch.testing.assert_close(
+                uniform_output[i * 2 : (i + 1) * 2].float(),
+                expected_mean,
+                rtol=1e-2,
+                atol=1e-2,
+            )
 
 
 class CacheStoreInputLengthTest(unittest.TestCase):

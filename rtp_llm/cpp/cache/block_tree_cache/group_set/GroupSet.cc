@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 
+#include <algorithm>
 #include <limits>
 #include <unordered_set>
 
@@ -55,7 +57,8 @@ GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
 void GroupSet::initialize(size_t                               group_set_id,
                           std::shared_ptr<const CacheTopology> topology,
                           std::vector<std::string>             group_tags,
-                          BackingLayout                        backing_layout) {
+                          BackingLayout                        backing_layout,
+                          bool                                 local_only) {
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "GroupSet requires a topology");
     RTP_LLM_CHECK_WITH_INFO(!group_tags.empty(), "GroupSet requires at least one member tag");
     RTP_LLM_CHECK_WITH_INFO(device_pools_.empty() || device_pools_.size() == group_tags.size(),
@@ -88,9 +91,169 @@ void GroupSet::initialize(size_t                               group_set_id,
     group_set_id_  = group_set_id;
     topology_      = std::move(topology);
     group_tags_    = std::move(group_tags);
+    local_only_    = local_only;
     payload_bytes_ = physical_payload_bytes;
     enable_crc_    = backing_layout.crc_enabled;
     storage_bytes_ = backing_layout.storage_bytes == 0 ? physical_payload_bytes : backing_layout.storage_bytes;
+}
+
+std::vector<size_t> GroupSet::requiredPathIndices(const std::vector<TreeNode*>& path, size_t token_end) const {
+    std::vector<size_t> indices;
+    if (path.empty() || token_end == 0) {
+        return indices;
+    }
+    const GroupBase& cache_group = group(groupTags().front());
+    size_t           start       = 0;
+    if (cache_group.policy.group_type == CacheGroupType::LINEAR) {
+        start = token_end - 1;
+    } else if (cache_group.policy.group_type == CacheGroupType::SWA) {
+        const size_t window = static_cast<size_t>(std::max(0, cache_group.policy.sliding_window_size));
+        if (local_only_) {
+            RTP_LLM_CHECK_WITH_INFO(window > 0, "local HCA requires a positive compression window");
+            const size_t pending = token_end % window;
+            if (pending == 0) {
+                return indices;
+            }
+            start = token_end - pending;
+        } else if (window > 1 && token_end >= window) {
+            // A continuation at G reads the previous window-1 tokens.
+            start = token_end - (window - 1);
+        }
+    }
+    for (size_t i = 0; i < path.size(); ++i) {
+        const size_t node_start = path[i]->parent == nullptr ? 0 : path[i]->parent->token_end;
+        if (path[i]->token_end > start && node_start < token_end) {
+            indices.push_back(i);
+        }
+    }
+    return indices;
+}
+
+bool GroupSet::hasZeroStateDemand(size_t token_end) const {
+    if (!local_only_ || groupType() != CacheGroupType::SWA) {
+        return false;
+    }
+    const int window = group(group_tags_.front()).policy.sliding_window_size;
+    return window > 0 && token_end % static_cast<size_t>(window) == 0;
+}
+
+bool GroupSet::requiresExactStateEndpoint() const {
+    if (groupType() == CacheGroupType::LINEAR || local_only_) {
+        return true;
+    }
+    if (groupType() != CacheGroupType::SWA) {
+        return false;
+    }
+    for (const auto& tag : group_tags_) {
+        const auto& member = group(tag);
+        if (member.spec->type == KVCacheSpecType::OpaqueState) {
+            const auto* state = dynamic_cast<const FixedStateCacheSpec*>(member.spec.get());
+            // The packed-byte SWA ABI stores token-addressed KV rows. Entry
+            // projected compressor state (including CP1) stores accumulator
+            // history, whose entry count is not a token KV coverage window.
+            if (state == nullptr || member.policy.cp_slice == CpBlockSliceMode::PAYLOAD_BYTES) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool GroupSet::hasDeviceCoverage(const std::vector<TreeNode*>& path, size_t token_end) const {
+    if (!hasPhysicalCoverage(path, token_end)) {
+        return false;
+    }
+    for (const size_t index : requiredPathIndices(path, token_end)) {
+        const auto& resource = path[index]->group_set_resources[group_set_id_];
+        if (!resource.isMatchUsable() || !resource.hasCompleteDeviceValue()
+            || resource.device_blocks.size() != group_tags_.size()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool GroupSet::hasPhysicalCoverage(const std::vector<TreeNode*>& path, size_t token_end) const {
+    if (path.empty() || token_end == 0 || token_end > path.back()->token_end) {
+        return false;
+    }
+    if (hasZeroStateDemand(token_end)) {
+        return true;
+    }
+    if (requiresExactStateEndpoint() && token_end != path.back()->token_end) {
+        return false;
+    }
+    for (const size_t index : requiredPathIndices(path, token_end)) {
+        const auto* node = path[index];
+        if (!coversTokenInterval(node->parent == nullptr ? 0 : node->parent->token_end, node->token_end, token_end)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool GroupSet::hasCanonicalCoverage(size_t count, size_t canonical_size_per_block) const {
+    RTP_LLM_CHECK(canonical_size_per_block > 0
+                  && count <= std::numeric_limits<size_t>::max() / canonical_size_per_block);
+    if (groupType() != CacheGroupType::SWA || local_only_ || count == 0) {
+        return true;
+    }
+    const size_t token_end = count * canonical_size_per_block;
+    const size_t window    = static_cast<size_t>(std::max(0, group(group_tags_.front()).policy.sliding_window_size));
+    const size_t start     = window > 1 && token_end >= window ? token_end - (window - 1) : 0;
+    for (size_t index = start / canonical_size_per_block; index < count; ++index) {
+        if (!coversTokenInterval(index * canonical_size_per_block, (index + 1) * canonical_size_per_block, token_end)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool GroupSet::coversTokenInterval(size_t node_start, size_t node_end, size_t token_end) const {
+    if (groupType() != CacheGroupType::SWA || local_only_) {
+        return true;
+    }
+    for (const auto& tag : group_tags_) {
+        const auto& member = group(tag);
+        if (member.spec->type == KVCacheSpecType::OpaqueState) {
+            const auto* state = dynamic_cast<const FixedStateCacheSpec*>(member.spec.get());
+            if (state == nullptr || member.policy.cp_slice == CpBlockSliceMode::PAYLOAD_BYTES) {
+                // Exactness applies to the selected endpoint, not each
+                // ancestor. Keep required ancestor resources for overlap
+                // across physical blocks; do not reinterpret their small
+                // compressor ring as the model's SWA token window.
+                continue;
+            }
+        }
+        const size_t window         = static_cast<size_t>(std::max(0, member.policy.sliding_window_size));
+        const size_t window_start   = window > 1 && token_end >= window ? token_end - (window - 1) : 0;
+        const size_t required_start = std::max(window_start, node_start);
+        // A canonical CP node can span more than one nonsharded SWA
+        // physical slot. Its single resource only owns the last slot.
+        // BLOCK_ROUND_ROBIN IDs instead collectively represent all ranks'
+        // portions of that canonical interval.
+        const size_t span = member.seqSizePerBlock();
+        if (span == 0
+            || (member.policy.cp_mapping != CpBlockMappingMode::BLOCK_ROUND_ROBIN
+                && required_start < ((node_end - 1) / span) * span)) {
+            return false;
+        }
+        if (member.spec->type != KVCacheSpecType::OpaqueState) {
+            continue;
+        }
+        const auto* state = dynamic_cast<const FixedStateCacheSpec*>(member.spec.get());
+        if (state == nullptr || member.policy.cp_slice == CpBlockSliceMode::PAYLOAD_BYTES) {
+            return false;
+        }
+        // Packed-byte CP slices collectively retain the complete token KV
+        // ring. Compressor entry-projected states were handled above.
+        const size_t entries        = state->entriesPerBlock();
+        const size_t retained_start = node_end > entries ? node_end - entries : 0;
+        if (entries == 0 || required_start < retained_start) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void GroupSet::referenceBlocks(const MultiNodeResource& resource) const {

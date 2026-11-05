@@ -43,44 +43,63 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               const std::vector<std::vector<GroupSetResource>>& resources,
                                               Tier                                              target_tier,
                                               bool                                              is_resident,
-                                              size_t& resident_prefix_length) {
+                                              size_t& resident_prefix_length,
+                                              const std::vector<std::vector<int>>* token_segments,
+                                              const std::vector<size_t>* token_ends) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
                             "unsupported store target tier: %s",
                             tierName(target_tier));
     if (target_tier == Tier::DEVICE) {
-        publishDeviceLocked(cache_keys, resources, is_resident, resident_prefix_length);
+        publishDeviceLocked(cache_keys,
+                            resources,
+                            is_resident,
+                            resident_prefix_length,
+                            token_segments,
+                            token_ends);
     } else {
         submitLowerTierLocked(cache_keys, resources, target_tier);
         return {};
     }
-    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
+    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources, token_ends)) :
                               StorageWriteTask{};
 }
 
 void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
                                           const std::vector<std::vector<GroupSetResource>>& resources,
                                           bool                                              is_resident,
-                                          size_t&                                           resident_prefix_length) {
-    const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
-    const bool resources_inserted = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
-    if (resources_inserted || !insert_result.newly_resident_nodes.empty()) {
+                                          size_t&                                           resident_prefix_length,
+                                          const std::vector<std::vector<int>>*              token_segments,
+                                          const std::vector<size_t>*                         token_ends) {
+    const BlockTreeInsertResult insert_result =
+        tree_->insertNode(cache_keys, resources, false, is_resident, token_segments, token_ends);
+    const bool tree_data_mutated = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
+    if (tree_data_mutated || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);
     }
-    if (resources_inserted) {
+    if (tree_data_mutated) {
         settled_(true);
     }
     resident_prefix_length = insert_result.resident_prefix_length;
 }
 
 StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&                              cache_keys,
-                                                   const std::vector<std::vector<GroupSetResource>>& resources) const {
-    StorageRequest request{std::make_shared<CacheKeysType>(cache_keys),
-                           std::vector<std::vector<StorageBlockHandle>>(cache_keys.size())};
+                                                   const std::vector<std::vector<GroupSetResource>>& resources,
+                                                   const std::vector<size_t>* token_ends) const {
+    auto keys = std::make_shared<CacheKeysType>();
+    StorageRequest request{keys, {}};
     for (size_t key_index = 0; key_index < resources.size(); ++key_index) {
-        auto& key_handles = request.handles[key_index];
+        // The existing backend protocol only names complete cumulative keys.
+        if (token_ends != nullptr && (*token_ends)[key_index] % tree_->reuseUnitTokens() != 0) {
+            continue;
+        }
+        keys->push_back(cache_keys[key_index]);
+        auto& key_handles = request.handles.emplace_back();
         for (size_t group_set = 0; group_set < tree_->groupSets().size(); ++group_set) {
+            if (tree_->groupSets()[group_set]->localOnly()) {
+                continue;
+            }
             const auto& resource = resources[key_index][group_set];
             if (!resource.hasCompleteDeviceValue()) {
                 continue;
@@ -106,7 +125,8 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         cache_keys,
         std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_));
 
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
+    block_tree_cache_detail::ScopeRollback prepare_guard(
+        [this, &task]() { settleLocked(*task, /*publish=*/false); });
 
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;
@@ -166,6 +186,9 @@ void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
 }
 
 void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error) {
+    if (!task->markFinished()) {
+        return;
+    }
     auto          settle      = [this, task, error = std::move(error)]() mutable { settleTask(*task, error.ok()); };
     const int64_t queue_begin = currentTimeUs();
     if (!task_pool_->submitCompletion([this, settle, queue_begin]() mutable {

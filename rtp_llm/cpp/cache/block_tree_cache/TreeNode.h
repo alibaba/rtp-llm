@@ -13,6 +13,8 @@ namespace rtp_llm {
 struct TreeNode {
     CacheKeyType                                cache_key{0};
     size_t                                      index{std::numeric_limits<size_t>::max()};
+    // Absolute token endpoint. A span shorter than the tree reuse unit is a terminal short leaf.
+    size_t                                      token_end{0};
     std::vector<int>                            token_ids;
     std::unordered_map<CacheKeyType, TreeNode*> children;
     TreeNode*                                   parent{nullptr};

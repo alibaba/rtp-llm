@@ -27,6 +27,11 @@ enum class CpPrefillSliceLayout : int8_t {
 
 struct CacheReusePolicyDesc {
     std::optional<bool> enable_prefix_reuse;
+    // True marks a state group that must stay on the local DEVICE with its own
+    // independent GroupSet (no prefix reuse, no combined-stride packing, no
+    // HOST/DISK pools) — e.g. DSV4's HCA state. Lets the block-tree factory
+    // select the local-only topology by policy instead of by tag name.
+    std::optional<bool> local_only_state;
 };
 
 struct CacheCapacityPolicyDesc {

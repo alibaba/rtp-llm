@@ -274,6 +274,12 @@ torch::Tensor PyWrappedModel::snapshotMtpIndexerTopk(int64_t batch_size) {
     return py_model_.attr("snapshot_mtp_indexer_topk")(batch_size).cast<torch::Tensor>();
 }
 
+bool PyWrappedModel::supportsSparseCacheSave() const {
+    py::gil_scoped_acquire gil;
+    return py::hasattr(py_model_, "supports_sparse_cache_save")
+           && py_model_.attr("supports_sparse_cache_save").cast<bool>();
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -361,6 +367,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.prefix_lengths   = normalize_i32(inputs.prefix_lengths);
     py_attn_inputs.sequence_lengths = normalize_i32(inputs.sequence_lengths);
     py_attn_inputs.input_lengths    = normalize_i32(inputs.input_lengths);
+    py_attn_inputs.cache_save_positions = inputs.cache_save_positions;
 #if !USING_CUDA
     // Non-CUDA platforms only support the host metadata pipeline (the device
     // branch below needs the CUDA-only metadata kernel), so lift any
@@ -559,6 +566,12 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         py_attn_inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id;
         py_attn_inputs.kv_cache_kernel_block_id_device =
             tensorHoldHostAndToCuda(py_attn_inputs.kv_cache_kernel_block_id);
+        if (inputs.cache_save_block_ids.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(inputs.cache_save_block_ids.dim() == 3
+                                        && inputs.cache_save_block_ids.size(0) == 1,
+                                    "single-group sparse save IDs require one tag row");
+            py_attn_inputs.cache_save_block_ids = inputs.cache_save_block_ids.select(0, 0);
+        }
         if (inputs.kv_cache_block_id.defined()) {
             RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_block_id.dim() == 2,
                                     "kv_cache_block_id must be 2-D when kernel block table is 2-D");
@@ -602,6 +615,10 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                     && inputs.kv_cache_block_id.size(0) == static_cast<int64_t>(group_count)
                                     && inputs.kv_cache_block_id.size(1) == inputs.kv_cache_kernel_block_id.size(1)),
                             "physical KV block table must match kernel table group and batch dimensions");
+    RTP_LLM_CHECK_WITH_INFO(!inputs.cache_save_block_ids.defined()
+                                || (inputs.cache_save_block_ids.dim() == 3
+                                    && inputs.cache_save_block_ids.size(0) == static_cast<int64_t>(group_count)),
+                            "sparse save destination rows must match payload tags");
 
     /** Match payload rows by tag: a PP stage's local group order can differ from the incoming plan. */
     torch_ext::AttentionInputsByTag by_tag;
@@ -610,6 +627,9 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         auto       group_inputs = py_attn_inputs;
         group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[payload_row];
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
+        if (inputs.cache_save_block_ids.defined()) {
+            group_inputs.cache_save_block_ids = inputs.cache_save_block_ids.select(0, payload_row);
+        }
         if (inputs.kv_cache_block_id.defined()) {
             group_inputs.kv_cache_block_id = inputs.kv_cache_block_id[payload_row];
             if (group_inputs.cache_store_inputs.has_value()) {
@@ -1470,6 +1490,8 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.kv_cache_block_id);
     buffer_holder_.hold_host(inputs.kv_cache_group_types);
     buffer_holder_.hold_host(inputs.kv_cache_update_mapping);
+    buffer_holder_.hold_host(inputs.cache_save_positions);
+    buffer_holder_.hold_host(inputs.cache_save_block_ids);
     if (inputs.multimodal_features.has_value()) {
         for (auto& mm_feature : inputs.multimodal_features.value()) {
             buffer_holder_.hold_host(mm_feature);

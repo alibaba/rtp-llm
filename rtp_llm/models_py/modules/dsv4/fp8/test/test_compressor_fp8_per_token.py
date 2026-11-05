@@ -25,11 +25,21 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
     KV_ENTRY_BYTES,
     KV_HEAD_DIM,
 )
+from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
+    run_save_partial_states,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorFP8,
     _linear_bf16_bf16_fp32,
     build_decode_metadata,
     build_prefill_metadata,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.sparse_save import SparseSaveTargets
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+    CSA_KV,
+    CSA_STATE,
+    HCA_KV,
+    HCA_STATE,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
@@ -580,6 +590,462 @@ def test_state_pool_clear_pool_context() -> None:
     print("  [warmup]      no-pool forward OK")
 
 
+def _check_sparse_csa_save_restore_continue_short_suffix(suffix_len: int) -> None:
+    """Real state/packed-KV kernels preserve A while B writes C and D."""
+    torch.manual_seed(20261018)
+    cmp = _build_compressor(
+        dim=128, head_dim=KV_HEAD_DIM, rope_head_dim=64, compress_ratio=4
+    )
+    state_eb = 8
+    kv_eb = 256 // 4
+    state = torch.zeros(
+        (8, state_eb, 4 * KV_HEAD_DIM), dtype=torch.float32, device=DEVICE
+    )
+    kv = torch.zeros((8, kv_eb, KV_ENTRY_BYTES), dtype=torch.uint8, device=DEVICE)
+    state_bt = torch.tensor([[4, 2]], dtype=torch.int32, device=DEVICE)
+    kv_bt = torch.tensor([[0, 0, 0, 0, 4, 2]], dtype=torch.int32, device=DEVICE)
+    cmp.set_pool_context(
+        kv_pool_view=kv,
+        kv_block_table=kv_bt,
+        kv_eb=kv_eb,
+        state_pool_view=state,
+        state_block_table=state_bt,
+        state_eb=state_eb,
+        state_tokens_per_block=256,
+        kv_tokens_per_block=256,
+        kv_owner_tokens_per_block=256,
+    )
+    old_x = torch.randn((4, 128), dtype=torch.bfloat16, device=DEVICE) * 0.1
+    new_x = torch.randn((suffix_len, 128), dtype=torch.bfloat16, device=DEVICE) * 0.1
+    all_x = torch.cat((old_x, new_x))
+    fused = _linear_bf16_bf16_fp32(all_x.contiguous(), cmp._wkv_wgate_fused)
+    kv_raw, score_raw = fused[:, : 2 * KV_HEAD_DIM], fused[:, 2 * KV_HEAD_DIM :]
+    old_pos = torch.arange(1296, 1300, device=DEVICE, dtype=torch.int64)
+    run_save_partial_states(
+        kv_raw[:4],
+        score_raw[:4],
+        cmp.ape,
+        old_pos,
+        state,
+        1 * state_eb + old_pos % state_eb,
+        compress_ratio=4,
+    )
+    # The physical block is payload[64,576] followed by scales[64,8].
+    # A tensor view [64,584] is only an allocation shape, not one logical
+    # payload+scale row; its row 4 slice overlaps the next payload row.
+    packed = kv.view(8, -1)
+    old_entry = (1299 % 256) // 4
+    packed[1, old_entry * 576 : (old_entry + 1) * 576].fill_(37)
+    packed[1, kv_eb * 576 + old_entry * 8 : kv_eb * 576 + (old_entry + 1) * 8].fill_(37)
+    state[2].copy_(state[1])
+    state[3].copy_(state[1])
+    kv[2].copy_(kv[1])
+    kv[3].copy_(kv[1])
+    old_state = state[1].clone()
+    old_kv = packed[1].clone()
+
+    cmp._protect_short_prefix = True
+    cmp._sparse_state_tag = CSA_STATE
+    cmp._sparse_kv_tag = CSA_KV
+    cmp._sparse_save_targets_by_tag = {
+        CSA_STATE: SparseSaveTargets(
+            torch.tensor([[1300 + suffix_len]], dtype=torch.int64),
+            torch.tensor([[3]], dtype=torch.int32),
+        ),
+        CSA_KV: SparseSaveTargets(
+            torch.tensor([[1300 + suffix_len]], dtype=torch.int64),
+            torch.tensor([[3]], dtype=torch.int32),
+        ),
+    }
+    new_pos = torch.arange(1300, 1300 + suffix_len, device=DEVICE, dtype=torch.int64)
+    new_meta = cmp.prepare_metadata(
+        new_pos,
+        torch.zeros_like(new_pos),
+        has_prefix=True,
+        is_batched=True,
+        seq_start_per_req=torch.tensor([1300], device=DEVICE),
+        cu_seq_per_req=torch.tensor([0, suffix_len], device=DEVICE),
+    )
+    cmp._launch(kv_raw[4:], score_raw[4:], new_meta)
+
+    ref_state = torch.zeros_like(state)
+    ref_kv = torch.zeros_like(kv)
+    cmp._sparse_save_targets_by_tag = None
+    cmp._protect_short_prefix = False
+    cmp.set_pool_context(
+        kv_pool_view=ref_kv,
+        kv_block_table=torch.tensor(
+            [[0, 0, 0, 0, 4, 5]], dtype=torch.int32, device=DEVICE
+        ),
+        kv_eb=kv_eb,
+        state_pool_view=ref_state,
+        state_block_table=torch.tensor([[4, 5]], dtype=torch.int32, device=DEVICE),
+        state_eb=state_eb,
+        state_tokens_per_block=256,
+        kv_tokens_per_block=256,
+        kv_owner_tokens_per_block=256,
+    )
+    all_pos = torch.arange(1296, 1300 + suffix_len, device=DEVICE, dtype=torch.int64)
+    ref_meta = cmp.prepare_metadata(
+        all_pos,
+        torch.zeros_like(all_pos),
+        has_prefix=False,
+        is_batched=True,
+        seq_start_per_req=torch.tensor([1296], device=DEVICE),
+        cu_seq_per_req=torch.tensor([0, 4 + suffix_len], device=DEVICE),
+    )
+    cmp._launch(kv_raw, score_raw, ref_meta)
+    torch.cuda.synchronize()
+
+    assert torch.equal(state[1], old_state), "saved source state A mutated"
+    assert torch.equal(packed[1], old_kv), "saved source compressed KV A mutated"
+    assert torch.equal(
+        state[3], ref_state[5]
+    ), "saved D state differs from cold continuation"
+    ref_packed = ref_kv.view(8, -1)
+    for entry in range(5, (20 + suffix_len) // 4):
+        assert torch.equal(
+            packed[3, entry * 576 : (entry + 1) * 576],
+            ref_packed[5, entry * 576 : (entry + 1) * 576],
+        ), f"saved D compressed payload entry {entry} differs from cold continuation"
+        assert torch.equal(
+            packed[3, kv_eb * 576 + entry * 8 : kv_eb * 576 + (entry + 1) * 8],
+            ref_packed[5, kv_eb * 576 + entry * 8 : kv_eb * 576 + (entry + 1) * 8],
+        ), f"saved D compressed scale entry {entry} differs from cold continuation"
+    for block_id in (2, 3):
+        assert torch.equal(
+            packed[block_id, old_entry * 576 : (old_entry + 1) * 576],
+            old_kv[old_entry * 576 : (old_entry + 1) * 576],
+        ), f"block {block_id} lost copied compressed history payload"
+        assert torch.equal(
+            packed[
+                block_id,
+                kv_eb * 576 + old_entry * 8 : kv_eb * 576 + (old_entry + 1) * 8,
+            ],
+            old_kv[kv_eb * 576 + old_entry * 8 : kv_eb * 576 + (old_entry + 1) * 8],
+        ), f"block {block_id} lost copied compressed history scale"
+    print(
+        f"  [sparse CSA] G1300→N{1300 + suffix_len} state/KV D, immutable A, cold reference OK"
+    )
+
+
+def test_sparse_csa_save_restore_continue_short_suffix() -> None:
+    _check_sparse_csa_save_restore_continue_short_suffix(20)
+
+
+def test_sparse_csa_one_token_save_keeps_runtime_writer() -> None:
+    _check_sparse_csa_save_restore_continue_short_suffix(1)
+
+
+def test_sparse_hca_state_and_prefix_read_before_ring_overwrite() -> None:
+    """HCA's 128-row ring must preserve G1300 history for boundary 1407."""
+    torch.manual_seed(20261019)
+    cmp = _build_compressor(
+        dim=128, head_dim=KV_HEAD_DIM, rope_head_dim=64, compress_ratio=128
+    )
+    state_eb = 128
+    kv_eb = 2
+    state = torch.zeros(
+        (8, state_eb, 2 * KV_HEAD_DIM), dtype=torch.float32, device=DEVICE
+    )
+    kv = torch.zeros((8, kv_eb, KV_ENTRY_BYTES), dtype=torch.uint8, device=DEVICE)
+    cmp.set_pool_context(
+        kv_pool_view=kv,
+        kv_block_table=torch.tensor(
+            [[0, 0, 0, 0, 4, 2]], dtype=torch.int32, device=DEVICE
+        ),
+        kv_eb=kv_eb,
+        state_pool_view=state,
+        state_block_table=torch.tensor([[4, 2]], dtype=torch.int32, device=DEVICE),
+        state_eb=state_eb,
+        state_tokens_per_block=256,
+        kv_tokens_per_block=256,
+        kv_owner_tokens_per_block=256,
+    )
+    old_x = torch.randn((20, 128), dtype=torch.bfloat16, device=DEVICE) * 0.1
+    new_x = torch.randn((236, 128), dtype=torch.bfloat16, device=DEVICE) * 0.1
+    fused = _linear_bf16_bf16_fp32(torch.cat((old_x, new_x)), cmp._wkv_wgate_fused)
+    kv_raw, score_raw = fused[:, :KV_HEAD_DIM], fused[:, KV_HEAD_DIM:]
+    old_pos = torch.arange(1280, 1300, device=DEVICE, dtype=torch.int64)
+    run_save_partial_states(
+        kv_raw[:20],
+        score_raw[:20],
+        cmp.ape,
+        old_pos,
+        state,
+        1 * state_eb + old_pos % state_eb,
+        compress_ratio=128,
+    )
+    state[2].copy_(state[1])
+    state[3].copy_(state[1])
+    old_state = state[1].clone()
+
+    cmp._protect_short_prefix = True
+    cmp._sparse_state_tag = HCA_STATE
+    cmp._sparse_kv_tag = None
+    cmp._sparse_save_targets_by_tag = {
+        HCA_STATE: SparseSaveTargets(
+            torch.tensor([[1320]], dtype=torch.int64),
+            torch.tensor([[3]], dtype=torch.int32),
+        )
+    }
+    new_pos = torch.arange(1300, 1536, device=DEVICE, dtype=torch.int64)
+    new_meta = cmp.prepare_metadata(
+        new_pos,
+        torch.zeros_like(new_pos),
+        has_prefix=True,
+        is_batched=True,
+        seq_start_per_req=torch.tensor([1300], device=DEVICE),
+        cu_seq_per_req=torch.tensor([0, 236], device=DEVICE),
+    )
+    cmp._launch(kv_raw[20:], score_raw[20:], new_meta)
+
+    ref_state = torch.zeros_like(state)
+    ref_kv = torch.zeros_like(kv)
+    cmp._protect_short_prefix = False
+    cmp._sparse_save_targets_by_tag = None
+    cmp.set_pool_context(
+        kv_pool_view=ref_kv,
+        kv_block_table=torch.tensor(
+            [[0, 0, 0, 0, 4, 5]], dtype=torch.int32, device=DEVICE
+        ),
+        kv_eb=kv_eb,
+        state_pool_view=ref_state,
+        state_block_table=torch.tensor([[4, 5]], dtype=torch.int32, device=DEVICE),
+        state_eb=state_eb,
+        state_tokens_per_block=256,
+        kv_tokens_per_block=256,
+        kv_owner_tokens_per_block=256,
+    )
+    all_pos = torch.arange(1280, 1536, device=DEVICE, dtype=torch.int64)
+    ref_meta = cmp.prepare_metadata(
+        all_pos,
+        torch.zeros_like(all_pos),
+        has_prefix=False,
+        is_batched=True,
+        seq_start_per_req=torch.tensor([1280], device=DEVICE),
+        cu_seq_per_req=torch.tensor([0, 256], device=DEVICE),
+    )
+    cmp._launch(kv_raw, score_raw, ref_meta)
+    torch.cuda.synchronize()
+
+    assert torch.equal(state[1], old_state), "HCA source A mutated"
+    assert torch.equal(
+        state[3, :40, :KV_HEAD_DIM], kv_raw[:40]
+    ), "HCA D lost old or new KV history at p1320"
+    expected_score = score_raw[:40] + cmp.ape[all_pos[:40] % 128]
+    assert torch.equal(
+        state[3, :40, KV_HEAD_DIM:], expected_score
+    ), "HCA D score+ape history differs at p1320"
+    packed = kv.view(8, -1)
+    ref_packed = ref_kv.view(8, -1)
+    for entry in (0, 1):
+        assert torch.equal(
+            packed[2, entry * 576 : (entry + 1) * 576],
+            ref_packed[5, entry * 576 : (entry + 1) * 576],
+        ), f"HCA compressed payload entry {entry} differs after G1300 continuation"
+        assert torch.equal(
+            packed[2, kv_eb * 576 + entry * 8 : kv_eb * 576 + (entry + 1) * 8],
+            ref_packed[5, kv_eb * 576 + entry * 8 : kv_eb * 576 + (entry + 1) * 8],
+        ), f"HCA compressed scale entry {entry} differs after G1300 continuation"
+    print("  [sparse HCA] G1300→N1536, D1320 history and pre-write read OK")
+
+
+def test_sparse_hca_g1300_to_n2000_final_state_and_kv() -> None:
+    """The tail 2000 checkpoint uses final state and the last packed HCA page."""
+    torch.manual_seed(20261020)
+    cmp = _build_compressor(
+        dim=128, head_dim=KV_HEAD_DIM, rope_head_dim=64, compress_ratio=128
+    )
+    state_eb, kv_eb = 128, 2
+    state = torch.zeros(
+        (10, state_eb, 2 * KV_HEAD_DIM), dtype=torch.float32, device=DEVICE
+    )
+    kv = torch.zeros((10, kv_eb, KV_ENTRY_BYTES), dtype=torch.uint8, device=DEVICE)
+    cmp.set_pool_context(
+        kv_pool_view=kv,
+        kv_block_table=torch.tensor(
+            [[0, 0, 0, 0, 4, 2, 5, 6]], dtype=torch.int32, device=DEVICE
+        ),
+        kv_eb=kv_eb,
+        state_pool_view=state,
+        state_block_table=torch.tensor([[4, 2]], dtype=torch.int32, device=DEVICE),
+        state_eb=state_eb,
+        state_tokens_per_block=256,
+        kv_tokens_per_block=256,
+        kv_owner_tokens_per_block=256,
+    )
+    old_x = torch.randn((20, 128), dtype=torch.bfloat16, device=DEVICE) * 0.1
+    new_x = torch.randn((700, 128), dtype=torch.bfloat16, device=DEVICE) * 0.1
+    fused = _linear_bf16_bf16_fp32(torch.cat((old_x, new_x)), cmp._wkv_wgate_fused)
+    kv_raw, score_raw = fused[:, :KV_HEAD_DIM], fused[:, KV_HEAD_DIM:]
+    old_pos = torch.arange(1280, 1300, device=DEVICE, dtype=torch.int64)
+    run_save_partial_states(
+        kv_raw[:20],
+        score_raw[:20],
+        cmp.ape,
+        old_pos,
+        state,
+        1 * state_eb + old_pos % state_eb,
+        compress_ratio=128,
+    )
+    state[2].copy_(state[1])
+    state[3].copy_(state[1])
+    source_state = state[1].clone()
+    source_kv = kv[4].clone()
+    cmp._protect_short_prefix = True
+    cmp._sparse_state_tag = HCA_STATE
+    cmp._sparse_kv_tag = HCA_KV
+    cmp._sparse_save_targets_by_tag = {
+        HCA_STATE: SparseSaveTargets(
+            torch.tensor([[2000]], dtype=torch.int64),
+            torch.tensor([[3]], dtype=torch.int32),
+        ),
+        HCA_KV: SparseSaveTargets(
+            torch.tensor([[2000]], dtype=torch.int64),
+            torch.tensor([[7]], dtype=torch.int32),
+        ),
+    }
+    new_pos = torch.arange(1300, 2000, device=DEVICE, dtype=torch.int64)
+    meta = cmp.prepare_metadata(
+        new_pos,
+        torch.zeros_like(new_pos),
+        has_prefix=True,
+        is_batched=True,
+        seq_start_per_req=torch.tensor([1300], device=DEVICE),
+        cu_seq_per_req=torch.tensor([0, 700], device=DEVICE),
+    )
+    cmp._launch(kv_raw[20:], score_raw[20:], meta)
+
+    ref_state = torch.zeros_like(state)
+    ref_kv = torch.zeros_like(kv)
+    cmp._protect_short_prefix = False
+    cmp._sparse_save_targets_by_tag = None
+    cmp.set_pool_context(
+        kv_pool_view=ref_kv,
+        kv_block_table=torch.tensor(
+            [[0, 0, 0, 0, 4, 5, 6, 7]], dtype=torch.int32, device=DEVICE
+        ),
+        kv_eb=kv_eb,
+        state_pool_view=ref_state,
+        state_block_table=torch.tensor([[4, 5]], dtype=torch.int32, device=DEVICE),
+        state_eb=state_eb,
+        state_tokens_per_block=256,
+        kv_tokens_per_block=256,
+        kv_owner_tokens_per_block=256,
+    )
+    all_pos = torch.arange(1280, 2000, device=DEVICE, dtype=torch.int64)
+    # The 128-row state ring revisits the same physical block over 720 tokens.
+    # Cold reference chunks enforce chronological writes; one oversized
+    # launch would race earlier and later generations of the same ring rows.
+    for start, end in ((1280, 1536), (1536, 1792), (1792, 2000)):
+        begin, stop = start - 1280, end - 1280
+        part_pos = all_pos[begin:stop]
+        ref_meta = cmp.prepare_metadata(
+            part_pos,
+            torch.zeros_like(part_pos),
+            has_prefix=start > 1280,
+            is_batched=True,
+            seq_start_per_req=torch.tensor([start], device=DEVICE),
+            cu_seq_per_req=torch.tensor([0, stop - begin], device=DEVICE),
+        )
+        cmp._launch(kv_raw[begin:stop], score_raw[begin:stop], ref_meta)
+    torch.cuda.synchronize()
+
+    assert torch.equal(state[1], source_state), "HCA source A state mutated"
+    assert torch.equal(kv[4], source_kv), "HCA source A compressed KV mutated"
+    expected_state = torch.empty_like(state[3])
+    tail_pos = all_pos[-state_eb:]
+    expected_state[tail_pos % state_eb, :KV_HEAD_DIM] = kv_raw[-state_eb:]
+    expected_state[tail_pos % state_eb, KV_HEAD_DIM:] = (
+        score_raw[-state_eb:] + cmp.ape[tail_pos % 128]
+    )
+    assert torch.equal(
+        state[3], expected_state
+    ), "HCA D state differs from exact final 128 rows"
+    assert torch.equal(
+        state[3], ref_state[5]
+    ), "HCA final D state differs from cold reference"
+    packed = kv.view(10, -1)
+    reference = ref_kv.view(10, -1)
+    for runtime_id, reference_id, entries in (
+        (2, 5, (0, 1)),
+        (5, 6, (0, 1)),
+        (7, 7, (0,)),
+    ):
+        for entry in entries:
+            assert torch.equal(
+                packed[runtime_id, entry * 576 : (entry + 1) * 576],
+                reference[reference_id, entry * 576 : (entry + 1) * 576],
+            ), f"HCA payload mismatch at block {runtime_id}, entry {entry}"
+            assert torch.equal(
+                packed[
+                    runtime_id, kv_eb * 576 + entry * 8 : kv_eb * 576 + (entry + 1) * 8
+                ],
+                reference[
+                    reference_id,
+                    kv_eb * 576 + entry * 8 : kv_eb * 576 + (entry + 1) * 8,
+                ],
+            ), f"HCA scale mismatch at block {runtime_id}, entry {entry}"
+    print("  [sparse HCA] G1300→N2000 final D state/KV and source A immutable OK")
+
+
+def test_sparse_hca_zero_demand_keeps_runtime_writer() -> None:
+    """A zero-needed-state point may skip D, but runtime C still advances."""
+    torch.manual_seed(20261021)
+    cmp = _build_compressor(
+        dim=128, head_dim=KV_HEAD_DIM, rope_head_dim=64, compress_ratio=128
+    )
+    state = torch.zeros((4, 128, 2 * KV_HEAD_DIM), dtype=torch.float32, device=DEVICE)
+    kv = torch.zeros((4, 2, KV_ENTRY_BYTES), dtype=torch.uint8, device=DEVICE)
+    cmp.set_pool_context(
+        kv_pool_view=kv,
+        kv_block_table=torch.tensor(
+            [[0, 0, 0, 0, 1, 2]], dtype=torch.int32, device=DEVICE
+        ),
+        kv_eb=2,
+        state_pool_view=state,
+        state_block_table=torch.tensor([[1, 2]], dtype=torch.int32, device=DEVICE),
+        state_eb=128,
+        state_tokens_per_block=256,
+        kv_tokens_per_block=256,
+        kv_owner_tokens_per_block=256,
+    )
+    state[1].fill_(17)
+    state[2].copy_(state[1])
+    source = state[1].clone()
+    cmp._sparse_state_tag = HCA_STATE
+    cmp._sparse_kv_tag = HCA_KV
+    cmp._sparse_save_targets_by_tag = {
+        HCA_STATE: SparseSaveTargets(
+            torch.tensor([[1301]], dtype=torch.int64),
+            torch.tensor([[-1]], dtype=torch.int32),
+        ),
+        HCA_KV: SparseSaveTargets(
+            torch.tensor([[1301]], dtype=torch.int64),
+            torch.tensor([[-1]], dtype=torch.int32),
+        ),
+    }
+    x = torch.randn((1, 128), dtype=torch.bfloat16, device=DEVICE) * 0.1
+    fused = _linear_bf16_bf16_fp32(x, cmp._wkv_wgate_fused)
+    meta = cmp.prepare_metadata(
+        torch.tensor([1300], dtype=torch.int64, device=DEVICE),
+        torch.tensor([0], dtype=torch.int64, device=DEVICE),
+        has_prefix=True,
+        is_batched=True,
+        seq_start_per_req=torch.tensor([1300], device=DEVICE),
+        cu_seq_per_req=torch.tensor([0, 1], device=DEVICE),
+    )
+    cmp._launch(fused[:, :KV_HEAD_DIM], fused[:, KV_HEAD_DIM:], meta)
+    torch.cuda.synchronize()
+    assert torch.equal(state[1], source), "zero-demand point mutated source A"
+    assert torch.equal(state[2, 1300 % 128, :KV_HEAD_DIM], fused[0, :KV_HEAD_DIM])
+    assert torch.equal(
+        state[2, 1300 % 128, KV_HEAD_DIM:], fused[0, KV_HEAD_DIM:] + cmp.ape[1300 % 128]
+    )
+    print("  [sparse HCA] zero-demand D=-1 retains runtime state writer")
+
+
 if __name__ == "__main__":
     if not torch.cuda.is_available():
         raise SystemExit("CUDA required for CompressorFP8 UT")
@@ -592,4 +1058,9 @@ if __name__ == "__main__":
     test_prepared_metadata_path()
     test_decode_strided_kv_score_matches_contiguous_path()
     test_state_pool_clear_pool_context()
+    test_sparse_csa_save_restore_continue_short_suffix()
+    test_sparse_csa_one_token_save_keeps_runtime_writer()
+    test_sparse_hca_state_and_prefix_read_before_ring_overwrite()
+    test_sparse_hca_g1300_to_n2000_final_state_and_kv()
+    test_sparse_hca_zero_demand_keeps_runtime_writer()
     print("\nOK")

@@ -246,10 +246,14 @@ bool groupSetSemanticsCompatible(const CacheConfig& cache_config, std::string_vi
     return true;
 }
 
-bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<std::string>>& group_members) {
+bool buildGroupMembers(const CacheConfig&                     cache_config,
+                       bool                                   enable_partial_tail_reuse,
+                       std::vector<std::vector<std::string>>& group_members) {
     group_members.clear();
     for (const GroupBase& group : cache_config.topology().groups()) {
-        if (!cacheGroupParticipatesInBlockTree(group.policy)) {
+        const bool local_hca = enable_partial_tail_reuse && group.policy.local_only_state
+                               && group.policy.group_type == CacheGroupType::SWA;
+        if (!cacheGroupParticipatesInBlockTree(group.policy, enable_partial_tail_reuse)) {
             continue;
         }
 
@@ -260,10 +264,16 @@ bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<
             return false;
         }
 
+        if (local_hca) {
+            // HCA retains its one-slot runtime tail. Tree membership is independent
+            // of the ordinary SWA set and is never backed by HOST/DISK.
+            group_members.push_back({group.tag});
+            continue;
+        }
         auto it =
             std::find_if(group_members.begin(), group_members.end(), [&](const std::vector<std::string>& members) {
                 const GroupBase& first = cache_config.topology().group(members.front());
-                return first.policy.group_type == group.policy.group_type;
+                return !first.policy.local_only_state && first.policy.group_type == group.policy.group_type;
             });
         if (it == group_members.end()) {
             group_members.push_back({group.tag});
@@ -352,7 +362,7 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                c
 BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&   cache_config,
                                                  const KVCacheConfig& kv_cache_config) {
     auto layout = std::make_shared<BlockTreeCacheLayout>();
-    if (!buildGroupMembers(cache_config, layout->group_members)) {
+    if (!buildGroupMembers(cache_config, kv_cache_config.enable_prefill_partial_tail_reuse, layout->group_members)) {
         return nullptr;
     }
     const bool enable_crc = kv_cache_config.enable_crc && CrcBlockCopyBatch::available()
@@ -363,7 +373,9 @@ BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&   cache_conf
     layout->backing_layouts.reserve(layout->group_members.size());
     for (const auto& members : layout->group_members) {
         auto backing_layout = computeBackingLayout(cache_config, members, enable_crc, pool_alignment);
-        layout->sizing.group_sets.push_back({members.front(), backing_layout.pool_stride});
+        if (cacheGroupUsesBlockTreeStorage(cache_config.group(members.front()).policy)) {
+            layout->sizing.group_sets.push_back({members.front(), backing_layout.pool_stride});
+        }
         layout->backing_layouts.push_back(std::move(backing_layout));
     }
     const auto budget_bytes = [](bool enabled, int64_t mb) -> size_t {
@@ -497,6 +509,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     std::vector<size_t> device_block_counts;
     std::vector<size_t> pool_strides;
     for (size_t i = 0; i < group_members.size(); ++i) {
+        if (!cacheGroupUsesBlockTreeStorage(cache_config.group(group_members[i].front()).policy)) {
+            device_block_counts.push_back(0);
+            pool_strides.push_back(0);
+            continue;
+        }
         device_block_counts.push_back(
             poolForTag(cache_config.topology(), group_pools, group_members[i].front())->totalBlocksNum() + 1);
         pool_strides.push_back(backing_layouts[i].pool_stride);
@@ -508,6 +525,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         }
         std::vector<size_t> counts;
         for (size_t i = 0; i < group_members.size(); ++i) {
+            if (device_block_counts[i] == 0) {
+                counts.push_back(0);
+                continue;
+            }
             const auto type  = cache_config.topology().group(group_members[i].front()).policy.group_type;
             const auto found = agreed->find(type);
             RTP_LLM_CHECK_WITH_INFO(found != agreed->end(), "missing negotiated BlockTreeCache capacity");
@@ -527,8 +548,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         const auto   block_counts = tier_block_counts(bytes, layout->block_nums ? &layout->block_nums->host : nullptr);
         for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
             const std::vector<std::string>& members = group_members[group_set_id];
-            const GroupBase&                first   = cache_config.topology().group(members.front());
-            const std::string               pool_name =
+            if (cache_config.topology().group(members.front()).policy.local_only_state) {
+                continue;
+            }
+            const GroupBase&  first = cache_config.topology().group(members.front());
+            const std::string pool_name =
                 "block_tree_host_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
             const size_t physical_blocks = block_counts[group_set_id];
             RTP_LLM_LOG_INFO("%s device_blocks=%zu physical_blocks=%zu stride_bytes=%zu bytes=%zu budget_bytes=%zu",
@@ -557,8 +581,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         }
         for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
             const std::vector<std::string>& members = group_members[group_set_id];
-            const GroupBase&                first   = cache_config.topology().group(members.front());
-            const std::string               pool_name =
+            if (cache_config.topology().group(members.front()).policy.local_only_state) {
+                continue;
+            }
+            const GroupBase&  first = cache_config.topology().group(members.front());
+            const std::string pool_name =
                 "block_tree_disk_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
             const size_t physical_blocks = block_counts[group_set_id];
             RTP_LLM_LOG_INFO("%s device_blocks=%zu physical_blocks=%zu stride_bytes=%zu bytes=%zu budget_bytes=%zu",
@@ -598,7 +625,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                         std::move(device_pools),
                                         std::move(host_pools[group_set_id]),
                                         std::move(disk_pools[group_set_id]));
-        group_set->initialize(group_set_id, cache_topology, members, backing_layouts[group_set_id]);
+        group_set->initialize(group_set_id,
+                              cache_topology,
+                              members,
+                              backing_layouts[group_set_id],
+                              cache_config.topology().group(members.front()).policy.local_only_state);
         RTP_LLM_LOG_INFO(
             "group_set[%zu] membership sealed: payload_bytes=%zu", group_set_id, group_set->payloadBytes());
         group_sets.push_back(std::move(group_set));
@@ -709,7 +740,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     auto         task_pool           = std::make_unique<BlockTreeTaskPool>(
         static_cast<size_t>(config.task_pool_size), business_queue_size, "BlockTreeCacheTaskPool");
 
-    auto tree = std::make_unique<BlockTree>(std::move(group_sets));
+    const size_t reuse_unit_tokens = cache_config.canonicalSizePerBlock();
+    auto         tree              = std::make_unique<BlockTree>(std::move(group_sets), reuse_unit_tokens);
 
     auto result = std::make_shared<BlockTreeCache>(std::move(tree),
                                                    std::move(config),

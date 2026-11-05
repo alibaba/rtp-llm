@@ -24,6 +24,7 @@ from flashinfer.page import append_paged_kv_cache
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_full_causal_kv_indices,
     generate_q_indices,
+    plan_cp_attention,
     plan_prefix_paged_attention,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
@@ -69,7 +70,8 @@ class PCPAllGatherAttnOp:
         self.prefill_cp_rank = parallelism_config.tp_rank
         self.prefill_cp_size = parallelism_config.tp_size
 
-        self.seq_size_per_block = attn_configs.tokens_per_block
+        self.seq_size_per_block = attn_configs.kernel_tokens_per_block
+        self.cache_geometry = None
 
         self.q0_idx = self.q1_idx = None
         self.kv0_idx = self.kv1_idx = None
@@ -122,7 +124,11 @@ class PCPAllGatherAttnOp:
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id,
+            (
+                self.cache_geometry.block_ids
+                if self.cache_geometry is not None
+                else self.attn_inputs.kv_cache_kernel_block_id
+            ),
             self.attn_configs.kernel_tokens_per_block,
         )
 
@@ -152,12 +158,14 @@ class PCPAllGatherAttnOp:
             "causal": True,
             "q_data_type": torch.bfloat16,
         }
-        self.prefill_wrappers["ragged"]["part0"].plan(
+        plan_cp_attention(
+            self.prefill_wrappers["ragged"]["part0"],
             qo_indptr=qo_indptr,
             kv_indptr=kv_indptr_part0,
             **common_params,
         )
-        self.prefill_wrappers["ragged"]["part1"].plan(
+        plan_cp_attention(
+            self.prefill_wrappers["ragged"]["part1"],
             qo_indptr=qo_indptr,
             kv_indptr=kv_indptr_part1,
             **common_params,

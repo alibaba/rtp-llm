@@ -517,6 +517,7 @@ message BroadcastLoadRequestPB {
     int32 prefill_cp_size = 13;
     repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
     repeated StagePeerGroupPB stage_peer_groups = 15;
+    uint64 input_token_count = 16;
 
 }
 

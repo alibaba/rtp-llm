@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import torch
@@ -27,12 +28,7 @@ def plan_prefix_paged_attention(
     """
     batch_size = params.kvlen_h.shape[0]
     prefix_lens = prefix_lengths.cpu().to(torch.int32)
-    assert (prefix_lens % page_size == 0).all(), (
-        f"prefix lengths must be multiples of page_size({page_size}), "
-        f"got {prefix_lens}"
-    )
-
-    prefix_pages = prefix_lens // page_size
+    prefix_pages = (prefix_lens + page_size - 1) // page_size
     page_indptr = torch.zeros(batch_size + 1, dtype=torch.int32)
     page_indptr[1:] = prefix_pages.cumsum(0)
 
@@ -50,9 +46,13 @@ def plan_prefix_paged_attention(
     else:
         prefix_page_indices = torch.tensor([], dtype=torch.int32, device=device)
 
-    last_page_len = torch.where(prefix_pages > 0, page_size, 0).to(torch.int32)
+    # The suffix may already occupy the rest of the final physical page.
+    # Expose only prefix tokens here; suffix attention is merged separately.
+    last_page_len = torch.where(
+        prefix_lens > 0, (prefix_lens - 1) % page_size + 1, 0
+    ).to(torch.int32)
 
-    wrapper.plan(
+    plan_args = dict(
         qo_indptr=qo_indptr,
         paged_kv_indptr=page_indptr.to(device),
         paged_kv_indices=prefix_page_indices,
@@ -64,6 +64,43 @@ def plan_prefix_paged_attention(
         causal=False,
         q_data_type=torch.bfloat16,
     )
+    plan_cp_attention(wrapper, **plan_args)
+
+
+def plan_cp_attention(wrapper, **plan_args) -> None:
+    """Plan one CP wrapper, growing only its float workspace on overflow."""
+    try:
+        wrapper.plan(**plan_args)
+    except RuntimeError as error:
+        # FA2's split-KV schedule can need more than the default 128 MiB even
+        # for a short suffix with many heads. Use the allocator's actual plan
+        # requirement instead of reserving a large fixed buffer for every CP
+        # request. Integer-workspace errors and unrelated failures propagate.
+        overflow = re.search(
+            r"Buffer overflow when allocating memory for batch_prefill_tmp_([vs]) "
+            r"with size (\d+) and alignment (\d+), but only (\d+) bytes available",
+            str(error),
+        )
+        if overflow is None:
+            raise
+        allocation, size, alignment, remaining = overflow.groups()
+        size, alignment, remaining = int(size), int(alignment), int(remaining)
+        old_workspace = wrapper._float_workspace_buffer
+        used = old_workspace.numel() * old_workspace.element_size() - remaining
+        # scheduler.cuh allocates float tmp_v[rows, heads, head_dim] followed
+        # by float tmp_s[rows, heads]. A failure at tmp_s already includes v.
+        required = used + size + alignment - 1
+        if allocation == "v":
+            required += (
+                size // plan_args.get("head_dim_vo", plan_args["head_dim_qk"])
+                + alignment
+                - 1
+            )
+        workspace = torch.empty(
+            required, dtype=old_workspace.dtype, device=old_workspace.device
+        )
+        wrapper.reset_workspace_buffer(workspace, wrapper._int_workspace_buffer)
+        wrapper.plan(**plan_args)
 
 
 def generate_full_causal_kv_indices(cp_chunk_lengths, cp_rank, cp_size):

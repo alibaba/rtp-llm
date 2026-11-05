@@ -29,6 +29,7 @@ struct BlockTreeCacheLayout;
 using BlockTreeCacheLayoutConstPtr = std::shared_ptr<const BlockTreeCacheLayout>;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
+struct PrefixCacheRegistration;
 
 class KVCacheManager {
 public:
@@ -66,6 +67,14 @@ public:
     bool         detachSharedBlocksForRecompute(const BatchKVCacheResourcePtr& resource, int device_ready_reuse_length);
     // Outputs the resident key-prefix count; ordinary inserts report zero.
     void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    void
+    prepareRegisteredSave(PrefixCacheRegistration& registration, BatchKVCacheResource& runtime, size_t resume_endpoint);
+    MallocStatus prepareRequiredContinuation(PrefixCacheRegistration& registration,
+                                             BatchKVCacheResource&    runtime,
+                                             size_t                   resume_endpoint);
+    void         releaseRegisteredSave(PrefixCacheRegistration& registration);
+    void         releaseRegisteredSourcePins(PrefixCacheRegistration& registration);
+    bool         relinquishOptionalRegisteredSave(PrefixCacheRegistration& registration);
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.
@@ -100,7 +109,8 @@ public:
     void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
     void blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
                                   const std::vector<std::string>& group_tags,
-                                  const torch::Tensor&            valid_token_lengths = torch::Tensor());
+                                  bool                            require_complete_payload = false,
+                                  const torch::Tensor&            valid_token_lengths = {});
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,

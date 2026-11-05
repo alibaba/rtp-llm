@@ -9,6 +9,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
+from rtp_llm.models_py.modules.hybrid.full_checkpoint import save_full_checkpoints
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
@@ -70,6 +71,7 @@ class MlaAttention(nn.Module):
             bool(attn_config.is_sparse) if has_indexer is None else has_indexer
         )
         self.reuse_topk_indices = bool(reuse_topk_indices)
+        self.cache_base_tokens = attn_config.tokens_per_block
 
         if self.has_indexer:
             self.indexer = Indexer(
@@ -376,6 +378,12 @@ class MlaAttention(nn.Module):
         # The sparse-attention launch has consumed these projections. PyTorch's
         # stream-aware allocator delays physical reuse until the launch is safe.
         del q_view, compressed_kv, k_pe, fused_qkv, q
+
+        save_full_checkpoints(
+            default_kv_cache,
+            default_fmha_impl.attn_inputs,
+            self.cache_base_tokens,
+        )
 
         if attn_output is not None:
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()

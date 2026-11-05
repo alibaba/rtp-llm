@@ -203,10 +203,10 @@ StageCacheSnapshot StageCacheSnapshot::captureLocalStage(const CacheConfig&     
         StageCacheGroupSnapshot captured;
         captured.tag                       = group.tag;
         captured.type                      = group.policy.group_type;
-        captured.block_tree_group_member   = cacheGroupParticipatesInBlockTree(group.policy);
+        captured.block_tree_group_member   = cacheGroupUsesBlockTreeStorage(group.policy);
         captured.seq_size_per_block        = group.seqSizePerBlock();
         captured.kernel_seq_size_per_block = group.kernelSeqSizePerBlock();
-        captured.cache_key_token_stride    = group.cacheKeyTokenStride();
+        captured.cache_key_token_stride    = config.canonicalSizePerBlock();
         captured.block_num                 = group.block_num;
         captured.explicit_block_num        = group.policy.explicit_block_num;
         captured.policy_fingerprint        = group.policy.policyFingerprint();

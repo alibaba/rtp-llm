@@ -18,6 +18,7 @@ from rtp_llm.ops.compute_ops import (
     KVCache,
     LayerKVCache,
     PyAttentionInputs,
+    PyContextParallelParams,
     PyModelInputs,
     PyModelOutputs,
 )
@@ -160,6 +161,55 @@ class PyModelInputsCompatTest(unittest.TestCase):
         attn_inputs.is_prefill = is_prefill
         attn_inputs.input_lengths = torch.tensor([input_length], dtype=torch.int32)
         return attn_inputs
+
+    def test_clone_without_cache_store_preserves_inputs_and_detaches_metadata(
+        self,
+    ) -> None:
+        original = self._attn_inputs(is_prefill=True, input_length=700)
+        original.prefix_lengths = torch.tensor([1300], dtype=torch.int32)
+        original.kv_cache_kernel_block_id_device = torch.tensor(
+            [[4, 5]], dtype=torch.int32
+        )
+        original.cache_save_positions = torch.tensor([[2000]], dtype=torch.int32)
+        original.cache_save_block_ids = torch.tensor([[19]], dtype=torch.int32)
+        original.combo_position_ids = torch.arange(1300, 2000, dtype=torch.int32)
+        cp = PyContextParallelParams()
+        cp.prefill_actual_input_lengths_cpu = torch.tensor([700], dtype=torch.int32)
+        cp.prefill_prefix_lengths_cpu = original.prefix_lengths
+        original.context_parallel_info = cp
+        cloned = original.clone_without_cache_store()
+        self.assertTrue(cloned.is_prefill)
+        self.assertIsNone(cloned.cache_store_inputs)
+        self.assertIsNone(cloned.cache_store_writer)
+        for field in (
+            "input_lengths",
+            "prefix_lengths",
+            "kv_cache_kernel_block_id_device",
+            "cache_save_positions",
+            "cache_save_block_ids",
+            "combo_position_ids",
+        ):
+            self.assertEqual(
+                getattr(original, field).data_ptr(), getattr(cloned, field).data_ptr()
+            )
+        self.assertEqual(
+            original.context_parallel_info.prefill_actual_input_lengths_cpu.data_ptr(),
+            cloned.context_parallel_info.prefill_actual_input_lengths_cpu.data_ptr(),
+        )
+        self.assertEqual(cloned.input_lengths_device, original.input_lengths_device)
+        self.assertEqual(cloned.prefix_lengths_device, original.prefix_lengths_device)
+        # The copy has independent field assignments while tensor storage is
+        # intentionally shared until the caller installs its private tables.
+        cloned.prefix_lengths = torch.tensor([0], dtype=torch.int32)
+        cloned.cache_save_positions = torch.empty((1, 0), dtype=torch.int32)
+        cloned.kv_cache_kernel_block_id_device = torch.tensor(
+            [[1, 2]], dtype=torch.int32
+        )
+        self.assertEqual(original.prefix_lengths.tolist(), [1300])
+        self.assertEqual(original.cache_save_positions.tolist(), [[2000]])
+        self.assertEqual(original.kv_cache_kernel_block_id_device.tolist(), [[4, 5]])
+        self.assertIsNone(original.cache_store_inputs)
+        self.assertIsNone(original.cache_store_writer)
 
     def test_default_constructor_then_assign_attention_inputs(self) -> None:
         attn_inputs = self._attn_inputs(is_prefill=True, input_length=3)

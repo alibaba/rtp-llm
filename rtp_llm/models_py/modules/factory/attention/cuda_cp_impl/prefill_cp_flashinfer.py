@@ -18,6 +18,10 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.alltoa
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.fused_allgather_cp_impl import (
     PCPFusedPagedAttnOp,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_cache import (
+    CPPagedCacheGeometry,
+    save_full_checkpoints,
+)
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -52,6 +56,14 @@ def select_prefill_cp_impl(
         and parallelism_config.prefill_cp_config.all_gather_impl
         == CPAllGatherImpl.FUSED
     ):
+        if (
+            parallelism_config.prefill_cp_config.kv_cache_sharded
+            and parallelism_config.tp_size > 1
+        ):
+            logging.warning(
+                "Falling back to legacy all-gather CP: sharded KV cache requires staging"
+            )
+            return impl
         supported, reason = PCPFusedPagedAttnOp.can_run(
             attn_configs, attn_inputs, parallelism_config
         )
@@ -167,10 +179,21 @@ class CPFlashInferImpl(FMHAImplBase):
     ):
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
+        self.attn_configs = attn_configs
+        self.parallelism_config = parallelism_config
 
         impl = select_prefill_cp_impl(attn_configs, attn_inputs, parallelism_config)
         logging.info("Selected prefill CP implementation: %s", impl.__name__)
         self.fmha_impl = impl(attn_configs, attn_inputs, parallelism_config)
+        self.cache_geometry = (
+            CPPagedCacheGeometry(attn_configs, attn_inputs, parallelism_config)
+            if (
+                parallelism_config.prefill_cp_config.kv_cache_sharded
+                and parallelism_config.tp_size > 1
+            )
+            else None
+        )
+        self.fmha_impl.cache_geometry = self.cache_geometry
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
 
         # Store input info
@@ -205,7 +228,18 @@ class CPFlashInferImpl(FMHAImplBase):
             fmha_input = qkv
 
         assert self.fmha_impl is not None
-        output = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        attention_cache = (
+            self.cache_geometry.materialize(kv_cache)
+            if self.cache_geometry is not None
+            else kv_cache
+        )
+        output = self.fmha_impl.forward(fmha_input, attention_cache, self.fmha_params)
+        if self.cache_geometry is not None:
+            self.cache_geometry.commit_suffix(attention_cache, kv_cache)
+
+        save_full_checkpoints(
+            kv_cache, self.attn_inputs, self.attn_configs, self.parallelism_config
+        )
 
         # Delay write to cache store until local kv cache finishes writing
         common.apply_write_cache_store(

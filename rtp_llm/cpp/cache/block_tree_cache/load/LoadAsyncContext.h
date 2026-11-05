@@ -58,6 +58,11 @@ public:
     size_t   localMatchedBlocks() const;
     size_t   matchedBlocks() const;
     size_t   matchedBlocks(Tier tier) const;
+    size_t   matchedTokenEndpoint(size_t reuse_unit_tokens) const;
+    bool     localFallbackSelected() const {
+        return local_fallback_selected_.load(std::memory_order_acquire);
+    }
+    void     setLocalFallback(size_t token_endpoint, size_t reuse_unit_tokens);
     bool     needBackendMatch() const;
 
     void setValidPrefix(std::function<bool(size_t)> valid_prefix) {
@@ -130,6 +135,9 @@ private:
     std::condition_variable   cv_;
     size_t                    remaining_transfer_count_{0};
     std::atomic<size_t>       remaining_join_count_{0};
+    size_t                    local_fallback_endpoint_{0};
+    size_t                    local_fallback_reuse_unit_{1};
+    std::atomic<bool>         local_fallback_selected_{false};
     int64_t                   join_start_time_us_{0};
     bool                      has_failure_{false};
     ErrorInfo                 error_info_{ErrorInfo::OkStatus()};

@@ -39,7 +39,7 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + ["//rtp_llm/cpp/testing:test_log_capture"],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

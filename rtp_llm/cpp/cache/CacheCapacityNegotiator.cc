@@ -13,7 +13,11 @@ std::vector<size_t> computeTierBlockCounts(size_t                     capacity_b
     RTP_LLM_CHECK(device_block_counts.size() == pool_strides.size());
     size_t weighted_bytes = 0;
     for (size_t i = 0; i < device_block_counts.size(); ++i) {
-        RTP_LLM_CHECK(device_block_counts[i] > 0 && pool_strides[i] > 0);
+        if (device_block_counts[i] == 0) {
+            RTP_LLM_CHECK_WITH_INFO(pool_strides[i] == 0, "tier placeholder %zu must have zero stride", i);
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(pool_strides[i] > 0, "tier group set %zu must have a positive stride", i);
         RTP_LLM_CHECK_WITH_INFO(device_block_counts[i]
                                     <= (std::numeric_limits<size_t>::max() - weighted_bytes) / pool_strides[i],
                                 "BlockTreeCache weighted lower-tier budget overflow at group_set=%zu",
@@ -23,6 +27,10 @@ std::vector<size_t> computeTierBlockCounts(size_t                     capacity_b
     std::vector<size_t> block_counts;
     block_counts.reserve(device_block_counts.size());
     for (size_t i = 0; i < device_block_counts.size(); ++i) {
+        if (device_block_counts[i] == 0) {
+            block_counts.push_back(0);
+            continue;
+        }
         const size_t physical_blocks =
             static_cast<unsigned __int128>(capacity_bytes) * device_block_counts[i] / weighted_bytes;
         RTP_LLM_CHECK_WITH_INFO(

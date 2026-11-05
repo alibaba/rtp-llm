@@ -2,14 +2,19 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <optional>
 #include <stdexcept>
+#include <tuple>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets): group_sets_(std::move(group_sets)) {
+BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets, size_t reuse_unit_tokens):
+    group_sets_(std::move(group_sets)), reuse_unit_tokens_(reuse_unit_tokens) {
+    RTP_LLM_CHECK_WITH_INFO(reuse_unit_tokens_ > 0, "BlockTree reuse unit must be positive");
     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
         const auto& group_tags = group_sets_[group_set_id]->groupTags();
         for (size_t member_group_id = 0; member_group_id < group_tags.size(); ++member_group_id) {
@@ -89,10 +94,11 @@ void BlockTree::releaseNode(TreeNode* node) {
     }
 }
 
-TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent) {
+TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent, size_t token_end) {
     auto node       = std::make_unique<TreeNode>();
     node->cache_key = key;
     node->parent    = parent;
+    node->token_end = token_end;
     node->index     = node_pool_.size();
     node->group_set_resources.resize(group_sets_.size());
     auto* raw = node.get();
@@ -100,6 +106,83 @@ TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent) {
     cache_keys_.push_back(key);
     ++key_version_;
     return raw;
+}
+
+std::vector<TreeNode*>
+BlockTree::contentMatchCandidates(const std::vector<int>&                    request_tokens,
+                                  const std::function<CacheKeyType(size_t)>& endpoint_key) const {
+    std::vector<TreeNode*> candidates;
+    if (request_tokens.empty() || !endpoint_key) {
+        return candidates;
+    }
+    std::vector<const TreeNode*> pending{root_.get()};
+    while (!pending.empty()) {
+        const TreeNode* parent = pending.back();
+        pending.pop_back();
+        for (const auto& [_, child] : parent->children) {
+            if (child->token_ids.empty() || child->token_end > request_tokens.size()
+                || child->token_ids.size() != child->token_end - parent->token_end
+                || !std::equal(
+                    child->token_ids.begin(), child->token_ids.end(), request_tokens.begin() + parent->token_end)
+                || child->cache_key != endpoint_key(child->token_end)) {
+                continue;
+            }
+            candidates.push_back(child);
+            if (!isShortLeaf(child)) {
+                pending.push_back(child);
+            }
+        }
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const TreeNode* lhs, const TreeNode* rhs) {
+        return lhs->token_end < rhs->token_end;
+    });
+    return candidates;
+}
+
+std::vector<BlockTreeContentRange> BlockTree::contentMatchRanges(
+    const std::vector<int>&                                                   request_tokens,
+    const std::function<CacheKeyType(size_t)>&                                endpoint_key,
+    const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>& source_identity) const {
+    std::vector<BlockTreeContentRange> ranges;
+    if (request_tokens.empty() || !endpoint_key) {
+        return ranges;
+    }
+    std::vector<const TreeNode*> pending{root_.get()};
+    while (!pending.empty()) {
+        const TreeNode* parent = pending.back();
+        pending.pop_back();
+        for (const auto& [_, child] : parent->children) {
+            if (child->token_ids.empty() || child->token_end <= parent->token_end
+                || child->token_ids.size() != child->token_end - parent->token_end
+                || parent->token_end >= request_tokens.size()) {
+                continue;
+            }
+            const size_t limit   = std::min(child->token_ids.size(), request_tokens.size() - parent->token_end);
+            size_t       matched = 0;
+            while (matched < limit && child->token_ids[matched] == request_tokens[parent->token_end + matched]) {
+                ++matched;
+            }
+            if (matched == 0) {
+                continue;
+            }
+            const bool whole = matched == child->token_ids.size();
+            // Token equality alone is insufficient: the key also carries the
+            // original hash seed and image identity. Never accept an interior
+            // range unless the caller can authenticate its complete source.
+            if (whole ? child->cache_key != endpoint_key(child->token_end) :
+                        (!source_identity || !source_identity(parent->token_end, child->token_ids, child->cache_key))) {
+                continue;
+            }
+            ranges.push_back({child, parent->token_end + matched});
+            if (whole && !isShortLeaf(child)) {
+                pending.push_back(child);
+            }
+        }
+    }
+    std::sort(ranges.begin(), ranges.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.matched_end > rhs.matched_end;
+    });
+    return ranges;
 }
 
 std::vector<TreeNode*> BlockTree::findNode(const CacheKeysType& cache_keys) const {
@@ -127,7 +210,18 @@ std::vector<TreeNode*> BlockTree::findNode(const CacheKeysType& cache_keys) cons
 }
 
 CacheKeysType BlockTree::cacheKeys() const {
-    return cache_keys_;
+    CacheKeysType full_keys;
+    full_keys.reserve(cache_keys_.size());
+    for (size_t index = 0; index < node_pool_.size(); ++index) {
+        if (!isShortLeaf(node_pool_[index].get())) {
+            full_keys.push_back(cache_keys_[index]);
+        }
+    }
+    return full_keys;
+}
+
+bool BlockTree::isShortLeaf(const TreeNode* node) const {
+    return node != nullptr && node->parent != nullptr && node->token_end - node->parent->token_end < reuse_unit_tokens_;
 }
 
 bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const {
@@ -142,11 +236,31 @@ bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tie
 BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& resources,
                                             bool                                              collect_path,
-                                            bool                                              is_resident) {
+                                            bool                                              is_resident,
+                                            const std::vector<std::vector<int>>*              token_segments,
+                                            const std::vector<size_t>*                        token_ends) {
     BlockTreeInsertResult result;
     if (resources.size() != cache_keys.size()) {
         RTP_LLM_LOG_WARNING("key/resource size mismatch, keys=%zu resources=%zu", cache_keys.size(), resources.size());
         return result;
+    }
+    if (token_ends != nullptr
+        && (token_ends->size() != cache_keys.size() || token_segments == nullptr
+            || token_segments->size() != cache_keys.size())) {
+        RTP_LLM_LOG_WARNING("exact endpoint insert requires one token segment and endpoint per key");
+        return result;
+    }
+    if (token_ends != nullptr) {
+        size_t previous = 0;
+        for (size_t i = 0; i < token_ends->size(); ++i) {
+            const size_t end = (*token_ends)[i];
+            if (end <= previous || end - previous > reuse_unit_tokens_ || (*token_segments)[i].size() != end - previous
+                || (end - previous < reuse_unit_tokens_ && i + 1 != token_ends->size())) {
+                RTP_LLM_LOG_WARNING("invalid exact endpoint insert at key_index=%zu endpoint=%zu", i, end);
+                return result;
+            }
+            previous = end;
+        }
     }
     for (size_t i = 0; i < resources.size(); ++i) {
         if (resources[i].size() != group_sets_.size()) {
@@ -156,8 +270,15 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
                                 resources[i].size());
             return result;
         }
+        const bool short_endpoint =
+            token_ends != nullptr && ((*token_ends)[i] - (i == 0 ? 0 : (*token_ends)[i - 1])) < reuse_unit_tokens_;
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
             const GroupSetResource& resource = resources[i][group_set_id];
+            if (short_endpoint && (resource.hasTier(Tier::HOST) || resource.hasTier(Tier::DISK))) {
+                RTP_LLM_LOG_WARNING(
+                    "short leaf requires local DEVICE resource: key_index=%zu group_set_id=%zu", i, group_set_id);
+                return result;
+            }
             RTP_LLM_CHECK_WITH_INFO(resource.isValidSteadyState()
                                         && (!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue()),
                                     "BlockTree insert requires an IDLE steady resource and complete DEVICE value: "
@@ -169,13 +290,15 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
         }
     }
 
-    return insertNodeImpl(cache_keys, resources, collect_path, is_resident);
+    return insertNodeImpl(cache_keys, resources, collect_path, is_resident, token_segments, token_ends);
 }
 
 BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&                              cache_keys,
                                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                                 bool                                              collect_path,
-                                                bool                                              is_resident) {
+                                                bool                                              is_resident,
+                                                const std::vector<std::vector<int>>*              token_segments,
+                                                const std::vector<size_t>*                        token_ends) {
     BlockTreeInsertResult result;
     if (collect_path) {
         result.path.reserve(cache_keys.size());
@@ -194,9 +317,20 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
         if (pending_node_pool_.count(key)) {
             break;
         }
-        auto         it  = current->children.find(key);
+        if (current != root_.get() && isShortLeaf(current)) {
+            RTP_LLM_LOG_WARNING("cannot insert a child below short leaf: parent_key=%ld", current->cache_key);
+            break;
+        }
+        const size_t token_end = token_ends != nullptr ? (*token_ends)[i] : current->token_end + reuse_unit_tokens_;
+        auto         it        = current->children.find(key);
         if (it != current->children.end()) {
             TreeNode* child = it->second;
+            if (child->token_end != token_end
+                || (token_ends != nullptr && !child->token_ids.empty() && child->token_ids != (*token_segments)[i])) {
+                RTP_LLM_LOG_WARNING(
+                    "cache key identity conflict: key_index=%zu key=%ld endpoint=%zu", i, key, token_end);
+                break;
+            }
             if (is_resident
                 && std::any_of(child->group_set_resources.begin(),
                                child->group_set_resources.end(),
@@ -248,7 +382,11 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 break;
             }
 
-            current                                = child;
+            current = child;
+            if ((token_ends != nullptr) && token_segments != nullptr && i < token_segments->size()
+                && current->token_ids.empty()) {
+                current->token_ids = (*token_segments)[i];
+            }
             const auto&         incoming_resources = resources[i];
             std::vector<size_t> adopted_group_set_ids;
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
@@ -270,10 +408,13 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&            
                 result.adopted_nodes.emplace_back(current, std::move(adopted_group_set_ids));
             }
         } else {
-            TreeNode* child              = createNode(key, current);
+            TreeNode* child              = createNode(key, current, token_end);
             current->children[key]       = child;
             current                      = child;
             current->group_set_resources = resources[i];
+            if ((token_ends != nullptr) && token_segments != nullptr && i < token_segments->size()) {
+                current->token_ids = (*token_segments)[i];
+            }
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
                 const GroupSetResource& resource = current->group_set_resources[group_set_id];
                 const Tier              tier     = resource.getTopTier();
@@ -405,7 +546,7 @@ void BlockTree::removePublishedKey(CacheKeyType key) {
 }
 
 void BlockTree::refreshPublishedState(const TreeNode* node) {
-    if (!event_publisher_ || node->parent == nullptr) {
+    if (!event_publisher_ || node->parent == nullptr || isShortLeaf(node)) {
         return;
     }
     for (const auto& location : publication_groups_) {

@@ -268,3 +268,11 @@ py_library(
     visibility = ["//visibility:public"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test (
+    name = "full_checkpoint_test",
+    srcs = ["full_checkpoint_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    tags = ["L20_CU13", "open_skip"],
+    exec_properties = {"gpu": "L20_CU13"},
+)

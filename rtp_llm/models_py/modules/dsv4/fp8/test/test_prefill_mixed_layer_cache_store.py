@@ -126,6 +126,9 @@ class _FakeKVCache:
         self.events = events
         self.cache_tags = cache_tags
 
+    def get_seq_size_per_block(self, tag: str) -> int:
+        return 64
+
     def get_layer_cache_groups(self, layer_idx: int):
         self.events.append(("get_cache", layer_idx))
         return [
