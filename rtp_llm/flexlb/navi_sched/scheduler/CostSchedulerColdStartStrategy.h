@@ -41,6 +41,8 @@ public:
         double minimumRampProgress = 1.0;
         double minimumRampedTargetInflight = 0.0;
         std::vector<NaviSchedColdStartRoutingStats::RandomDecision> randomDecisions;
+        std::vector<NaviSchedColdStartRoutingStats::TargetRandomDecision>
+            targetRandomDecisions;
         bool costScheduleRequired = false;
     };
 

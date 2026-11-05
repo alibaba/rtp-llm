@@ -346,10 +346,11 @@ void MasterScheduleContextKernel::buildReadyContexts(int64_t activationTimeUs)
             }
         }
         const auto admissionBeginUs = autil::TimeUtility::monotonicTimeUs();
-        const auto accepted = applyQueueOverloadLimit(context);
+        const auto accepted = prepareAdmission(context);
         const auto admissionEndUs = autil::TimeUtility::monotonicTimeUs();
         context->context->_snapshotPrepareUs = snapshotEndUs - snapshotBeginUs;
-        context->context->_admissionPrepareUs = admissionEndUs - admissionBeginUs;
+        context->context->_admissionPrepareUs =
+            admissionEndUs - admissionBeginUs - context->context->_contextPrepareUs;
         if (!accepted) {
             context->context->_scheduleLatencyUs = std::max<int64_t>(
                 0, autil::TimeUtility::monotonicTimeUs() - activationTimeUs);
@@ -369,12 +370,17 @@ void MasterScheduleContextKernel::buildReadyContexts(int64_t activationTimeUs)
             }
             continue;
         }
-        _masterStateR->recordScheduleRound(context->context->requestCount());
-        if (!context->context->prepare()) {
+        const auto &coldStart = context->context->_coldStartRoutingStats;
+        _masterStateR->recordScheduleRound(
+            coldStart.evaluated
+                ? context->context->_requests.size() - coldStart.rejectedRequestCount -
+                      context->context->_queueOverloadRejectedRequestCount
+                : context->context->requestCount());
+        if (!context->context->_prepared && !context->context->prepare()) {
             context->context->fail("scheduler_error");
         }
         const auto preparedUs = autil::TimeUtility::monotonicTimeUs();
-        context->context->_contextPrepareUs = preparedUs - admissionEndUs;
+        context->context->_contextPrepareUs += preparedUs - admissionEndUs;
         context->context->_masterPrepareUs = preparedUs - activationTimeUs;
         if (context->context->_scheduleId < 10 ||
             context->context->_scheduleId % 100 == 0) {
@@ -388,8 +394,8 @@ void MasterScheduleContextKernel::buildReadyContexts(int64_t activationTimeUs)
                 context->context->_scheduleId, context->context->requestCount(),
                 context->context->nodeCount(), snapshotBeginUs - activationTimeUs,
                 snapshotEndUs - snapshotBeginUs, context->context->_replayPrepareUs,
-                admissionEndUs - admissionBeginUs, preparedUs - admissionEndUs,
-                preparedUs - activationTimeUs,
+                context->context->_admissionPrepareUs,
+                context->context->_contextPrepareUs, preparedUs - activationTimeUs,
                 context->context->_snapshotRuntimeLockWaitUs,
                 context->context->_snapshotRuntimeLockHoldUs);
         }
@@ -441,6 +447,26 @@ bool MasterScheduleContextKernel::shouldDropRequest(
     return randomSample < dropProbability;
 }
 
+bool MasterScheduleContextKernel::prepareAdmission(
+    const MasterScheduleContextDataPtr &contextData,
+    const std::function<uint64_t()> &randomDraw)
+{
+    auto &context = *contextData->context;
+    context._contextPrepareUs = 0;
+    if (_schedulerKernelId == CostSchedulerKernel::KERNEL_ID && context.nodeCount() > 0) {
+        const auto beginUs = autil::TimeUtility::monotonicTimeUs();
+        const auto prepared = context.prepare();
+        context._contextPrepareUs = autil::TimeUtility::monotonicTimeUs() - beginUs;
+        CostSchedulerColdStartStrategy::Result result;
+        if (!prepared || !CostSchedulerColdStartStrategy::apply(context, _randomGenerator,
+                                                                result, randomDraw)) {
+            context.fail("scheduler_error");
+            return false;
+        }
+    }
+    return applyQueueOverloadLimit(contextData, randomDraw);
+}
+
 bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     const MasterScheduleContextDataPtr &contextData,
     const std::function<uint64_t()> &randomDraw)
@@ -453,8 +479,13 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     context._queueOverloadScheduleCycleMs = _maxWaitScheduleTimeMs;
     context._queueOverloadStartCycleMultiplier = _queueOverloadStartCycleMultiplier;
     context._queueOverloadFullCycleMultiplier = _queueOverloadFullCycleMultiplier;
-    context._queueOverloadRequestCount = context.requestCount();
+    const auto routed = context._coldStartRoutingStats.evaluated;
+    context._queueOverloadRequestCount =
+        routed && !context._scheduleViewActive ? 0 : context.requestCount();
     context._queueOverloadRejectedRequestCount = 0;
+    if (routed && !context._scheduleViewActive) {
+        return true;
+    }
     if (0 == context.requestCount() || 0 == context.nodeCount()) {
         return context.requestCount() > 0;
     }
@@ -535,26 +566,45 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
 
     std::vector<NaviSchedScheduleItem> acceptedRequests;
     std::vector<MasterScheduleRequestDataPtr> acceptedResponseRequests;
-    acceptedRequests.reserve(requestCount);
-    acceptedResponseRequests.reserve(requestCount);
+    std::vector<size_t> acceptedIndexes;
+    if (routed) {
+        acceptedIndexes.reserve(requestCount);
+    } else {
+        acceptedRequests.reserve(requestCount);
+        acceptedResponseRequests.reserve(requestCount);
+    }
     size_t rejectedRequestCount = 0;
     for (size_t requestIndex = 0; requestIndex < requestCount; ++requestIndex) {
-        auto &request = context._requests[requestIndex];
-        auto &responseRequest = context._responseRequests[requestIndex];
+        const auto storageIndex = context.resolveRequestIndex(requestIndex);
+        auto &request = context._requests[storageIndex];
+        auto &responseRequest = context._responseRequests[storageIndex];
         uint64_t randomSample = 0;
         const auto dropped =
             shouldDropRequest(dropProbability, &randomSample, randomDraw);
         if (context.isCollectingReplay() && dropProbability > 0.0 &&
             dropProbability < 1.0) {
             context._queueOverloadRandomDecisions.push_back(
-                {requestIndex, randomSample, dropProbability, !dropped});
+                {storageIndex, randomSample, dropProbability, !dropped});
         }
         if (!dropped) {
-            acceptedRequests.emplace_back(std::move(request));
-            acceptedResponseRequests.emplace_back(std::move(responseRequest));
+            if (routed) {
+                acceptedIndexes.emplace_back(storageIndex);
+            } else {
+                acceptedRequests.emplace_back(std::move(request));
+                acceptedResponseRequests.emplace_back(std::move(responseRequest));
+            }
             continue;
         }
         ++rejectedRequestCount;
+        if (routed) {
+            if (!context.reject(requestIndex, "rate_limited")) {
+                context.fail("scheduler_error");
+                return false;
+            }
+            context._decisions[storageIndex].predictedQueueLatencyMs =
+                averagePredictedLatencyMs;
+            continue;
+        }
         NaviSchedScheduleContext::DeferredResponse deferred;
         deferred.request = std::move(responseRequest);
         deferred.decision.requestId = request.request.requestId;
@@ -564,8 +614,20 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
         deferred.decision.predictedQueueLatencyMs = averagePredictedLatencyMs;
         context._deferredResponses.emplace_back(std::move(deferred));
     }
-    context._requests.swap(acceptedRequests);
-    context._responseRequests.swap(acceptedResponseRequests);
+    if (routed) {
+        // Preserve cold-start selections and original response ownership. Only
+        // shrink the trusted view consumed by Cost, including an empty remainder.
+        auto nodeIndexes = context._scheduleViewNodeIndexes;
+        context.clearScheduleView();
+        if (!acceptedIndexes.empty() &&
+            !context.activateScheduleView(acceptedIndexes, nodeIndexes)) {
+            context.fail("scheduler_error");
+            return false;
+        }
+    } else {
+        context._requests.swap(acceptedRequests);
+        context._responseRequests.swap(acceptedResponseRequests);
+    }
     _masterScheduleR->recordQueueOverload(requestCount, rejectedRequestCount,
                                           averagePredictedLatencyMs, dropProbability);
     context._queueOverloadRejectedRequestCount = rejectedRequestCount;
@@ -576,7 +638,7 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
                     static_cast<int>(_executionUtilizationLimitEnabled),
                     averagePredictedLatencyMs, dropProbability, requestCount,
                     rejectedRequestCount);
-    return !context._requests.empty();
+    return routed || !context._requests.empty();
 }
 
 bool MasterScheduleContextKernel::activate(navi::KernelComputeContext &ctx)
@@ -1039,6 +1101,8 @@ void MasterScheduleResultKernel::recordReplayAdmission(NaviSchedScheduleContext 
     if (context._replay) {
         auto &schedulerInfo = context._replay->schedulerInfo;
         schedulerInfo["audit_version"] = int64_t(1);
+        schedulerInfo["admission_after_cold_start"] =
+            context._coldStartRoutingStats.evaluated;
         schedulerInfo["schedule_id"] = context._scheduleId;
         schedulerInfo["schedule_begin_time_us"] = context._scheduleBeginTimeUs;
         schedulerInfo["schedule_latency_us"] = context._scheduleLatencyUs;
@@ -1095,6 +1159,22 @@ void MasterScheduleResultKernel::recordReplayAdmission(NaviSchedScheduleContext 
             randomDecisions.emplace_back(std::move(randomDecision));
         }
         schedulerInfo["cold_start_random_decisions"] = std::move(randomDecisions);
+        autil::legacy::json::JsonArray targetRandomDecisions;
+        targetRandomDecisions.reserve(
+            context._coldStartRoutingStats.targetRandomDecisions.size());
+        for (const auto &decision :
+             context._coldStartRoutingStats.targetRandomDecisions) {
+            autil::legacy::json::JsonMap record;
+            record["node_index"] = int64_t(decision.nodeIndex);
+            record["target_inflight"] = decision.targetInflight;
+            record["admitted_target_inflight"] = decision.admittedTargetInflight;
+            record["sample"] = std::to_string(decision.sample);
+            record["probability"] = decision.probability;
+            record["rounded_up"] = decision.roundedUp;
+            targetRandomDecisions.emplace_back(std::move(record));
+        }
+        schedulerInfo["cold_start_target_random_decisions"] =
+            std::move(targetRandomDecisions);
         autil::legacy::json::JsonArray queueOverloadRandomDecisions;
         queueOverloadRandomDecisions.reserve(
             context._queueOverloadRandomDecisions.size());

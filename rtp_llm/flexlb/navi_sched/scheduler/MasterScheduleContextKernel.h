@@ -38,15 +38,19 @@ private:
     bool stopScheduleTimer(navi::KernelComputeContext &ctx);
     bool updateScheduleTimer(navi::KernelComputeContext &ctx, int64_t currentTimeUs);
     void retireCancelledRequests();
-    bool retireRequest(const MasterScheduleRequestDataPtr &request, int64_t currentTimeUs);
+    bool retireRequest(const MasterScheduleRequestDataPtr &request,
+                       int64_t currentTimeUs);
     std::shared_ptr<void> beginScheduleRound();
     void buildReadyContexts(int64_t activationTimeUs);
+    bool prepareAdmission(const std::shared_ptr<MasterScheduleContextData> &context,
+                          const std::function<uint64_t()> &randomDraw = {});
     bool applyQueueOverloadLimit(
         const std::shared_ptr<MasterScheduleContextData> &context,
         const std::function<uint64_t()> &randomDraw = {});
-    static double calculateQueueOverloadDropProbability(
-        double averagePredictedLatencyMs, int64_t scheduleCycleMs,
-        int64_t startCycleMultiplier, int64_t fullCycleMultiplier);
+    static double calculateQueueOverloadDropProbability(double averagePredictedLatencyMs,
+                                                        int64_t scheduleCycleMs,
+                                                        int64_t startCycleMultiplier,
+                                                        int64_t fullCycleMultiplier);
     bool shouldDropRequest(double dropProbability, uint64_t *sample = nullptr,
                            const std::function<uint64_t()> &randomDraw = {});
     bool activate(navi::KernelComputeContext &ctx);
@@ -110,7 +114,8 @@ protected:
     void logAdmissionPredictions(const NaviSchedScheduleContext &context) const;
     bool finishContext(NaviSchedScheduleContext &context);
     bool prepareContext(NaviSchedScheduleContext &context, int64_t resultBeginUs);
-    void reportResultTiming(NaviSchedScheduleContext &context, int64_t resultBeginUs) const;
+    void reportResultTiming(NaviSchedScheduleContext &context,
+                            int64_t resultBeginUs) const;
     void reportPredictionMetrics(const NaviSchedScheduleContext &context) const;
     void reportResultMetrics(const NaviSchedScheduleContext &context) const;
 

@@ -116,7 +116,9 @@ bool hasUnsafeWaitingRequestMarginal(const NaviSchedScheduleContext &context,
     return false;
 }
 
-ColdStartRoutingPlan buildRoutingPlan(const NaviSchedScheduleContext &context)
+ColdStartRoutingPlan buildRoutingPlan(
+    const NaviSchedScheduleContext &context,
+    const std::function<double(size_t, double)> &roundTarget = {})
 {
     ColdStartRoutingPlan plan;
     std::vector<UntrustedNode> untrustedNodes;
@@ -207,6 +209,9 @@ ColdStartRoutingPlan buildRoutingPlan(const NaviSchedScheduleContext &context)
                     std::min(plan.analysis.minimumRampedTargetInflight, targetInflight);
             }
         }
+        if (roundTarget) {
+            targetInflight = roundTarget(nodeIndex, targetInflight);
+        }
         const auto inflight = std::max<int64_t>(0, node.getInflightRequests());
         const auto deficit = targetInflight - inflight;
         if (deficit > 0.0) {
@@ -233,7 +238,26 @@ bool CostSchedulerColdStartStrategy::apply(NaviSchedScheduleContext &context,
         return false;
     }
 
-    auto routingPlan = buildRoutingPlan(context);
+    auto routingPlan = buildRoutingPlan(context, [&](size_t nodeIndex, double target) {
+        const auto base = std::floor(target);
+        const auto probability = target - base;
+        if (probability <= 0.0 ||
+            context.getNode(nodeIndex).getInflightRequests() >= target) {
+            return base;
+        }
+        // Draw once per node, not once per request: a large round must not
+        // repeatedly retry the fractional slot until it is inevitably admitted.
+        const auto sample = randomDraw ? randomDraw() : randomGenerator.get();
+        const auto roundedUp =
+            static_cast<double>(sample) / std::numeric_limits<uint64_t>::max() <
+            probability;
+        const auto admittedTarget = base + (roundedUp ? 1.0 : 0.0);
+        if (context.isCollectingReplay()) {
+            result.targetRandomDecisions.push_back(
+                {nodeIndex, target, admittedTarget, sample, probability, roundedUp});
+        }
+        return admittedTarget;
+    });
     result.targetInflight = routingPlan.analysis.targetInflight;
     result.trustedNodeCount = routingPlan.analysis.trustedNodeCount;
     result.untrustedNodeCount = routingPlan.analysis.untrustedNodeCount;
@@ -317,6 +341,8 @@ bool CostSchedulerColdStartStrategy::apply(NaviSchedScheduleContext &context,
             result.minimumRampedTargetInflight;
         if (context.isCollectingReplay()) {
             context._coldStartRoutingStats.randomDecisions = result.randomDecisions;
+            context._coldStartRoutingStats.targetRandomDecisions =
+                result.targetRandomDecisions;
         }
         context._coldStartRoutingStats.evaluated = true;
     }
@@ -335,7 +361,8 @@ double CostSchedulerColdStartStrategy::calculateTargetInflight(int64_t trustedIn
     if (trustedNodeCount == 0) {
         return NO_TRUSTED_TARGET_INFLIGHT;
     }
-    return static_cast<double>(std::max<int64_t>(0, trustedInflight)) / trustedNodeCount;
+    return std::max(1.0, static_cast<double>(std::max<int64_t>(0, trustedInflight)) /
+                             trustedNodeCount);
 }
 
 size_t CostSchedulerColdStartStrategy::calculateUntrustedCapacity(
@@ -377,7 +404,7 @@ double CostSchedulerColdStartStrategy::calculateRampedTargetInflight(
     double targetInflight, double rampProgress)
 {
     if (rampProgress >= 1.0) {
-        return std::max(0.0, targetInflight);
+        return std::max(1.0, targetInflight);
     }
     const auto boundedProgress = std::clamp(rampProgress, 0.0, 1.0);
     const auto finalTarget = std::max(COLD_START_INITIAL_TARGET_INFLIGHT, targetInflight);

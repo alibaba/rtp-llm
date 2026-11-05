@@ -28,6 +28,14 @@ class SchedulerBaseKernel;
 struct NaviSchedLatencyModel;
 
 struct NaviSchedColdStartRoutingStats {
+    struct TargetRandomDecision {
+        size_t nodeIndex = 0;
+        double targetInflight = 0.0;
+        double admittedTargetInflight = 0.0;
+        uint64_t sample = 0;
+        double probability = 0.0;
+        bool roundedUp = false;
+    };
     struct RandomDecision {
         size_t requestIndex = 0;
         uint64_t sample = 0;
@@ -47,6 +55,7 @@ struct NaviSchedColdStartRoutingStats {
     double minimumRampProgress = 1.0;
     double minimumRampedTargetInflight = 0.0;
     std::vector<RandomDecision> randomDecisions;
+    std::vector<TargetRandomDecision> targetRandomDecisions;
     bool evaluated = false;
 };
 

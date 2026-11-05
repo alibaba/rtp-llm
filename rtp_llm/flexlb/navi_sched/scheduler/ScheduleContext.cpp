@@ -13,10 +13,7 @@
 
 namespace navi_sched {
 
-int64_t NaviSchedScheduleContext::getScheduleTimeUs() const
-{
-    return _scheduleTimeUs;
-}
+int64_t NaviSchedScheduleContext::getScheduleTimeUs() const { return _scheduleTimeUs; }
 
 NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
                                              NaviSchedNodeSnapshot snapshot,
@@ -28,8 +25,7 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
     , _residualRuntimeConfig(snapshot.residualRuntimeConfig)
     , _totalBlocks(snapshot.load.totalBlocks)
     , _inflightRequests(snapshot.load.inflightRequests)
-    , _inflightPredictedLatencySumMs(
-          snapshot.load.inflightPredictedLatencySumMs)
+    , _inflightPredictedLatencySumMs(snapshot.load.inflightPredictedLatencySumMs)
     , _batchWaitingRequests(snapshot.load.batchWaitingRequests)
     , _queuedBatchRequests(snapshot.load.queuedBatchRequests)
     , _runningRequests(snapshot.load.runningRequests)
@@ -46,10 +42,8 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
     , _reportedWorkloadFeatures(std::move(snapshot.reportedWorkloadFeatures))
     , _reservedWorkloadFeatures(std::move(snapshot.reservedWorkloadFeatures))
     , _maxRunningRequestCount(snapshot.maxRunningRequestCount)
-    , _workloadRunningCapacitySlotCount(
-          snapshot.workloadRunningCapacitySlotCount)
-    , _reservedRunningCapacitySlotCount(
-          snapshot.reservedRunningCapacitySlotCount)
+    , _workloadRunningCapacitySlotCount(snapshot.workloadRunningCapacitySlotCount)
+    , _reservedRunningCapacitySlotCount(snapshot.reservedRunningCapacitySlotCount)
     , _workloadReportReceiveTimeUs(snapshot.workloadReportReceiveTimeUs)
     , _agentStartTimeUs(snapshot.agentStartTimeUs)
 {
@@ -58,17 +52,13 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
         const bool supportsRunningElapsed =
             _latencyModel && NonLinearPrefillModelR::usesCapacitySplitParameters(
                                  _latencyModel->parameters);
-        if (supportsRunningElapsed &&
-            _workload.runningCapacityPrefillRequestCount > 0) {
+        if (supportsRunningElapsed && _workload.runningCapacityPrefillRequestCount > 0) {
             const auto runningElapsedDeltaMs =
-                workloadReportAgeMs *
-                _workload.runningCapacityPrefillRequestCount;
+                workloadReportAgeMs * _workload.runningCapacityPrefillRequestCount;
             auto reportedFeatures = _reportedWorkloadFeatures;
             auto workloadFeatures = _workloadFeatures;
-            if (reportedFeatures.appendRunningElapsedTimeMs(
-                    runningElapsedDeltaMs) &&
-                workloadFeatures.appendRunningElapsedTimeMs(
-                    runningElapsedDeltaMs)) {
+            if (reportedFeatures.appendRunningElapsedTimeMs(runningElapsedDeltaMs) &&
+                workloadFeatures.appendRunningElapsedTimeMs(runningElapsedDeltaMs)) {
                 _reportedWorkloadFeatures = std::move(reportedFeatures);
                 _workloadFeatures = std::move(workloadFeatures);
                 _runningElapsedProgressApplied = true;
@@ -83,8 +73,8 @@ void NaviSchedScheduleNode::refreshExistingUnifiedLatency()
     NaviSchedLatencyFeatures floorFeatures;
     if (usesUnifiedLatencyPrediction() && hasLatencyModel() &&
         getUnifiedDecayFloorFeatures(floorFeatures)) {
-        _existingUnifiedLatencyMs = decayUnifiedLatency(
-            predictLatency(_workloadFeatures), predictLatency(floorFeatures));
+        _existingUnifiedLatencyMs = decayUnifiedLatency(predictLatency(_workloadFeatures),
+                                                        predictLatency(floorFeatures));
     }
 }
 
@@ -135,8 +125,7 @@ double NaviSchedScheduleNode::getEstimatedQueueWaitMsAt(int64_t predictionTimeUs
     }
     const auto elapsedMs =
         _queueReportReceiveTimeUs > 0
-            ? std::max<int64_t>(0, predictionTimeUs - _queueReportReceiveTimeUs) /
-                  1000.0
+            ? std::max<int64_t>(0, predictionTimeUs - _queueReportReceiveTimeUs) / 1000.0
             : 0.0;
     const auto decayMs =
         std::min(_queueDecayHeadRemainingMs, elapsedMs * _timeCompression);
@@ -148,10 +137,9 @@ double NaviSchedScheduleNode::getEstimatedBacklogLatencyMs() const
     if (!usesUnifiedLatencyPrediction()) {
         return getEstimatedQueueWaitMs();
     }
-    if (!hasLatencyModel() ||
-        (_workloadFeatures.getBatchCount() == 0 &&
-         _workloadFeatures.getBatchSize() == 0 &&
-         _workloadFeatures.getPrecedingRequestCount() == 0)) {
+    if (!hasLatencyModel() || (_workloadFeatures.getBatchCount() == 0 &&
+                               _workloadFeatures.getBatchSize() == 0 &&
+                               _workloadFeatures.getPrecedingRequestCount() == 0)) {
         return 0.0;
     }
     const auto latencyWithReportedWorkloadMs = predictLatency(_workloadFeatures);
@@ -164,9 +152,8 @@ double NaviSchedScheduleNode::getEstimatedBacklogLatencyMs() const
                 floorFeatures.getPrecedingRequestCount() == 0
             ? 0.0
             : predictLatency(floorFeatures);
-    return std::max(
-        0.0, decayUnifiedLatency(latencyWithReportedWorkloadMs,
-                                 latencyWithoutReportedWorkloadMs));
+    return std::max(0.0, decayUnifiedLatency(latencyWithReportedWorkloadMs,
+                                             latencyWithoutReportedWorkloadMs));
 }
 
 double NaviSchedScheduleNode::getExecutionUtilization() const
@@ -184,15 +171,11 @@ bool NaviSchedScheduleNode::hasLatencyModel() const { return bool(_latencyModel)
 bool NaviSchedScheduleNode::hasValidLatencyModel() const
 {
     return _latencyModel &&
-           NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL ==
-               _latencyModel->formula &&
-           NonLinearPrefillModelR::BINARY_VERSION ==
-               _latencyModel->binaryVersion &&
-           NonLinearPrefillModelR::validateParameters(
-               _latencyModel->parameters) &&
+           NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL == _latencyModel->formula &&
+           NonLinearPrefillModelR::BINARY_VERSION == _latencyModel->binaryVersion &&
+           NonLinearPrefillModelR::validateParameters(_latencyModel->parameters) &&
            LatencyResidualModel::VERSION == _latencyModel->residualVersion &&
-           LatencyResidualModel::validateParameters(
-               _latencyModel->residualParameters) &&
+           LatencyResidualModel::validateParameters(_latencyModel->residualParameters) &&
            _latencyModel->residualLastUpdateTimeUs >= 0;
 }
 
@@ -233,12 +216,10 @@ const std::string &NaviSchedScheduleNode::getLatencyModelFingerprint() const
 
 bool NaviSchedScheduleNode::isLatencyModelTrusted() const
 {
-    if (!hasValidLatencyModel() ||
-        !_latencyModel->overloadPredictionTrusted) {
+    if (!hasValidLatencyModel() || !_latencyModel->overloadPredictionTrusted) {
         return false;
     }
-    if (!NonLinearPrefillModelR::usesCapacitySplitParameters(
-            _latencyModel->parameters) ||
+    if (!NonLinearPrefillModelR::usesCapacitySplitParameters(_latencyModel->parameters) ||
         !_workloadFeatures.usesCapacitySplit()) {
         return true;
     }
@@ -257,8 +238,8 @@ const std::vector<double> &NaviSchedScheduleNode::getLatencyParameters() const
     return _latencyModel ? _latencyModel->parameters : EMPTY_PARAMETERS;
 }
 
-double NaviSchedScheduleNode::applyLatencyResidual(
-    double basePredictionMs, double *derivativeFactor) const
+double NaviSchedScheduleNode::applyLatencyResidual(double basePredictionMs,
+                                                   double *derivativeFactor) const
 {
     if (derivativeFactor) {
         *derivativeFactor = 1.0;
@@ -268,8 +249,7 @@ double NaviSchedScheduleNode::applyLatencyResidual(
     }
     const auto result = LatencyResidualModel::evaluate(
         basePredictionMs, _latencyModel->residualParameters,
-        _latencyModel->residualLastUpdateTimeUs, _scheduleTimeUs,
-        _residualRuntimeConfig);
+        _latencyModel->residualLastUpdateTimeUs, _scheduleTimeUs, _residualRuntimeConfig);
     if (derivativeFactor) {
         *derivativeFactor = result.derivativeFactor;
     }
@@ -288,24 +268,19 @@ bool NaviSchedScheduleNode::usesUnifiedLatencyPrediction() const
     return _unifiedLatencyPrediction;
 }
 
-int64_t NaviSchedScheduleNode::getAgentStartTimeUs() const
-{
-    return _agentStartTimeUs;
-}
+int64_t NaviSchedScheduleNode::getAgentStartTimeUs() const { return _agentStartTimeUs; }
 
 const NaviSchedLatencyFeatures &NaviSchedScheduleNode::getWorkloadFeatures() const
 {
     return _workloadFeatures;
 }
 
-const NaviSchedLatencyFeatures &
-NaviSchedScheduleNode::getReportedWorkloadFeatures() const
+const NaviSchedLatencyFeatures &NaviSchedScheduleNode::getReportedWorkloadFeatures() const
 {
     return _reportedWorkloadFeatures;
 }
 
-const NaviSchedLatencyFeatures &
-NaviSchedScheduleNode::getReservedWorkloadFeatures() const
+const NaviSchedLatencyFeatures &NaviSchedScheduleNode::getReservedWorkloadFeatures() const
 {
     return _reservedWorkloadFeatures;
 }
@@ -314,8 +289,7 @@ bool NaviSchedScheduleNode::getUnifiedDecayFloorFeatures(
     NaviSchedLatencyFeatures &features) const
 {
     auto floorFeatures = _reservedWorkloadFeatures;
-    if (NonLinearPrefillModelR::usesCapacitySplitParameters(
-            getLatencyParameters()) &&
+    if (NonLinearPrefillModelR::usesCapacitySplitParameters(getLatencyParameters()) &&
         !floorFeatures.appendPrecedingRequestCount(
             _reportedWorkloadFeatures.getPrecedingRequestCount())) {
         return false;
@@ -354,10 +328,7 @@ int32_t NaviSchedScheduleNode::getRunningCapacityPrefillRequestCount() const
     return _workload.runningCapacityPrefillRequestCount;
 }
 
-uint64_t NaviSchedScheduleNode::getWorkloadRevision() const
-{
-    return _workload.revision;
-}
+uint64_t NaviSchedScheduleNode::getWorkloadRevision() const { return _workload.revision; }
 
 int64_t NaviSchedScheduleNode::getWorkloadEventTimeUs() const
 {
@@ -374,8 +345,8 @@ double NaviSchedScheduleNode::getWorkloadReportAgeMs() const
     if (_workloadReportReceiveTimeUs <= 0) {
         return 0.0;
     }
-    return std::max<int64_t>(0, _scheduleTimeUs - _workloadReportReceiveTimeUs) /
-           1000.0 * _timeCompression;
+    return std::max<int64_t>(0, _scheduleTimeUs - _workloadReportReceiveTimeUs) / 1000.0 *
+           _timeCompression;
 }
 
 bool NaviSchedScheduleNode::usesRunningElapsedProgress() const
@@ -389,10 +360,9 @@ NaviSchedScheduleNode::getLatencyResidualRuntimeConfig() const
     return _residualRuntimeConfig;
 }
 
-double NaviSchedScheduleNode::decayUnifiedLatency(
-    double latencyWithReportedWorkloadMs,
-    double latencyWithoutReportedWorkloadMs,
-    bool *usesReportedWorkload) const
+double NaviSchedScheduleNode::decayUnifiedLatency(double latencyWithReportedWorkloadMs,
+                                                  double latencyWithoutReportedWorkloadMs,
+                                                  bool *usesReportedWorkload) const
 {
     if (usesReportedWorkload) {
         *usesReportedWorkload = true;
@@ -401,9 +371,10 @@ double NaviSchedScheduleNode::decayUnifiedLatency(
         _reportedWorkloadFeatures.getBatchCount() == 0) {
         return latencyWithReportedWorkloadMs;
     }
-    const auto decayedLatencyMs = _runningElapsedProgressApplied
-        ? latencyWithReportedWorkloadMs
-        : latencyWithReportedWorkloadMs - getWorkloadReportAgeMs();
+    const auto decayedLatencyMs =
+        _runningElapsedProgressApplied
+            ? latencyWithReportedWorkloadMs
+            : latencyWithReportedWorkloadMs - getWorkloadReportAgeMs();
     if (decayedLatencyMs <= latencyWithoutReportedWorkloadMs) {
         if (usesReportedWorkload) {
             *usesReportedWorkload = false;
@@ -418,6 +389,7 @@ bool NaviSchedScheduleContext::valid() const { return _prepared; }
 bool NaviSchedScheduleContext::prepare()
 {
     clearScheduleView();
+    _coldStartRoutingStats = {};
     _prepared = false;
     _resultPrepared = false;
     if (_requests.empty()) {
@@ -437,14 +409,12 @@ bool NaviSchedScheduleContext::prepare()
 
 size_t NaviSchedScheduleContext::requestCount() const
 {
-    return _scheduleViewActive ? _scheduleViewRequestIndexes.size()
-                               : _requests.size();
+    return _scheduleViewActive ? _scheduleViewRequestIndexes.size() : _requests.size();
 }
 
 size_t NaviSchedScheduleContext::nodeCount() const
 {
-    return _scheduleViewActive ? _scheduleViewNodeIndexes.size()
-                               : _scheduleNodes.size();
+    return _scheduleViewActive ? _scheduleViewNodeIndexes.size() : _scheduleNodes.size();
 }
 
 const NaviSchedScheduleItem &NaviSchedScheduleContext::getRequest(
@@ -526,10 +496,7 @@ bool NaviSchedScheduleContext::getCacheHitBlockCounts(
     return true;
 }
 
-bool NaviSchedScheduleContext::isCollectingReplay() const
-{
-    return bool(_replay);
-}
+bool NaviSchedScheduleContext::isCollectingReplay() const { return bool(_replay); }
 
 void NaviSchedScheduleContext::setSchedulerInfo(
     autil::legacy::json::JsonMap schedulerInfo)
@@ -543,8 +510,8 @@ void NaviSchedScheduleContext::setSchedulerInfo(
     }
 }
 
-void NaviSchedScheduleContext::recordDiscreteSearchLosses(
-    double initialLoss, double finalLoss) const
+void NaviSchedScheduleContext::recordDiscreteSearchLosses(double initialLoss,
+                                                          double finalLoss) const
 {
     _discreteSearchLosses.reset();
     if (std::isfinite(initialLoss) && std::isfinite(finalLoss)) {
@@ -564,8 +531,7 @@ std::optional<double> NaviSchedScheduleContext::discreteSearchImprovementPct() c
     const auto initial = static_cast<long double>(initialLoss);
     const auto improvement = static_cast<double>(
         (initial - static_cast<long double>(finalLoss)) / std::abs(initial) * 100.0L);
-    return std::isfinite(improvement) ? std::optional<double>(improvement)
-                                     : std::nullopt;
+    return std::isfinite(improvement) ? std::optional<double>(improvement) : std::nullopt;
 }
 
 bool NaviSchedScheduleContext::setScheduleLoss(double loss)
@@ -581,8 +547,8 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
     size_t nodeIndex, const std::vector<size_t> &requestIndexes,
     NaviSchedLatencyPrediction *latencyPrediction) const
 {
-    return estimateBatchExecutionLatencyMs(
-        nodeIndex, requestIndexes, latencyPrediction, nullptr);
+    return estimateBatchExecutionLatencyMs(nodeIndex, requestIndexes, latencyPrediction,
+                                           nullptr);
 }
 
 double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
@@ -601,15 +567,15 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
     if (!node.hasValidLatencyModel()) {
         return 0.0;
     }
-    const auto capacitySplit = NonLinearPrefillModelR::usesCapacitySplitParameters(
-        node.getLatencyParameters());
+    const auto capacitySplit =
+        NonLinearPrefillModelR::usesCapacitySplitParameters(node.getLatencyParameters());
     NaviSchedLatencyFeatures requestFeatures;
     NaviSchedLatencyFeatures requestFeaturesWithoutReportedWorkload;
     auto workloadSlots = node._workloadRunningCapacitySlotCount;
     auto reservedSlots = node._reservedRunningCapacitySlotCount;
     if (capacitySplit) {
-        if (!requestFeatures.appendCapacitySplitAggregate(
-                1, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0.0, 0.0) ||
+        if (!requestFeatures.appendCapacitySplitAggregate(1, 0, 0, 0, 0.0, 0.0, 0, 0, 0,
+                                                          0.0, 0.0) ||
             !requestFeaturesWithoutReportedWorkload.appendCapacitySplitAggregate(
                 1, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0.0, 0.0)) {
             return 0.0;
@@ -626,8 +592,8 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
         auto promptTokenCount = request.promptTokenCount;
         auto blockSize = request.blockSize;
         auto matchedBlockCount = matchedBlockCounts
-            ? (*matchedBlockCounts)[requestIndex]
-            : getCacheHitBlockCount(requestIndex, nodeIndex);
+                                     ? (*matchedBlockCounts)[requestIndex]
+                                     : getCacheHitBlockCount(requestIndex, nodeIndex);
         auto matchedTokenCount = matchedBlockCount * blockSize;
         const auto computeTokenCount = promptTokenCount - matchedTokenCount;
         if (!capacitySplit) {
@@ -638,12 +604,11 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
             requestFeatures.appendRequest(matchedTokenCount, computeTokenCount);
             ++workloadSlots;
         } else {
-            requestFeatures.appendWaitingRequest(matchedTokenCount,
-                                                 computeTokenCount);
+            requestFeatures.appendWaitingRequest(matchedTokenCount, computeTokenCount);
         }
         if (reservedSlots < node._maxRunningRequestCount) {
-            requestFeaturesWithoutReportedWorkload.appendRequest(
-                matchedTokenCount, computeTokenCount);
+            requestFeaturesWithoutReportedWorkload.appendRequest(matchedTokenCount,
+                                                                 computeTokenCount);
             ++reservedSlots;
         } else {
             requestFeaturesWithoutReportedWorkload.appendWaitingRequest(
@@ -670,18 +635,15 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
         return 0.0;
     }
     const auto withReportedPrediction = node.predictLatency(withReportedWorkload);
-    const auto withoutReportedPrediction =
-        node.predictLatency(withoutReportedWorkload);
-    const auto prediction = node.decayUnifiedLatency(
-        withReportedPrediction, withoutReportedPrediction);
+    const auto withoutReportedPrediction = node.predictLatency(withoutReportedWorkload);
+    const auto prediction =
+        node.decayUnifiedLatency(withReportedPrediction, withoutReportedPrediction);
     if (latencyPrediction) {
         latencyPrediction->features = std::move(withReportedWorkload);
         latencyPrediction->floorFeatures = std::move(withoutReportedWorkload);
-        latencyPrediction->hasFloor =
-            node._workloadReportReceiveTimeUs > 0 &&
-            node._reportedWorkloadFeatures.getBatchCount() > 0;
-        if (latencyPrediction->hasFloor &&
-            !node._runningElapsedProgressApplied) {
+        latencyPrediction->hasFloor = node._workloadReportReceiveTimeUs > 0 &&
+                                      node._reportedWorkloadFeatures.getBatchCount() > 0;
+        if (latencyPrediction->hasFloor && !node._runningElapsedProgressApplied) {
             latencyPrediction->fixedLatencyMs = -node.getWorkloadReportAgeMs();
         }
         latencyPrediction->recomputable = true;
@@ -689,10 +651,9 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
     return prediction;
 }
 
-bool NaviSchedScheduleContext::selectNode(size_t requestIndex, size_t nodeIndex,
-                                          const std::string &reason,
-                                          NaviSchedLatencyTrainingPhase
-                                              latencyTrainingPhase)
+bool NaviSchedScheduleContext::selectNode(
+    size_t requestIndex, size_t nodeIndex, const std::string &reason,
+    NaviSchedLatencyTrainingPhase latencyTrainingPhase)
 {
     if (!_prepared || requestIndex >= requestCount() || nodeIndex >= nodeCount() ||
         reason.empty() || !validLatencyTrainingPhase(latencyTrainingPhase)) {
@@ -741,8 +702,7 @@ void NaviSchedScheduleContext::setNodes(std::vector<NaviSchedNodeConstPtr> nodes
 }
 
 bool NaviSchedScheduleContext::activateScheduleView(
-    const std::vector<size_t> &requestIndexes,
-    const std::vector<size_t> &nodeIndexes)
+    const std::vector<size_t> &requestIndexes, const std::vector<size_t> &nodeIndexes)
 {
     if (_scheduleViewActive || requestIndexes.empty() || nodeIndexes.empty()) {
         return false;
@@ -764,7 +724,8 @@ bool NaviSchedScheduleContext::activateScheduleView(
     _scheduleViewRequestIndexes = requestIndexes;
     _scheduleViewNodeIndexes = nodeIndexes;
     _scheduleViewUsesAllRequests = requestIndexes.size() == _requests.size();
-    for (size_t index = 0; _scheduleViewUsesAllRequests && index < requestIndexes.size(); ++index) {
+    for (size_t index = 0; _scheduleViewUsesAllRequests && index < requestIndexes.size();
+         ++index) {
         _scheduleViewUsesAllRequests = requestIndexes[index] == index;
     }
     if (!_scheduleViewUsesAllRequests) {
@@ -790,14 +751,12 @@ void NaviSchedScheduleContext::clearScheduleView()
 
 size_t NaviSchedScheduleContext::resolveRequestIndex(size_t requestIndex) const
 {
-    return _scheduleViewActive ? _scheduleViewRequestIndexes[requestIndex]
-                               : requestIndex;
+    return _scheduleViewActive ? _scheduleViewRequestIndexes[requestIndex] : requestIndex;
 }
 
 size_t NaviSchedScheduleContext::resolveNodeIndex(size_t nodeIndex) const
 {
-    return _scheduleViewActive ? _scheduleViewNodeIndexes[nodeIndex]
-                               : nodeIndex;
+    return _scheduleViewActive ? _scheduleViewNodeIndexes[nodeIndex] : nodeIndex;
 }
 
 void NaviSchedScheduleContext::setReplay(
@@ -818,7 +777,8 @@ void NaviSchedScheduleContext::setReplay(
     for (size_t index = 0; index < replay->requests.size(); ++index) {
         if (replay->nodeMatches[index].size() != _scheduleNodes.size() ||
             !_replayMatchRequestIndexes
-                 .emplace(replay->requests[index].request.requestId, index).second) {
+                 .emplace(replay->requests[index].request.requestId, index)
+                 .second) {
             _replayMatchRequestIndexes.clear();
             return;
         }
@@ -826,16 +786,16 @@ void NaviSchedScheduleContext::setReplay(
 }
 
 bool NaviSchedScheduleContext::getReplayMatch(size_t storageRequestIndex,
-                                             size_t storageNodeIndex,
-                                             int64_t &matchedBlockCount) const
+                                              size_t storageNodeIndex,
+                                              int64_t &matchedBlockCount) const
 {
-    const auto it = _replayMatchRequestIndexes.find(
-        _requests[storageRequestIndex].request.requestId);
+    const auto it =
+        _replayMatchRequestIndexes.find(_requests[storageRequestIndex].request.requestId);
     if (it == _replayMatchRequestIndexes.end()) {
         return false;
     }
-    matchedBlockCount = _replay->nodeMatches[it->second][storageNodeIndex]
-                            .matchedBlockCount;
+    matchedBlockCount =
+        _replay->nodeMatches[it->second][storageNodeIndex].matchedBlockCount;
     return true;
 }
 
@@ -902,13 +862,15 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
             continue;
         }
         for (auto requestIndex : batchState.requestIndexes) {
-            matchedBlockCounts[requestIndex] = getCacheHitBlockCount(requestIndex, nodeIndex);
+            matchedBlockCounts[requestIndex] =
+                getCacheHitBlockCount(requestIndex, nodeIndex);
         }
         batchState.predictedQueueLatencyMs =
             _scheduleNodes[nodeIndex].getEstimatedQueueWaitMsAt(_queuePredictionTimeUs);
         auto latencyPrediction = std::make_shared<NaviSchedLatencyPrediction>();
-        batchState.predictedExecutionLatencyMs = estimateBatchExecutionLatencyMs(
-            nodeIndex, batchState.requestIndexes, latencyPrediction.get(), &matchedBlockCounts);
+        batchState.predictedExecutionLatencyMs =
+            estimateBatchExecutionLatencyMs(nodeIndex, batchState.requestIndexes,
+                                            latencyPrediction.get(), &matchedBlockCounts);
         latencyPrediction->fixedLatencyMs += batchState.predictedQueueLatencyMs;
         if (latencyPrediction->valid()) {
             batchState.latencyPrediction = std::move(latencyPrediction);
@@ -942,11 +904,9 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
         decision.batchId = batchState.batchId;
         decision.expectedBatchSize = batchState.requestCount;
         decision.predictedCacheHitTokenCount =
-            matchedBlockCounts[requestIndex] *
-            _requests[requestIndex].request.blockSize;
+            matchedBlockCounts[requestIndex] * _requests[requestIndex].request.blockSize;
         decision.predictedQueueLatencyMs = batchState.predictedQueueLatencyMs;
-        decision.predictedExecutionLatencyMs =
-            batchState.predictedExecutionLatencyMs;
+        decision.predictedExecutionLatencyMs = batchState.predictedExecutionLatencyMs;
         decision.latencyPrediction = batchState.latencyPrediction;
     }
     _resultPrepared = true;
@@ -1066,8 +1026,7 @@ void NaviSchedScheduleContext::attachLatencyModelGlobals(
             continue;
         }
         const auto &node = _scheduleNodes[nodeIndex];
-        if (!node._info || !node._latencyModel ||
-            node._info->collectorAddress.empty()) {
+        if (!node._info || !node._latencyModel || node._info->collectorAddress.empty()) {
             continue;
         }
         auto global = latencyModels.getGlobalZeroPoint(
@@ -1092,11 +1051,9 @@ MasterResponseToClientDataPtr NaviSchedScheduleContext::makeResponse(
     response->reason = decision.reason.empty() ? "not_scheduled" : decision.reason;
     response->batchId = decision.batchId;
     response->expectedBatchSize = decision.expectedBatchSize;
-    response->predictedCacheHitTokenCount =
-        decision.predictedCacheHitTokenCount;
+    response->predictedCacheHitTokenCount = decision.predictedCacheHitTokenCount;
     response->predictedQueueLatencyMs = decision.predictedQueueLatencyMs;
-    response->predictedExecutionLatencyMs =
-        decision.predictedExecutionLatencyMs;
+    response->predictedExecutionLatencyMs = decision.predictedExecutionLatencyMs;
     response->latencyPrediction = decision.latencyPrediction;
     response->latencyTrainingPhase = decision.latencyTrainingPhase;
     response->target = decision.target;
