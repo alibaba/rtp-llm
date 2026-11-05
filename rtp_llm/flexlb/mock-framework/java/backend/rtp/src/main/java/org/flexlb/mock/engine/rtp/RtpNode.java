@@ -42,7 +42,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
         var finished = new TaskHistory();
         try {
             var scheduler = schedulers.create(lock, cache, finished);
-            metricSource = scheduler instanceof RtpSchedulerBase rtp ? new MetricSource(lock, rtp.metrics()) : null;
+            metricSource = scheduler instanceof AbstractRtpScheduler rtp ? new MetricSource(lock, rtp.metrics()) : null;
             var engine = new EngineLoop(lock, scheduler, finished, cache, config.compute(), config.role(), config.id());
             try {
                 service = new RpcService(config.endpoint(), cache, lock, finished, engine, config.groupScheduling());
@@ -61,7 +61,7 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     }
 
     public static RtpNode start(RtpConfig config, int rpcPort, int controlPort) throws IOException {
-        return start(config, rpcPort, controlPort, RtpScheduler.factory(config));
+        return start(config, rpcPort, controlPort, RtpFifoScheduler.factory(config));
     }
 
     public static RtpNode start(RtpConfig config, Scheduler.Factory schedulers) throws IOException {
@@ -86,10 +86,12 @@ public final class RtpNode implements org.flexlb.mock.runtime.EngineInstance {
     }
 
     private List<MetricFamilySamples> collectMetrics() {
-        if (metricSource == null) return List.of();
+        if (metricSource == null) return service.collectMetrics();
         synchronized (metricSource.lock()) {
             service.checkHealthy();
-            return metricSource.metrics().collect();
+            var samples = new ArrayList<>(metricSource.metrics().collect());
+            samples.addAll(service.collectMetrics());
+            return samples;
         }
     }
 

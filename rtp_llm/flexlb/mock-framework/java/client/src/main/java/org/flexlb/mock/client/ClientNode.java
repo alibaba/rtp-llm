@@ -11,7 +11,9 @@ import java.util.concurrent.*;
 import org.flexlb.mock.runtime.ApiServer;
 import org.flexlb.mock.client.ClientProtocol.*;
 
-/** Each JVM executes locally; only client-0 coordinates the one current plan. */
+/**
+ * Each JVM executes locally; only client-0 coordinates the one current plan.
+ */
 public final class ClientNode implements ClientProtocol, AutoCloseable {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final String id;
@@ -108,7 +110,7 @@ public final class ClientNode implements ClientProtocol, AutoCloseable {
                 int slots = args.concurrency() / created.peers.size() + (i < args.concurrency() % created.peers.size() ? 1 : 0);
                 call(created.peers.get(i), "worker/prepare", new Shard(created.number, args.masters(), part.path(),
                     part.count(), i, created.peers.size(), created.firstId, part.sha256(), args.qps(), args.replay_speed(), slots,
-                    args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms()));
+                    args.queue_capacity(), args.request_timeout_ms(), args.drain_timeout_ms(), args.reuse_cache()));
             }
             long startAt = System.currentTimeMillis() + Math.max(1000, created.peers.size() * 100L);
             for (String peer : created.peers) {

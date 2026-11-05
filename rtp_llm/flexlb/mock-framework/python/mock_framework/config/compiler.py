@@ -50,12 +50,11 @@ def _has_reference(value):
     return False
 
 
-def _expectation(raw, interface, previous):
+def _expectation(raw, interface, previous, output):
     fields(raw, {'eq', 'count', 'gte', 'lte'}, where='expect')
     if set(raw) not in ({'eq'}, {'count'}, {'gte'}, {'lte'}, {'gte', 'lte'}):
         raise ConfigError('expect needs eq, count, or gte/lte')
     result = {}
-    output = interface.returns
     for op, value in raw.items():
         expected = output
         if op == 'count':
@@ -63,8 +62,10 @@ def _expectation(raw, interface, previous):
                 raise ConfigError('count requires a list result')
             expected = {'type': 'integer', 'minimum': 0}
         elif op in ('gte', 'lte'):
-            if output['type'] not in ('integer', 'number'):
+            numeric = output['items'] if output['type'] == 'array' else output
+            if numeric['type'] not in ('integer', 'number'):
                 raise ConfigError(f'{op} requires numeric output')
+            expected = numeric
         if isinstance(value, str) and interface.unit == 's' and op != 'count':
             value = float(duration(value))
         result[op] = _argument(value, expected, previous, 'expect.' + op)
@@ -108,8 +109,13 @@ def _compile_step(raw, registry, ids, previous):
         duration(within, positive=True)
     wait_after = raw.get('wait_after', '0s')
     duration(wait_after)
-    expect = _expectation(raw['expect'], interface, previous) if 'expect' in raw else None
-    previous[step_id] = interface.returns
+    output = interface.returns
+    if output.get('variants') == [{'type': 'number'}, {'type': 'array', 'items': {'type': 'number'}}]:
+        if _has_reference(args.get('mode')):
+            raise ConfigError('Metric mode must be a literal to determine its result type')
+        output = output['variants'][1 if args.get('mode', 'interval') == 'series' else 0]
+    expect = _expectation(raw['expect'], interface, previous, output) if 'expect' in raw else None
+    previous[step_id] = output
     return Step(step_id, description, interface.name, args, expect, within, wait_after)
 
 

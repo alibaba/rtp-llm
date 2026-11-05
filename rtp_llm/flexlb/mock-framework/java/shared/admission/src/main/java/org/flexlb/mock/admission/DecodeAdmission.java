@@ -16,15 +16,17 @@ final class DecodeAdmission implements AutoCloseable {
     private final AdmissionConfig config;
     private final EngineLoop engine;
     private final Object executionLock;
+    private final Runnable recordCancellation;
     private final ExecutorService transport = Executors.newVirtualThreadPerTaskExecutor();
-    private final KvTransfer transfer = new KvTransfer();
+    private final SimulatedKvLoad transfer = new SimulatedKvLoad();
     private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
     private boolean closed;
 
-    DecodeAdmission(AdmissionConfig config, Object executionLock, EngineLoop engine) {
+    DecodeAdmission(AdmissionConfig config, Object executionLock, EngineLoop engine, Runnable recordCancellation) {
         this.config = config;
         this.executionLock = executionLock;
         this.engine = engine;
+        this.recordCancellation = recordCancellation;
     }
 
     StreamObserver<GenerateRequestPB> open(StreamObserver<GenerateOutputsPB> observer) {
@@ -41,7 +43,7 @@ final class DecodeAdmission implements AutoCloseable {
         Scheduler.Request request;
         volatile boolean terminal;
         Stage stage = Stage.ALLOCATING;
-        KvTransfer.Execution transfer;
+        SimulatedKvLoad.Execution transfer;
         int token;
 
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
@@ -150,11 +152,11 @@ final class DecodeAdmission implements AutoCloseable {
         } catch (RuntimeException error) { use.close(); throw error; }
     }
 
-    private void loaded(Call call, KvTransfer.Outcome outcome) {
+    private void loaded(Call call, SimulatedKvLoad.Outcome outcome) {
         synchronized (executionLock) {
             if (!live(call)) return;
-            var failure = outcome.state() == KvTransfer.State.COMPLETED ? null : new RequestFailure(
-                outcome.state() == KvTransfer.State.CANCELLED ? RequestFailure.Reason.CANCELLED : RequestFailure.Reason.INTERNAL,
+            var failure = outcome.state() == SimulatedKvLoad.State.COMPLETED ? null : new RequestFailure(
+                outcome.state() == SimulatedKvLoad.State.CANCELLED ? RequestFailure.Reason.CANCELLED : RequestFailure.Reason.INTERNAL,
                 "KV transfer " + outcome.state(), outcome.error());
             try {
                 engine.transferCompleted(call.request, new TransferResult(false, failure));
@@ -198,6 +200,7 @@ final class DecodeAdmission implements AutoCloseable {
         synchronized (executionLock) {
             if (call.terminal) return;
             call.terminal = true;
+            if (status.getCode() == Status.Code.CANCELLED) recordCancellation.run();
             if (call.transfer != null) call.transfer.cancel();
             call.delivery.finish(status.isOk() ? null : RpcErrors.failure(status, code));
         }

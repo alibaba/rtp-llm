@@ -14,9 +14,9 @@ import com.github.luben.zstd.ZstdCompressCtx;
 
 class RequestFilesTest {
     @TempDir Path directory;
-    Start filePlan(Path file) { return new Start(null, file.toString(), 1000000000.0, null, 3, 4, 1000, 1000); }
+    Start filePlan(Path file) { return new Start(null, file.toString(), 1000000000.0, null, 3, 4, 1000, 1000, false); }
     static Shard shard(ReplayInput.Part part, int index, int stride) {
-        return new Shard(1, null, part.path(), part.count(), index, stride, 100, part.sha256(), 1000000000.0, null, 1, 4, 1000, 1000);
+        return new Shard(1, null, part.path(), part.count(), index, stride, 100, part.sha256(), 1000000000.0, null, 1, 4, 1000, 1000, false);
     }
     static byte[] frame(InputChunk chunk) throws Exception {
         try (var compressor = new ZstdCompressCtx().setLevel(3).setContentSize(true).setChecksum(true);
@@ -47,11 +47,11 @@ class RequestFilesTest {
     @Test void replayKeepsGlobalArrivalOffsetsAcrossShardsAndAppliesSpeedOnce() throws Exception {
         var file = InputFixture.write(directory.resolve("timed.binpb.zst"), java.util.stream.IntStream.range(0, 6)
             .mapToObj(i -> InputFixture.request().toBuilder().setArrivalOffsetMs(i * 100L).build()).toList());
-        var plan = new Start(null, file.toString(), null, 5.0, 3, 4, 1000, 1000);
+        var plan = new Start(null, file.toString(), null, 5.0, 3, 4, 1000, 1000, false);
         var parts = ReplayInput.split(plan, directory.resolve("timed-shards"), 3, () -> false);
         for (int i = 0; i < 3; i++) {
             var part = parts.get(i);
-            var replay = new Shard(1, null, part.path(), part.count(), i, 3, 100, part.sha256(), null, 5.0, 1, 4, 1000, 1000);
+            var replay = new Shard(1, null, part.path(), part.count(), i, 3, 100, part.sha256(), null, 5.0, 1, 4, 1000, 1000, false);
             LoadClient.play(replay, System.nanoTime() - TimeUnit.SECONDS.toNanos(1), item -> {
                 assertEquals(item.index() * 100, item.input().getArrivalOffsetMs());
                 assertEquals(item.index() * 20_000_000L, assertDoesNotThrow(() -> ReplayInput.delayNanos(item.index(), item.input(), null, 5.0)));
@@ -70,12 +70,12 @@ class RequestFilesTest {
             }
             InputFixture.write(file, inputs);
             var target = directory.resolve(UUID.randomUUID().toString());
-            assertThrows(IOException.class, () -> ReplayInput.split(new Start(null, file.toString(), null, 1.0, 1, 1, 1000, 1000), target, 1, () -> false));
+            assertThrows(IOException.class, () -> ReplayInput.split(new Start(null, file.toString(), null, 1.0, 1, 1, 1000, 1000, false), target, 1, () -> false));
             assertFalse(Files.exists(target.resolve("0.binpb.zst")));
         }
-        assertThrows(IllegalArgumentException.class, () -> new Start(null, "/input", null, null, 1, 1, 1000, 1000));
-        assertThrows(IllegalArgumentException.class, () -> new Start(null, "/input", 1.0, 1.0, 1, 1, 1000, 1000));
-        assertThrows(IllegalArgumentException.class, () -> new Start(null, "/input", null, Double.NaN, 1, 1, 1000, 1000));
+        assertThrows(IllegalArgumentException.class, () -> new Start(null, "/input", null, null, 1, 1, 1000, 1000, false));
+        assertThrows(IllegalArgumentException.class, () -> new Start(null, "/input", 1.0, 1.0, 1, 1, 1000, 1000, false));
+        assertThrows(IllegalArgumentException.class, () -> new Start(null, "/input", null, Double.NaN, 1, 1, 1000, 1000, false));
     }
     @Test void invalidRequestsAndJsonInputAreRejected() throws Exception {
         var valid = InputFixture.request();
@@ -126,7 +126,7 @@ class RequestFilesTest {
     @Test void stoppedPreparationAndOverlongPlaybackNeverPublish() throws Exception {
         var file = InputFixture.write(directory.resolve("input.binpb.zst"), List.of(InputFixture.request()));
         assertThrows(InterruptedIOException.class, () -> ReplayInput.split(filePlan(file), directory.resolve("stop"), 1, () -> true));
-        var plan = new Start(null, file.toString(), 0.000001, null, 1, 1, 1000, 1000);
+        var plan = new Start(null, file.toString(), 0.000001, null, 1, 1, 1000, 1000, false);
         assertThrows(IOException.class, () -> ReplayInput.split(plan, directory.resolve("slow"), 1, () -> false));
         assertFalse(Files.exists(directory.resolve("slow/0.binpb.zst")));
     }
@@ -155,7 +155,7 @@ class RequestFilesTest {
         } finally { process.destroyForcibly(); process.waitFor(); }
     }
     public static void main(String[] args) throws Exception {
-        var plan = new Start(null, args[0], 1000000000.0, null, 1, 1, 1000, 1000);
+        var plan = new Start(null, args[0], 1000000000.0, null, 1, 1, 1000, 1000, false);
         var parts = ReplayInput.split(plan, Path.of(args[1]), 1, () -> false);
         var count = new AtomicLong();
         LoadClient.play(shard(parts.getFirst(), 0, 1), System.nanoTime(), item -> count.incrementAndGet());

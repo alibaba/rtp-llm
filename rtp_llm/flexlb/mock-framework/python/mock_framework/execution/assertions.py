@@ -8,9 +8,9 @@ def compare(actual, expected):
         elif operator == 'count':
             good = len(actual) == target
         elif operator == 'gte':
-            good = actual >= target
+            good = bool(actual) and all(v >= target for v in actual) if isinstance(actual, list) else actual >= target
         else:
-            good = actual <= target
+            good = bool(actual) and all(v <= target for v in actual) if isinstance(actual, list) else actual <= target
         if not good:
             return False
     return True

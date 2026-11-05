@@ -9,12 +9,12 @@ import static org.flexlb.mock.engine.RequestFailure.Reason.*;
 /**
  * Explicit-group admission, isolated from ordinary FIFO scheduling.
  */
-final class RtpGroupScheduler extends RtpSchedulerBase {
+final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
     private final ArrayDeque<ArrayDeque<Entry>> groups = new ArrayDeque<>();
     private final Map<Entry, ArrayDeque<Entry>> memberships = new IdentityHashMap<>();
     private boolean preferGroup;
 
-    RtpGroupScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory history) { super(lock, config, cache, history); }
+    RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory history) { super(lock, config, cache, history); }
 
     @Override public List<InputResult> input(List<InputItem> batch) {
         if (closed) throw new RequestFailure(CLOSED, "Engine is closing");

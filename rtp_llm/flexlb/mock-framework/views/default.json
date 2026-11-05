@@ -1381,7 +1381,7 @@
         {
           "id": 100159,
           "type": "timeseries",
-          "title": "gather model input rt · 待埋点",
+          "title": "ForwardBatch 输入准备耗时（Mock）",
           "gridPos": {
             "x": 0,
             "y": 83,
@@ -1395,7 +1395,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_gather_model_input_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "avg by(${prefill_group})(mock_forward_batch_prepare_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -1444,7 +1444,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 159。",
+          "description": "Mock 构造本轮 ForwardBatch 的实际耗时，单位 µs。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -1681,7 +1681,7 @@
         {
           "id": 100162,
           "type": "timeseries",
-          "title": "framework cancel qps · 待埋点",
+          "title": "framework cancel qps",
           "gridPos": {
             "x": 0,
             "y": 101,
@@ -1744,7 +1744,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 162。",
+          "description": "以 CANCELLED 结束的 Mock 生成 RPC，每秒请求数。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -5073,6 +5073,156 @@
             }
           },
           "description": ""
+        },
+        {
+          "id": 100225,
+          "type": "timeseries",
+          "title": "streaming qps",
+          "gridPos": {
+            "x": 0,
+            "y": 308,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${prefill_group})(rtp_llm_is_streaming_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "legendFormat": "{{${prefill_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "按请求的 is_streaming 标志统计已结束的 Worker 请求。",
+          "links": [
+            {
+              "title": "RTP-LLM 原面板",
+              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=225",
+              "targetBlank": true
+            }
+          ]
+        },
+        {
+          "id": 100236,
+          "type": "timeseries",
+          "title": "not streaming qps",
+          "gridPos": {
+            "x": 12,
+            "y": 308,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${prefill_group})(rtp_llm_not_streaming_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "legendFormat": "{{${prefill_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "按请求的 is_streaming 标志统计已结束的 Worker 请求。",
+          "links": [
+            {
+              "title": "RTP-LLM 原面板",
+              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=236",
+              "targetBlank": true
+            }
+          ]
         }
       ],
       "gridPos": {
@@ -6080,7 +6230,7 @@
         {
           "id": 110035,
           "type": "timeseries",
-          "title": "Prefill 理论命中/总输入数量 · 待埋点",
+          "title": "Prefill 理论命中 / 总输入（token/s）",
           "gridPos": {
             "x": 0,
             "y": 373,
@@ -6094,7 +6244,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${prefill_group})(rtp_llm_prefill_worker_recent_cache_key_hit_count{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_prefill_worker_recent_cache_key_hit_count_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))",
               "legendFormat": "Prefill · hit-count · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -6103,7 +6253,7 @@
             },
             {
               "refId": "B",
-              "expr": "sum by(${prefill_group})(rtp_llm_prefill_worker_recent_cache_key_total_count{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_prefill_worker_recent_cache_key_total_count_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))",
               "legendFormat": "Prefill · total-count · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -6152,7 +6302,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 10035。",
+          "description": "近 30 分钟内本 Worker 曾见的完整缓存键折算为理论命中 token。总数包含完整输入。曲线显示统计窗口内的 token/s。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -6164,7 +6314,7 @@
         {
           "id": 100143,
           "type": "timeseries",
-          "title": "kv cache item num · 待埋点",
+          "title": "kv cache item num",
           "gridPos": {
             "x": 12,
             "y": 373,
@@ -6227,7 +6377,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。kv cache item num 参考 RTP-LLM 大盘 v514 / panel 143。",
+          "description": "本机 KV 前缀树当前索引的块数，包括仍被请求引用的缓存块。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -6923,7 +7073,7 @@
         {
           "id": 100222,
           "type": "timeseries",
-          "title": "match_cost_time · 待埋点",
+          "title": "match_cost_time",
           "gridPos": {
             "x": 0,
             "y": 436,
@@ -6986,7 +7136,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。match_cost_time 参考 RTP-LLM 大盘 v514 / panel 222。",
+          "description": "启用本地复用时，成功分配请求的前缀树匹配耗时，单位 µs。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -7148,7 +7298,7 @@
         {
           "id": 110086,
           "type": "timeseries",
-          "title": "evicted block lifetime · 待埋点",
+          "title": "evicted block lifetime",
           "gridPos": {
             "x": 12,
             "y": 445,
@@ -7211,11 +7361,236 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC 728359：被选中淘汰时刻−进入当前 tier 的时刻，单位 ms。按 tier、group_type、trigger_type 展示；trigger_type 为 watermark 或 force_drop。不再提供 target_tier。包括依赖裁剪、级联删除及搬运中被裁剪的源资源；已选中降层的源资源沿用原选择时刻，避免把排队/搬运耗时算入并避免重复上报。 参考 RTP-LLM 大盘 v514 / panel 10086。",
+          "description": "容量不足淘汰设备缓存块时，从进入缓存索引到被淘汰的时长，单位 ms。没有淘汰时没有样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
               "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=10086",
+              "targetBlank": true
+            }
+          ]
+        },
+        {
+          "id": 111049,
+          "type": "timeseries",
+          "title": "Worker 实际缓存命中率（token 加权）",
+          "gridPos": {
+            "x": 0,
+            "y": 472,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_kv_cache_reuse_length_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_input_token_length_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
+              "legendFormat": "{{${prefill_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "Prefill 请求终态的复用 token 总量除以输入 token 总量。",
+          "links": [
+            {
+              "title": "RTP-LLM 原面板",
+              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=10149",
+              "targetBlank": true
+            }
+          ]
+        },
+        {
+          "id": 110033,
+          "type": "timeseries",
+          "title": "Prefill 30min 理论命中率",
+          "gridPos": {
+            "x": 12,
+            "y": 472,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_prefill_worker_recent_cache_key_hit_count_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_prefill_worker_recent_cache_key_total_count_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
+              "legendFormat": "{{${prefill_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "按 Worker 的近 30 分钟键历史统计理论命中。",
+          "links": [
+            {
+              "title": "RTP-LLM 原面板",
+              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=10033",
+              "targetBlank": true
+            }
+          ]
+        },
+        {
+          "id": 111050,
+          "type": "timeseries",
+          "title": "Worker 实际/近30分钟理论命中率",
+          "gridPos": {
+            "x": 0,
+            "y": 481,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "((sum by(${prefill_group})(rate(rtp_llm_kv_cache_reuse_length_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_input_token_length_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)) / ((sum by(${prefill_group})(rate(rtp_llm_prefill_worker_recent_cache_key_hit_count_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_prefill_worker_recent_cache_key_total_count_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0) > 0)",
+              "legendFormat": "{{${prefill_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "实际复用率除以 Worker 近期理论命中率。理论值为零时无有效比值。",
+          "links": [
+            {
+              "title": "RTP-LLM 原面板",
+              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=10150",
               "targetBlank": true
             }
           ]
@@ -8726,7 +9101,7 @@
         {
           "id": 200159,
           "type": "timeseries",
-          "title": "gather model input rt · 待埋点",
+          "title": "ForwardBatch 输入准备耗时（Mock）",
           "gridPos": {
             "x": 0,
             "y": 701,
@@ -8740,7 +9115,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_gather_model_input_us{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "avg by(${decode_group})(mock_forward_batch_prepare_us{instance=~\"${decode_instance}\",role=\"decode\"})",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -8789,7 +9164,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 159。",
+          "description": "Mock 构造本轮 ForwardBatch 的实际耗时，单位 µs。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -9026,7 +9401,7 @@
         {
           "id": 200162,
           "type": "timeseries",
-          "title": "framework cancel qps · 待埋点",
+          "title": "framework cancel qps",
           "gridPos": {
             "x": 0,
             "y": 719,
@@ -9089,7 +9464,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 162。",
+          "description": "以 CANCELLED 结束的 Mock 生成 RPC，每秒请求数。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -12202,6 +12577,156 @@
               "targetBlank": true
             }
           ]
+        },
+        {
+          "id": 200225,
+          "type": "timeseries",
+          "title": "streaming qps",
+          "gridPos": {
+            "x": 0,
+            "y": 962,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${decode_group})(rtp_llm_is_streaming_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "legendFormat": "{{${decode_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "按请求的 is_streaming 标志统计已结束的 Worker 请求。",
+          "links": [
+            {
+              "title": "RTP-LLM 原面板",
+              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=225",
+              "targetBlank": true
+            }
+          ]
+        },
+        {
+          "id": 200236,
+          "type": "timeseries",
+          "title": "not streaming qps",
+          "gridPos": {
+            "x": 12,
+            "y": 962,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by(${decode_group})(rtp_llm_not_streaming_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "legendFormat": "{{${decode_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "按请求的 is_streaming 标志统计已结束的 Worker 请求。",
+          "links": [
+            {
+              "title": "RTP-LLM 原面板",
+              "url": "https://grafana.alibaba-inc.com/d/iZ5Q_81nz?viewPanel=236",
+              "targetBlank": true
+            }
+          ]
         }
       ],
       "gridPos": {
@@ -12909,7 +13434,7 @@
         {
           "id": 200143,
           "type": "timeseries",
-          "title": "kv cache item num · 待埋点",
+          "title": "kv cache item num",
           "gridPos": {
             "x": 0,
             "y": 973,
@@ -12972,7 +13497,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。kv cache item num 参考 RTP-LLM 大盘 v514 / panel 143。",
+          "description": "本机 KV 前缀树当前索引的块数，包括仍被请求引用的缓存块。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13518,7 +14043,7 @@
         {
           "id": 200222,
           "type": "timeseries",
-          "title": "match_cost_time · 待埋点",
+          "title": "match_cost_time",
           "gridPos": {
             "x": 0,
             "y": 1009,
@@ -13581,7 +14106,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。match_cost_time 参考 RTP-LLM 大盘 v514 / panel 222。",
+          "description": "启用本地复用时，成功分配请求的前缀树匹配耗时，单位 µs。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -13743,7 +14268,7 @@
         {
           "id": 210086,
           "type": "timeseries",
-          "title": "evicted block lifetime · 待埋点",
+          "title": "evicted block lifetime",
           "gridPos": {
             "x": 12,
             "y": 1018,
@@ -13806,7 +14331,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。BTC 728359：被选中淘汰时刻−进入当前 tier 的时刻，单位 ms。按 tier、group_type、trigger_type 展示；trigger_type 为 watermark 或 force_drop。不再提供 target_tier。包括依赖裁剪、级联删除及搬运中被裁剪的源资源；已选中降层的源资源沿用原选择时刻，避免把排队/搬运耗时算入并避免重复上报。 参考 RTP-LLM 大盘 v514 / panel 10086。",
+          "description": "容量不足淘汰设备缓存块时，从进入缓存索引到被淘汰的时长，单位 ms。没有淘汰时没有样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -23152,7 +23677,7 @@
         {
           "id": 409201,
           "type": "timeseries",
-          "title": "Worker 实际收到多少 Status / Cache 查询 · 待埋点",
+          "title": "Worker 实际收到多少 Status / Cache 查询",
           "gridPos": {
             "x": 0,
             "y": 1712,
@@ -23167,7 +23692,7 @@
             {
               "refId": "A_prefill",
               "expr": "sum by(${prefill_group})(rtp_llm_rpc_worker_status_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · Worker 收到 Status 查询/秒 | 部署角色= · {{${prefill_group}}}",
+              "legendFormat": "Prefill · Worker 收到 Status 查询/秒 · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23176,7 +23701,7 @@
             {
               "refId": "A_decode",
               "expr": "sum by(${decode_group})(rtp_llm_rpc_worker_status_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · Worker 收到 Status 查询/秒 | 部署角色= · {{${decode_group}}}",
+              "legendFormat": "Decode · Worker 收到 Status 查询/秒 · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23185,7 +23710,7 @@
             {
               "refId": "B_prefill",
               "expr": "sum by(${prefill_group})(rtp_llm_rpc_cache_status_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · Worker 收到 Cache 查询/秒 | 部署角色= · {{${prefill_group}}}",
+              "legendFormat": "Prefill · Worker 收到 Cache 查询/秒 · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23194,7 +23719,7 @@
             {
               "refId": "B_decode",
               "expr": "sum by(${decode_group})(rtp_llm_rpc_cache_status_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · Worker 收到 Cache 查询/秒 | 部署角色= · {{${decode_group}}}",
+              "legendFormat": "Decode · Worker 收到 Cache 查询/秒 · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23242,7 +23767,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 9201。",
+          "description": "P/D Worker 服务端实际处理的 GetWorkerStatus 和 GetCacheStatus 请求速率。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -23254,7 +23779,7 @@
         {
           "id": 409202,
           "type": "timeseries",
-          "title": "Worker 服务端处理查询多久：平均 / 最大 · 待埋点",
+          "title": "Worker 服务端处理查询多久：平均 / 最大",
           "gridPos": {
             "x": 12,
             "y": 1712,
@@ -23269,7 +23794,7 @@
             {
               "refId": "A_prefill",
               "expr": "avg by(${prefill_group})(rtp_llm_rpc_worker_status_total_rt_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · Status 服务端处理·平均 | 部署角色= · {{${prefill_group}}}",
+              "legendFormat": "Prefill · Status 服务端处理·平均 · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23278,7 +23803,7 @@
             {
               "refId": "A_decode",
               "expr": "avg by(${decode_group})(rtp_llm_rpc_worker_status_total_rt_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · Status 服务端处理·平均 | 部署角色= · {{${decode_group}}}",
+              "legendFormat": "Decode · Status 服务端处理·平均 · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23287,7 +23812,7 @@
             {
               "refId": "B_prefill",
               "expr": "max by(${prefill_group})(rtp_llm_rpc_worker_status_total_rt_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · Status 服务端处理·最大 | 部署角色= · {{${prefill_group}}}",
+              "legendFormat": "Prefill · Status 服务端处理·最大 · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23296,7 +23821,7 @@
             {
               "refId": "B_decode",
               "expr": "max by(${decode_group})(rtp_llm_rpc_worker_status_total_rt_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · Status 服务端处理·最大 | 部署角色= · {{${decode_group}}}",
+              "legendFormat": "Decode · Status 服务端处理·最大 · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23305,7 +23830,7 @@
             {
               "refId": "C_prefill",
               "expr": "avg by(${prefill_group})(rtp_llm_rpc_cache_status_total_rt_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · Cache 服务端处理·平均 | 部署角色= · {{${prefill_group}}}",
+              "legendFormat": "Prefill · Cache 服务端处理·平均 · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23314,7 +23839,7 @@
             {
               "refId": "C_decode",
               "expr": "avg by(${decode_group})(rtp_llm_rpc_cache_status_total_rt_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · Cache 服务端处理·平均 | 部署角色= · {{${decode_group}}}",
+              "legendFormat": "Decode · Cache 服务端处理·平均 · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23323,7 +23848,7 @@
             {
               "refId": "D_prefill",
               "expr": "max by(${prefill_group})(rtp_llm_rpc_cache_status_total_rt_us{instance=~\"${prefill_instance}\",role=\"prefill\"})",
-              "legendFormat": "Prefill · Cache 服务端处理·最大 | 部署角色= · {{${prefill_group}}}",
+              "legendFormat": "Prefill · Cache 服务端处理·最大 · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23332,7 +23857,7 @@
             {
               "refId": "D_decode",
               "expr": "max by(${decode_group})(rtp_llm_rpc_cache_status_total_rt_us{instance=~\"${decode_instance}\",role=\"decode\"})",
-              "legendFormat": "Decode · Cache 服务端处理·最大 | 部署角色= · {{${decode_group}}}",
+              "legendFormat": "Decode · Cache 服务端处理·最大 · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -23380,7 +23905,7 @@
               ]
             }
           },
-          "description": "当前新 Mock 框架尚未导出这些观测；无数据不代表零。 参考 RTP-LLM 大盘 v514 / panel 9202。",
+          "description": "P/D Worker 服务端处理 GetWorkerStatus 和 GetCacheStatus 的耗时，单位 µs。最大值为所选 Worker 的采样均值最大值。",
           "links": [
             {
               "title": "RTP-LLM 原面板",

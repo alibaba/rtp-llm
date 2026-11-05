@@ -48,12 +48,17 @@ final class RtpMetrics {
     private final Object observations = new Object();
     private final LongSupplier clock;
     private final boolean prefill;
+    private static final long RECENT_CACHE_WINDOW_NANOS = java.util.concurrent.TimeUnit.MINUTES.toNanos(30);
+    private final LinkedHashMap<Long, Long> recentCacheKeys = new LinkedHashMap<>();
     private long windowStarted, windowInput, windowComputed, windowTpsTokens, windowTpsNanos, windowComputeNanos, windowInputNanos;
     private double lastFinished, lastErrors, lastCancelled;
 
     public RtpMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime); }
 
     RtpMetrics(String role, Supplier<State> state, LongSupplier clock) {
+        this(role, state, clock, () -> 0);
+    }
+    RtpMetrics(String role, Supplier<State> state, LongSupplier clock, java.util.function.IntSupplier cacheItems) {
         if (role == null || role.isBlank()) throw new IllegalArgumentException("Metric role must not be blank");
         Objects.requireNonNull(state);
         this.clock = Objects.requireNonNull(clock);
@@ -98,6 +103,7 @@ final class RtpMetrics {
                 kv.addMetric(List.of(role, "held"), value.heldTokens());
                 var result = new ArrayList<MetricFamilySamples>();
                 result.addAll(List.of(tasks, kv));
+                result.add(gauge("rtp_llm_kv_cache_item_num", "Indexed KV blocks.", role, cacheItems.getAsInt()));
                 result.add(gauge("rtp_llm_wait_stream_size", "Waiting scheduler requests.", role, value.waiting()));
                 result.add(gauge("rtp_llm_running_stream_size", "Running scheduler requests.", role, value.running()));
                 result.add(gauge("rtp_llm_kv_cache_left_seq", "Available Device KV token capacity.", role, value.availableTokens()));
@@ -165,7 +171,7 @@ final class RtpMetrics {
     }
     public void started() { started.inc(); }
 
-    void requestFinished(Outcome outcome, RequestStats stats) {
+    void requestFinished(Outcome outcome, RequestStats stats, boolean reportCacheReuse) {
         // Real emits stream timings for success, cancellation and timeout, not arbitrary internal errors.
         if (outcome != Outcome.error) {
             events.observe("rtp_llm_latency_us", stats.elapsedNanos() / 1000.0);
@@ -174,6 +180,7 @@ final class RtpMetrics {
             positiveMicros("rtp_llm_stream_canrun_to_running_us", stats.canRunToRunningNanos());
             if (stats.firstTokenNanos() >= 0) events.observe("rtp_llm_first_token_latency_us", stats.firstTokenNanos() / 1000.0);
             events.observe("rtp_llm_input_token_length", stats.inputTokens());
+            if (reportCacheReuse) events.observe("rtp_llm_kv_cache_reuse_length", stats.reusedTokens());
             events.observe("rtp_llm_output_token_length", stats.outputTokens());
             events.observe("rtp_llm_iterate_count", stats.iterations());
             events.observe("rtp_llm_reuse_length", stats.reusedTokens());
@@ -189,9 +196,28 @@ final class RtpMetrics {
         if (input < 0 || reused < 0 || reused > input) throw new IllegalArgumentException("Invalid cache observation");
         cacheInputs.inc(input); cacheHits.inc(reused);
     }
+    void recordPrefillCacheKeys(List<Long> keys, int inputTokens, int blockSize) {
+        long now = clock.getAsLong();
+        while (!recentCacheKeys.isEmpty() && now - recentCacheKeys.firstEntry().getValue() >= RECENT_CACHE_WINDOW_NANOS)
+            recentCacheKeys.pollFirstEntry();
+        long hitTokens = 0;
+        for (long key : keys) if (recentCacheKeys.containsKey(key)) hitTokens += blockSize;
+        for (long key : keys) recentCacheKeys.putLast(key, now);
+        events.observe("rtp_llm_prefill_worker_recent_cache_key_hit_count", Math.min(hitTokens, inputTokens));
+        events.observe("rtp_llm_prefill_worker_recent_cache_key_total_count", inputTokens);
+    }
+    void cacheMatched(long nanos) { events.observe("rtp_llm_match_cost_time_us", nanos / 1000.0); }
+    void blockEvicted(long nanos) {
+        events.observe("rtp_llm_kv_cache_evicted_block_lifetime_ms", nanos / 1_000_000.0,
+            Map.of("tier", "DEVICE", "trigger_type", "force_drop", "group_type", "full"));
+    }
+    void batchPrepared(long nanos) { events.observe("mock_forward_batch_prepare_us", nanos / 1000.0); }
+    void streamingFinished(boolean streaming) {
+        events.increment(streaming ? "rtp_llm_is_streaming_qps" : "rtp_llm_not_streaming_qps");
+    }
+
     void cacheReuse(long input, long reused) {
         events.observe("rtp_llm_device_input_length", input);
-        events.observe("rtp_llm_kv_cache_reuse_length", reused);
         events.observe("rtp_llm_stream_cache_device_reuse_length", reused);
     }
     private void recordBatch(int context, int generate, long tokens, long maxSequence) {

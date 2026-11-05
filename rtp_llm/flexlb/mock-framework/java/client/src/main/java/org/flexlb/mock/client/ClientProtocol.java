@@ -6,14 +6,16 @@ import org.flexlb.mock.api.Argument;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import static org.flexlb.mock.api.Endpoint.Kind.*;
 
-/** Private Client control transport. Python owns the Case API. */
+/**
+ * Private Client control transport. Python owns the Case API.
+ */
 public interface ClientProtocol {
     record Empty() {}
     @JsonInclude(JsonInclude.Include.NON_NULL)
     record Start(@Argument(optional=true) List<String> masters, String requests_file,
                  @Argument(optional=true) Double qps, @Argument(optional=true) Double replay_speed,
                  int concurrency, int queue_capacity,
-                 long request_timeout_ms, long drain_timeout_ms) {
+                 long request_timeout_ms, long drain_timeout_ms, @Argument(optional=true) Boolean reuse_cache) {
         public Start {
             if (requests_file == null || requests_file.isBlank() || !java.nio.file.Path.of(requests_file).isAbsolute())
                 throw new IllegalArgumentException("requests_file must be an absolute local path");
@@ -35,9 +37,9 @@ public interface ClientProtocol {
     record Shard(long sequence, @Argument(optional=true) List<String> masters, String requests_file,
                  long count, long first_index, int stride, long first_request_id, String sha256,
                  @Argument(optional=true) Double qps, @Argument(optional=true) Double replay_speed,
-                 int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms) {
+                 int concurrency, int queue_capacity, long request_timeout_ms, long drain_timeout_ms, @Argument(optional=true) Boolean reuse_cache) {
         public Shard {
-            new Start(masters, requests_file, qps, replay_speed, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms);
+            new Start(masters, requests_file, qps, replay_speed, concurrency, queue_capacity, request_timeout_ms, drain_timeout_ms, reuse_cache);
             masters = masters == null ? null : List.copyOf(masters);
             if (sequence < 1 || count < 1 || first_index < 0 || stride < 1 || first_index >= stride || first_request_id < 1
                     || sha256 == null || !sha256.matches("[0-9a-f]{64}"))

@@ -5,8 +5,10 @@ import org.flexlb.mock.engine.RequestState;
 import java.util.*;
 import java.util.concurrent.*;
 
-/** Asynchronous zero-time KV transfer model. Resource use lasts until execution quiesces. */
-final class KvTransfer implements AutoCloseable {
+/**
+ * Asynchronous zero-time KV transfer model. Resource use lasts until execution quiesces.
+ */
+final class SimulatedKvLoad implements AutoCloseable {
     public enum State { COMPLETED, CANCELLED, FAILED }
     public record Outcome(State state, RuntimeException error) {}
     private final Object lock = new Object();
@@ -38,7 +40,9 @@ final class KvTransfer implements AutoCloseable {
         }
     }
 
-    /** Ownership transfers only on a successful return. The zero-time model executes asynchronously. */
+    /**
+     * Ownership transfers only on a successful return. The zero-time model executes asynchronously.
+     */
     public Execution submit(RequestState.Use use) {
         Objects.requireNonNull(use);
         synchronized (lock) {

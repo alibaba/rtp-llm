@@ -74,3 +74,5 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 新增事件 Gauge 用采集窗口均值而非只保留最后一个事件；无事件时不发耗时样本。`_sum` / `_count` 为本地累计查询辅助量。QPS 按实际窗口秒数换算，空闲为零。它们与 KMonitor 的固定上报周期并非逐点相同；共享 JVM 不能导出可信的单 Engine CPU/堆/GPU 利用率，资源面板继续留空。
 
 P/D KV 仅模拟本地 Full-KV 池和 LRU。大盘删除 Host 容量、Memory KVCache、Disk/Remote 复用和远程 connector 引用面板；保留本地容量、请求引用和前缀复用观测。ViT 的 CPU/GPU embedding 缓存不属于 P/D KV，保留原有面板。
+
+Worker 新增 Status/Cache RPC 请求率与处理耗时、本地缓存条目/匹配/淘汰寿命、streaming 请求终态和 ForwardBatch 输入准备耗时。Prefill 的 30 分钟理论 cache key 重叠与实际复用分开展示，理论重叠不代表本地仍持有 KV。查询继续使用 P/D/V 独立选择器与默认聚合。

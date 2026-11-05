@@ -1,7 +1,9 @@
 package org.flexlb.mock.engine.rtp;
 
 import static org.junit.jupiter.api.Assertions.*;
+import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.flexlb.mock.engine.rtp.RtpMetrics.StepStats;
@@ -39,8 +41,8 @@ class RtpMetricsTest {
         metrics.cacheReuse(100, 60);
         metrics.stepCompleted(new StepStats(0, 0, 0, 20_000_000, 20_000_000, 20_000_000, 1000, 100, 40, 1, 0, 0, 0, 0));
         metrics.stepCompleted(new StepStats(0, 0, 0, 10_000_000, 10_000_000, 10_000_000, 1000, 10, 10, 1, 0, 0, 0, 0));
-        metrics.requestFinished(RtpMetrics.Outcome.success, REQUEST);
-        metrics.requestFinished(RtpMetrics.Outcome.timeout, REQUEST);
+        metrics.requestFinished(RtpMetrics.Outcome.success, REQUEST, true);
+        metrics.requestFinished(RtpMetrics.Outcome.timeout, REQUEST, true);
         var text = metrics.scrape();
         assertEquals(110, sample(text, "rtp_llm_cache_lookup_tokens_total", ""));
         assertEquals(60, sample(text, "rtp_llm_cache_hit_tokens_total", ""));
@@ -124,8 +126,8 @@ class RtpMetricsTest {
         metrics.started(); metrics.started(); metrics.started();
         metrics.stepCompleted(new StepStats(0, 0, 0, 20_000_000, 20_000_000, 20_000_000, 1000, 100, 40, 1, 0, 0, 0, 0));
         metrics.stepCompleted(new StepStats(0, 0, 0, 10_000_000, 10_000_000, 10_000_000, 1000, 10, 10, 1, 0, 0, 0, 0));
-        metrics.requestFinished(RtpMetrics.Outcome.success, REQUEST);
-        metrics.requestFinished(RtpMetrics.Outcome.timeout, REQUEST);
+        metrics.requestFinished(RtpMetrics.Outcome.success, REQUEST, true);
+        metrics.requestFinished(RtpMetrics.Outcome.timeout, REQUEST, true);
         clock.set(1_000_000_000);
         var text = metrics.scrape();
         assertFalse(text.contains("rtp_llm_generate_tps"));
@@ -151,12 +153,12 @@ class RtpMetricsTest {
 
     @Test void requestFinishRecordsTimingsOnlyForNativeStreamOutcomes() {
         var metrics = new RtpMetrics("decode", () -> IDLE);
-        metrics.requestFinished(RtpMetrics.Outcome.error, REQUEST);
+        metrics.requestFinished(RtpMetrics.Outcome.error, REQUEST, true);
         var error = metrics.scrape();
         assertEquals(1, sample(error, "rtp_llm_framework_requests_total", "outcome=\"error\""));
         assertFalse(error.contains("rtp_llm_latency_us{"));
 
-        metrics.requestFinished(RtpMetrics.Outcome.cancelled, REQUEST);
+        metrics.requestFinished(RtpMetrics.Outcome.cancelled, REQUEST, true);
         var cancelled = metrics.scrape();
         assertEquals(1, sample(cancelled, "rtp_llm_framework_requests_total", "outcome=\"cancelled\""));
         assertEquals(20, sample(cancelled, "rtp_llm_latency_us", ""));
@@ -211,7 +213,7 @@ class RtpMetricsTest {
             for (int thread = 0; thread < 8; thread++) writes.add(threads.submit(() -> {
                 for (int i = 0; i < 500; i++) {
                     metrics.started(); metrics.cacheLookup(5, 2); metrics.stepCompleted(new StepStats(0, 0, 0, 1000, 1000, 1000, 1000, 5, 3, 1, 0, 0, 0, 0));
-                    metrics.requestFinished(RtpMetrics.Outcome.success, REQUEST);
+                    metrics.requestFinished(RtpMetrics.Outcome.success, REQUEST, true);
                     if (i % 50 == 0) assertFalse(metrics.scrape().isEmpty());
                 }
             }));
@@ -223,4 +225,44 @@ class RtpMetricsTest {
         assertEquals(12000, sample(text, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
         assertEquals(4000, sample(text, "rtp_llm_model_forward_seconds_count", ""));
     }
+    @Test void reportsActualReuseAtCompletionWhenEnabled() {
+        var prefill = new RtpMetrics("prefill", () -> IDLE);
+        prefill.cacheReuse(10, 4);
+        assertFalse(prefill.scrape().contains("rtp_llm_kv_cache_reuse_length"));
+        prefill.requestFinished(RtpMetrics.Outcome.success, REQUEST, true);
+        var completed = prefill.scrape();
+        assertEquals(4, sample(completed, "rtp_llm_kv_cache_reuse_length", "role=\"prefill\""));
+        assertEquals(10, sample(completed, "rtp_llm_input_token_length", "role=\"prefill\""));
+
+        var decode = new RtpMetrics("decode", () -> IDLE);
+        decode.cacheReuse(10, 4);
+        decode.requestFinished(RtpMetrics.Outcome.success, REQUEST, true);
+        var decoded = decode.scrape();
+        assertEquals(4, sample(decoded, "rtp_llm_kv_cache_reuse_length", "role=\"decode\""));
+        assertEquals(10, sample(decoded, "rtp_llm_input_token_length", "role=\"decode\""));
+
+        var disabled = new RtpMetrics("decode", () -> IDLE);
+        disabled.requestFinished(RtpMetrics.Outcome.success, REQUEST, false);
+        assertFalse(disabled.scrape().contains("rtp_llm_kv_cache_reuse_length"));
+    }
+
+    @Test void theoryCountsPriorCompleteBlocksAndExpiresOldKeys() {
+        var clock = new AtomicLong();
+        var metrics = new RtpMetrics("prefill", () -> IDLE, clock::get);
+        var hit = "rtp_llm_prefill_worker_recent_cache_key_hit_count";
+        var total = "rtp_llm_prefill_worker_recent_cache_key_total_count";
+        metrics.recordPrefillCacheKeys(List.of(1L, 2L), 10, 4);
+        clock.addAndGet(TimeUnit.MINUTES.toNanos(20));
+        var first = metrics.scrape();
+        assertEquals(0, sample(first, hit, ""));
+        assertEquals(10, sample(first, total, ""));
+
+        metrics.recordPrefillCacheKeys(List.of(1L), 6, 4);
+        clock.addAndGet(TimeUnit.MINUTES.toNanos(11));
+        assertEquals(4, sample(metrics.scrape(), hit, ""));
+        metrics.recordPrefillCacheKeys(List.of(1L, 2L), 10, 4);
+        clock.incrementAndGet();
+        assertEquals(4, sample(metrics.scrape(), hit, ""));
+    }
+
 }

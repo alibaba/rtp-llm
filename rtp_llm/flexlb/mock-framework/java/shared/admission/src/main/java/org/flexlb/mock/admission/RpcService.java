@@ -1,6 +1,13 @@
 package org.flexlb.mock.admission;
 
 import io.grpc.Status;
+import io.prometheus.client.Collector.MetricFamilySamples;
+import io.prometheus.client.CollectorRegistry;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import org.flexlb.mock.metrics.MetricTags;
+import org.flexlb.mock.metrics.WindowMetrics;
 import io.grpc.stub.StreamObserver;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
@@ -14,6 +21,9 @@ import org.flexlb.mock.engine.TaskHistory;
  * Native RPC adapter; P and D owners manage request state and KV independently.
  */
 public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implements AutoCloseable {
+    private final CollectorRegistry rpcRegistry = new CollectorRegistry();
+    private final WindowMetrics rpcMetrics;
+    private final Map<String, String> metricTags;
     private final AdmissionConfig config;
     private final KvCache cache;
     private final PrefillAdmission prefill;
@@ -27,9 +37,14 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
         this.config = config;
         this.groups = groups;
         this.cache = cache;
+        rpcMetrics = new WindowMetrics(config.role().name());
+        rpcMetrics.register(rpcRegistry);
+        var tags = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
+        tags.put("dp_rank", "0");
+        metricTags = Map.copyOf(tags);
         prefill = config.role() == org.flexlb.mock.api.model.Types.Role.prefill
-            ? new PrefillAdmission(config, executionLock, finished, engine) : null;
-        decode = prefill == null ? new DecodeAdmission(config, executionLock, engine) : null;
+            ? new PrefillAdmission(config, executionLock, finished, engine, this::recordCancellation) : null;
+        decode = prefill == null ? new DecodeAdmission(config, executionLock, engine, this::recordCancellation) : null;
     }
 
     public void close() {
@@ -56,7 +71,7 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
 
     @Override public void enqueueBatch(EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
         if (prefill == null || !groups) { super.enqueueBatch(request, response); return; }
-        PrefillBatch.enqueue(prefill, request, response);
+        PrefillEnqueueHandler.enqueue(prefill, request, response);
     }
 
     @Override public void enqueueGroup(EnqueueGroupRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
@@ -67,7 +82,7 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
             if (item.hasInput()) external.setInput(item.getInput());
             slot.addRequests(external);
         }
-        PrefillBatch.enqueue(prefill, EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
+        PrefillEnqueueHandler.enqueue(prefill, EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
             .setFetchAttachTimeoutMs(request.getFetchAttachTimeoutMs()).addDpSlots(slot).build(), response);
     }
 
@@ -91,7 +106,7 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
     }
 
     @Override public void getWorkerStatus(StatusVersionPB request, StreamObserver<WorkerStatusPB> response) {
-        reply(response, () -> {
+        statusReply("worker_status", response, () -> {
             var snapshot = cache.snapshot(request.getLatestCacheVersion(), false);
             String role = config.role().name().toUpperCase(java.util.Locale.ROOT);
             long micros = Math.multiplyExact(System.currentTimeMillis(), 1000);
@@ -110,13 +125,33 @@ public final class RpcService extends RpcServiceGrpc.RpcServiceImplBase implemen
     }
 
     @Override public void getCacheStatus(CacheVersionPB request, StreamObserver<CacheStatusPB> response) {
-        reply(response, () -> {
+        statusReply("cache_status", response, () -> {
             var snapshot = cache.snapshot(request.getLatestCacheVersion(), request.getNeedCacheKeys());
             var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
                 .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.blockSize()).setVersion(snapshot.version());
             snapshot.keys().forEach(key -> result.putCacheKeys(key, true));
             return result.build();
         });
+    }
+
+    private void recordCancellation() {
+        rpcMetrics.increment("rtp_llm_rpc_cancel_qps");
+    }
+
+    public List<MetricFamilySamples> collectMetrics() {
+        return MetricTags.collect(rpcRegistry, metricTags);
+    }
+
+    private <T> void statusReply(String kind, StreamObserver<T> observer, Supplier<T> read) {
+        long started = System.nanoTime();
+        try {
+            reply(observer, read);
+        } finally {
+            synchronized (rpcMetrics) {
+                rpcMetrics.increment("rtp_llm_rpc_" + kind + "_qps");
+                rpcMetrics.observe("rtp_llm_rpc_" + kind + "_total_rt_us", (System.nanoTime() - started) / 1000.0);
+            }
+        }
     }
 
     private long tokens(int blocks) { return (long) blocks * config.blockSize(); }

@@ -55,11 +55,24 @@ phases:
 
 省略 targets 等价于该操作域全部实例；显式空列表、重复地址或未知地址报错。全局发现信息在 step 开始时取值；已保存的 step 返回值保持原样，不跟着发现变化自动改写。Client 控制接口单独约定：start 作用于全部已配置 Client，stop 无参数；指标接口仍可指定 targets。
 
+### ID 命名要求
+
+新增或修改 Case 时，ID 统一使用小写 `snake_case`，并在同一个 Case 中全局唯一。Case ID 描述场景并与目录名一致，例如 `version_regression`；Phase ID 描述阶段，例如 `startup`、`performance`。
+
+Step ID 必须采用“动作 + 对象”，必要时追加统计量或时序条件。启动和停止使用 `start_client`、`stop_client`；读取并保存结果使用 `get_master_a`；带断言的检查使用 `check_master_leader`、`check_prefill_tps`、`check_client_ttft_p95`、`check_client_success_rate_after_drain`。不要只写 `traffic`、`leader`、`drain` 或指标名。ID 用于引用和事件定位，具体参数、阈值与说明放在 args、expect 和 describe 中。重命名时同步更新 Step 引用及 View 的 annotation_steps。
+
+这些是 Case 编写和评审要求；编译器目前只校验标识符格式、唯一性和引用，不强制动作前缀。
+
 ### 查询和断言
 
-普通指标优先使用语义接口，YAML 不写 PromQL。当前支持 `latest` 和相对该 step 固定查询时刻的区间 `[-60s, 0s]`；`client/success_rate` 必须显式提供区间，不接受 latest 或 all，也不隐式切换为整轮累计成功率。其他指标的时间语义保持各自定义；`all` 的跨轮次查询窗口尚未实现，目前拒绝。
+普通指标优先使用语义接口，YAML 不写 PromQL。range 使用相对该 Step 固定查询时刻的区间，例如 `[-60s, 0s]`，不支持 `latest` 或 `all`。省略 range 时默认最近 60 秒；`client/success_rate` 必须显式提供 range，不隐式切换为整轮累计成功率。
 
-`latest` 使用前 60 秒内最近两次样本的 irate；区间使用 increase。执行器固定 `query_time`，指标实现记录实际查询点、表达式和窗口，不重新取墙钟。`expect` 支持 eq、列表 count 或数值 gte/lte。eq 是结构相等，列表顺序参与比较；实例查询返回排序后的地址列表。普通数值直接返回 float，不包装为 `{value, unit}`；单位在接口定义里。逐 Master 状态返回 `{master服务地址: [engine服务地址, ...]}`。
+数值指标的 `mode` 默认为 `interval`，Case 中省略 `mode: interval`，只有逐点检查时才写 `mode: series`：
+
+- `interval` 返回区间汇总数值。吞吐 counter 用区间增量除以时长；命中率、成功率分别汇总分子与分母的增量后相除，不平均比率采样点；延迟均值使用 sum/count 的增量比值，P95/P99 合并 histogram bucket 增量后计算。
+- `series` 返回按采集周期排列的数值列表，gte/lte 要求每一个点都满足。Counter 派生指标每点使用四个采集周期的滚动统计长度，由实现确定，不另配置 lookback 或 step。
+
+执行器固定每个 Step 的 `query_time`，指标实现记录实际查询点、表达式和时间范围，不重新取墙钟。缺点、缺实例、非有限数值或零分母均报错。`expect` 支持 eq、列表 count 或数值 gte/lte。eq 是结构相等，列表顺序参与比较；实例查询返回排序后的地址列表。普通数值返回 float，series 返回数值列表，不包装为 `{value, unit}`；单位在接口定义里。逐 Master 状态返回 `{master服务地址: [engine服务地址, ...]}`。
 
 原始 `prometheus/query` 只接受 promql，在固定 query_time 执行一次 instant query；历史窗口写进表达式。返回 `{samples: [{labels, value, sample_time}], query_time}`，不自动把它压成数值或对全部序列应用同一阈值。空 vector 保留为空；业务数值门禁使用语义接口，缺数据报错而不是补零。
 
@@ -195,3 +208,5 @@ environment:
 编译时读取文件并沿用内联配置的重复键、点路径冲突和 Master JSON 校验，结果展开到原有组件配置和运行产物，Runner/Java 不需要重新读取源文件。不增加文件继承或覆盖合并；小配置与测试夹具仍可直接使用内联 mapping。
 
 Engine 配置名、Mock 参数命名、ENV 映射和忽略规则见[组件配置参考](component-reference.md#engine-配置规则)。Case 使用每实例文件作为唯一配置源；共享 JVM 不从进程 ENV 覆盖业务配置。
+
+`client/start` 的 `reuse_cache` 默认 false，控制请求级缓存复用；Engine 的原生 `reuse_cache` 控制实例策略，两者都开启才复用。`client/ttft`、`client/tpot` 使用 `statistic: mean|p95|p99`，单位为秒，阈值可写 `200ms`。性能回归示例见 `cases/version_regression/`，阈值需要按目标机器校准。

@@ -87,11 +87,11 @@ def test_missing_insufficient_or_duplicate_instance_history_fails_before_aggrega
     assert len(calls) == 1
 
 
-def test_explicit_target_scope_does_not_broadcast_and_latest_is_instant_rate():
+def test_explicit_target_scope_does_not_broadcast_and_default_is_interval():
     ctx = context()
     selector, targets = metrics.scope(ctx, metrics.MetricArgs(targets=['127.0.0.1:1002']), 'prefill')
     assert targets == ['127.0.0.1:1002'] and '1001' not in selector
-    assert metrics.window(ctx, metrics.MetricArgs()) == (metrics.epoch(ctx.query_time), 60000, 'irate')
+    assert metrics.window(ctx, metrics.MetricArgs()) == (metrics.epoch(ctx.query_time), 60000, 'increase')
     with pytest.raises(ExecutionError):
         metrics.scope(ctx, metrics.MetricArgs(targets=['old:1']), 'prefill')
     with pytest.raises(ValueError):
@@ -200,3 +200,53 @@ def test_prefill_throughput_uses_the_matching_nonempty_forward_duration(monkeypa
     monkeypatch.setattr(metrics, 'metric', metric)
     assert asyncio.run(method(context(), metrics.MetricArgs())) == 42
     assert calls[0][1:3] == ('rtp_llm_forward_tokens_total', denominator)
+
+
+def test_latency_quantiles_merge_buckets_and_require_each_instance(monkeypatch):
+    ctx = context()
+    for node in ctx.nodes:
+        node['role'] = 'client'
+    calls = []
+    async def instant(ctx, expression, at):
+        calls.append(expression)
+        if expression.startswith('count_over_time'):
+            return [metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, 4, at) for port in (1001, 1002)]
+        return [metrics.QuerySample({}, .2, at)]
+    monkeypatch.setattr(metrics, 'instant', instant)
+    value = asyncio.run(metrics.client_ttft(ctx, metrics.LatencyArgs(statistic='p95')))
+    assert value == .2
+    assert any('le="+Inf"' in q for q in calls)
+    assert 'histogram_quantile(0.95, sum by(le)' in calls[-1]
+    assert 'mock_client_ttft_seconds_bucket' in calls[-1]
+
+
+def test_series_checks_all_points_and_preserves_query_window(monkeypatch):
+    ctx = context()
+    ctx.runtime.monitoring = SimpleNamespace(interval=1)
+    events = []
+    ctx.records.emit = lambda **event: events.append(event)
+    at = metrics.epoch(ctx.query_time)
+    async def query(ctx, expression, start, end, step):
+        assert (start, end, step) == (at - 2, at, 1)
+        if expression.startswith('count_over_time'):
+            return [[metrics.QuerySample({'instance': f'127.0.0.1:{port}'}, 4, t)
+                     for t in (start, start + 1, end)] for port in (1001, 1002)]
+        return [[metrics.QuerySample({}, value, t) for value, t in zip((3, 1, 3), (start, start + 1, end))]]
+    monkeypatch.setattr(metrics, 'series_query', query)
+    args = metrics.MetricArgs(range=['-3s', '0s'], mode='series')
+    result = asyncio.run(metrics.evaluate(ctx, args, 'sum(x)', [('x', '', ['127.0.0.1:1001', '127.0.0.1:1002'])]))
+    from mock_framework.execution.assertions import compare
+    assert result == [3, 1, 3]
+    assert not compare(result, {'gte': 2})
+    assert not compare([], {'gte': 0})
+    assert events[0]['start'] == at - 3 and events[0]['end'] == at
+
+
+def test_range_matrix_rejects_missing_and_nonfinite_samples(prometheus):
+    prometheus['body']['data'] = {'resultType': 'matrix', 'result': [
+        {'metric': {}, 'values': [[1, '1'], [3, '2']]}]}
+    with pytest.raises(ExecutionError, match='coverage'):
+        metrics.fetch_series(prometheus['url'], 'x', 1, 3, 1, 2)
+    prometheus['body']['data']['result'][0]['values'] = [[1, '1'], [2, 'NaN'], [3, '2']]
+    with pytest.raises(ExecutionError, match='Nonfinite'):
+        metrics.fetch_series(prometheus['url'], 'x', 1, 3, 1, 2)

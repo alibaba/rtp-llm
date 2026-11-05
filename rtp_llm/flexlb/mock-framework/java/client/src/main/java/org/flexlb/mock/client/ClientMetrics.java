@@ -13,6 +13,7 @@ final class ClientMetrics {
     private final Histogram.Child latency = Histogram.build().name("mock_client_request_seconds").help("Client call lifetime.")
         .labelNames("role").register(registry).labels("client");
     private final Histogram.Child ttft = Histogram.build().name("mock_client_ttft_seconds").help("Call start to first received token.")
+        .buckets(.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 3600)
         .labelNames("role").register(registry).labels("client");
     private final Histogram.Child tpot = Histogram.build().name("mock_client_tpot_seconds")
         .help("Time from first to last received token per token after the first, for successful calls.")

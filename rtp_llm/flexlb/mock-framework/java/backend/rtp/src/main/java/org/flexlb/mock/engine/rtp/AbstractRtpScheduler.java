@@ -6,12 +6,12 @@ import org.flexlb.mock.compute.*;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.cache.KvCache;
 import static org.flexlb.mock.engine.RequestFailure.Reason.*;
-import static org.flexlb.mock.engine.rtp.RtpSchedulerBase.Phase.*;
+import static org.flexlb.mock.engine.rtp.AbstractRtpScheduler.Phase.*;
 
 /**
  * Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues.
  */
-abstract class RtpSchedulerBase implements Scheduler {
+abstract class AbstractRtpScheduler implements Scheduler {
     enum Phase { QUEUED, CAPACITY, LOADING, TRANSFERRING, TRANSFERRED, RUNNING, OUTPUT, FORWARD, READY }
     private final TaskHistory history;
     private final Object lock;
@@ -48,7 +48,7 @@ abstract class RtpSchedulerBase implements Scheduler {
             this.listener = listener;
             this.state = new RequestState(input.deadline(), failure -> terminal(this, failure));
         }
-        RtpSchedulerBase owner() { return RtpSchedulerBase.this; }
+        AbstractRtpScheduler owner() { return AbstractRtpScheduler.this; }
         @Override public Input input() { return input; }
         @Override public RequestState.Snapshot snapshot() { synchronized (lock) { return state.snapshot(); } }
         @Override public int reused() { synchronized (lock) { return reused; } }
@@ -58,12 +58,13 @@ abstract class RtpSchedulerBase implements Scheduler {
     private record Batch(List<Member> members, long scheduleStarted, long stepStarted) {}
     private record Notice(Runnable action, boolean terminal) {}
 
-    RtpSchedulerBase(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
+    AbstractRtpScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
         this.history = Objects.requireNonNull(history);
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
         this.cache = Objects.requireNonNull(cache);
-        this.metrics = new RtpMetrics(config.role().name(), this::metricState);
+        this.metrics = new RtpMetrics(config.role().name(), this::metricState, System::nanoTime, cache::itemCount);
+        cache.onEvictionLifetime(metrics::blockEvicted);
     }
 
     @Override public Request input(Input input, Listener listener) {
@@ -109,7 +110,7 @@ abstract class RtpSchedulerBase implements Scheduler {
                 finish(entry, null);
             }
             case TRANSFER_ACKNOWLEDGED -> {
-                if (!prefill() || !entry.input.retained() || !entry.transferBegun || entry.phase != TRANSFERRED)
+                if (!prefill() || !entry.input.retained() || !entry.transferBegun || entry.phase != TRANSFERRING)
                     throw new RequestFailure(INVALID, "Transfer acknowledgement without a readable Prefill source");
                 finish(entry, null);
             }
@@ -156,6 +157,7 @@ abstract class RtpSchedulerBase implements Scheduler {
             }
         }
         if (selected.isEmpty()) return null;
+        long prepareStarted = System.nanoTime();
         var members = new ArrayList<Member>();
         var items = new ArrayList<ForwardBatch.Request>();
         for (var entry : selected) {
@@ -173,6 +175,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         }
         var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
         executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime()), batch);
+        metrics.batchPrepared(System.nanoTime() - prepareStarted);
         return executing;
     }
 
@@ -336,12 +339,10 @@ abstract class RtpSchedulerBase implements Scheduler {
         if (transferred.failure() != null) { finish(entry, transferred.failure()); return; }
         if (!entry.transferBegun || entry.phase != TRANSFERRING)
             throw new RequestFailure(INVALID, "Stale or duplicate transfer completion");
-        if (!prefill()) {
-            if (entry.lease == null || entry.loaded || entry.generating)
-                throw new RequestFailure(INVALID, "Unexpected KV load completion");
-            entry.loaded = true;
-            entry.prefillFinished = transferred.prefillFinished();
-        }
+        if (prefill() || entry.lease == null || entry.loaded || entry.generating)
+            throw new RequestFailure(INVALID, "Unexpected Decode KV load completion");
+        entry.loaded = true;
+        entry.prefillFinished = transferred.prefillFinished();
         entry.phase = TRANSFERRED;
     }
     @Override public void finish(Request request, RequestFailure failure) {
@@ -368,7 +369,9 @@ abstract class RtpSchedulerBase implements Scheduler {
             entry.canRun == 0 ? 0 : Math.max(0, entry.canRun - entry.enqueuedAt),
             entry.canRun == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.canRun),
             entry.firstToken == 0 ? -1 : entry.firstToken - entry.begun,
-            entry.input.tokens(), progress.generated(), progress.iterations(), entry.reused));
+            entry.input.tokens(), progress.generated(), progress.iterations(), entry.reused),
+            prefill() || canReuseLocalKv(entry));
+        metrics.streamingFinished(entry.input.streaming());
         active.remove(entry.input.identity(), entry);
         enqueue(entry, () -> {
             try { entry.listener.terminal(entry, failure); }
@@ -414,18 +417,23 @@ abstract class RtpSchedulerBase implements Scheduler {
         return !entry.state.terminating();
     }
     private Entry entry(Request request) {
-        if (!(request instanceof RtpSchedulerBase.Entry entry) || entry.owner() != this)
+        if (!(request instanceof AbstractRtpScheduler.Entry entry) || entry.owner() != this)
             throw new IllegalArgumentException("Foreign request handle");
         return entry;
     }
     protected final boolean prefill() { return config.role() == Role.prefill; }
+    private boolean canReuseLocalKv(Entry entry) {
+        return config.reuseCache() && config.deviceCache() && entry.input.reuse()
+            && (prefill() || !config.disableDecodeFirstReuse());
+    }
     private KvCache.Failure acquire(Entry entry) {
         if (entry.lease != null) return null;
         long generation = cache.allocationGeneration();
         if (entry.attemptedGeneration == generation) return KvCache.Failure.RETRYABLE;
-        boolean reuse = config.reuseCache() && config.deviceCache() && entry.input.reuse()
-            && (prefill() || !config.disableDecodeFirstReuse());
+        boolean reuse = canReuseLocalKv(entry);
         var keys = entry.input.keys();
+        if (prefill() && entry.attemptedGeneration == Long.MIN_VALUE)
+            metrics.recordPrefillCacheKeys(keys, entry.input.tokens(), config.blockSize());
         int matched = Math.min(keys.size(), (entry.input.tokens() - 1) / config.blockSize());
         long capacityTokens = (long) entry.input.tokens() + (prefill() ? 0 : config.compute().kvReserveTokens());
         var admission = cache.acquire(capacityTokens, reuse ? keys.subList(0, matched) : List.of());
@@ -437,6 +445,7 @@ abstract class RtpSchedulerBase implements Scheduler {
         }
         entry.lease = admission.lease();
         entry.reused = Math.toIntExact(admission.lease().reusedTokens());
+        if (reuse && matched > 0) metrics.cacheMatched(admission.matchNanos());
         entry.state.attach(entry.lease, () -> {
             // The final sampled token has not entered a Forward and owns no computed KV.
             int computedOutput = !prefill() && entry.generating ? Math.max(0, entry.state.snapshot().generated() - 1) : 0;

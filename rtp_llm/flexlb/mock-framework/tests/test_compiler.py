@@ -244,3 +244,15 @@ def test_union_preserves_nested_constructor_failure():
     interface = Registry((choice,)).get('extension/choice')
     with pytest.raises(ConfigError, match=r'extension/choice\.args\.item: value must be positive'):
         interface.arguments({'item': {'value': 0}})
+
+
+def test_metric_series_gates_accept_scalar_bounds_but_references_keep_list_type(case_data, compile_data):
+    steps = case_data['phases'][0]['steps']
+    steps[2]['args']['mode'] = 'series'
+    # A list of samples cannot be used as the scalar threshold of a later gate.
+    with pytest.raises(ConfigError, match='Reference type mismatch'):
+        compile_data(case_data)
+    steps[3]['expect'] = {'gte': 0}
+    case = compile_data(case_data)
+    assert case.phases[0].steps[2].args['mode'] == 'series'
+    assert case.phases[0].steps[2].expect.comparisons == {'gte': 0}

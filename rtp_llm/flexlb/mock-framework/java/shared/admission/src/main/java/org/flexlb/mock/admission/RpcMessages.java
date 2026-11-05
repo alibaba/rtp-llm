@@ -18,7 +18,7 @@ final class RpcMessages {
                                  boolean retained, int blockSize, long seed) {
         return new Scheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,
             input.getTokenIdsCount(), input.getGenerateConfig().getMaxNewTokens(), input.getPriority(), started, rpcDeadline,
-            new org.flexlb.mock.cache.CacheSequence(blockSize, input.getTokenIdsList(), java.util.List.of(), seed), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos());
+            new org.flexlb.mock.cache.CacheSequence(blockSize, input.getTokenIdsList(), java.util.List.of(), seed), input.getGenerateConfig().getReuseCache(), retained, input.getGenerateConfig().getMinNewTokens(), input.getGenerateConfig().getIgnoreEos(), input.getGenerateConfig().getIsStreaming());
     }
     static Scheduler.Task pending(GenerateInputPB input) {
         return new Scheduler.Task(input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,

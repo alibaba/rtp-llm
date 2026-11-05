@@ -61,7 +61,8 @@ async def run_step(step, interface, context):
         expected = resolve(step.expect.comparisons, context.results, context.globals()) if step.expect else None
         if expected is not None:
             for op, value in expected.items():
-                validate(value, {'type': 'integer', 'minimum': 0} if op == 'count' else interface.returns, 'expect.' + op)
+                validate(value, {'type': 'integer', 'minimum': 0} if op == 'count' else
+                         {'type': 'number'} if op in ('gte', 'lte') else interface.returns, 'expect.' + op)
             gate = {'step': step.id, 'interface': step.interface, 'args': args,
                     'query_time': context.query_time, 'expect': expected}
         budget = context.timeout

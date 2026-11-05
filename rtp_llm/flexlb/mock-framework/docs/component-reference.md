@@ -51,7 +51,7 @@ RTP 请求公共支持范围集中在 `RequestValidation`，本地单 token、P/
 
 - P 的 `GenerateStreamCall(max_new_tokens=1)` 由 PrefillAdmission 处理，不启用 D。请求经过 FIFO→选中时分配 KV→共享 Compute→真实等待→编码输出→释放；排队不占 KV。
 - 多 token P/D 要求 `can_use_pd_separation=true` 且恰好一个有效 DECODE 地址。PrefillAdmission 先向 D ALLOCATE，确认后启动 P，随后 LOAD、发 P 首 token、等待 LOAD 确认、发 GENERATE 并转发 D 输出。
-- D 的 DecodeAdmission 处理原生协议，RtpScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
+- D 的 DecodeAdmission 处理原生协议，RtpFifoScheduler 管理资源和队列，只有 GENERATE 后进入计算队列；每个 Engine 一轮一个 Forward，按配置合并多个请求。初始 KV 分配遇临时不足等待容量变化；生成期间每轮先增长 KV，失败则终止，成功后才执行与提交输出。
 
 PD 只执行调度器之间的交接，不模拟 KV 数据传输。P/D 只使用原生 RemoteGenerate TCP 连接，不注册自定义回调服务，也不跨节点比对 prompt、块布局或 cache keys。P 必须等自身 Scheduler 报告首轮 Forward 完成后才发送 LOAD；D 对已分配的请求执行零耗时异步传输事件，完成后回复 LOAD ACK。P 收到 ACK 才释放源 KV，然后发送 GENERATE 或 PREFILL_COMPLETE，D Scheduler 决定开始计算或结束。两端块大小各自独立，KV 的申请、持有、释放及 finished 记录仍归各自 Scheduler 管理。
 
@@ -297,10 +297,11 @@ ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embeddi
 | engine/prefill/tps | P 实际计算 token 增量／含实际计算的 Forward 耗时增量。 |
 | engine/prefill/tps_with_cache | P 输入 token 增量／有输入的 Forward 耗时增量，输入含命中。 |
 | engine/decode/tps | D 完成 Forward 输出 token 增量／墙钟时间。 |
+| client/ttft / client/tpot | Client 延迟 mean/p95/p99，合并全部选中实例的直方图；单位秒。TPOT 只统计成功且输出多于一个 token 的请求。 |
 | client/success_rate | 必填 range 区间内成功终态计数增量／全部终态计数增量，先对各 Client 算增量再聚合；可选 targets。 |
 | prometheus/query | 固定 query_time 的一次 scalar 或 float instant vector，保留标签、数值和 sample_time。 |
 
-普通接口在本次独占 Prometheus 内按 role 和 instance 地址过滤，先逐条 Counter 算增量再聚合以处理 reset；hit_rate 不能平均节点比率。显式空 targets 报错，选择器转义；每个选中实例的分子/分母至少需要两次采样，重复或缺失序列报错。range 在固定 end 执行单次 instant query，窗口=end−start，精度 ms，低于 1ms 拒绝；latest 用检查前 60s 内最近两次采样的 irate，不平均整分钟。缺少采样或没有可计算 Forward 时报错。
+普通接口在本次独占 Prometheus 内按 role 和 instance 地址过滤，先逐条 Counter 算增量再聚合以处理 reset；hit_rate 不能平均节点比率。显式空 targets 报错，选择器转义；每个选中实例的分子/分母至少需要两次采样，重复或缺失序列报错。range 默认 [-60s, 0s]，窗口=end−start，精度 ms，低于 1ms 拒绝；不接受 latest/all。mode 默认 interval，返回窗口汇总值；series 返回逐点列表，每点按四个采集周期计算 Counter 增量，gte/lte 检查所有点。缺少采样或没有可计算 Forward 时报错。
 
 `client/success_rate` 的 range 是必填的 `[start, end]`（start < end <= 0），按固定查询时刻定位窗口，使用 Counter 的 increase，按完成时间统计，分母包含 success/error/timeout/cancelled。它没有最小请求数门槛；窗口无终态时分母为零，或任一 Client 的终态序列采集不完整时均报错。至少两次抓取是计数器增量的计算条件，不是请求数要求。近期完成请求可能在更早时发出；此口径不表示同一发送阶段的成功率。
 
@@ -345,7 +346,7 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 ### RTP 调度实现边界
 
-`RtpSchedulerBase` 共享请求状态、KV 引用、PD 生命周期、Forward 提交、取消和指标；`RtpScheduler` 仅做普通 FIFO 准入，`RtpGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。当前拆分保留既有同步缓存行为，尚未增加远端 KV 加载或组级异步加载。
+`AbstractRtpScheduler` 共享请求状态、KV 引用、PD 生命周期、Forward 提交、取消和指标；`RtpFifoScheduler` 仅做普通 FIFO 准入，`RtpPrefillGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。当前拆分保留既有同步缓存行为，尚未增加远端 KV 加载或组级异步加载。
 
 ### main 的调度状态和缓存指标
 
@@ -368,3 +369,5 @@ KVCM 元数据仍只上报逻辑 KV。心跳独立于串行数据任务，大快
 接入层与执行层共享完成记录，但不共享协议类型。Scheduler.Task 使用 RequestFailure 表示失败，RpcTasks 转换为原生 ErrorDetailsPB，并保留 main 的 request_id_str、prefix_length_valid。main 的图片展开 span、hash token 和 PD 报文保持原协议。Client 接受已有 token 后的空终止帧（长度不变、finished=true），仍拒绝空非终止帧和不连续的增量。
 
 KVCM 心跳与串行数据上报独立执行；回复会扫描全部 item 的重新注册/快照提示，旧注册代次的心跳反馈不会作用到新注册。快照仍保留同一版本与报文直到 ACK，随后才推进版本、发送增量；失败重试保留 retry_after_ms 约束。
+
+WorkerStatus/CacheStatus 的 RPC QPS、耗时和取消由 RpcService 上报；Scheduler 上报 streaming 请求终态、本地缓存条目数、匹配耗时、淘汰块寿命和 Mock batch 准备耗时。`rtp_llm_kv_cache_reuse_length` 在请求终态上报，与输入长度同口径。Prefill 最近 30 分钟 cache key 命中是理论重叠统计，不表示缓存仍驻留；实际复用按成功准入时的本地命中统计。

@@ -20,7 +20,7 @@ public interface Scheduler extends AutoCloseable {
     }
 
     record Input(String identity, long requestId, long groupId, int tokens, int maxNewTokens, int priority,
-                 long started, long deadline, CacheSequence cacheSequence, boolean reuse, boolean retained, int minNewTokens, boolean ignoreEos) {
+                 long started, long deadline, CacheSequence cacheSequence, boolean reuse, boolean retained, int minNewTokens, boolean ignoreEos, boolean streaming) {
         public Input {
             if (identity == null || identity.isBlank() || tokens < 1 || maxNewTokens < 1 || minNewTokens < 0 || minNewTokens > maxNewTokens)
                 throw new IllegalArgumentException("Invalid scheduling input");

@@ -20,6 +20,7 @@ import org.flexlb.mock.api.model.Types.Role;
 final class PrefillAdmission implements AutoCloseable {
     private final AdmissionConfig config;
     private final Object executionLock;
+    private final Runnable recordCancellation;
     private final EngineLoop engine;
     private final TaskHistory finished;
     // Local request lifetime; output/Fetch sessions may outlive these entries. Guarded by executionLock.
@@ -37,11 +38,12 @@ final class PrefillAdmission implements AutoCloseable {
     private long nextOutputSweep;
     private volatile boolean closed;
 
-    PrefillAdmission(AdmissionConfig config, Object executionLock, TaskHistory finished, EngineLoop engine) {
+    PrefillAdmission(AdmissionConfig config, Object executionLock, TaskHistory finished, EngineLoop engine, Runnable recordCancellation) {
         this.config = config;
         this.executionLock = executionLock;
         this.finished = finished;
         this.engine = engine;
+        this.recordCancellation = recordCancellation;
         vision = new org.flexlb.mock.multimodal.MediaClient();
         deadlines.setRemoveOnCancelPolicy(true);
     }
@@ -220,11 +222,7 @@ final class PrefillAdmission implements AutoCloseable {
         try { return engine.beginTransfer(session.request); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
-    void transferCompleted(Session session, TransferResult result) {
-        try { engine.transferCompleted(session.request, result); }
-        catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
-    }
-    void transferred(Session session) {
+    private void acknowledgeLoad(Session session) {
         try { engine.control(session.request, Control.TRANSFER_ACKNOWLEDGED); }
         catch (RequestFailure failure) { throw RpcErrors.failure(failure); }
     }
@@ -477,8 +475,7 @@ final class PrefillAdmission implements AutoCloseable {
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
                 synchronized (this) {
                     if (terminal) return;
-                    transferCompleted(source, new TransferResult(prefillFinished, null));
-                    transferred(source);
+                    acknowledgeLoad(source);
                     transferUse.close(); transferUse = null;
                 }
                 if (prefillFinished) stream.onNext(frame(RemoteStage.PREFILL_COMPLETE));
@@ -517,6 +514,8 @@ final class PrefillAdmission implements AutoCloseable {
         synchronized void finish(Throwable error) {
             if (terminal) return;
             terminal = true;
+            if (error != null && Status.fromThrowable(error).getCode() == Status.Code.CANCELLED)
+                recordCancellation.run();
             if (timeout != null) timeout.cancel(false);
             Throwable failure = error == null ? Status.CANCELLED.asRuntimeException() : error;
             prepared.completeExceptionally(failure);
