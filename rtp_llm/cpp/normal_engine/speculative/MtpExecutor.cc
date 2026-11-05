@@ -1804,15 +1804,6 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    // EPLB consumes only target-forward state and must run before any
-    // rank-local sampling failure can branch toward the readiness rendezvous.
-    if (expert_balancer_) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        expert_balancer_->stepForward(*model_, executor_collector);
-        executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-
     SamplerOutput sampler_output;
     auto          run_sampling_and_cap = [&]() -> absl::Status {
         // trick: update draft sampler output after spec decode to avoid kernel launch overhead
@@ -1861,6 +1852,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             return absl::InternalError(
                 "MTP async spec logits processor is present but no verify artifact was produced; "
                          "disable MTP/async or implement spec verify for this processor");
+        }
+
+        // Keep legacy EPLB ordering after draft/spec-logits preparation.
+        if (expert_balancer_) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(eplb_step_forward)");
+            int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            expert_balancer_->stepForward(*model_, executor_collector);
+            executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         }
 
         if (isTpRank0()) {

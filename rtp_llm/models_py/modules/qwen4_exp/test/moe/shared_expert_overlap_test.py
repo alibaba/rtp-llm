@@ -7,7 +7,7 @@ import torch
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.modules.base import FusedSiluAndMul, SigmoidGateScaleAdd
 from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
-from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+from rtp_llm.models_py.modules.qwen4_exp.dense_mlp import Qwen4DenseMLP as DenseMLP
 from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import (
     Qwen4MoeLayer,
     _shared_stream_for_device,

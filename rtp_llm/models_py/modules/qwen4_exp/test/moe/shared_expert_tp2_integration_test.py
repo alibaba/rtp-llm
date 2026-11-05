@@ -179,7 +179,7 @@ def _executor(pc, weights, full=False):
 
 
 def _layer(pc, source, executor):
-    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig as ModelConfig
     from rtp_llm.models_py.modules import SelectTopk
     from rtp_llm.models_py.modules.base import FusedSiluAndMul, SigmoidGateScaleAdd
     from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
@@ -189,7 +189,7 @@ def _layer(pc, source, executor):
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
         CudaF16Linear,
     )
-    from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+    from rtp_llm.models_py.modules.qwen4_exp.dense_mlp import Qwen4DenseMLP as DenseMLP
     from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
     from rtp_llm.ops import ActivationType
 

@@ -1104,10 +1104,13 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         }
     };
     auto stageTpPart = [&](std::vector<BlockInfo> parts, const CacheConfig& cfg, const std::string& tag, int peer_idx) {
+        if (!typed_tp) {
+            return parts;
+        }
         const auto& group  = cfg.topology().group(tag);
         const auto& spec   = group.spec;
         const auto& layout = spec->tp_transfer;
-        if (!typed_tp || !layout.needsReassembly(group.localKvHeadNum())) {
+        if (!layout.needsReassembly(group.localKvHeadNum())) {
             return parts;
         }
         requireTypedTp(parts.size() == (spec->scale_block_size_bytes() == 0 ? 1u : 2u),

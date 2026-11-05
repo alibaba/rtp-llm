@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig as ModelConfig
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,

@@ -4,8 +4,10 @@ The snapshot is built after common overrides and the effective topology are
 known. Target and draft build independent snapshots; pickle preserves them.
 """
 
+import json
 from dataclasses import dataclass
 
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import (
     QWEN4_FP8_NVFP4_RECIPE,
     ModelOptFp4Config,
@@ -20,6 +22,50 @@ def ple_eos_token_id(config):
     if eos is None:
         eos = getattr(getattr(config, "special_tokens", None), "eos_token_id", None)
     return eos
+
+
+class Qwen4ModelConfig(ModelConfig):
+    _python_fields = ModelConfig._python_fields | {
+        "qwen4_ple_prefetch_mb",
+        "linear_attn_norm_activation",
+    }
+
+    # Checkpoint capabilities are read-only; they are not model options.
+    @property
+    def enable_qwen4_ple(self) -> bool:
+        return bool(getattr(self, "_qwen4_ple_layer_ids", ()))
+
+    @property
+    def enable_qwen4_qsa(self) -> bool:
+        return int(getattr(self, "_qwen4_indexer_head_dim", 0)) > 0
+
+    @property
+    def qwen4_ple_prefetch_mb(self) -> int:
+        snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
+        if snapshot is not None:
+            return snapshot.options.ple_prefetch_mb
+        return getattr(self, "_qwen4_ple_prefetch_mb", Qwen4Options.ple_prefetch_mb)
+
+    @qwen4_ple_prefetch_mb.setter
+    def qwen4_ple_prefetch_mb(self, value: int) -> None:
+        self._validate_ple_budget(value)
+        self._qwen4_ple_prefetch_mb = value
+
+    def _validate_ple_budget(self, value: int) -> None:
+        options = Qwen4Options(value)
+        snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
+        if snapshot is not None and options != snapshot.options:
+            raise RuntimeError(
+                "qwen4_exp resource options are frozen after model loading"
+            )
+
+    def apply_override_args(self, json_model_override_args):
+        model_override_args = json.loads(json_model_override_args)
+        if "qwen4_ple_prefetch_mb" in model_override_args:
+            self._validate_ple_budget(model_override_args["qwen4_ple_prefetch_mb"])
+        super().apply_override_args(json_model_override_args)
+        if "qwen4_ple_prefetch_mb" in model_override_args:
+            self.qwen4_ple_prefetch_mb = model_override_args["qwen4_ple_prefetch_mb"]
 
 
 @dataclass(frozen=True)

@@ -894,6 +894,7 @@ test_suite(
 test_suite(
     name = "qwen4_moe",
     tests = [
+        ":factory_isolation_test",
         ":marlin_large_decode_test",
         ":marlin_nvfp4_hopper_test",
         ":marlin_nvfp4_test",
@@ -942,4 +943,12 @@ qwen4_test(
         ":math_references",
         ":test_support",
     ],
+)
+
+
+
+qwen4_test(
+    name = "factory_isolation_test",
+    src = "moe/factory_isolation_test.py",
+    gpu = "RTX_5000_PRO_CU13",
 )

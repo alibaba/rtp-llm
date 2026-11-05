@@ -63,7 +63,12 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self.N = self.w1.size(1)  # 2 * inter_size
         self.K = self.w1.size(2)  # hidden_size
         self.inter_size = self.N // 2
-        capabilities = decode_capabilities(self.w1, self.top_k, self.ep_size)
+        capabilities = decode_capabilities(
+            self.w1,
+            self.top_k,
+            self.ep_size,
+            getattr(getattr(config, "model_config", None), "model_type", ""),
+        )
         self._decode_alignment = capabilities.alignment
         self._decode_tiles = capabilities.tuned_tiles
         self._small_moe_gemv = capabilities.small_gemv

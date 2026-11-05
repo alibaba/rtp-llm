@@ -4,12 +4,16 @@ import sys
 from importlib import metadata
 from pathlib import Path
 
+import torch
+
 
 def setup_cutlass_import_path() -> None:
     """Expose the ``cutlass`` package bundled by ``nvidia-cutlass-dsl``."""
     # Bazel keeps the base and CUDA 13 compiler wheels in separate runfiles.
     # Their identical namespace paths must not make import order select CUDA 12.
     try:
+        if not torch.version.cuda or torch.version.cuda.split(".", 1)[0] != "13":
+            raise metadata.PackageNotFoundError("CUDA 13 runtime is not active")
         cu13 = metadata.distribution("nvidia-cutlass-dsl-libs-cu13")
     except metadata.PackageNotFoundError:
         pass

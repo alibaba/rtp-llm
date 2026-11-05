@@ -1,11 +1,12 @@
 """Configuration ownership across final overrides and target/draft spawn."""
 
+import json
 import pickle
 import unittest
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig as ModelConfig
 from rtp_llm.config.qwen4_exp_config import freeze_runtime_config
 from rtp_llm.ops import HiddenStateCaptureDtype
 
@@ -54,6 +55,42 @@ class RuntimeSnapshotTest(unittest.TestCase):
         self.assertEqual(
             config.hidden_state_capture_dtype, HiddenStateCaptureDtype.BF16
         )
+        self.assertEqual(config.qwen4_ple_prefetch_mb, 256)
+
+    def test_invalid_ple_budget_leaves_other_overrides_unchanged(self):
+        config = self.config()
+        config.num_layers = 8
+        config.hidden_state_capture_layer_ids = [7]
+        original_rope_style = config.attn_config.rope_config.style
+        for budget in (None, True, 0, -1, 1.5, "256"):
+            with (
+                self.subTest(budget=budget),
+                self.assertRaisesRegex(ValueError, "positive integer"),
+            ):
+                config.apply_override_args(
+                    json.dumps(
+                        {
+                            "hidden_state_capture_layer_ids": [1, 3],
+                            "hidden_state_capture_dtype": "fp8_e4m3",
+                            "rope_scaling": {"type": "base"},
+                            "qwen4_ple_prefetch_mb": budget,
+                        }
+                    )
+                )
+            self.assertEqual(config.hidden_state_capture_layer_ids, [7])
+            self.assertEqual(
+                config.hidden_state_capture_dtype, HiddenStateCaptureDtype.BF16
+            )
+            self.assertEqual(config.attn_config.rope_config.style, original_rope_style)
+            self.assertEqual(config.qwen4_ple_prefetch_mb, 256)
+
+    def test_invalid_capture_override_leaves_ple_budget_unchanged(self):
+        config = self.config()
+        config.num_layers = 8
+        with self.assertRaisesRegex(ValueError, "hidden_state_capture_dtype"):
+            config.apply_override_args(
+                '{"hidden_state_capture_dtype":"float16","qwen4_ple_prefetch_mb":64}'
+            )
         self.assertEqual(config.qwen4_ple_prefetch_mb, 256)
 
     def test_draft_snapshot_has_independent_geometry_and_role(self):

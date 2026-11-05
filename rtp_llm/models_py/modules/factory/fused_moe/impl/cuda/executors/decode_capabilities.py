@@ -1,4 +1,4 @@
-"""BF16 MoE decode specializations selected only by their kernel support domain."""
+"""Qwen4 BF16 MoE decode specializations and their kernel support domain."""
 
 import inspect
 from dataclasses import dataclass
@@ -21,7 +21,11 @@ def masked_histogram_available() -> bool:
         return False
 
 
-def decode_capabilities(weight, top_k: int, ep_size: int) -> DecodeCapabilities:
+def decode_capabilities(
+    weight, top_k: int, ep_size: int, model_type: str = ""
+) -> DecodeCapabilities:
+    if model_type not in ("qwen4_exp", "qwen4_exp_mtp"):
+        return DecodeCapabilities(False, False, False)
     cuda_bf16 = (
         weight.dtype == torch.bfloat16 and weight.is_cuda and torch.version.hip is None
     )

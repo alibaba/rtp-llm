@@ -8,7 +8,7 @@ import torch
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
-from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+from rtp_llm.models_py.modules.qwen4_exp.dense_mlp import Qwen4DenseMLP as DenseMLP
 from rtp_llm.models_py.triton_kernels.common.silu_fp8_quant import try_silu_mul_quant
 from rtp_llm.ops import ActivationType
 

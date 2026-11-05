@@ -135,7 +135,7 @@ py_test(
     data = [":th_pywrapped_model_cache_store_integration_test"],
     deps = pywrapped_model_test_deps,
     env = {"TEST_USING_DEVICE": "CUDA", "GPU_COUNT": "2"},
-    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
     tags = ["RTX_5000_PRO_CU13"],
 )
 

@@ -4,6 +4,7 @@ from typing import Dict, List
 
 from rtp_llm.config.model_config import ModelConfig, apply_quant_scope_to_pricing
 from rtp_llm.config.qwen4_exp_config import (
+    Qwen4ModelConfig,
     build_qwen4_quant_config,
     freeze_runtime_config,
     validate_qwen4_runtime,
@@ -29,6 +30,8 @@ class Qwen4Exp(Qwen35Moe):
     Shares the Qwen3.5 multimodal shell and GDN linear-attention layers. Gated
     residual and checkpoint-required PLE/QSA paths are always connected.
     """
+
+    _model_config_cls = Qwen4ModelConfig
 
     @staticmethod
     def get_weight_cls():

@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig as ModelConfig
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import PLE_NGRAM_CTX_TAG, PLE_STATE_TAG
 from rtp_llm.models_py.model_desc import qwen3_next, qwen4_exp
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (

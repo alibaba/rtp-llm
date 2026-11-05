@@ -1,5 +1,6 @@
 import datetime
 import gc
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -272,8 +273,14 @@ def _tp_worker(rank, rendezvous):
         dist.destroy_process_group()
 
 
-@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class NativeLmHeadTpTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if torch.cuda.device_count() < 2:
+            if int(os.environ.get("GPU_COUNT", "0")) >= 2:
+                raise RuntimeError("TP LM head validation requires two CUDA devices")
+            raise unittest.SkipTest("requires two CUDA devices")
+
     def test_real_tp_collective_preserves_rank_order_and_per_rank_scale(self):
         with tempfile.TemporaryDirectory() as directory:
             mp.spawn(

@@ -17,6 +17,8 @@ from rtp_llm.ops import DataType, HybridAttentionType, KVCacheSpecType
 
 
 class Qwen3NextBase(BaseModel):
+    _model_config_cls = ModelConfig
+
     def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config
@@ -72,7 +74,7 @@ class Qwen3NextBase(BaseModel):
 
         config_json = cls._preprocess_config_json(config_json)
 
-        config = ModelConfig()
+        config = cls._model_config_cls()
         config.ckpt_path = ckpt_path
 
         cls._parse_basic_config(config_json, config)
@@ -220,7 +222,7 @@ class Qwen35Moe(Qwen3NextBase):
 
         text_config_json = config_json["text_config"]
 
-        config = ModelConfig()
+        config = cls._model_config_cls()
         config.ckpt_path = ckpt_path
 
         cls._parse_basic_config(text_config_json, config)

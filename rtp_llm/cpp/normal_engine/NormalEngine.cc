@@ -874,16 +874,6 @@ void NormalEngine::loop() {
             running_ = false;
             RTP_LLM_LOG_INFO("normal engine TP loop stopped: %s", e.what());
             break;
-        } catch (const std::exception& e) {
-            // A peer may close its TP broadcast socket after stop() clears
-            // running_ but before this rank returns from its current step.
-            // Treat that exception as part of shutdown; an exception during
-            // normal service must still fail the process.
-            if (running_) {
-                throw;
-            }
-            RTP_LLM_LOG_WARNING("normal engine loop stopped during shutdown: %s", e.what());
-            break;
         }
     }
     running_ = false;

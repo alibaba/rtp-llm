@@ -8,7 +8,6 @@ import torch
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
-    QWEN4_FP8_NVFP4_RECIPE,
     CompressedW4A8Int4PerChannelQuantConfig,
     Fp8BlockWiseQuantConfig,
     ModelOptFp4Config,
@@ -17,7 +16,6 @@ from rtp_llm.config.quant_config import (
     W4a8Int4PerChannelQuantConfig,
     init_quant_config,
 )
-from rtp_llm.config.qwen4_exp_config import Qwen4Options
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
 from rtp_llm.ops import DataType, HiddenStateCaptureDtype, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
@@ -127,32 +125,6 @@ def resolve_ssm_state_dtype(
 
 
 class ModelConfig(CppModelConfig):
-    # Checkpoint capabilities are read-only; they are not model options.
-    @property
-    def enable_qwen4_ple(self) -> bool:
-        return bool(getattr(self, "_qwen4_ple_layer_ids", ()))
-
-    @property
-    def enable_qwen4_qsa(self) -> bool:
-        return int(getattr(self, "_qwen4_indexer_head_dim", 0)) > 0
-
-    @property
-    def qwen4_ple_prefetch_mb(self) -> int:
-        snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
-        if snapshot is not None:
-            return snapshot.options.ple_prefetch_mb
-        return getattr(self, "_qwen4_ple_prefetch_mb", Qwen4Options.ple_prefetch_mb)
-
-    @qwen4_ple_prefetch_mb.setter
-    def qwen4_ple_prefetch_mb(self, value: int) -> None:
-        options = Qwen4Options(value)
-        snapshot = getattr(self, "_qwen4_runtime_snapshot", None)
-        if snapshot is not None and options != snapshot.options:
-            raise RuntimeError(
-                "qwen4_exp resource options are frozen after model loading"
-            )
-        self._qwen4_ple_prefetch_mb = value
-
     # Model-specific weight estimators add to these fields when needed. Class
     # defaults keep the generic estimator statically visible and zero-cost for
     # every existing model.
@@ -190,7 +162,6 @@ class ModelConfig(CppModelConfig):
         "moe_inter_size",
         "moe_w1_layout",
         "moe_prefill_max_tokens_per_rank",
-        "qwen4_ple_prefetch_mb",
         "n_shared_experts",
         "dsv4_fixed_pool_use_memory",
         "generate_env_config",
@@ -198,7 +169,6 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
-        "linear_attn_norm_activation",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -863,10 +833,8 @@ class ModelConfig(CppModelConfig):
                 )
             capture_dtype = capture_dtype_by_name[capture_dtype_name]
 
-        # Validate capture overrides before applying the budget; a rejected or
-        # frozen budget must also leave capture and rope settings unchanged.
-        if "qwen4_ple_prefetch_mb" in model_override_args:
-            self.qwen4_ple_prefetch_mb = model_override_args["qwen4_ple_prefetch_mb"]
+        # Apply only after all capture overrides have been validated so an
+        # invalid later field cannot leave an earlier field partially updated.
         self.apply_rope_scaling_override(model_override_args)
         if layer_ids is not None:
             self.hidden_state_capture_layer_ids = layer_ids
@@ -898,13 +866,11 @@ class ModelConfig(CppModelConfig):
             except ValueError:
                 if not quant_config:
                     raise
-        if requested is not None:
-            recipe = getattr(requested, "model_recipe", None)
-            if recipe is not None and (
-                recipe != QWEN4_FP8_NVFP4_RECIPE
-                or self.model_type not in ("qwen4_exp", "qwen4_exp_mtp")
-            ):
-                raise ValueError("QWEN4_FP8_NVFP4 is only valid for qwen4_exp models")
+        supported_models = getattr(requested, "supported_model_types", None)
+        if supported_models and self.model_type not in supported_models:
+            raise ValueError(
+                f"Requested quantization is only valid for {', '.join(supported_models)}"
+            )
         if not quant_config and requested is not None:
             quant_config = requested
             logging.info(f"need_load_quant by {quant_config.get_method()}")

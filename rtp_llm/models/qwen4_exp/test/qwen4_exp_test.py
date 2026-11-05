@@ -6,13 +6,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import (
     QWEN4_FP8_NVFP4_RECIPE,
     Fp8BlockWiseQuantConfig,
     ModelOptFp4Config,
     init_quant_config,
 )
+from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig as ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
     _tokenizer_factory,
     ensure_tokenizer_registered,

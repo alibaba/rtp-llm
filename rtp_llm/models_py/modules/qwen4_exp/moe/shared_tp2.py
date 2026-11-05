@@ -102,7 +102,7 @@ def _eligible(layer):
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
         CudaF16Linear,
     )
-    from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+    from rtp_llm.models_py.modules.qwen4_exp.dense_mlp import Qwen4DenseMLP as DenseMLP
     from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
     from rtp_llm.ops import ActivationType
 

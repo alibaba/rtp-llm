@@ -29,7 +29,7 @@ from rtp_llm.openai.api_datatype import (
 from rtp_llm.openai.renderer_factory import ChatRendererFactory, RendererParams
 from rtp_llm.openai.renderer_factory_register import _renderer_factory
 from rtp_llm.openai.renderers.basic_renderer import BasicRenderer
-from rtp_llm.openai.renderers.qwen35_renderer import Qwen35Renderer
+from rtp_llm.openai.renderers.qwen35_renderer import Qwen4Renderer, Qwen35Renderer
 from rtp_llm.openai.renderers.qwen_agent_renderer import QwenAgentRenderer
 from rtp_llm.openai.renderers.qwen_agent_tool_renderer import QwenAgentToolRenderer
 from rtp_llm.openai.renderers.qwen_renderer import QwenRenderer
@@ -386,40 +386,47 @@ class TemplateTest(TestCase):
             "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         )
 
-    def test_qwen35_passes_top_level_enable_thinking_to_template(self):
-        renderer = Qwen35Renderer(
-            _Qwen35DefaultTemplateTokenizer(),
-            RendererParams(
-                model_type="qwen4_exp",
-                max_seq_len=1024,
-                eos_token_id=0,
-                stop_word_ids_list=[],
-            ),
-            GenerateEnvConfig(),
-            RenderConfig(),
-        )
-        messages = [ChatMessage(role=RoleEnum.user, content="hello")]
-
-        for top_level, kwargs in (
-            (False, {"enable_thinking": True}),
-            (True, {"enable_thinking": False}),
-            (None, {"enable_thinking": False}),
-            (None, {"thinking_mode": "disabled"}),
+    def test_qwen35_and_qwen4_pass_top_level_thinking_to_template(self):
+        for model_type, renderer_cls in (
+            ("qwen35_dense", Qwen35Renderer),
+            ("qwen35_moe", Qwen35Renderer),
+            ("qwen4_exp", Qwen4Renderer),
         ):
-            with self.subTest(enable_thinking=top_level, kwargs=kwargs):
-                prompt = renderer.render_chat(
-                    ChatCompletionRequest(
-                        messages=messages,
-                        enable_thinking=top_level,
-                        chat_template_kwargs=kwargs,
+            renderer = renderer_cls(
+                _Qwen35DefaultTemplateTokenizer(),
+                RendererParams(
+                    model_type=model_type,
+                    max_seq_len=1024,
+                    eos_token_id=0,
+                    stop_word_ids_list=[],
+                ),
+                GenerateEnvConfig(),
+                RenderConfig(),
+            )
+            messages = [ChatMessage(role=RoleEnum.user, content="hello")]
+            for top_level, kwargs, disabled in (
+                (False, {"enable_thinking": True}, True),
+                (True, {"enable_thinking": False}, True),
+                (None, {"enable_thinking": False}, True),
+                (None, {"thinking_mode": "disabled"}, True),
+                (True, {}, False),
+                (None, {}, False),
+            ):
+                with self.subTest(
+                    model_type=model_type, top_level=top_level, kwargs=kwargs
+                ):
+                    prompt = renderer.render_chat(
+                        ChatCompletionRequest(
+                            messages=messages,
+                            enable_thinking=top_level,
+                            chat_template_kwargs=kwargs,
+                        )
+                    ).rendered_prompt
+                    self.assertTrue(
+                        prompt.endswith(
+                            "<think>\n\n</think>\n\n" if disabled else "<think>\n"
+                        )
                     )
-                ).rendered_prompt
-                self.assertTrue(prompt.endswith("<think>\n\n</think>\n\n"))
-        enabled_prompt = renderer.render_chat(
-            ChatCompletionRequest(messages=messages, enable_thinking=True)
-        ).rendered_prompt
-
-        self.assertTrue(enabled_prompt.endswith("<think>\n"))
 
     def test_basic_renderer_preserves_template_thinking_default(self):
         generate_env_config = GenerateEnvConfig()

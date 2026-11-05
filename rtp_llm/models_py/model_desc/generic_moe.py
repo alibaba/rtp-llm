@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
 
+    _shared_mlp_cls = None
+
     def __init__(
         self,
         config: ModelConfig,
@@ -99,7 +101,7 @@ class GenericMoeLayer(nn.Module):
             config.moe_style == 2 and not self.fused_moe.includes_shared_expert
         )
         if self.add_shared_expert:
-            self.shared_expert = DenseMLP(
+            self.shared_expert = (self._shared_mlp_cls or DenseMLP)(
                 config.activation_type,
                 parallelism_config,
                 weights,

@@ -11,6 +11,7 @@ from functools import lru_cache
 import torch
 
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.modules.qwen4_exp.dense_mlp import Qwen4DenseMLP
 
 
 @lru_cache(maxsize=None)
@@ -20,6 +21,8 @@ def _shared_stream_for_device(device_index: int):
 
 
 class Qwen4MoeLayer(GenericMoeLayer):
+    _shared_mlp_cls = Qwen4DenseMLP
+
     _shared_stream = None
     _reused_shared_stream = None
 
@@ -42,7 +45,9 @@ class Qwen4MoeLayer(GenericMoeLayer):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
             PureTpRouterNvfp4Cutlass,
         )
-        from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+        from rtp_llm.models_py.modules.qwen4_exp.dense_mlp import (
+            Qwen4DenseMLP as DenseMLP,
+        )
 
         pc = self.parallelism_config
         role = str(getattr(pc, "role_type", "PDFUSION")).rsplit(".", 1)[-1]
