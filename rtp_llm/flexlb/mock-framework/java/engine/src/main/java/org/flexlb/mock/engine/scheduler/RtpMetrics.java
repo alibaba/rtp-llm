@@ -49,7 +49,15 @@ final class RtpMetrics {
     private static final long RECENT_CACHE_WINDOW_NANOS = TimeUnit.MINUTES.toNanos(30);
     private final boolean prefill;
     private final LinkedHashMap<Long, Long> recentCacheKeys = new LinkedHashMap<>();
-    private long windowStarted, windowInput, windowComputed, windowTpsTokens, windowTpsNanos, windowComputeNanos, windowInputNanos;
+    record TokenCounts(long context, long withCache, long generate, long total) {
+        TokenCounts plus(TokenCounts other) {
+            return new TokenCounts(context + other.context, withCache + other.withCache,
+                generate + other.generate, total + other.total);
+        }
+    }
+    private final Map<Integer, TokenCounts> windowTokens = new TreeMap<>();
+    private long windowStarted, ratesStarted, windowComputeNanos, windowInputNanos;
+    private boolean computing;
     private double lastFinished, lastErrors, lastCancelled;
 
     public RtpMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime); }
@@ -63,16 +71,17 @@ final class RtpMetrics {
         Objects.requireNonNull(state);
         this.clock = Objects.requireNonNull(clock);
         prefill = role.equals("prefill");
-        windowStarted = clock.getAsLong();
+        windowStarted = ratesStarted = clock.getAsLong();
         var physical = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
+        physical.remove("priority"); // Request priority belongs to each TPS bucket, not the process.
         physical.put("dp_rank", "0"); // The current Engine supports exactly one DP worker.
         tags = Map.copyOf(physical);
         events = new EventMetrics(role, clock, tags);
         events.register(registry);
         String[] identity = {role};
         started = counter("rtp_llm_requests_started_total", "Accepted engine requests.").labels(identity);
-        contextSeconds = counter("rtp_llm_context_forward_seconds_total", "Forward seconds with nonzero Prefill computation.").labels(identity);
-        contextWithCacheSeconds = counter("rtp_llm_context_forward_with_cache_seconds_total", "Forward seconds with nonzero Prefill input.").labels(identity);
+        contextSeconds = counter("rtp_llm_context_forward_seconds_total", "Execution seconds with nonzero Prefill computation, matching context TPS.").labels(identity);
+        contextWithCacheSeconds = counter("rtp_llm_context_forward_with_cache_seconds_total", "Execution seconds with nonzero Prefill input, matching context TPS with cache.").labels(identity);
         cacheInputs = counter(CACHE_LOOKUPS, "Input tokens considered by successful KV admission.").labels(identity);
         cacheHits = counter(CACHE_HITS, "Historical prefix tokens reused at KV admission.").labels(identity);
         var results = Counter.build().name("rtp_llm_framework_requests_total").help("Terminal engine requests by outcome.")
@@ -123,23 +132,10 @@ final class RtpMetrics {
                     : 100.0 * (value.totalTokens() - value.availableTokens()) / value.totalTokens());
                 result.add(used);
                 synchronized (observations) {
-                    long now = clock.getAsLong(), elapsed = now - windowStarted;
+                    long now = clock.getAsLong(), elapsed = now - ratesStarted;
+                    collectTps(result, role, now);
                     if (elapsed > 0) {
                         double seconds = elapsed / 1_000_000_000.0;
-                        boolean idle = windowTpsNanos == 0 && (!prefill || windowInputNanos == 0);
-                        if (prefill) {
-                            if (idle || windowComputeNanos > 0)
-                                result.add(gauge("rtp_llm_context_tps", "Computed Prefill tokens per active execution second.", role, tps(windowComputed, windowComputeNanos)));
-                            if (idle || windowInputNanos > 0)
-                                result.add(gauge("rtp_llm_context_tps_with_cache", "Input Prefill tokens per active execution second.", role, tps(windowInput, windowInputNanos)));
-                            result.add(gauge("rtp_llm_context_wall_tps", "Computed Prefill tokens per wall second.", role, windowComputed / seconds));
-                            result.add(gauge("rtp_llm_context_wall_tps_with_cache", "Input Prefill tokens per wall second.", role, windowInput / seconds));
-                            result.add(gauge("rtp_llm_wall_tps_report_interval_us", "Actual wall-clock report window, microseconds.", role, elapsed / 1000.0));
-                        } else {
-                            result.add(gauge("rtp_llm_generate_tps", "Decode tokens per active execution second.", role, tps(windowTpsTokens, windowTpsNanos)));
-                        }
-                        if (idle || windowTpsNanos > 0)
-                            result.add(gauge("rtp_llm_total_tps", "Executor tokens per active execution second.", role, tps(windowTpsTokens, windowTpsNanos)));
                         double done = finished.values().stream().mapToDouble(Counter.Child::get).sum();
                         double errors = finished.get(Outcome.error).get() + finished.get(Outcome.timeout).get();
                         double cancelled = finished.get(Outcome.cancelled).get();
@@ -147,13 +143,54 @@ final class RtpMetrics {
                         result.add(gauge("rtp_llm_framework_error_qps", "Terminal errors and timeouts per wall second.", role, (errors - lastErrors) / seconds));
                         result.add(gauge("rtp_llm_cancel_qps", "Terminal cancellations per wall second.", role, (cancelled - lastCancelled) / seconds));
                         lastFinished = done; lastErrors = errors; lastCancelled = cancelled;
-                        windowStarted = now;
-                        windowInput = windowComputed = windowTpsTokens = windowTpsNanos = windowComputeNanos = windowInputNanos = 0;
+                        ratesStarted = now;
                     }
                 }
                 return result;
             }
         }.register(registry);
+    }
+
+    void computeStarted() { synchronized (observations) { computing = true; } }
+    void computeFinished() { synchronized (observations) { computing = false; } }
+
+    private void collectTps(List<Collector.MetricFamilySamples> result, String role, long now) {
+        long elapsed = now - windowStarted;
+        // Like Real's ActiveGuard: do not reset a long in-flight forward's wall window.
+        if (elapsed <= 0 || windowTokens.isEmpty() && computing) return;
+        boolean idle = windowTokens.isEmpty();
+        var buckets = idle ? Map.of(0, new TokenCounts(0, 0, 0, 0)) : windowTokens;
+        var tpsMetrics = new LinkedHashMap<String, GaugeMetricFamily>();
+        for (var bucket : buckets.entrySet()) {
+            int priority = bucket.getKey();
+            var tokens = bucket.getValue();
+            if (prefill) {
+                if (idle || windowComputeNanos > 0) {
+                    addTps(tpsMetrics, "context_tokens", "Computed Prefill tokens in the report window.", role, priority, tokens.context());
+                    addTps(tpsMetrics, "context_tps", "Computed Prefill tokens per active execution second.", role, priority, tps(tokens.context(), windowComputeNanos));
+                }
+                if (idle || windowInputNanos > 0) {
+                    addTps(tpsMetrics, "context_tokens_with_cache", "Input Prefill tokens in the report window.", role, priority, tokens.withCache());
+                    addTps(tpsMetrics, "context_tps_with_cache", "Input Prefill tokens per active execution second.", role, priority, tps(tokens.withCache(), windowInputNanos));
+                }
+                addTps(tpsMetrics, "context_wall_tps", "Computed Prefill tokens per wall second.", role, priority, tps(tokens.context(), elapsed));
+                addTps(tpsMetrics, "context_wall_tps_with_cache", "Input Prefill tokens per wall second.", role, priority, tps(tokens.withCache(), elapsed));
+            } else if (idle || tokens.generate() > 0) {
+                addTps(tpsMetrics, "generate_tps", "Accepted Decode tokens in the report window (native RTP contract).", role, priority, tokens.generate());
+            }
+            if (idle || tokens.total() > 0)
+                addTps(tpsMetrics, "total_tps", "Executor tokens in the report window (native RTP contract).", role, priority, tokens.total());
+        }
+        result.addAll(tpsMetrics.values());
+        // Window duration is process-wide, not additive across priorities.
+        result.add(gauge("rtp_llm_wall_tps_report_interval_us", "Actual TPS report window, microseconds.", role, elapsed / 1000.0));
+        windowTokens.clear(); windowComputeNanos = windowInputNanos = 0; windowStarted = now;
+    }
+
+    private static void addTps(Map<String, GaugeMetricFamily> metrics, String suffix, String help,
+                               String role, int priority, double value) {
+        metrics.computeIfAbsent(suffix, ignored -> new GaugeMetricFamily("rtp_llm_" + suffix, help, List.of("role", "priority")))
+            .addMetric(List.of(role, Integer.toString(priority)), value);
     }
 
     private static double tps(long tokens, long nanos) {
@@ -250,6 +287,11 @@ final class RtpMetrics {
     }
 
     void stepCompleted(StepStats step) {
+        stepCompleted(step, Map.of(0, new TokenCounts(prefill ? step.computed() : 0, prefill ? step.input() : 0,
+            prefill ? 0 : step.acceptedTokens(), prefill ? step.computed() : step.acceptedTokens())));
+    }
+
+    void stepCompleted(StepStats step, Map<Integer, TokenCounts> byPriority) {
         long executionNanos = prefill ? step.scheduleToCompletionNanos() : step.stepNanos();
         if (step.forwardNanos() < 0 || step.plannedNanos() < 0 || step.input() < 0 || step.computed() < 0
             || step.computed() > step.input() || step.output() < 0 || executionNanos < 0 || step.stepNanos() < 0
@@ -259,23 +301,25 @@ final class RtpMetrics {
         positiveMicros("rtp_llm_step_latency_us", step.stepNanos());
         if (!prefill && step.generate() > 0 && step.acceptedTokens() > 0)
             events.observe("rtp_llm_sp_estimate_tpot_us", step.tpotStepNanos() / 1000.0 * step.generate() / step.acceptedTokens());
-        recordForward(step, executionNanos, prefill ? step.computed() : step.output());
+        recordForward(step, executionNanos, byPriority);
     }
 
-    private void recordForward(StepStats step, long executionNanos, long tpsTokens) {
+    private void recordForward(StepStats step, long executionNanos, Map<Integer, TokenCounts> byPriority) {
         synchronized (observations) {
-            if (tpsTokens > 0) {
-                windowTpsTokens += tpsTokens;
-                windowTpsNanos += executionNanos;
+            for (var entry : byPriority.entrySet()) {
+                var counts = entry.getValue();
+                var timed = new TokenCounts(executionNanos > 0 ? counts.context() : 0,
+                    executionNanos > 0 ? counts.withCache() : 0, counts.generate(), counts.total());
+                if (timed.context() > 0 || timed.withCache() > 0 || timed.generate() > 0 || timed.total() > 0)
+                    windowTokens.merge(entry.getKey(), timed, TokenCounts::plus);
             }
-            windowInput += step.input(); windowComputed += step.computed();
-            if (step.computed() > 0) {
+            if (step.computed() > 0 && executionNanos > 0) {
                 windowComputeNanos += executionNanos;
-                if (prefill) contextSeconds.inc(step.forwardNanos() / 1_000_000_000.0);
+                if (prefill) contextSeconds.inc(executionNanos / 1_000_000_000.0);
             }
-            if (step.input() > 0) {
+            if (step.input() > 0 && executionNanos > 0) {
                 windowInputNanos += executionNanos;
-                if (prefill) contextWithCacheSeconds.inc(step.forwardNanos() / 1_000_000_000.0);
+                if (prefill) contextWithCacheSeconds.inc(executionNanos / 1_000_000_000.0);
             }
             tokens.get("input").inc(step.input()); tokens.get("compute").inc(step.computed()); tokens.get("output").inc(step.output());
         }

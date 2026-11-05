@@ -85,7 +85,10 @@ final class VitScheduler implements AutoCloseable {
                 for(var job:batch) {
                     Throwable failure=error!=null?error:completed>=job.deadline
                         ?Status.DEADLINE_EXCEEDED.withDescription("V media computation expired").asRuntimeException():null;
-                    if(failure==null) metrics.events.observe("py_rtp_vit_embedding_rt",(completed-job.enqueued)/1e6);
+                    if(failure==null) {
+                        metrics.events.observe("py_rtp_vit_embedding_rt",(completed-job.enqueued)/1e6);
+                        metrics.events.observe("py_rtp_vit_embedding_tps",job.image.rows());
+                    }
                     complete(job,failure);
                 }
             }

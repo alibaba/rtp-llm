@@ -6,7 +6,7 @@
 
 状态表示源码中是否有对应导出，不表示每次实验必有样本。待埋点项仅保留查询/说明，不增加虚假指标；资源项因共享 JVM 归属未接线，暂不绑定每 Engine 查询。
 
-P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指标只在模拟 draft 验收的执行步出现。P/D KV 仅展示本地 Device 池的块数、比例和事件。PD 仅保留 Mock 已模拟的流状态和逻辑加载耗时，真实 CacheStore 传输阶段没有样本。ViT 的图片准备指标仅在成功完成实际 URL 路径时采样。
+TPS 以当前分支 Real 的 `RtpLLMMetrics.h/.cc` 和 `MtpExecutor.cc` 为合同：context 是有效执行速率，context wall 是实际窗口墙钟速率，generate/total 是报告窗口 token 数。Decode 分子为本轮验收量，独立于交付截断；各 priority 共享整批时间。ViT embedding TPS 已接入原始计算 token 的累计速率；命中与 in-flight 去重不重复计数。P/D KV 仅展示本地 Device 池，真实 CacheStore 传输阶段没有样本。
 
 | 角色 | RTP-LLM panel | 标题 | 新框架导出 | 原指标 |
 |---|---:|---|---|---|
@@ -344,3 +344,5 @@ P/D 执行步和 TPS 对照生产 MTP 源码 `5f026a038`。Decode 的投机指�
 | prefill | 269 | pod SM利用率 | 待埋点 | pod_gpu_sm_util |
 | prefill | 271 | pod SM occupancy | 待埋点 | pod_gpu_sm_occupancy |
 | prefill | 273 | tensorflops used max | 待埋点 | pod_gpu_tensortflops_used |
+
+本地原生 TPS 面板先合并同实例 priority；generate/total 的标题明确标为报告窗口 token 数。一分钟墙钟 TPS 使用累计 token Counter，不复用这些窗口计数。ViT 新增源面板 10691 对应的 embedding TPS（本地 310691）。

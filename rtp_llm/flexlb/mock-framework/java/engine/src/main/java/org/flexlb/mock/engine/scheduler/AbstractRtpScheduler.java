@@ -205,6 +205,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         }
         var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
         executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime(), prepareStarted), batch);
+        metrics.computeStarted();
         metrics.batchPrepared(System.nanoTime() - prepareStarted);
         return executing;
     }
@@ -289,6 +290,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         // before cancellation filtering and EOS/max-length output truncation.
         long tpotStepNanos = System.nanoTime() - batch.inputStarted();
         long acceptedTokens = 0;
+        var byPriority = new TreeMap<Integer, RtpMetrics.TokenCounts>();
         try {
             for (var member : batch.members()) {
                 var entry = member.request();
@@ -296,6 +298,10 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 input += prefill() ? entry.input.tokens() : 1;
                 computed += prefill() ? entry.input.tokens() - entry.reused : 1;
                 acceptedTokens += member.step().candidates();
+                long context = prefill() ? entry.input.tokens() - entry.reused : 0;
+                long generated = prefill() ? 0 : member.step().candidates();
+                byPriority.merge(entry.input.priority(), new RtpMetrics.TokenCounts(context,
+                    prefill() ? entry.input.tokens() : 0, generated, context + generated), RtpMetrics.TokenCounts::plus);
                 if (!live(entry)) continue;
                 if (outcome.state() != SimulatedCompute.State.COMPLETED) {
                     finish(entry, new RequestFailure(CANCELLED, "Forward cancelled"));
@@ -315,16 +321,16 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 int size = batch.members().size();
                 metrics.stepCompleted(new RtpMetrics.StepStats(prefill() ? size : 0, prefill() ? 0 : size,
                     maxSequence, completed - batch.scheduleStarted(), completed - batch.stepStarted(),
-                    outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output, acceptedTokens, tpotStepNanos));
+                    outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output, acceptedTokens, tpotStepNanos), byPriority);
             }
-        } finally { batch.members().forEach(member -> member.use().close()); }
+        } finally { metrics.computeFinished(); batch.members().forEach(member -> member.use().close()); }
     }
 
     @Override public void failed(Work work, RuntimeException error) {
         var batch = completedBatch(work);
         var failure = error instanceof RequestFailure known ? known : new RequestFailure(INTERNAL, "Forward failed", error);
         try { batch.members().forEach(member -> finish(member.request(), failure)); }
-        finally { batch.members().forEach(member -> member.use().close()); }
+        finally { metrics.computeFinished(); batch.members().forEach(member -> member.use().close()); }
     }
     @Override public boolean cancelled(Work work) {
         return work == executing && ((Batch) work.owner()).members().stream().allMatch(member -> member.request().state.terminating());

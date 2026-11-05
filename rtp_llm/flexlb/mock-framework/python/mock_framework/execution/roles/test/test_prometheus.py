@@ -168,7 +168,7 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
     if mode == 'pass' and tool.is_file():
         dumped = subprocess.run([str(tool), 'tsdb', 'dump',
             '--match={__name__="rtp_llm_forward_tokens_total",kind="output"}', str(output / 'prometheus/data')],
-            capture_output=True, text=True, timeout=15)
+            cwd=output / 'prometheus', capture_output=True, text=True, timeout=15)
         assert dumped.returncode == 0, dumped.stderr
         (output / 'prometheus/offline-samples.txt').write_text(dumped.stdout)
         for node, expected in [('prefill-0', 2), ('prefill-1', 10)]:

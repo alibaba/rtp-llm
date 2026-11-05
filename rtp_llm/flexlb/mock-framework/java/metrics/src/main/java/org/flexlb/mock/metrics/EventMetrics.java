@@ -48,7 +48,7 @@ public final class EventMetrics extends Collector {
             catch (RuntimeException error) { LOG.log(System.Logger.Level.ERROR, "Engine metric observation failed: " + name, error); }
             return;
         }
-        if (name.endsWith("_qps")) {
+        if (isRate(name)) {
             qps.merge(new Series(name, Map.copyOf(ordered)), value, Double::sum);
             return;
         }
@@ -59,6 +59,9 @@ public final class EventMetrics extends Collector {
             .labelNames(names.toArray(String[]::new)).register(registry))
             .labels(labels.toArray(String[]::new)).observe(value);
     }
+
+    // Native ViT embedding TPS is an accumulating token metric, just like event QPS.
+    static boolean isRate(String name) { return name.endsWith("_qps") || name.equals("py_rtp_vit_embedding_tps"); }
 
     public void increment(String name) { observe(name, 1); }
 
