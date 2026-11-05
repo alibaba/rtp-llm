@@ -87,5 +87,22 @@ TEST(CpTransferProjectionTest, SourceQueryRejectsInvalidProducerTopology) {
     EXPECT_THROW((void)rankKeySlots(4, 2, 2), std::exception);
 }
 
+TEST(CpTransferProjectionTest, ExactSwaHandoffSkipsOnlyHistoryOutsideTheWindow) {
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.cp_mapping          = CpBlockMappingMode::COMPACT_LAST_RANK;
+    policy.sliding_window_size = 128;
+    // CP2 has 512-token physical slots. At N1320, all 127 prior tokens are
+    // in slot 2; immediately after N1024, the window still crosses slots.
+    EXPECT_EQ(firstRequiredSwaHandoffPage(policy, 512, 1320), 2u);
+    EXPECT_EQ(firstRequiredSwaHandoffPage(policy, 512, 1025), 1u);
+    EXPECT_EQ(firstRequiredSwaHandoffPage(policy, 512, 1425), 2u);
+    EXPECT_EQ(firstRequiredSwaHandoffPage(policy, 512, 3745), 7u);
+    // Non-CP 256-token slots at N1320 need both tail slots.
+    policy.cp_mapping = CpBlockMappingMode::NONE;
+    EXPECT_EQ(firstRequiredSwaHandoffPage(policy, 256, 1320), 4u);
+    policy.active_tail_blocks = 1;  // HCA_STATE has its own one-slot rule.
+    EXPECT_EQ(firstRequiredSwaHandoffPage(policy, 512, 1320), 0u);
+}
+
 }  // namespace
 }  // namespace rtp_llm::test

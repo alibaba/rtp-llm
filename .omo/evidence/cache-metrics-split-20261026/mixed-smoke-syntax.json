@@ -1,0 +1,7 @@
+{
+  "scenario": "mixed fatal-writer smoke keeps valid Python after moving observation block",
+  "invocation": "python3 ast.parse(Path(source).read_bytes())",
+  "source": "rtp_llm/test/smoke/deepseek_v4_tail_reuse_4layer_test.py",
+  "sha256": "eabb41e14187717334d0d68f69317d43d503c18d2897f6de7b3ab86bb391a845",
+  "observable": "PASS: AST parse completed; no runtime smoke claimed"
+}

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="7" failures="0" disabled="0" errors="0" time="0.025" timestamp="2026-10-26T16:44:46.525" name="AllTests">
+  <testsuite name="KVCacheLayoutViewTest" tests="7" failures="0" disabled="0" skipped="0" errors="0" time="0.025" timestamp="2026-10-26T16:44:46.525">
+    <testcase name="MhaUsesGroupHeadsAndSpecPayloadForKernelView" status="run" result="completed" time="0.023" timestamp="2026-10-26T16:44:46.525" classname="KVCacheLayoutViewTest" />
+    <testcase name="MlaReshapesKvAndScaleWithoutChangingStorage" status="run" result="completed" time="0" timestamp="2026-10-26T16:44:46.549" classname="KVCacheLayoutViewTest" />
+    <testcase name="FullOpaqueExpandsButLinearSwaAndStateStayPhysical" status="run" result="completed" time="0" timestamp="2026-10-26T16:44:46.549" classname="KVCacheLayoutViewTest" />
+    <testcase name="CompressedSpecPreservesPaddingBetweenKernelPages" status="run" result="completed" time="0" timestamp="2026-10-26T16:44:46.549" classname="KVCacheLayoutViewTest" />
+    <testcase name="Cp5ByteSlicedRingEntryCountExcludesAlignmentPadding" status="run" result="completed" time="0" timestamp="2026-10-26T16:44:46.549" classname="KVCacheLayoutViewTest" />
+    <testcase name="AlignedSwaRingSharesFullStrideAcrossPrefillAndDecode" status="run" result="completed" time="0" timestamp="2026-10-26T16:44:46.550" classname="KVCacheLayoutViewTest" />
+    <testcase name="MultiGroupRequiresTagAndEnumerationSkipsPlaceholder" status="run" result="completed" time="0" timestamp="2026-10-26T16:44:46.550" classname="KVCacheLayoutViewTest" />
+  </testsuite>
+</testsuites>

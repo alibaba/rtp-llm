@@ -1,0 +1,3 @@
+The fresh 18-target run at b3b6ea49 completed: 17 targets PASS, BlockTreeTest.InsertBackfillsTokenSegmentsOnAdoptedNode FAIL.
+Original fixture uses BlockTree(..., 2, true), where true enables diagnostic token metadata capture even without explicit endpoints. Removing that diagnostic flag leaves token_ids empty by the original default-off semantics.
+Functional tail insertion stores metadata when token_ends is explicitly supplied (BlockTree::insertNodeImpl, token_ends != nullptr guard). Adapt fixture to token_ends{2} with existing segments{{1,2}}. Preserve every adopted-node count, node identity, and token content assertion. No production behavior change.

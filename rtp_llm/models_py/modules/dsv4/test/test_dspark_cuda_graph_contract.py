@@ -6,6 +6,7 @@ import torch
 
 import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_model_module
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
+from rtp_llm.models_py.modules.dsv4.fp8.sparse_save import SparseSaveTargets
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
 from rtp_llm.ops.compute_ops import PyModelInputs
 
@@ -346,6 +347,39 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         self.assertEqual(kwargs["ring_entries"], 134)
         self.assertTrue(
             torch.equal(cache_writer.call_args.kwargs["slot_mapping"], expected_slots)
+        )
+
+        with (
+            patch.object(
+                dspark_model_module,
+                "fused_rmsnorm_rope",
+                return_value=torch.zeros((4, 4), dtype=torch.bfloat16),
+            ),
+            patch.object(
+                dspark_model_module,
+                "compute_swa_slot_mapping_from_positions",
+                return_value=expected_slots,
+            ),
+            patch.object(dspark_model_module, "decode_write_swa_fp8") as sparse_writer,
+        ):
+            model._commit_layer_features(
+                layer_idx=0,
+                main_x=torch.zeros((4, 4), dtype=torch.bfloat16),
+                context_req_ids=context_req_ids,
+                context_positions=context_positions,
+                committed_ends=prefix_lengths,
+                block_table=torch.tensor([[1]], dtype=torch.int32),
+                tokens_per_block=256,
+                batch_size=1,
+                sparse_save_targets=SparseSaveTargets(
+                    torch.tensor([[12]], dtype=torch.int64),
+                    torch.tensor([[3]], dtype=torch.int32),
+                ),
+            )
+        self.assertEqual(sparse_writer.call_count, 2)
+        self.assertEqual(
+            sparse_writer.call_args.kwargs["slot_mapping"].tolist(),
+            [3 * 134 + 10, 3 * 134 + 11, -1, -1],
         )
 
     def test_cp_project_then_gather_selects_cache_writer(self) -> None:

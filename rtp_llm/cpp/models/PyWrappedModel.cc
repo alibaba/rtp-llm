@@ -173,6 +173,12 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
+bool PyWrappedModel::supportsSparseCacheSave() const {
+    py::gil_scoped_acquire gil;
+    return py::hasattr(py_model_, "supports_sparse_cache_save")
+           && py_model_.attr("supports_sparse_cache_save").cast<bool>();
+}
+
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
@@ -248,6 +254,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.prefix_lengths   = normalize_i32(inputs.prefix_lengths);
     py_attn_inputs.sequence_lengths = normalize_i32(inputs.sequence_lengths);
     py_attn_inputs.input_lengths    = normalize_i32(inputs.input_lengths);
+    py_attn_inputs.cache_save_positions = inputs.cache_save_positions;
 #if !USING_CUDA
     // Non-CUDA platforms only support the host metadata pipeline (the device
     // branch below needs the CUDA-only metadata kernel), so lift any
@@ -437,6 +444,12 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         py_attn_inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id;
         py_attn_inputs.kv_cache_kernel_block_id_device =
             tensorHoldHostAndToCuda(py_attn_inputs.kv_cache_kernel_block_id);
+        if (inputs.cache_save_block_ids.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(inputs.cache_save_block_ids.dim() == 3
+                                        && inputs.cache_save_block_ids.size(0) == 1,
+                                    "single-group sparse save IDs require one tag row");
+            py_attn_inputs.cache_save_block_ids = inputs.cache_save_block_ids.select(0, 0);
+        }
         if (inputs.kv_cache_block_id.defined()) {
             RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_block_id.dim() == 2,
                                     "kv_cache_block_id must be 2-D when kernel block table is 2-D");
@@ -480,6 +493,10 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                     && inputs.kv_cache_block_id.size(0) == static_cast<int64_t>(group_count)
                                     && inputs.kv_cache_block_id.size(1) == inputs.kv_cache_kernel_block_id.size(1)),
                             "physical KV block table must match kernel table group and batch dimensions");
+    RTP_LLM_CHECK_WITH_INFO(!inputs.cache_save_block_ids.defined()
+                                || (inputs.cache_save_block_ids.dim() == 3
+                                    && inputs.cache_save_block_ids.size(0) == static_cast<int64_t>(group_count)),
+                            "sparse save destination rows must match payload tags");
 
     torch_ext::AttentionInputsByTag by_tag;
     for (const auto& group : model_groups) {
@@ -487,6 +504,9 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         auto       group_inputs = py_attn_inputs;
         group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[payload_row];
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
+        if (inputs.cache_save_block_ids.defined()) {
+            group_inputs.cache_save_block_ids = inputs.cache_save_block_ids.select(0, payload_row);
+        }
         if (inputs.kv_cache_block_id.defined()) {
             group_inputs.kv_cache_block_id = inputs.kv_cache_block_id[payload_row];
             if (group_inputs.cache_store_inputs.has_value()) {
@@ -1228,6 +1248,293 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
 }
 
+MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
+    if (!int(device_props_.enable_layer_micro_batch)) {
+        RTP_LLM_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");
+        return {false, {}};
+    }
+
+    const auto&  input_lengths      = inputs.input_lengths;
+    const auto&  sequence_lengths   = inputs.sequence_lengths;
+    const size_t decoder_batch_size = sequence_lengths.size(0);
+    const size_t context_batch_size = input_lengths.size(0) - decoder_batch_size;
+    // TODO(async): layer micro-batch planning still needs host lengths for
+    // split arithmetic. Keep the CPU mirror explicit while model inputs stay CUDA.
+    const auto input_lengths_host = input_lengths.is_cuda() ? input_lengths.cpu().pin_memory() : input_lengths;
+    const auto input_lengths_ptr  = input_lengths_host.data_ptr<int32_t>();
+
+    if (decoder_batch_size + context_batch_size < 2) {
+        RTP_LLM_LOG_DEBUG("micro batch disable when batch size %ld is less than 2",
+                          decoder_batch_size + context_batch_size);
+        return {false, {}};
+    }
+
+    if (context_batch_size && decoder_batch_size) {
+        if (layer_num_ == 1) {
+            size_t total_token_num = decoder_batch_size;
+            for (size_t i = 0; i < context_batch_size; i++) {
+                total_token_num += input_lengths_ptr[i + decoder_batch_size];
+            }
+            RTP_LLM_LOG_DEBUG("total_token_num %ld, decode_batch_size %ld, context_batch_size %ld",
+                              total_token_num,
+                              decoder_batch_size,
+                              context_batch_size);
+            size_t context_batch_0_size = 0;
+            size_t context_batch_1_size = 0;
+            size_t decode_batch_0_size  = 0;
+            size_t decode_batch_1_size  = 0;
+            if (total_token_num > decoder_batch_size * 2) {
+                decode_batch_0_size        = decoder_batch_size;
+                decode_batch_1_size        = 0;
+                size_t acc_token_num       = decoder_batch_size;
+                size_t context_split_point = 0;
+                for (context_split_point = 0; context_split_point < context_batch_size; context_split_point++) {
+                    acc_token_num += input_lengths_ptr[context_split_point + decoder_batch_size];
+                    if (acc_token_num * 2 >= total_token_num) {
+                        break;
+                    }
+                }
+                context_batch_0_size = context_split_point;
+                context_batch_1_size = context_batch_size - context_split_point;
+            } else {
+                decode_batch_0_size  = total_token_num / 2;
+                decode_batch_1_size  = decoder_batch_size - total_token_num / 2;
+                context_batch_0_size = 0;
+                context_batch_1_size = context_batch_size;
+            }
+            RTP_LLM_LOG_DEBUG("split [c]%d:[d]%d in micro batch 0 and [c]%d:[d]%d in micro batch 1",
+                              context_batch_0_size,
+                              decode_batch_0_size,
+                              context_batch_1_size,
+                              decode_batch_1_size);
+            return MicroBatchPlan{
+                true, {{context_batch_0_size, decode_batch_0_size}, {context_batch_1_size, decode_batch_1_size}}};
+        } else {
+            RTP_LLM_LOG_DEBUG("split context in micro batch 0, decode in micro batch 1 disabled!");
+            return {false, {}};
+        }
+    }
+
+    const size_t batch_size_to_split = context_batch_size ? context_batch_size : decoder_batch_size;
+    const size_t micro_batch_0_size  = (batch_size_to_split + 1) / 2;
+    const size_t micro_batch_1_size  = batch_size_to_split - micro_batch_0_size;
+
+    RTP_LLM_LOG_DEBUG("split micro batch size %ld, %ld", micro_batch_0_size, micro_batch_1_size);
+    return context_batch_size ? MicroBatchPlan{true, {{micro_batch_0_size, 0}, {micro_batch_1_size, 0}}} :
+                                MicroBatchPlan{true, {{0, micro_batch_0_size}, {0, micro_batch_1_size}}};
+}
+
+std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
+PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan) {
+    std::vector<GptModelInputs> micro_batch_inputs;
+    std::vector<TokenSliceInfo> token_slice_recipes;
+    size_t                      sliced_token_idx       = 0;
+    size_t                      sliced_lm_output_index = 0;
+    size_t                      sliced_batch_idx       = 0;
+    size_t                      decode_batch_idx       = 0;
+    size_t                      prefill_batch_idx      = 0;
+    // TODO(async): micro-batch token slicing still computes CPU scalar sums.
+    // Convert explicitly and keep all sliced GptModelInputs device-resident.
+    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                         inputs.input_lengths.cpu().pin_memory() :
+                                         inputs.input_lengths;
+    const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    auto slice_sparse_save = [&](GptModelInputs& micro, size_t start, size_t count) {
+        micro.cache_save_positions = inputs.cache_save_positions.defined() ?
+                                         inputs.cache_save_positions.narrow(0, start, count) :
+                                         torch::Tensor();
+        micro.cache_save_block_ids = inputs.cache_save_block_ids.defined() ?
+                                         inputs.cache_save_block_ids.narrow(1, start, count) :
+                                         torch::Tensor();
+    };
+
+    if (!micro_batch_plan.enable) {
+        RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");
+        micro_batch_inputs.push_back(inputs);
+
+        GptModelInputs fake_inputs;
+        fake_inputs.kv_cache_block_id = torch::Tensor();
+        fake_inputs.combo_tokens =
+            inputs.combo_tokens.numel() == 0 ? inputs.combo_tokens : inputs.combo_tokens.narrow(0, 0, 1);
+        if (inputs.engram_token_windows.defined()) {
+            fake_inputs.engram_token_windows = inputs.engram_token_windows.numel() == 0 ?
+                                                   inputs.engram_token_windows :
+                                                   inputs.engram_token_windows.narrow(0, 0, 1);
+        }
+        fake_inputs.input_lengths    = torch::ones({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.sequence_lengths = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.prefix_lengths   = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        micro_batch_inputs.push_back(fake_inputs);
+    } else {
+        for (size_t i = 0; i < micro_batch_plan.batch_infos.size(); ++i) {
+            const auto& p_micro_batch_size = micro_batch_plan.batch_infos[i].prefill_num;
+            const auto& d_micro_batch_size = micro_batch_plan.batch_infos[i].decoder_num;
+            RTP_LLM_LOG_DEBUG(
+                "micro batch index %ld, prefill size %ld, decode size %ld", i, p_micro_batch_size, d_micro_batch_size);
+
+            if (d_micro_batch_size && p_micro_batch_size) {
+                GptModelInputs micro_model_inputs = inputs;
+                size_t         total_batch_size   = d_micro_batch_size + p_micro_batch_size;
+                RTP_LLM_LOG_DEBUG("d and p slice from %ld %ld %ld %ld",
+                                  sliced_token_idx,
+                                  sliced_batch_idx,
+                                  decode_batch_idx,
+                                  prefill_batch_idx);
+                micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, total_batch_size);
+                micro_model_inputs.sequence_lengths =
+                    inputs.sequence_lengths.narrow(0, decode_batch_idx, d_micro_batch_size);
+                micro_model_inputs.kv_cache_block_id =
+                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, total_batch_size);
+                micro_model_inputs.kv_cache_kernel_block_id =
+                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, total_batch_size);
+                micro_model_inputs.prefix_lengths =
+                    inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
+                micro_model_inputs.cache_store_publish_start_tokens =
+                    inputs.cache_store_publish_start_tokens.defined() ?
+                        inputs.cache_store_publish_start_tokens.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
+                micro_model_inputs.attention_mask =
+                    inputs.attention_mask.defined() ?
+                        inputs.attention_mask.narrow(0, sliced_batch_idx, total_batch_size) :
+                        torch::Tensor();
+                int32_t slice_token_num = std::accumulate(input_lengths_ptr + sliced_batch_idx + d_micro_batch_size,
+                                                          input_lengths_ptr + sliced_batch_idx + total_batch_size,
+                                                          0)
+                                          + d_micro_batch_size;
+                int32_t slice_lm_output_num = total_batch_size;
+                micro_model_inputs.lm_output_indexes =
+                    inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);
+                micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, slice_token_num);
+                if (inputs.engram_token_windows.defined()) {
+                    micro_model_inputs.engram_token_windows =
+                        inputs.engram_token_windows.narrow(0, sliced_token_idx, slice_token_num);
+                }
+                micro_model_inputs.request_id = inputs.request_id.defined() ?
+                                                    inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                                                    torch::Tensor();
+                micro_model_inputs.request_pd_separation =
+                    inputs.request_pd_separation.defined() ?
+                        inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
+                micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
+                                                    inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                                                    torch::Tensor();
+                slice_sparse_save(micro_model_inputs, prefill_batch_idx, p_micro_batch_size);
+
+                token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
+
+                micro_batch_inputs.push_back(micro_model_inputs);
+
+                sliced_lm_output_index += slice_lm_output_num;
+                sliced_token_idx += slice_token_num;
+                sliced_batch_idx += total_batch_size;
+                prefill_batch_idx += p_micro_batch_size;
+                decode_batch_idx += d_micro_batch_size;
+                RTP_LLM_LOG_DEBUG(
+                    "micro batch %ld sliced context and decode, batch idx %ld, token idx %ld, prefill batch idx %d, decode batch idx %d",
+                    i,
+                    sliced_batch_idx,
+                    sliced_token_idx,
+                    prefill_batch_idx,
+                    decode_batch_idx);
+            } else if (d_micro_batch_size) {
+                GptModelInputs micro_model_inputs = inputs;
+                RTP_LLM_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
+                micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, d_micro_batch_size);
+                if (inputs.engram_token_windows.defined()) {
+                    micro_model_inputs.engram_token_windows =
+                        inputs.engram_token_windows.narrow(0, sliced_token_idx, d_micro_batch_size);
+                }
+                micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.sequence_lengths =
+                    inputs.sequence_lengths.narrow(0, decode_batch_idx, d_micro_batch_size);
+                micro_model_inputs.attention_mask =
+                    inputs.attention_mask.defined() ?
+                        inputs.attention_mask.narrow(0, sliced_batch_idx, d_micro_batch_size) :
+                        torch::Tensor();
+                micro_model_inputs.kv_cache_block_id =
+                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.kv_cache_kernel_block_id =
+                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.prefix_lengths =
+                    torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+                micro_model_inputs.cache_store_publish_start_tokens = torch::Tensor();
+                micro_model_inputs.cache_save_positions = torch::Tensor();
+                micro_model_inputs.cache_save_block_ids = torch::Tensor();
+                micro_model_inputs.lm_output_indexes =
+                    inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);
+
+                token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, d_micro_batch_size});
+
+                micro_batch_inputs.push_back(micro_model_inputs);
+
+                sliced_token_idx += d_micro_batch_size;
+                sliced_batch_idx += d_micro_batch_size;
+                decode_batch_idx += d_micro_batch_size;
+                sliced_lm_output_index += d_micro_batch_size;
+                RTP_LLM_LOG_DEBUG("micro batch %ld sliced decode, batch idx %ld, token idx %ld",
+                                  i,
+                                  sliced_batch_idx,
+                                  sliced_token_idx);
+            } else {
+                GptModelInputs micro_model_inputs = inputs;
+                RTP_LLM_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
+                micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, p_micro_batch_size);
+                micro_model_inputs.kv_cache_block_id =
+                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_block_id, sliced_batch_idx, p_micro_batch_size);
+                micro_model_inputs.kv_cache_kernel_block_id =
+                    sliceKvCacheBlockIdByBatch(inputs.kv_cache_kernel_block_id, sliced_batch_idx, p_micro_batch_size);
+                micro_model_inputs.prefix_lengths =
+                    inputs.prefix_lengths.narrow(0, prefill_batch_idx, p_micro_batch_size);
+                micro_model_inputs.cache_store_publish_start_tokens =
+                    inputs.cache_store_publish_start_tokens.defined() ?
+                        inputs.cache_store_publish_start_tokens.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
+                micro_model_inputs.attention_mask =
+                    inputs.attention_mask.defined() ?
+                        inputs.attention_mask.narrow(0, sliced_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
+                micro_model_inputs.sequence_lengths =
+                    torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+                int32_t slice_token_num = std::accumulate(
+                    input_lengths_ptr + sliced_batch_idx, input_lengths_ptr + sliced_batch_idx + p_micro_batch_size, 0);
+                int32_t slice_lm_output_num = p_micro_batch_size;
+                micro_model_inputs.lm_output_indexes =
+                    inputs.lm_output_indexes.narrow(0, sliced_lm_output_index, slice_lm_output_num);
+                micro_model_inputs.combo_tokens = inputs.combo_tokens.narrow(0, sliced_token_idx, slice_token_num);
+                if (inputs.engram_token_windows.defined()) {
+                    micro_model_inputs.engram_token_windows =
+                        inputs.engram_token_windows.narrow(0, sliced_token_idx, slice_token_num);
+                }
+                micro_model_inputs.request_id = inputs.request_id.defined() ?
+                                                    inputs.request_id.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                                                    torch::Tensor();
+                micro_model_inputs.request_pd_separation =
+                    inputs.request_pd_separation.defined() ?
+                        inputs.request_pd_separation.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
+                micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
+                                                    inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                                                    torch::Tensor();
+                slice_sparse_save(micro_model_inputs, prefill_batch_idx, p_micro_batch_size);
+
+                token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
+
+                micro_batch_inputs.push_back(micro_model_inputs);
+                sliced_lm_output_index += slice_lm_output_num;
+                sliced_token_idx += slice_token_num;
+                sliced_batch_idx += p_micro_batch_size;
+                prefill_batch_idx += p_micro_batch_size;
+                RTP_LLM_LOG_DEBUG("micro batch %ld sliced context, batch idx %ld, token idx %ld",
+                                  i,
+                                  sliced_batch_idx,
+                                  sliced_token_idx);
+            }
+        }
+    }
+    return {micro_batch_inputs, token_slice_recipes};
+}
+
 void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.combo_tokens);
     buffer_holder_.hold_host(inputs.input_lengths);
@@ -1245,6 +1552,8 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.kv_cache_block_id);
     buffer_holder_.hold_host(inputs.kv_cache_group_types);
     buffer_holder_.hold_host(inputs.kv_cache_update_mapping);
+    buffer_holder_.hold_host(inputs.cache_save_positions);
+    buffer_holder_.hold_host(inputs.cache_save_block_ids);
     if (inputs.multimodal_features.has_value()) {
         for (auto& mm_feature : inputs.multimodal_features.value()) {
             buffer_holder_.hold_host(mm_feature);

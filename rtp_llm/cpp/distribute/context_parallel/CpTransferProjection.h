@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -33,6 +34,12 @@ std::vector<size_t> selectProducerTransferPages(const CacheGroupPolicy& policy,
                                                 size_t                  logical_page_count,
                                                 bool                    use_hybrid,
                                                 bool                    compact_tail);
+
+// Pages before this boundary are outside the SWA history needed by the first
+// decode step. Unlike a missing destination, they impose no transfer obligation.
+size_t firstRequiredSwaHandoffPage(const CacheGroupPolicy& policy,
+                                   size_t                  tokens_per_block,
+                                   size_t                  input_token_count);
 
 LoadTransferPlan selectLoadTransferPages(const CacheGroupPolicy& policy,
                                          size_t                  logical_page_count,

@@ -1,0 +1,57 @@
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:77:class DestructionObserverContext: public AsyncContext {
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:79:    explicit DestructionObserverContext(std::function<void()> observer): observer_(std::move(observer)) {}
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:81:    ~DestructionObserverContext() override {
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:82:        observer_();
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:95:    std::function<void()> observer_;
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:575:TEST_F(StreamCacheResourceTest, PartialTailRegistrationIsGatedAndIndependentOfObservation) {
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:742:    enablePrefixObservation();
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:759:    const auto summary = resource.prefixObservationSummaryPayload("ready");
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:971:TEST_F(StreamCacheResourceTest, InternalForkObservationMarksOriginalPointDeduplication) {
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:976:    enablePrefixObservation();
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:996:    const auto summary = resource.prefixObservationSummaryPayload("ready");
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:1025:    enablePrefixObservation();
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:1055:    const auto summary = resource.prefixObservationSummaryPayload("ready");
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:3111:    // The observer may outlive this test body if releaseResource regresses.
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:3113:    struct ReleaseObservation {
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:3117:    auto                          observed    = std::make_shared<ReleaseObservation>();
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:3120:        std::make_shared<DestructionObserverContext>([observed, weak_stream, manager = cache_manager_] {
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:3121:            observed->context_destroyed = true;
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:3123:            observed->blocks_present =
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:3130:    EXPECT_TRUE(observed->context_destroyed);
+/tmp/final-test-work/rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc:3131:    EXPECT_TRUE(observed->blocks_present);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/load/test/LoadAsyncContextTest.cc:467:            const bool release_observed = cv.wait_for(lock, 10s, [&] { return released; });
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/load/test/LoadAsyncContextTest.cc:468:            EXPECT_TRUE(release_observed);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/load/test/LoadAsyncContextTest.cc:469:            return release_observed;
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/load/test/BlockTreeLoaderTest.cc:457:TEST(BlockTreeLoaderTest, MatchObservationSkipsIncompleteTokenMetadata) {
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/load/test/BlockTreeLoaderTest.cc:489:    environment->insertRequestPath();  // Allocate request-owned blocks before rebuilding the observable tree.
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/load/test/BlockTreeLoaderTest.cc:654:    EXPECT_EQ(context->remoteObservation(256).candidate_pos, 256u);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/load/test/BlockTreeLoaderTest.cc:713:            EXPECT_EQ(later.async_context->remoteObservation(256).candidate_pos, 256u);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/load/test/BlockTreeLoaderTest.cc:1574:    EXPECT_TRUE(commit.get());  // Commit either submits or observes invalidation under the cache mutex.
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h:34:// Test-only observation of backend-owned I/O completion; not a write mode or
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h:250:struct MatchObservation {
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h:421:[[maybe_unused]] MatchObservation match(KVCMStorageBackend& backend, StorageRequest request) {
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h:422:    auto promise = std::make_shared<std::promise<MatchObservation>>();
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/store/test/BlockTreeStorerTest.cc:254:size_t logOccurrenceCount(const std::string& content, const std::string& needle) {
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.cc:669:void BlockTreeCacheTestPeer::setTransferDrainObserverForTest(BlockTreeCache& cache, std::function<void()> observer) {
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.cc:670:    cache.transfer_dispatcher_->drain_observer_for_test_ = std::move(observer);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:761:    const auto ranges = tree.contentMatchRanges(request, key, source_identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:770:    tree.contentMatchRanges(request, key, source_identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:775:    tree.contentMatchRanges(std::vector<int>(256, 1), key, source_identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:780:    tree.contentMatchRanges(source_ended, key, source_identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:785:    tree.contentMatchRanges(request, key,
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:811:    tree.contentMatchRanges(request, key, identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:831:    tree.contentMatchRanges(request, endpoint_key, source_identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:838:    tree.contentMatchRanges(request, endpoint_key, source_identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:847:    const auto ranges = tree.contentMatchRanges(request, different_image_key, source_identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:873:        const auto ranges = tree.contentMatchRanges(request, key, identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:889:    tree.contentMatchRanges(request, key, identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:892:    tree.contentMatchRanges(truncated, key, identity, &fork);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:896:    tree.contentMatchRanges(request, key,
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:927:    const auto candidates = tree.contentMatchCandidates(request, [](size_t end) { return static_cast<CacheKeyType>(end); });
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:935:    const auto image_mismatch = tree.contentMatchCandidates(request, [](size_t end) {
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:957:    EXPECT_EQ(tree.contentMatchCandidates(std::vector<int>(128, 7), [](size_t end) { return end; }).size(), 1u);
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc:974:    const auto candidates = tree.contentMatchCandidates(cp_request, [](size_t end) { return end; });
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTest.cc:1356:TEST_F(BlockTreeCacheTest, PreciseForkObservationUsesAuthenticatedContentAndKeepsReuseUnchanged) {
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTest.cc:1357:    for (const bool observe : {false, true}) {
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTest.cc:1387:        if (observe) {
+/tmp/final-test-work/rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTest.cc:3682:    // to LOADING, registers it, and takes its target holder; the duplicate observes the same

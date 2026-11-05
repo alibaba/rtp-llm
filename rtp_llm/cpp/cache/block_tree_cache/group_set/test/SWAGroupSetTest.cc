@@ -94,6 +94,27 @@ TEST_F(SWAGroupSetTest, WindowValidatorConnectedPath) {
     delete c;
 }
 
+TEST_F(SWAGroupSetTest, LocalHcaRequiredPathIsEmptyAtCompressionBoundaries) {
+    auto hca = std::make_shared<SWAGroupSet>(128, 256, std::vector<DeviceBlockPoolPtr>{pool_}, nullptr, nullptr);
+    hca->initialize(0, group_->topologyPtr(), group_->groupTags(), {}, /*local_only=*/true);
+
+    std::vector<TreeNode> nodes(7);
+    for (size_t i = 0; i < 5; ++i) {
+        nodes[i].token_end = (i + 1) * 256;
+        nodes[i].parent    = i == 0 ? nullptr : &nodes[i - 1];
+    }
+    nodes[5].parent    = &nodes[4];
+    nodes[5].token_end = 1281;
+    nodes[6].parent    = &nodes[4];
+    nodes[6].token_end = 1408;
+    std::vector<TreeNode*> prefix{&nodes[0], &nodes[1], &nodes[2], &nodes[3], &nodes[4]};
+    EXPECT_TRUE(hca->requiredPathIndices(prefix, 1280).empty());
+    prefix.push_back(&nodes[5]);
+    EXPECT_EQ(hca->requiredPathIndices(prefix, 1281), (std::vector<size_t>{5}));
+    prefix.back() = &nodes[6];
+    EXPECT_TRUE(hca->requiredPathIndices(prefix, 1408).empty());
+}
+
 TEST_F(SWAGroupSetTest, WindowValidatorGapRequiresEnoughWindowAfterReset) {
     std::unique_ptr<MatchValidator> validator     = group_->createMatchValidator();
     SWAMatchValidator*              swa_validator = dynamic_cast<SWAMatchValidator*>(validator.get());

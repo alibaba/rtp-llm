@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="33" failures="0" disabled="0" errors="0" time="0.304" timestamp="2026-10-26T16:45:51.572" name="AllTests">
+  <testsuite name="StorageBackendExecutorTest" tests="3" failures="0" disabled="0" skipped="0" errors="0" time="0.1" timestamp="2026-10-26T16:45:51.572">
+    <testcase name="RejectsZeroDimensions" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.572" classname="StorageBackendExecutorTest" />
+    <testcase name="HonorsConfiguredWorkerAndQueueCapacity" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.572" classname="StorageBackendExecutorTest" />
+    <testcase name="ShutdownDrainsQueuedTasksAndWaitsForConcurrentShutdown" status="run" result="completed" time="0.1" timestamp="2026-10-26T16:45:51.572" classname="StorageBackendExecutorTest" />
+  </testsuite>
+  <testsuite name="StorageBackendTest" tests="30" failures="0" disabled="0" skipped="0" errors="0" time="0.203" timestamp="2026-10-26T16:45:51.672">
+    <testcase name="InvalidHandlesFailBeforePinOrIoSubmission" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.672" classname="StorageBackendTest" />
+    <testcase name="ReorderedPoolInputsPreserveTagIdentityAndTopologyLifetime" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.673" classname="StorageBackendTest" />
+    <testcase name="InvalidPoolBindingsFailBeforeDerivedInitOrIo" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.673" classname="StorageBackendTest" />
+    <testcase name="RejectsSharedExecutorBeforeInitializingSecondBackend" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.674" classname="StorageBackendTest" />
+    <testcase name="CallbackExceptionsSettleTasksAndPreserveExecutor" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.674" classname="StorageBackendTest" />
+    <testcase name="DefaultExecutorRunsOperationsAsynchronously" status="run" result="completed" time="0.05" timestamp="2026-10-26T16:45:51.674" classname="StorageBackendTest" />
+    <testcase name="DefaultExecutorShutdownSettlesQueuedOperationsAndPins" status="run" result="completed" time="0.05" timestamp="2026-10-26T16:45:51.724" classname="StorageBackendTest" />
+    <testcase name="CustomExecutorControlsScheduling" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.774" classname="StorageBackendTest" />
+    <testcase name="ExecutorStartFailurePropagatesFromInit" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.774" classname="StorageBackendTest" />
+    <testcase name="SubmissionFailureCompletesOnceAndReleasesPins" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.775" classname="StorageBackendTest" />
+    <testcase name="IoExceptionsPropagateFailureAndReleasePins" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.775" classname="StorageBackendTest" />
+    <testcase name="AsyncWritesReturnBeforeCompletionAndReleaseOnlyTheirOwnPins" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.775" classname="StorageBackendTest" />
+    <testcase name="AsyncWriteFailuresAndRejectionReleasePins" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.775" classname="StorageBackendTest" />
+    <testcase name="AsyncWriteDuringStoppingIsRejectedAndReleasesPins" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.775" classname="StorageBackendTest" />
+    <testcase name="AsyncWriteFromOwnCallbacksQueuesWithoutBlocking" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.775" classname="StorageBackendTest" />
+    <testcase name="DuplicateExecutorInvocationCompletesExactlyOnce" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.775" classname="StorageBackendTest" />
+    <testcase name="ShutdownDrainsAcceptedTasksAndRejectsNewOnes" status="run" result="completed" time="0.1" timestamp="2026-10-26T16:45:51.775" classname="StorageBackendTest" />
+    <testcase name="ShutdownFromCompletionIsRejectedWithoutDeadlock" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.875" classname="StorageBackendTest" />
+    <testcase name="ReadAfterShutdownReleasesPin" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.875" classname="StorageBackendTest" />
+    <testcase name="UnsubmittedWriteTasksReleasePinsAcrossShutdown" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.875" classname="StorageBackendTest" />
+    <testcase name="EmptyPerKeyRowsDoNotCreateWriteTask" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.876" classname="StorageBackendTest" />
+    <testcase name="InitPopulatesBaseResourcesBeforeCallingDerivedImplementation" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.876" classname="StorageBackendTest" />
+    <testcase name="InitPropagatesDerivedFailure" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.876" classname="StorageBackendTest" />
+    <testcase name="InvalidArgumentsDoNotConsumeInitializationAttempt" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.876" classname="StorageBackendTest" />
+    <testcase name="FailedDerivedInitReleasesUnusedExecutorBinding" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.876" classname="StorageBackendTest" />
+    <testcase name="WritePinsEachPhysicalBlockOnceUntilCompletion" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.876" classname="StorageBackendTest" />
+    <testcase name="IndependentPoolsPinSameBlockIdSeparately" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.876" classname="StorageBackendTest" />
+    <testcase name="UninitializedBackendRejectsTaskAndReleasesPinnedSource" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.876" classname="StorageBackendTest" />
+    <testcase name="ReadPinsTargetsUntilCompletion" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.876" classname="StorageBackendTest" />
+    <testcase name="ResolvesGpuBufferAndGroupMetadataFromBoundResources" status="run" result="completed" time="0" timestamp="2026-10-26T16:45:51.876" classname="StorageBackendTest" />
+  </testsuite>
+</testsuites>

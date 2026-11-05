@@ -1,0 +1,7 @@
+G17 B4 CP2 linear: old begin=4, expected=5, before=FAIL; new begin=5, after=PASS
+G17 B4 CP2 full: old begin=3, expected=3, before=PASS; new begin=3, after=PASS
+G17 B4 CP4 linear: old begin=4, expected=5, before=FAIL; new begin=5, after=PASS
+G17 B4 CP4 full: old begin=2, expected=2, before=PASS; new begin=2, after=PASS
+G8 B4 CP2 linear: new begin=2, expected=2: PASS
+G8 B4 CP2 full: new begin=1, expected=1: PASS
+Arithmetic/source verification only. Bazel regression test not executed; parent owns runtime validation.

@@ -20,6 +20,7 @@ struct ResourceContext {
     bool     decode_entrance{false};  // PD反转模式：Decode侧作为请求入口
 
     bool reuse_cache{false};
+    bool enable_prefill_partial_tail_reuse{false};
     bool enable_device_cache{true};
     bool enable_memory_cache{false};
     bool enable_disk_cache{false};

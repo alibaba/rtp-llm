@@ -1,0 +1,89 @@
+diff --git a/rtp_llm/cpp/cache/CoordinatorCacheManager.cc b/rtp_llm/cpp/cache/CoordinatorCacheManager.cc
+index aafea8d12f..566ec46b96 100644
+--- a/rtp_llm/cpp/cache/CoordinatorCacheManager.cc
++++ b/rtp_llm/cpp/cache/CoordinatorCacheManager.cc
+@@ -386,9 +386,11 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
+         const auto& pool      = group->blockPool();
+         auto&       locations = block_locations[i];
+         const auto& tag       = group->tag();
+-        const int   local_reuse_length =
+-            config_.localAllocTokens(tag, device_ready_reuse_length);
+-        const size_t recompute_begin = local_reuse_length / group->seqSizePerBlock();
++        const size_t span = logicalBlockSpan(config_, config_.group(tag));
++        const size_t ready_tokens = static_cast<size_t>(device_ready_reuse_length);
++        // Required continuation preserves and copies the partially ready slot
++        // before forward. Detach only slots with no device-ready tokens here.
++        const size_t recompute_begin = ready_tokens / span + (ready_tokens % span != 0);
+         for (int batch = 0; batch < resource->batchSize(); ++batch) {
+             auto&       ids    = resource->mutableBlockIds(batch, tag);
+             const auto& blocks = ids.blocks();
+diff --git a/rtp_llm/cpp/cache/test/HybridCoordinatorCacheManagerCPShardTest.cc b/rtp_llm/cpp/cache/test/HybridCoordinatorCacheManagerCPShardTest.cc
+index ae21a779e2..4fffd0db96 100644
+--- a/rtp_llm/cpp/cache/test/HybridCoordinatorCacheManagerCPShardTest.cc
++++ b/rtp_llm/cpp/cache/test/HybridCoordinatorCacheManagerCPShardTest.cc
+@@ -163,6 +163,65 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, RecomputeDetachesSuffixUsingGro
+     EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+ }
+ 
++TEST_F(HybridCoordinatorCacheManagerCPShardTest, RecomputePreservesPartialSlotsForRequiredContinuation) {
++    for (const int cp_size : {2, 4}) {
++        for (int cp_rank = 0; cp_rank < cp_size; ++cp_rank) {
++            SCOPED_TRACE(::testing::Message() << "cp_size=" << cp_size << " cp_rank=" << cp_rank);
++            auto config = makeCPHybridConfig();
++            resolveTestCpLayout(config, cp_size, cp_rank);
++            auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
++            ASSERT_TRUE(allocator->init());
++            auto resource = makeBatchRes(1, config, {100, 101, 102, 103, 104, 105, 106, 107});
++            const std::vector<std::string> tags{"linear", "full"};
++            const std::vector<size_t> partial_slots{4u, cp_size == 2 ? 2u : 1u};
++            std::vector<BlockIndicesType> original_blocks;
++            for (size_t group = 0; group < tags.size(); ++group) {
++                const auto pool = allocator->groupBlockPools()[group];
++                auto blocks = pool->malloc(partial_slots[group] + 2);
++                ASSERT_TRUE(blocks.has_value());
++                pool->incRef(*blocks);
++                pool->incTreeRef(*blocks, BlockTreeRefType::CACHE);
++                resource->mutableBlockIds(0, tags[group]).assign(*blocks);
++                original_blocks.push_back(*blocks);
++            }
++
++            ASSERT_TRUE(allocator->detachSharedBlocksForRecompute(resource, /*reuse_length=*/17));
++            for (size_t group = 0; group < tags.size(); ++group) {
++                const size_t partial = partial_slots[group];
++                const auto pool = allocator->groupBlockPools()[group];
++                for (size_t slot = 0; slot <= partial; ++slot) {
++                    EXPECT_EQ(resource->blocks(0, tags[group])[slot], original_blocks[group][slot]);
++                }
++                EXPECT_EQ(pool->refCount(original_blocks[group][partial]), 2u);
++                EXPECT_NE(resource->blocks(0, tags[group])[partial + 1], original_blocks[group][partial + 1]);
++                EXPECT_EQ(pool->refCount(original_blocks[group][partial + 1]), 1u);
++            }
++
++            PrefixCacheRegistration registration;
++            ASSERT_EQ(allocator->prepareRequiredContinuation(registration, *resource, 17), MallocStatus::NONE);
++            ASSERT_EQ(registration.copy_mappings.size(), 2u);
++            ASSERT_EQ(registration.source_pins.size(), 2u);
++            for (size_t group = 0; group < tags.size(); ++group) {
++                const auto source = original_blocks[group][partial_slots[group]];
++                const auto destination = resource->blocks(0, tags[group])[partial_slots[group]];
++                EXPECT_NE(destination, source);
++                EXPECT_EQ(registration.copy_mappings[group].tag, tags[group]);
++                EXPECT_EQ(registration.copy_mappings[group].src, source);
++                EXPECT_EQ(registration.copy_mappings[group].dst, destination);
++                EXPECT_EQ(registration.source_pins[group].block, source);
++                EXPECT_EQ(allocator->groupBlockPools()[group]->refCount(source), 2u);
++            }
++            allocator->releaseRegisteredSave(registration);
++            allocator->free({resource, makeTokens(1, 32, 4)});
++            for (size_t group = 0; group < tags.size(); ++group) {
++                const auto pool = allocator->groupBlockPools()[group];
++                pool->decTreeRef(original_blocks[group], BlockTreeRefType::CACHE);
++                EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
++            }
++        }
++    }
++}
++
+ TEST_F(HybridCoordinatorCacheManagerCPShardTest, ExactEndpointProjectsEachTagThroughItsResolvedCpGeometry) {
+     for (const int cp_size : {2, 4}) {
+         auto config = makeCPHybridConfig();  // B=4; LINEAR is unscaled, FULL is round robin.

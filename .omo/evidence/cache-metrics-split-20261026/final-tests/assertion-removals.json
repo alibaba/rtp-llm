@@ -1,0 +1,197 @@
+[
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/load/test/BlockTreeLoaderTest.cc",
+    "test": "MatchObservationSkipsIncompleteTokenMetadata",
+    "removed": [
+      "EXPECT_FALSE(result.match_observation.has_value());"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/load/test/BlockTreeLoaderTest.cc",
+    "test": "RemoteCompetitionReportsAuthenticatedLocalContent",
+    "removed": [
+      "ASSERT_TRUE(result.match_observation.has_value());",
+      "EXPECT_EQ(result.match_observation->content_pos, 400u);",
+      "EXPECT_EQ(result.match_observation->local_valid_pos, 256u);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockFullLinearTest.cc",
+    "test": "MatchSdkFailureKeepsLocalBoundaryAndReportsQueryError",
+    "removed": [
+      "EXPECT_EQ(result.query_status, PrefixCacheRemoteQueryStatus::ERROR);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockFullLinearTest.cc",
+    "test": "LocalBoundaryIsNotReportedAsRemoteMiss",
+    "removed": [
+      "EXPECT_EQ(result.query_status, PrefixCacheRemoteQueryStatus::NOT_QUERIED);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/store/test/BlockTreeStorerTest.cc",
+    "test": "StoreCopyFailureLeavesTreeAndPoolsUntouched",
+    "removed": [
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"request_id\\\":771\"), 3u) << content;",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"publication\\\"\"), 1u) << content;",
+      "EXPECT_NE(content.find(\"\\\"insert_attempted\\\":false\"), std::string::npos) << content;",
+      "EXPECT_NE(content.find(\"\\\"accepted_resources\\\":0\"), std::string::npos) << content;",
+      "EXPECT_EQ(content.find(\"\\\"used_pos\\\":\"), std::string::npos) << content;",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan\\\"\"), 1u) << content;",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan_unfulfilled\\\"\"), 1u) << content;",
+      "EXPECT_NE(content.find(\"\\\"reason\\\":\\\"copy_failed\\\"\"), std::string::npos) << content;"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/store/test/BlockTreeStorerTest.cc",
+    "test": "DuplicateStoreSettlementSettlesTaskOnce",
+    "removed": [
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan_unfulfilled\\\"\"), 1u) << content;",
+      "EXPECT_NE(content.find(\"\\\"reason\\\":\\\"copy_failed\\\"\"), std::string::npos) << content;"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/store/test/BlockTreeStorerTest.cc",
+    "test": "StoreQueueRejectionClosesPlanExactlyOnce",
+    "removed": [
+      "EXPECT_EQ(plan_state, PrefixCachePlanState::FORMED);",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan\\\"\"), 1u) << content;",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan_unfulfilled\\\"\"), 1u) << content;",
+      "EXPECT_NE(content.find(\"\\\"reason\\\":\\\"queue_rejected\\\"\"), std::string::npos) << content;"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/store/test/BlockTreeStorerTest.cc",
+    "test": "StoreQueueTimeoutClosesPlanExactlyOnce",
+    "removed": [
+      "EXPECT_EQ(plan_state, PrefixCachePlanState::FORMED);",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan\\\"\"), 1u) << content;",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan_unfulfilled\\\"\"), 1u) << content;",
+      "EXPECT_NE(content.find(\"\\\"reason\\\":\\\"store_timeout\\\"\"), std::string::npos) << content;"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/store/test/BlockTreeStorerTest.cc",
+    "test": "StoreShutdownClosesLowerTierPlanExactlyOnce",
+    "removed": [
+      "EXPECT_EQ(plan_state, PrefixCachePlanState::FORMED);",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan\\\"\"), 1u) << content;",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan_unfulfilled\\\"\"), 1u) << content;",
+      "EXPECT_NE(content.find(\"\\\"reason\\\":\\\"store_stopped\\\"\"), std::string::npos) << content;"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/store/test/BlockTreeStorerTest.cc",
+    "test": "DeviceInsertDuringShutdownPreservesPublicationAndClosesPlan",
+    "removed": [
+      "EXPECT_EQ(plan_state, PrefixCachePlanState::FORMED);",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan\\\"\"), 1u) << content;",
+      "EXPECT_EQ(logOccurrenceCount(content, \"\\\"kind\\\":\\\"plan_unfulfilled\\\"\"), 0u) << content;"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTest.cc",
+    "test": "InternalForkInsertSkipsAfterAncestorEvictionWithoutTakingItsBlock",
+    "removed": [
+      "EXPECT_NE(skipped.find(\"\\\"internal_fork\\\":true,\\\"internal_fork_pos\\\":300,\\\"internal_fork_ready\\\":null\"), std::string::npos);",
+      "EXPECT_NE(skipped.find(\"\\\"reason\\\":\\\"missing_internal_fork_ancestor\\\"\"), std::string::npos);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTest.cc",
+    "test": "PreciseForkObservationUsesAuthenticatedContentAndKeepsReuseUnchanged",
+    "removed": [
+      "ASSERT_TRUE(result.match_observation.has_value());",
+      "EXPECT_EQ(result.match_observation->content_pos, std::optional<size_t>(4));",
+      "EXPECT_EQ(result.match_observation->local_valid_pos, std::optional<size_t>(2));",
+      "EXPECT_EQ(result.match_observation->content_key, std::optional<CacheKeyType>(201));",
+      "EXPECT_FALSE(result.match_observation->content_partial);",
+      "EXPECT_FALSE(result.match_observation.has_value());"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTest.cc",
+    "test": "InternalForkInsertRequiresJointlyReadyPathUnderLock",
+    "removed": [
+      "EXPECT_NE(skipped.find(\"\\\"internal_fork\\\":true,\\\"internal_fork_pos\\\":300,\\\"internal_fork_ready\\\":null\"), std::string::npos);",
+      "EXPECT_NE(skipped.find(\"\\\"reason\\\":\\\"internal_fork_not_jointly_ready\\\"\"), std::string::npos);",
+      "ASSERT_NE(first_publication, std::string::npos);",
+      "EXPECT_EQ(skipped.find(\"\\\"kind\\\":\\\"publication\\\"\", first_publication + 1), std::string::npos);",
+      "EXPECT_NE(logs.find(\"\\\"internal_fork\\\":true,\\\"internal_fork_pos\\\":300,\\\"internal_fork_ready\\\":true\"), std::string::npos);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc",
+    "test": "CpForkKeepsExactBoundaryAndRejectsDifferentImageIdentity",
+    "removed": [
+      "EXPECT_EQ(tree.contentMatchPos(request), 600u);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc",
+    "test": "ShortLeavesRemainTerminalWhileCompleteSiblingContinues",
+    "removed": [
+      "EXPECT_EQ(tree.contentMatchPos(request), 900u);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc",
+    "test": "InsertBackfillsTokenSegmentsOnAdoptedNode",
+    "removed": [
+      "EXPECT_EQ(tree.contentMatchPos({1, 2}), 2u);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc",
+    "test": "LargeCpBlocksKeepExactContentAndForkOffsets",
+    "removed": [
+      "EXPECT_EQ(tree.contentMatchPos(request), mismatch);",
+      "EXPECT_EQ(tree.contentMatchPos(request), 2 * unit);",
+      "EXPECT_EQ(tree.contentMatchPos(truncated), truncated.size());"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc",
+    "test": "InternalForkFullAliasPublishesForLaterMatchingRequest",
+    "removed": [
+      "EXPECT_NE(summary.find(\"\\\"farthest_fork_pos\\\":3\"), std::string::npos);",
+      "EXPECT_NE(summary.find(\"\\\"fork_save_decision\\\":\\\"registered\\\"\"), std::string::npos);",
+      "EXPECT_NE(summary.find(\"\\\"purpose\\\":\\\"internal\\\"\"), std::string::npos);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc",
+    "test": "StorageMatchDefersReusePublicationUntilReadCompletes",
+    "removed": [
+      "ASSERT_TRUE(resource.remote_observation_.effective.has_value());",
+      "EXPECT_TRUE(*resource.remote_observation_.effective);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc",
+    "test": "RemoteQuerySelectingLocalShortLeafKeepsExactDeviceReuse",
+    "removed": [
+      "EXPECT_EQ(resource.remote_observation_.query_status, PrefixCacheRemoteQueryStatus::HIT);",
+      "ASSERT_TRUE(resource.remote_observation_.effective.has_value());",
+      "EXPECT_FALSE(*resource.remote_observation_.effective);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc",
+    "test": "InternalForkObservationMarksOriginalPointDeduplication",
+    "removed": [
+      "EXPECT_NE(summary.find(\"\\\"farthest_fork_pos\\\":2\"), std::string::npos);",
+      "EXPECT_NE(summary.find(\"\\\"fork_save_decision\\\":\\\"deduplicated_original\\\"\"), std::string::npos);",
+      "EXPECT_NE(summary.find(\"\\\"purpose\\\":\\\"original_internal\\\"\"), std::string::npos);"
+    ]
+  },
+  {
+    "file": "rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc",
+    "test": "ImageInteriorForkIsNotSavedOrReplacedByAlignedPoint",
+    "removed": [
+      "EXPECT_NE(summary.find(\"\\\"farthest_fork_pos\\\":3\"), std::string::npos);",
+      "EXPECT_NE(summary.find(\"\\\"fork_save_decision\\\":\\\"invalid_exact_endpoint\\\"\"), std::string::npos);"
+    ]
+  }
+]

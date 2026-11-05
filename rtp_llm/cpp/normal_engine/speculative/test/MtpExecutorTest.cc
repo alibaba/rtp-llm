@@ -895,7 +895,9 @@ public:
                                       bool                       simulate_cp_mutation   = false,
                                       std::optional<std::string> deferred_capture_error = std::nullopt,
                                       SpeculativeType            sp_type                = SP_TYPE_MTP,
-                                      bool                       existing_stream_error  = false) {
+                                      bool                       existing_stream_error  = false,
+                                      bool                       enable_tail_reuse      = false,
+                                      bool                       dspark_publication_failure = false) {
         MtpExecutorTestConfig test_config;
         test_config.role_type = role_type;
         test_config.sp_type   = sp_type;
@@ -908,38 +910,14 @@ public:
             components.executor->parallelism_config_.dp_size    = 2;
             components.executor->parallelism_config_.world_size = 2;
         }
-        auto target_only_stream = createContextStream(
-            components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3}, 0);
-        EXPECT_TRUE(target_only_stream->generateConfig()->isPrefillOnly());
-        EXPECT_TRUE(target_only_stream->generateConfig()->reuse_cache);
-        EXPECT_FALSE(target_only_stream->reuseCache());
-
-        auto target_input                  = GptModelInputs{};
-        target_input.combo_tokens          = torch::tensor({0, 1, 2, 3}, torch::kInt32);
-        target_input.input_lengths         = torch::tensor({4}, torch::kInt32);
-        target_input.prefix_lengths        = torch::tensor({0}, torch::kInt32);
-        target_input.lm_output_indexes     = torch::tensor({3}, torch::kInt32);
-        target_input.skip_lm_head          = true;
-        target_input.capture_hidden_states = true;
-
-        auto target_output = GptModelOutputs{};
-        target_output.all_hidden_states =
-            torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
-        vector<string> forward_trace;
-        components.fake_target_model->setInputs({target_input});
-        components.fake_target_model->setOutputs({target_output});
-        components.fake_target_model->setForwardTrace(&forward_trace, "target");
-        if (existing_stream_error) {
-            components.fake_target_model->setForwardObserver([target_only_stream, &forward_trace]() {
-                target_only_stream->reportError(ErrorCode::INVALID_PARAMS, "existing request error");
-                forward_trace.push_back("target.request_error_reported");
-            });
+        if (dspark_publication_failure) {
+            components.fake_target_model->setPublicationResult("injected cache-store failure");
         }
-        auto* draft_forward_model =
-            sp_type == SP_TYPE_DSPARK ? components.fake_draft_prefill_model.get() : components.fake_draft_model.get();
-        draft_forward_model->setForwardTrace(&forward_trace, "draft");
-        if (deferred_capture_error.has_value()) {
-            components.fake_target_model->setDeferredHiddenStateCaptureError(*deferred_capture_error);
+        if (simulate_cp_mutation) {
+            components.fake_target_model->setPostForwardInputMutation(torch::tensor({0, 1}, torch::kInt32),
+                                                                      torch::tensor({2}, torch::kInt32));
+            components.fake_target_model->setMtpTargetHiddenStates(target_output.all_hidden_states.narrow(0, 0, 2));
+            EXPECT_TRUE(components.fake_target_model->hasMtpTargetHiddenBuffer());
         }
 
         if (expect_draft_forward) {
@@ -971,7 +949,7 @@ public:
 
         auto status = components.executor->process({target_only_stream});
         ASSERT_TRUE(status.ok());
-        if (deferred_capture_error.has_value()) {
+        if (deferred_capture_error.has_value() || dspark_publication_failure) {
             EXPECT_TRUE(target_only_stream->hasError());
             auto output = target_only_stream->nextOutput();
             ASSERT_FALSE(output.ok());
@@ -979,6 +957,8 @@ public:
                 EXPECT_EQ(output.status().code(), ErrorCode::INVALID_PARAMS);
                 EXPECT_EQ(target_only_stream->stopReason(), "existing request error");
                 EXPECT_NE(output.status().ToString().find("existing request error"), std::string::npos);
+            } else if (dspark_publication_failure) {
+                EXPECT_EQ(output.status().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
             } else {
                 EXPECT_NE(output.status().ToString().find(*deferred_capture_error), std::string::npos);
             }
@@ -1013,6 +993,15 @@ public:
         EXPECT_EQ(draft_sampler->forwardCount(), 0);
         EXPECT_EQ(speculative_sampler->forwardCount(), 0);
         EXPECT_EQ(target_sampler->forwardCount(), 0);
+        if (enable_tail_reuse) {
+            EXPECT_TRUE(destination_bytes.eq(0x5a).all().item<bool>());
+            const auto& registration = *target_only_stream->streamCacheResource().prefixCacheRegistration();
+            const bool should_complete = !deferred_capture_error.has_value() && !existing_stream_error
+                                         && !dspark_publication_failure;
+            EXPECT_EQ(registration.content_completed, should_complete);
+            EXPECT_EQ(registration.points.front().group_bindings.front().state,
+                      should_complete ? PrefixCacheSaveState::CONTENT_COMPLETE : PrefixCacheSaveState::REGISTERED);
+        }
     }
 
     void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
@@ -1268,7 +1257,31 @@ TEST_F(MtpExecutorTest, testCpPrefillDoesNotFallBackWithoutHiddenBuffers) {
 }
 
 TEST_F(MtpExecutorTest, testTargetOnlyRunsTargetPrefillWithoutDraftOrSampling) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, false);
+}
+
+TEST_F(MtpExecutorTest, testTailReuseTargetOnlyCopiesBeforeForwardAndCompletesRuntimeSave) {
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, false,
+                                 false, std::nullopt, SP_TYPE_MTP, false, true);
+}
+
+TEST_F(MtpExecutorTest, testTailReuseMtpDraftRestoresCpInputWithoutCopyReplay) {
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true,
+                                 true, std::nullopt, SP_TYPE_MTP, false, true);
+}
+
+TEST_F(MtpExecutorTest, testTailReuseDSparkCommitDoesNotReplayCopy) {
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, true,
+                                 false, std::nullopt, SP_TYPE_DSPARK, false, true);
+}
+
+TEST_F(MtpExecutorTest, testTailReuseDSparkPublicationFailureDoesNotCompleteSave) {
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, true,
+                                 false, std::nullopt, SP_TYPE_DSPARK, false, true, true);
+}
+
+TEST_F(MtpExecutorTest, testTargetOnlyRunsDraftPrefillForFfnAlignmentWithoutSampling) {
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true);
 }
 
 TEST_F(MtpExecutorTest, testTargetOnlyRunsDraftPrefillForMultiDpAlignmentWithoutSampling) {

@@ -378,6 +378,37 @@ CacheConfig makeReusableGroupsAroundDisabledConfig() {
     return config;
 }
 
+CacheConfig makeInterleavedLocalOnlySwaConfig() {
+    // Topology order: FULL(non-local), SWA(local-only), SWA(non-local).
+    // buildGroupMembers interleaves the local-only SWA group set at the middle
+    // index, so device_block_counts/pool_strides must stay 1:1 with
+    // group_members via zero placeholders or the host-tier loop indexes OOB.
+    CacheConfig config;
+    config.dtype              = DataType::TYPE_FP16;
+    config.layer_num          = 3;
+    config.seq_size_per_block = 4;
+
+    auto full_spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 8, 4);
+    auto swa_spec  = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 8, 4);
+
+    auto full_policy       = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto local_swa_policy  = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    local_swa_policy.local_only_state = true;
+    auto swa_policy        = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_policy.enable_prefix_reuse    = true;
+    swa_policy.sliding_window_size    = 128;
+
+    test::configureIndexedTestGroups(config,
+                                     {full_spec, swa_spec, swa_spec->clone()},
+                                     {{0}, {1}, {2}},
+                                     {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA},
+                                     {full_policy, local_swa_policy, swa_policy});
+
+    const size_t stride = full_spec->block_size_bytes();
+    config.setGroupBlockLayout({"group0", "group1", "group2"}, {8, 8, 8}, {stride, stride, stride}, {0, 0, 0});
+    return config;
+}
+
 template<typename Allocator>
 std::shared_ptr<Allocator> initAllocator(const CacheConfig& config) {
     auto allocator = std::make_shared<Allocator>(config);
@@ -687,6 +718,19 @@ TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsRejectUnusableCapacityAndO
 TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsUseWideIntermediateProduct) {
     EXPECT_EQ(computeTierBlockCounts(size_t{1} << 63, {size_t{1} << 30}, {size_t{1} << 33}),
               (std::vector<size_t>{size_t{1} << 30}));
+}
+
+TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsSkipLocalOnlyPlaceholders) {
+    // A zero (blocks, stride) pair is a placeholder for a local-only group set.
+    // It is skipped in the proportional split and yields a zero entry; non-
+    // placeholder entries keep the same share they would have had without it.
+    EXPECT_EQ(computeTierBlockCounts(16 * 4096, {40, 0, 10}, {4096, 0, 8192}),
+              (std::vector<size_t>{10, 0, 2}));
+    EXPECT_EQ(computeTierBlockCounts(4 * 4096, {0, 8}, {0, 4096}),
+              (std::vector<size_t>{0, 4}));
+    // A zero count paired with a non-zero stride is not a valid placeholder.
+    CoreDumpGuard guard;
+    EXPECT_ANY_THROW(computeTierBlockCounts(4096, {0, 8}, {4096, 4096}));
 }
 
 TEST(BlockTreeCacheFactoryUtilityTest, ResolveDiskMountPathUsesLocalRankAndRejectsInvalidShape) {
@@ -1069,6 +1113,22 @@ TEST_F(BlockTreeCacheFactoryTest, SwaCanonicalWindowDoesNotDefaultToPhysicalSpan
         pool->decRef(blocks);
         EXPECT_EQ(pool->freeBlocksNum(), free_before);
     }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, HostTierProportionalSplitSkipsInterleavedLocalOnlyGroupSet) {
+    const auto config    = makeInterleavedLocalOnlySwaConfig();
+    auto       allocator = initAllocator<CoordinatorCacheManager>(config);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.enable_memory_cache               = true;
+    kv_cache_config.enable_prefill_partial_tail_reuse = true;
+    kv_cache_config.memory_cache_size_mb              = 1;
+
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 3u);
+    EXPECT_NE(cache->groupSets()[0]->hostPool(), nullptr);
+    EXPECT_EQ(cache->groupSets()[1]->hostPool(), nullptr);
+    EXPECT_NE(cache->groupSets()[2]->hostPool(), nullptr);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, HybridTypeBindsExistingTargetGroupsByTag) {

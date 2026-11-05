@@ -35,11 +35,16 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
     causal_conv1d_update,
+    gather_conv_initial_states,
+    has_nonaligned_conv_prefix,
     prepare_causal_conv1d_metadata,
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
+    prepare_selected_state_positions,
+    store_selected_conv_states_to_block_map,
+    store_selected_ssm_states_to_block_map,
     store_ssm_state_to_block_map,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
@@ -76,6 +81,36 @@ class KimiLinearMetadata(object):
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
+
+
+def _sparse_save_inputs(
+    attn_inputs: PyAttentionInputs,
+) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    positions = getattr(attn_inputs, "cache_save_positions", None)
+    block_ids = getattr(attn_inputs, "cache_save_block_ids", None)
+    if positions is None or block_ids is None or positions.numel() == 0:
+        return None, None
+    return positions, block_ids
+
+
+def _private_conv_initial_states(
+    conv_states: Optional[torch.Tensor],
+    attn_inputs: PyAttentionInputs,
+    seq_size_per_block: int,
+) -> Optional[torch.Tensor]:
+    if conv_states is None:
+        return None
+    prefix_lengths = getattr(attn_inputs, "prefix_lengths", None)
+    if prefix_lengths is None:
+        prefix_lengths = attn_inputs.prefix_lengths_device
+    if not has_nonaligned_conv_prefix(prefix_lengths, seq_size_per_block):
+        return None
+    return gather_conv_initial_states(
+        conv_states,
+        attn_inputs.prefix_lengths_device,
+        attn_inputs.kv_cache_kernel_block_id_device,
+        seq_size_per_block,
+    )
 
 
 class KimiLinearKDABase(nn.Module):
@@ -185,6 +220,9 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             if kv_cache_tensor is not None
             else None
         )
+        initial_states = _private_conv_initial_states(
+            conv_states, attn_inputs, seq_size_per_block
+        )
         out = causal_conv1d_fn(
             x=mixed_qkv.transpose(0, 1),
             weight=self.conv_weights,
@@ -195,6 +233,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             seq_size_per_block=seq_size_per_block,
             prefix_lengths=attn_inputs.prefix_lengths_device,
             metadata=metadata,
+            initial_states=initial_states,
         ).transpose(0, 1)
         return out
 
@@ -229,7 +268,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
                 self.head_k_dim,
                 self.head_v_dim,
                 device=mixed_qkv.device,
-                dtype=self.ssm_state_dtype,
+                dtype=torch.float32,
             )
             load_initial_state_from_block_map(
                 attn_inputs.prefix_lengths_device,
@@ -258,6 +297,27 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             1, value.shape[0], self.local_num_v_heads, self.head_v_dim
         ).contiguous()
 
+        save_positions, save_block_ids = _sparse_save_inputs(attn_inputs)
+        state_positions: Optional[torch.Tensor] = None
+        selected_states: Optional[torch.Tensor] = None
+        if ssm_states is not None and save_positions is not None:
+            state_positions = prepare_selected_state_positions(
+                attn_inputs.prefix_lengths_device,
+                cu_seqlens_without_padding,
+                save_positions,
+                save_block_ids,
+                mixed_qkv.device,
+            )
+            selected_states = torch.empty(
+                context_batch_size,
+                state_positions.shape[1],
+                self.local_num_v_heads,
+                self.head_k_dim,
+                self.head_v_dim,
+                device=mixed_qkv.device,
+                dtype=torch.float32,
+            )
+
         q_len = query.shape[1]
         # Prefill: use chunk_kda with fused gate (use_gate_in_kernel=True)
         attn_out, final_state, h = chunk_kda(
@@ -274,9 +334,21 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             return_intermediate_states=True,
             A_log=self.alog,
             dt_bias=self.dt_bias,
+            state_positions=state_positions,
+            selected_states=selected_states,
         )
         h_from_chunk = h
 
+        if selected_states is not None:
+            store_selected_conv_states_to_block_map(
+                self._get_conv_states(kv_cache_tensor).transpose(1, 2),
+                attn_inputs.prefix_lengths_device,
+                cu_seqlens_without_padding,
+                save_positions,
+                save_block_ids,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                seq_size_per_block,
+            )
         if ssm_states is not None and final_state is not None:
             _target_dtype = ssm_states.dtype
             h_for_store = (
@@ -300,6 +372,21 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
                 seq_size_per_block,
                 chunk_size=64,
             )
+            if selected_states is not None:
+                if final_state.dtype != torch.float32:
+                    final_state = final_state.float()
+                # KDA selected states use the same [K, V] producer convention
+                # as its existing final-state store. Equal K and V does not make
+                # a transpose semantically safe, so pass the buffer directly.
+                store_selected_ssm_states_to_block_map(
+                    selected_states,
+                    final_state,
+                    attn_inputs.prefix_lengths_device,
+                    cu_seqlens_without_padding,
+                    save_positions,
+                    save_block_ids,
+                    ssm_states,
+                )
 
         return attn_out.squeeze_(0)
 
@@ -777,6 +864,11 @@ class KimiLinearDecoderLayer(nn.Module):
 
 
 class KimiLinearModel(GptModelBase):
+    @property
+    def supports_sparse_cache_save(self) -> bool:
+        # KDA's selected-state writer is implemented for NVIDIA CUDA Triton.
+        return torch.cuda.is_available() and torch.version.hip is None
+
     def __init__(
         self,
         model_config: ModelConfig,

@@ -49,6 +49,10 @@ enum class CpBlockSliceMode : int8_t {
 struct CacheGroupPolicy {
     CacheGroupType       group_type             = CacheGroupType::FULL;
     bool                 enable_prefix_reuse    = true;
+    // Set from CacheReusePolicyDesc::local_only_state. Marks a state group that
+    // owns an independent local-only GroupSet rather than sharing its type's
+    // default group set and pools (e.g. DSV4 HCA state).
+    bool                 local_only_state       = false;
     bool                 reservable             = true;
     uint32_t             explicit_block_num     = 0;
     bool                 charge_to_paged_budget = false;

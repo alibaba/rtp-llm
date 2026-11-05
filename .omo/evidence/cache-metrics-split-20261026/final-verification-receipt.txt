@@ -1,0 +1,58 @@
+$ git log --oneline 1d20e29a428f1bc1497c92ee415bbfd925291ccf..HEAD
+00bb35cacd feat(cache): add optional prefix cache diagnostics
+8f842c2885 feat(cache): recover exact internal common prefixes
+d117337a75 feat(cache): reuse incomplete prefill tails across cache groups
+6e6ab2ce85 refactor(cache): centralize CP cache geometry and transfer assembly
+
+
+exit=0
+$ git rev-parse HEAD^{tree}
+4d2c36f1be0b2c20c8666f9deee6fb2e658e84a7
+
+
+exit=0
+$ git diff --exit-code 1b56fd1e680b7842e3a1cfd246603d21a61102bf HEAD
+
+
+exit=0
+$ git status --short
+?? .omo/
+
+
+exit=0
+$ git -C .. rev-parse HEAD
+ab22e47dd296f72cb570d7ff1320732fcf66ee2a
+
+
+exit=0
+BUILD 6e6ab2ce857e0089084435a5db9b2313d90020ef .omo/evidence/cache-metrics-split-20261026/builds/split_cp_6e6ab2ce_20261026.log signal=0
+INFO: Elapsed time: 36.763s, Critical Path: 28.92s
+INFO: Build completed successfully, 273 total actions
+BUILD d117337a75d3d2e0d86cf83118c47d451cad6ac9 .omo/evidence/cache-metrics-split-20261026/builds/split_tail_d117337a_20261026.log signal=0
+INFO: Elapsed time: 36.405s, Critical Path: 28.86s
+INFO: Build completed successfully, 206 total actions
+BUILD 8f842c28859357aa53f02c02268d36f62a0d7ab5 .omo/evidence/cache-metrics-split-20261026/builds/split_prefix_8f842c28_20261026.log signal=0
+INFO: Elapsed time: 36.682s, Critical Path: 29.52s
+INFO: Build completed successfully, 206 total actions
+BUILD 00bb35cacdd1f6f8a3f5b1d0bef5a01f00fb08d8 .omo/evidence/cache-metrics-split-20261026/builds/split_optional_00bb35ca_20261026.log signal=0
+INFO: Elapsed time: 34.559s, Critical Path: 28.17s
+INFO: Build completed successfully, 208 total actions
+TEST //rtp_llm/cpp/cache/block_tree_cache/evict/test:block_tree_evictor_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/evict/test/block_tree_evictor_test/test.xml cases=81 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/block_tree_cache/load/test:block_tree_loader_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/load/test/block_tree_loader_test/test.xml cases=29 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/block_tree_cache/load/test:load_async_context_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/load/test/load_async_context_test/test.xml cases=31 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:kvcm_mock_full_linear_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/kvcm_mock_full_linear_test/test.xml cases=8 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/block_tree_cache/storage_backend/test:storage_backend_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/storage_backend/test/storage_backend_test/test.xml cases=33 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/block_tree_cache/store/test:block_tree_storer_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/store/test/block_tree_storer_test/test.xml cases=28 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/block_tree_cache/store/test:store_task_runner_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/store/test/store_task_runner_test/test.xml cases=11 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/test/block_tree_cache_test/test.xml cases=95 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/test:hybrid_kv_cache_allocator_cp_shard_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/hybrid_kv_cache_allocator_cp_shard_test/test.xml cases=16 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/test:kv_cache_layout_view_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/kv_cache_layout_view_test/test.xml cases=7 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/test:kv_cache_manager_cp_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/kv_cache_manager_cp_test/test.xml cases=13 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/test:prefill_cache_hit_metrics_contract_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/prefill_cache_hit_metrics_contract_test/test.xml cases=5 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/test:single_type_kv_cache_allocator_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/single_type_kv_cache_allocator_test/test.xml cases=75 skips=0 failures=0
+TEST //rtp_llm/cpp/engine_base/stream/test:stream_cache_resource_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/engine_base/stream/test/stream_cache_resource_test/test.xml cases=76 skips=0 failures=0
+TEST //rtp_llm/cpp/normal_engine/test:engine_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/normal_engine/test/engine_test/test.xml cases=50 skips=2 failures=0
+TEST //rtp_llm/cpp/normal_engine/test:tail_reuse_cp_completion_integration_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/normal_engine/test/tail_reuse_cp_completion_integration_test/test.xml cases=1 skips=0 failures=0
+TEST //rtp_llm/cpp/normal_engine/test:tail_reuse_tp_subgroups_integration_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test/test.xml cases=1 skips=0 failures=0
+TEST //rtp_llm/cpp/cache/block_tree_cache/test:block_tree_test XML=.omo/evidence/cache-metrics-split-20261026/regressions-8f842c28/test.xml cases=47 skips=0 failures=0
+PASS: four exact commit builds;18 suites without failures,2 manual external-KVCM cases skipped;final original tree equality;internal HEAD preserved.

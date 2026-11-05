@@ -1,0 +1,1563 @@
+diff --git a/rtp_llm/cpp/cache/Types.h b/rtp_llm/cpp/cache/Types.h
+index 769b58e8a3..544be9261c 100644
+--- a/rtp_llm/cpp/cache/Types.h
++++ b/rtp_llm/cpp/cache/Types.h
+@@ -1,6 +1,5 @@
+ #pragma once
+ 
+-#include <array>
+ #include <cstddef>
+ #include <memory>
+ #include <optional>
+@@ -62,19 +61,6 @@ struct GroupBlockIdPair {
+ static_assert(sizeof(GroupBlockIdPair) == 3 * sizeof(int32_t),
+               "GroupBlockIdPair must match the three-column int32 tensor layout");
+ 
+-enum class PrefixCacheMediumStatus : uint8_t {
+-    NOT_CHECKED = 0,
+-    DISABLED,
+-    CHECKED,
+-};
+-
+-struct PrefixCacheGroupObservation {
+-    size_t                                 group_set_id{0};
+-    std::vector<std::string>              member_tags;
+-    std::array<std::optional<size_t>, 3>  max_pos;
+-    std::array<std::optional<CacheKeyType>, 3> max_key;
+-};
+-
+ struct PrefixCachePlanPoint {
+     size_t       index{0};
+     CacheKeyType key{0};
+@@ -96,51 +82,6 @@ enum class PrefixCacheSaveOwnership : uint8_t {
+     PINNED_RUNTIME,    // Dense SWA runtime value protected by shared registration-owned pins; no snapshot.
+ };
+ 
+-enum class PrefixCachePlanState : uint8_t {
+-    NOT_FORMED = 0,
+-    FORMED,
+-    TERMINAL_UNFORMED,
+-};
+-
+-inline const char* prefixCachePlanStateName(PrefixCachePlanState state) {
+-    switch (state) {
+-        case PrefixCachePlanState::FORMED:
+-            return "formed";
+-        case PrefixCachePlanState::TERMINAL_UNFORMED:
+-            return "terminal_unformed";
+-        case PrefixCachePlanState::NOT_FORMED:
+-            break;
+-    }
+-    return "not_formed";
+-}
+-
+-enum class PrefixCacheRemoteQueryStatus : uint8_t {
+-    UNSET = 0,
+-    NOT_QUERIED,
+-    HIT,
+-    MISS,
+-    ERROR,
+-};
+-
+-struct PrefixCacheRemoteObservation {
+-    PrefixCacheRemoteQueryStatus query_status{PrefixCacheRemoteQueryStatus::NOT_QUERIED};
+-    std::optional<size_t>        candidate_pos;
+-    std::optional<bool>          effective;
+-};
+-
+-struct PrefixCacheMatchObservation {
+-    int64_t                                input_tokens{0};
+-    std::optional<size_t>                  content_pos;
+-    std::optional<CacheKeyType>            content_key;
+-    size_t                                 content_node_offset{0};
+-    bool                                   content_partial{false};
+-    std::optional<size_t>                  local_valid_pos;
+-    std::optional<CacheKeyType>            local_valid_key;
+-    std::array<PrefixCacheMediumStatus, 3> medium_status;
+-    std::vector<PrefixCacheGroupObservation> groups;
+-    int64_t                                match_time_us{0};
+-};
+-
+ struct MallocInfo {
+     BatchKVCacheResourcePtr batch_kv_cache_resource;
+     CompleteTokenIdsPtr     complete_token_ids;
+@@ -183,8 +124,7 @@ struct MallocInfo {
+         // drops an unaligned final key in every batch before CP sampling.
+         // An empty vector is still a valid snapshot, hence optional.
+         std::optional<std::vector<CacheKeysType>> theory_window_keys;
+-        // Owned full-input token snapshot, populated only when complete prefix
+-        // observability is enabled. Empty means content matching is unformed.
++        // Owned token snapshot for functional local short-leaf lookup.
+         std::vector<int> token_ids;
+         // Functional local short-leaf lookup uses this immutable first-prefill
+         // view even when prefix observability is disabled.
+@@ -245,10 +185,6 @@ struct MallocResult {
+     int64_t load_prepare_latency_us = 0;
+     int64_t device_input_length     = 0;
+     bool    load_attempted          = false;
+-
+-    // Diagnostic-only value snapshot; absence means the match observation is
+-    // not formed rather than a zero endpoint.
+-    std::optional<PrefixCacheMatchObservation> match_observation;
+ };
+ 
+ struct FreeInfo {
+@@ -263,11 +199,7 @@ struct InsertInfo {
+     CompleteTokenIdsPtr     complete_token_ids;
+     bool                    is_resident;
+     Tier                    target_tier{Tier::DEVICE};
+-    // Optional request-owned plan-state sink. The cache writes only the state;
+-    // plan points remain owned by the store task.
+-    PrefixCachePlanState*   prefix_plan_state{nullptr};
+     const PrefixCacheRegistration* prefix_cache_registration{nullptr};
+-    std::optional<int64_t> observation_request_id{std::nullopt};
+ };
+ 
+ }  // namespace rtp_llm
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/BlockTree.cc b/rtp_llm/cpp/cache/block_tree_cache/BlockTree.cc
+index db43ea0782..74097a0a51 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/BlockTree.cc
++++ b/rtp_llm/cpp/cache/block_tree_cache/BlockTree.cc
+@@ -12,92 +12,11 @@
+ 
+ namespace rtp_llm {
+ 
+-namespace {
+-
+-int64_t steadyTimeUs() {
+-    return std::chrono::duration_cast<std::chrono::microseconds>(
+-               std::chrono::steady_clock::now().time_since_epoch())
+-        .count();
+-}
+-
+-using Validators = std::vector<std::unique_ptr<MatchValidator>>;
+-
+-Validators makeValidators(const std::vector<GroupSetPtr>& group_sets) {
+-    Validators validators;
+-    validators.reserve(group_sets.size());
+-    for (const GroupSetPtr& group_set : group_sets) {
+-        validators.push_back(group_set->createMatchValidator());
+-    }
+-    return validators;
+-}
+-
+-Validators cloneValidators(const Validators& source) {
+-    Validators validators;
+-    validators.reserve(source.size());
+-    for (const auto& validator : source) {
+-        validators.push_back(validator->clone());
+-    }
+-    return validators;
+-}
+-
+-bool validateObservedResource(MatchValidator& validator, const GroupSetResource& resource, bool ignore_transfer_state) {
+-    if (!ignore_transfer_state && !resource.transfer_detached) {
+-        return validator.validate(resource);
+-    }
+-    GroupSetResource observed = resource;
+-    if (observed.transfer_detached) {
+-        // Detached resources are being pruned; pinned bytes cannot become a new cache hit.
+-        observed.device_blocks.clear();
+-        observed.host_block = NULL_BLOCK_IDX;
+-        observed.disk_block = NULL_BLOCK_IDX;
+-    }
+-    if (ignore_transfer_state) {
+-        // A temporary transfer reservation does not end retained cache lifetime.
+-        observed.transfer_state = GroupSetTransferState::IDLE;
+-        if (observed.hasTier(Tier::DEVICE) && !observed.hasCompleteDeviceValue()) {
+-            observed.device_blocks.clear();
+-        }
+-    }
+-    return validator.validate(observed);
+-}
+-
+-// Observation uses the same endpoint geometry as precise matching. Point-state
+-// groups need only their endpoint; SWA short leaves contribute their actual span.
+-bool observedEndpointReady(const std::vector<GroupSetPtr>& groups,
+-                           const std::vector<TreeNode*>& path,
+-                           size_t endpoint) {
+-    if (groups.empty() || path.empty() || path.back()->token_end != endpoint) {
+-        return false;
+-    }
+-    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+-        const auto& group = groups[group_id];
+-        for (const size_t index : group->requiredPathIndices(path, endpoint)) {
+-            const auto& resource = path[index]->group_set_resources[group_id];
+-            if (!resource.isMatchUsable() || resource.is_empty()
+-                || (resource.hasTier(Tier::DEVICE)
+-                    && (!resource.hasCompleteDeviceValue()
+-                        || resource.device_blocks.size() != group->groupTags().size()))) {
+-                return false;
+-            }
+-        }
+-    }
+-    return true;
+-}
+-
+-}  // namespace
+-
+ BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets,
+-                     size_t                    reuse_unit_tokens,
+-                     bool                      enable_observability,
+-                     std::string               observability_instance):
++                     size_t                    reuse_unit_tokens):
+     group_sets_(std::move(group_sets)),
+-    reuse_unit_tokens_(reuse_unit_tokens),
+-    observability_enabled_(enable_observability),
+-    observability_instance_(std::move(observability_instance)) {
++    reuse_unit_tokens_(reuse_unit_tokens) {
+     RTP_LLM_CHECK_WITH_INFO(reuse_unit_tokens_ > 0, "BlockTree reuse unit must be positive");
+-    if (observability_enabled_) {
+-        tree_epoch_us_ = steadyTimeUs();
+-    }
+     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
+         const auto& group_tags = group_sets_[group_set_id]->groupTags();
+         for (size_t member_group_id = 0; member_group_id < group_tags.size(); ++member_group_id) {
+@@ -114,87 +33,6 @@ BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets,
+     root_->group_set_resources.resize(group_sets_.size());
+ }
+ 
+-BlockTree::ObservationBatch::ObservationBatch(BlockTree& tree): tree_(tree) {
+-    ++tree_.observation_batch_depth_;
+-}
+-
+-BlockTree::ObservationBatch::~ObservationBatch() {
+-    tree_.endObservationBatch();
+-}
+-
+-void BlockTree::deferObservationRoot(const TreeNode* node, const char* trigger) {
+-    if (!observability_enabled_ || node == nullptr || node == root_.get()) {
+-        return;
+-    }
+-    for (DeferredObservationRoot& root : deferred_observation_roots_) {
+-        if (root.node == node) {
+-            root.trigger = trigger;
+-            return;
+-        }
+-    }
+-    deferred_observation_roots_.push_back({node, trigger});
+-}
+-
+-void BlockTree::endObservationBatch() {
+-    if (observation_batch_depth_ == 0) {
+-        return;
+-    }
+-    --observation_batch_depth_;
+-    if (observation_batch_depth_ == 0) {
+-        commitDeferredObservations();
+-    }
+-}
+-
+-void BlockTree::commitDeferredObservations() {
+-    std::vector<DeferredObservationRoot> roots = std::move(deferred_observation_roots_);
+-    deferred_observation_roots_.clear();
+-    for (size_t candidate_index = 0; candidate_index < roots.size(); ++candidate_index) {
+-        bool covered = false;
+-        for (size_t other_index = 0; other_index < roots.size(); ++other_index) {
+-            if (candidate_index != other_index
+-                && isObservationAncestor(roots[other_index].node, roots[candidate_index].node)) {
+-                covered = true;
+-                break;
+-            }
+-        }
+-        if (!covered) {
+-            observeCacheState(roots[candidate_index].node,
+-                              roots[candidate_index].trigger != nullptr ? roots[candidate_index].trigger : "mutation");
+-        }
+-    }
+-}
+-
+-void BlockTree::eraseDeferredObservationRoots(const TreeNode* node) {
+-    if (node == nullptr || deferred_observation_roots_.empty()) {
+-        return;
+-    }
+-    std::vector<const TreeNode*> pending{node};
+-    while (!pending.empty()) {
+-        const TreeNode* current = pending.back();
+-        pending.pop_back();
+-        deferred_observation_roots_.erase(
+-            std::remove_if(deferred_observation_roots_.begin(),
+-                           deferred_observation_roots_.end(),
+-                           [current](const DeferredObservationRoot& root) { return root.node == current; }),
+-            deferred_observation_roots_.end());
+-        for (const auto& child : current->children) {
+-            pending.push_back(child.second);
+-        }
+-    }
+-}
+-
+-bool BlockTree::isObservationAncestor(const TreeNode* ancestor, const TreeNode* candidate) {
+-    if (ancestor == nullptr || candidate == nullptr) {
+-        return false;
+-    }
+-    for (const TreeNode* current = candidate->parent; current != nullptr; current = current->parent) {
+-        if (current == ancestor) {
+-            return true;
+-        }
+-    }
+-    return false;
+-}
+-
+ const ReusableGroupLocation* BlockTree::reusableGroupLocation(std::string_view group_tag) const {
+     const auto location_it = reusable_group_locations_.find(std::string(group_tag));
+     return location_it == reusable_group_locations_.end() ? nullptr : &location_it->second;
+@@ -258,115 +96,6 @@ void BlockTree::releaseNode(TreeNode* node) {
+     }
+ }
+ 
+-size_t BlockTree::tierIndex(Tier tier) {
+-    switch (tier) {
+-        case Tier::DEVICE:
+-            return 0;
+-        case Tier::HOST:
+-            return 1;
+-        case Tier::DISK:
+-            return 2;
+-        default:
+-            RTP_LLM_CHECK_WITH_INFO(false, "prefix observability does not support tier=%d", static_cast<int>(tier));
+-            return 0;
+-    }
+-}
+-
+-void BlockTree::startInterval(IntervalSet& intervals, int64_t& since_us) {
+-    if (!observability_enabled_ || since_us >= 0) {
+-        return;
+-    }
+-    since_us = steadyTimeUs() - tree_epoch_us_;
+-    intervals.starts.insert(since_us);
+-    intervals.start_sum += static_cast<long double>(since_us);
+-}
+-
+-void BlockTree::endInterval(IntervalSet& intervals,
+-                            int64_t&     since_us,
+-                            const TreeNode& node,
+-                            const char* kind,
+-                            const char* medium,
+-                            const char* trigger,
+-                            const char* effect) {
+-    if (!observability_enabled_ || since_us < 0) {
+-        return;
+-    }
+-    const int64_t duration_us = std::max<int64_t>(steadyTimeUs() - tree_epoch_us_ - since_us, 0);
+-    const auto    it          = intervals.starts.find(since_us);
+-    if (it != intervals.starts.end()) {
+-        intervals.start_sum -= static_cast<long double>(*it);
+-        intervals.starts.erase(it);
+-    }
+-    RTP_LLM_LOG_INFO("event=prefix_cache_observation payload={\"kind\":\"interval_end\","
+-                     "\"schema_version\":1,\"instance\":\"%s\",\"key\":\"%ld\","
+-                     "\"interval\":\"%s\",\"medium\":\"%s\",\"since_us\":%ld,"
+-                     "\"duration_us\":%ld,\"trigger\":\"%s\",\"effect\":\"%s\"}",
+-                     observability_instance_.c_str(),
+-                     node.cache_key,
+-                     kind,
+-                     medium ? medium : "none",
+-                     since_us,
+-                     duration_us,
+-                     trigger,
+-                     effect);
+-    since_us = -1;
+-}
+-
+-void BlockTree::updateContentShape(const TreeNode& node, size_t old_child_count, size_t new_child_count) {
+-    if (!observability_enabled_ || &node == root_.get()) {
+-        return;
+-    }
+-    if (old_child_count == 0 && new_child_count != 0) {
+-        --leaf_count_;
+-    } else if (old_child_count != 0 && new_child_count == 0) {
+-        ++leaf_count_;
+-    }
+-    if (old_child_count <= 1 && new_child_count > 1) {
+-        ++branch_count_;
+-    } else if (old_child_count > 1 && new_child_count <= 1) {
+-        --branch_count_;
+-    }
+-}
+-
+-void BlockTree::updateTierIntervals(TreeNode& node, const char* trigger) {
+-    if (!observability_enabled_ || &node == root_.get()) {
+-        return;
+-    }
+-    for (size_t tier_idx = 0; tier_idx < node.observation.tier_since_us.size(); ++tier_idx) {
+-        const Tier tier = static_cast<Tier>(tier_idx);
+-        bool has_tier = false;
+-        for (const GroupSetResource& resource : node.group_set_resources) {
+-            has_tier = resource.hasTier(tier) || has_tier;
+-        }
+-        if (has_tier) {
+-            startInterval(tier_intervals_[tier_idx], node.observation.tier_since_us[tier_idx]);
+-        } else {
+-            const char* medium = tier_idx == 0 ? "DEVICE" : (tier_idx == 1 ? "HOST" : "DISK");
+-            endInterval(tier_intervals_[tier_idx],
+-                        node.observation.tier_since_us[tier_idx],
+-                        node,
+-                        "tier",
+-                        medium,
+-                        trigger,
+-                        "tier_release");
+-        }
+-    }
+-}
+-
+-BlockTreeAgeSummary BlockTree::intervalSummary(const IntervalSet& intervals) const {
+-    BlockTreeAgeSummary summary;
+-    summary.count = intervals.starts.size();
+-    if (summary.count == 0) {
+-        return summary;
+-    }
+-    const int64_t now_us = steadyTimeUs() - tree_epoch_us_;
+-    const long double mean_age =
+-        static_cast<long double>(now_us) - intervals.start_sum / static_cast<long double>(summary.count);
+-    summary.mean_age_us = std::max<int64_t>(static_cast<int64_t>(mean_age), 0);
+-    summary.max_age_us  = std::max<int64_t>(now_us - *intervals.starts.begin(), 0);
+-    return summary;
+-}
+-
+ TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent, size_t token_end) {
+     auto node       = std::make_unique<TreeNode>();
+     node->cache_key = key;
+@@ -374,10 +103,6 @@ TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent, size_t token
+     node->token_end = token_end;
+     node->index     = node_pool_.size();
+     node->group_set_resources.resize(group_sets_.size());
+-    if (observability_enabled_) {
+-        ++leaf_count_;
+-    }
+-    startInterval(content_intervals_, node->observation.content_since_us);
+     auto* raw = node.get();
+     node_pool_.push_back(std::move(node));
+     cache_keys_.push_back(key);
+@@ -385,44 +110,6 @@ TreeNode* BlockTree::createNode(CacheKeyType key, TreeNode* parent, size_t token
+     return raw;
+ }
+ 
+-std::optional<BlockTreeContentMatch> BlockTree::contentMatchInfo(const std::vector<int>& request_tokens) const {
+-    if (request_tokens.empty()) {
+-        return std::nullopt;
+-    }
+-    struct Frame {
+-        const TreeNode* node;
+-        size_t          pos;
+-    };
+-    std::vector<Frame> pending{{root_.get(), 0}};
+-    BlockTreeContentMatch best;
+-    while (!pending.empty()) {
+-        const Frame frame = pending.back();
+-        pending.pop_back();
+-        for (const auto& [key, child] : frame.node->children) {
+-            if (child == nullptr || child->token_ids.empty()) {
+-                continue;
+-            }
+-            const size_t remaining = request_tokens.size() - frame.pos;
+-            const size_t limit     = std::min(child->token_ids.size(), remaining);
+-            size_t matched = 0;
+-            while (matched < limit && child->token_ids[matched] == request_tokens[frame.pos + matched]) {
+-                ++matched;
+-            }
+-            const size_t end = frame.pos + matched;
+-            if (end > best.pos || (end == best.pos && matched > best.node_offset)) {
+-                best = {end, key, matched, matched != child->token_ids.size()};
+-            }
+-            if (matched == child->token_ids.size() && !isShortLeaf(child) && end < request_tokens.size()) {
+-                pending.push_back({child, end});
+-            }
+-        }
+-    }
+-    if (best.pos == 0) {
+-        return std::nullopt;
+-    }
+-    return best;
+-}
+-
+ std::vector<TreeNode*> BlockTree::contentMatchCandidates(
+     const std::vector<int>& request_tokens, const std::function<CacheKeyType(size_t)>& endpoint_key) const {
+     std::vector<TreeNode*> candidates;
+@@ -499,101 +186,6 @@ std::vector<BlockTreeContentRange> BlockTree::contentMatchRanges(
+     return ranges;
+ }
+ 
+-size_t BlockTree::contentMatchPos(const std::vector<int>& request_tokens) const {
+-    const auto match = contentMatchInfo(request_tokens);
+-    return match.has_value() ? match->pos : 0;
+-}
+-
+-std::vector<PrefixCachePlanPoint> BlockTree::planRecoveryPoints(
+-    const CacheKeysType&                              cache_keys,
+-    const std::vector<std::vector<GroupSetResource>>& resources,
+-    const std::vector<std::vector<int>>*              /*token_segments*/,
+-    Tier                                              target_tier,
+-    const std::vector<size_t>*                         token_ends) const {
+-    std::vector<PrefixCachePlanPoint> points;
+-    if (!observability_enabled_ || cache_keys.empty() || resources.size() != cache_keys.size()
+-        || (token_ends != nullptr && token_ends->size() != cache_keys.size())) {
+-        return points;
+-    }
+-
+-    std::vector<TreeNode> current_nodes(cache_keys.size());
+-    std::vector<TreeNode> projected_nodes(cache_keys.size());
+-    std::vector<TreeNode*> current_path;
+-    std::vector<TreeNode*> projected_path;
+-    const TreeNode* current         = root_.get();
+-    size_t           pos            = 0;
+-    for (size_t i = 0; i < cache_keys.size(); ++i) {
+-        const TreeNode* child = current == nullptr ? nullptr : [&] {
+-            const auto it = current->children.find(cache_keys[i]);
+-            return it == current->children.end() ? nullptr : it->second;
+-        }();
+-
+-        std::vector<GroupSetResource> current_resources(group_sets_.size());
+-        if (child != nullptr) {
+-            current_resources = child->group_set_resources;
+-        }
+-        std::vector<GroupSetResource> projected_resources = current_resources;
+-        for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
+-            if (!current_resources[group_set_id].is_empty()) {
+-                continue;
+-            }
+-            const GroupSetResource& incoming = resources[i][group_set_id];
+-            if (target_tier == Tier::DEVICE && incoming.hasTier(Tier::DEVICE)) {
+-                projected_resources[group_set_id].setBlocks(Tier::DEVICE, incoming.getBlocks(Tier::DEVICE));
+-            } else if (target_tier != Tier::DEVICE && incoming.hasTier(Tier::DEVICE)) {
+-                projected_resources[group_set_id].setBlocks(target_tier, incoming.getBlocks(Tier::DEVICE));
+-            }
+-        }
+-
+-        // Mirror insertNode geometry. Legacy content segments may include the
+-        // live request tail beyond the last complete cache key.
+-        pos = token_ends != nullptr ? (*token_ends)[i] : (i + 1) * reuse_unit_tokens_;
+-        auto& current_node = current_nodes[i];
+-        auto& projected_node = projected_nodes[i];
+-        current_node.parent = current_path.empty() ? nullptr : current_path.back();
+-        projected_node.parent = projected_path.empty() ? nullptr : projected_path.back();
+-        current_node.token_end = projected_node.token_end = pos;
+-        current_node.group_set_resources = std::move(current_resources);
+-        projected_node.group_set_resources = std::move(projected_resources);
+-        current_path.push_back(&current_node);
+-        projected_path.push_back(&projected_node);
+-        const bool current_valid = observedEndpointReady(group_sets_, current_path, pos);
+-        const bool projected_valid = observedEndpointReady(group_sets_, projected_path, pos);
+-        if (projected_valid && !current_valid && pos > 0) {
+-            points.push_back({i, cache_keys[i], pos});
+-        }
+-        current = child;
+-    }
+-    return points;
+-}
+-
+-std::vector<PrefixCachePlanPoint> BlockTree::unfulfilledPlanPoints(
+-    const std::vector<PrefixCachePlanPoint>& plan_points,
+-    const CacheKeysType&                     cache_keys) const {
+-    std::vector<PrefixCachePlanPoint> unfulfilled;
+-    if (!observability_enabled_) {
+-        return unfulfilled;
+-    }
+-    for (const PrefixCachePlanPoint& point : plan_points) {
+-        const TreeNode* current = root_.get();
+-        std::vector<TreeNode*> path;
+-        bool valid = point.index < cache_keys.size();
+-        for (size_t i = 0; valid && i <= point.index; ++i) {
+-            const auto it = current->children.find(cache_keys[i]);
+-            if (it == current->children.end()) {
+-                valid = false;
+-                break;
+-            }
+-            current = it->second;
+-            path.push_back(it->second);
+-        }
+-        if (!valid || !observedEndpointReady(group_sets_, path, point.pos)) {
+-            unfulfilled.push_back(point);
+-        }
+-    }
+-    return unfulfilled;
+-}
+-
+ std::vector<TreeNode*> BlockTree::findNode(const CacheKeysType& cache_keys) const {
+     std::vector<TreeNode*> path;
+     TreeNode*              current = root_.get();
+@@ -716,7 +308,6 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&
+     }
+ 
+     TreeNode* current                = root_.get();
+-    TreeNode* first_changed          = nullptr;
+     size_t    inserted_prefix_length = 0;
+ 
+     auto publishTier = [this](TreeNode* node, size_t group_set_id, const GroupSetResource& resource, Tier tier) {
+@@ -795,7 +386,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&
+             }
+ 
+             current                                = child;
+-            if ((observability_enabled_ || token_ends != nullptr) && token_segments != nullptr && i < token_segments->size()
++            if ((token_ends != nullptr) && token_segments != nullptr && i < token_segments->size()
+                 && current->token_ids.empty()) {
+                 current->token_ids = (*token_segments)[i];
+             }
+@@ -817,20 +408,14 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&
+                 adopted_group_set_ids.push_back(group_set_id);
+             }
+             if (!adopted_group_set_ids.empty()) {
+-                updateTierIntervals(*current, "store");
+-                if (first_changed == nullptr) {
+-                    first_changed = current;
+-                }
+                 result.adopted_nodes.emplace_back(current, std::move(adopted_group_set_ids));
+             }
+         } else {
+-            const size_t old_child_count = current->children.size();
+             TreeNode* child              = createNode(key, current, token_end);
+             current->children[key]       = child;
+-            updateContentShape(*current, old_child_count, current->children.size());
+             current                      = child;
+             current->group_set_resources = resources[i];
+-            if ((observability_enabled_ || token_ends != nullptr) && token_segments != nullptr && i < token_segments->size()) {
++            if ((token_ends != nullptr) && token_segments != nullptr && i < token_segments->size()) {
+                 current->token_ids = (*token_segments)[i];
+             }
+             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
+@@ -842,11 +427,7 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&
+                 publishTier(current, group_set_id, resource, tier);
+                 ++result.accepted_resource_count;
+             }
+-            updateTierIntervals(*current, "store");
+             result.inserted_nodes.push_back(current);
+-            if (first_changed == nullptr) {
+-                first_changed = current;
+-            }
+         }
+         if (is_resident && !current->is_resident) {
+             assert(current->parent == root_.get() || current->parent->is_resident);
+@@ -859,14 +440,10 @@ BlockTreeInsertResult BlockTree::insertNodeImpl(const CacheKeysType&
+         if (collect_path) {
+             result.path.push_back(current);
+         }
+-        refreshPublishedState(current, false);
++        refreshPublishedState(current);
+         inserted_prefix_length = i + 1;
+     }
+ 
+-    if (first_changed != nullptr) {
+-        observeCacheState(first_changed, "store");
+-    }
+-
+     RTP_LLM_LOG_DEBUG("keys=%zu created=%zu adopted=%zu tree_nodes=%zu",
+                       inserted_prefix_length,
+                       result.inserted_nodes.size(),
+@@ -882,53 +459,16 @@ bool BlockTree::isRemovable(TreeNode* node) const {
+                           [](const GroupSetResource& resource) { return resource.is_removable(); });
+ }
+ 
+-void BlockTree::removeNode(TreeNode* node, const char* trigger) {
++void BlockTree::removeNode(TreeNode* node) {
+     RTP_LLM_LOG_DEBUG("removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
+ 
+-    eraseDeferredObservationRoots(node);
+-    if (observability_enabled_) {
+-        for (size_t tier_idx = 0; tier_idx < node->observation.tier_since_us.size(); ++tier_idx) {
+-            const char* medium = tier_idx == 0 ? "DEVICE" : (tier_idx == 1 ? "HOST" : "DISK");
+-            endInterval(tier_intervals_[tier_idx],
+-                        node->observation.tier_since_us[tier_idx],
+-                        *node,
+-                        "tier",
+-                        medium,
+-                        trigger,
+-                        "tier_release");
+-        }
+-        endInterval(recovery_intervals_,
+-                    node->observation.recovery_since_us,
+-                    *node,
+-                    "recovery",
+-                    nullptr,
+-                    trigger,
+-                    "dependency_loss");
+-        endInterval(content_intervals_,
+-                    node->observation.content_since_us,
+-                    *node,
+-                    "content",
+-                    nullptr,
+-                    trigger,
+-                    "content_remove");
+-    }
+     if (node->parent == nullptr) {
+         pending_node_pool_.erase(node->cache_key);
+         return;
+     }
+     removePublishedKey(node->cache_key);
+-    TreeNode* parent = node->parent;
+-    const size_t old_child_count = parent->children.size();
+-    parent->children.erase(node->cache_key);
+-    node->parent = nullptr;
+-    if (observability_enabled_) {
+-        if (node->children.empty()) {
+-            --leaf_count_;
+-        } else if (node->children.size() > 1) {
+-            --branch_count_;
+-        }
+-    }
+-    updateContentShape(*parent, old_child_count, parent->children.size());
++    node->parent->children.erase(node->cache_key);
++    node->parent            = nullptr;
+     const size_t index      = node->index;
+     const size_t last_index = node_pool_.size() - 1;
+     if (index != last_index) {
+@@ -953,12 +493,12 @@ void BlockTree::removePendingNodes(const std::unordered_set<TreeNode*>& nodes) {
+     }
+ }
+ 
+-TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node, const char* trigger) {
++TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node) {
+     TreeNode* current       = node;
+     size_t    removed_count = 0;
+     while (isRemovable(current)) {
+         TreeNode* parent = current->parent;
+-        removeNode(current, trigger);
++        removeNode(current);
+         current = parent;
+         ++removed_count;
+     }
+@@ -989,10 +529,7 @@ void BlockTree::setEventPublisher(KVCacheEventPublisherPtr        publisher,
+     // Initialization only. Normal mutations update a single affected key.
+     // The publisher starts after attachment and reconciles this initial snapshot.
+     for (const auto& node : node_pool_) {
+-        refreshPublishedState(node.get(), false);
+-    }
+-    for (const auto& child : root_->children) {
+-        observeCacheState(child.second, "publisher_attachment");
++        refreshPublishedState(node.get());
+     }
+ }
+ 
+@@ -1011,17 +548,8 @@ void BlockTree::removePublishedKey(CacheKeyType key) {
+     }
+ }
+ 
+-void BlockTree::refreshPublishedState(const TreeNode* node, bool observe_cache_state, const char* trigger) {
+-    if (node->parent == nullptr) {
+-        return;
+-    }
+-    if (observe_cache_state) {
+-        observeCacheState(node, trigger);
+-    }
+-    if (!event_publisher_) {
+-        return;
+-    }
+-    if (isShortLeaf(node)) {
++void BlockTree::refreshPublishedState(const TreeNode* node) {
++    if (!event_publisher_ || node->parent == nullptr || isShortLeaf(node)) {
+         return;
+     }
+     for (const auto& location : publication_groups_) {
+@@ -1039,78 +567,4 @@ void BlockTree::refreshPublishedState(const TreeNode* node, bool observe_cache_s
+     }
+ }
+ 
+-void BlockTree::observeCacheState(const TreeNode* node, const char* trigger) {
+-    if (!observability_enabled_ || node == root_.get()) {
+-        return;
+-    }
+-    if (observation_batch_depth_ > 0) {
+-        deferObservationRoot(node, trigger);
+-        return;
+-    }
+-    Validators initial_validators = makeValidators(group_sets_);
+-    std::vector<const TreeNode*> ancestors;
+-    for (const TreeNode* current = node->parent; current != root_.get(); current = current->parent) {
+-        ancestors.push_back(current);
+-    }
+-    std::reverse(ancestors.begin(), ancestors.end());
+-    for (const TreeNode* ancestor : ancestors) {
+-        for (size_t group_set_id = 0; group_set_id < initial_validators.size(); ++group_set_id) {
+-            validateObservedResource(
+-                *initial_validators[group_set_id], ancestor->group_set_resources[group_set_id], true);
+-        }
+-    }
+-    struct Frame {
+-        TreeNode*  node;
+-        Validators validators;
+-    };
+-    std::vector<Frame> pending;
+-    pending.push_back({const_cast<TreeNode*>(node), std::move(initial_validators)});
+-    while (!pending.empty()) {
+-        Frame frame = std::move(pending.back());
+-        pending.pop_back();
+-        TreeNode* current = frame.node;
+-        bool      valid   = !frame.validators.empty();
+-        for (size_t group_set_id = 0; group_set_id < frame.validators.size(); ++group_set_id) {
+-            valid = validateObservedResource(*frame.validators[group_set_id],
+-                                             current->group_set_resources[group_set_id],
+-                                             true)
+-                    && valid;
+-        }
+-        int64_t& recovery_since_us = current->observation.recovery_since_us;
+-        if (valid) {
+-            startInterval(recovery_intervals_, recovery_since_us);
+-        } else if (recovery_since_us >= 0) {
+-            endInterval(recovery_intervals_,
+-                        recovery_since_us,
+-                        *current,
+-                        "recovery",
+-                        nullptr,
+-                        trigger,
+-                        "dependency_loss");
+-        }
+-        updateTierIntervals(*current, trigger);
+-        size_t remaining_children = current->children.size();
+-        for (const auto& child : current->children) {
+-            --remaining_children;
+-            Validators child_validators =
+-                remaining_children == 0 ? std::move(frame.validators) : cloneValidators(frame.validators);
+-            pending.push_back({child.second, std::move(child_validators)});
+-        }
+-    }
+-}
+-
+-BlockTreeObservabilitySnapshot BlockTree::observabilitySnapshot() const {
+-    BlockTreeObservabilitySnapshot snapshot;
+-    snapshot.node_count  = node_pool_.size();
+-    snapshot.leaf_count  = leaf_count_;
+-    snapshot.branch_count = branch_count_;
+-    snapshot.content     = intervalSummary(content_intervals_);
+-    snapshot.recovery    = intervalSummary(recovery_intervals_);
+-    for (size_t tier_idx = 0; tier_idx < tier_intervals_.size(); ++tier_idx) {
+-        snapshot.tier[tier_idx] = intervalSummary(tier_intervals_[tier_idx]);
+-    }
+-    return snapshot;
+-}
+-
+-
+ }  // namespace rtp_llm
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/BlockTree.h b/rtp_llm/cpp/cache/block_tree_cache/BlockTree.h
+index f4c8799544..213cce7ec2 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/BlockTree.h
++++ b/rtp_llm/cpp/cache/block_tree_cache/BlockTree.h
+@@ -1,11 +1,8 @@
+ #pragma once
+ 
+-#include <array>
+ #include <deque>
+ #include <functional>
+ #include <memory>
+-#include <optional>
+-#include <set>
+ #include <string>
+ #include <string_view>
+ #include <unordered_map>
+@@ -47,13 +44,6 @@ struct BlockTreeNodeRangeResult {
+     bool   cycle_complete{false};
+ };
+ 
+-struct BlockTreeContentMatch {
+-    size_t       pos{0};
+-    CacheKeyType key{0};
+-    size_t       node_offset{0};
+-    bool         partial{false};
+-};
+-
+ // A content-matched interval backed by a real tree node. The source endpoint
+ // can exceed matched_end; dense groups may reuse the shared part of that node.
+ struct BlockTreeContentRange {
+@@ -61,32 +51,13 @@ struct BlockTreeContentRange {
+     size_t    matched_end{0};
+ };
+ 
+-struct BlockTreeAgeSummary {
+-    size_t                     count{0};
+-    std::optional<int64_t>     mean_age_us;
+-    std::optional<int64_t>     max_age_us;
+-};
+-
+-struct BlockTreeObservabilitySnapshot {
+-    size_t                 node_count{0};
+-    size_t                 leaf_count{0};
+-    size_t                 branch_count{0};
+-    BlockTreeAgeSummary    content;
+-    BlockTreeAgeSummary    recovery;
+-    std::array<BlockTreeAgeSummary, 3> tier;
+-};
+-
+ class BlockTree {
+ public:
+     explicit BlockTree(std::vector<GroupSetPtr> group_sets,
+-                       size_t                    reuse_unit_tokens = 1,
+-                       bool                      enable_observability = false,
+-                       std::string               observability_instance = {});
++                       size_t                    reuse_unit_tokens = 1);
+     ~BlockTree();
+ 
+     std::vector<TreeNode*> findNode(const CacheKeysType& cache_keys) const;
+-    size_t                 contentMatchPos(const std::vector<int>& request_tokens) const;
+-    std::optional<BlockTreeContentMatch> contentMatchInfo(const std::vector<int>& request_tokens) const;
+     // Returns all content- and identity-matched endpoints, including terminal short leaves.
+     // The caller supplies keys computed with the request's original hash seed and base-block layout.
+     std::vector<TreeNode*> contentMatchCandidates(
+@@ -97,16 +68,6 @@ public:
+                        const std::function<CacheKeyType(size_t)>&                                endpoint_key,
+                        const std::function<bool(size_t, const std::vector<int>&, CacheKeyType)>& source_identity) const;
+ 
+-    std::vector<PrefixCachePlanPoint> planRecoveryPoints(
+-        const CacheKeysType&                              cache_keys,
+-        const std::vector<std::vector<GroupSetResource>>& resources,
+-        const std::vector<std::vector<int>>*              token_segments,
+-        Tier                                              target_tier,
+-        const std::vector<size_t>*                         token_ends = nullptr) const;
+-    std::vector<PrefixCachePlanPoint> unfulfilledPlanPoints(
+-        const std::vector<PrefixCachePlanPoint>& plan_points,
+-        const CacheKeysType&                     cache_keys) const;
+-
+     bool isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const;
+ 
+     BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
+@@ -118,7 +79,7 @@ public:
+ 
+     bool      isRemovable(TreeNode* node) const;
+     void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
+-    TreeNode* removeNodeAndEmptyAncestors(TreeNode* node, const char* trigger = "mutation");
++    TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
+ 
+     TreeNode* root() const {
+         return root_.get();
+@@ -130,12 +91,6 @@ public:
+     size_t                       reusableGroupCount() const {
+         return reusable_group_locations_.size();
+     }
+-    bool                         observabilityEnabled() const {
+-        return observability_enabled_;
+-    }
+-    const std::string&           observabilityInstance() const {
+-        return observability_instance_;
+-    }
+     size_t size() const {
+         return node_pool_.size();
+     }
+@@ -155,35 +110,11 @@ public:
+                                                   size_t                                      max_nodes,
+                                                   const std::function<void(const TreeNode&)>& visitor) const;
+ 
+-    // The owning BlockTreeCache mutex protects both state transitions and snapshots.
+-    void                           observeCacheState(const TreeNode* node,
+-                                                    const char*      trigger = "mutation");
+-    BlockTreeObservabilitySnapshot observabilitySnapshot() const;
+-
+     // All publication operations require the owning BlockTreeCache mutex.
+     // Only complete, matchable DEVICE values in every required group are advertised.
+     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
+     KVCacheSnapshot logicalCacheSnapshot() const;
+-    void            refreshPublishedState(const TreeNode* node,
+-                                          bool            observe_cache_state = true,
+-                                          const char*     trigger             = "store");
+-
+-    // Defers interval observation until the end of one locked mutation batch.
+-    // The caller must already hold the owning BlockTreeCache mutex. Nested scopes
+-    // are supported; only the outermost scope observes the final tree state.
+-    class ObservationBatch {
+-    public:
+-        explicit ObservationBatch(BlockTree& tree);
+-        ~ObservationBatch();
+-
+-        ObservationBatch(const ObservationBatch&)            = delete;
+-        ObservationBatch& operator=(const ObservationBatch&) = delete;
+-        ObservationBatch(ObservationBatch&&)                 = delete;
+-        ObservationBatch& operator=(ObservationBatch&&)      = delete;
+-
+-    private:
+-        BlockTree& tree_;
+-    };
++    void            refreshPublishedState(const TreeNode* node);
+ 
+ private:
+     void                               removePublishedKey(CacheKeyType key);
+@@ -201,58 +132,19 @@ private:
+                                          const std::vector<std::vector<int>>*              token_segments,
+                                          const std::vector<size_t>*                         token_ends);
+ 
+-    void      removeNode(TreeNode* node, const char* trigger = "mutation");
++    void      removeNode(TreeNode* node);
+     TreeNode* createNode(CacheKeyType key, TreeNode* parent, size_t token_end);
+     void      releaseNode(TreeNode* node);
+ 
+-    struct IntervalSet {
+-        std::multiset<int64_t> starts;
+-        long double            start_sum{0.0L};
+-    };
+-
+-    struct DeferredObservationRoot {
+-        const TreeNode* node{nullptr};
+-        const char*     trigger{nullptr};
+-    };
+-
+-    static size_t tierIndex(Tier tier);
+-    void deferObservationRoot(const TreeNode* node, const char* trigger);
+-    void endObservationBatch();
+-    void commitDeferredObservations();
+-    void eraseDeferredObservationRoots(const TreeNode* node);
+-    static bool isObservationAncestor(const TreeNode* ancestor, const TreeNode* candidate);
+-
+-    void startInterval(IntervalSet& intervals, int64_t& since_us);
+-    void endInterval(IntervalSet& intervals,
+-                     int64_t&     since_us,
+-                     const TreeNode& node,
+-                     const char* kind,
+-                     const char* medium = nullptr,
+-                     const char* trigger = "mutation",
+-                     const char* effect = "release");
+-    void updateContentShape(const TreeNode& node, size_t old_child_count, size_t new_child_count);
+-    void updateTierIntervals(TreeNode& node, const char* trigger);
+-    BlockTreeAgeSummary intervalSummary(const IntervalSet& intervals) const;
+-
+     std::vector<GroupSetPtr>              group_sets_;
+     ReusableGroupLocations                reusable_group_locations_;
+     std::unique_ptr<TreeNode>             root_;
+     std::deque<std::unique_ptr<TreeNode>> node_pool_;
+     std::unordered_map<CacheKeyType, std::unique_ptr<TreeNode>> pending_node_pool_;
+     // Indexed together with node_pool_ for contiguous snapshot copies.
++    size_t reuse_unit_tokens_{1};
+     CacheKeysType cache_keys_;
+     int64_t       key_version_{-1};
+-    size_t        reuse_unit_tokens_{1};
+-    bool          observability_enabled_{false};
+-    std::string   observability_instance_;
+-    int64_t       tree_epoch_us_{0};
+-    size_t        leaf_count_{0};
+-    size_t        branch_count_{0};
+-    IntervalSet   content_intervals_;
+-    IntervalSet   recovery_intervals_;
+-    std::array<IntervalSet, 3> tier_intervals_;
+-    size_t       observation_batch_depth_{0};
+-    std::vector<DeferredObservationRoot> deferred_observation_roots_;
+ };
+ 
+ }  // namespace rtp_llm
+diff --git a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.cc b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.cc
+index a242d998c4..081d04df5e 100644
+--- a/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.cc
++++ b/rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.cc
+@@ -4,7 +4,6 @@
+ #include <cctype>
+ #include <chrono>
+ #include <iterator>
+-#include <unistd.h>
+ #include <limits>
+ #include <optional>
+ #include <string>
+@@ -34,15 +33,6 @@ namespace {
+ constexpr size_t kCopyAlignment     = 16;
+ constexpr size_t kDirectIOAlignment = 4096;
+ 
+-std::string makePrefixObservabilityInstance(const ParallelismConfig& parallelism_config) {
+-    char host[128] = {0};
+-    (void)gethostname(host, sizeof(host) - 1);
+-    const auto startup_tick = std::chrono::steady_clock::now().time_since_epoch().count();
+-    return std::string(host) + "|pid=" + std::to_string(static_cast<long long>(getpid()))
+-           + "|dp_rank=" + std::to_string(parallelism_config.dp_rank)
+-           + "|startup_tick=" + std::to_string(startup_tick);
+-}
+-
+ std::optional<EvictionPolicy> parseEvictionPolicy(const std::string& value) {
+     std::string normalized = value;
+     std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
+@@ -589,10 +579,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&
+     config.enable_host_cache   = host_enabled;
+     config.enable_disk_cache   = disk_enabled;
+     config.enable_remote_cache = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
+-    config.enable_prefix_cache_observability = kv_cache_config.enable_prefix_cache_observability;
+-    if (config.enable_prefix_cache_observability) {
+-        config.prefix_observability_instance = makePrefixObservabilityInstance(parallelism_config);
+-    }
+     if (!config.enable_remote_cache) {
+         storage_backend = nullptr;
+     }
+@@ -695,10 +681,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&
+ 
+     const size_t reuse_unit_tokens =
+         cache_config.cache_key_layout_resolved ? cache_config.reuse_unit_tokens : cache_config.seq_size_per_block;
+-    auto tree = std::make_unique<BlockTree>(std::move(group_sets),
+-                                             reuse_unit_tokens,
+-                                             config.enable_prefix_cache_observability,
+-                                             config.prefix_observability_instance);
++    auto tree = std::make_unique<BlockTree>(std::move(group_sets), reuse_unit_tokens);
+ 
+     auto result = std::make_shared<BlockTreeCache>(std::move(tree),
+                                                    std::move(config),
+diff --git a/rtp_llm/cpp/engine_base/stream/StreamCacheResource.cc b/rtp_llm/cpp/engine_base/stream/StreamCacheResource.cc
+index 24aa63094c..8b50b62a82 100644
+--- a/rtp_llm/cpp/engine_base/stream/StreamCacheResource.cc
++++ b/rtp_llm/cpp/engine_base/stream/StreamCacheResource.cc
+@@ -13,9 +13,7 @@
+ #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+ #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+ #include <algorithm>
+-#include <iomanip>
+ #include <limits>
+-#include <sstream>
+ #include <thread>
+ #include <unordered_map>
+ 
+@@ -42,127 +40,6 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
+     return topology;
+ }
+ 
+-std::string jsonEscape(const std::string& value) {
+-    std::ostringstream escaped;
+-    escaped << '"';
+-    for (const unsigned char ch : value) {
+-        switch (ch) {
+-            case '"':
+-                escaped << "\\\"";
+-                break;
+-            case '\\':
+-                escaped << "\\\\";
+-                break;
+-            case '\b':
+-                escaped << "\\b";
+-                break;
+-            case '\f':
+-                escaped << "\\f";
+-                break;
+-            case '\n':
+-                escaped << "\\n";
+-                break;
+-            case '\r':
+-                escaped << "\\r";
+-                break;
+-            case '\t':
+-                escaped << "\\t";
+-                break;
+-            default:
+-                if (ch < 0x20) {
+-                    escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+-                            << static_cast<int>(ch) << std::dec;
+-                } else {
+-                    escaped << static_cast<char>(ch);
+-                }
+-        }
+-    }
+-    escaped << '"';
+-    return escaped.str();
+-}
+-
+-void appendOptionalCacheKey(std::ostringstream& payload, const std::optional<CacheKeyType>& value) {
+-    if (value.has_value()) {
+-        payload << '"' << *value << '"';
+-    } else {
+-        payload << "null";
+-    }
+-}
+-
+-const char* prefixMediumStatusName(PrefixCacheMediumStatus status) {
+-    switch (status) {
+-        case PrefixCacheMediumStatus::NOT_CHECKED:
+-            return "not_checked";
+-        case PrefixCacheMediumStatus::DISABLED:
+-            return "disabled";
+-        case PrefixCacheMediumStatus::CHECKED:
+-            return "checked";
+-    }
+-    return "unknown";
+-}
+-
+-void appendOptionalSize(std::ostringstream& payload, const std::optional<size_t>& value) {
+-    if (value.has_value()) {
+-        payload << *value;
+-    } else {
+-        payload << "null";
+-    }
+-}
+-
+-void appendOptionalBool(std::ostringstream& payload, const std::optional<bool>& value) {
+-    if (value.has_value()) {
+-        payload << (*value ? "true" : "false");
+-    } else {
+-        payload << "null";
+-    }
+-}
+-
+-void appendAgeSummary(std::ostringstream& payload, const char* name, const BlockTreeAgeSummary& summary) {
+-    payload << jsonEscape(name) << ":{\"count\":" << summary.count << ",\"mean_age_us\":";
+-    if (summary.mean_age_us.has_value()) {
+-        payload << *summary.mean_age_us;
+-    } else {
+-        payload << "null";
+-    }
+-    payload << ",\"max_age_us\":";
+-    if (summary.max_age_us.has_value()) {
+-        payload << *summary.max_age_us;
+-    } else {
+-        payload << "null";
+-    }
+-    payload << '}';
+-}
+-
+-void appendTreeSnapshot(std::ostringstream& payload, const BlockTreeObservabilitySnapshot& snapshot) {
+-    static constexpr const char* kTierNames[] = {"DEVICE", "HOST", "DISK"};
+-    payload << "\"tree\":{\"node_count\":" << snapshot.node_count << ",\"leaf_count\":" << snapshot.leaf_count
+-            << ",\"branch_count\":" << snapshot.branch_count << ',';
+-    appendAgeSummary(payload, "content", snapshot.content);
+-    payload << ',';
+-    appendAgeSummary(payload, "recovery", snapshot.recovery);
+-    for (size_t tier = 0; tier < snapshot.tier.size(); ++tier) {
+-        payload << ',';
+-        appendAgeSummary(payload, kTierNames[tier], snapshot.tier[tier]);
+-    }
+-    payload << '}';
+-}
+-
+-const char* remoteQueryStatusName(PrefixCacheRemoteQueryStatus status) {
+-    switch (status) {
+-        case PrefixCacheRemoteQueryStatus::NOT_QUERIED:
+-            return "not_queried";
+-        case PrefixCacheRemoteQueryStatus::HIT:
+-            return "hit";
+-        case PrefixCacheRemoteQueryStatus::MISS:
+-            return "miss";
+-        case PrefixCacheRemoteQueryStatus::ERROR:
+-            return "error";
+-        case PrefixCacheRemoteQueryStatus::UNSET:
+-            break;
+-    }
+-    return "unset";
+-}
+-
+ std::shared_ptr<const MallocInfo::RequestLayout> makeRequestTokenSnapshot(const BatchKVCacheResource& resource,
+                                                                           CompleteTokenIds&           tokens,
+                                                                           int  incr_seq_len_override,
+@@ -201,14 +78,6 @@ std::shared_ptr<const MallocInfo::RequestLayout> makeRequestTokenSnapshot(const
+ 
+ }  // namespace
+ 
+-bool StreamCacheResource::prefixObservationEnabled() const {
+-    return resource_context_.cache_manager != nullptr
+-           && resource_context_.cache_manager->blockTreeCache() != nullptr
+-           && resource_context_.cache_manager->blockTreeCache()->prefixObservabilityEnabled()
+-           && resource_context_.role_type == RoleType::PREFILL
+-           && resource_context_.cache_manager->isAllocatorOwner();
+-}
+-
+ void StreamCacheResource::init(int batch_size) {
+     batch_kv_cache_resource_->resetBatchSize(batch_size);
+     // cache manager is null when warmup
+@@ -314,20 +183,6 @@ void StreamCacheResource::releaseResource() {
+     if (!resource_context_.cache_manager) {
+         return;
+     }
+-    if (allocator_load_context_) {
+-        const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+-        if (load_context != nullptr) {
+-            remote_observation_ = load_context->remoteObservation(static_cast<size_t>(reuseBlockTokens()));
+-        }
+-        remote_observation_.effective = false;
+-    }
+-    if (prefixObservationEnabled() && !prefix_summary_emitted_) {
+-        const char* log_status = prefixObservationStatus();
+-        if (stream_->statusInfoWithoutLock().hasError() && prefix_plan_state_ == PrefixCachePlanState::NOT_FORMED) {
+-            prefix_plan_state_ = PrefixCachePlanState::TERMINAL_UNFORMED;
+-        }
+-        emitPrefixObservationSummary(log_status);
+-    }
+     // Check against double release
+     if (resource_released_) {
+         RTP_LLM_LOG_ERROR("=== DOUBLE RELEASE CACHE RESOURCE DETECTED ===");
+@@ -387,28 +242,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
+     int total_blocks = curBlocksNum();
+     RTP_LLM_CHECK(nums == total_blocks);
+ 
+-    if (prefixObservationEnabled()) {
+-        const char* skipped_reason = nullptr;
+-        if (total_blocks == 0) {
+-            skipped_reason = "zero_block";
+-        } else if (stream_->hasErrorWithoutLock()) {
+-            skipped_reason = "request_error";
+-        } else if (stream_->getStatus() != StreamState::FINISHED) {
+-            skipped_reason = "request_not_finished";
+-        } else if (!reuseCache()) {
+-            skipped_reason = "reuse_disabled";
+-        } else if (storeTarget() == Tier::NONE) {
+-            skipped_reason = "store_disabled";
+-        }
+-        if (skipped_reason) {
+-            resource_context_.cache_manager->blockTreeCache()->observePublicationSkipped(
+-                stream_->streamId(), storeTarget(), skipped_reason);
+-        }
+-    }
+-    if (total_blocks == 0 && prefixObservationEnabled() && !stream_->hasErrorWithoutLock()
+-        && stream_->getStatus() == StreamState::FINISHED) {
+-        emitPrefixPlanClosed("zero_block");
+-    }
+     if (total_blocks > 0) {
+         if (reuseCache() && !stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
+             const Tier target_tier = storeTarget();
+@@ -418,8 +251,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
+                               tierName(target_tier));
+             if (target_tier != Tier::NONE) {
+                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
+-                insert_info.prefix_plan_state = &prefix_plan_state_;
+-                insert_info.observation_request_id = stream_->streamId();
+                 insert_info.prefix_cache_registration = prefix_cache_registration_ ? &*prefix_cache_registration_ :
+                                                                                        nullptr;
+                 size_t     resident_prefix_length = 0;
+@@ -431,9 +262,6 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
+                               reuseCache(),
+                               stream_->hasErrorWithoutLock(),
+                               StreamStateToString(stream_->getStatus()).c_str());
+-            if (!stream_->hasErrorWithoutLock() && stream_->getStatus() == StreamState::FINISHED) {
+-                emitPrefixPlanClosed(reuseCache() ? "store_disabled" : "reuse_disabled");
+-            }
+         }
+ 
+         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
+@@ -494,9 +322,6 @@ absl::Status StreamCacheResource::initKVBlock() {
+         resource_context_.cache_manager->cacheConfig().disable_decode_first_malloc_device_reuse;
+     const bool is_decode_role  = (resource_context_.role_type == RoleType::DECODE);
+     const bool is_first_malloc = (batch_kv_cache_resource_->curBlocksNum() == 0);
+-    if (is_first_malloc && prefixObservationEnabled()) {
+-        remote_observation_ = PrefixCacheRemoteObservation{};
+-    }
+ 
+     if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
+         malloc_info.reuse_cache         = false;
+@@ -580,7 +405,7 @@ absl::Status StreamCacheResource::initKVBlock() {
+                                  -1,
+                                  is_first_malloc && malloc_info.cache_keys_initialized_now
+                                      && resource_context_.cache_manager->needsPrefillHitSnapshot(),
+-                                 prefixObservationEnabled() || (is_first_malloc && partialTailReuseEnabled()),
++                                 (is_first_malloc && partialTailReuseEnabled()),
+                                  is_first_malloc && partialTailReuseEnabled());
+ 
+     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
+@@ -608,9 +433,6 @@ absl::Status StreamCacheResource::initKVBlock() {
+     // HOST/DISK reuse is published after the asynchronous load completes.
+     publishReuseLengths(result.reuse_len, 0, 0, 0);
+     allocator_load_context_ = std::move(result.async_context);
+-    if (!allocator_load_context_ && prefixObservationEnabled()) {
+-        remote_observation_.effective = false;
+-    }
+     return absl::OkStatus();
+ }
+ 
+@@ -625,9 +447,6 @@ void StreamCacheResource::clearCacheReuseState() {
+ }
+ 
+ void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
+-    if (result.match_observation.has_value()) {
+-        prefix_match_observation_ = result.match_observation;
+-    }
+     cache_reuse_metrics_.device_input_length    = result.device_input_length;
+     cache_reuse_metrics_.match_cost_time_us     = result.match_cost_time_us;
+     cache_reuse_metrics_.report_match_cost_time = result.match_end_time_us > 0;
+@@ -666,14 +485,6 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
+     const auto error         = allocator_load_context_->errorInfo();
+     const auto load_context  = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
+     auto       malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
+-    if (prefixObservationEnabled() && load_context != nullptr) {
+-        remote_observation_ = load_context->remoteObservation(static_cast<size_t>(reuseBlockTokens()));
+-        const int64_t input_length = stream_->inputLength();
+-        if (remote_observation_.candidate_pos.has_value() && input_length > 0) {
+-            remote_observation_.candidate_pos = std::min(*remote_observation_.candidate_pos,
+-                                                         static_cast<size_t>(input_length - 1));
+-        }
+-    }
+     if (load_success) {
+         RTP_LLM_CHECK(load_context != nullptr);
+         const size_t total = load_context->matchedBlocks();
+@@ -718,7 +529,6 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
+     } else {
+         clearCacheReuseState();
+     }
+-    remote_observation_.effective = load_success && stream_->remoteReuseLength() > 0;
+     if (!cache_reuse_metrics_.report_load_metrics) {
+         const int64_t load_end_time_us                = currentTimeUs();
+         cache_reuse_metrics_.load_success             = load_success;
+@@ -750,9 +560,6 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
+ }
+ 
+ void StreamCacheResource::reportCacheReuseMetrics() {
+-    if (prefixObservationEnabled() && (!allocator_load_context_ || allocator_load_context_->done())) {
+-        emitPrefixObservationSummary(prefixObservationStatus());
+-    }
+     if (stream_->metrics_reporter_ == nullptr || !reuseCache()) {
+         return;
+     }
+@@ -767,176 +574,6 @@ void StreamCacheResource::reportCacheReuseMetrics() {
+         &tags, &cache_reuse_metrics_);
+ }
+ 
+-std::string StreamCacheResource::prefixObservationSummaryPayload(const char* status) const {
+-    std::ostringstream payload;
+-    const int64_t input_length = stream_->inputLength();
+-    payload << "{\"kind\":\"request\",\"schema_version\":1,\"request_id\":" << stream_->streamId()
+-            << ",\"status\":" << jsonEscape(status) << ",\"input_tokens\":" << input_length << ",\"instance\":";
+-    if (resource_context_.cache_manager != nullptr && resource_context_.cache_manager->blockTreeCache() != nullptr) {
+-        payload << jsonEscape(resource_context_.cache_manager->blockTreeCache()->prefixObservabilityInstance());
+-    } else {
+-        payload << "null";
+-    }
+-    payload << ",\"observation_time_us\":" << currentTimeUs() << ",\"match\":";
+-    if (prefix_match_observation_.has_value()) {
+-        const auto& match = *prefix_match_observation_;
+-        payload << "{\"content_pos\":";
+-        appendOptionalSize(payload, match.content_pos);
+-        payload << ",\"content_key\":";
+-        appendOptionalCacheKey(payload, match.content_key);
+-        payload << ",\"content_node_offset\":" << match.content_node_offset
+-                << ",\"content_partial\":" << (match.content_partial ? "true" : "false")
+-                << ",\"local_valid_pos\":";
+-        appendOptionalSize(payload, match.local_valid_pos);
+-        payload << ",\"local_valid_key\":";
+-        appendOptionalCacheKey(payload, match.local_valid_key);
+-        payload << ",\"match_time_us\":" << match.match_time_us << ",\"media_status\":{";
+-        for (size_t tier = 0; tier < match.medium_status.size(); ++tier) {
+-            if (tier != 0) {
+-                payload << ',';
+-            }
+-            payload << jsonEscape(tier == 0 ? "DEVICE" : (tier == 1 ? "HOST" : "DISK")) << ':'
+-                    << jsonEscape(prefixMediumStatusName(match.medium_status[tier]));
+-        }
+-        payload << "},\"groups\":[";
+-        for (size_t index = 0; index < match.groups.size(); ++index) {
+-            const auto& group = match.groups[index];
+-            if (index != 0) {
+-                payload << ',';
+-            }
+-            payload << "{\"group_set_id\":" << group.group_set_id << ",\"member_tags\":[";
+-            for (size_t tag = 0; tag < group.member_tags.size(); ++tag) {
+-                if (tag != 0) {
+-                    payload << ',';
+-                }
+-                payload << jsonEscape(group.member_tags[tag]);
+-            }
+-            payload << "],\"DEVICE\":";
+-            appendOptionalSize(payload, group.max_pos[static_cast<size_t>(Tier::DEVICE)]);
+-            payload << ",\"DEVICE_key\":";
+-            appendOptionalCacheKey(payload, group.max_key[static_cast<size_t>(Tier::DEVICE)]);
+-            payload << ",\"HOST\":";
+-            appendOptionalSize(payload, group.max_pos[static_cast<size_t>(Tier::HOST)]);
+-            payload << ",\"HOST_key\":";
+-            appendOptionalCacheKey(payload, group.max_key[static_cast<size_t>(Tier::HOST)]);
+-            payload << ",\"DISK\":";
+-            appendOptionalSize(payload, group.max_pos[static_cast<size_t>(Tier::DISK)]);
+-            payload << ",\"DISK_key\":";
+-            appendOptionalCacheKey(payload, group.max_key[static_cast<size_t>(Tier::DISK)]);
+-            payload << '}';
+-        }
+-        payload << "]}";
+-    } else {
+-        payload << "null";
+-    }
+-
+-    payload << ",\"remote\":{\"query_status\":" << jsonEscape(remoteQueryStatusName(remote_observation_.query_status))
+-            << ",\"candidate_pos\":";
+-    appendOptionalSize(payload, remote_observation_.candidate_pos);
+-    payload << ",\"effective\":";
+-    appendOptionalBool(payload, remote_observation_.effective);
+-    payload << "},\"used_pos\":";
+-    if (absl::string_view(status) == "ready") {
+-        const int64_t used = stream_->initialReuseLength();
+-        payload << (used >= 0 ? static_cast<size_t>(used) : 0);
+-    } else {
+-        payload << "null";
+-    }
+-    // This is a snapshot of request-owned intent at summary emission, not a
+-    // publication event. CONTENT_COMPLETE does not imply adoption by the tree.
+-    payload << ",\"registration\":";
+-    if (!prefix_cache_registration_) {
+-        payload << "null";
+-    } else {
+-        const auto& registration = *prefix_cache_registration_;
+-        payload << "{\"sample_stage\":\"request_summary\",\"original_input_tokens\":"
+-                << registration.original_input_tokens << ",\"prepared\":"
+-                << (registration.prepared ? "true" : "false") << ",\"prepared_resume_endpoint\":"
+-                << registration.prepared_resume_endpoint << ",\"points\":[";
+-        for (size_t index = 0; index < registration.points.size(); ++index) {
+-            if (index != 0) {
+-                payload << ',';
+-            }
+-            const auto& point = registration.points[index];
+-            payload << "{\"pos\":" << point.endpoint.pos << ",\"groups\":[";
+-            for (size_t group = 0; group < point.group_bindings.size(); ++group) {
+-                if (group != 0) {
+-                    payload << ',';
+-                }
+-                const auto& binding = point.group_bindings[group];
+-                const char* state = "registered";
+-                switch (binding.state) {
+-                    case PrefixCacheSaveState::REGISTERED: break;
+-                    case PrefixCacheSaveState::CONTENT_COMPLETE: state = "content_complete"; break;
+-                    case PrefixCacheSaveState::UNFULFILLED: state = "unfulfilled"; break;
+-                    case PrefixCacheSaveState::CACHED_REF: state = "cached_ref"; break;
+-                }
+-                payload << "{\"group_set_id\":" << binding.group_set_id << ",\"state\":" << jsonEscape(state)
+-                        << ",\"unfulfilled_reason\":";
+-                if (binding.unfulfilled_reason.empty()) {
+-                    payload << "null";
+-                } else {
+-                    payload << jsonEscape(binding.unfulfilled_reason);
+-                }
+-                payload << '}';
+-            }
+-            payload << "]}";
+-        }
+-        payload << "]}";
+-    }
+-    PrefixCachePlanState plan_state = prefix_plan_state_;
+-    if (plan_state == PrefixCachePlanState::NOT_FORMED && absl::string_view(status) != "ready") {
+-        plan_state = PrefixCachePlanState::TERMINAL_UNFORMED;
+-    }
+-    payload << ",\"plan_state\":" << jsonEscape(prefixCachePlanStateName(plan_state)) << ',';
+-    if (resource_context_.cache_manager != nullptr && resource_context_.cache_manager->blockTreeCache() != nullptr) {
+-        appendTreeSnapshot(payload, resource_context_.cache_manager->blockTreeCache()->observabilitySnapshot());
+-    } else {
+-        payload << "\"tree\":null";
+-    }
+-    payload << ",\"tree_time_us\":" << currentTimeUs() << '}';
+-    return payload.str();
+-}
+-
+-const char* StreamCacheResource::prefixObservationStatus() const {
+-    const ErrorInfo status = stream_->statusInfoWithoutLock();
+-    if (status.hasError()) {
+-        return status.code() == ErrorCode::CANCELLED ? "cancelled" : "failed";
+-    }
+-    if (stream_->getStatus() == StreamState::FINISHED) {
+-        return "ready";
+-    }
+-    return "terminal_unformed";
+-}
+-
+-void StreamCacheResource::emitPrefixObservationSummary(const char* status) {
+-    if (prefix_summary_emitted_ || !prefixObservationEnabled()) {
+-        return;
+-    }
+-    const std::string payload = prefixObservationSummaryPayload(status);
+-    RTP_LLM_LOG_INFO("event=prefix_cache_observation payload=%s", payload.c_str());
+-    prefix_summary_emitted_ = true;
+-}
+-
+-void StreamCacheResource::emitPrefixPlanClosed(const char* reason) {
+-    if (prefix_plan_event_emitted_ || !prefixObservationEnabled()) {
+-        return;
+-    }
+-    std::ostringstream payload;
+-    payload << "{\"kind\":\"plan\",\"schema_version\":1,\"instance\":";
+-    if (resource_context_.cache_manager != nullptr && resource_context_.cache_manager->blockTreeCache() != nullptr) {
+-        payload << jsonEscape(resource_context_.cache_manager->blockTreeCache()->prefixObservabilityInstance());
+-    } else {
+-        payload << "null";
+-    }
+-    payload << ",\"request_id\":" << stream_->streamId()
+-            << ",\"state\":\"formed\",\"formed_time_us\":" << currentTimeUs() << ",\"points\":[],\"reason\":"
+-            << jsonEscape(reason) << '}';
+-    RTP_LLM_LOG_INFO("event=prefix_cache_observation payload=%s", payload.str().c_str());
+-    prefix_plan_state_       = PrefixCachePlanState::FORMED;
+-    prefix_plan_event_emitted_ = true;
+-}
+-
+ std::optional<absl::Status> StreamCacheResource::pollAllocatorLoad() {
+     if (!allocator_load_context_) {
+         return absl::OkStatus();
+@@ -999,7 +636,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
+                                  seq_len_override,
+                                  batch_kv_cache_resource_->curBlocksNum() == 0 && malloc_info.cache_keys_initialized_now
+                                      && resource_context_.cache_manager->needsPrefillHitSnapshot(),
+-                                 prefixObservationEnabled());
++                                 false);
+ 
+     auto result = resource_context_.cache_manager->malloc(malloc_info);
+     if (!result.success && prefix_cache_registration_

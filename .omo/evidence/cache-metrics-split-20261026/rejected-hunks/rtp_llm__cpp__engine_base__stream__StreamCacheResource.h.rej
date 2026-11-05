@@ -1,0 +1,13 @@
+diff a/rtp_llm/cpp/engine_base/stream/StreamCacheResource.h b/rtp_llm/cpp/engine_base/stream/StreamCacheResource.h	(rejected hunks)
+@@ -150,6 +155,11 @@ private:
+     bool                             resource_released_     = false;
+     std::shared_ptr<AsyncContext>    allocator_load_context_;
+     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
++    std::optional<PrefixCacheMatchObservation> prefix_match_observation_;
++    PrefixCacheRemoteObservation      remote_observation_;
++    bool                              prefix_summary_emitted_{false};
++    PrefixCachePlanState               prefix_plan_state_{PrefixCachePlanState::NOT_FORMED};
++    bool                              prefix_plan_event_emitted_{false};
+     int64_t                          malloc_begin_time_us_    = 0;
+     int64_t                          load_wait_begin_time_us_ = 0;
+ 

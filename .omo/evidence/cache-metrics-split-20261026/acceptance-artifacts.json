@@ -1,0 +1,247 @@
+[
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/REPORT.md",
+    "bytes": 5017,
+    "sha256": "4ba02d6f5e163f61299e5c8f0adea593b6a90858cf13809304dbe413d07891ef"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/build-results.json",
+    "bytes": 1887,
+    "sha256": "4a8f69803cf27f4a9eb9f113ba96f593352a2f880ea374e514028bc5e973f6fd"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regression-results.json",
+    "bytes": 10627,
+    "sha256": "0112b4cff03587067c19a9ad87bac9083de8195a7a43f6c4869f08c7d4bb0f02"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/final-proof.json",
+    "bytes": 1483,
+    "sha256": "1327f9e0f6cc253a64d459ef6becfb563e273ac01d15bb3c77252d2bcaf7b61f"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/commands.md",
+    "bytes": 6247,
+    "sha256": "e1c1263a56a8cb25937f80d1ede75018f8dffeedd287450290acc5f58d9b37cb"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/builds/split_cp_6e6ab2ce_20261026.log",
+    "bytes": 18356,
+    "sha256": "fe05791ec60bcc9dcd57884e3373be0aa52aa4e6ce945924afada7289b8a47c6"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/builds/split_cp_6e6ab2ce_20261026.signal",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/builds/split_tail_d117337a_20261026.log",
+    "bytes": 17898,
+    "sha256": "638050bcd93006ceae4a953c89120d0194abb112859ee997fc749f4daa4dd99e"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/builds/split_tail_d117337a_20261026.signal",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/builds/split_prefix_8f842c28_20261026.log",
+    "bytes": 18003,
+    "sha256": "24d0048bbc92b0cd7a027c9de3b760f604fa7fa311788df74fb63482a49e9f7a"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/builds/split_prefix_8f842c28_20261026.signal",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/builds/split_optional_00bb35ca_20261026.log",
+    "bytes": 17716,
+    "sha256": "6ccb5e5817eb762be2e2048e6922aea450117ba72ebd9d7f93fd8567fabe0a73"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/builds/split_optional_00bb35ca_20261026.signal",
+    "bytes": 2,
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/evict/test/block_tree_evictor_test/test.xml",
+    "bytes": 16255,
+    "sha256": "bea8ec9c441939aee2c29c99fa9bac325fe5fd681972d597a5e98b4db8289dae"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/evict/test/block_tree_evictor_test/test.log",
+    "bytes": 19026,
+    "sha256": "bb175216b691817162449ae3ee63c38300810b45bdb8daf40b03e25a80da52a2"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/load/test/block_tree_loader_test/test.xml",
+    "bytes": 6980,
+    "sha256": "69d951c31f29ea7bb4100039f0cd347bb2b0a9f7a27298e6a3f8d7bc6e83c159"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/load/test/block_tree_loader_test/test.log",
+    "bytes": 10426,
+    "sha256": "8b9d516558d70bc0cc6f09877d1e627e88d78d3c3faedbf11b058766088ff4ae"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/load/test/load_async_context_test/test.xml",
+    "bytes": 6063,
+    "sha256": "ae6891d41bf6fcd2c8ff71456a205ae762335efc1309bf58facc3d5c75ff2816"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/load/test/load_async_context_test/test.log",
+    "bytes": 9862,
+    "sha256": "6a6d989e2d6e17d21a9bd06de1c0a74a92e1b5919f74555e0738287046b5b218"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/kvcm_mock_full_linear_test/test.xml",
+    "bytes": 1855,
+    "sha256": "79b5cb89bfe82a551217b6ae28ec3bb70d850b7df8eb97d05b44deb18c5959be"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/kvcm_mock_full_linear_test/test.log",
+    "bytes": 5680,
+    "sha256": "306355b8a04f513a85b34ed4582fc58c72f9bc264c83694b7bbf890f4dde72f2"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/storage_backend/test/storage_backend_test/test.xml",
+    "bytes": 6389,
+    "sha256": "1a502d11b7d3cd787b2be87c0023c599272b397b192b1e95597a4df3ad68ec3a"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/storage_backend/test/storage_backend_test/test.log",
+    "bytes": 10012,
+    "sha256": "8205ae5a080fb70a28c69c16768be43885e472f54a44885ee5e2e63634e3c992"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/store/test/block_tree_storer_test/test.xml",
+    "bytes": 6354,
+    "sha256": "00925739a46cdabb5b64db4100eb907089c4d8871336ab3fd5841abfc06e1789"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/store/test/block_tree_storer_test/test.log",
+    "bytes": 9543,
+    "sha256": "4539a3b729466afc1078b5cd0a9e2d751de650f9b130ee4eb3c86d15bceb2706"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/store/test/store_task_runner_test/test.xml",
+    "bytes": 2337,
+    "sha256": "985d7d8550c2c7f52994ed6f13ef41574b2697b503ce6b320f102d08b456a0c9"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/store/test/store_task_runner_test/test.log",
+    "bytes": 5941,
+    "sha256": "e8e09872b7b2abf669350cd9c7ab16735d6c2f63a66fdfdf3ff836064fb818b5"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/test/block_tree_cache_test/test.xml",
+    "bytes": 18045,
+    "sha256": "a374b2189668c9dbbeaec5a7286ddad2d3edf6c080c4fd3b10cb8f30017383f7"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/block_tree_cache/test/block_tree_cache_test/test.log",
+    "bytes": 20230,
+    "sha256": "3992f925376f4bcbbd82e8c0786237141cd76116cb547b7d20e16fe336c90004"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/hybrid_kv_cache_allocator_cp_shard_test/test.xml",
+    "bytes": 3595,
+    "sha256": "76c7370fd3f67c6609fa6441301b16f5d13ec8b351aafc4b6fbd288eed4eec3f"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/hybrid_kv_cache_allocator_cp_shard_test/test.log",
+    "bytes": 239826,
+    "sha256": "c080901abdd4e9ec0d6b911b6d17b56e478fb8fd97ee7e76ec09ae0f8118fc80"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/kv_cache_layout_view_test/test.xml",
+    "bytes": 1638,
+    "sha256": "be457a4478eceead0063b5dfafd1fc5fcaf041f059c9a4cc179e1f377f1fca7a"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/kv_cache_layout_view_test/test.log",
+    "bytes": 2326,
+    "sha256": "c4a030ee59f73d5228831b53759ca16b7324c5efe904719d733a801d38002eae"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/kv_cache_manager_cp_test/test.xml",
+    "bytes": 2789,
+    "sha256": "4a2b61fdafc5a94053828c43578351e376e2f5be7000a6560d7e8132eb3b5808"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/kv_cache_manager_cp_test/test.log",
+    "bytes": 85752,
+    "sha256": "53d6df2d8a21f7a175e6f3d6bc4e419e3b5156e4f5e66109be519cfd1c4c9f6f"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/prefill_cache_hit_metrics_contract_test/test.xml",
+    "bytes": 1474,
+    "sha256": "7f60dc6d04a347fd86c844cb2489f1ce6069a2f0923db0b12734646da1485fa4"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/prefill_cache_hit_metrics_contract_test/test.log",
+    "bytes": 25858,
+    "sha256": "699e381ffeb79aafb0bd3407a9ebd346840fcb02ab12cb6bbf1dce5808ec3cc1"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/single_type_kv_cache_allocator_test/test.xml",
+    "bytes": 15222,
+    "sha256": "2f4d1d3aece030b799576b95d49a3cb3ad33e3fcfa8f15da7a71cd675f31eaf8"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/cache/test/single_type_kv_cache_allocator_test/test.log",
+    "bytes": 18578,
+    "sha256": "badab9043414bb7107845f48932f302ce6c7324a430334a7f55aff2cdc012fe7"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/engine_base/stream/test/stream_cache_resource_test/test.xml",
+    "bytes": 14906,
+    "sha256": "bb16bca6489d8318a67a41676b39f36a3d975e3969ff9edae885bc4a1ca94640"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/engine_base/stream/test/stream_cache_resource_test/test.log",
+    "bytes": 883882,
+    "sha256": "c9b4ba69dbec9d8e7d35039d8a6ac124c8df94e170fb6d8d42f46ca6b06d1e33"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/normal_engine/test/engine_test/test.xml",
+    "bytes": 10325,
+    "sha256": "5f3922acf2837b8d27f7bd3c043be500f365dcb315e6067980f8fda88cce48d7"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/normal_engine/test/engine_test/test.log",
+    "bytes": 755580,
+    "sha256": "ccc1a88c89e9c01dd77326f4f2544d3ebf2c251ef3e413522c2438c93dc284c5"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/normal_engine/test/tail_reuse_cp_completion_integration_test/test.xml",
+    "bytes": 18308,
+    "sha256": "aff437b9956cc10abf18fa470cfaba066463f7ef5f5538f3dc795a7099533433"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/normal_engine/test/tail_reuse_cp_completion_integration_test/test.log",
+    "bytes": 17827,
+    "sha256": "06cc98bb5d9a38f1ffdbe8a60be5e1dcd3c58984febc0e440076d304d4e3a6e0"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test/test.xml",
+    "bytes": 30054,
+    "sha256": "3967c3d267822349aa7e02766a275baec02ca61b0649a409353b1d0a0232ad9c"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-b3b6ea49/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test/test.log",
+    "bytes": 29575,
+    "sha256": "196606522792dae7c51e3ef0a64bccf4e123cd211eebf40a9593d15053cda1ab"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-8f842c28/test.xml",
+    "bytes": 8339,
+    "sha256": "b728598d9b4b8185948b8fd07626589e945659f7610fcc66e6632caae7af6a9a"
+  },
+  {
+    "path": ".omo/evidence/cache-metrics-split-20261026/regressions-8f842c28/test.log",
+    "bytes": 10781,
+    "sha256": "7d81dbe48b7b71de775e4b1c624ed2abd3121431194abda61c21e2356598140a"
+  }
+]

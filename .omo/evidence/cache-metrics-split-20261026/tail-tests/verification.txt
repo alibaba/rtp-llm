@@ -1,0 +1,16 @@
+rtp_llm/cpp/cache/block_tree_cache/evict/test/BlockTreeEvictorTest.cc PASS; tests retained: 81 whole diagnostics removed: 2
+rtp_llm/cpp/cache/block_tree_cache/load/test/BlockTreeLoaderTest.cc PASS; tests retained: 16 whole diagnostics removed: 1
+rtp_llm/cpp/cache/block_tree_cache/load/test/LoadAsyncContextTest.cc PASS; tests retained: 31 whole diagnostics removed: 1
+rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockFullLinearTest.cc PASS; tests retained: 8 whole diagnostics removed: 0
+rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h PASS; tests retained: 0 whole diagnostics removed: 0
+rtp_llm/cpp/cache/block_tree_cache/storage_backend/test/StorageBackendTest.cc PASS; tests retained: 33 whole diagnostics removed: 1
+rtp_llm/cpp/cache/block_tree_cache/store/test/BlockTreeStorerTest.cc PASS; tests retained: 18 whole diagnostics removed: 2
+rtp_llm/cpp/cache/block_tree_cache/store/test/StoreTaskRunnerTest.cc PASS; tests retained: 11 whole diagnostics removed: 0
+rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTest.cc PASS; tests retained: 89 whole diagnostics removed: 2
+rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.cc PASS; tests retained: 0 whole diagnostics removed: 0
+rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc PASS; tests retained: 43 whole diagnostics removed: 12
+rtp_llm/cpp/cache/test/KVCacheLayoutViewTest.cc PASS; tests retained: 7 whole diagnostics removed: 0
+rtp_llm/cpp/cache/test/KVCacheManagerCPLayoutTest.cc PASS; tests retained: 13 whole diagnostics removed: 0
+rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc PASS; tests retained: 66 whole diagnostics removed: 12
+PASS: diagnostic/conflict scan; exact whole-test inventory; unchanged settlement tests; diff --check. Retained tests: 416
+Build/runtime tests NOT RUN: delegated owner integrates source and runs builds.

@@ -1,0 +1,19 @@
+diff a/rtp_llm/cpp/cache/CoordinatorCacheManager.h b/rtp_llm/cpp/cache/CoordinatorCacheManager.h	(rejected hunks)
+@@ -226,6 +226,7 @@ protected:
+     std::mutex malloc_mutex_;
+ 
+     struct PreparedKVCache {
++        std::optional<PrefixCacheMatchObservation> match_observation;
+         size_t                         matched_device_blocks = 0;
+         size_t                         total_logical_blocks  = 0;
+         std::vector<RequiredPositions> required_positions;
+@@ -237,7 +238,8 @@ protected:
+     std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
+                                                      BatchKVCacheResource&                kv_resource,
+                                                      PreparedKVCache&                     prepared,
+-                                                     const std::function<bool(size_t)>&   valid_prefix = {});
++                                                     const std::function<bool(size_t)>&   valid_prefix = {},
++                                                     const std::vector<int>*              request_tokens = nullptr);
+     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
+                                                                PreparedKVCache&  prepared,
+                                                                LoadAsyncContext* context,

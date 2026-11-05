@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test" tests="1" failures="0" errors="0">
+    <testcase name="rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test" status="run" duration="17" time="17"></testcase>
+      <system-out>
+Generated test.log (if the file is not UTF-8, then this may be unreadable):
+<![CDATA[exec ${PAGER:-/usr/bin/less} "$0" || exit 1
+Executing tests from //rtp_llm/cpp/normal_engine/test:tail_reuse_tp_subgroups_integration_test
+-----------------------------------------------------------------------------
+2026-10-26 16:48:14,478 - INFO - cuda info result: {"NVIDIA L20": 8}
+, return code: 0
+2026-10-26 16:48:14,514 - INFO - [Package Setup] setup_jit_cache starting
+2026-10-26 16:48:17,668 - INFO - [Package Setup] FlashInfer eviction scan found 0 stale candidate(s) under /home/admin
+2026-10-26 16:48:17,668 - INFO - [Package Setup] FlashInfer eviction done in 3.2s: evicted=0 skipped=0 of 0 candidate(s)
+2026-10-26 16:48:17,669 - INFO - [Package Setup] Set DG_JIT_CACHE_DIR: /home/admin/.deep_gemm
+2026-10-26 16:48:17,669 - INFO - [Package Copy] Processing flashinfer...
+2026-10-26 16:48:17,674 - INFO - [Package Copy] Found flashinfer v0.6.9+8c4f4dcf at /home/admin/hippo/worker/slave/drogo-share_worker-l20-cu13-ea118.worker-l20-cu13-ea118_11_43/main/nativelink/work/8c3abef8-4106-4722-9bf6-719af413e52e/work/bazel-out/k8-opt/bin/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test.runfiles/pip_gpu_cuda13_torch_flashinfer_python/site-packages/flashinfer
+2026-10-26 16:48:17,674 - INFO - [Package Copy] flashinfer v0.6.9+8c4f4dcf already cached at /home/admin/.cache/flashinfer_python-0.6.9+8c4f4dcf-cp310__pip_gpu_cuda13_torch_flashinfer_python
+2026-10-26 16:48:17,674 - INFO - [Package Copy] Processing torch...
+2026-10-26 16:48:17,680 - INFO - [Package Copy] Found torch v2.11.0+cu130 at /home/admin/hippo/worker/slave/drogo-share_worker-l20-cu13-ea118.worker-l20-cu13-ea118_11_43/main/nativelink/work/8c3abef8-4106-4722-9bf6-719af413e52e/work/bazel-out/k8-opt/bin/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test.runfiles/pip_gpu_cuda13_torch_torch/site-packages/torch
+2026-10-26 16:48:17,680 - INFO - [Package Copy] torch v2.11.0+cu130 already cached at /home/admin/.cache/torch_python-2.11.0+cu130-cp310__pip_gpu_cuda13_torch_torch
+2026-10-26 16:48:17,680 - INFO - [Package Copy] Processing deep_gemm...
+2026-10-26 16:48:17,682 - INFO - [Package Copy] Found deep_gemm v2.8.0+122e18b.cu132 at /home/admin/hippo/worker/slave/drogo-share_worker-l20-cu13-ea118.worker-l20-cu13-ea118_11_43/main/nativelink/work/8c3abef8-4106-4722-9bf6-719af413e52e/work/bazel-out/k8-opt/bin/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test.runfiles/pip_gpu_cuda13_torch_deep_gemm/site-packages/deep_gemm
+2026-10-26 16:48:17,682 - INFO - [Package Copy] deep_gemm v2.8.0+122e18b.cu132 already cached at /home/admin/.cache/deep_gemm_python-2.8.0+122e18b.cu132-cp310__pip_gpu_cuda13_torch_deep_gemm
+2026-10-26 16:48:17,682 - INFO - [Package Copy] Processing tvm_ffi...
+2026-10-26 16:48:17,685 - INFO - [Package Copy] Found tvm_ffi v0.1.12 at /home/admin/hippo/worker/slave/drogo-share_worker-l20-cu13-ea118.worker-l20-cu13-ea118_11_43/main/nativelink/work/8c3abef8-4106-4722-9bf6-719af413e52e/work/bazel-out/k8-opt/bin/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test.runfiles/pip_gpu_cuda13_torch_apache_tvm_ffi/site-packages/tvm_ffi
+2026-10-26 16:48:17,685 - INFO - [Package Copy] tvm_ffi v0.1.12 already cached at /home/admin/.cache/tvm_ffi_python-0.1.12-cp310__pip_gpu_cuda13_torch_apache_tvm_ffi
+2026-10-26 16:48:17,685 - INFO - [Package Setup] Set _JIT_CACHE_PATHS: /home/admin/.cache/flashinfer_python-0.6.9+8c4f4dcf-cp310__pip_gpu_cuda13_torch_flashinfer_python/site-packages:/home/admin/.cache/torch_python-2.11.0+cu130-cp310__pip_gpu_cuda13_torch_torch/site-packages:/home/admin/.cache/deep_gemm_python-2.8.0+122e18b.cu132-cp310__pip_gpu_cuda13_torch_deep_gemm/site-packages:/home/admin/.cache/tvm_ffi_python-0.1.12-cp310__pip_gpu_cuda13_torch_apache_tvm_ffi/site-packages
+2026-10-26 16:48:17,685 - INFO - [Package Setup] Modified Bazel wrapper: /home/admin/hippo/worker/slave/drogo-share_worker-l20-cu13-ea118.worker-l20-cu13-ea118_11_43/main/nativelink/work/8c3abef8-4106-4722-9bf6-719af413e52e/work/bazel-out/k8-opt/bin/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test.runfiles/rtp_llm/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test_new_1143886
+2026-10-26 16:48:17,685 - INFO - [Package Setup] Injected _JIT_CACHE_PATHS at the beginning of PYTHONPATH
+2026-10-26 16:48:17,685 - INFO - [Package Setup] Copied Bazel wrapper to: /home/admin/hippo/worker/slave/drogo-share_worker-l20-cu13-ea118.worker-l20-cu13-ea118_11_43/main/nativelink/work/8c3abef8-4106-4722-9bf6-719af413e52e/work/bazel-out/k8-opt/bin/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test.runfiles/rtp_llm/rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test_new_1143886
+2026-10-26 16:48:19,256 - INFO - cuda info result: {"NVIDIA L20": 8}
+, return code: 0
+2026-10-26 16:48:19,256 - INFO - ('NVIDIA L20', 8)
+2026-10-26 16:48:19,259 - INFO - 11.251.243.103 NVIDIA L20: range(0, 8)
+2026-10-26 16:48:19,259 - INFO - waiting for gpu count:[4] of 8 visible, timeout=1800s
+2026-10-26 16:48:19,457 - INFO - candidate gpu groups: [[0, 1, 2, 3], range(1, 5), range(2, 6), range(3, 7), range(4, 8)]
+2026-10-26 16:48:19,457 - INFO - lock device 0 failed
+2026-10-26 16:48:19,457 - INFO - lock device 1 failed
+2026-10-26 16:48:19,529 - INFO - 11.251.243.103 lock device 2 done
+2026-10-26 16:48:19,651 - INFO - 11.251.243.103 lock device 3 done
+2026-10-26 16:48:19,763 - INFO - 11.251.243.103 lock device 4 done
+2026-10-26 16:48:19,836 - INFO - 11.251.243.103 lock device 5 done
+2026-10-26 16:48:20,407 - INFO - use gpus:[['2', '3', '4', '5']]
+2026-10-26 16:48:22,371 - INFO - host=serverless-011251243103.eo166 gpus=2,3,4,5 uuids=GPU-8d474c40-7204-ee70-081e-afe486bbcdbf,GPU-2ed72517-0b30-12bd-a286-cb11ecb5a0e3,GPU-c352f243-aeb3-37ff-4fc4-cd88f7f98914,GPU-53dc4e8c-db61-f1e4-561b-edc1d24b1e51
+2026-10-26 16:48:22,371 - INFO - running test: rtp_llm/cpp/normal_engine/test/tail_reuse_tp_subgroups_integration_test_new_1143886 (RTP_TEST_WATCHDOG_SECONDS=1800)
+ss/home/admin/.cache/torch_python-2.11.0+cu130-cp310__pip_gpu_cuda13_torch_torch/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+serverless-011251243103:1144120:1144120 [2] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144120:1144120 [2] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Bootstrap: Using eth0:11.251.243.103<0>
+serverless-011251243103:1144120:1144120 [2] NCCL INFO cudaDriverVersion 13000
+serverless-011251243103:1144120:1144120 [2] NCCL INFO NCCL version 2.30.4+cuda13.2
+serverless-011251243103:1144120:1144120 [2] NCCL INFO NCCL git version HEAD 747384637
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Comm config Blocking set to 1
+serverless-011251243103:1144120:1144120 [2] NCCL INFO ncclOsDlopen(libnccl-net.so) failed: libnccl-net.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144120:1144120 [2] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+serverless-011251243103:1144120:1144120 [2] NCCL INFO NET/IB : No device found.
+serverless-011251243103:1144120:1144120 [2] NCCL INFO NET/IB : Using [RO]; OOB eth0:11.251.243.103<0>
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Failed to initialize NET plugin IB
+serverless-011251243103:1144120:1144120 [2] NCCL INFO NET/Socket : Using [0]eth0:11.251.243.103<0>
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Initialized NET plugin Socket
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Assigned NET plugin Socket to comm
+serverless-011251243103:1144120:1144120 [2] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144120:1144120 [2] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Failed to initialize any GIN plugin
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Using network Socket
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+serverless-011251243103:1144120:1144120 [2] NCCL INFO [Rank 0] ncclCommInitRankConfig comm 0x55d8afc6d120 rank 0 nranks 2 cudaDev 2 nvmlDev 4 busId 189000 commId 0x9f82869cb570efcb - Init START
+/home/admin/.cache/torch_python-2.11.0+cu130-cp310__pip_gpu_cuda13_torch_torch/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W1026 16:48:26.255567555 ProcessGroupNCCL.cpp:5188] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+serverless-011251243103:1144121:1144121 [3] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144121:1144121 [3] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+serverless-011251243103:1144121:1144121 [3] NCCL INFO cudaDriverVersion 13000
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Bootstrap: Using eth0:11.251.243.103<0>
+serverless-011251243103:1144121:1144121 [3] NCCL INFO NCCL version 2.30.4+cuda13.2
+serverless-011251243103:1144121:1144121 [3] NCCL INFO NCCL git version HEAD 747384637
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Comm config Blocking set to 1
+serverless-011251243103:1144118:1144118 [0] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144118:1144118 [0] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Bootstrap: Using eth0:11.251.243.103<0>
+serverless-011251243103:1144118:1144118 [0] NCCL INFO cudaDriverVersion 13000
+serverless-011251243103:1144119:1144119 [1] NCCL INFO ncclOsDlopen(libnccl-env.so) failed: libnccl-env.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144119:1144119 [1] NCCL INFO ENV/Plugin: Could not find: libnccl-env.so
+serverless-011251243103:1144119:1144119 [1] NCCL INFO cudaDriverVersion 13000
+serverless-011251243103:1144118:1144118 [0] NCCL INFO NCCL version 2.30.4+cuda13.2
+serverless-011251243103:1144118:1144118 [0] NCCL INFO NCCL git version HEAD 747384637
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Bootstrap: Using eth0:11.251.243.103<0>
+serverless-011251243103:1144119:1144119 [1] NCCL INFO NCCL version 2.30.4+cuda13.2
+serverless-011251243103:1144119:1144119 [1] NCCL INFO NCCL git version HEAD 747384637
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Comm config Blocking set to 1
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Comm config Blocking set to 1
+serverless-011251243103:1144121:1144121 [3] NCCL INFO ncclOsDlopen(libnccl-net.so) failed: libnccl-net.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144121:1144121 [3] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+serverless-011251243103:1144121:1144121 [3] NCCL INFO NET/IB : No device found.
+serverless-011251243103:1144121:1144121 [3] NCCL INFO NET/IB : Using [RO]; OOB eth0:11.251.243.103<0>
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Failed to initialize NET plugin IB
+serverless-011251243103:1144121:1144121 [3] NCCL INFO NET/Socket : Using [0]eth0:11.251.243.103<0>
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Initialized NET plugin Socket
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Assigned NET plugin Socket to comm
+serverless-011251243103:1144121:1144121 [3] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144121:1144121 [3] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Failed to initialize any GIN plugin
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Using network Socket
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+serverless-011251243103:1144118:1144118 [0] NCCL INFO ncclOsDlopen(libnccl-net.so) failed: libnccl-net.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144118:1144118 [0] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+serverless-011251243103:1144118:1144118 [0] NCCL INFO NET/IB : No device found.
+serverless-011251243103:1144118:1144118 [0] NCCL INFO NET/IB : Using [RO]; OOB eth0:11.251.243.103<0>
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Failed to initialize NET plugin IB
+serverless-011251243103:1144118:1144118 [0] NCCL INFO NET/Socket : Using [0]eth0:11.251.243.103<0>
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Initialized NET plugin Socket
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Assigned NET plugin Socket to comm
+serverless-011251243103:1144118:1144118 [0] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144118:1144118 [0] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Failed to initialize any GIN plugin
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Using network Socket
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+serverless-011251243103:1144121:1144121 [3] NCCL INFO [Rank 1] ncclCommInitRankConfig comm 0x5557b5870130 rank 1 nranks 2 cudaDev 3 nvmlDev 5 busId 18a000 commId 0x9f82869cb570efcb - Init START
+serverless-011251243103:1144118:1144118 [0] NCCL INFO [Rank 0] ncclCommInitRankConfig comm 0x55744286d770 rank 0 nranks 2 cudaDev 0 nvmlDev 2 busId d1000 commId 0x4928a5524236fcb2 - Init START
+serverless-011251243103:1144121:1144121 [3] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+serverless-011251243103:1144120:1144120 [2] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Bootstrap timings total 0.000445 (create 0.000021, send 0.000074, recv 0.000110, ring 0.000042, delay 0.000000)
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Bootstrap timings total 0.200440 (create 0.000018, send 0.000070, recv 0.200109, ring 0.000017, delay 0.000000)
+serverless-011251243103:1144119:1144119 [1] NCCL INFO ncclOsDlopen(libnccl-net.so) failed: libnccl-net.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144119:1144119 [1] NCCL INFO NET/Plugin: Could not find: libnccl-net.so
+serverless-011251243103:1144119:1144119 [1] NCCL INFO NET/IB : No device found.
+serverless-011251243103:1144119:1144119 [1] NCCL INFO NET/IB : Using [RO]; OOB eth0:11.251.243.103<0>
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Failed to initialize NET plugin IB
+serverless-011251243103:1144119:1144119 [1] NCCL INFO NET/Socket : Using [0]eth0:11.251.243.103<0>
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Initialized NET plugin Socket
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Assigned NET plugin Socket to comm
+serverless-011251243103:1144119:1144119 [1] NCCL INFO ncclOsDlopen(libnccl-gin.so) failed: libnccl-gin.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144119:1144119 [1] NCCL INFO GIN/Plugin: Could not find: libnccl-gin.so
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Failed to initialize any GIN plugin
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Using network Socket
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Loaded NVML from libnvidia-ml.so.1
+serverless-011251243103:1144120:1144120 [2] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 4 is empty, ignoring. (GPU affinity = 32-63,96-127 ; CPU affinity = 0-31,64-95).
+serverless-011251243103:1144120:1144120 [2] NCCL INFO NVLS multicast support is not available on dev 2
+serverless-011251243103:1144121:1144121 [3] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 5 is empty, ignoring. (GPU affinity = 32-63,96-127 ; CPU affinity = 0-31,64-95).
+serverless-011251243103:1144121:1144121 [3] NCCL INFO NVLS multicast support is not available on dev 3
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Rank 0: 1 Net devices
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Rank 0: 0 CollNet devices
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Rank 1: 1 Net devices
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Rank 1: 0 CollNet devices
+serverless-011251243103:1144121:1144121 [3] NCCL INFO comm 0x5557b5870130 rank 1 nRanks 2 nNodes 1 localRanks 2 localRank 1 MNNVL 0
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Local Net device counts across ranks: min 1 max 1
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+serverless-011251243103:1144120:1144120 [2] NCCL INFO comm 0x55d8afc6d120 rank 0 nRanks 2 nNodes 1 localRanks 2 localRank 0 MNNVL 0
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Trees [0] -1/-1/-1->1->0 [1] 0/-1/-1->1->-1 [2] -1/-1/-1->1->0 [3] 0/-1/-1->1->-1
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Channel 00/04 : 0 1
+serverless-011251243103:1144121:1144121 [3] NCCL INFO P2P Chunksize set to 131072
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Channel 01/04 : 0 1
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Channel 02/04 : 0 1
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Channel 03/04 : 0 1
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1 [2] 1/-1/-1->0->-1 [3] -1/-1/-1->0->1
+serverless-011251243103:1144120:1144120 [2] NCCL INFO P2P Chunksize set to 131072
+serverless-011251243103:1144119:1144119 [1] NCCL INFO [Rank 1] ncclCommInitRankConfig comm 0x55cfd0e6eb90 rank 1 nranks 2 cudaDev 1 nvmlDev 3 busId d2000 commId 0x4928a5524236fcb2 - Init START
+serverless-011251243103:1144120:1144120 [2] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144121:1144121 [3] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144121:1144121 [3] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+serverless-011251243103:1144120:1144120 [2] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+serverless-011251243103:1144119:1144119 [1] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+serverless-011251243103:1144118:1144118 [0] NCCL INFO RAS client listening socket at 127.0.0.1<28028>
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Bootstrap timings total 0.000351 (create 0.000015, send 0.000060, recv 0.000101, ring 0.000010, delay 0.000000)
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Bootstrap timings total 0.009504 (create 0.000015, send 0.000060, recv 0.009229, ring 0.000018, delay 0.000000)
+serverless-011251243103:1144120:1144208 [0] NCCL INFO [Proxy Service] Device 2 CPU core 69
+serverless-011251243103:1144121:1144205 [0] NCCL INFO [Proxy Service] Device 3 CPU core 23
+serverless-011251243103:1144121:1144209 [0] NCCL INFO [Proxy Service UDS] Device 3 CPU core 24
+serverless-011251243103:1144120:1144210 [0] NCCL INFO [Proxy Service UDS] Device 2 CPU core 70
+serverless-011251243103:1144121:1144121 [3] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144120:1144120 [2] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144121:1144121 [3] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+serverless-011251243103:1144120:1144120 [2] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+serverless-011251243103:1144121:1144121 [3] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+serverless-011251243103:1144121:1144121 [3] NCCL INFO 4 coll channels, 4 collnet channels, 0 nvls channels, 4 p2p channels, 2 p2p channels per peer
+serverless-011251243103:1144120:1144120 [2] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+serverless-011251243103:1144120:1144120 [2] NCCL INFO 4 coll channels, 4 collnet channels, 0 nvls channels, 4 p2p channels, 2 p2p channels per peer
+serverless-011251243103:1144120:1144120 [2] NCCL INFO CC Off, workFifoBytes 1048576
+serverless-011251243103:1144121:1144121 [3] NCCL INFO ncclCommInitRankConfig comm 0x5557b5870130 rank 1 nranks 2 cudaDev 3 nvmlDev 5 busId 18a000 commId 0x9f82869cb570efcb - Init COMPLETE
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Init timings - ncclCommInitRankConfig: rank 1 nranks 2 total 0.19 (kernels 0.14, alloc 0.03, bootstrap 0.00, allgathers 0.00, topo 0.01, graphs 0.00, connections 0.00, rest 0.00)
+serverless-011251243103:1144120:1144120 [2] NCCL INFO ncclCommInitRankConfig comm 0x55d8afc6d120 rank 0 nranks 2 cudaDev 2 nvmlDev 4 busId 189000 commId 0x9f82869cb570efcb - Init COMPLETE
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Init timings - ncclCommInitRankConfig: rank 0 nranks 2 total 0.36 (kernels 0.13, alloc 0.02, bootstrap 0.20, allgathers 0.00, topo 0.01, graphs 0.00, connections 0.00, rest 0.00)
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Symmetric VA size=48GB
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Symmetric VA size=48GB
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Channel 00/0 : 1[5] -> 0[4] via P2P/CUMEM
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Channel 00/0 : 0[4] -> 1[5] via P2P/CUMEM
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Channel 01/0 : 1[5] -> 0[4] via P2P/CUMEM
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Channel 01/0 : 0[4] -> 1[5] via P2P/CUMEM
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Channel 02/0 : 1[5] -> 0[4] via P2P/CUMEM
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Channel 02/0 : 0[4] -> 1[5] via P2P/CUMEM
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Channel 03/0 : 1[5] -> 0[4] via P2P/CUMEM
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Channel 03/0 : 0[4] -> 1[5] via P2P/CUMEM
+serverless-011251243103:1144118:1144118 [0] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 2 is 0-31,64-95. (GPU affinity = 0-31,64-95 ; CPU affinity = 0-31,64-95).
+serverless-011251243103:1144118:1144118 [0] NCCL INFO NVLS multicast support is not available on dev 0
+serverless-011251243103:1144119:1144119 [1] NCCL INFO ncclTopoGetCpuAffinity: Affinity for GPU 3 is 0-31,64-95. (GPU affinity = 0-31,64-95 ; CPU affinity = 0-31,64-95).
+serverless-011251243103:1144119:1144119 [1] NCCL INFO NVLS multicast support is not available on dev 1
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Rank 0: 1 Net devices
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Rank 0: 0 CollNet devices
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Rank 1: 1 Net devices
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Rank 1: 0 CollNet devices
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Local Net device counts across ranks: min 1 max 1
+serverless-011251243103:1144119:1144119 [1] NCCL INFO comm 0x55cfd0e6eb90 rank 1 nRanks 2 nNodes 1 localRanks 2 localRank 1 MNNVL 0
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Local CollNet device counts across ranks: min 0 max 0
+serverless-011251243103:1144118:1144118 [0] NCCL INFO comm 0x55744286d770 rank 0 nRanks 2 nNodes 1 localRanks 2 localRank 0 MNNVL 0
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Trees [0] -1/-1/-1->1->0 [1] 0/-1/-1->1->-1 [2] -1/-1/-1->1->0 [3] 0/-1/-1->1->-1
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Channel 00/04 : 0 1
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Channel 01/04 : 0 1
+serverless-011251243103:1144119:1144119 [1] NCCL INFO P2P Chunksize set to 131072
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Channel 02/04 : 0 1
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Channel 03/04 : 0 1
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Trees [0] 1/-1/-1->0->-1 [1] -1/-1/-1->0->1 [2] 1/-1/-1->0->-1 [3] -1/-1/-1->0->1
+serverless-011251243103:1144118:1144118 [0] NCCL INFO P2P Chunksize set to 131072
+serverless-011251243103:1144119:1144119 [1] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144119:1144119 [1] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+serverless-011251243103:1144118:1144118 [0] NCCL INFO ncclOsDlopen(libnccl-profiler.so) failed: libnccl-profiler.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144118:1144118 [0] NCCL INFO PROFILER/Plugin: Could not find: libnccl-profiler.so
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Check P2P Type isAllDirectP2p 1 directMode 0 isAllCudaP2p 1
+serverless-011251243103:1144119:1144211 [0] NCCL INFO [Proxy Service] Device 1 CPU core 16
+serverless-011251243103:1144118:1144212 [0] NCCL INFO [Proxy Service] Device 0 CPU core 75
+serverless-011251243103:1144119:1144213 [0] NCCL INFO [Proxy Service UDS] Device 1 CPU core 17
+serverless-011251243103:1144118:1144214 [0] NCCL INFO [Proxy Service UDS] Device 0 CPU core 76
+serverless-011251243103:1144119:1144119 [1] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144119:1144119 [1] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+serverless-011251243103:1144119:1144119 [1] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+serverless-011251243103:1144119:1144119 [1] NCCL INFO 4 coll channels, 4 collnet channels, 0 nvls channels, 4 p2p channels, 2 p2p channels per peer
+serverless-011251243103:1144118:1144118 [0] NCCL INFO ncclOsDlopen(libnccl-tuner.so) failed: libnccl-tuner.so: cannot open shared object file: No such file or directory
+serverless-011251243103:1144118:1144118 [0] NCCL INFO TUNER/Plugin: Could not find: libnccl-tuner.so
+serverless-011251243103:1144118:1144118 [0] NCCL INFO threadThresholds 8/8/64 | 16/8/64 | 512 | 512
+serverless-011251243103:1144118:1144118 [0] NCCL INFO 4 coll channels, 4 collnet channels, 0 nvls channels, 4 p2p channels, 2 p2p channels per peer
+serverless-011251243103:1144118:1144118 [0] NCCL INFO CC Off, workFifoBytes 1048576
+serverless-011251243103:1144119:1144119 [1] NCCL INFO ncclCommInitRankConfig comm 0x55cfd0e6eb90 rank 1 nranks 2 cudaDev 1 nvmlDev 3 busId d2000 commId 0x4928a5524236fcb2 - Init COMPLETE
+serverless-011251243103:1144118:1144118 [0] NCCL INFO ncclCommInitRankConfig comm 0x55744286d770 rank 0 nranks 2 cudaDev 0 nvmlDev 2 busId d1000 commId 0x4928a5524236fcb2 - Init COMPLETE
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Init timings - ncclCommInitRankConfig: rank 1 nranks 2 total 0.19 (kernels 0.17, alloc 0.01, bootstrap 0.00, allgathers 0.00, topo 0.01, graphs 0.00, connections 0.01, rest 0.00)
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Init timings - ncclCommInitRankConfig: rank 0 nranks 2 total 0.20 (kernels 0.13, alloc 0.03, bootstrap 0.01, allgathers 0.00, topo 0.01, graphs 0.00, connections 0.01, rest 0.00)
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Symmetric VA size=48GB
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Symmetric VA size=48GB
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Channel 00/0 : 0[2] -> 1[3] via P2P/CUMEM
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Channel 01/0 : 0[2] -> 1[3] via P2P/CUMEM
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Channel 02/0 : 0[2] -> 1[3] via P2P/CUMEM
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Channel 00/0 : 1[3] -> 0[2] via P2P/CUMEM
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Channel 01/0 : 1[3] -> 0[2] via P2P/CUMEM
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Channel 02/0 : 1[3] -> 0[2] via P2P/CUMEM
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Channel 03/0 : 0[2] -> 1[3] via P2P/CUMEM
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Channel 03/0 : 1[3] -> 0[2] via P2P/CUMEM
+serverless-011251243103:1144121:1144121 [3] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+serverless-011251243103:1144120:1144120 [2] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+serverless-011251243103:1144119:1144119 [1] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+serverless-011251243103:1144118:1144118 [0] NCCL INFO Connected all rings, use ring PXN 0 GDR 1
+.
+----------------------------------------------------------------------
+Ran 3 tests in 4.453s
+
+OK (skipped=2)
+2026-10-26 16:48:28,878 - INFO - exitcode: 0
+2026-10-26 16:48:29,439 - INFO - release gpu:['2', '3', '4', '5']
+2026-10-26 16:48:29,439 - INFO - release done]]>
+      </system-out>
+    </testsuite>
+</testsuites>

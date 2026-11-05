@@ -1,0 +1,8 @@
+COMMAND: Python Path.exists and hashlib.sha256 verification of relocated task artifacts
+PASS original task-owned directory absent: /data0/songchenyi.scy/Projects/RTP-LLM-20261008-Partial_Match/.omo/evidence/tail-tests-20261026
+PASS SHA256 /tmp/partial-match-tail-tests-20261026/removed.json 884de46506d1d9c837ed39e33885dd00b171db7c1b53c66ab9ad433d5170f728
+PASS SHA256 /tmp/partial-match-tail-tests-20261026/verify.py de6b0ec3b8786fe133781413c5af1f6e31e6cf6ddf8fa1881aeeedc01c1e610d
+PASS SHA256 /tmp/partial-match-tail-tests-20261026/assertion-removals.txt 9dca65c7fad7661a13d973ca39894b242ff4a2b33847ebe11407a5cadb2c6358
+PASS SHA256 /tmp/partial-match-tail-tests-20261026/verification.txt 3db38a88730d399af04061655a7d2f12179f6cf6244e2154670713d804186dd1
+PASS SHA256 /tmp/partial-match-tail-tests-20261026/files b520f0df94222a0280116f56d8f9e9ab8162476593769e7aa68d1df11c5055c2
+Conclusion: relocation complete and original task artifacts removed. No source/test changes.

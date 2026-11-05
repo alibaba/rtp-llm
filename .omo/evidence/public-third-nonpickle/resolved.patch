@@ -1,0 +1,60 @@
+diff --git a/rtp_llm/cpp/cache/test/HybridCoordinatorCacheManagerCPShardTest.cc b/rtp_llm/cpp/cache/test/HybridCoordinatorCacheManagerCPShardTest.cc
+index a4ae3a80fa..ae21a779e2 100644
+--- a/rtp_llm/cpp/cache/test/HybridCoordinatorCacheManagerCPShardTest.cc
++++ b/rtp_llm/cpp/cache/test/HybridCoordinatorCacheManagerCPShardTest.cc
+@@ -163,6 +163,16 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, RecomputeDetachesSuffixUsingGro
+     EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+ }
+ 
++TEST_F(HybridCoordinatorCacheManagerCPShardTest, ExactEndpointProjectsEachTagThroughItsResolvedCpGeometry) {
++    for (const int cp_size : {2, 4}) {
++        auto config = makeCPHybridConfig();  // B=4; LINEAR is unscaled, FULL is round robin.
++        resolveTestCpLayout(config, cp_size);
++        const size_t endpoint = 17;
++        EXPECT_EQ(config.endpointBlockPosition("linear", endpoint), 4u);
++        EXPECT_EQ(config.endpointBlockPosition("full", endpoint), cp_size == 2 ? 2u : 1u);
++    }
++}
++
+ // 1) Without a sharded request projection, behavior follows the non-CP baseline:
+ //    a request occupying 4 logical blocks allocates 4 blocks in the full group.
+ TEST_F(HybridCoordinatorCacheManagerCPShardTest, OrdinaryRequestIsPassthrough) {
+diff --git a/rtp_llm/ops/libth_transformer_config.pyi b/rtp_llm/ops/libth_transformer_config.pyi
+index 77b2163271..dd188c1908 100644
+--- a/rtp_llm/ops/libth_transformer_config.pyi
++++ b/rtp_llm/ops/libth_transformer_config.pyi
+@@ -730,6 +730,7 @@ class HybridAttentionType:
+         ...
+ class KVCacheConfig:
+     enable_crc: bool
++    enable_prefill_partial_tail_reuse: bool
+     enable_device_cache: bool
+     enable_memory_cache: bool
+     enable_disk_cache: bool
+diff --git a/rtp_llm/server/server_args/test/server_args_test.py b/rtp_llm/server/server_args/test/server_args_test.py
+index 75e28f89fd..a7cb272ef3 100644
+--- a/rtp_llm/server/server_args/test/server_args_test.py
++++ b/rtp_llm/server/server_args/test/server_args_test.py
+@@ -159,6 +159,22 @@ class CacheConfigArgumentsTest(TestCase):
+                 self.assertEqual(raised.exception.code, 2)
+                 self.assertIn("Boolean value expected", stderr.getvalue())
+ 
++    def test_prefill_partial_tail_switch_defaults_off_and_binds_env_and_cli(self):
++        self.assertFalse(
++            self.parse_cache_config([], {}).enable_prefill_partial_tail_reuse
++        )
++        self.assertTrue(
++            self.parse_cache_config(
++                [], {"ENABLE_PREFILL_PARTIAL_TAIL_REUSE": "true"}
++            ).enable_prefill_partial_tail_reuse
++        )
++        self.assertFalse(
++            self.parse_cache_config(
++                ["--enable_prefill_partial_tail_reuse", "false"],
++                {"ENABLE_PREFILL_PARTIAL_TAIL_REUSE": "true"},
++            ).enable_prefill_partial_tail_reuse
++        )
++
+     def test_canonical_env_and_cli_bind_all_fields(self):
+         samples = self.startup_samples()
+         env = self.startup_env(samples)

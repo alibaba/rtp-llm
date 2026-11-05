@@ -1,0 +1,110 @@
+diff a/rtp_llm/cpp/cache/block_tree_cache/BlockTree.h b/rtp_llm/cpp/cache/block_tree_cache/BlockTree.h	(rejected hunks)
+@@ -44,23 +47,60 @@ struct BlockTreeNodeRangeResult {
+     bool   cycle_complete{false};
+ };
+ 
++struct BlockTreeContentMatch {
++    size_t       pos{0};
++    CacheKeyType key{0};
++    size_t       node_offset{0};
++    bool         partial{false};
++};
++
++struct BlockTreeAgeSummary {
++    size_t                     count{0};
++    std::optional<int64_t>     mean_age_us;
++    std::optional<int64_t>     max_age_us;
++};
++
++struct BlockTreeObservabilitySnapshot {
++    size_t                 node_count{0};
++    size_t                 leaf_count{0};
++    size_t                 branch_count{0};
++    BlockTreeAgeSummary    content;
++    BlockTreeAgeSummary    recovery;
++    std::array<BlockTreeAgeSummary, 3> tier;
++};
++
+ class BlockTree {
+ public:
+-    explicit BlockTree(std::vector<GroupSetPtr> group_sets);
++    explicit BlockTree(std::vector<GroupSetPtr> group_sets,
++                       size_t                    reuse_unit_tokens = 1,
++                       bool                      enable_observability = false,
++                       std::string               observability_instance = {});
+     ~BlockTree();
+ 
+     std::vector<TreeNode*> findNode(const CacheKeysType& cache_keys) const;
++    size_t                 contentMatchPos(const std::vector<int>& request_tokens) const;
++    std::optional<BlockTreeContentMatch> contentMatchInfo(const std::vector<int>& request_tokens) const;
++
++    std::vector<PrefixCachePlanPoint> planRecoveryPoints(
++        const CacheKeysType&                              cache_keys,
++        const std::vector<std::vector<GroupSetResource>>& resources,
++        const std::vector<std::vector<int>>*              token_segments,
++        Tier                                              target_tier) const;
++    std::vector<PrefixCachePlanPoint> unfulfilledPlanPoints(
++        const std::vector<PrefixCachePlanPoint>& plan_points,
++        const CacheKeysType&                     cache_keys) const;
+ 
+     bool isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const;
+ 
+     BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
+                                      const std::vector<std::vector<GroupSetResource>>& resources,
+                                      bool                                              collect_path,
+-                                     bool                                              is_resident);
++                                     bool                                              is_resident,
++                                     const std::vector<std::vector<int>>*              token_segments = nullptr);
+ 
+     bool      isRemovable(TreeNode* node) const;
+     void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
+-    TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
++    TreeNode* removeNodeAndEmptyAncestors(TreeNode* node, const char* trigger = "mutation");
+ 
+     TreeNode* root() const {
+         return root_.get();
+@@ -105,12 +175,42 @@ private:
+     BlockTreeInsertResult insertNodeImpl(const CacheKeysType&                              cache_keys,
+                                          const std::vector<std::vector<GroupSetResource>>& resources,
+                                          bool                                              collect_path,
+-                                         bool                                              is_resident);
++                                         bool                                              is_resident,
++                                         const std::vector<std::vector<int>>*              token_segments);
+ 
+-    void      removeNode(TreeNode* node);
++    void      removeNode(TreeNode* node, const char* trigger = "mutation");
+     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
+     void      releaseNode(TreeNode* node);
+ 
++    struct IntervalSet {
++        std::multiset<int64_t> starts;
++        long double            start_sum{0.0L};
++    };
++
++    struct DeferredObservationRoot {
++        const TreeNode* node{nullptr};
++        const char*     trigger{nullptr};
++    };
++
++    static size_t tierIndex(Tier tier);
++    void deferObservationRoot(const TreeNode* node, const char* trigger);
++    void endObservationBatch();
++    void commitDeferredObservations();
++    void eraseDeferredObservationRoots(const TreeNode* node);
++    static bool isObservationAncestor(const TreeNode* ancestor, const TreeNode* candidate);
++
++    void startInterval(IntervalSet& intervals, int64_t& since_us);
++    void endInterval(IntervalSet& intervals,
++                     int64_t&     since_us,
++                     const TreeNode& node,
++                     const char* kind,
++                     const char* medium = nullptr,
++                     const char* trigger = "mutation",
++                     const char* effect = "release");
++    void updateContentShape(const TreeNode& node, size_t old_child_count, size_t new_child_count);
++    void updateTierIntervals(TreeNode& node, const char* trigger);
++    BlockTreeAgeSummary intervalSummary(const IntervalSet& intervals) const;
++
+     std::vector<GroupSetPtr>              group_sets_;
+     ReusableGroupLocations                reusable_group_locations_;
+     std::unique_ptr<TreeNode>             root_;

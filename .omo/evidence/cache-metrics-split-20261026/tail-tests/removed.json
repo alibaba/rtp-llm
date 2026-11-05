@@ -1,0 +1,51 @@
+{
+  "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeTest.cc": [
+    "PrefixObservabilityDisabledHasNoIntervalBookkeeping",
+    "PrefixObservabilityEnabledSummarizesContentAndTiers",
+    "ContentMatchIncludesTailAndPartialTokenInsideNode",
+    "ObservationDisabledDoesNotStoreTokenSegments",
+    "PrefixObservabilityCountsBranchAndLeaves",
+    "PrefixPlanProjectsOnlyNewJointRecoveryPointAndClosesAfterInsert",
+    "PrefixPlanLegacyTailContentDoesNotMoveCompleteEndpoint",
+    "PrefixPlanUsesActualShortSwaSpan",
+    "PrefixPlanAllowsLaterLinearStateAndAlignedHcaNoDemand",
+    "PrefixObservabilityDisabledDoesNotFormPlanPoints",
+    "PrefixObservabilityEndsContentIntervalWhenNodeIsRemoved",
+    "ContentMatchInfoCarriesKeyOffsetAndPartialFlag"
+  ],
+  "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTest.cc": [
+    "PrefixMatchObservationSeparatesContentAndReusableEndpoint",
+    "PrefixObservabilityDoesNotChangeDeviceReuseOrResourceState"
+  ],
+  "rtp_llm/cpp/cache/block_tree_cache/evict/test/BlockTreeEvictorTest.cc": [
+    "EvictionMutationBatchDoesNotRestartDependencyInterval",
+    "CompleteEvictObservesFinalTierStateAfterBatch"
+  ],
+  "rtp_llm/cpp/cache/block_tree_cache/storage_backend/test/StorageBackendTest.cc": [
+    "MatchQueryStatusIsDiagnosticAndDoesNotChangeSuccess"
+  ],
+  "rtp_llm/cpp/cache/block_tree_cache/store/test/BlockTreeStorerTest.cc": [
+    "PrefixPlanOutputMarksEmptyFormedPlan",
+    "PrefixPlanOutputRemainsNotFormedWhenObservabilityIsDisabled"
+  ],
+  "rtp_llm/cpp/cache/block_tree_cache/load/test/BlockTreeLoaderTest.cc": [
+    "LoadMutationBatchDoesNotRestartDependencyInterval"
+  ],
+  "rtp_llm/cpp/cache/block_tree_cache/load/test/LoadAsyncContextTest.cc": [
+    "RemoteObservationKeepsCandidateAndQueryStatusBeforeMaterialization"
+  ],
+  "rtp_llm/cpp/engine_base/stream/test/StreamCacheResourceTest.cc": [
+    "PrefixObservationRespectsDefaultAndRoleBoundaries",
+    "PrefixObservationRequiresAllocatorOwner",
+    "PrefixObservationStatusDerivesTerminalStreamStatus",
+    "PrefixObservationStatusDerivesNonCancelledError",
+    "PrefixObservationMetricsSummaryUsesDerivedStatus",
+    "PrefixObservationEmitsOneRequestSummary",
+    "PrefixObservationRegistrationSnapshotPreservesIntentAndStates",
+    "PrefixObservationRegistrationRetainsOriginalTailAfterGrowth",
+    "PrefixObservationPublicationIsCorrelatedAfterEitherSummaryExit",
+    "PrefixObservationTerminalSummaryKeepsUnformedFieldsNull",
+    "PrefixObservationClosesEmptyPlanWhenStoreIsDisabled",
+    "PrefixObservationRemoteReadFallbackIsNotEffective"
+  ]
+}

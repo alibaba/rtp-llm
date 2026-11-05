@@ -1,0 +1,13 @@
+# Later public commits: non-pickle shadow integration
+
+An owned temporary shadow worktree at `/data0/songchenyi.scy/Projects/RTP-LLM-20261024-Partial_Match/.future-nonpickle-validation` starts from replayed public `e7e24839331d24968cc1cb718e81ccf9a449bdd5`. It contains the paused third commit's staged patch, excluding only unresolved `ConfigInit.cc` and `kv_cache_config_pickle_test.py`, then applies later feature commits in original order: `9730f94e54`, `8c02abb902`, `f927ca281d`, `c37c310a69`, `d158701f4f`, and `cd7caa2eaf`. Commit `98fe5bea29` changes only the pickle-dependent server test and is deferred. The pickle-dependent `server_config_setup_test.py` changes were also deferred.
+
+`9730f94e54` needed one non-pickle merge adaptation: the `KVCacheConfig` type stub now has upstream `enable_crc` followed by `enable_prefill_partial_tail_reuse` and `enable_prefill_common_prefix_recovery`. The original `f927ca281d` change to `KVCacheManagerCPLayoutTest.cc` was superseded by the stronger partial-runtime-key assertion staged in the paused branch. All other selected patches applied directly. The combined shadow staged diff has SHA-256 `cf4705df7d0f7d273fa009db0e051b482872745c12fdd45696a380a9a78e0b76`; `git diff --cached --check` passed.
+
+The final SWA handoff patch is present: `firstRequiredSwaHandoffPage` filters pruned pages on the receiver using transmitted input-token count. The upstream P/D accounting policy remains: no `markLoadedCacheReuse` helper, so newly transferred KV is not added to historical reuse.
+
+Local test run used the mandatory non-root CUDA13 precheck and `bazel_run.sh` with unique output root `/data0/songchenyi.scy/.cache/bazel_cuda13_RTP-LLM-20261024-Partial_Match_future-nonpickle_cache`, fixed remote cache, shared disk cache, and exact GPU lock. All five targets PASSED: `block_tree_cache_test` (6.8s), `block_tree_loader_test` (6.7s), `cp_transfer_projection_test` (6.2s), `stream_cache_resource_test` (7.2s), and `decode_rpc_server_test` (6.7s). See adjacent log and signal.
+
+This is a validation prototype, not the deliverable rebased branch. It does not decide the ambiguous v8 pickle interpretation or replace replaying the original commits in the paused branch. Additional later-commit conflicts and full-branch tests still require the user's compatibility decision.
+
+The combined shadow patch also passed Python 3.12 syntax compilation for 73 staged Python files. A second wrapper run passed `block_tree_test` (5.7s), `single_type_kv_cache_allocator_test` (7.1s), and `engine_test` (13.7s). See `engine.log` and zero signal. These targets exercise the later common-prefix recovery changes in addition to the first five targets.

@@ -1,0 +1,16 @@
+{
+  "sha": "d117337a75d3d2e0d86cf83118c47d451cad6ac9",
+  "invocation": [
+    "git",
+    "grep",
+    "-n",
+    "-E",
+    "prefix_cache_observation|PREFIX_CACHE_OBSERVABILITY|enable_prefix_cache_observability|observabilitySnapshot|PrefixCache(MatchObservation|RemoteObservation|RemoteQueryStatus|PlanState)|observation_request_id",
+    "d117337a75d3d2e0d86cf83118c47d451cad6ac9",
+    "--",
+    "rtp_llm"
+  ],
+  "exit_code": 1,
+  "matches": "",
+  "observable": "PASS: no new diagnostic symbols/events/config in tracked rtp_llm tree"
+}

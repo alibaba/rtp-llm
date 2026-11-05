@@ -89,7 +89,12 @@ public:
     void initialize(size_t                               group_set_id,
                     std::shared_ptr<const CacheTopology> topology,
                     std::vector<std::string>             group_tags,
-                    BackingLayout                        backing_layout = {});
+                    BackingLayout                        backing_layout = {},
+                    bool                                 local_only     = false);
+
+    bool localOnly() const {
+        return local_only_;
+    }
 
     size_t groupSetId() const {
         return group_set_id_;
@@ -123,6 +128,17 @@ public:
 
     virtual size_t computeReuseBlockCount(size_t matched_block_count) const = 0;
 
+    // One endpoint determines the same required nodes for validation, pinning,
+    // and table materialization. Indices refer to the root-to-endpoint path.
+    std::vector<size_t> requiredPathIndices(const std::vector<TreeNode*>& path, size_t token_end) const;
+    // DEVICE readiness includes actual retained token coverage, not merely a
+    // present ID: opaque SWA rings only retain the suffix of their source node.
+    bool hasDeviceCoverage(const std::vector<TreeNode*>& path, size_t token_end) const;
+    bool hasPhysicalCoverage(const std::vector<TreeNode*>& path, size_t token_end) const;
+    bool hasCanonicalCoverage(size_t count, size_t canonical_size_per_block) const;
+    bool hasZeroStateDemand(size_t token_end) const;
+    bool requiresExactStateEndpoint() const;
+
     const std::vector<DeviceBlockPoolPtr>& devicePools() const {
         return device_pools_;
     }
@@ -144,6 +160,8 @@ public:
     void                       releaseSingleBlock(Tier tier, BlockIdxType block, BlockTreeRefType ref_type) const;
 
 private:
+    bool coversTokenInterval(size_t node_start, size_t node_end, size_t token_end) const;
+
     std::vector<DeviceBlockPoolPtr>         device_pools_;
     std::shared_ptr<HostBlockPool>          host_pool_;
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool_;
@@ -154,6 +172,7 @@ private:
     size_t                                  storage_bytes_{0};
     bool                                    enable_crc_{false};
     bool                                    uses_physical_payload_geometry_{false};
+    bool                                    local_only_{false};
 };
 
 using GroupSetPtr = std::shared_ptr<GroupSet>;

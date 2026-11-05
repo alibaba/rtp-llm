@@ -1,0 +1,43 @@
+commit 1b56fd1e680b7842e3a1cfd246603d21a61102bf
+Author:     fxp19950422 <29155977+fxp19950422@users.noreply.github.com>
+AuthorDate: Mon Oct 26 14:38:16 2026 +0800
+Commit:     fxp19950422 <29155977+fxp19950422@users.noreply.github.com>
+CommitDate: Mon Oct 26 14:38:16 2026 +0800
+
+    feat(cache): recover exact internal common prefixes
+    
+    Recover shared internal cache prefixes with safe async suffix loading and versioned KVCacheConfig state. Keep the pickle state-construction correction with the feature that adds its fields.
+
+commit 61acca1d5e3a91c01df22be6a6fdae7987dc2550
+Author:     fxp19950422 <29155977+fxp19950422@users.noreply.github.com>
+AuthorDate: Mon Oct 26 14:28:48 2026 +0800
+Commit:     fxp19950422 <29155977+fxp19950422@users.noreply.github.com>
+CommitDate: Mon Oct 26 14:28:48 2026 +0800
+
+    feat(cache): reuse incomplete prefill tails across cache groups
+    
+    Add prefix-cache observability and selected GDN/KDA state saves alongside tail reuse. Fold the related compact CP, handoff, DSv4 profiling, and test dependency fixes into this feature boundary.
+
+commit 5ff9b83615851527731adb8226a46b1685a88836
+Author:     fxp19950422 <29155977+fxp19950422@users.noreply.github.com>
+AuthorDate: Mon Oct 26 14:18:19 2026 +0800
+Commit:     fxp19950422 <29155977+fxp19950422@users.noreply.github.com>
+CommitDate: Mon Oct 26 14:18:19 2026 +0800
+
+    refactor(cache): centralize CP cache geometry and transfer assembly
+    
+    Resolve CP storage layouts and transfer projections from cache topology. Fold the warmup binding and chunked prefill scheduler adaptations into the CP boundary.
+
+commit 1d20e29a428f1bc1497c92ee415bbfd925291ccf
+Author:     Weixiang Huang <72499177+Jonathan-hwx@users.noreply.github.com>
+AuthorDate: Sun Oct 25 15:49:12 2026 +0800
+Commit:     GitHub <noreply@github.com>
+CommitDate: Sun Oct 25 07:49:12 2026 +0000
+
+    feat: add chunked prefill for standard, MLA, and hybrid attention (#1460)
+    
+    * feat: add chunked prefill for standard, MLA, and hybrid attention
+    
+    * Preallocate and reuse Linear, SWA, and HCA cache blocks for chunked prefill
+    
+    * fix: resolve CI failures and address review feedback

@@ -53,6 +53,22 @@ std::vector<std::vector<GroupSetResource>> makeEmpty2DResources(int path_len) {
     return std::vector<std::vector<GroupSetResource>>(static_cast<size_t>(path_len), std::vector<GroupSetResource>(1));
 }
 
+class ShortLeafRecordingPublisher final: public KVCacheEventPublisher {
+public:
+    bool start() noexcept override {
+        return true;
+    }
+    void            stop() noexcept override {}
+    PublisherStatus status() const noexcept override {
+        return {};
+    }
+    PublishResult tryPublish(KVCacheEvent event) noexcept override {
+        events.push_back(event);
+        return PublishResult::ACCEPTED;
+    }
+    std::vector<KVCacheEvent> events;
+};
+
 TreeNode* insertAndGetNode(BlockTree&                                        tree,
                            const CacheKeysType&                              cache_keys,
                            const std::vector<std::vector<GroupSetResource>>& resources) {
@@ -698,6 +714,175 @@ TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtBusyEmptyNode) {
     EXPECT_EQ(tree.removeNodeAndEmptyAncestors(node), node);
     EXPECT_EQ(tree.size(), 1u);
     EXPECT_EQ(node->parent, tree.root());
+}
+
+TEST(BlockTreeTest, InsertBackfillsTokenSegmentsOnAdoptedNode) {
+    BlockTree                                  tree(makeGroupSets(1), 2);
+    std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(1));
+    TreeNode*                                  node = insertAndGetNode(tree, {100}, original);
+    ASSERT_NE(node, nullptr);
+    EXPECT_TRUE(node->token_ids.empty());
+
+    const std::vector<std::vector<int>> segments{{1, 2}};
+    const std::vector<size_t>           token_ends{2};
+    const BlockTreeInsertResult         result = tree.insertNode(
+        {100}, make2DResources(1, 1, 20), /*collect_path=*/false, /*is_resident=*/false, &segments, &token_ends);
+    ASSERT_EQ(result.adopted_nodes.size(), 1u);
+    EXPECT_EQ(result.adopted_nodes[0].first, node);
+    EXPECT_EQ(node->token_ids, (std::vector<int>{1, 2}));
+}
+
+TEST(BlockTreeTest, ShortLeavesRemainTerminalWhileCompleteSiblingContinues) {
+    BlockTree                           tree(makeGroupSets(1), 256);
+    const std::vector<std::vector<int>> prefix{std::vector<int>(256, 1), std::vector<int>(256, 2)};
+    const std::vector<size_t>           prefix_ends{256, 512};
+    tree.insertNode({256, 512}, makeEmpty2DResources(2), false, false, &prefix, &prefix_ends);
+
+    const std::vector<std::vector<int>> short_600{
+        std::vector<int>(256, 1), std::vector<int>(256, 2), std::vector<int>(88, 3)};
+    const std::vector<size_t> ends_600{256, 512, 600};
+    auto first = tree.insertNode({256, 512, 600}, makeEmpty2DResources(3), false, false, &short_600, &ends_600);
+    ASSERT_EQ(first.inserted_nodes.size(), 1u);
+    EXPECT_TRUE(tree.isShortLeaf(first.inserted_nodes.front()));
+
+    const std::vector<std::vector<int>> short_650{
+        std::vector<int>(256, 1), std::vector<int>(256, 2), std::vector<int>(138, 3)};
+    const std::vector<size_t> ends_650{256, 512, 650};
+    tree.insertNode({256, 512, 650}, makeEmpty2DResources(3), false, false, &short_650, &ends_650);
+    const std::vector<std::vector<int>> full{
+        std::vector<int>(256, 1), std::vector<int>(256, 2), std::vector<int>(256, 3), std::vector<int>(256, 4)};
+    const std::vector<size_t> full_ends{256, 512, 768, 1024};
+    tree.insertNode({256, 512, 768, 1024}, makeEmpty2DResources(4), false, false, &full, &full_ends);
+
+    std::vector<int> request(900, 1);
+    std::fill(request.begin() + 256, request.begin() + 512, 2);
+    std::fill(request.begin() + 512, request.begin() + 768, 3);
+    std::fill(request.begin() + 768, request.end(), 4);
+    const auto candidates =
+        tree.contentMatchCandidates(request, [](size_t end) { return static_cast<CacheKeyType>(end); });
+    std::vector<size_t> endpoints;
+    for (const auto* node : candidates) {
+        endpoints.push_back(node->token_end);
+    }
+    EXPECT_EQ(endpoints, (std::vector<size_t>{256, 512, 600, 650, 768}));
+
+    // A different content identity at the same placeholder tokens cannot reuse the short leaf.
+    const auto image_mismatch = tree.contentMatchCandidates(
+        request, [](size_t end) { return static_cast<CacheKeyType>(end == 650 ? 651 : end); });
+    EXPECT_EQ(image_mismatch.size(), 4u);
+
+    const std::vector<std::vector<int>> illegal_child{
+        std::vector<int>(256, 1), std::vector<int>(256, 2), std::vector<int>(88, 3), std::vector<int>(256, 4)};
+    const std::vector<size_t> illegal_ends{256, 512, 600, 856};
+    EXPECT_TRUE(
+        tree.insertNode({256, 512, 600, 856}, makeEmpty2DResources(4), false, false, &illegal_child, &illegal_ends)
+            .inserted_nodes.empty());
+    EXPECT_TRUE(first.inserted_nodes.front()->children.empty());
+    EXPECT_EQ(tree.cacheKeys(), (CacheKeysType{256, 512, 768, 1024}));
+}
+
+TEST(BlockTreeTest, RootShortLeafAndCPBaseAlignedShortEndpointStayLocal) {
+    BlockTree                           tree(makeGroupSets(1), 512);
+    const std::vector<std::vector<int>> root_segment{std::vector<int>(128, 7)};
+    const std::vector<size_t>           root_end{128};
+    auto root_short = tree.insertNode({128}, makeEmpty2DResources(1), false, false, &root_segment, &root_end);
+    ASSERT_EQ(root_short.inserted_nodes.size(), 1u);
+    EXPECT_TRUE(tree.isShortLeaf(root_short.inserted_nodes.front()));
+    EXPECT_TRUE(tree.cacheKeys().empty());
+    EXPECT_EQ(tree.contentMatchCandidates(std::vector<int>(128, 7), [](size_t end) { return end; }).size(), 1u);
+
+    const std::vector<std::vector<int>> cp_segments{
+        std::vector<int>(512, 1), std::vector<int>(512, 2), std::vector<int>(256, 3)};
+    const std::vector<size_t> cp_ends{512, 1024, 1280};
+    auto cp = tree.insertNode({512, 1024, 1280}, makeEmpty2DResources(3), false, false, &cp_segments, &cp_ends);
+    ASSERT_EQ(cp.inserted_nodes.size(), 3u);
+    EXPECT_TRUE(tree.isShortLeaf(cp.inserted_nodes.back()));
+    EXPECT_EQ(tree.cacheKeys(), (CacheKeysType{512, 1024}));
+
+    TreeNode* old_root = root_short.inserted_nodes.front();
+    tree.removeNodeAndEmptyAncestors(old_root);
+    EXPECT_EQ(tree.size(), 3u);
+    EXPECT_EQ(tree.cacheKeys(), (CacheKeysType{512, 1024}));
+    std::vector<int> cp_request(1280, 1);
+    std::fill(cp_request.begin() + 512, cp_request.begin() + 1024, 2);
+    std::fill(cp_request.begin() + 1024, cp_request.end(), 3);
+    const auto candidates = tree.contentMatchCandidates(cp_request, [](size_t end) { return end; });
+    ASSERT_EQ(candidates.size(), 3u);
+    EXPECT_EQ(candidates.back()->token_end, 1280u);
+}
+
+TEST(BlockTreeTest, ShortKeyStaysOutOfSnapshotAndPublicationAcrossDeletion) {
+    BlockTree tree(makeGroupSets(1), 256);
+    auto      publisher = std::make_shared<ShortLeafRecordingPublisher>();
+    tree.setEventPublisher(publisher, {"group0"});
+    const std::vector<std::vector<int>> short_segment{std::vector<int>(128, 1)};
+    const std::vector<size_t>           short_end{128};
+    auto short_result = tree.insertNode({128}, makeEmpty2DResources(1), false, false, &short_segment, &short_end);
+    ASSERT_EQ(short_result.inserted_nodes.size(), 1u);
+    const std::vector<std::vector<int>> resident_short_segment{std::vector<int>(160, 3)};
+    const std::vector<size_t>           resident_short_end{160};
+    auto                                resident_short =
+        tree.insertNode({160}, make2DResources(1, 1, 10), false, false, &resident_short_segment, &resident_short_end);
+    ASSERT_EQ(resident_short.inserted_nodes.size(), 1u);
+    EXPECT_TRUE(tree.cacheKeys().empty());
+    EXPECT_TRUE(tree.logicalCacheSnapshot().block_keys.empty());
+    EXPECT_TRUE(publisher->events.empty());
+    const int64_t version_after_short = tree.keyVersion();
+
+    const std::vector<std::vector<int>> full_segment{std::vector<int>(256, 2)};
+    const std::vector<size_t>           full_end{256};
+    auto full_result = tree.insertNode({256}, make2DResources(1, 1, 20), false, false, &full_segment, &full_end);
+    ASSERT_EQ(full_result.inserted_nodes.size(), 1u);
+    EXPECT_EQ(tree.cacheKeys(), (CacheKeysType{256}));
+    EXPECT_EQ(tree.logicalCacheSnapshot().block_keys, (std::vector<int64_t>{256}));
+    ASSERT_EQ(publisher->events.size(), 1u);
+    EXPECT_EQ(publisher->events[0].type, KVCacheEventType::BLOCK_ADD);
+
+    // After swap deletion the internal key array still follows node_pool_, while the external view stays filtered.
+    tree.removeNodeAndEmptyAncestors(short_result.inserted_nodes.front());
+    EXPECT_GT(tree.keyVersion(), version_after_short);
+    EXPECT_EQ(tree.size(), 2u);
+    EXPECT_EQ(tree.cacheKeys(), (CacheKeysType{256}));
+    EXPECT_EQ(tree.logicalCacheSnapshot().block_keys, (std::vector<int64_t>{256}));
+    EXPECT_EQ(publisher->events.size(), 1u);
+}
+
+TEST(BlockTreeTest, ExactKeyConflictCannotAdoptResourcesOrChangeLeafIdentity) {
+    BlockTree                           tree(makeGroupSets(1), 256);
+    const std::vector<std::vector<int>> first_segment{std::vector<int>(100, 1)};
+    const std::vector<size_t>           first_end{100};
+    auto first = tree.insertNode({42}, makeEmpty2DResources(1), false, false, &first_segment, &first_end);
+    ASSERT_EQ(first.inserted_nodes.size(), 1u);
+    TreeNode* leaf = first.inserted_nodes.front();
+
+    const std::vector<std::vector<int>> other_end_segment{std::vector<int>(120, 1)};
+    const std::vector<size_t>           other_end{120};
+    auto                                conflicting_end =
+        tree.insertNode({42}, make2DResources(1, 1, 10), false, false, &other_end_segment, &other_end);
+    EXPECT_EQ(conflicting_end.accepted_resource_count, 0u);
+    EXPECT_EQ(leaf->token_end, 100u);
+
+    const std::vector<std::vector<int>> other_content_segment{std::vector<int>(100, 2)};
+    auto                                conflicting_content =
+        tree.insertNode({42}, make2DResources(1, 1, 20), false, false, &other_content_segment, &first_end);
+    EXPECT_EQ(conflicting_content.accepted_resource_count, 0u);
+    EXPECT_TRUE(leaf->group_set_resources[0].is_empty());
+    EXPECT_EQ(leaf->token_ids, first_segment.front());
+
+    auto adopted = tree.insertNode({42}, make2DResources(1, 1, 30), false, false, &first_segment, &first_end);
+    EXPECT_EQ(adopted.accepted_resource_count, 1u);
+    EXPECT_EQ(tree.size(), 1u);
+}
+
+TEST(BlockTreeTest, ShortLeafRejectsNonDeviceResource) {
+    BlockTree                           tree(makeGroupSets(1), 256);
+    const std::vector<std::vector<int>> segment{std::vector<int>(100, 1)};
+    const std::vector<size_t>           endpoint{100};
+    auto                                resources = makeEmpty2DResources(1);
+    resources[0][0].host_block                    = 10;
+    const auto result                             = tree.insertNode({42}, resources, false, false, &segment, &endpoint);
+    EXPECT_TRUE(result.inserted_nodes.empty());
+    EXPECT_EQ(tree.size(), 0u);
 }
 
 TEST(BlockTreeTest, VisitNodeRangeLockedStopsAtMaxNodes) {

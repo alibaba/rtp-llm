@@ -1,0 +1,7 @@
+# DSv4 profiler scope adaptation
+
+Local public branch `codex/partial-match-20261024-profiler-fix`, commit `b33cd0d77a`, based on replayed public commit `e7e24839331d24968cc1cb718e81ccf9a449bdd5`. This commit is intentionally separate from the paused tail-reuse rebase and must be cherry-picked after that rebase completes.
+
+Finding: `DeepSeekV4Model.forward` created the hidden-state capture context inside `moe_record_function_scope` but called `forward_prefill` after leaving the scope. With `DSV4_RECORD_FUNCTION_RANGES=0`, generic MoE ranges therefore remained active during prefill. The fix keeps capture creation and `forward_prefill` in one scope. A regression checks generic profiler suppression during the mocked forward and restoration afterward, while verifying capture context handoff.
+
+Validation: Python 3.12 syntax compile, `git diff --check`, and container Black check passed. Required non-root CUDA13 Bazel precheck passed. `//rtp_llm/models_py/modules/dsv4/test:test_layer_profiler_ranges` was incompatible under `--config=cuda13` because it is the ARM target (see `arm-target.log`). The correct `test_layer_profiler_ranges_x86` target failed during Bazel analysis before running any tests: repeated connection timeouts downloading pinned `fastsafetensors` and other wheels from `rtp-maga.cn-zhangjiakou.oss.aliyuncs.com` (see `x86-target.log`). Both exit signals were 1; neither is a code-test failure.

@@ -1,4 +1,5 @@
 
+#include <set>
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
 
@@ -36,6 +37,7 @@
 #include <functional>
 #include <memory>
 #include <limits>
+#include <numeric>
 #include <thread>
 
 using namespace std;
@@ -264,9 +266,20 @@ protected:
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type,
-                                        const KVCacheConfig&    kv_cache_config = {}) {
-        cache_manager_ = std::make_shared<KVCacheManager>(
-            cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
+                                        const KVCacheConfig&    kv_cache_config = {},
+                                        int                     tp_rank         = 0) {
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = role_type;
+        ParallelismConfig parallelism_config;
+        parallelism_config.tp_rank = tp_rank;
+        cache_manager_             = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          /*metrics_reporter=*/nullptr,
+                                                          kv_cache_config,
+                                                          parallelism_config,
+                                                          RuntimeConfig{},
+                                                          SpeculativeExecutionConfig{},
+                                                          pd_sep_config);
         ASSERT_TRUE(cache_manager_->init());
         size_t expected_free_blocks = 0;
         for (const auto& group : cache_manager_->cacheConfig().topology().groups()) {
@@ -399,13 +412,16 @@ TEST_F(StreamCacheResourceTest, testResourceContextReadsIgnoreRequestCacheSwitch
         KVCacheConfig   kv_cache_config;
         resource_context.initCacheConfig(kv_cache_config);
         EXPECT_FALSE(resource_context.ignore_request_cache_switches);
+        EXPECT_FALSE(resource_context.enable_prefill_partial_tail_reuse);
     }
     {
         autil::EnvGuard env_guard("RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES", "1");
         ResourceContext resource_context;
         KVCacheConfig   kv_cache_config;
+        kv_cache_config.enable_prefill_partial_tail_reuse = true;
         resource_context.initCacheConfig(kv_cache_config);
         EXPECT_TRUE(resource_context.ignore_request_cache_switches);
+        EXPECT_TRUE(resource_context.enable_prefill_partial_tail_reuse);
     }
 }
 
@@ -657,15 +673,74 @@ TEST_F(StreamCacheResourceTest, CacheOwnedLayoutDrivesStreamInitIncrementAndRele
     EXPECT_EQ(resource.kvCache().cacheKeys(0).size(), 4u);
     EXPECT_EQ(resource.singleBatchNeedBlocks(/*seq_len=*/9, /*reserve_step=*/0), 1);
 
+    const auto original_keys = resource.kvCache().cacheKeys(0);
+    for (int batch = 0; batch < resource.kvCache().batchSize(); ++batch) {
+        stream_->completeTokenIdsPtr()->data(batch)[8] = 9;
+    }
     stream_->setSeqLength(9);
     ASSERT_TRUE(resource.incrKVBlock().ok());
     EXPECT_EQ(resource.kvCache().blocksNum(0, "default"), 3);
     EXPECT_EQ(resource.kvCache().blocksNum(1, "default"), 3);
-    EXPECT_EQ(resource.kvCache().cacheKeys(0).size(), 4u);
+    // Runtime/base keys include the new partial block (T02/T06 P-to-D
+    // contract); CP canonical pages and complete-only tree exports differ.
+    ASSERT_EQ(resource.kvCache().cacheKeys(0).size(), 5u);
+    EXPECT_TRUE(std::equal(original_keys.begin(), original_keys.end(), resource.kvCache().cacheKeys(0).begin()));
+    EXPECT_FALSE(resource.kvCache().lastBlockAligned());
+    auto fresh_keys = std::make_shared<BatchKVCacheResource>();
+    fresh_keys->resetBatchSize(resource.kvCache().batchSize());
+    fresh_keys->initGroups(cache_manager_->cacheConfig().topologyPtr());
+    initCacheKeys(fresh_keys, stream_->completeTokenIdsPtr(), cache_manager_->cacheConfig().seq_size_per_block);
+    for (int batch = 0; batch < resource.kvCache().batchSize(); ++batch) {
+        EXPECT_EQ(resource.kvCache().cacheKeys(batch), fresh_keys->cacheKeys(batch));
+    }
 
     stream_->generate_status_->status = StreamState::FINISHED;
     stream_->releaseResource();
     EXPECT_EQ(cache_manager_->freeBlocksNum(), free_before);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+TEST_F(StreamCacheResourceTest, ManagerMallocStampsBeginTimeForInitAndIncr) {
+    prepareResourceWithInputTokens({1, 2, 3, 4, 5, 6, 7, 8}, /*reuse_cache=*/false);
+    auto&      resource = stream_->streamCacheResource();
+    MallocInfo info{resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
+    info.reuse_cache         = false;
+    info.enable_cache_lookup = false;
+
+    const int64_t legacy_before_us = currentTimeUs();
+    const auto    first            = cache_manager_->malloc(info);
+    const int64_t legacy_after_us  = currentTimeUs();
+    ASSERT_TRUE(first.success);
+    EXPECT_GE(first.malloc_begin_time_us, legacy_before_us);
+    EXPECT_LE(first.malloc_begin_time_us, legacy_after_us);
+
+    // The manager stamps the incremental attempt itself; the caller cannot
+    // override the window.
+    stream_->setSeqLength(9);
+    const int64_t incr_before_us = currentTimeUs();
+    const auto    incremental    = cache_manager_->malloc(info);
+    const int64_t incr_after_us  = currentTimeUs();
+    ASSERT_TRUE(incremental.success);
+    EXPECT_GE(incremental.malloc_begin_time_us, incr_before_us);
+    EXPECT_LE(incremental.malloc_begin_time_us, incr_after_us);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->releaseResource();
 }
 
 TEST_F(StreamCacheResourceTest, CacheOwnedLayoutPublishesAndFindsSameCanonicalPrefix) {
@@ -1289,6 +1364,9 @@ TEST_F(StreamCacheResourceTest, testReleasePendingAllocatorLoadDoesNotFinalizeMe
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
 }
 
+// Serialization contract only: injected binding states below are not evidence
+// that a producer completed, a copy succeeded, or a save entered the tree.
+
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_PendingAllocatorLoad_ReturnsFalse) {
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
@@ -1302,7 +1380,10 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_PendingAllocatorLoad_ReturnsFa
 }
 
 TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompletes) {
-    auto  backend  = prepareStorageBackendResource(/*block_matches=*/false);
+    auto  backend  = prepareStorageBackendResource(/*block_matches=*/false,
+                                                 /*seed_host=*/false,
+                                                 RoleType::PDFUSION,
+                                                 /*cp_size=*/0);
     auto& resource = stream_->streamCacheResource();
     backend->blockReads();
 
@@ -1329,6 +1410,41 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     EXPECT_EQ(resource.kvCache().cacheResource(0).memoryReuseBlockNum(), 0u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).diskReuseBlockNum(), 0u);
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
+}
+
+TEST_F(StreamCacheResourceTest, RemoteQuerySelectingLocalShortLeafKeepsExactDeviceReuse) {
+    auto  backend     = prepareStorageBackendResource(/*block_matches=*/false,
+                                                 /*seed_host=*/false,
+                                                 RoleType::PREFILL,
+                                                 /*cp_size=*/0);
+    auto& resource    = stream_->streamCacheResource();
+    auto  coordinator = std::make_shared<LoadContextCoordinator>(
+        [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
+    auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setLocalFallback(/*token_endpoint=*/5, /*reuse_unit_tokens=*/2);
+    context->setMatchCallback([&resource](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 0u);
+        EXPECT_TRUE(current.localFallbackSelected());
+        // Coordinator transfers the pinned short-leaf references to the
+        // request before the Stream publishes the final source counters.
+        resource.kvCacheMutable().cacheResource(0).setDeviceReuseBlockNum(2);
+        return current.commit();
+    });
+    resource.allocator_load_context_ = context;
+    context->startBackendMatch();
+    context->waitDone();
+    ASSERT_TRUE(context->success());
+    ASSERT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(context->matchedTokenEndpoint(2), 5u);
+    EXPECT_EQ(stream_->initialReuseLength(), 5);
+    EXPECT_EQ(stream_->localReuseLength(), 5);
+    EXPECT_EQ(stream_->deviceReuseLength(), 5);
+    EXPECT_EQ(stream_->remoteReuseLength(), 0);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).deviceReuseBlockNum(), 2u);
+    EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 0u);
+    coordinator->shutdown();
 }
 
 TEST_F(StreamCacheResourceTest, StorageMatchWithExternalCpRequestLayoutWaitsForRemoteCompletion) {

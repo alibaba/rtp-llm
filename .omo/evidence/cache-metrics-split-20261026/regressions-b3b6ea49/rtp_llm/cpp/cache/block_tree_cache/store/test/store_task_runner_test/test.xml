@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="11" failures="0" disabled="0" errors="0" time="0.285" timestamp="2026-10-26T16:46:36.347" name="AllTests">
+  <testsuite name="StoreTaskRunnerTest" tests="11" failures="0" disabled="0" skipped="0" errors="0" time="0.285" timestamp="2026-10-26T16:46:36.347">
+    <testcase name="PrepareTaskCreatesHostTransferAndTemporaryHolds" status="run" result="completed" time="0.259" timestamp="2026-10-26T16:46:36.347" classname="StoreTaskRunnerTest" />
+    <testcase name="LocalOnlyGroupDoesNotBlockCompleteGroupLowerTierStore" status="run" result="completed" time="0.003" timestamp="2026-10-26T16:46:36.607" classname="StoreTaskRunnerTest" />
+    <testcase name="PrepareTaskRecordsPathIndexInTransferDescriptors" status="run" result="completed" time="0.003" timestamp="2026-10-26T16:46:36.610" classname="StoreTaskRunnerTest" />
+    <testcase name="ReleaseTaskResourcesDropsTemporaryHolds" status="run" result="completed" time="0.002" timestamp="2026-10-26T16:46:36.613" classname="StoreTaskRunnerTest" />
+    <testcase name="DiskFailureWaitsForEverySubmittedBatch" status="run" result="completed" time="0.001" timestamp="2026-10-26T16:46:36.615" classname="StoreTaskRunnerTest" />
+    <testcase name="SplitHostAndDiskBatchesReportOneCrcErrorAfterAllCompletions" status="run" result="completed" time="0.001" timestamp="2026-10-26T16:46:36.617" classname="StoreTaskRunnerTest" />
+    <testcase name="RunTransferReturnsDispatcherFailure" status="run" result="completed" time="0.003" timestamp="2026-10-26T16:46:36.619" classname="StoreTaskRunnerTest" />
+    <testcase name="TaskPhasePreventsDuplicateSettlementSubmission" status="run" result="completed" time="0" timestamp="2026-10-26T16:46:36.622" classname="StoreTaskRunnerTest" />
+    <testcase name="RepeatedRunTransferCannotSettleSameTaskTwice" status="run" result="completed" time="0" timestamp="2026-10-26T16:46:36.622" classname="StoreTaskRunnerTest" />
+    <testcase name="TransferSubmissionFollowsTargetTier" status="run" result="completed" time="0.004" timestamp="2026-10-26T16:46:36.623" classname="StoreTaskRunnerTest" />
+    <testcase name="PendingTransferDoesNotRetainOuterWorker" status="run" result="completed" time="0.005" timestamp="2026-10-26T16:46:36.627" classname="StoreTaskRunnerTest" />
+  </testsuite>
+</testsuites>

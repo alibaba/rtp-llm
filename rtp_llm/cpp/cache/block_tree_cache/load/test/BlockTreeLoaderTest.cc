@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -26,11 +27,14 @@ namespace {
 
 using block_tree_cache_test::FullSWAEnvironment;
 using block_tree_cache_test::FullSWAEnvironmentOptions;
+using block_tree_cache_test::MultiNodeBlocks;
+using block_tree_cache_test::allocateDeviceBlocksForTest;
 using block_tree_cache_test::cudaAvailable;
 using block_tree_cache_test::insertGroupSetResources;
 using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
+using block_tree_cache_test::unreferenceDeviceBlocksForTest;
 
 class ReadFailureBackend final: public StorageBackend {
 public:
@@ -471,6 +475,29 @@ TEST_P(BlockTreeLoaderReuseTimeTest, DevicePrefixAndLogicalSuffixShareReuseAndEv
 }
 
 INSTANTIATE_TEST_SUITE_P(DevicePrefixes, BlockTreeLoaderReuseTimeTest, ::testing::Values(0u, 2u, 3u, 4u));
+TEST(BlockTreeLoaderTest, MatchObservationSkipsIncompleteTokenMetadata) {
+    auto full =
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, nullptr, nullptr);
+    std::vector<GroupSetPtr> groups = {full};
+
+    BlockTreeCacheConfig config;
+    config.enable_device_cache = true;
+    auto cache                 = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config);
+    ASSERT_NE(cache, nullptr);
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(groups.size()));
+    resources[0][0].device_blocks = {42};
+    resources[1][0].device_blocks = {43};
+    const std::vector<std::vector<int>> segments{{1, 2}, {}};
+    cache->insert({100, 200}, resources, Tier::DEVICE, false, &segments);
+
+    const std::vector<TreeNode*> path = cache->tree()->findNode({100, 200});
+    ASSERT_EQ(path.size(), 2u);
+    ASSERT_TRUE(path[1]->token_ids.empty());
+
+    const auto result = cache->match({100, 200}, {});
+    EXPECT_EQ(result.matched_device_blocks, 2u);
+}
 
 TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     if (!cudaAvailable()) {

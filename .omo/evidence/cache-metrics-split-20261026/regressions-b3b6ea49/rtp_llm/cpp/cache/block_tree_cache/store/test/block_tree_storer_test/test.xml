@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="28" failures="0" disabled="0" errors="0" time="0.322" timestamp="2026-10-26T16:51:15.588" name="AllTests">
+  <testsuite name="BlockTreeStorerTest" tests="18" failures="0" disabled="0" skipped="0" errors="0" time="0.285" timestamp="2026-10-26T16:51:15.588">
+    <testcase name="StorePublishesTargetTierOnlyWithoutDeviceResidency" status="run" result="completed" time="0.207" timestamp="2026-10-26T16:51:15.588" classname="BlockTreeStorerTest" />
+    <testcase name="DeviceInsertSubmitsAllBlocksOutsideTreeLockAndPinsUntilCompletion" status="run" result="completed" time="0.001" timestamp="2026-10-26T16:51:15.796" classname="BlockTreeStorerTest" />
+    <testcase name="UnsupportedInsertTargetsRejectWithoutPublishingOrPinning" status="run" result="completed" time="0.001" timestamp="2026-10-26T16:51:15.798" classname="BlockTreeStorerTest" />
+    <testcase name="WatermarkDropKeepsPendingRemoteWritePayloadAlive" status="run" result="completed" time="0.001" timestamp="2026-10-26T16:51:15.800" classname="BlockTreeStorerTest" />
+    <testcase name="DeviceInsertDoesNotWaitForBackendWriteOrLocalTaskPool" status="run" result="completed" time="0.001" timestamp="2026-10-26T16:51:15.802" classname="BlockTreeStorerTest" />
+    <testcase name="HostAndDiskInsertReturnBeforeTransferSettlement" status="run" result="completed" time="0.005" timestamp="2026-10-26T16:51:15.803" classname="BlockTreeStorerTest" />
+    <testcase name="DeviceInsertWithoutBackendOnlyPublishesLocalCache" status="run" result="completed" time="0.003" timestamp="2026-10-26T16:51:15.808" classname="BlockTreeStorerTest" />
+    <testcase name="StorageHandlesUseTopologyGroupsAndResolveGpuBuffers" status="run" result="completed" time="0.004" timestamp="2026-10-26T16:51:15.811" classname="BlockTreeStorerTest" />
+    <testcase name="StoreToDiskStaysDiscoverableWhenDeviceCacheIsEnabled" status="run" result="completed" time="0.004" timestamp="2026-10-26T16:51:15.816" classname="BlockTreeStorerTest" />
+    <testcase name="StoreKeepsDeviceSourceAliveAfterRequestRelease" status="run" result="completed" time="0.009" timestamp="2026-10-26T16:51:15.821" classname="BlockTreeStorerTest" />
+    <testcase name="StoreCopyFailureLeavesTreeAndPoolsUntouched" status="run" result="completed" time="0.018" timestamp="2026-10-26T16:51:15.830" classname="BlockTreeStorerTest" />
+    <testcase name="StoreQueueRejectionClosesPlanExactlyOnce" status="run" result="completed" time="0.002" timestamp="2026-10-26T16:51:15.849" classname="BlockTreeStorerTest" />
+    <testcase name="StoreQueueTimeoutClosesPlanExactlyOnce" status="run" result="completed" time="0.002" timestamp="2026-10-26T16:51:15.851" classname="BlockTreeStorerTest" />
+    <testcase name="DuplicateStoreSettlementSettlesTaskOnce" status="run" result="completed" time="0.002" timestamp="2026-10-26T16:51:15.853" classname="BlockTreeStorerTest" />
+    <testcase name="StoreShutdownClosesLowerTierPlanExactlyOnce" status="run" result="completed" time="0.003" timestamp="2026-10-26T16:51:15.856" classname="BlockTreeStorerTest" />
+    <testcase name="DeviceInsertDuringShutdownPreservesPublicationAndClosesPlan" status="run" result="completed" time="0.004" timestamp="2026-10-26T16:51:15.859" classname="BlockTreeStorerTest" />
+    <testcase name="StoreRejectionRollsBackEveryTemporaryHolderExactlyOnce" status="run" result="completed" time="0.006" timestamp="2026-10-26T16:51:15.864" classname="BlockTreeStorerTest" />
+    <testcase name="DuplicateStoreForSameKeyReleasesLoserBlock" status="run" result="completed" time="0.002" timestamp="2026-10-26T16:51:15.871" classname="BlockTreeStorerTest" />
+  </testsuite>
+  <testsuite name="HostAndDisk/ResidentTieredCacheTest" tests="10" failures="0" disabled="0" skipped="0" errors="0" time="0.036" timestamp="2026-10-26T16:51:15.874">
+    <testcase name="ResidentInsertDoesNotDuplicateExistingLowerTier/0" value_param="1-byte object &lt;01&gt;" status="run" result="completed" time="0.002" timestamp="2026-10-26T16:51:15.874" classname="HostAndDisk/ResidentTieredCacheTest" />
+    <testcase name="ResidentInsertDoesNotDuplicateExistingLowerTier/1" value_param="1-byte object &lt;02&gt;" status="run" result="completed" time="0.002" timestamp="2026-10-26T16:51:15.877" classname="HostAndDisk/ResidentTieredCacheTest" />
+    <testcase name="SuccessfulAsyncLoadCanBePromotedToResidentAfterSettlement/0" value_param="1-byte object &lt;01&gt;" status="run" result="completed" time="0.002" timestamp="2026-10-26T16:51:15.879" classname="HostAndDisk/ResidentTieredCacheTest" />
+    <testcase name="SuccessfulAsyncLoadCanBePromotedToResidentAfterSettlement/1" value_param="1-byte object &lt;02&gt;" status="run" result="completed" time="0.003" timestamp="2026-10-26T16:51:15.882" classname="HostAndDisk/ResidentTieredCacheTest" />
+    <testcase name="FailedAsyncLoadPreservesSourceForResidentRetry/0" value_param="1-byte object &lt;01&gt;" status="run" result="completed" time="0.005" timestamp="2026-10-26T16:51:15.885" classname="HostAndDisk/ResidentTieredCacheTest" />
+    <testcase name="FailedAsyncLoadPreservesSourceForResidentRetry/1" value_param="1-byte object &lt;02&gt;" status="run" result="completed" time="0.004" timestamp="2026-10-26T16:51:15.891" classname="HostAndDisk/ResidentTieredCacheTest" />
+    <testcase name="ResidentDeviceMatchDoesNotSubmitLowerTierReadOrReadmitNodes/0" value_param="1-byte object &lt;01&gt;" status="run" result="completed" time="0.002" timestamp="2026-10-26T16:51:15.895" classname="HostAndDisk/ResidentTieredCacheTest" />
+    <testcase name="ResidentDeviceMatchDoesNotSubmitLowerTierReadOrReadmitNodes/1" value_param="1-byte object &lt;02&gt;" status="run" result="completed" time="0.003" timestamp="2026-10-26T16:51:15.898" classname="HostAndDisk/ResidentTieredCacheTest" />
+    <testcase name="CancelPendingLoadThenRetryBeforeRegisteringResident/0" value_param="1-byte object &lt;01&gt;" status="run" result="completed" time="0.005" timestamp="2026-10-26T16:51:15.901" classname="HostAndDisk/ResidentTieredCacheTest" />
+    <testcase name="CancelPendingLoadThenRetryBeforeRegisteringResident/1" value_param="1-byte object &lt;02&gt;" status="run" result="completed" time="0.004" timestamp="2026-10-26T16:51:15.906" classname="HostAndDisk/ResidentTieredCacheTest" />
+  </testsuite>
+</testsuites>

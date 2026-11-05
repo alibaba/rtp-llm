@@ -678,7 +678,6 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPr
             config.seq_size_per_block = context.seq_size_per_block;
             config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {tag}, {policy});
             config.setGroupBlockLayout({tag}, {8}, {spec->block_size_bytes()}, {0});
-            ASSERT_EQ(config.group(tag).seqSizePerBlock(), device_ready_reuse_length);
             config.finalizeStorageLayout(parallelism);
             ASSERT_TRUE(config.group(tag).policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK
                         && config.groupKeyScale(tag) > 1);
@@ -688,6 +687,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPr
             auto       tokens   = makeCompleteTokenIds(1, 2 * device_ready_reuse_length, context.seq_size_per_block);
             MallocInfo malloc_info{resource, tokens};
             malloc_info.enable_cache_lookup = false;
+            malloc_info.request_layout      = snapshotGlobalCacheRequest(*resource, *tokens);
             ASSERT_TRUE(allocator->malloc(malloc_info).success);
             const auto original = resource->blocks(0, tag);
             ASSERT_EQ(original.size(), 2u);

@@ -137,7 +137,7 @@ enum GptModelInputIndex : size_t {
     mmFeaturesSpans,
     engramTokenWindowRows,
     engramTokenWindowWidth,
-    kvCacheCopyTokenLengths,
+    cacheSavePointCount,
     gptModelInputLength,
 };
 
@@ -166,6 +166,8 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitMmFeaturesLocs      = 1u << 14,
     kDeviceBitEngramWindows       = 1u << 15,
     kDeviceBitMmFeaturesSpans     = 1u << 16,
+    kDeviceBitCacheSavePositions  = 1u << 17,
+    kDeviceBitCacheSaveBlockIds   = 1u << 18,
 };
 
 enum GptModelInputControlFlag : uint32_t {
@@ -192,6 +194,11 @@ class ModelBase {
 public:
     virtual ~ModelBase()                                                     = default;
     virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
+    // Explicit sparse save destinations require a model writer. Legacy models
+    // fail closed until their precise-state writer opts in.
+    virtual bool supportsSparseCacheSave() const {
+        return false;
+    }
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
