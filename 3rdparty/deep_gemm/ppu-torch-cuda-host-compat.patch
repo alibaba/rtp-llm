@@ -1,0 +1,109 @@
+diff --git a/csrc/jit/device_runtime.hpp b/csrc/jit/device_runtime.hpp
+--- a/csrc/jit/device_runtime.hpp
++++ b/csrc/jit/device_runtime.hpp
+@@ -6,13 +6,21 @@
+ #include <hggc_runtime_api.h>
+ #include <torch/version.h>
+ #include <torch/torch.h>
++#if !defined(USE_HGGC)
+ #include <ATen/cuda/CUDAContext.h>
++#endif
+ #include <c10/cuda/CUDAStream.h>
+ 
+ #include "../utils/exception.hpp"
+ #include "../utils/lazy_init.hpp"
+ 
++// Native HGGC must not import CUDAContext's cuBLAS/half headers or reuse its
++// unrelated cuBLASLt handle. Keep the native handle owned by DeviceRuntime.
++#if defined(USE_HGGC)
++#define PYTORCH_SUPPORTS_GET_ACBLASLT_HANDLE 0
++#else
+ #define PYTORCH_SUPPORTS_GET_ACBLASLT_HANDLE (TORCH_VERSION_MAJOR > 2 or (TORCH_VERSION_MAJOR == 2 and TORCH_VERSION_MINOR >= 3))
++#endif
+ 
+ namespace deep_gemm {
+ 
+@@ -36,7 +44,8 @@
+         // as `at::cuda::getCurrentCUDABlasLtHandle` has large CPU overhead with some PyTorch versions
+         use_pytorch_managed_acblaslt_handle = get_env<int>("DG_USE_PYTORCH_ACBLASLT_HANDLE", 0) > 0;
+ #if not PYTORCH_SUPPORTS_GET_ACBLASLT_HANDLE
+-        DG_HOST_ASSERT(not use_pytorch_managed_acblaslt_handle and "PyTorch does not support to get acBLASLt handle");
++        DG_HOST_ASSERT(not use_pytorch_managed_acblaslt_handle and
++                       "DG_USE_PYTORCH_ACBLASLT_HANDLE requires a compatible PyTorch acBLASLt handle");
+ #endif
+ 
+         // Whether to create workspace tensor on each call instead of holding one.
+diff --git a/csrc/jit_kernels/impls/smxx_acblaslt.hpp b/csrc/jit_kernels/impls/smxx_acblaslt.hpp
+--- a/csrc/jit_kernels/impls/smxx_acblaslt.hpp
++++ b/csrc/jit_kernels/impls/smxx_acblaslt.hpp
+@@ -1,7 +1,9 @@
+ #pragma once
+ 
+ #include <acblasLt.h>
++#if !defined(USE_HGGC)
+ #include <ATen/cuda/CUDAContext.h>
++#endif
+ #include <ATen/cuda/CUDADataType.h>
+ 
+ #include "../../jit/device_runtime.hpp"
+@@ -9,6 +11,30 @@
+ #include "../../utils/compatibility.hpp"
+ 
+ namespace deep_gemm {
++
++#if defined(USE_HGGC)
++// CUDADataType contains enum mappings only. SDK 2.2's CUDA-facing and native
++// enum encodings agree; reject a future SDK mismatch rather than mislabel data.
++static_assert(static_cast<int>(HGGC_R_8U) == static_cast<int>(CUDA_R_8U) &&
++              static_cast<int>(HGGC_R_8I) == static_cast<int>(CUDA_R_8I) &&
++              static_cast<int>(HGGC_R_32I) == static_cast<int>(CUDA_R_32I) &&
++              static_cast<int>(HGGC_R_16F) == static_cast<int>(CUDA_R_16F) &&
++              static_cast<int>(HGGC_R_32F) == static_cast<int>(CUDA_R_32F) &&
++              static_cast<int>(HGGC_R_64F) == static_cast<int>(CUDA_R_64F) &&
++              static_cast<int>(HGGC_C_16F) == static_cast<int>(CUDA_C_16F) &&
++              static_cast<int>(HGGC_C_32F) == static_cast<int>(CUDA_C_32F) &&
++              static_cast<int>(HGGC_C_64F) == static_cast<int>(CUDA_C_64F) &&
++              static_cast<int>(HGGC_R_16I) == static_cast<int>(CUDA_R_16I) &&
++              static_cast<int>(HGGC_R_64I) == static_cast<int>(CUDA_R_64I) &&
++              static_cast<int>(HGGC_R_16BF) == static_cast<int>(CUDA_R_16BF) &&
++              static_cast<int>(HGGC_R_8F_E4M3) == static_cast<int>(CUDA_R_8F_E4M3) &&
++              static_cast<int>(HGGC_R_8F_E5M2) == static_cast<int>(CUDA_R_8F_E5M2),
++              "HGGC and CUDA scalar datatype encodings must agree");
++#if defined(CUDA_VERSION) && CUDA_VERSION >= 12080
++static_assert(static_cast<int>(HGGC_R_4F_E2M1) == static_cast<int>(CUDA_R_4F_E2M1),
++              "HGGC and CUDA FP4 datatype encodings must agree");
++#endif
++#endif
+ 
+ static auto get_acblaslt_layout(const hggcDataType& type, const int& rows, const int& cols, const int& ld,
+                                 const std::optional<int>& batch_count = std::nullopt,
+@@ -106,9 +132,9 @@
+     const auto trans_b = a_major == MajorType::K ? ACBLAS_OP_N : ACBLAS_OP_T;
+ 
+     // Matrix layouts
+-    const auto hggc_type_a = at::cuda::ScalarTypeToCudaDataType(rhs.scalar_type());
+-    const auto hggc_type_b = at::cuda::ScalarTypeToCudaDataType(lhs.scalar_type());
+-    const auto hggc_type_d = at::cuda::ScalarTypeToCudaDataType(out.scalar_type());
++    const auto hggc_type_a = static_cast<hggcDataType>(at::cuda::ScalarTypeToCudaDataType(rhs.scalar_type()));
++    const auto hggc_type_b = static_cast<hggcDataType>(at::cuda::ScalarTypeToCudaDataType(lhs.scalar_type()));
++    const auto hggc_type_d = static_cast<hggcDataType>(at::cuda::ScalarTypeToCudaDataType(out.scalar_type()));
+     const auto layout_a = b_major == MajorType::K ? get_acblaslt_layout(hggc_type_a, k, n, rhs.stride(0))
+                                                            : get_acblaslt_layout(hggc_type_a, n, k, rhs.stride(1));
+     const auto layout_b = a_major == MajorType::K ? get_acblaslt_layout(hggc_type_b, k, m, lhs.stride(0))
+diff --git a/csrc/apis/mega_mhc.hpp b/csrc/apis/mega_mhc.hpp
+--- a/csrc/apis/mega_mhc.hpp
++++ b/csrc/apis/mega_mhc.hpp
+@@ -129,7 +129,13 @@
+     }
+     const c10::cuda::CUDAGuard guard(x.device());
+     std::lock_guard<std::mutex> lock(submit_mutex);
++#if defined(USE_HGGC)
++    hggcDeviceProp native_prop{};
++    DG_HGGC_RUNTIME_CHECK(hggcGetDeviceProperties(&native_prop, x.get_device()));
++    const auto* prop = &native_prop;
++#else
+     const auto* prop = at::cuda::getDeviceProperties(x.get_device());
++#endif
+     if (prop->major != 8 || prop->minor != 9 || std::string(prop->name).find("M890") == std::string::npos)
+         throw std::runtime_error("Mega-mHC requires Zhenwu M890P");
+     const int sms = get_num_sms();
