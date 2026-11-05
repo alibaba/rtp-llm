@@ -41,12 +41,6 @@ class FlashInferJitTest(unittest.TestCase):
                 torch_path,
                 f"Torch should not be imported from Bazel runfiles, but got: {torch_path}",
             )
-            # 断言：torch 路径应该包含 .cache
-            self.assertIn(
-                ".cache",
-                torch_path,
-                f"Torch should be imported from .cache, but got: {torch_path}",
-            )
 
             # 断言：flashinfer 路径不能包含 runfiles
             self.assertNotIn(
@@ -54,12 +48,20 @@ class FlashInferJitTest(unittest.TestCase):
                 flashinfer_path,
                 f"FlashInfer should not be imported from Bazel runfiles, but got: {flashinfer_path}",
             )
-            # 断言：flashinfer 路径应该包含 .cache
-            self.assertIn(
-                ".cache",
-                flashinfer_path,
-                f"FlashInfer should be imported from .cache, but got: {flashinfer_path}",
-            )
+            # 断言：必须从 wrapper 注入的稳定包缓存导入（HOME .cache 或持久
+            # jit_disk_cache 布局皆可）——runfiles 树里的 include 锚点会随
+            # action 销毁而悬空，毒化共享缓存。
+            cache_roots = [
+                root
+                for root in os.environ.get("_JIT_CACHE_PATHS", "").split(os.pathsep)
+                if root
+            ]
+            for name, path in (("Torch", torch_path), ("FlashInfer", flashinfer_path)):
+                self.assertTrue(
+                    any(path.startswith(root) for root in cache_roots),
+                    f"{name} should be imported from the wrapper package cache "
+                    f"(_JIT_CACHE_PATHS), but got: {path}",
+                )
 
             logging.info("✓ Package import paths validated successfully")
 

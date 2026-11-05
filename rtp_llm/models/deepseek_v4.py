@@ -145,6 +145,33 @@ def _require_n_shared_experts(config_json: dict) -> int:
     return raw_value
 
 
+def _is_ppu_flash(config):
+    if config.model_type not in ("deepseek_v4", "deepseek_v4_mtp"):
+        return False
+    from rtp_llm.device.device_type import is_ppu
+
+    return (
+        is_ppu()
+        and config.hidden_size == 4096
+        and config.num_layers == (1 if config.model_type == "deepseek_v4_mtp" else 43)
+    )
+
+
+def configure_ppu_scheduler(config, scheduler):
+    """Preserve FIFO admission bounds before target or draft buffers are built."""
+    if not _is_ppu_flash(config):
+        return
+    chunk_size = int(scheduler.prefill_chunk_size)
+    config._ppu_prefill_chunk_size = chunk_size
+    config.moe_prefill_max_tokens_per_rank = min(
+        int(scheduler.max_context_batch_size) * int(config.max_seq_len),
+        max(
+            int(scheduler.max_batch_tokens_size),
+            chunk_size if chunk_size > 0 else int(config.max_seq_len),
+        ),
+    )
+
+
 class DeepSeekV4Weight(DeepSeekV2Weight):
     """DeepSeek-V4 weight info.
 
@@ -164,6 +191,16 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         whether the layer's router is hash (``layer_id < num_hash_layers``) or
         noaux_tc (``layer_id >= num_hash_layers``).
     """
+
+    def get_weight_info(self):
+        info = super().get_weight_info()
+        if _is_ppu_flash(self.model_config) and self._moe_pure_tp_mode:
+            from rtp_llm.models_py.modules.dsv4.ppu.resources import (
+                configure_weight_splits,
+            )
+
+            configure_weight_splits(info)
+        return info
 
     def _process_meta(self, meta_dict, weight_keys):  # type: ignore[override]
         # V4 has no LoRA q-projection split (we use ``wq_a`` / ``wq_b`` directly)
@@ -311,6 +348,11 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 norm_name,
                 [CkptWeightInfo(self._key(f"{ckpt_prefix}.norm.weight"), identity)],
                 identity,
+                data_type=(
+                    torch.float32
+                    if inner and _is_ppu_flash(self.model_config)
+                    else None
+                ),
             ),
             AtomicWeight(
                 ape_name,
@@ -691,8 +733,33 @@ class DeepSeekV4(DeepSeekV2):
 
         model_config.kv_cache_spec_descs = descs
 
+    def create_model_loader(self):
+        if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.modules.dsv4.ppu.metadata.cache import (
+                configure_indexer_cache,
+            )
+            from rtp_llm.models_py.modules.dsv4.ppu.manifest import validate_cache_config
+
+            validate_cache_config(self.kv_cache_config)
+            configure_indexer_cache(self.model_config)
+            if self.model_config.model_type == "deepseek_v4":
+                from rtp_llm.models_py.modules.dsv4.ppu.communication import (
+                    maybe_warmup_ppu_tp_communication,
+                )
+
+                maybe_warmup_ppu_tp_communication(
+                    self.parallelism_config,
+                    options={"DSV4_PPU_TP_COMM_WARMUP": "1", **os.environ},
+                )
+        return super().create_model_loader()
+
     def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
+        if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.model_desc.deepseek_v4_ppu.model import (
+                PpuDeepSeekV4Model as DeepSeekV4Model,
+            )
+        else:
+            from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 
         self.py_model = DeepSeekV4Model(
             self.model_config,
@@ -999,6 +1066,12 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
                 identity,
             ),
         ]
+        if _is_ppu_flash(self.model_config):
+            # Quantized projections already own these scale bytes.
+            weights = [
+                w for w in weights
+                if w.name not in (W.v4_mtp_e_proj_s, W.v4_mtp_h_proj_s)
+            ]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
@@ -1014,9 +1087,12 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         return config
 
     def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import (
-            DeepSeekV4MtpModel,
-        )
+        if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.model_desc.deepseek_v4_ppu.mtp_model import (
+                PpuDeepSeekV4MtpModel as DeepSeekV4MtpModel,
+            )
+        else:
+            from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import DeepSeekV4MtpModel
 
         self.py_model = DeepSeekV4MtpModel(
             self.model_config,

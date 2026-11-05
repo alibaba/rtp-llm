@@ -31,7 +31,7 @@ mode reads tensors from `mw.global_weights[W.*]` and
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 
@@ -43,7 +43,9 @@ from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
 )
 from rtp_llm.models_py.modules.dsv41.chunk_env import (
     DSV4_CHUNK_TOKENS_ENV,
+    chunked_moe_enabled,
     dsv4_global_chunk_tokens_configured,
+    moe_chunk_tokens_from_env,
 )
 from rtp_llm.models_py.modules.dsv41.decode.forward import (
     build_paged_pool_specs,
@@ -51,15 +53,13 @@ from rtp_llm.models_py.modules.dsv41.decode.forward import (
     forward_decode,
 )
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
-from rtp_llm.models_py.modules.dsv41.moe.moe_layer import (
-    chunked_moe_enabled,
-    cp_padded_batch_tokens_per_rank_bound,
-    cp_padded_tokens_per_rank_bound,
-    moe_chunk_tokens_from_env,
-    resolve_moe_max_tokens_per_rank,
-)
 from rtp_llm.models_py.modules.dsv41.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv41.transformer import V4Args, V4Transformer
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    cp_padded_batch_tokens_per_rank_bound,
+    cp_padded_tokens_per_rank_bound,
+    resolve_moe_max_tokens_per_rank,
+)
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
@@ -217,13 +217,18 @@ class Dsv4SharedRuntimeBufferStore:
 
 
 def _args_from_model_config(
-    model_config: ModelConfig, max_generate_batch_size: int = 4
+    model_config: ModelConfig,
+    max_generate_batch_size: int = 4,
+    moe_config=None,
 ) -> V4Args:
     from rtp_llm.ops import KvCacheDataType, RoleType
 
     attn_config = model_config.attn_config
     rope_config = attn_config.rope_config
     fp8_kv_cache = attn_config.kv_cache_dtype == KvCacheDataType.FP8
+    moe_strategy = (
+        str(getattr(moe_config, "moe_strategy", "auto") or "auto").strip() or "auto"
+    )
     return V4Args(
         vocab_size=model_config.vocab_size,
         dim=model_config.hidden_size,
@@ -251,6 +256,7 @@ def _args_from_model_config(
         moe_inter_dim=int(model_config.moe_inter_size),
         n_routed_experts=model_config.expert_num,
         n_shared_experts=int(model_config.n_shared_experts),
+        moe_strategy=moe_strategy,
         n_activated_experts=model_config.moe_k,
         score_func={0: "softmax", 1: "sigmoid", 2: "sqrtsoftplus"}[
             model_config.scoring_func
@@ -294,7 +300,9 @@ class DeepSeekV4Model(GptModelBase):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
-        args = _args_from_model_config(model_config, max_generate_batch_size)
+        args = _args_from_model_config(
+            model_config, max_generate_batch_size, moe_config=moe_config
+        )
         self._max_generate_batch_size = int(max_generate_batch_size)
         self._gen_num_per_cycle = int(model_config.gen_num_per_cycle)
         self._capture_aux_hidden_layer_ids = tuple(
@@ -608,6 +616,8 @@ class DeepSeekV4Model(GptModelBase):
             is_decode_role=self._is_decode_role,
             is_speculative=self._is_speculative,
             gen_num_per_cycle=self._gen_num_per_cycle,
+            chunking_enabled=chunked_moe_enabled(),
+            chunk_tokens=moe_chunk_tokens_from_env(),
         )
         if runtime_resolved_max_tokens_per_rank != self._v4_args.max_tokens_per_rank:
             chunk_tokens_env_for_log = (
@@ -768,11 +778,15 @@ class DeepSeekV4Model(GptModelBase):
             try:
                 import torch.distributed as _dist
 
-                _strategy = self.v4.layers[0].ffn._strategy
-                if getattr(_strategy, "name", "") in ("mega", "mega_se"):
+                _moe_layer = self.v4.layers[0].ffn
+                if getattr(_moe_layer, "strategy_name", None) in (
+                    "mega_moe",
+                    "mega_moe_se",
+                ):
+                    _executor = _moe_layer.fused_moe.fused_experts
                     if _dist.is_available() and _dist.is_initialized():
                         _dist.barrier()
-                    _cfg = _strategy.cfg
+                    _cfg = _executor.cfg
                     _x_moe = _torch.zeros(
                         (1, int(_cfg.dim)), dtype=_torch.bfloat16, device=device_str
                     )
@@ -794,7 +808,7 @@ class DeepSeekV4Model(GptModelBase):
                         + _start
                     )
                     _idx_moe = _idx_vals.unsqueeze(0).contiguous()
-                    _strategy(_x_moe, _w_moe, _idx_moe)
+                    _executor(_x_moe, _w_moe, _idx_moe)
                     _torch.cuda.synchronize()
                     if _dist.is_available() and _dist.is_initialized():
                         _dist.barrier()

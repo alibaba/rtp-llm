@@ -11,13 +11,23 @@ from __future__ import annotations
 import logging
 import math
 import os
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
+
+import torch
 
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def mega_moe_jit_warmup_enabled() -> bool:
     return model_warm_up_enabled()
+
+
+def resolve_mega_num_sms(deep_gemm, device=None) -> int:
+    """New DeepGEMM uses zero to request all available device SMs."""
+    num_sms = int(deep_gemm.get_num_sms())
+    if num_sms <= 0:
+        num_sms = int(torch.cuda.get_device_properties(device).multi_processor_count)
+    return num_sms
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -113,6 +123,7 @@ def generate_mega_moe_jit_token_counts(
     num_sms: int,
     max_tokens_per_rank: int,
     include_cap: bool = False,
+    block_m_resolver: Callable[[int], int] | None = None,
 ) -> list[int]:
     """Return one token count per reachable MegaMoE heuristic bucket.
 
@@ -124,15 +135,19 @@ def generate_mega_moe_jit_token_counts(
     production full-chunk shape.  When chunking is disabled, keep the bucket
     start to avoid warming a very large long-context token count that compiles
     the same kernel as a smaller representative.
+
+    ``block_m_resolver`` lets newer DeepGEMM builds own the dispatch policy:
+    all request-dependent template arguments then derive from ``block_m``, so a
+    single probe replaces the versioned heuristics below.
     """
     max_tokens = max(int(max_tokens_per_rank), 0)
     if max_tokens == 0:
         return []
 
-    reps: list[int] = []
-    last_signature: tuple[int, int, int] | None = None
-    for num_tokens in range(1, max_tokens + 1):
-        signature = mega_moe_config_signature(
+    def signature_for(num_tokens: int):
+        if block_m_resolver is not None:
+            return (int(block_m_resolver(num_tokens)),)
+        return mega_moe_config_signature(
             num_ranks=num_ranks,
             num_experts=num_experts,
             num_experts_per_rank=num_experts_per_rank,
@@ -141,29 +156,18 @@ def generate_mega_moe_jit_token_counts(
             intermediate_hidden=intermediate_hidden,
             num_sms=num_sms,
         )
+
+    reps: list[int] = []
+    last_signature: tuple[int, ...] | None = None
+    for num_tokens in range(1, max_tokens + 1):
+        signature = signature_for(num_tokens)
         if signature != last_signature:
             reps.append(num_tokens)
             last_signature = signature
 
     if reps and include_cap:
-        cap_signature = mega_moe_config_signature(
-            num_ranks=num_ranks,
-            num_experts=num_experts,
-            num_experts_per_rank=num_experts_per_rank,
-            num_tokens=max_tokens,
-            num_topk=num_topk,
-            intermediate_hidden=intermediate_hidden,
-            num_sms=num_sms,
-        )
-        last_rep_signature = mega_moe_config_signature(
-            num_ranks=num_ranks,
-            num_experts=num_experts,
-            num_experts_per_rank=num_experts_per_rank,
-            num_tokens=reps[-1],
-            num_topk=num_topk,
-            intermediate_hidden=intermediate_hidden,
-            num_sms=num_sms,
-        )
+        cap_signature = signature_for(max_tokens)
+        last_rep_signature = signature_for(reps[-1])
         if cap_signature == last_rep_signature:
             reps[-1] = max_tokens
     return reps

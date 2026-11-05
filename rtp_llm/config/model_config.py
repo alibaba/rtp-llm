@@ -322,13 +322,29 @@ class ModelConfig(CppModelConfig):
         expert_param_bytes = layer_param_bytes
         expert_weight_dtype = (self.expert_weight_dtype or "").strip().lower()
         if expert_weight_dtype:
-            if expert_weight_dtype in ("fp4", "int4", "nf4"):
+            # Checkpoints spell the narrow-expert dtype several ways ("fp4",
+            # "fp4_e2m1", "float4_e2m1fn", "nvfp4", "uint8", ...).  Normalize
+            # by family instead of exact match, and price an unrecognized
+            # spelling at the model-wide width -- what an uninterpreted
+            # declaration already meant before this field existed -- instead
+            # of failing startup before the weights load.
+            four_bit = (
+                expert_weight_dtype in ("fp4", "int4", "nf4")
+                or "fp4" in expert_weight_dtype
+                or "e2m1" in expert_weight_dtype
+            )
+            eight_bit = (
+                expert_weight_dtype in ("fp8", "int8")
+                or "fp8" in expert_weight_dtype
+                or "e4m3" in expert_weight_dtype
+            )
+            if four_bit:
                 expert_param_bytes = 0.54
-            elif expert_weight_dtype not in ("fp8", "int8"):
-                raise ValueError(
-                    f"expert_weight_dtype {self.expert_weight_dtype!r} is not a "
-                    "supported routed-expert storage dtype; expected 'fp4'/'int4' "
-                    "(narrow experts) or 'fp8'/'int8' (model-wide width)"
+            elif not eight_bit:
+                logging.warning(
+                    "expert_weight_dtype %r is not a recognized routed-expert "
+                    "storage dtype; pricing experts at the model-wide width",
+                    self.expert_weight_dtype,
                 )
 
         # The complementary scope: expert-only quantization keeps the dense

@@ -8,8 +8,13 @@ from typing import Callable, Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.kernels.cuda.quant_layouts import FP8_BLOCK
 from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import Gate
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.quantized_linear import (
+    MXFP8_BLOCK,
+    is_mxfp8_scale,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
     W13SharedExpert,
     combine_routed_and_shared,
@@ -52,6 +57,8 @@ class Fp8Fp4MoeRuntimeConfig:
         route_scale: float = 1.0,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        shared_fp8_block_size: int = FP8_BLOCK,
+        is_decode_role: bool = False,
     ) -> None:
         if expert_num % max(ep_size, 1) != 0:
             raise ValueError(
@@ -90,6 +97,15 @@ class Fp8Fp4MoeRuntimeConfig:
         self.warmup_include_capacity = bool(warmup_include_capacity)
         self.route_scale = float(route_scale)
         self.swiglu_limit = float(swiglu_limit)
+        # Standalone shared experts are quantized either per 128 or per 32
+        # activations; fused shared-expert strategies read this to pick their
+        # shared recipe.
+        if shared_fp8_block_size not in {FP8_BLOCK, MXFP8_BLOCK}:
+            raise ValueError(
+                f"unsupported shared FP8 block size {shared_fp8_block_size}"
+            )
+        self.shared_fp8_block_size = int(shared_fp8_block_size)
+        self.is_decode_role = bool(is_decode_role)
         self.ep_size = int(ep_size)
         self.ep_rank = int(ep_rank)
         self.n_local_experts = self.physical_expert_num // max(self.ep_size, 1)
@@ -149,6 +165,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         warmup_include_capacity: bool = False,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        is_decode_role: bool = False,
     ) -> None:
         super().__init__()
         if n_shared_experts < 0:
@@ -159,6 +176,15 @@ class Fp8Fp4MoeLayer(nn.Module):
         self.dim = int(dim)
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self.n_shared_experts = int(n_shared_experts)
+        shared_w13 = layer_weights.get(W.ffn_w13)
+        shared_s13 = layer_weights.get(W.ffn_s13)
+        shared_fp8_block_size = (
+            MXFP8_BLOCK
+            if shared_w13 is not None
+            and shared_s13 is not None
+            and is_mxfp8_scale(shared_w13, shared_s13)
+            else FP8_BLOCK
+        )
         self.gate = Gate(
             layer_id,
             dim,
@@ -190,6 +216,8 @@ class Fp8Fp4MoeLayer(nn.Module):
             route_scale=route_scale,
             moe_w1_layout=moe_w1_layout,
             physical_expert_num=physical_expert_num,
+            shared_fp8_block_size=shared_fp8_block_size,
+            is_decode_role=is_decode_role,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(
             runtime_config, layer_weights
@@ -224,6 +252,7 @@ class Fp8Fp4MoeLayer(nn.Module):
                 dim=dim,
                 inter_dim=shared_inter_dim,
                 swiglu_limit=swiglu_limit,
+                native_mxfp8=shared_fp8_block_size == MXFP8_BLOCK,
             )
             self._shared_executor.prepare(self.shared_experts)
 

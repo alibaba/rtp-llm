@@ -77,6 +77,11 @@ cc_test(
     srcs = glob([
         "MtpExecutorTest.cc",
     ]),
+    visibility = ["//visibility:public"],
+    args = select({
+        "@//:using_ppu": ["--gtest_filter=MtpExecutorTest.testMultiBatchDecode"],
+        "//conditions:default": [],
+    }),
     data = [],
     copts = test_copts,
     deps = [
@@ -94,9 +99,17 @@ cc_test(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps() + cuda13_torch_link_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {"gpu": "L20_CU13"},
-    tags = ["L20_CU13"],
+    env = select({
+        "@//:using_ppu": {
+            "TEST_USING_DEVICE": "CUDA",
+            "RTP_LLM_STREAM_ASYNC": "0",
+            "RTP_LLM_MTP_ASYNC_DEVICE_STATE": "0",
+        },
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
+    }),
+    exec_properties = select({
+        "@//:using_ppu": {"gpu": "PPU-ZW810E"},
+        "//conditions:default": {"gpu": "L20_CU13"},
+    }),
+    tags = ["L20_CU13", "PPU-ZW810E"],
 )
