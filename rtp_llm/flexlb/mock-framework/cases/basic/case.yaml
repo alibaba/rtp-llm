@@ -57,4 +57,3 @@ phases:
             outcomes: {success: 20, error: 0, timeout: 0, cancelled: 0}
             records: []
             truncated: true
-view: ../../views/default.json
