@@ -100,6 +100,7 @@ cc_library(
         "//rtp_llm/cpp/model_utils:model_utils",
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/models_py/bindings:op_defs",
+        "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:stack_trace",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
     ],

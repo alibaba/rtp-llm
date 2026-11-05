@@ -5,6 +5,13 @@ package(default_visibility = ["//:__subpackages__"])
 
 
 
+cc_library(
+    name = "serving_device_health",
+    hdrs = ["ServingDeviceHealth.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # KVCache utilities - simple inline functions, no external dependencies
 cc_library(
     name = "kv_cache_utils",

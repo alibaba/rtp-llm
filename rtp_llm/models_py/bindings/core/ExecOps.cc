@@ -134,23 +134,33 @@ void runtimeSyncAndCheck() {
 // Events
 // ============================================================
 
+namespace {
+std::shared_ptr<torch::Event> allocateRuntimeEvent() {
 #if USING_CUDA
+    return std::make_shared<torch::Event>(torch::kCUDA);
+#else
+    return std::make_shared<torch::Event>(torch::kHIP);
+#endif
+}
+
+void recordRuntimeEvent(torch::Event& event) {
+#if USING_CUDA
+    event.record(at::cuda::getCurrentCUDAStream());
+#else
+    event.record(at::hip::getCurrentHIPStream(at::hip::current_device()));
+#endif
+}
+}  // namespace
 
 std::shared_ptr<torch::Event> runtimeCreateEvent() {
-    auto event = std::make_shared<torch::Event>(torch::kCUDA);
-    event->record(at::cuda::getCurrentCUDAStream());
+    auto event = allocateRuntimeEvent();
+    recordRuntimeEvent(*event);
     return event;
 }
 
-#else  // ROCm
-
-std::shared_ptr<torch::Event> runtimeCreateEvent() {
-    auto event = std::make_shared<torch::Event>(torch::kHIP);
-    event->record(at::hip::getCurrentHIPStream(at::hip::current_device()));
-    return event;
+std::shared_ptr<torch::Event> runtimeTryCreateEvent() {
+    return detail::tryCreateRecordedEvent(allocateRuntimeEvent, recordRuntimeEvent);
 }
-
-#endif  // USING_CUDA
 
 // ============================================================
 // CacheStore (cache_store passed explicitly from CacheStoreAsyncWriter)
@@ -779,8 +789,8 @@ std::unique_ptr<P2PWork> runP2PCallback(const torch::Tensor& tensor,
 }  // anonymous namespace
 
 void execBroadcast(const BroadcastParams& params) {
-    py::function           fn;
     py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         if (g_broadcast_fn != nullptr) {
@@ -826,8 +836,8 @@ bool isCpuTpBroadcasterInitialized() {
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
-    py::function           fn;
     py::gil_scoped_acquire gil;
+    py::function           fn;
     {
         std::lock_guard<std::mutex> lock(g_comm_mutex);
         if (g_allreduce_fn != nullptr) {

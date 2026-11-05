@@ -87,9 +87,8 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                                                     const std::optional<SpeculativeExecutionConfig>& sp_config,
                                                     size_t transfer_memory_bytes) {
     if (kv_cache_config.kv_cache_mem_mb > 0) {
-        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",
-                         kv_cache_config.kv_cache_mem_mb);
-        return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
+        return getKVCacheMemorySizeForBudget(
+            runtime_config, kv_cache_config, model_config, parallelism_config, 0, 0, warm_up_result);
     }
 
     const auto remaining_bytes = availableCacheMemory(
@@ -106,18 +105,15 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
     return kv_cache_mem_size;
 }
 
-size_t MemoryEvaluationHelper::availableCacheMemory(const RuntimeConfig&                             runtime_config,
-                                                    const ModelConfig&                               model_config,
-                                                    const ParallelismConfig&                         parallelism_config,
-                                                    const std::optional<WarmUpResult>&               warm_up_result,
-                                                    const std::optional<SpeculativeExecutionConfig>& sp_config,
-                                                    const KVCacheConfig*                             kv_cache_config) {
-    size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
-    size_t runtime_required_bytes       = 0;
-
-    size_t env_runtime_required_bytes = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(
-        runtime_config, parallelism_config, model_config, sp_config);
-
+// CRC planning needs the available budget even when the requested KV size is explicit.
+static size_t availableCacheMemoryForBudget(const RuntimeConfig&               runtime_config,
+                                            const KVCacheConfig*               kv_cache_config,
+                                            const ModelConfig&                 model_config,
+                                            const ParallelismConfig&           parallelism_config,
+                                            size_t                             device_reserved_memory_bytes,
+                                            size_t                             env_runtime_required_bytes,
+                                            const std::optional<WarmUpResult>& warm_up_result) {
+    size_t runtime_required_bytes = 0;
     if (warm_up_result) {
         if (device_reserved_memory_bytes != warm_up_result->device_reserved_bytes) {
             RTP_LLM_LOG_WARNING("device reserved memory bytes %ld when create config does not equal to "
@@ -168,10 +164,21 @@ size_t MemoryEvaluationHelper::availableCacheMemory(const RuntimeConfig&        
                      runtime_required_bytes / 1024 / 1024);
     runtime_required_bytes = std::max(sample_need_mem, runtime_required_bytes);
 
+    // Match target-role selection, publisher ownership and stream chunking without a cache -> engine dependency.
+    // Python canonical-hook capability is validated later; has_post_decoder_layernorm is not that capability.
+    const bool capture_owner = !model_config.hidden_state_capture_layer_ids.empty()
+                               && (parallelism_config.role_type == RoleType::PREFILL
+                                   || parallelism_config.role_type == RoleType::PDFUSION)
+                               && parallelism_config.tp_rank == 0 && parallelism_config.pp_size == 1
+                               && runtime_config.fifo_scheduler_config.prefill_chunk_size <= 0;
+    const size_t capture_headroom_bytes = capture_owner && model_config.hidden_state_capture_max_inflight_bytes > 0 ?
+        static_cast<size_t>(model_config.hidden_state_capture_max_inflight_bytes) : 0;
     RTP_LLM_CHECK_WITH_INFO(device_reserved_memory_bytes > runtime_required_bytes,
-                            "device reserved memory %ld  MiB is less than runtime required memory %ld MiB",
+                            "device reserved memory %zu MiB must exceed runtime required memory %zu MiB before "
+                            "reserving capture logical headroom %zu MiB",
                             device_reserved_memory_bytes / 1024 / 1024,
-                            runtime_required_bytes / 1024 / 1024);
+                            runtime_required_bytes / 1024 / 1024,
+                            capture_headroom_bytes / 1024 / 1024);
 
     size_t available_cache_bytes = device_reserved_memory_bytes - runtime_required_bytes;
     // Crediting initialize() growth only offsets runtime reserve already spent; whenever
@@ -192,7 +199,58 @@ size_t MemoryEvaluationHelper::availableCacheMemory(const RuntimeConfig&        
             available_cache_bytes = physical_cap;
         }
     }
-    return available_cache_bytes;
+    // This logical quota is additional to runtime and must survive the physical clamp.
+    if (capture_headroom_bytes > 0) {
+        RTP_LLM_LOG_INFO("capture logical headroom %zu MiB is additional to runtime memory %zu MiB",
+                         capture_headroom_bytes / 1024 / 1024,
+                         runtime_required_bytes / 1024 / 1024);
+        RTP_LLM_CHECK_WITH_INFO(available_cache_bytes > capture_headroom_bytes,
+                                "available cache memory %zu bytes must exceed capture logical headroom %zu bytes",
+                                available_cache_bytes,
+                                capture_headroom_bytes);
+    }
+    return available_cache_bytes - capture_headroom_bytes;
+}
+
+size_t MemoryEvaluationHelper::availableCacheMemory(const RuntimeConfig&                             runtime_config,
+                                                    const ModelConfig&                               model_config,
+                                                    const ParallelismConfig&                         parallelism_config,
+                                                    const std::optional<WarmUpResult>&               warm_up_result,
+                                                    const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                                    const KVCacheConfig*                             kv_cache_config) {
+    size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
+    size_t env_runtime_required_bytes = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(
+        runtime_config, parallelism_config, model_config, sp_config);
+    return availableCacheMemoryForBudget(runtime_config,
+                                         kv_cache_config,
+                                         model_config,
+                                         parallelism_config,
+                                         device_reserved_memory_bytes,
+                                         env_runtime_required_bytes,
+                                         warm_up_result);
+}
+
+size_t MemoryEvaluationHelper::getKVCacheMemorySizeForBudget(
+    const RuntimeConfig&               runtime_config,
+    const KVCacheConfig&               kv_cache_config,
+    const ModelConfig&                 model_config,
+    const ParallelismConfig&           parallelism_config,
+    size_t                             device_reserved_memory_bytes,
+    size_t                             env_runtime_required_bytes,
+    const std::optional<WarmUpResult>& warm_up_result) {
+    if (kv_cache_config.kv_cache_mem_mb > 0) {
+        // Explicit KV sizing leaves runtime and capture headroom to the caller.
+        RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",
+                         kv_cache_config.kv_cache_mem_mb);
+        return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
+    }
+    return availableCacheMemoryForBudget(runtime_config,
+                                         &kv_cache_config,
+                                         model_config,
+                                         parallelism_config,
+                                         device_reserved_memory_bytes,
+                                         env_runtime_required_bytes,
+                                         warm_up_result);
 }
 
 }  // namespace rtp_llm

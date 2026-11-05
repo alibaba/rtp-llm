@@ -28,6 +28,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputPB,
     MultimodalInputsPB,
     RoleAddrPB,
+    TensorPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
     MultimodalRpcServiceStub,
@@ -572,13 +573,43 @@ class StreamState:
         self.prefill_aux_info_observed = False
 
 
+_TENSOR_PAYLOAD_FIELDS = tuple(
+    (dtype, f"{name.lower()}_data") for name, dtype in TensorPB.DataType.items()
+)
+
+
 def _validate_prefill_only_response(
     input_py: GenerateInput, outputs_pb: GenerateOutputsPB, stream_state: StreamState
 ) -> None:
     if not input_py.generate_config.is_prefill_only():
         return
 
-    aux_infos = outputs_pb.flatten_output.aux_info
+    output_pb = outputs_pb.flatten_output
+    if output_pb.HasField("output_ids"):
+        # Validate raw tensors before trans_output skips scalar/empty frames.
+        # Reuse normal tensor decoding, including the legacy empty sentinel.
+        tensor = output_pb.output_ids
+        try:
+            # trans_tensor only reads the payload selected by data_type.
+            for dtype, field in _TENSOR_PAYLOAD_FIELDS:
+                if tensor.data_type != dtype and getattr(tensor, field):
+                    raise ValueError(f"unexpected non-empty {field} for data_type={tensor.data_type}")
+            token_count = trans_tensor(tensor).numel()
+            violation = f"output_ids contains {token_count} tokens" if token_count else None
+        except (ValueError, RuntimeError) as error:
+            violation = f"invalid output_ids: {error}"
+        if violation is not None:
+            logger.error(
+                "prefill-only response contract violation: request_id=%s, %s",
+                input_py.request_id,
+                violation,
+            )
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                f"prefill-only request [{input_py.request_id}] received {violation}",
+            )
+
+    aux_infos = output_pb.aux_info
     if not aux_infos:
         return
 
@@ -851,6 +882,9 @@ def trans_input(input_py: GenerateInput):
     )
     generate_config_pb.return_all_hidden_states = (
         input_py.generate_config.return_all_hidden_states
+    )
+    generate_config_pb.capture_hidden_states = (
+        input_py.generate_config.capture_hidden_states
     )
     generate_config_pb.hidden_states_cut_dim = (
         input_py.generate_config.hidden_states_cut_dim
@@ -1624,7 +1658,7 @@ class ModelRpcClient(object):
         code = error.error_code
         if code == 0:
             code = ExceptionType.UNKNOWN_ERROR.value
-        elif 0 < code <= 27:
+        elif 0 < code <= ErrorCodePB.HIDDEN_STATE_CAPTURE_BACKPRESSURE:
             names = {
                 "MALLOC_FAILED": "MALLOC_ERROR",
                 "P2P_CONNECTOR_WORKER_READ_CANCELED": "P2P_CONNECTOR_WORKER_READ_CANCELLED",
@@ -1787,9 +1821,13 @@ class ModelRpcClient(object):
                     break
                 if response.error_info.error_code or response.error_info.error_message:
                     self._raise_pb_error(response.error_info, f"request={input_pb.request_id}")
+                if response.frontend_metric_only:
+                    # Progress frames cannot complete generation, even if they carry finished bits.
+                    if input_py.generate_config.frontend_metric_streaming:
+                        yield trans_output(input_py, response, stream_state, response_role_addrs=response_role_addrs)
+                    continue
                 output_py = trans_output(input_py, response, stream_state, response_role_addrs=response_role_addrs)
-                if not output_py.frontend_metric_only:
-                    last_output = output_py
+                last_output = output_py
                 if _is_finished_response(response):
                     terminal_seen = True
                 if terminal_seen:
@@ -1991,9 +2029,20 @@ class ModelRpcClient(object):
                 response_iterator.cancel()
 
     async def batch_generate(
-        self, inputs: list[GenerateInput], *, allow_partial: bool = False
+        self,
+        inputs: list[GenerateInput],
+        *,
+        allow_partial: bool = False,
+        preserve_capture_backpressure: bool = False,
     ) -> list[GenerateOutputs | FtRuntimeException]:
-        """Return results in input order, optionally preserving per-item RPC errors."""
+        """Return results in input order; by default any failure raises.
+
+        allow_partial preserves all item errors. preserve_capture_backpressure
+        preserves only a strict zero-token capture's pre-admission rejection.
+        Neither mode returns partial results on transport or conversion failure.
+        """
+        if allow_partial and preserve_capture_backpressure:
+            raise FtRuntimeException(ExceptionType.INVALID_PARAMS, "batch error modes are mutually exclusive")
         if not inputs:
             return []
         selected_targets = [self._get_explicit_target(inp) for inp in inputs]
@@ -2081,6 +2130,21 @@ class ModelRpcClient(object):
                 span, item_metadata = start_batch_item_span(inp.request_id, i)
                 item_spans.append(span)
                 input_pb = trans_input(inp)
+                if preserve_capture_backpressure:
+                    config_pb = input_pb.generate_config
+                    if not (
+                        config_pb.max_new_tokens == 0
+                        and config_pb.prefill_only
+                        and config_pb.capture_hidden_states
+                        and not config_pb.reuse_cache
+                    ):
+                        raise FtRuntimeException(
+                            ExceptionType.INVALID_PARAMS,
+                            "preserve_capture_backpressure requires every input to "
+                            "use effective max_new_tokens == 0, "
+                            "capture_hidden_states=True, and reuse_cache=False "
+                            f"(invalid batch item {i})",
+                        )
                 if input_pb.multimodal_inputs:
                     await self._wait_greennet_verdict(inp, input_pb)
                 if selected_roles[i] == RoleType.PREFILL:
@@ -2154,11 +2218,19 @@ class ModelRpcClient(object):
                             exception_type,
                             f"batch item {i} failed: {self._client_backend_message(exception_type, error_message)}",
                         )
-                        if not allow_partial:
-                            raise item_error
-                        results.append(item_error)
-                        continue
+                        if allow_partial or (
+                            preserve_capture_backpressure
+                            and error.error_code == ErrorCodePB.HIDDEN_STATE_CAPTURE_BACKPRESSURE
+                        ):
+                            results.append(item_error)
+                            continue
+                        raise item_error
                     conversion_index = i
+                    if result_pb.final_output.frontend_metric_only:
+                        raise FtRuntimeException(
+                            ExceptionType.EXECUTION_EXCEPTION,
+                            f"batch item {i} returned a metric-only frame as final_output",
+                        )
                     stream_state = StreamState()
                     output = trans_output(
                         batch_inputs[i], result_pb.final_output, stream_state,

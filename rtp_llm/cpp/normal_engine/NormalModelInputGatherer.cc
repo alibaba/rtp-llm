@@ -1059,7 +1059,41 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
 
     auto model_input                  = allocateModelInputBuffers(stream_groups);
     model_input.skip_lm_head          = prefill_only;
-    model_input.capture_hidden_states = prefill_only;
+    const bool pure_context  = stream_groups.totalDecodeBatchSize() == 0 && stream_groups.totalContextBatchSize() > 0;
+
+    // Decide once before TP sync, using every packed row, including an admitted peer whose RPC was
+    // cancelled. The scheduled batch owns the streams through forward; RPC does not revoke their tokens.
+    // Errored rows do not select skip_lm_head above, but must still fit the selected mode for capture.
+    model_input.capture_hidden_states =
+        config_.enable_hidden_state_capture && pure_context && !mixed_execution_modes && !model_input.is_fake_stream
+        && std::all_of(context_streams.begin(), context_streams.end(), [prefill_only](const auto& stream) {
+               return isPrefillOnly(stream) == prefill_only && stream->canExecuteReservedHiddenStateCapture();
+           });
+    if (!model_input.capture_hidden_states) {
+        int64_t cancelled_requests = 0;
+        const bool report_cancellation = config_.capture_metrics_reporter && config_.enable_hidden_state_capture
+                                         && !config_.warm_up && !model_input.is_fake_stream;
+        for (const auto& stream : context_streams) {
+            // Count before cancelHiddenStateCapture consumes the reservation. Missing
+            // reservations were rejected earlier; never recount them at this layer.
+            if (report_cancellation && stream->hasHiddenStateCaptureReservation()) {
+                ++cancelled_requests;
+            }
+            if (stream->generateConfig()->requiresHiddenStateCaptureAdmission() && !stream->hasError()) {
+                // Preserve batch geometry and TP collective order, but never report
+                // successful required prefill when this gather suppresses capture.
+                stream->reportError(ErrorCode::EXECUTION_EXCEPTION,
+                                    "required hidden-state capture was disabled by the gathered batch");
+            }
+            stream->cancelHiddenStateCapture();
+        }
+        if (cancelled_requests > 0) {
+            RtpLLMHiddenStateCaptureMetricsCollector collector;
+            collector.batch_cancelled_requests = cancelled_requests;
+            config_.capture_metrics_reporter
+                ->report<RtpLLMHiddenStateCaptureMetrics, RtpLLMHiddenStateCaptureMetricsCollector>(nullptr, &collector);
+        }
+    }
     if (record_lengths) {
         model_input.record_lengths.emplace();
         model_input.record_lengths->q_tokens.resize(stream_groups.totalModelBatchSize(), -1);

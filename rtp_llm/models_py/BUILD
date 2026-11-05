@@ -6,6 +6,15 @@ exports_files(
     visibility = ["//rtp_llm/models_py/modules/factory/linear/test:__pkg__"],
 )
 
+filegroup(
+    name = "hidden_state_capture_sources",
+    srcs = [
+        "model_desc/hidden_state_capture.py",
+        "utils/profiler.py",
+    ],
+    visibility = ["//rtp_llm/cpp/models/test:__pkg__"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([

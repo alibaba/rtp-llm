@@ -24,7 +24,8 @@ public:
 
     size_t handleOutputs(torch::Tensor&                            hidden_states,
                          const GptModelInputs&                     inputs,
-                         const torch_ext::PyContextParallelParams& cp_params) override;
+                         const torch_ext::PyContextParallelParams& cp_params,
+                         LocalOutputStage                          stage = {}) override;
 
     void handleOutputsLastHidden(torch::Tensor&                            hidden_states,
                                  const GptModelInputs&                     inputs,

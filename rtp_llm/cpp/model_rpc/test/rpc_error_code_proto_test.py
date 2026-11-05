@@ -51,6 +51,7 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
         for wire_id, expected in (
             (26, ErrorCodePB.INVALID_PARAMS),
             (27, ErrorCodePB.EXECUTION_EXCEPTION),
+            (28, ErrorCodePB.HIDDEN_STATE_CAPTURE_BACKPRESSURE),
         ):
             with self.subTest(wire_id=wire_id):
                 # These bytes are independent of the generated enum values.
@@ -91,6 +92,42 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
                     self.assertEqual(parsed.enable_disk_cache, disk_cache)
                     self.assertEqual(parsed.prefill_only, prefill_only)
                     self.assertEqual(parsed.max_new_tokens, 0)
+
+    def test_capture_hidden_states_has_an_independent_opt_in_wire_field(self):
+        fields = GenerateConfigPB.DESCRIPTOR.fields_by_name
+        self.assertNotIn("export_hidden_states", fields)
+        field = fields["capture_hidden_states"]
+        self.assertEqual(fields["logits_index"].number, 78)
+        self.assertEqual(fields["logits_index"].message_type.full_name, "google.protobuf.Int32Value")
+        self.assertEqual(fields["top_logprobs"].number, 79)
+        self.assertEqual(fields["top_logprobs"].type, FieldDescriptor.TYPE_UINT32)
+        self.assertEqual(fields["return_logprobs"].number, 80)
+        self.assertEqual(field.number, 81)
+        self.assertEqual(field.type, FieldDescriptor.TYPE_BOOL)
+        self.assertFalse(GenerateConfigPB().capture_hidden_states)
+        self.assertEqual(
+            GenerateConfigPB(capture_hidden_states=True).SerializeToString(),
+            b"\x88\x05\x01",
+        )
+        for max_new_tokens, top_logprobs in ((0, 0), (7, 5)):
+            for enabled in (False, True):
+                with self.subTest(max_new_tokens=max_new_tokens, enabled=enabled):
+                    config = GenerateConfigPB(
+                        max_new_tokens=max_new_tokens,
+                        prefill_only=max_new_tokens == 0,
+                        capture_hidden_states=enabled,
+                        top_logprobs=top_logprobs,
+                    )
+                    config.logits_index.value = 0
+                    parsed = GenerateConfigPB.FromString(config.SerializeToString())
+                    self.assertTrue(parsed.HasField("logits_index"))
+                    self.assertEqual(parsed.logits_index.value, 0)
+                    self.assertEqual(parsed.capture_hidden_states, enabled)
+                    self.assertEqual(parsed.top_logprobs, top_logprobs)
+                    self.assertEqual(parsed.max_new_tokens, max_new_tokens)
+                    self.assertEqual(parsed.prefill_only, max_new_tokens == 0)
+                    self.assertFalse(parsed.return_hidden_states)
+                    self.assertFalse(parsed.return_all_hidden_states)
 
     def test_prefill_only_disambiguates_plain_max_new_tokens_wire_zero(self):
         max_new_tokens = GenerateConfigPB.DESCRIPTOR.fields_by_name["max_new_tokens"]

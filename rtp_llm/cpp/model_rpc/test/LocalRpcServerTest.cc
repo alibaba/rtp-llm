@@ -49,6 +49,7 @@ public:
 
 class TestLocalRpcServer: public LocalRpcServer {
 public:
+    using LocalRpcServer::serializeErrorMsg;
     grpc::Status poll(std::shared_ptr<GenerateStream>& stream) {
         return pollStreamOutput(nullptr, "request", nullptr, stream);
     }
@@ -217,9 +218,16 @@ public:
     }
 
     KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        ++cache_reads;
         return cache_status;
     }
 
+    ErrorInfo checkHealth() const override {
+        return health;
+    }
+
+    ErrorInfo health;
+    int cache_reads{0};
     std::vector<GenerateStreamPtr> streams;
     KVCacheInfo                    cache_status;
 
@@ -431,6 +439,43 @@ public:
 private:
     LocalRpcServer& server_;
 };
+
+TEST(LocalRpcServerTest, DeviceHealthReachesHealthWorkerAndCacheProbes) {
+    class HealthStatusServer: public TestLocalRpcServer {
+    public:
+        EngineScheduleInfo getEngineScheduleInfo(int64_t) override { return {}; }
+    };
+    for (const bool healthy : {true, false}) {
+        SCOPED_TRACE(healthy);
+        HealthStatusServer server;
+        auto engine = std::make_shared<FailingEngine>(EngineFailureMode::REJECT_ALL);
+        if (!healthy) {
+            engine->health = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device unavailable");
+        }
+        server.setEngineForTest(engine);
+        grpc::ServerContext context;
+        EmptyPB empty;
+        CheckHealthResponsePB health_response;
+        auto health_status = server.CheckHealth(&context, &empty, &health_response);
+        EXPECT_EQ(health_status.ok(), healthy);
+        EXPECT_EQ(health_response.health(), healthy ? "OK" : "UNHEALTHY");
+        if (!healthy) {
+            EXPECT_EQ(health_status.error_code(), grpc::StatusCode::UNAVAILABLE);
+        }
+        StatusVersionPB version;
+        WorkerStatusPB worker;
+        EXPECT_TRUE(server.GetWorkerStatus(&context, &version, &worker).ok());
+        EXPECT_EQ(worker.alive(), healthy);
+        CacheVersionPB cache_version;
+        CacheStatusPB cache;
+        auto cache_status = server.GetCacheStatus(&context, &cache_version, &cache);
+        EXPECT_EQ(cache_status.ok(), healthy);
+        if (!healthy) {
+            EXPECT_EQ(cache_status.error_code(), grpc::StatusCode::UNAVAILABLE);
+        }
+        EXPECT_EQ(engine->cache_reads, healthy ? 2 : 0);
+    }
+}
 
 TEST(LocalRpcServerTest, BatchTraceKeepsPerItemParentsErrorsAndTransportOk) {
     namespace memory = opentelemetry::exporter::memory;
@@ -1104,6 +1149,28 @@ TEST(RpcErrorCodeTest, InvalidParamsUsesDeclaredRpcEnum) {
     EXPECT_EQ(transRPCErrorCode(ErrorCodePB::EXECUTION_EXCEPTION), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_EQ(static_cast<int>(ErrorCodePB::EXECUTION_EXCEPTION), 27);
     EXPECT_EQ(static_cast<int>(ErrorCode::EXECUTION_EXCEPTION), 606);
+}
+
+TEST(RpcErrorCodeTest, CaptureBackpressureRoundTripsDeclaredRpcEnum) {
+    const auto code = ErrorCode::HIDDEN_STATE_CAPTURE_BACKPRESSURE;
+    EXPECT_EQ(static_cast<int>(code), 8107);
+    EXPECT_EQ(static_cast<int>(ErrorCodePB::HIDDEN_STATE_CAPTURE_BACKPRESSURE), 28);
+    EXPECT_EQ(ErrorCodeToString(code), "HIDDEN_STATE_CAPTURE_BACKPRESSURE");
+    EXPECT_EQ(transErrorCodeToRPC(code), ErrorCodePB::HIDDEN_STATE_CAPTURE_BACKPRESSURE);
+    EXPECT_EQ(transRPCErrorCode(transErrorCodeToRPC(code)), code);
+    EXPECT_EQ(transErrorCodeToGrpc(code), grpc::StatusCode::RESOURCE_EXHAUSTED);
+}
+
+TEST(LocalRpcServerTest, CaptureBackpressureSingleGrpcDetailsPreserveNativeCode) {
+    TestLocalRpcServer server;
+    const auto status = server.serializeErrorMsg(
+        "capture", ErrorInfo(ErrorCode::HIDDEN_STATE_CAPTURE_BACKPRESSURE, "capture admission full"));
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), 8107);
+    EXPECT_EQ(details.error_message(), "capture admission full");
 }
 
 TEST(LocalRpcServerTest, UninitializedServerRejectsValidBatchRequests) {

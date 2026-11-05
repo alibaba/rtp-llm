@@ -63,6 +63,22 @@ def _spawn_sleeper(testcase, ignore_sigterm: bool = False) -> subprocess.Popen:
     return child
 
 
+def _pid_still_running(pid: int) -> bool:
+    try:
+        if sys.platform == "linux":
+            try:
+                stat = Path(f"/proc/{pid}/stat").read_bytes()
+            except FileNotFoundError:
+                pass  # Confirm disappearance even if procfs is unavailable.
+            else:
+                # comm can contain spaces and ')'; state follows its final ')'.
+                return stat.rsplit(b")", 1)[1].split()[0] != b"Z"
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def _reaped_pid(testcase) -> int:
     """A pid that is guaranteed not to exist in /proc."""
     child = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -385,6 +401,58 @@ class GpuRealIdleCheckTest(unittest.TestCase):
         resource = _make_resource()
         with patch("rtp_llm.test.utils.device_resource._nvidia_smi", return_value=None):
             self.assertEqual(resource._gpu_group_idle_problems(["0", "1"]), [])
+
+    def test_nvidia_smi_queries_use_60_second_timeout(self):
+        resource = _make_resource()
+        queries = (
+            ("memory", lambda: resource._get_gpu_used_memory_mib("0")),
+            ("compute_apps", lambda: resource._get_gpu_compute_apps("0")),
+            ("pids", lambda: resource._get_gpu_pids("0")),
+            ("topology", resource._get_topology_numa_groups),
+            ("uuid", _log_test_placement),
+        )
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        for name, query in queries:
+            with self.subTest(query=name), patch.dict(
+                os.environ, {"CUDA_VISIBLE_DEVICES": "0"}
+            ), patch(
+                "rtp_llm.test.utils.device_resource._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ), patch(
+                "rtp_llm.test.utils.device_resource.subprocess.run",
+                return_value=completed,
+            ) as run:
+                query()
+                run.assert_called_once()
+                self.assertEqual(run.call_args.kwargs["timeout"], 60)
+
+    def test_nvidia_smi_timeout_never_makes_gpu_idle(self):
+        resource = _make_resource()
+        for failed_query, expected in (
+            ("--query-gpu=memory.used", "memory.used=unknown"),
+            ("--query-compute-apps=", "compute-apps query failed"),
+        ):
+            def query(cmd, **kwargs):
+                self.assertEqual(kwargs["timeout"], 60)
+                if cmd[1].startswith(failed_query):
+                    raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+                stdout = "0\n" if cmd[1] == "--query-gpu=memory.used" else ""
+                return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+            with self.subTest(query=failed_query), patch.dict(
+                os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}
+            ), patch(
+                "rtp_llm.test.utils.device_resource._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ), patch(
+                "rtp_llm.test.utils.device_resource.subprocess.run", side_effect=query
+            ) as run, self.assertLogs(level="WARNING"):
+                problems = resource._gpu_group_idle_problems(["0"])
+            self.assertEqual(len(problems), 1)
+            self.assertIn(expected, problems[0])
+            if failed_query == "--query-compute-apps=":
+                self.assertEqual(run.call_count, 3)
+                self.assertEqual(run.call_args.args[0][1], "--query-compute-apps=pid")
 
     def test_memory_query_parses_nvidia_smi_output(self):
         resource = _make_resource()
@@ -728,6 +796,16 @@ class RuntimeWatchdogTest(unittest.TestCase):
         ):
             self.assertEqual(_run_test_command(), 70)
 
+    @unittest.skipUnless(sys.platform == "linux", "requires Linux procfs")
+    def test_stopped_child_is_alive_but_unreaped_zombie_is_not(self):
+        child = _spawn_sleeper(self)
+        os.kill(child.pid, signal.SIGSTOP)
+        os.waitid(os.P_PID, child.pid, os.WSTOPPED)
+        self.assertTrue(_pid_still_running(child.pid))
+        child.kill()
+        os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+        self.assertFalse(_pid_still_running(child.pid))
+
     def test_watchdog_kills_the_whole_process_group(self):
         # Both levels ignore SIGUSR1, so only the group SIGKILL can stop them:
         # the workers a hung test spawned must not outlive the wrapper.
@@ -754,15 +832,11 @@ class RuntimeWatchdogTest(unittest.TestCase):
             ):
                 self.assertEqual(_run_test_command(), 70)
             grandchild_pid = int(pid_file.read_text())
-            deadline = time.time() + 5
-            while time.time() < deadline:
-                try:
-                    os.kill(grandchild_pid, 0)
-                except ProcessLookupError:
-                    break
+            deadline = time.monotonic() + 5
+            while _pid_still_running(grandchild_pid):
+                if time.monotonic() >= deadline:
+                    self.fail(f"grandchild {grandchild_pid} survived the watchdog")
                 time.sleep(0.1)
-            else:
-                self.fail(f"grandchild {grandchild_pid} survived the watchdog")
 
 
 if __name__ == "__main__":

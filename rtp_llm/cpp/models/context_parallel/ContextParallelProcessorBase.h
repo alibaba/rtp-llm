@@ -1,4 +1,5 @@
 #pragma once
+#include <c10/util/FunctionRef.h>
 #include <memory>
 #include <vector>
 #include <torch/extension.h>
@@ -27,10 +28,14 @@ public:
     /// @brief Prepare context parallel inputs: split and shuffle tokens, compute restore indices and masks.
     void handleInputs(GptModelInputs& model_input, torch_ext::PyContextParallelParams& cp_params);
 
+    // Capture only: run local work and agree on success before the next collective.
+    using LocalOutputStage = c10::function_ref<bool(c10::function_ref<void()>)>;
+
     /// @brief Gather outputs from all CP ranks and restore original token order.
     virtual size_t handleOutputs(torch::Tensor&                            hidden_states,
                                  const GptModelInputs&                     inputs,
-                                 const torch_ext::PyContextParallelParams& cp_params) = 0;
+                                 const torch_ext::PyContextParallelParams& cp_params,
+                                 LocalOutputStage                          stage = {}) = 0;
 
     /// @brief CP exit variant that materializes only the last-token rows lm_head needs.
     ///

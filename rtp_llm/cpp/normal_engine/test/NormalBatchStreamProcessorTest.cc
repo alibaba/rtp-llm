@@ -1,3 +1,7 @@
+#include "kmonitor/client/MetricType.h"
+#include "kmonitor/client/core/MetricsRecord.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -9,6 +13,7 @@
 #include <list>
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -27,6 +32,7 @@
 #define protected public
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -39,6 +45,7 @@
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
@@ -95,6 +102,38 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {
 protected:
+    struct ScopedServingMetrics {
+        ScopedServingMetrics() {
+            startKmonServiceStatus(nullptr);
+            setKmonServiceServing(true);
+        }
+        ~ScopedServingMetrics() {
+            stopKmonServiceStatus();
+        }
+    };
+
+    static double captureMetricValue(const kmonitor::MetricsReporterPtr& reporter,
+                                     kmonitor::MutableMetric* metric,
+                                     bool require_sample = false) {
+        auto  tags  = kmonTagsWithServiceStatus(&reporter->getTags());
+        auto* value = metric->DeclareMetric(&tags);
+        if (!value) {
+            ADD_FAILURE() << "failed to declare capture metric";
+            return 0;
+        }
+        kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+        value->Snapshot(&record, 1000);
+        metric->UndeclareMetric(value);
+        if (require_sample) {
+            EXPECT_FALSE(record.Values().empty());
+        }
+        if (record.Values().empty()) {
+            return 0;
+        }
+        EXPECT_EQ(record.Values().size(), 1u);
+        return std::stod(record.Values().front()->Value());
+    }
+
     static ModelConfig makeLogprobsModelConfig(int vocab_size = 4) {
         ModelConfig model_config;
         model_config.max_seq_len                 = 16;
@@ -281,13 +320,16 @@ TEST_F(NormalBatchStreamProcessorTest, testDispatchWorkersOnlyCreatedOnOutputRan
     }
 }
 
-TEST_P(OutputDispatchTest, testExecutorUsesGatheredModeAndPreservesCaptureErrors) {
+TEST_P(OutputDispatchTest, testExecutorUsesGatheredCaptureAndLmHeadModes) {
     class CaptureModel: public ModelBase {
     public:
         GptModelOutputs forward(const GptModelInputs& inputs) override {
             ++forward_count;
             EXPECT_EQ(inputs.skip_lm_head, expected_prefill_only);
-            EXPECT_EQ(inputs.capture_hidden_states, expected_prefill_only);
+            EXPECT_EQ(inputs.capture_hidden_states, expected_capture_hidden_states);
+            if (fail_forward) {
+                throw std::runtime_error("canonical model forward failed");
+            }
             GptModelOutputs output;
             output.generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             // No logits at all for target-only prefill: entering the sampler is a regression.
@@ -298,12 +340,10 @@ TEST_P(OutputDispatchTest, testExecutorUsesGatheredModeAndPreservesCaptureErrors
             return output;
         }
 
-        std::optional<std::string> takeDeferredHiddenStateCaptureError() override {
-            return fail_capture ? std::make_optional<std::string>("capture publication failed") : std::nullopt;
-        }
+        bool expected_prefill_only          = true;
+        bool expected_capture_hidden_states = false;
+        bool fail_forward                   = false;
 
-        bool expected_prefill_only = true;
-        bool fail_capture          = false;
         int  forward_count         = 0;
     };
 
@@ -314,41 +354,108 @@ TEST_P(OutputDispatchTest, testExecutorUsesGatheredModeAndPreservesCaptureErrors
         bool        first_has_error;
         bool        second_is_decode;
         bool        expected_prefill_only;
-        bool        fail_capture;
+        bool        expected_capture_hidden_states;
+        bool        capture_hidden_states;
+        bool        first_is_decode             = false;
+        int         first_num_return_sequences  = 1;
+        int         second_num_return_sequences = 1;
+        bool        admit_capture               = true;
+        bool        capture_configured          = true;
+        bool        fail_forward                = false;
+        bool        reuse_cache                 = false;
     };
     const std::vector<TestCase> cases = {
-        {"prefill-only", 0, 0, false, false, true, false},
-        {"failed-generation-before-prefill", 1, 0, true, false, true, false},
-        {"failed-prefill-before-generation", 0, 1, true, false, false, false},
-        {"failed-prefill-before-decode-generation", 0, 1, true, true, false, false},
-        {"decode-prefill-precedes-context-generation", 1, 0, false, true, true, false},
-        {"decode-generation-precedes-context-prefill", 0, 1, false, true, false, false},
-        {"capture-failure", 0, 0, false, false, true, true},
-        {"capture-failure-preserves-existing-error", 1, 0, true, false, true, true},
+        {"prefill-only-legacy", 0, 0, false, false, true, true, false},
+        {"prefill-only-required", 0, 0, false, false, true, true, true},
+        {"prefill-only-required-without-admission", 0, 0, false, false, true, false, true, false, 1, 1, false},
+        {"prefill-only-required-without-global-config",
+         0,
+         0,
+         false,
+         false,
+         true,
+         false,
+         true,
+         false,
+         1,
+         1,
+         true,
+         false},
+        {"generation-context-default", 1, 1, false, false, false, false, false},
+        {"generation-context-explicit-capture", 1, 1, false, false, false, true, true},
+        {"generation-context-reuse-conflict",
+         1,
+         1,
+         false,
+         false,
+         false,
+         false,
+         true,
+         false,
+         1,
+         1,
+         true,
+         true,
+         false,
+         true},
+        {"generation-context-without-admission", 1, 1, false, false, false, false, true, false, 1, 1, false},
+        {"generation-context-without-global-config", 1, 1, false, false, false, false, true, false, 1, 1, true, false},
+        {"multi-sequence-generation-context", 1, 1, false, false, false, false, true, false, 1, 2},
+        {"failed-prefill-before-generation", 0, 1, true, false, false, false, true},
+        {"failed-prefill-before-decode-generation", 0, 1, true, true, false, false, true},
+        {"decode-prefill-precedes-context-generation", 1, 0, false, true, true, false, true},
+        {"decode-generation-precedes-context-prefill", 0, 1, false, true, false, false, true},
+        {"errored-context-disables-capture", 1, 0, true, false, true, false, true},
+        {"decode-only-does-not-capture", 1, 1, false, true, false, false, true, true},
+        {"generation-forward-failure", 1, 1, false, false, false, true, true, false, 1, 1, true, true, true},
+        {"prefill-only-forward-failure", 0, 0, false, false, true, true, false, false, 1, 1, true, true, true},
+        {"forward-failure-preserves-existing-error",
+         1,
+         0,
+         true,
+         false,
+         true,
+         false,
+         true,
+         false,
+         1,
+         1,
+         true,
+         true,
+         true},
     };
     for (const auto& test_case : cases) {
         SCOPED_TRACE(test_case.name);
         auto           params = makeExecutorParams(GetParam());
+        params.model_config_.hidden_state_capture_layer_ids =
+            test_case.capture_configured ? std::vector<int64_t>{0} : std::vector<int64_t>{};
         NormalExecutor executor(params, nullptr);
-        // Reuse the warmup gatherer's fake KV layout, but run normal executor dispatch.
+        // Use the normal gather path so generation-context capture is exercised.
         executor.setBatchProcessor(std::make_unique<NormalBatchStreamProcessor>(params.model_config_,
                                                                                 params.pd_sep_config,
                                                                                 params.profiling_debug_logging_config,
                                                                                 CacheConfig(),
-                                                                                true,
+                                                                                false,
                                                                                 GetParam()));
         auto  model                  = std::make_unique<CaptureModel>();
         auto* observed_model         = model.get();
         model->expected_prefill_only = test_case.expected_prefill_only;
-        model->fail_capture          = test_case.fail_capture;
+        model->expected_capture_hidden_states = test_case.expected_capture_hidden_states;
+        model->fail_forward                   = test_case.fail_forward;
+
         executor.setModel(std::move(model));
 
         ResourceContext resource_context;
-        auto            make_stream = [&](int max_new_tokens) {
+        int64_t         next_request_id = 1000;
+        auto            make_stream     = [&](int max_new_tokens, int num_return_sequences) {
             auto query                             = make_shared<GenerateInput>();
+            query->request_id                             = next_request_id++;
             query->input_ids                       = hostIntBuffer({1, 2});
             query->generate_config                 = make_shared<GenerateConfig>();
             query->generate_config->max_new_tokens = max_new_tokens;
+            query->generate_config->capture_hidden_states = test_case.capture_hidden_states;
+            query->generate_config->reuse_cache = test_case.capture_hidden_states ? test_case.reuse_cache : true;
+            query->generate_config->num_return_sequences = num_return_sequences;
             query->generate_config->top_k          = 1;
             query->generate_config->aux_info       = true;
             auto stream                            = make_shared<NormalGenerateStream>(
@@ -356,37 +463,67 @@ TEST_P(OutputDispatchTest, testExecutorUsesGatheredModeAndPreservesCaptureErrors
             stream->generate_status_->status = StreamState::RUNNING;
             return stream;
         };
-        auto first  = make_stream(test_case.first_max_new_tokens);
-        auto second = make_stream(test_case.second_max_new_tokens);
+        auto first  = make_stream(test_case.first_max_new_tokens, test_case.first_num_return_sequences);
+        auto second = make_stream(test_case.second_max_new_tokens, test_case.second_num_return_sequences);
         if (test_case.first_has_error) {
             first->reportError(ErrorCode::INVALID_PARAMS, "original request error");
         }
+        first->setIsContextStream(!test_case.first_is_decode);
         second->setIsContextStream(!test_case.second_is_decode);
-        ASSERT_TRUE(executor.process(ScheduleOutput{{first, second}}).ok());
+        // Preset admission isolates the gather/executor gates. Real Engine
+        // makeStream/enqueue admission and publisher lifetime belong to their
+        // respective Engine/publisher fixtures, not this model double.
+        if (test_case.admit_capture && !test_case.first_is_decode) {
+            first->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+        }
+        if (test_case.admit_capture && !test_case.second_is_decode) {
+            second->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+        }
+        if (test_case.fail_forward) {
+            EXPECT_THROW((void)executor.process(ScheduleOutput{{first, second}}), std::runtime_error);
+        } else {
+            ASSERT_TRUE(executor.process(ScheduleOutput{{first, second}}).ok());
+        }
         EXPECT_EQ(observed_model->forward_count, 1);
+        if (!test_case.expected_capture_hidden_states) {
+            EXPECT_FALSE(first->hasHiddenStateCaptureReservation());
+            EXPECT_FALSE(second->hasHiddenStateCaptureReservation());
+        }
         EXPECT_FALSE(first->hasPendingAsyncBookkeeping());
         EXPECT_FALSE(second->hasPendingAsyncBookkeeping());
         if (test_case.first_has_error) {
             EXPECT_EQ(first->statusInfo().code(), ErrorCode::INVALID_PARAMS);
             EXPECT_EQ(first->stopReason(), "original request error");
         }
-        if (test_case.fail_capture) {
-            EXPECT_EQ(second->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
-            EXPECT_EQ(second->stopReason(), "capture publication failed");
+
+        if (test_case.fail_forward) {
+            EXPECT_FALSE(first->hasOutput());
             EXPECT_FALSE(second->hasOutput());
-        } else if (test_case.second_is_decode && !test_case.first_has_error) {
+        } else if (test_case.second_is_decode && !test_case.first_has_error && !test_case.first_is_decode) {
             // Mixed batches still forward for collective alignment, but may not publish success.
             EXPECT_EQ(first->statusInfo().code(), ErrorCode::INVALID_PARAMS);
             EXPECT_EQ(second->statusInfo().code(), ErrorCode::INVALID_PARAMS);
             EXPECT_EQ(second->stopReason(), kMixedExecutionModeBatchError);
             EXPECT_FALSE(first->hasOutput());
             EXPECT_FALSE(second->hasOutput());
+        } else if (second->generateConfig()->requiresHiddenStateCaptureAdmission()
+                   && !test_case.expected_capture_hidden_states) {
+            EXPECT_EQ(second->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+            EXPECT_EQ(second->stopReason(), "required hidden-state capture was disabled by the gathered batch");
+            EXPECT_FALSE(second->hasOutput());
+            EXPECT_FALSE(second->hasHiddenStateCaptureReservation());
+            if (!test_case.first_has_error && first->generateConfig()->requiresHiddenStateCaptureAdmission()) {
+                EXPECT_EQ(first->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+                EXPECT_FALSE(first->hasOutput());
+            }
         } else {
             ASSERT_FALSE(second->hasError());
             auto output = second->nextOutput();
             ASSERT_TRUE(output.ok());
-            ASSERT_EQ(output.value().generate_outputs.size(), 1);
-            EXPECT_TRUE(output.value().generate_outputs[0].finished);
+            ASSERT_EQ(output.value().generate_outputs.size(), static_cast<size_t>(second->maxBatchSize()));
+            for (const auto& generate_output : output.value().generate_outputs) {
+                EXPECT_TRUE(generate_output.finished);
+            }
             EXPECT_EQ(second->outputTokenLen(), test_case.second_max_new_tokens);
             EXPECT_EQ(second->seqLength(), 2 + test_case.second_max_new_tokens);
             if (test_case.expected_prefill_only) {
@@ -396,6 +533,336 @@ TEST_P(OutputDispatchTest, testExecutorUsesGatheredModeAndPreservesCaptureErrors
         }
     }
 }
+
+TEST_F(NormalBatchStreamProcessorTest, RpcCancelAfterSchedulePreservesReservedCaptureRows) {
+    // Use the token value as a deterministic one-column hidden state. Split the packed result by
+    // the model's actual IDs and lengths, not by the order or lengths expected by the test.
+    struct CaptureModel: ModelBase {
+        std::map<int64_t, torch::Tensor> payloads;
+        GptModelOutputs forward(const GptModelInputs& inputs) override {
+            EXPECT_TRUE(inputs.skip_lm_head);
+            EXPECT_TRUE(inputs.capture_hidden_states);
+            if (inputs.capture_hidden_states) {
+                auto ids = toVec<int64_t>(inputs.request_id);
+                auto lengths = toVec<int64_t>(inputs.input_lengths.to(torch::kInt64));
+                auto rows = inputs.combo_tokens.cpu().reshape({-1, 1}).split_with_sizes(lengths);
+                EXPECT_EQ(ids.size(), rows.size());
+                for (size_t i = 0; i < ids.size(); ++i) {
+                    EXPECT_TRUE(payloads.emplace(ids[i], rows.at(i)).second);
+                }
+            }
+            return {};
+        }
+    };
+
+    auto params = makeExecutorParams(0);
+    params.model_config_.hidden_state_capture_layer_ids = {0};
+    params.runtime_config.max_generate_batch_size = 2;
+    params.runtime_config.fifo_scheduler_config.max_batch_tokens_size = 16;
+    params.pd_sep_config.role_type = RoleType::PDFUSION;
+    ResourceContext context;
+    context.cache_manager = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 16, 2, DataType::TYPE_FP16));
+    ASSERT_TRUE(context.cache_manager->init());
+    NormalExecutor executor(params, context.cache_manager);
+    auto model = std::make_unique<CaptureModel>();
+    auto* captured = model.get();
+    executor.setModel(std::move(model));
+
+    std::vector<int> releases(2, 0);
+    {
+        FIFOScheduler scheduler(params.runtime_config, params.model_config_, params.pd_sep_config,
+                                params.parallelism_config, context.cache_manager);
+        auto admit = [&](int id, std::vector<int32_t> tokens) {
+            auto query = std::make_shared<GenerateInput>();
+            query->request_id = id;
+            query->input_ids = hostIntBuffer(tokens);
+            query->generate_config = std::make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens = 0;
+            query->generate_config->capture_hidden_states = true;
+            query->generate_config->reuse_cache = false;
+            auto stream = std::make_shared<NormalGenerateStream>(
+                query, params.model_config_, params.runtime_config, context, nullptr);
+            EXPECT_TRUE(stream->isHiddenStateCaptureCandidate());
+            stream->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>(
+                [&, id]() noexcept { ++releases[id]; }));
+            return stream;
+        };
+        auto cancelled = admit(0, {11});
+        auto healthy = admit(1, {21, 22, 23});
+        ASSERT_TRUE(scheduler.enqueue(cancelled).ok());
+        ASSERT_TRUE(scheduler.enqueue(healthy).ok());
+        auto scheduled = scheduler.schedule();
+        ASSERT_TRUE(scheduled.ok());
+        ASSERT_EQ(scheduled->streams, (std::list<GenerateStreamPtr>{cancelled, healthy}));
+        cancelled->reportError(ErrorCode::CANCELLED, "RPC cancelled");
+        EXPECT_FALSE(cancelled->isHiddenStateCaptureCandidate());
+        ASSERT_TRUE(cancelled->hasHiddenStateCaptureReservation());
+
+        ASSERT_TRUE(executor.process(*scheduled).ok());
+        ASSERT_EQ(captured->payloads.size(), 2u);
+        EXPECT_EQ(toVec<int32_t>(captured->payloads.at(0)), (std::vector<int32_t>{11}));
+        EXPECT_EQ(toVec<int32_t>(captured->payloads.at(1)), (std::vector<int32_t>{21, 22, 23}));
+        EXPECT_FALSE(cancelled->hasOutput());
+        auto failed = cancelled->nextOutput(1);
+        ASSERT_FALSE(failed.ok());
+        EXPECT_EQ(failed.status().code(), ErrorCode::CANCELLED);
+        auto output = healthy->nextOutput(1);
+        ASSERT_TRUE(output.ok());
+        ASSERT_EQ(output.value().generate_outputs.size(), 1u);
+        EXPECT_TRUE(output.value().generate_outputs[0].finished);
+        EXPECT_EQ(output.value().generate_outputs[0].output_ids.numel(), 0);
+        EXPECT_EQ(releases, (std::vector<int>{0, 0}));
+        auto reaped = scheduler.schedule();
+        ASSERT_TRUE(reaped.ok());
+        EXPECT_TRUE(reaped->streams.empty());
+        EXPECT_FALSE(healthy->hasError());
+    }
+    EXPECT_EQ(releases, (std::vector<int>{1, 1}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, CaptureBatchCancellationCountsOnlyLiveReservations) {
+    ScopedServingMetrics serving_metrics;
+    struct Case {
+        int admitted;
+        bool owner;
+        bool warmup;
+        bool configured;
+    };
+    for (const auto& test_case : {Case{2, true, false, true}, Case{1, true, false, true},
+                                 Case{0, true, false, true}, Case{2, false, false, true},
+                                 Case{2, true, true, true}, Case{2, true, false, false}}) {
+        SCOPED_TRACE(::testing::Message() << "admitted=" << test_case.admitted << " owner=" << test_case.owner
+                                         << " warmup=" << test_case.warmup << " configured=" << test_case.configured);
+        auto params = makeExecutorParams(0);
+        params.model_config_.hidden_state_capture_layer_ids = test_case.configured ? std::vector<int64_t>{0} :
+                                                                                   std::vector<int64_t>{};
+        auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+        NormalBatchStreamProcessor processor(params.model_config_, params.pd_sep_config,
+                                              params.profiling_debug_logging_config, CacheConfig(), test_case.warmup,
+                                              0, test_case.owner ? reporter : nullptr);
+        ResourceContext resource_context;
+        int cancellations = 0;
+        std::list<GenerateStreamPtr> streams;
+        for (int i = 0; i < 3; ++i) {
+            auto query = std::make_shared<GenerateInput>();
+            query->request_id = i + 1;
+            query->input_ids = hostIntBuffer({1, 2});
+            query->generate_config = std::make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens = 1;
+            query->generate_config->capture_hidden_states = true;
+            query->generate_config->reuse_cache = false;
+            auto stream = std::make_shared<NormalGenerateStream>(
+                query, params.model_config_, params.runtime_config, resource_context, nullptr);
+            stream->generate_status_->status = StreamState::RUNNING;
+            if (i < test_case.admitted) {
+                stream->setHiddenStateCaptureReservation(
+                    std::make_shared<HiddenStateCaptureReservation>([&cancellations]() noexcept { ++cancellations; }));
+            }
+            streams.push_back(std::move(stream));
+        }
+        auto* metrics = reporter->getMetricsGroup<RtpLLMHiddenStateCaptureMetrics>();
+        const int expected = test_case.owner && !test_case.warmup && test_case.configured ? test_case.admitted : 0;
+        TensorHolder holder;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            auto input = processor.gatherModelInput(StreamGroups(streams), holder);
+            ASSERT_TRUE(input.ok());
+            EXPECT_FALSE(input->capture_hidden_states);
+            EXPECT_EQ(captureMetricValue(reporter, metrics->batch_cancelled_requests_metric), attempt == 0 ? expected : 0);
+            EXPECT_EQ(captureMetricValue(reporter, metrics->admission_rejected_qps_metric), 0);
+            EXPECT_EQ(captureMetricValue(reporter, metrics->eligibility_skip_qps_metric), 0);
+            EXPECT_EQ(cancellations, test_case.admitted);
+            for (const auto& stream : streams) {
+                EXPECT_FALSE(stream->hasHiddenStateCaptureReservation());
+                EXPECT_FALSE(stream->hasError());
+            }
+        }
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, CaptureMetricsReportAdmissionReasonsAndZeroQuota) {
+    ScopedServingMetrics serving_metrics;
+    using Collector = RtpLLMHiddenStateCaptureMetricsCollector;
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto* metrics = reporter->getMetricsGroup<RtpLLMHiddenStateCaptureMetrics>();
+    for (auto reason : {Collector::SkipReason::CAPACITY, Collector::SkipReason::CONFIG, Collector::SkipReason::UNAVAILABLE}) {
+        Collector collector;
+        collector.admission_rejected_qps = true;
+        collector.skip_reason = reason;
+        reporter->report<RtpLLMHiddenStateCaptureMetrics, Collector>(nullptr, &collector);
+        EXPECT_EQ(captureMetricValue(reporter, metrics->admission_rejected_qps_metric), 1);
+        EXPECT_EQ(captureMetricValue(reporter, metrics->skip_capacity_qps_metric), reason == Collector::SkipReason::CAPACITY);
+        EXPECT_EQ(captureMetricValue(reporter, metrics->skip_config_qps_metric), reason == Collector::SkipReason::CONFIG);
+        EXPECT_EQ(captureMetricValue(reporter, metrics->skip_unavailable_qps_metric), reason == Collector::SkipReason::UNAVAILABLE);
+        EXPECT_EQ(captureMetricValue(reporter, metrics->eligibility_skip_qps_metric), 0);
+    }
+    for (int64_t occupied : {int64_t{2}, int64_t{0}}) {
+        Collector collector;
+        collector.has_quota = true;
+        collector.quota_samples = occupied;
+        collector.quota_bytes = occupied * 1024;
+        collector.quota_tokens = occupied * 16;
+        reporter->report<RtpLLMHiddenStateCaptureMetrics, Collector>(nullptr, &collector);
+        EXPECT_EQ(metrics->quota_samples_metric->GetMetricType(), kmonitor::MetricType::GAUGE);
+        EXPECT_EQ(captureMetricValue(reporter, metrics->quota_samples_metric, true), occupied);
+        EXPECT_EQ(captureMetricValue(reporter, metrics->quota_bytes_metric, true), occupied * 1024);
+        EXPECT_EQ(captureMetricValue(reporter, metrics->quota_tokens_metric, true), occupied * 16);
+        EXPECT_EQ(captureMetricValue(reporter, metrics->admission_rejected_qps_metric), 0);
+    }
+}
+
+TEST_P(OutputDispatchTest, CaptureFailureIsAttributedPerRequestInMixedOptInBatch) {
+    auto params = makeExecutorParams(GetParam());
+    NormalBatchStreamProcessor processor(params.model_config_,
+                                          params.pd_sep_config,
+                                          params.profiling_debug_logging_config,
+                                          CacheConfig(),
+                                          false,
+                                          GetParam());
+    auto required = makeLogprobsStream(params.model_config_, 0, false);
+    auto bare = makeLogprobsStream(params.model_config_, 0, false);
+    required->generateConfig()->capture_hidden_states = true;
+    required->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+    bare->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+    const std::list<GenerateStreamPtr> streams{bare, required};
+    StreamGroups groups(streams);
+    NormalExecutor::reportHiddenStateCaptureError(streams, {ErrorCode::EXECUTION_EXCEPTION, "current capture failed"});
+    ASSERT_TRUE(processor.dispatchPrefillOnly(groups).ok());
+    auto failed = required->nextOutput();
+    ASSERT_FALSE(failed.ok());
+    EXPECT_EQ(failed.status().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_FALSE(required->hasOutput());
+    EXPECT_FALSE(required->hasHiddenStateCaptureReservation());
+    EXPECT_TRUE(bare->hasHiddenStateCaptureReservation());
+    auto output = bare->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    EXPECT_TRUE(output.value().generate_outputs[0].finished);
+    EXPECT_EQ(output.value().generate_outputs[0].output_ids.sizes(), (torch::IntArrayRef{1, 0}));
+}
+
+struct CaptureOutcomeCase {
+    const char* name;
+    int         max_new_tokens;
+    bool        explicit_capture;
+    const char* error;
+    bool        existing_error = false;
+    bool        fatal          = false;
+};
+
+class NormalCaptureOutcomeTest:
+    public NormalBatchStreamProcessorTest,
+    public testing::WithParamInterface<std::tuple<int, CaptureOutcomeCase>> {};
+
+TEST_P(NormalCaptureOutcomeTest, CurrentForwardOutcomeDoesNotPublishFalseSuccess) {
+    class CaptureModel: public ModelBase {
+    public:
+        GptModelOutputs forward(const GptModelInputs& inputs) override {
+            EXPECT_EQ(inputs.capture_hidden_states, expected_capture);
+            if (on_forward) {
+                on_forward();
+            }
+            if (fatal) {
+                throw std::runtime_error("fatal model failure");
+            }
+            GptModelOutputs output;
+            output.hidden_state_capture_error = error;
+            if (!inputs.skip_lm_head) {
+                output.logits = torch::zeros({inputs.lm_output_indexes.size(0), 128},
+                                             torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            }
+            return output;
+        }
+        ErrorInfo             error;
+        bool                  expected_capture = false;
+        bool                  fatal = false;
+        std::function<void()> on_forward;
+    };
+
+    const auto& test_case = std::get<1>(GetParam());
+    auto params = makeExecutorParams(std::get<0>(GetParam()));
+    params.model_config_.hidden_state_capture_layer_ids = {0};
+    NormalExecutor executor(params, nullptr);
+    executor.setBatchProcessor(std::make_unique<NormalBatchStreamProcessor>(params.model_config_,
+                                                                            params.pd_sep_config,
+                                                                            params.profiling_debug_logging_config,
+                                                                            CacheConfig(),
+                                                                            false,
+                                                                            std::get<0>(GetParam())));
+    auto model = std::make_unique<CaptureModel>();
+    auto* observed_model = model.get();
+    if (test_case.error[0]) {
+        model->error = {ErrorCode::EXECUTION_EXCEPTION, test_case.error};
+    }
+    model->expected_capture = test_case.explicit_capture || test_case.max_new_tokens == 0;
+    model->fatal = test_case.fatal;
+    executor.setModel(std::move(model));
+
+    auto make_stream = [&] {
+        auto stream = makeLogprobsStream(params.model_config_, test_case.max_new_tokens, false);
+        stream->generateConfig()->capture_hidden_states = test_case.explicit_capture;
+        stream->generateConfig()->reuse_cache = false;
+        stream->generateConfig()->top_k = 1;
+        return stream;
+    };
+    auto stream = make_stream();
+    auto cancellation_count = std::make_shared<int>(0);
+    stream->setHiddenStateCaptureReservation(
+        std::make_shared<HiddenStateCaptureReservation>([cancellation_count]() noexcept { ++*cancellation_count; }));
+    if (test_case.existing_error) {
+        observed_model->on_forward = [stream] {
+            stream->reportError(ErrorCode::INVALID_PARAMS, "original request error");
+        };
+    }
+    if (test_case.fatal) {
+        EXPECT_THROW((void)executor.process(ScheduleOutput{{stream}}), std::runtime_error);
+        EXPECT_FALSE(stream->hasOutput());
+        stream->cancelHiddenStateCapture();
+        return;
+    }
+    ASSERT_TRUE(executor.process(ScheduleOutput{{stream}}).ok());
+    const bool required_failure = test_case.explicit_capture && test_case.max_new_tokens == 0 && test_case.error[0];
+    auto output = stream->nextOutput();
+    if (test_case.existing_error || required_failure) {
+        ASSERT_FALSE(output.ok());
+        EXPECT_EQ(output.status().code(),
+                  test_case.existing_error ? ErrorCode::INVALID_PARAMS : ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_EQ(output.status().ToString(), test_case.existing_error ? "original request error" : test_case.error);
+        EXPECT_NE(output.status().code(), ErrorCode::HIDDEN_STATE_CAPTURE_BACKPRESSURE);
+        EXPECT_FALSE(stream->hasOutput());
+        EXPECT_EQ(stream->hasHiddenStateCaptureReservation(), test_case.existing_error);
+        EXPECT_EQ(*cancellation_count, test_case.existing_error ? 0 : 1);
+    } else {
+        ASSERT_TRUE(output.ok());
+        ASSERT_EQ(output.value().generate_outputs.size(), 1);
+        EXPECT_TRUE(output.value().generate_outputs[0].finished);
+        EXPECT_EQ(stream->outputTokenLen(), test_case.max_new_tokens);
+    }
+    stream->cancelHiddenStateCapture();
+
+    // Reuse the executor, but a new forward with no error must not inherit the old outcome.
+    observed_model->error = ErrorInfo{};
+    observed_model->on_forward = {};
+    auto next = make_stream();
+    next->setHiddenStateCaptureReservation(std::make_shared<HiddenStateCaptureReservation>([]() noexcept {}));
+    ASSERT_TRUE(executor.process(ScheduleOutput{{next}}).ok());
+    EXPECT_TRUE(next->nextOutput().ok());
+    EXPECT_FALSE(next->hasError());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    CaptureSemantics,
+    NormalCaptureOutcomeTest,
+    testing::Combine(testing::Values(0, 2),
+                     testing::Values(CaptureOutcomeCase{"HookFailure", 0, true, "capture hook failed"},
+                                     CaptureOutcomeCase{"BareZeroToken", 0, false, "capture hook failed"},
+                                     CaptureOutcomeCase{"ExplicitGeneration", 1, true, "capture pack failed"},
+                                     CaptureOutcomeCase{"OrdinaryGeneration", 1, false, ""},
+                                     CaptureOutcomeCase{"ExistingError", 0, true, "capture hook failed", true},
+                                     CaptureOutcomeCase{"CaptureSuccess", 0, true, ""},
+                                     CaptureOutcomeCase{"FatalRethrown", 0, true, "", false, true})),
+    [](const testing::TestParamInfo<NormalCaptureOutcomeTest::ParamType>& info) {
+        return std::string(std::get<1>(info.param).name) + "Workers" + std::to_string(std::get<0>(info.param));
+    });
 
 TEST_F(NormalBatchStreamProcessorTest, testZeroDispatchWorkerCount) {
     NormalOutputDispatcher default_dispatcher;
@@ -616,7 +1083,7 @@ TEST_P(NormalBatchStreamProcessorPrefillOnlyTest, prefillOnlySkipsLmHeadAndDispa
     auto         model_input = processor.gatherModelInput(stream_groups, holder);
     ASSERT_TRUE(model_input.ok());
     EXPECT_TRUE(model_input->skip_lm_head);
-    EXPECT_TRUE(model_input->capture_hidden_states);
+    EXPECT_FALSE(model_input->capture_hidden_states);
     EXPECT_EQ(model_input->combo_tokens.numel(), 5);
 
     for (int i = 0; i < 2; ++i) {
@@ -713,9 +1180,9 @@ TEST_F(NormalBatchStreamProcessorTest, gatherExecutionModesPreserveFlagsAndError
         {"context-mixed-generation-first", {{true, 1}, {true, 0}}, false, true},
         {"decode-mixed-prefill-first", {{false, 0}, {false, 1}}, true, true},
         {"decode-mixed-generation-first", {{false, 1}, {false, 0}}, false, true},
-        {"cross-container-decode-generation-first", {{false, 1}, {true, 0}}, false, true},
+
         {"cross-container-context-prefill-first", {{true, 0}, {false, 1}}, false, true},
-        {"cross-container-decode-prefill-first", {{false, 0}, {true, 1}}, true, true},
+
         {"cross-container-context-generation-first", {{true, 1}, {false, 0}}, true, true},
         {"mixed-context-behind-generation-decode", {{false, 1}, {true, 1}, {true, 0}}, false, true},
         {"mixed-decode-ahead-of-generation-context", {{true, 1}, {false, 1}, {false, 0}}, false, true},
@@ -740,12 +1207,13 @@ TEST_F(NormalBatchStreamProcessorTest, gatherExecutionModesPreserveFlagsAndError
         StreamGroups stream_groups(streams);
         TensorHolder holder;
         auto         model_input = processor.gatherModelInput(stream_groups, holder);
-        // Mixed batches still reach TP sync; flags follow the execution mode
-        // derived from schedulable (non-errored) streams.
+        // Mixed batches still reach TP sync; skip_lm_head follows the execution mode
+        // derived from schedulable (non-errored) streams. This warmup fixture has no
+        // eligible hidden-state capture configuration.
         ASSERT_TRUE(model_input.ok());
         EXPECT_EQ(model_input->combo_tokens.numel(), expected_tokens);
         EXPECT_EQ(model_input->skip_lm_head, test_case.prefill_only);
-        EXPECT_EQ(model_input->capture_hidden_states, test_case.prefill_only);
+        EXPECT_FALSE(model_input->capture_hidden_states);
         for (const auto& stream : streams) {
             if (test_case.existing_error && stream == streams.front()) {
                 EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
@@ -2024,7 +2492,19 @@ private:
     std::shared_ptr<ProcessOverlapProbe> probe_;
 };
 
-TEST_F(NormalBatchStreamProcessorTest, testProcessOverlapsMropeSnapshotButJoinsBeforeSampler) {
+static void runWithFreshExecutorFlags(void (*scenario)()) {
+    // NormalExecutor caches the async and device-input flags on first use in each process.
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    ASSERT_EXIT(
+        {
+            scenario();
+            std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
+static void checkProcessOverlapsMropeSnapshotButJoinsBeforeSampler() {
     // A real previous-worker task is held on NormalExecutor's AsyncRunner.
     // Snapshot decode may reach model forward before release; it still must
     // join at the pre-sampler boundary, where host sampler metadata is read.
@@ -2142,7 +2622,11 @@ TEST_F(NormalBatchStreamProcessorTest, testProcessOverlapsMropeSnapshotButJoinsB
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
 }
 
-TEST_F(NormalBatchStreamProcessorTest, testProcessJoinsBeforeFallbackGatherWithoutMropeAnchor) {
+TEST_F(NormalBatchStreamProcessorTest, testProcessOverlapsMropeSnapshotButJoinsBeforeSampler) {
+    runWithFreshExecutorFlags(checkProcessOverlapsMropeSnapshotButJoinsBeforeSampler);
+}
+
+static void checkProcessJoinsBeforeFallbackGatherWithoutMropeAnchor() {
     // The no-anchor case cannot derive a safe snapshot position. It must not
     // enter model forward while the previous worker is blocked; after release
     // it follows ordinary host gather and reaches the controlled sampler stop.
@@ -2244,6 +2728,10 @@ TEST_F(NormalBatchStreamProcessorTest, testProcessJoinsBeforeFallbackGatherWitho
         EXPECT_EQ(probe->sampler_iter_count, 1);
     }
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testProcessJoinsBeforeFallbackGatherWithoutMropeAnchor) {
+    runWithFreshExecutorFlags(checkProcessJoinsBeforeFallbackGatherWithoutMropeAnchor);
 }
 
 TEST_P(OutputDispatchTest, testSoftmaxProbs) {

@@ -95,14 +95,15 @@ startBatchItemSpan(const GenerateInputPB&                                       
 
 void recordBatchItemCompletion(telemetry::GrpcStatusSpanGuard&        guard,
                                const std::shared_ptr<GenerateStream>& stream,
+                               const GenerateInput&                   input,
                                bool                                   request_ok,
                                const char*                            error_type) {
     if (!guard.valid()) {
         return;
     }
-    const auto             time_info = stream->getTimeInfo();
+    const auto             time_info = stream ? stream->getTimeInfo() : GenerateStream::TimeInfo{};
     telemetry::PhaseTiming timing;
-    timing.begin_time_us           = time_info.begin_time_us;
+    timing.begin_time_us           = stream ? time_info.begin_time_us : input.begin_time_us;
     timing.running_started         = time_info.running_started;
     timing.running_started_time_us = time_info.running_started_time_us;
     timing.first_token_committed   = time_info.first_token_committed;
@@ -110,9 +111,9 @@ void recordBatchItemCompletion(telemetry::GrpcStatusSpanGuard&        guard,
     timing.generation_done         = time_info.generation_done;
     timing.generation_done_time_us = time_info.generation_done_time_us;
     timing.synthesis_end_time_us   = currentTimeUs();
-    timing.request_id              = stream->streamId();
+    timing.request_id              = stream ? stream->streamId() : input.request_id;
     timing.error_type              = error_type;
-    if (request_ok && time_info.generation_done) {
+    if (stream && request_ok && time_info.generation_done) {
         const auto sequence_count =
             stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) : stream->currentBatchSize();
         telemetry::setUsageTokenAttributes(
@@ -919,11 +920,7 @@ grpc::Status LocalRpcServer::generateLocalBatch(grpc::ServerContext*        cont
                 admission_errors[i] =
                     cancel_registry->admit(request->inputs(i), "", "", currentTimeMs() + timeout, cancel_handles[i]);
             }
-            if (!admission_errors[i].ok()) {
-                streams[i] = engine_->makeStream(inputs[i]);
-                streams[i]->reportError(admission_errors[i].code(), admission_errors[i].ToString());
-                streams[i]->finishWithoutGenerate();
-            } else {
+            if (admission_errors[i].ok()) {
                 active_inputs.push_back(inputs[i]);
                 active_indices.push_back(i);
             }
@@ -950,25 +947,24 @@ grpc::Status LocalRpcServer::generateLocalBatch(grpc::ServerContext*        cont
         // For batch decode this is bounded (all streams advance together), but TODO: parallelize for
         // mixed-length batches.
         for (int i = 0; i < (int)streams.size(); i++) {
-            if (!streams[i]) {
+            if (admission_errors[i].ok() && !streams[i]) {
                 throw std::runtime_error("enqueueMultiple returned a null stream at index " + std::to_string(i));
             }
             auto* result = response->add_results();
             if (!enqueue_successes[i]) {
-                const auto code =
-                    streams[i]->hasError() ? streams[i]->statusInfo().code() : ErrorCode::EXECUTION_EXCEPTION;
-                mark_item_error(i, code, "Batch enqueue was rejected", "BusinessError");
-                auto* error_info = result->mutable_error_info();
-                if (streams[i]->hasError()) {
-                    const auto stream_error = streams[i]->statusInfo();
-                    error_info->set_error_code(transErrorCodeToRPC(stream_error.code()));
-                    error_info->set_error_message(stream_error.ToString());
-                } else {
-                    error_info->set_error_code(transErrorCodeToRPC(ErrorCode::EXECUTION_EXCEPTION));
-                    error_info->set_error_message("enqueueMultiple rejected input at index " + std::to_string(i));
+                auto error = admission_errors[i].ok() ? streams[i]->statusInfo() : admission_errors[i];
+                if (error.ok()) {
+                    error = {ErrorCode::EXECUTION_EXCEPTION,
+                             "enqueueMultiple rejected input at index " + std::to_string(i)};
                 }
+                const char* error_type =
+                    !streams[i] && error.code() == ErrorCode::CANCELLED ? "Cancelled" : "BusinessError";
+                mark_item_error(i, error.code(), "Batch enqueue was rejected", error_type);
+                auto* error_info = result->mutable_error_info();
+                error_info->set_error_code(transErrorCodeToRPC(error.code()));
+                error_info->set_error_message(error.ToString());
                 stream_cleanup_guard.markHandled(static_cast<size_t>(i));
-                recordBatchItemCompletion(item_guard(i), streams[i], false, "BusinessError");
+                recordBatchItemCompletion(item_guard(i), streams[i], *inputs[i], false, error_type);
                 continue;
             }
 
@@ -990,7 +986,7 @@ grpc::Status LocalRpcServer::generateLocalBatch(grpc::ServerContext*        cont
                                               maga_init_params_.misc_config.aux_string,
                                               streams[i]->specialTokens().eos_token_id);
             }
-            recordBatchItemCompletion(item_guard(i), streams[i], err.ok(), error_type);
+            recordBatchItemCompletion(item_guard(i), streams[i], *inputs[i], err.ok(), error_type);
         }
 
         stream_cleanup_guard.dismiss();
@@ -1035,6 +1031,12 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",
                       context->peer().c_str(),
                       request->latest_cache_version());
+    if (engine_) {
+        const auto health = engine_->checkHealth();
+        if (!health.ok()) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, health.ToString());
+        }
+    }
     KVCacheInfo cache_status = getCacheStatusInfo(request->latest_cache_version(), request->need_cache_keys());
     response->set_available_kv_cache(cache_status.available_kv_cache);
     response->set_total_kv_cache(cache_status.total_kv_cache);
@@ -1136,7 +1138,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
                                           std::max<int64_t>(1, std::min(batch_tokens, fifo_config.max_batch_kv_len));
     }
     response->set_max_batch_tokens_size(batch_tokens);
-    auto kv_info = engine_->getCacheStatusInfo(-1, false);
+    auto kv_info = status_info.alive ? engine_->getCacheStatusInfo(-1, false) : KVCacheInfo{};
     response->set_available_kv_cache(kv_info.available_kv_cache);
     response->set_total_kv_cache(kv_info.total_kv_cache);
     auto       group_mode    = KV_CACHE_GROUP_MODE_UNSPECIFIED;
@@ -1170,7 +1172,7 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
     status_info.dp_rank                 = maga_init_params_.parallelism_config.dp_rank;
     status_info.status_version          = currentTimeUs();
     status_info.latest_finished_version = status_info.engine_schedule_info.latest_finished_version;
-    status_info.alive                   = true;
+    status_info.alive                   = !engine_ || engine_->checkHealth().ok();
     auto quant_method                   = maga_init_params_.model_config_.quant_algo.getQuantMethod();
 
     switch (quant_method) {
@@ -1550,6 +1552,13 @@ grpc::Status LocalRpcServer::DumpTorchAllocatorInternal(grpc::ServerContext*    
 grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    if (engine_) {
+        const auto health = engine_->checkHealth();
+        if (!health.ok()) {
+            response->set_health("UNHEALTHY");
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, health.ToString());
+        }
+    }
     response->set_health("OK");
     return grpc::Status::OK;
 }

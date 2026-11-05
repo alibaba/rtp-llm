@@ -392,8 +392,10 @@ TEST(AccuracyCheckExecutorTest, OnlyServingExecutorOwnsSharedPythonModel) {
     KVCacheConfig kv_cache_config;
     auto          params               = createEngineInitParams({}, model_config, runtime_config, kv_cache_config);
     bool          owns_py_model        = false;
+    bool          model_accuracy_check = false;
     NormalExecutor::test_model_factory = [&](const GptModelInitParams& model_params) {
         owns_py_model = model_params.owns_py_model;
+        model_accuracy_check = model_params.accuracy_check_mode;
         return std::make_unique<MockModel>(model_config.vocab_size);
     };
     struct FactoryResetGuard {
@@ -406,6 +408,7 @@ TEST(AccuracyCheckExecutorTest, OnlyServingExecutorOwnsSharedPythonModel) {
             SCOPED_TRACE(::testing::Message() << "warm_up=" << warm_up << ", accuracy_check=" << accuracy_check);
             NormalExecutor executor(params, nullptr, warm_up, false, 0, nullptr, nullptr, false, accuracy_check);
             EXPECT_EQ(owns_py_model, !warm_up && !accuracy_check);
+            EXPECT_EQ(model_accuracy_check, accuracy_check);
         }
     }
 }

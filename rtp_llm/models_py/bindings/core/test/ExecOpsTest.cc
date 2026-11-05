@@ -292,6 +292,17 @@ TEST_F(ExecOpsTest, testRuntimeCreateEvent) {
     ASSERT_NO_THROW(event->synchronize());
 }
 
+TEST_F(ExecOpsTest, testOptionalEventOnlyDropsPreRecordBadAlloc) {
+    auto fail_allocation = []() -> std::shared_ptr<torch::Event> { throw std::bad_alloc(); };
+    EXPECT_EQ(rtp_llm::detail::tryCreateRecordedEvent(fail_allocation, [](torch::Event&) { ADD_FAILURE(); }), nullptr);
+
+    auto event = runtimeTryCreateEvent();
+    ASSERT_NE(event, nullptr);
+    ASSERT_TRUE(event->was_marked_for_recording());
+    EXPECT_THROW(rtp_llm::detail::tryCreateRecordedEvent([&] { return event; }, [](torch::Event&) { throw std::bad_alloc(); }),
+                 std::bad_alloc);
+}
+
 TEST_F(ExecOpsTest, testCopyD2D) {
     auto       src = torch::randn({16}, torch::kCUDA);
     auto       dst = torch::empty({16}, torch::kCUDA);

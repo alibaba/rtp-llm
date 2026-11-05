@@ -197,7 +197,10 @@ public:
     }
 
     std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override {
-        return std::make_shared<NormalGenerateStream>(input, model_, runtime_, resource_context_, nullptr);
+        auto stream = std::make_shared<NormalGenerateStream>(input, model_, runtime_, resource_context_, nullptr);
+        if (input->request_id == unhealthy_request_id.load())
+            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "local serving device context is unavailable");
+        return stream;
     }
 
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) override {
@@ -296,6 +299,7 @@ public:
     std::atomic<size_t> published_bytes{0};
     std::atomic<size_t> checked_bytes{0};
     std::atomic<int>    checked_requests{0};
+    std::atomic<int64_t> unhealthy_request_id{-1};
     std::atomic<int>    published_layers{0};
 
 private:
@@ -1495,6 +1499,36 @@ TEST_F(P2PGenerateStreamSmokeTest, MultiDPBatchAttachesMasterAdmissionsWithoutEn
     }
     EXPECT_EQ(decode_engine_->checked_requests.load(), 2);
     ASSERT_NO_FATAL_FAILURE(expectReleased());
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, DecodeStreamCreationErrorDoesNotSubmitPrefillWork) {
+    initialize(DataType::TYPE_FP16, Fault::RejectSecondBatchItem);
+    decode_engine_->unhealthy_request_id = 1851;
+    std::vector<GenerateOutputsPB> outputs;
+    const auto status = generate(request(1851, 8), outputs);
+    ASSERT_FALSE(status.ok());
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::EXECUTION_EXCEPTION));
+    EXPECT_TRUE(outputs.empty());
+    EXPECT_EQ(prefill_process_->snapshot().generate_calls, 0);
+
+    // The Prefill mock rejects item 2 if both arrive. Its success proves that
+    // Decode kept the failed item out of EnqueueBatch, not just out of the response.
+    decode_engine_->unhealthy_request_id = 1852;
+    BatchGenerateInputPB batch;
+    batch.add_inputs()->CopyFrom(request(1852, 8));
+    batch.add_inputs()->CopyFrom(request(1853, 11));
+    auto stub = RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeouts_.request_ms + 2000));
+    BatchGenerateOutputsPB response;
+    ASSERT_TRUE(stub->BatchGenerateCall(&context, batch, &response).ok());
+    ASSERT_EQ(response.results_size(), 2);
+    EXPECT_EQ(response.results(0).error_info().error_code(), ErrorCodePB::EXECUTION_EXCEPTION);
+    ASSERT_TRUE(response.results(1).has_final_output());
+    EXPECT_EQ(response.results(1).final_output().request_id(), 1853);
+    expectReleased();
 }
 
 TEST_F(P2PGenerateStreamSmokeTest, BatchPartialPrefillAdmissionKeepsAcceptedItem) {

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <string>
 #include <stdexcept>
@@ -9,6 +10,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
@@ -1147,6 +1149,160 @@ TEST(CacheConfigCreatorTest, LinearCacheReclaimRejectsProjectedKeySpan) {
     } catch (const std::exception& error) {
         EXPECT_NE(std::string(error.what()).find("cache-key span"), std::string::npos);
     }
+}
+
+TEST(CacheConfigCreatorTest, CaptureLogicalHeadroomEligibility) {
+    struct Case {
+        const char* name;
+        RoleType    role;
+        int64_t     tp_rank;
+        int64_t     chunk_size;
+        int64_t     pp_size;
+        bool        configured;
+        int64_t     quota;
+        size_t      headroom;
+    };
+    const Case cases[] = {
+        {"off", RoleType::PREFILL, 0, 0, 1, false, 1073741824, 0},
+        {"prefill_owner", RoleType::PREFILL, 0, 0, 1, true, 256, 256},
+        {"fusion_owner", RoleType::PDFUSION, 0, 0, 1, true, 256, 256},
+        {"non_owner", RoleType::PREFILL, 1, 0, 1, true, 256, 0},
+        {"decode", RoleType::DECODE, 0, 0, 1, true, 256, 0},
+        {"vit", RoleType::VIT, 0, 0, 1, true, 256, 0},
+        {"frontend", RoleType::FRONTEND, 0, 0, 1, true, 256, 0},
+        {"chunked_prefill", RoleType::PREFILL, 0, 128, 1, true, 256, 0},
+        {"chunked_fusion", RoleType::PDFUSION, 0, 128, 1, true, 256, 0},
+        {"pipeline", RoleType::PREFILL, 0, 0, 2, true, 256, 0},
+        {"zero_quota", RoleType::PREFILL, 0, 0, 1, true, 0, 0},
+        {"negative_quota", RoleType::PREFILL, 0, 0, 1, true, -1, 0},
+    };
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        auto mc = makeFlashModelConfig();
+        mc.vocab_size = 0;
+        mc.hidden_state_capture_layer_ids = test_case.configured ? std::vector<int64_t>{0, 1} : std::vector<int64_t>{};
+        mc.hidden_state_capture_max_inflight_bytes = test_case.quota;
+        ParallelismConfig pc;
+        pc.role_type = test_case.role;
+        pc.tp_size = 2;
+        pc.tp_rank = test_case.tp_rank;
+        pc.pp_size = test_case.pp_size;
+        RuntimeConfig runtime;
+        runtime.fifo_scheduler_config.prefill_chunk_size = test_case.chunk_size;
+        for (const auto cp_method : {CPRotateMethod::DISABLED, CPRotateMethod::ALL_GATHER, CPRotateMethod::PREFILL_CP}) {
+            pc.prefill_cp_config.method = cp_method;
+            // Some CP modes expose attention rank zero on every rank; the publisher still uses TP0.
+            EXPECT_EQ(MemoryEvaluationHelper::getKVCacheMemorySizeForBudget(
+                          runtime, KVCacheConfig{}, mc, pc, 1024, 128, std::nullopt),
+                      1024u - 128u - test_case.headroom);
+        }
+    }
+}
+
+TEST(CacheConfigCreatorTest, CaptureLogicalHeadroomIsAdditionalToRuntimeMaximum) {
+    struct Case {
+        const char*                 name;
+        size_t                      available;
+        size_t                      runtime;
+        std::optional<WarmUpResult> warmup;
+        int64_t                     vocab_size;
+        size_t                      expected;
+    };
+    const Case cases[] = {
+        {"default_runtime", 1024, 256, std::nullopt, 0, 640},
+        {"warmup_peak", 1024, 64, WarmUpResult{1024, 256}, 0, 640},
+        {"sampler", 1024, 64, WarmUpResult{1024, 96}, 8, 640},
+        {"warmup_available_min", 1024, 64, WarmUpResult{768, 128}, 0, 512},
+        {"current_available_min", 768, 64, WarmUpResult{1024, 128}, 0, 512},
+    };
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        auto mc = makeFlashModelConfig();
+        mc.vocab_size = test_case.vocab_size;
+        mc.hidden_state_capture_layer_ids = {0, 1};
+        mc.hidden_state_capture_max_inflight_bytes = 128;
+        ParallelismConfig pc;
+        pc.role_type = RoleType::PREFILL;
+        RuntimeConfig runtime;
+        runtime.max_generate_batch_size = 1;
+        for (const bool has_post_norm : {false, true}) {
+            // Capability comes from Python canonical hooks, not this weight-layout flag.
+            mc.has_post_decoder_layernorm = has_post_norm;
+            EXPECT_EQ(MemoryEvaluationHelper::getKVCacheMemorySizeForBudget(
+                          runtime, KVCacheConfig{}, mc, pc, test_case.available, test_case.runtime, test_case.warmup),
+                      test_case.expected);
+        }
+    }
+}
+
+TEST(CacheConfigCreatorTest, CaptureLogicalHeadroomAfterResidentGrowthClamp) {
+    auto mc = makeFlashModelConfig();
+    mc.vocab_size = 2;
+    mc.hidden_state_capture_layer_ids = {0};
+    ParallelismConfig pc;
+    pc.role_type = RoleType::PREFILL;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size = 1;
+    KVCacheConfig kv_config;
+    kv_config.draft_initialize_gpu_growth_bytes = 256;
+
+    // Credited free minus runtime is 384 bytes; physical free minus sampler is only 192.
+    const auto budget = [&]() {
+        return MemoryEvaluationHelper::getKVCacheMemorySizeForBudget(runtime, kv_config, mc, pc, 256, 128, std::nullopt);
+    };
+    mc.hidden_state_capture_max_inflight_bytes = 191;
+    EXPECT_EQ(budget(), 1u);
+    mc.hidden_state_capture_max_inflight_bytes = 192;
+    EXPECT_THROW(budget(), std::exception);
+}
+
+TEST(CacheConfigCreatorTest, CaptureLogicalHeadroomBudgetFailureAndExplicitOverrides) {
+    auto mc = makeFlashModelConfig();
+    mc.vocab_size = 0;
+    mc.hidden_state_capture_layer_ids = {0, 1};
+    ParallelismConfig pc;
+    pc.role_type = RoleType::PREFILL;
+    RuntimeConfig runtime;
+    struct Case {
+        size_t  available;
+        size_t  runtime;
+        int64_t quota;
+    };
+    const Case failures[] = {
+        {256, 128, 128},
+        {255, 128, 128},
+        {128, 128, 1},
+        {127, 128, 1},
+        {std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max() - 8,
+         std::numeric_limits<int64_t>::max()},
+    };
+    for (const auto& test_case : failures) {
+        SCOPED_TRACE(test_case.available);
+        mc.hidden_state_capture_max_inflight_bytes = test_case.quota;
+        try {
+            (void)MemoryEvaluationHelper::getKVCacheMemorySizeForBudget(
+                runtime, KVCacheConfig{}, mc, pc, test_case.available, test_case.runtime, std::nullopt);
+            FAIL() << "expected insufficient capture headroom";
+        } catch (const std::exception& error) {
+            EXPECT_NE(std::string(error.what()).find("capture logical headroom"), std::string::npos);
+        }
+    }
+    mc.hidden_state_capture_max_inflight_bytes = 128;
+    EXPECT_EQ(MemoryEvaluationHelper::getKVCacheMemorySizeForBudget(
+                  runtime, KVCacheConfig{}, mc, pc, 257, 128, std::nullopt),
+              1u);
+
+    KVCacheConfig kv_config;
+    kv_config.kv_cache_mem_mb = 1;
+    mc.hidden_state_capture_max_inflight_bytes = std::numeric_limits<int64_t>::max();
+    EXPECT_EQ(MemoryEvaluationHelper::getKVCacheMemorySizeForBudget(
+                  runtime, kv_config, mc, pc, 0, std::numeric_limits<size_t>::max(), std::nullopt),
+              1024u * 1024u);
+
+    kv_config.kv_cache_mem_mb = 0;
+    kv_config.test_block_num = 4;
+    auto config = CacheConfigCreator::createConfig(mc, pc, kv_config);
+    EXPECT_EQ(CacheConfigCreator::computeLocalBlockNum(config, mc, runtime, kv_config, pc), 4u);
 }
 
 TEST(CacheConfigCreatorTest, LinearValueHeadsMustDivideAttentionTp) {

@@ -7,11 +7,15 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/ServingDeviceHealth.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
+#include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -82,9 +86,16 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+    int64_t                 hidden_state_capture_max_inflight_samples = 64;
+    int64_t                 hidden_state_capture_max_inflight_bytes   = 1073741824;
+    int64_t                 hidden_state_capture_max_inflight_tokens  = 131072;
+    int64_t                 hidden_state_capture_max_pending_batches  = 8;
+    int64_t                 hidden_state_capture_poll_interval_ms     = 1000;
 
     // Warmup wrappers borrow the Python model later used by the real executor.
     bool owns_py_model = true;
+    // Set uniformly on all ranks constructing the temporary accuracy-check executor.
+    bool accuracy_check_mode = false;
 };
 
 enum GptModelInputIndex : size_t {
@@ -201,17 +212,62 @@ std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, in
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
+struct HiddenStateCaptureFatalState {
+    bool        failed{false};
+    std::string message;
+};
+
+// Shared by stream copies, but never owns an Executor/model. The cancellation
+// callback must be noexcept and may only release an unsubmitted reservation.
+class HiddenStateCaptureReservation final {
+public:
+    explicit HiddenStateCaptureReservation(std::function<void()> cancel_callback):
+        cancel_callback_(std::move(cancel_callback)) {}
+
+    ~HiddenStateCaptureReservation() {
+        cancel();
+    }
+
+    bool active() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<bool>(cancel_callback_);
+    }
+
+    void cancel() noexcept {
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callback.swap(cancel_callback_);
+        }
+        if (callback) {
+            callback();
+        }
+    }
+
+private:
+    mutable std::mutex    mutex_;
+    std::function<void()> cancel_callback_;
+};
+
+using HiddenStateCaptureReservationPtr = std::shared_ptr<HiddenStateCaptureReservation>;
+// Success must carry an active reservation; failures never represent an admitted request.
+using HiddenStateCaptureAdmissionResult = ErrorResult<HiddenStateCaptureReservationPtr>;
+
 class ModelBase {
 public:
     virtual ~ModelBase() = default;
+    virtual ServingDeviceHealthPtr servingDeviceHealth() const {
+        return nullptr;
+    }
     /** Runs this model instance; a partitioned target executes only its local stage. */
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     /** Builds rank-local PP warmup activations from full model inputs, applying CP padding when enabled. */
     virtual PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
-    virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
-        return std::nullopt;
+    virtual HiddenStateCaptureAdmissionResult tryReserveHiddenStateCapture(int64_t /*request_id*/,
+                                                                           int64_t /*valid_tokens*/) {
+        return {ErrorCode::EXECUTION_EXCEPTION, "model does not support hidden-state capture"};
     }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-

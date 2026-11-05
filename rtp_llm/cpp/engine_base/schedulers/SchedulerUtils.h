@@ -14,6 +14,18 @@ inline bool isPrefillOnly(const GenerateStreamPtr& stream) {
     return stream->generateConfig()->isPrefillOnly();
 }
 
+inline bool areStreamsBatchCompatible(const GenerateStreamPtr& lhs, const GenerateStreamPtr& rhs) {
+    if (isPrefillOnly(lhs) != isPrefillOnly(rhs)) {
+        return false;
+    }
+    if (!isPrefillOnly(lhs)) {
+        return true;
+    }
+    // Capture is batch-wide. A fail-open prefill without admission must not
+    // suppress capture for an admitted peer; positive-token serving is unchanged.
+    return lhs->canExecuteReservedHiddenStateCapture() == rhs->canExecuteReservedHiddenStateCapture();
+}
+
 template<typename StreamRange>
 bool hasMixedExecutionModes(const StreamRange& streams) {
     bool has_execution_mode = false;

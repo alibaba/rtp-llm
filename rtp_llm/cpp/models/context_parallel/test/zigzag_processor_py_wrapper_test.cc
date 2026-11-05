@@ -10,6 +10,10 @@
 namespace py = pybind11;
 using namespace rtp_llm;
 
+namespace rtp_llm {
+void registerExecCtxOps(pybind11::module& m);
+}
+
 namespace unittest {
 
 // Test-only wrapper class to expose protected methods for unit testing
@@ -197,6 +201,24 @@ std::tuple<torch::Tensor, torch::Tensor> zigzagRemapTokenFields(const torch::Ten
 }
 
 PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
+#if USING_CUDA
+    registerExecCtxOps(m);
+    m.def("capture_restore", [](torch::Tensor hidden, torch::Tensor restore, torch::Tensor mask, py::object vote) {
+        ParallelismConfig config;
+        config.tp_size = 2;
+        ZigZagProcessor processor(config);
+        torch_ext::PyContextParallelParams params;
+        params.prefill_qkv_restore_indice = restore;
+        params.prefill_qkv_padding_mask = mask;
+        auto stage = [&](c10::function_ref<void()> work) {
+            work();
+            return vote().cast<bool>();
+        };
+        auto rows = vote.is_none() ? processor.handleOutputs(hidden, GptModelInputs{}, params) :
+                                     processor.handleOutputs(hidden, GptModelInputs{}, params, stage);
+        return std::make_tuple(rows, hidden);
+    });
+#endif
     m.def("context_parallel_load_balance_split",
           &zigzagProcessorPlanWrapper,
           py::arg("total_input_tokens"),

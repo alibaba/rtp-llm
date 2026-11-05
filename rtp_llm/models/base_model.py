@@ -173,14 +173,15 @@ class BaseModel(object):
                 open(os.path.join(generation_config_path, "generation_config.json"))
             )
             # Checkpoint null means unspecified; request updates remain strict.
-            self.default_generate_config.update(
-                {
-                    key: value
-                    for key, value in generate_config.items()
-                    if key not in {"max_new_tokens", "min_new_tokens"}
-                    or value is not None
-                }
-            )
+            defaults = {
+                key: value
+                for key, value in generate_config.items()
+                if key not in {"max_new_tokens", "min_new_tokens"} or value is not None
+            }
+            # Only an explicitly disabled legacy export is a checkpoint no-op.
+            if defaults.get("export_hidden_states") is False:
+                defaults.pop("export_hidden_states")
+            self.default_generate_config.update(defaults)
             logging.info(
                 f"load generate config:{generation_config_path}/generation_config.json: \n\
                          {json.dumps(self.default_generate_config.model_dump(), indent=4)}"

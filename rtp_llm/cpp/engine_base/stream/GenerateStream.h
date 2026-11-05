@@ -18,10 +18,10 @@
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <atomic>
-#include <condition_variable>
-#include <iterator>
+#include <cstddef>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <limits>
@@ -30,6 +30,7 @@
 #include <optional>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -160,6 +161,17 @@ public:
     bool isStreamAlive() const {
         return stream_magic_ == STREAM_MAGIC;
     }
+
+    // Request intent used to check capture eligibility before admission.
+    bool requiresFullContextForHiddenStateCapture() const;
+    bool isHiddenStateCaptureCandidate() const;
+    bool canExecuteReservedHiddenStateCapture() const;
+    bool hasHiddenStateCaptureReservation() const;
+    // Installed before scheduling; a non-owner marker is not publisher admission.
+    void setHiddenStateCaptureReservation(HiddenStateCaptureReservationPtr reservation, bool owns_admission = true);
+    // Rejection before scheduling, executor-side failure, or final resource release only.
+    // An RPC cancelling a scheduled stream must reportError, not revoke a token mid-forward.
+    void cancelHiddenStateCapture() const;
 
 public:
     void setIsFakeStream(bool is_fake) {
@@ -1055,6 +1067,11 @@ protected:
     void reportMetricOnce();
 
 protected:
+    bool hasFullContextCaptureGeometry() const;
+    HiddenStateCaptureReservationPtr hidden_state_capture_reservation_;
+    // Latched at admission. KV release can run after submission or cancellation.
+    bool bypass_cache_for_admitted_capture_ = false;
+
     uint64_t                              stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;
