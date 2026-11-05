@@ -268,7 +268,25 @@ int w4a16_gemm_splitk_sm120(
     // 用下面的 launch_tuned 直接实例化。它只是把"从 StandardTuned 取调优参数"
     // 与 6 个 void* -> 具体类型的 cast 收在一处 (否则要复制三遍) —— 不是导出的
     // 启动函数, 只是本文件的局部设施。
-    if (M <= 8) {
+    if (M == 1 && n_split == 1) {
+        // 纯 GEMV (M=1) 且不切 K: 瓶颈是权重流式访存的并行度 (memory-level
+        // parallelism), 不是算力。默认档 TileN=64 让 grid.x = N/64; 换成
+        // TileN=32/Warps=2 后 grid.x 翻倍 (同样的总线程数, 但分散到 2 倍的
+        // 独立 CTA), 更多并发权重流把 DRAM 压得更满。实测 gate_up N=17408:
+        // 中位 53.25us -> 51.20us (~4%), 且因 n_split==1 (无原子累加、K 归约
+        // 顺序不变) 结果与默认档**逐位相同** (max_abs=0)。down (n_split>1) 与
+        // M>=2 都不进这条分支, 故不受影响。
+        launch_standard<8, 32, 64, 2, 4, true>(static_cast<const bf16_t*>(A),
+                                               static_cast<const int32_t*>(Wp),
+                                               static_cast<const uint8_t*>(Sc),
+                                               static_cast<bf16_t*>(D),
+                                               M,
+                                               N,
+                                               K,
+                                               Ks,
+                                               false,
+                                               st);
+    } else if (M <= 8) {
         // swapAB: 权重当 A 操作数。用的还是同一份 Wp (读法不同而已)。
         launch_tuned<8, true>(A, Wp, Sc, D, M, N, K, Ks, n_split > 1, st);
     } else if (M <= 16) {
