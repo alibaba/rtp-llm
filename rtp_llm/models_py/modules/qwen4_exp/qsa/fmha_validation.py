@@ -6,9 +6,106 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     qsa_assert_valid,
     qsa_strict_validation_enabled,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    host_input_mirror,
+)
+
+
+def _geometry_tensor_fingerprint(tensor) -> tuple:
+    """Identity + content-stability fingerprint of one geometry tensor.
+
+    Same convention as the step-plan fingerprints (``qsa_step_plan``): the
+    engine materialises fresh inference tensors per step and never rewrites
+    the fingerprinted metadata tensors in place, so storage identity plus the
+    version counter (inference tensors carry no counter) is a sound per-step
+    key. Shape and dtype ride along so a mutated-layout view can never alias
+    a memoized verdict.
+    """
+    if not isinstance(tensor, torch.Tensor):
+        return ("missing",)
+    if torch.is_inference(tensor):
+        return (int(tensor.data_ptr()), -1, tuple(tensor.shape), tensor.dtype)
+    return (int(tensor.data_ptr()), int(tensor._version), tuple(tensor.shape), tensor.dtype)
+
+
+# One step's layers validate the same main-cache geometry (the cache, the
+# block table and the two length tensors are the same objects for every
+# layer of a step), so the production path validates that geometry once per
+# step and replays the page-size verdict for the remaining layers. Strict
+# mode and graph capture keep their exact per-call validation.
+_MAIN_GEOMETRY_MEMO: "tuple[tuple, int] | None" = None
+_MAIN_GEOMETRY_MEMO_STATS = {"hits": 0, "misses": 0}
+
+
+def main_geometry_validation_stats() -> "dict[str, int]":
+    """Observability for the per-step main-geometry validation memo."""
+    return dict(_MAIN_GEOMETRY_MEMO_STATS)
+
+
+def clear_main_geometry_memo() -> None:
+    """Drop the memoized geometry verdict (tests isolate fresh cases)."""
+    global _MAIN_GEOMETRY_MEMO
+    _MAIN_GEOMETRY_MEMO = None
+
 
 
 def _validate_main_paged_geometry(
+    self,
+    cache: torch.Tensor,
+    block_table: torch.Tensor,
+    sequence_bases: torch.Tensor,
+    query_lengths: torch.Tensor,
+    device: torch.device,
+    graph_capture: bool = False,
+) -> int:
+    """Validate all pages that a paged prefill/decode may observe.
+
+    The layers of one model step validate identical geometry (the same
+    cache, block table and length objects), so the production path validates
+    once per step and serves the remaining layers from a single-entry memo;
+    graph capture keeps its host-only checks per call (capture must observe
+    every check) and strict mode keeps the legacy per-check diagnostics.
+    """
+    if graph_capture or qsa_strict_validation_enabled():
+        return _validate_main_paged_geometry_uncached(
+            self,
+            cache,
+            block_table,
+            sequence_bases,
+            query_lengths,
+            device,
+            graph_capture,
+        )
+    key = (
+        _geometry_tensor_fingerprint(cache),
+        _geometry_tensor_fingerprint(block_table),
+        _geometry_tensor_fingerprint(sequence_bases),
+        _geometry_tensor_fingerprint(query_lengths),
+        int(sequence_bases.numel()),
+        str(device),
+        int(self.attn_configs.kernel_tokens_per_block),
+        int(self.kv_head_num),
+        int(self.head_dim),
+    )
+    global _MAIN_GEOMETRY_MEMO
+    if _MAIN_GEOMETRY_MEMO is not None and _MAIN_GEOMETRY_MEMO[0] == key:
+        _MAIN_GEOMETRY_MEMO_STATS["hits"] += 1
+        return _MAIN_GEOMETRY_MEMO[1]
+    _MAIN_GEOMETRY_MEMO_STATS["misses"] += 1
+    page_size = _validate_main_paged_geometry_uncached(
+        self,
+        cache,
+        block_table,
+        sequence_bases,
+        query_lengths,
+        device,
+        graph_capture,
+    )
+    _MAIN_GEOMETRY_MEMO = (key, page_size)
+    return page_size
+
+
+def _validate_main_paged_geometry_uncached(
     self,
     cache: torch.Tensor,
     block_table: torch.Tensor,
@@ -229,18 +326,29 @@ def validate_qsa_before_side_write(
     if self.is_target_verify or is_incremental_prefill:
         sequence_bases = self.attn_inputs.prefix_lengths
         query_lengths = self.attn_inputs.input_lengths
+        # Fail-fast on the per-step CPU mirrors: a device source
+        # (RTP_LLM_DEVICE_INPUT) was read back once this step by the
+        # gate/plan build, so these checks never synchronize per layer.
+        bases_host = host_input_mirror(self.attn_inputs, "prefix_lengths")
+        lengths_host = host_input_mirror(self.attn_inputs, "input_lengths")
+        if bases_host is None:
+            bases_host = sequence_bases
+        if lengths_host is None:
+            lengths_host = query_lengths
     else:
         sequence_bases = self.attn_inputs.sequence_lengths
         query_lengths = torch.ones_like(sequence_bases)
+        bases_host = sequence_bases
+        lengths_host = query_lengths
     # Host fail-fast on the pinned length mirrors; free, and it lets
     # _validate_main_paged_geometry drop its own device-synchronizing sign
     # reads for the non-graph path.
-    if bool(torch.any(sequence_bases < 0)) or bool(torch.any(query_lengths <= 0)):
+    if bool(torch.any(bases_host < 0)) or bool(torch.any(lengths_host <= 0)):
         raise RuntimeError(
             "qwen4_exp QSA paged sequence bases must be non-negative and "
             "query lengths positive"
         )
-    if int(hidden_states.shape[0]) != int(query_lengths.sum().item()):
+    if int(hidden_states.shape[0]) != int(lengths_host.sum().item()):
         raise RuntimeError(
             "qwen4_exp QSA paged token count does not match batch/query geometry"
         )
