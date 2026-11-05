@@ -328,6 +328,14 @@ class BatchPerfImpl(object):
     # warmup (JIT compile) xN -> measure xN (trim min/max, average) ->
     # profile xN (optional, torch profiler affects accuracy)
     def run(self, num_measures: Optional[int] = None) -> TestResultMetrics:
+        try:
+            return self._run(num_measures)
+        finally:
+            # A grid creates one client pool per shape. Do not retain all of
+            # those processes until the end of a long batch/context sweep.
+            self.executor.shutdown(wait=True)
+
+    def _run(self, num_measures: Optional[int] = None) -> TestResultMetrics:
         self._set_concurrency()
 
         for i in range(self.warmup_runs):

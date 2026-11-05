@@ -730,6 +730,7 @@ def main() -> str:
             except Exception as e:
                 logging.warning(f"plot_decode_results failed: {e}")
     finally:
+        server.stop()
         summarize_and_cleanup_coredumps(args.result_dir)
 
     return args.result_dir
