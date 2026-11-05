@@ -1,4 +1,5 @@
 import unittest
+from collections import OrderedDict
 from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +18,50 @@ def _has_cuda():
 
 
 class FusedIndexerAssembleTest(unittest.TestCase):
+
+    @unittest.skipIf(not _has_cuda(), SKIP_REASON)
+    def test_packed_lengths_reuse_binary_and_keep_padding_exact(self):
+        for fast in (False, True):
+            with self.subTest(fast=fast), ExitStack() as patches:
+                patches.enter_context(
+                    patch.object(assemble._cpu_launch, "ENABLED", fast)
+                )
+                patches.enter_context(
+                    patch.object(assemble._cpu_launch, "_cache", OrderedDict())
+                )
+                kernel = assemble._pack_padded_k_scale_kernel
+                original_run = kernel.run
+                compiled = []
+
+                def record_run(*args, **kwargs):
+                    result = original_run(*args, **kwargs)
+                    compiled.append(result)
+                    return result
+
+                patches.enter_context(patch.object(kernel, "run", record_run))
+                for actual in (0, 1, 16, 17, 32, 127, 1024, 1025):
+                    k = torch.randint(
+                        0, 256, (actual, 128), dtype=torch.uint8, device="cuda"
+                    )
+                    scale = torch.randint(
+                        0, 256, (actual, 4), dtype=torch.uint8, device="cuda"
+                    )
+                    rows = actual + 5
+                    # Include negative and upper-bound-invalid map entries.
+                    mapping = torch.arange(rows, device="cuda") - 2
+                    result = assemble._pack_padded_k_scale(k, scale, rows, mapping)
+                    expected = torch.zeros(
+                        (rows, 132), dtype=torch.uint8, device="cuda"
+                    )
+                    expected[2 : actual + 2] = torch.cat((k, scale), dim=1)
+                    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+                    cached = assemble._pack_padded_k_scale(k, scale, rows, mapping)
+                    torch.testing.assert_close(cached, expected, rtol=0, atol=0)
+                self.assertTrue(compiled)
+                self.assertTrue(
+                    all(binary is compiled[0] for binary in compiled),
+                    "changing ACTUAL compiled another pack kernel",
+                )
 
     @unittest.skipIf(not _has_cuda(), SKIP_REASON)
     def test_assemble_retains_fast_launch_and_collective_packing(self):

@@ -5,10 +5,11 @@ import os
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["rows", "logical_rows", "physical_rows"])
 def _offset_topk_kernel(
     indices,
     offsets,
@@ -19,8 +20,8 @@ def _offset_topk_kernel(
     col_stride: tl.constexpr,
     offset_stride: tl.constexpr,
     restore_indices,
-    logical_rows: tl.constexpr,
-    physical_rows: tl.constexpr,
+    logical_rows,
+    physical_rows,
     REMAP: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -34,6 +35,7 @@ def _offset_topk_kernel(
     global_index = index.to(output.dtype.element_ty) + offset.to(
         output.dtype.element_ty
     )
+    # The layout mode is static; request-dependent bounds stay runtime values.
     if REMAP:
         in_bounds = (
             valid & (index >= 0) & (global_index >= 0) & (global_index < logical_rows)

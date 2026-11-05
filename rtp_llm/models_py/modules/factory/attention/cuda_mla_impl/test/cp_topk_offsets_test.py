@@ -1,11 +1,16 @@
 import json
 import os
 import unittest
+from collections import OrderedDict
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+    cp_topk_offsets_triton as offsets_impl,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_topk_offsets_triton import (
     is_supported,
     offset_cp_topk,
@@ -36,6 +41,57 @@ class CpTopkOffsetsCpuTest(unittest.TestCase):
 
 
 class CpTopkOffsetsCudaTest(unittest.TestCase):
+
+    def test_dynamic_remap_bounds_reuse_binary_and_preserve_invalid_indices(self):
+        for fast in (False, True):
+            with self.subTest(fast=fast), ExitStack() as patches:
+                patches.enter_context(
+                    patch.object(offsets_impl._cpu_launch, "ENABLED", fast)
+                )
+                patches.enter_context(
+                    patch.object(offsets_impl._cpu_launch, "_cache", OrderedDict())
+                )
+                kernel = offsets_impl._offset_topk_kernel
+                original_run = kernel.run
+                compiled = []
+
+                def record_run(*args, **kwargs):
+                    result = original_run(*args, **kwargs)
+                    compiled.append(result)
+                    return result
+
+                patches.enter_context(patch.object(kernel, "run", record_run))
+                for rows, logical, physical in (
+                    (1, 0, 1),
+                    (3, 1, 1),
+                    (16, 16, 17),
+                    (17, 19, 16),
+                    (32, 31, 33),
+                    (127, 257, 256),
+                    (128, 1025, 1024),
+                ):
+                    indices = torch.randint(
+                        -3, logical + 3, (rows, 129), device="cuda", dtype=torch.int32
+                    )
+                    offsets = torch.arange(rows, device="cuda", dtype=torch.int64) % 5
+                    mapping = torch.arange(logical, device="cuda") % (physical + 2) - 1
+                    result = offset_cp_topk(indices, offsets, mapping, physical)
+                    expected = torch.full_like(result, -1)
+                    if logical:
+                        absolute = indices.to(torch.int64) + offsets[:, None]
+                        valid = (indices >= 0) & (absolute >= 0) & (absolute < logical)
+                        mapped = mapping[absolute.clamp(0, logical - 1)]
+                        valid &= (mapped >= 0) & (mapped < physical)
+                        expected[valid] = mapped[valid]
+                    torch.testing.assert_close(result, expected, rtol=0, atol=0)
+                    cached = offset_cp_topk(indices, offsets, mapping, physical)
+                    torch.testing.assert_close(cached, expected, rtol=0, atol=0)
+                self.assertTrue(compiled)
+                self.assertTrue(
+                    all(binary is compiled[0] for binary in compiled),
+                    "changing request bounds compiled another remap kernel",
+                )
+
     def test_default_fuses_launches_and_explicit_optout_matches(self) -> None:
         indices = torch.randint(-3, 2048, (17, 129), device="cuda", dtype=torch.int32)
         offsets = torch.arange(17, device="cuda", dtype=torch.int64) * 1000

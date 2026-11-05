@@ -22,7 +22,7 @@ from rtp_llm.models_py.distributed.pynccl_cp import enabled as cp_opt_enabled
 from rtp_llm.models_py.triton_kernels.common import fast_launch as _cpu_launch
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ACTUAL"])
 def _pack_padded_k_scale_kernel(
     K,
     S,
@@ -30,13 +30,14 @@ def _pack_padded_k_scale_kernel(
     Out,
     KCOL: tl.constexpr,
     SCOL: tl.constexpr,
-    ACTUAL: tl.constexpr,
+    ACTUAL,
     USE_MAP: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     src = tl.load(Map + row).to(tl.int64) if USE_MAP else row
     col = tl.arange(0, BLOCK)
+    # Request lengths must not create a new binary for each prefill batch.
     valid = (src >= 0) & (src < ACTUAL)
     kval = tl.load(K + src * KCOL + col, mask=valid & (col < KCOL), other=0)
     sval = tl.load(
