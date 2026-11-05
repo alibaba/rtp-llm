@@ -76,6 +76,8 @@ def _abort_ft_runtime(context, error: FtRuntimeException) -> None:
         status = grpc.StatusCode.DEADLINE_EXCEEDED
     elif error.exception_type == ExceptionType.CANCELLED_ERROR:
         status = grpc.StatusCode.CANCELLED
+    elif error.exception_type == ExceptionType.MM_WRONG_FORMAT_ERROR:
+        status = grpc.StatusCode.INVALID_ARGUMENT
     elif error.exception_type == ExceptionType.UNSAFE_INPUT_CONTENT:
         status = grpc.StatusCode.PERMISSION_DENIED
     else:

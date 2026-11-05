@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalRpcError.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
@@ -217,16 +218,7 @@ private:
         }
         auto status = stub->RemoteMultimodalEmbedding(context.get(), request, &output_pb);
         if (!status.ok()) {
-            if (status.error_code() == grpc::StatusCode::CANCELLED) {
-                return ErrorInfo(ErrorCode::CANCELLED, status.error_message());
-            }
-            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {
-                return ErrorInfo(ErrorCode::CONCURRENCY_LIMIT_ERROR, status.error_message());
-            }
-            if (status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
-                return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, status.error_message());
-            }
-            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, status.error_message());
+            return ErrorInfo(multimodalRpcErrorCode(status.error_code()), status.error_message());
         }
 
         // RDMA fast path: encoder returned descriptor(s) instead of inline output bytes. The

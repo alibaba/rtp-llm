@@ -3,7 +3,11 @@ from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import ANY, MagicMock, patch
 
+import grpc
+
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    ErrorDetailsPB,
     MMRdmaDescPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
@@ -19,6 +23,30 @@ from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
 
 
 class VitWorkerRequestIdTest(TestCase):
+    @patch("rtp_llm.server.vit_rpc_server.trans_mm_input", return_value=[])
+    def test_invalid_image_has_invalid_argument_status_and_typed_details(self, _convert):
+        engine = MagicMock()
+        engine.get_embedding_result.side_effect = FtRuntimeException(
+            ExceptionType.MM_WRONG_FORMAT_ERROR, "invalid image"
+        )
+        servicer = MultimodalRpcServer.__new__(MultimodalRpcServer)
+        servicer.engine = engine
+        servicer._rdma = None
+        context = MagicMock()
+        context.time_remaining.return_value = None
+        context.abort.side_effect = RuntimeError("RPC aborted")
+
+        with self.assertRaisesRegex(RuntimeError, "RPC aborted"):
+            servicer.RemoteMultimodalEmbedding(MultimodalInputsPB(), context)
+
+        context.abort.assert_called_once_with(
+            grpc.StatusCode.INVALID_ARGUMENT, "[MM_WRONG_FORMAT_ERROR] invalid image"
+        )
+        key, value = context.set_trailing_metadata.call_args.args[0][0]
+        self.assertEqual(key, "grpc-status-details-bin")
+        details = ErrorDetailsPB.FromString(value)
+        self.assertEqual(details.error_code, int(ExceptionType.MM_WRONG_FORMAT_ERROR))
+
     @patch("rtp_llm.server.vit_rpc_server.trans_mm_input")
     def test_request_id_is_forwarded_to_all_engine_entrypoints(self, trans_mm_input):
         converted = [MagicMock(name="mm_input")]

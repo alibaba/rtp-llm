@@ -4,6 +4,21 @@
 namespace rtp_llm {
 namespace {
 
+TEST(MultimodalRpcErrorTest, MalformedInputDoesNotBecomeInternalProcessingFailure) {
+    EXPECT_EQ(multimodalRpcErrorCode(grpc::StatusCode::INVALID_ARGUMENT), ErrorCode::MM_WRONG_FORMAT_ERROR);
+}
+
+TEST(MultimodalRpcErrorTest, PreservesCapacityDeadlineAndCancellation) {
+    EXPECT_EQ(multimodalRpcErrorCode(grpc::StatusCode::RESOURCE_EXHAUSTED), ErrorCode::CONCURRENCY_LIMIT_ERROR);
+    EXPECT_EQ(multimodalRpcErrorCode(grpc::StatusCode::DEADLINE_EXCEEDED), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(multimodalRpcErrorCode(grpc::StatusCode::CANCELLED), ErrorCode::CANCELLED);
+}
+
+TEST(MultimodalRpcErrorTest, UnclassifiedRpcFailuresRemainInternal) {
+    EXPECT_EQ(multimodalRpcErrorCode(grpc::StatusCode::INTERNAL), ErrorCode::MM_PROCESS_ERROR);
+    EXPECT_EQ(multimodalRpcErrorCode(grpc::StatusCode::UNAVAILABLE), ErrorCode::MM_PROCESS_ERROR);
+}
+
 class FakeMMRdmaTransport: public MMRdmaTransport {
 public:
     bool exportEmbedding(const std::vector<torch::Tensor>&,

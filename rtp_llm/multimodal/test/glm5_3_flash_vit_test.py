@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.multimodal.multimodal_mixins.glm5_3_flash import (
     glm5_3_flash_mixin as glm53_mixin,
 )
@@ -380,6 +381,44 @@ class Glm53FlashVitTest(unittest.TestCase):
                     processor.call_args.kwargs["images"].size,
                     (expected_size, expected_size),
                 )
+
+    def test_malformed_images_are_client_format_errors(self):
+        encoded = io.BytesIO()
+        Image.new("RGB", (28, 28)).save(encoded, "PNG")
+        valid = encoded.getvalue()
+        # Same failure as an agent's struct.pack('<I', len(chunk)): a complete
+        # PNG whose IHDR length has the wrong byte order.
+        little_endian_length = valid[:8] + valid[8:12][::-1] + valid[12:]
+        for data in (b"not an image", valid[:20], little_endian_length):
+            with self.subTest(data_length=len(data)):
+                processor = Mock()
+                mm_input = SimpleNamespace(
+                    url="memory://malformed-image",
+                    mm_type=MMUrlType.IMAGE,
+                    mm_preprocess_config=SimpleNamespace(min_pixels=-1, max_pixels=-1),
+                )
+                with patch.object(
+                    glm53_mixin, "get_bytes_io_from_url", return_value=io.BytesIO(data)
+                ), self.assertRaises(FtRuntimeException) as error:
+                    Glm53FlashImageEmbedding.preprocess_input(
+                        [mm_input],
+                        SimpleNamespace(download_headers=""),
+                        processor=processor,
+                        video_processor=None,
+                        processor_config={
+                            "image_processor": {
+                                "patch_size": 14,
+                                "temporal_patch_size": 2,
+                                "merge_size": 2,
+                                "min_image_tokens": 16,
+                                "max_image_tokens": 8000,
+                            }
+                        },
+                    )
+                self.assertEqual(
+                    error.exception.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+                )
+                processor.assert_not_called()
 
     def test_real_mp4_decord_preprocess(self):
         import av

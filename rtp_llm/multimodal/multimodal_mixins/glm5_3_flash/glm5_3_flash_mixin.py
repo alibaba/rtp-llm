@@ -15,6 +15,7 @@ except ModuleNotFoundError:
     cpu = None
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalMixin,
@@ -621,7 +622,12 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
                 timestamps,
             )
 
-        image = Image.open(data).convert("RGB")
+        try:
+            image = Image.open(data).convert("RGB")
+        except (OSError, ValueError, Image.DecompressionBombError):
+            # Malformed tool-generated images are request errors. Reporting a
+            # Pillow decode failure as 903 makes clients retry the same bytes.
+            raise_mm(MMErr.IMG_OPEN)
         canvas = glm5_smart_resize(
             image.height,
             image.width,

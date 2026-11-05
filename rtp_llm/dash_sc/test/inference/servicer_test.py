@@ -160,6 +160,7 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
     def test_non_default_exception_groups(self) -> None:
         cases = (
             (ExceptionType.INVALID_PARAMS, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.MM_WRONG_FORMAT_ERROR, DASH_ERROR_BAD_REQUEST),
             (ExceptionType.LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
             (ExceptionType.UNSUPPORTED_OPERATION, DASH_ERROR_UNSUPPORTED),
             (ExceptionType.MASTER_NO_AVAILABLE_WORKER, DASH_ERROR_CAPACITY),
