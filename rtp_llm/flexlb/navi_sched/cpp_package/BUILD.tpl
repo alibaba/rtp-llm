@@ -18,6 +18,7 @@ cc_import(
     for name in [
         "lz4",
         "zstd",
+        "tbb",
         "elf",
         "ev",
     ]

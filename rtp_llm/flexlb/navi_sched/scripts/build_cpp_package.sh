@@ -116,7 +116,7 @@ if [[ "${PRIVATE_SYMBOL_COUNT}" -ne 0 ]]; then
     echo "navi_sched C++ package exports private crypto symbols" >&2
     exit 1
 fi
-for runtime_lib in liblz4.so libzstd.so libelf.so libev.so; do
+for runtime_lib in liblz4.so libzstd.so libtbb.so libelf.so libev.so; do
     runtime_path=$(find "${OUTPUT_BIN}/_solib_k8" \
         -name "${runtime_lib}" -print -quit)
     if [[ -z "${runtime_path}" ]]; then

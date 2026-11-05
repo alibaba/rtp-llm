@@ -7,5 +7,5 @@ package(default_visibility = ["//visibility:public"])
         outs = ["lib%s.so" % name],
         cmd = "cp $< $@",
     )
-    for name in ["navi_sched", "lz4", "zstd", "elf", "ev"]
+    for name in ["navi_sched", "lz4", "zstd", "tbb", "elf", "ev"]
 ]
