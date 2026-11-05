@@ -160,7 +160,10 @@ def git_deps():
         name = "boringssl",
         sha256 = "1188e29000013ed6517168600fc35a010d58c5d321846d6a6dfee74e4c788b45",
         strip_prefix = "boringssl-7f634429a04abc48e2eb041c81c5235816c96514",
-        patches = ["@rtp_llm//patches/boringssl:0001-match-x25519-array-parameter.patch"],
+        patches = [
+            "@rtp_llm//patches/boringssl:0001-match-x25519-array-parameter.patch",
+            "@rtp_llm//patches/boringssl:0002-correct-bn-sqr-comba8-array-bound.patch",
+        ],
         urls = [
             "https://mirror.bazel.build/github.com/google/boringssl/archive/7f634429a04abc48e2eb041c81c5235816c96514.tar.gz",
             "https://github.com/google/boringssl/archive/7f634429a04abc48e2eb041c81c5235816c96514.tar.gz",
