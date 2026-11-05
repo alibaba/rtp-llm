@@ -149,7 +149,10 @@ def git_deps():
         name = "grpc",
         remote = "https://github.com/grpc/grpc.git",
         commit = "109c570727c3089fef655edcdd0dd02cc5958010",
-        patches = ["@rtp_llm//patches/grpc:0001-Rename-gettid-functions.patch"],
+        patches = [
+            "@rtp_llm//patches/grpc:0001-Rename-gettid-functions.patch",
+            "@rtp_llm//patches/grpc:0002-explicitly-discard-unused-move.patch",
+        ],
         shallow_since = "1518192000 +0800",
     )
 
