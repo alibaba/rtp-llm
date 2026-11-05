@@ -157,7 +157,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             var snapshot = cache.snapshot(request.getLatestCacheVersion(), request.getNeedCacheKeys());
             var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
                 .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.blockSize()).setVersion(snapshot.version());
-            snapshot.keys().forEach(key -> result.putCacheKeys(key, true));
+            for (long key : snapshot.keys()) result.putCacheKeys(key, true);
             return result.build();
         });
     }

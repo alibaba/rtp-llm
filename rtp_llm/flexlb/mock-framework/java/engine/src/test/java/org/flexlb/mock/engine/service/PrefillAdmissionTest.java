@@ -65,7 +65,7 @@ class PrefillAdmissionTest {
             var first = engine.submit(input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertTrue(first.status().isOk());
             assertTrue(first.output().getFlattenOutput().getAuxInfo(0).getFirstTokenCostTimeUs() >= 5000);
-            assertEquals(2, cache.snapshot(-1, true).keys().size());
+            assertEquals(2, cache.snapshot(-1, true).keys().length);
             var second = engine.submit(input(2, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertEquals(4, second.output().getFlattenOutput().getAuxInfo(0).getTotalReuseLen());
             assertTrue(second.output().getFlattenOutput().getAuxInfo(0).getFirstTokenCostTimeUs() >= 1000);
@@ -100,7 +100,7 @@ class PrefillAdmissionTest {
         try (var cache = new KvCache(config.blockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
             var old = engine.submit(input(1, 0, true)); old.cancel();
             assertEquals(Status.Code.CANCELLED, old.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
-            assertTrue(cache.snapshot(-1, true).keys().isEmpty());
+            assertEquals(0, cache.snapshot(-1, true).keys().length);
             var fresh = engine.submit(input(1, 0, true)); old.cancel();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (engine.snapshot(0).running() == 0) {
@@ -125,7 +125,7 @@ class PrefillAdmissionTest {
                 for (var session : List.of(running, queued))
                     assertEquals(Status.Code.UNAVAILABLE, session.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
                 assertEquals(8, cache.snapshot(-1, false).availableBlocks());
-                assertTrue(cache.snapshot(-1, true).keys().isEmpty());
+                assertEquals(0, cache.snapshot(-1, true).keys().length);
             } finally { engine.close(); }
         }
     }
@@ -180,7 +180,7 @@ class PrefillAdmissionTest {
         var config = config("0");
         try (var cache = new KvCache(config.blockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
             assertTrue(engine.submit(input(1, 0, false)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
-            assertTrue(cache.snapshot(-1, true).keys().isEmpty());
+            assertEquals(0, cache.snapshot(-1, true).keys().length);
             assertEquals(8, cache.snapshot(-1, false).freeBlocks());
         }
     }

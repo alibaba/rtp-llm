@@ -6,6 +6,46 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.Test;
 
 class KvCacheTest {
+    @Test void keySnapshotsAreDetachedAndEachReaderUsesItsOwnVersion() {
+        try (var cache = new KvCache(1, 4, 0)) {
+            try (var seed = cache.acquire(2, List.of()).lease()) {
+                assertTrue(seed.publish(List.of(Long.MIN_VALUE, Long.MAX_VALUE), 2));
+            }
+            var first = cache.snapshot(-1, true);
+            var expected = new long[]{Long.MIN_VALUE, Long.MAX_VALUE};
+            var actual = first.keys().clone(); Arrays.sort(actual);
+            assertArrayEquals(expected, actual);
+            assertEquals(0, cache.snapshot(first.version(), true).keys().length);
+            var secondReader = cache.snapshot(-1, true);
+            assertNotSame(first.keys(), secondReader.keys());
+            assertEquals(first.version(), secondReader.version());
+            Arrays.sort(secondReader.keys());
+            assertArrayEquals(expected, secondReader.keys());
+
+            try (var held = cache.acquire(1, List.of()).lease()) {
+                var capacityOnly = cache.snapshot(12345, false);
+                assertEquals(12345, capacityOnly.version());
+                assertEquals(0, capacityOnly.keys().length);
+                assertEquals(3, capacityOnly.availableBlocks());
+                var unchanged = cache.snapshot(first.version(), true);
+                assertEquals(first.version(), unchanged.version());
+                assertEquals(0, unchanged.keys().length);
+                assertEquals(3, unchanged.availableBlocks());
+                assertTrue(held.publish(List.of(0L), 1));
+            }
+            var updated = cache.snapshot(first.version(), true);
+            assertTrue(updated.version() > first.version());
+            assertEquals(3, updated.keys().length);
+            assertEquals(4, updated.availableBlocks());
+            assertArrayEquals(actual, Arrays.stream(first.keys()).sorted().toArray());
+            // Mutating a caller-owned snapshot cannot corrupt the live index.
+            first.keys()[0] = 17;
+            assertArrayEquals(new long[]{Long.MIN_VALUE, 0L, Long.MAX_VALUE},
+                Arrays.stream(cache.snapshot(-1, true).keys()).sorted().toArray());
+            assertEquals(3, cache.snapshot(updated.version() + 1, true).keys().length);
+        }
+    }
+
     @Test void retryablePreparationWaitsForCapacityChange() {
         try (var cache = new KvCache(2, 2, 0)) {
             var held = cache.acquire(4, List.of()).lease();
@@ -46,7 +86,7 @@ class KvCacheTest {
             lease.close(); lease.close();
             assertFalse(lease.publish(List.of(1L, 2L), 2));
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
-            assertTrue(cache.snapshot(-1, true).keys().isEmpty());
+            assertEquals(0, cache.snapshot(-1, true).keys().length);
         }
     }
 
@@ -119,7 +159,7 @@ class KvCacheTest {
                 assertThrows(IllegalArgumentException.class, () -> lease.publish(List.of(1L, 2L), 129));
                 assertThrows(IllegalArgumentException.class, () -> lease.publish(List.of(1L), 257));
                 assertThrows(IllegalArgumentException.class, () -> lease.publish(List.of(1L), -1));
-                assertTrue(cache.snapshot(-1, true).keys().isEmpty());
+                assertEquals(0, cache.snapshot(-1, true).keys().length);
                 lease.publish(List.of(1L), 129);
             }
             try (var reader = cache.acquire(255, List.of(1L)).lease()) {

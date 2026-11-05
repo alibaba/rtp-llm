@@ -19,6 +19,9 @@ import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
 class DecodeAdmissionTest {
+    private static Set<Long> cacheKeys(RtpNode node) {
+        return new HashSet<>(Arrays.stream(node.cache().snapshot(-1, true).keys()).boxed().toList());
+    }
     @TempDir Path directory;
     private static GenerateRequestPB input(String client, long id, int length, int timeout) {
         return GenerateRequestPB.newBuilder().setStage(RemoteStage.ALLOCATE).setRequestId(id).setClientId(client)
@@ -83,7 +86,7 @@ class DecodeAdmissionTest {
             assertEquals(1, status.getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count()); assertEquals(0, status.getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count());
             call.close(); await(() -> node.status().getAvailableKvCache() == 16 && node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
             assertEquals(8100, node.status().getFinishedTaskList(0).getErrorInfo().getErrorCode());
-            assertTrue(node.node.cache().snapshot(-1, true).keys().isEmpty());
+            assertEquals(0, node.node.cache().snapshot(-1, true).keys().length);
         }
     }
 
@@ -144,7 +147,7 @@ class DecodeAdmissionTest {
                 call.request.onNext(input); call.ack();
                 assertEquals(disabled ? 0 : 4, node.status().getRunningTaskInfo(0).getPrefixLength());
                 call.close(); await(() -> node.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 0);
-                assertEquals(Set.copyOf(keys), node.node.cache().snapshot(-1, true).keys());
+                assertEquals(Set.copyOf(keys), cacheKeys(node.node));
             }
         }
     }
@@ -185,8 +188,8 @@ class DecodeAdmissionTest {
                 var allKeys = org.flexlb.mock.protocol.MediaInput.cacheKeys(full, 2);
                 // Three input tokens + four computed output tokens: three full blocks.
                 var expected = Set.copyOf(allKeys.subList(0, 3));
-                await(() -> node.node.cache().snapshot(-1, true).keys().equals(expected));
-                assertFalse(node.node.cache().snapshot(-1, true).keys().contains(allKeys.get(3)));
+                await(() -> cacheKeys(node.node).equals(expected));
+                assertFalse(Arrays.stream(node.node.cache().snapshot(-1, true).keys()).anyMatch(key -> key == allKeys.get(3)));
                 // A later request reuses the output prefix, including a block crossing the media tail.
                 try (var lease = node.node.cache().acquire(8, allKeys).lease()) {
                     assertNotNull(lease);
@@ -257,7 +260,7 @@ class DecodeAdmissionTest {
             node.node.close();
             assertEquals(0, node.node.cache().snapshot(0, false).heldBlocks());
             assertEquals(8, node.node.cache().snapshot(0, false).availableBlocks());
-            assertTrue(node.node.cache().snapshot(-1, true).keys().isEmpty());
+            assertEquals(0, node.node.cache().snapshot(-1, true).keys().length);
         }
     }
 }

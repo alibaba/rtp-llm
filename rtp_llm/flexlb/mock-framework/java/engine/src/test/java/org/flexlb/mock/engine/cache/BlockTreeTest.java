@@ -6,6 +6,9 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /** Behavioral cases mirrored from main FullEvictionTest; no reflection into implementation state. */
 class BlockTreeTest {
+    private static Set<Long> keySet(KvCache cache) {
+        return new HashSet<>(Arrays.stream(cache.snapshot(-1, true).keys()).boxed().toList());
+    }
     private static void seed(KvCache cache, Long... keys) {
         var lease = cache.acquire(keys.length, List.of()).lease();
         assertNotNull(lease); assertTrue(lease.publish(List.of(keys), keys.length)); lease.close();
@@ -15,7 +18,7 @@ class BlockTreeTest {
             seed(cache, 1L, 2L, 3L);
             try (var pressure = cache.acquire(1, List.of()).lease()) {
                 assertNotNull(pressure);
-                assertEquals(Set.of(1L, 2L), cache.snapshot(-1, true).keys());
+                assertEquals(Set.of(1L, 2L), keySet(cache));
             }
             try (var reused = cache.acquire(2, List.of(1L, 2L)).lease()) { assertEquals(2, reused.reusedTokens()); }
         }
@@ -28,7 +31,7 @@ class BlockTreeTest {
             pin.close();
             assertEquals(3, cache.snapshot(-1, false).availableBlocks());
             try (var pressure = cache.acquire(2, List.of()).lease()) {
-                assertNotNull(pressure); assertEquals(Set.of(1L), cache.snapshot(-1, true).keys());
+                assertNotNull(pressure); assertEquals(Set.of(1L), keySet(cache));
             }
         }
     }
@@ -39,7 +42,7 @@ class BlockTreeTest {
             var second = cache.acquire(1, List.of(2L)).lease();
             second.close(); first.close();
             try (var pressure = cache.acquire(2, List.of()).lease()) {
-                assertNotNull(pressure); assertEquals(Set.of(2L), cache.snapshot(-1, true).keys());
+                assertNotNull(pressure); assertEquals(Set.of(2L), keySet(cache));
             }
         }
     }
@@ -50,7 +53,7 @@ class BlockTreeTest {
             first.publish(List.of(1L), 1); first.close(); seed(cache, 2L);
             overlap.publish(List.of(1L), 1); overlap.close();
             try (var pressure = cache.acquire(2, List.of()).lease()) {
-                assertNotNull(pressure); assertEquals(Set.of(2L), cache.snapshot(-1, true).keys());
+                assertNotNull(pressure); assertEquals(Set.of(2L), keySet(cache));
             }
         }
     }
@@ -65,7 +68,7 @@ class BlockTreeTest {
             }
             try (var pressure = cache.acquire(3, List.of()).lease()) {
                 assertNotNull(pressure);
-                assertEquals(Set.of(1L), cache.snapshot(-1, true).keys());
+                assertEquals(Set.of(1L), keySet(cache));
             }
         }
     }

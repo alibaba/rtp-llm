@@ -84,9 +84,12 @@ public final class KvCache implements AutoCloseable {
         }
     }
 
+    private static final long[] EMPTY_KEYS = new long[0];
+
     public record Admission(Lease lease, Failure failure, long matchNanos) {}
+    /** Keys are a detached copy, safe to encode after releasing the cache monitor. */
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
-                           int referencedBlocks, long version, Set<Long> keys) {}
+                           int referencedBlocks, long version, long[] keys) {}
     private final BlockPool device;
     private final BlockTree tree = new BlockTree();
     private final int blockSize, reserve;
@@ -193,7 +196,7 @@ public final class KvCache implements AutoCloseable {
         var state = device.snapshot();
         int indexed = device.cachedActiveBlocks();
         return new Snapshot(state.total(), state.available(), state.free(), state.active() - indexed, indexed,
-            needKeys ? tree.version() : latestVersion, needKeys && latestVersion != tree.version() ? tree.keys() : Set.of());
+            needKeys ? tree.version() : latestVersion, needKeys && latestVersion != tree.version() ? tree.keys() : EMPTY_KEYS);
     }
 
     public final class Lease implements AutoCloseable {

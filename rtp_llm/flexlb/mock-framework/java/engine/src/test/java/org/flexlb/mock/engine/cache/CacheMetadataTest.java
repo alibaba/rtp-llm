@@ -19,7 +19,7 @@ class CacheMetadataTest {
                     assertNotNull(pressure);
                     assertEquals(0, cache.metadataKeys().keys().length);
                     assertArrayEquals(new long[]{11L}, initial.keys());
-                    assertTrue(cache.snapshot(-1, true).keys().isEmpty());
+                    assertEquals(0, cache.snapshot(-1, true).keys().length);
                     assertTrue(cache.metadataKeys().version() > initial.version());
                 }
                 assertEquals(List.of(true, false), changes.stream().map(CacheMetadata.Change::added).toList());

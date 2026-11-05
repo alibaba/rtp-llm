@@ -75,6 +75,37 @@ class LocalRpcTest {
         }
     }
 
+    @Test void cacheStatusPreservesVersionedKeysAndLiveCapacityOnTheWire() throws Exception {
+        try (var node = RtpNode.start(config("1"))) {
+            try (var seed = node.cache().acquire(4, List.of()).lease()) {
+                assertTrue(seed.publish(List.of(Long.MIN_VALUE, Long.MAX_VALUE), 4));
+            }
+            var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
+            try {
+                var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
+                var query = CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build();
+                var first = rpc.getCacheStatus(query);
+                assertEquals(Map.of(Long.MIN_VALUE, true, Long.MAX_VALUE, true), first.getCacheKeysMap());
+                assertEquals(first.getCacheKeysMap(), rpc.getCacheStatus(query).getCacheKeysMap());
+                assertEquals(2, first.getBlockSize());
+                assertEquals(16, first.getTotalKvCache());
+                assertEquals(16, first.getAvailableKvCache());
+                try (var held = node.cache().acquire(2, List.of()).lease()) {
+                    assertNotNull(held);
+                    var unchanged = rpc.getCacheStatus(query.toBuilder().setLatestCacheVersion(first.getVersion()).build());
+                    assertEquals(first.getVersion(), unchanged.getVersion());
+                    assertEquals(0, unchanged.getCacheKeysCount());
+                    assertEquals(14, unchanged.getAvailableKvCache());
+                    var capacityOnly = rpc.getCacheStatus(query.toBuilder().setNeedCacheKeys(false).setLatestCacheVersion(12345).build());
+                    assertEquals(12345, capacityOnly.getVersion());
+                    assertEquals(0, capacityOnly.getCacheKeysCount());
+                    assertEquals(14, capacityOnly.getAvailableKvCache());
+                }
+                assertEquals(16, rpc.getCacheStatus(query).getAvailableKvCache());
+            } finally { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+        }
+    }
+
     @Test void requestBudgetReturnsNative603DetailsAndReclaimsKv() throws Exception {
         try (var node = RtpNode.start(config("500"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
