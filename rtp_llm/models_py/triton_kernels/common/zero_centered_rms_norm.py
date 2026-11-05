@@ -78,7 +78,10 @@ def _small_qk_rmsnorm_kernel(
     QKV,
     QG,
     KG,
-    ROWS: tl.constexpr,
+    # ROWS stays a runtime argument: it varies with every request length and
+    # a constexpr key would recompile the kernel (and stall prefill) per new
+    # length. It only feeds the runtime wide/narrow reduction-lane choice.
+    ROWS,
     STRIDE: tl.constexpr,
     Q_HEADS: tl.constexpr,
     KV_HEADS: tl.constexpr,
@@ -127,7 +130,7 @@ def is_small_qk_supported(qkv, q_gamma, k_gamma, q_heads, kv_heads, head_dim):
         and 1 <= qkv.shape[0] <= 32
         and (q_heads, kv_heads, head_dim) in ((3, 1, 256), (6, 1, 256), (12, 1, 256))
         and qkv.shape[1] == (q_heads + 2 * kv_heads) * head_dim
-        and torch.cuda.get_device_capability(qkv.device) == (12, 0)
+        and torch.cuda.get_device_capability(qkv.device) in ((9, 0), (12, 0))
         and q_gamma.device == k_gamma.device == qkv.device
         and q_gamma.dtype in (torch.bfloat16, torch.float32)
         and k_gamma.dtype in (torch.bfloat16, torch.float32)
@@ -161,7 +164,7 @@ def try_prefill_qk_rmsnorm_(qkv, q_gamma, k_gamma, q_heads, kv_heads, head_dim, 
     if not (
         qkv.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(qkv.device) == (12, 0)
+        and torch.cuda.get_device_capability(qkv.device) in ((9, 0), (12, 0))
         and qkv.dtype == torch.bfloat16
         and qkv.ndim == 2
         and qkv.is_contiguous()
