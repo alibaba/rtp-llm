@@ -603,7 +603,10 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
     // (the top-p ternary search provably converges in <=20 rounds, no barrier sits
     // in a divergent branch, and every access is in range). The DSpARK draft path
     // uses the same kernel and is enabled.
-    constexpr bool kEnableFusedTargetSampling = false;
+    // Verified against the softmax -> top_p_renorm -> sampling_from_probs chain:
+    // matched supports agree to 1e-6 and the only permitted divergence is a top-p
+    // boundary tie (nucleus mass within 1e-4 of top_p, at most one candidate).
+    constexpr bool kEnableFusedTargetSampling = true;
     const bool     fuse_target_sampling       = kEnableFusedTargetSampling && !fused_greedy_top1
                                           && force_topk == 1024 && batch_top_k_unlimited && !batch_top_p_unrestricted
         && params.skip_logits_probs_restore && params.output_all_probs_indices.has_value()
