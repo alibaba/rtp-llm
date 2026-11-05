@@ -2426,6 +2426,37 @@ class AttentionV41FP8(AttentionFP8):
         """Return BF16 [request, prefix tail + new tokens] for sparse prefill."""
         from rtp_llm.models_py.modules.dsv4.cp import cp_swa_replay_starts
 
+        ced_start = self._shared_attention.get("ced_swa_start")
+        if ced_start is not None:
+            # CED compact replay (#19): absolute tail positions with NO
+            # computed SWA prefix — the earlier rows' upper-layer entries
+            # were never written, and reading the stale ring here would
+            # poison the exact region. Keep the runtime's fuse decision and
+            # run the ordinary concat (its prefix gather is ced-gated) so
+            # the fresh-row bytes stay identical to the baseline, then
+            # return the fresh-only view: row j <-> position ced_start + j.
+            if common.batch_size != 1 or self.layer_id <= 20:
+                raise ValueError(
+                    "CED SWA override requires a single-request upper layer"
+                )
+            prefixes_host = self._host_prefill_prefixes(common)
+            if len(prefixes_host) != 1 or int(prefixes_host[0]) != int(ced_start):
+                raise ValueError(
+                    "CED SWA override prefix disagrees with ced_swa_start"
+                )
+            buf = self._swa_prefill_concat(
+                qkv, common, fuse_cache_write=fuse_cache_write
+            )
+            lengths_host = self._host_prefill_lengths(common)
+            tails = min(int(prefixes_host[0]), self.window_size - 1)
+            row_stride, width_stride = buf.stride()[1:]
+            fresh = buf.as_strided(
+                (int(lengths_host[0]), buf.shape[2]),
+                (row_stride, width_stride),
+                buf.storage_offset() + tails * row_stride,
+            )
+            return [fresh], [int(ced_start)]
+
         lengths_host = self._host_prefill_lengths(common)
         if self.swa_bounded_replay:
             prefixes = self._host_prefill_prefixes(common)
@@ -2479,7 +2510,13 @@ class AttentionV41FP8(AttentionFP8):
         B, D = common.batch_size, self.head_dim
         allocate = torch.empty if fuse_cache_write else torch.zeros
         buf = allocate(B, meta.M, D, dtype=torch.bfloat16, device=qkv.kv_full.device)
-        if meta.prefix_len_max > 0:
+        if (
+            meta.prefix_len_max > 0
+            # CED compact replay: the pool's prefix-tail slots hold entries
+            # the skipped upper layers never wrote (stale). The CED workspace
+            # view excludes this region, so never gather it.
+            and self._shared_attention.get("ced_swa_start") is None
+        ):
             if self._swa_cp_byte_sliced():
                 swa_codec.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
                     out=buf,

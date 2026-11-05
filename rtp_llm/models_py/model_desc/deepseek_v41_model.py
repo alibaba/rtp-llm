@@ -101,6 +101,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._worker_stream = None
         self._dp_group = None
         self._stage_agreement = None
+        self._agree_lean_announced = False
         self._native_pp_owner = object()
         self._native_pp_contract = None
         self._native_pp_receiver = None
@@ -369,20 +370,53 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     sort_keys=True,
                 ).encode()
             ).digest()
-            signature = torch.tensor(
-                [status, *digest], dtype=torch.uint8, device=device
-            ).view(1, 33)
             group_size = (
                 self._stage_agreement.group_size
                 if self._stage_agreement is not None
                 else 8
             )
-            peers = torch.empty((group_size, 33), dtype=torch.uint8, device=device)
+            # R20/C2 (DSV41_AGREE_DP_LEAN): exchange the signature over the
+            # group's gloo twin on CPU — removes the pageable H2D signature
+            # staging, the NCCL launch and the blocking .cpu() D2H per
+            # agreement (~6-11 calls/chunk/rank on the admission path).
+            # uint8 gather content is backend-independent: byte-exact.
+            # Flag off or twin missing: the qualified CUDA path is unchanged.
+            lean_twin = None
+            from rtp_llm.models_py.distributed import _gloo_twin_policy
+
+            if _gloo_twin_policy.agree_dp_lean_enabled():
+                from rtp_llm.models_py.distributed import collective_torch
+
+                lean_twin = collective_torch.get_cpu_twin(self._dp_group)
             try:
-                torch.distributed.all_gather_into_tensor(
-                    peers, signature, group=self._dp_group
-                )
-                peers = peers.cpu()
+                if lean_twin is not None:
+                    signature = torch.tensor(
+                        [status, *digest], dtype=torch.uint8
+                    ).view(1, 33)
+                    peers = torch.empty((group_size, 33), dtype=torch.uint8)
+                    torch.distributed.all_gather_into_tensor(
+                        peers, signature, group=lean_twin
+                    )
+                    if not self._agree_lean_announced:
+                        self._agree_lean_announced = True
+                        import sys as _sys
+
+                        print(
+                            "[AGREELEAN] engaged (DSV41_AGREE_DP_LEAN=1, gloo twin)",
+                            file=_sys.stderr,
+                            flush=True,
+                        )
+                else:
+                    signature = torch.tensor(
+                        [status, *digest], dtype=torch.uint8, device=device
+                    ).view(1, 33)
+                    peers = torch.empty(
+                        (group_size, 33), dtype=torch.uint8, device=device
+                    )
+                    torch.distributed.all_gather_into_tensor(
+                        peers, signature, group=self._dp_group
+                    )
+                    peers = peers.cpu()
             except BaseException:
                 self._worker_state = "failed"
                 raise
@@ -543,6 +577,16 @@ class DeepSeekV41Model(DeepSeekV4Model):
             try:
                 error = None
                 try:
+                    # #21(a) R18/B: NUMA-local host affinity (default off).
+                    # Runs before super() so the engine's thread pools and
+                    # all later host allocations inherit the local mask.
+                    from rtp_llm.models_py.modules.dsv4._v41_numa_pin import (
+                        numa_pin_enabled,
+                        pin_current_thread,
+                    )
+
+                    if numa_pin_enabled() and device.type == "cuda":
+                        pin_current_thread(device.index)
                     result = super()._initialize_impl(init_resource)
                     self._check_execution_config()
                 except Exception as exc:

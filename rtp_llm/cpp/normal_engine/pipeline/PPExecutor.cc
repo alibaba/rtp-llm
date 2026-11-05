@@ -369,21 +369,30 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     round_device_sync_ = autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_ROUND_DEVICE_SYNC", static_cast<int64_t>(1)) != 0;
     round_fwd_event_sync_ =
         autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_ROUND_FWD_EVENT_SYNC", static_cast<int64_t>(1)) != 0;
+    // R20/B1: value-based opt-out of the two per-round host drains. Force-disabled
+    // below unless the V4.1 admission executor exists, because only its retained
+    // pre-commit cudaSyncAndCheck preserves the cross-round drain contract.
+    const bool no_round_sync_env =
+        autil::EnvUtil::getEnv<int64_t>("DSV41_PP_NO_ROUND_SYNC", static_cast<int64_t>(0)) != 0;
     if (!warm_up_ && params.model_config_.model_type == "deepseek_v41") {
         // Value-based selector: only a nonzero value enables the asynchronous
         // contract, so an explicitly-zeroed variable stays on the synchronous path.
         v41_pp_async_ = autil::EnvUtil::getEnv<int64_t>("RTP_LLM_V41_PP_ASYNC", 0) != 0;
-        RTP_LLM_CHECK_WITH_INFO(!sp_enabled_ && !params.hw_kernel_config.enable_cuda_graph && round_device_sync_
-                                    && round_fwd_event_sync_,
-                                "V4.1 PP requires eager gen=0 with the qualified forward/device drains");
+        RTP_LLM_CHECK_WITH_INFO(!sp_enabled_ && !params.hw_kernel_config.enable_cuda_graph
+                                    && ((round_device_sync_ && round_fwd_event_sync_) || no_round_sync_env),
+                                "V4.1 PP requires eager gen=0 with the qualified forward/device drains "
+                                "(or the explicit DSV41_PP_NO_ROUND_SYNC opt-out)");
         v41_pp_admission_ =
             std::make_unique<V41PPAdmission>(cache_manager_, params.model_config_, parallelism_config_, v41_pp_async_);
+        no_round_sync_ = no_round_sync_env && v41_pp_admission_ != nullptr;
     }
-    RTP_LLM_LOG_INFO("PPExecutor per-round sync: device_sync=%d fwd_event_sync=%d v41_async=%d "
-                     "(RTP_LLM_PP_ROUND_DEVICE_SYNC / RTP_LLM_PP_ROUND_FWD_EVENT_SYNC / RTP_LLM_V41_PP_ASYNC)",
+    RTP_LLM_LOG_INFO("PPExecutor per-round sync: device_sync=%d fwd_event_sync=%d v41_async=%d no_round_sync=%d "
+                     "(RTP_LLM_PP_ROUND_DEVICE_SYNC / RTP_LLM_PP_ROUND_FWD_EVENT_SYNC / RTP_LLM_V41_PP_ASYNC "
+                     "/ DSV41_PP_NO_ROUND_SYNC)",
                      static_cast<int>(round_device_sync_),
                      static_cast<int>(round_fwd_event_sync_),
-                     static_cast<int>(v41_pp_async_));
+                     static_cast<int>(v41_pp_async_),
+                     static_cast<int>(no_round_sync_));
     // Sender and receiver diagnostics must be enabled together; default off.
     pp_step_log_ = autil::EnvUtil::getEnv("RTP_LLM_PP_OBJ_LOG", false);
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
@@ -1537,15 +1546,29 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
         // Keep the host wait by default. The opt-out relies on stream-ordered NCCL
         // and ticket-owned activation storage until the send completes.
-        if (round_fwd_event_sync_) {
-            auto forward_done = cuda_graph::makeGraphEvent();
-            forward_done.record(cuda_graph::graphGetCurrentStream());
-            forward_done.synchronize();
-        }
-        // Drain side-stream state/cache writes before scheduling the next chunk.
-        // The explicit diagnostic opt-out does not prove cross-round safety.
-        if (round_device_sync_) {
-            cudaDeviceSynchronize();
+        // R20/B1 (DSV41_PP_NO_ROUND_SYNC): both drains below are skipped together;
+        // the pre-commit cudaSyncAndCheck in the admission block still drains the
+        // device before completion/commit, so cross-round cache-cursor publication
+        // keeps its qualified drain. One-shot announce proves engagement.
+        if (no_round_sync_) {
+            if (!no_round_sync_announced_) {
+                no_round_sync_announced_ = true;
+                RTP_LLM_LOG_INFO("[PPNOSYNC] rank=%lld step=%ld round drains skipped "
+                                 "(forward_done event + device sync); pre-commit drain retained",
+                                 static_cast<long long>(parallelism_config_.world_rank),
+                                 static_cast<long>(step));
+            }
+        } else {
+            if (round_fwd_event_sync_) {
+                auto forward_done = cuda_graph::makeGraphEvent();
+                forward_done.record(cuda_graph::graphGetCurrentStream());
+                forward_done.synchronize();
+            }
+            // Drain side-stream state/cache writes before scheduling the next chunk.
+            // The explicit diagnostic opt-out does not prove cross-round safety.
+            if (round_device_sync_) {
+                cudaDeviceSynchronize();
+            }
         }
 
         if (v41_pp_admission_) {

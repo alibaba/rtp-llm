@@ -7,7 +7,11 @@ from rtp_llm.models_py.modules.dsv4._v41_deferred_checks import (
     add_check as _add_deferred_check,
     grouped_asserts_enabled as _grouped_asserts_enabled,
 )
+from rtp_llm.models_py.modules.dsv4._v41_moe_count_dump import (
+    count_dump_record as _count_dump_record,
+)
 from rtp_llm.models_py.modules.dsv4._v41_device_segments import (
+    announce_device_segments as _ds_announce,
     capacity_for as _ds_capacity_for,
     device_segment_plan as _ds_plan,
     device_segments_enabled as _ds_enabled,
@@ -217,6 +221,7 @@ class V41LocalMoE(nn.Module):
         sorted_active = sorted_experts < experts
         route_map = torch.full((route_count,), -1, device=x.device, dtype=torch.int64)
         if layout == "contiguous" and device_segments:
+            _ds_announce()
             # G5: fixed-capacity device segments — no host count readback, no
             # data-dependent shapes. Live rows keep their exact host-path
             # placement (same stable order, same 128-aligned segment starts);
@@ -275,6 +280,7 @@ class V41LocalMoE(nn.Module):
             allocated = capacity
         elif layout == "contiguous":
             actual_counts = tuple(counts[:experts].cpu().tolist())
+            _count_dump_record(self.expert_start_id, actual_counts)
             segments = tuple(
                 (n + GROUPED_ALIGNMENT - 1) // GROUPED_ALIGNMENT * GROUPED_ALIGNMENT
                 for n in actual_counts

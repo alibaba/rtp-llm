@@ -4,12 +4,14 @@ import gc
 import logging
 import os
 import re
+import sys
 from datetime import timedelta
 from typing import Dict, List, Optional, Union
 
 import torch
 import torch.distributed
 
+from rtp_llm.models_py.distributed import _gloo_twin_policy
 from rtp_llm.models_py.distributed.rank_layout import Group, RankLayout
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
@@ -32,6 +34,38 @@ _initialized: bool = False  # Track if we've initialized (to prevent double init
 _cpu_tp_broadcaster_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
+
+# R20/C1: gloo twins of the NCCL groups for CPU-tensor allgathers. Under
+# DSV41_CPU_ALLGATHER_GLOO=1 (or DSV41_AGREE_DP_LEAN=1, which exchanges the
+# _agree_dp signature on the twin), small CPU payloads — the V4.1 PP admission
+# agreement packets — skip the pageable H2D + NCCL launch + blocking D2H
+# staging in cpp_allgather (3 host syncs per call). Allgather is pure rank-
+# ordered concatenation, so the gathered bytes are backend-independent:
+# byte-exact by construction. Both flags off: no twins are created and every
+# route below is unchanged. Flag + predicate semantics live in
+# _gloo_twin_policy (bare-shell CPU-testable).
+_gloo_twins: Dict[int, torch.distributed.ProcessGroup] = {}
+_gloo_ag_modes: set = set()
+_gloo_ag_count = [0]
+
+
+def _make_gloo_twin(pg, ranks, timeout):
+    """Create + register the gloo twin of a just-created NCCL group.
+
+    new_group is collective: when the flag is on, every rank runs this in the
+    same creation order (uniform launcher env). Idempotent per group object so
+    registry-recovery re-entry stays symmetric.
+    """
+    if not _gloo_twin_policy.cpu_gloo_twins_enabled() or id(pg) in _gloo_twins:
+        return
+    _gloo_twins[id(pg)] = torch.distributed.new_group(
+        ranks=ranks, backend="gloo", timeout=timeout
+    )
+
+
+def get_cpu_twin(group):
+    """The registered gloo twin of a live NCCL group, or None."""
+    return _gloo_twins.get(id(group))
 
 
 def _get_rocm_rccl():
@@ -238,6 +272,7 @@ def _create_process_groups(
     # External initialization and registry recovery also enter here. Keep the
     # existing WORLD group available to C++ callbacks on every creation path.
     _group_map[Group.WORLD] = torch.distributed.group.WORLD
+    _make_gloo_twin(torch.distributed.group.WORLD, None, timedelta(days=36500))
 
     world_rank = parallelism_config.world_rank
     world_size = parallelism_config.world_size
@@ -260,6 +295,7 @@ def _create_process_groups(
                 backend=backend,
                 timeout=timedelta(days=36500),
             )
+            _make_gloo_twin(dp_group, dp_ranks, timedelta(days=36500))
             # Only store the group if this rank is part of it
             if world_rank in dp_ranks:
                 group_key = Group.DP.name + str(first.pp * tp_size + first.tp)
@@ -284,6 +320,7 @@ def _create_process_groups(
                 backend=backend,
                 timeout=timedelta(days=36500),
             )
+            _make_gloo_twin(tp_group, tp_ranks, timedelta(days=36500))
             # Only store the group if this rank is part of it
             if world_rank in tp_ranks:
                 group_key = Group.TP.name + str(first.pp * dp_size + first.dp)
@@ -311,6 +348,7 @@ def _create_process_groups(
                     backend=backend,
                     timeout=timedelta(days=36500),
                 )
+                _make_gloo_twin(stage_group, stage_ranks, timedelta(days=36500))
                 if world_rank in stage_ranks:
                     group_key = Group.STAGE.name + str(first.pp)
                     _group_map[group_key] = stage_group
@@ -430,6 +468,14 @@ def _register_process_groups_to_cpp():
         if pg_tp is not None:
             mode_to_group[_CPP_PARALLEL_MODE_STAGE] = pg_tp
 
+    # R20/C1: parallel mode -> gloo twin map (only for modes whose NCCL group
+    # has a registered twin; empty when both twin flags are off).
+    mode_to_gloo: Dict[int, torch.distributed.ProcessGroup] = {}
+    for _mode, _pg in mode_to_group.items():
+        _twin = _gloo_twins.get(id(_pg))
+        if _twin is not None:
+            mode_to_gloo[_mode] = _twin
+
     # NOTE: These callbacks are NOT thin wrappers around the module-level broadcast()/
     # all_reduce()/all_gather() because the C++ calling convention differs significantly:
     #   - C++ uses int mode (ParallelMode enum ordinal) instead of Group enum
@@ -519,6 +565,7 @@ def _register_process_groups_to_cpp():
         if pg is None or pg.size() < 2:
             return
         world_size = pg.size()
+        gloo_pg = mode_to_gloo.get(mode)
         device_id: Optional[int] = None
         rank = pg.rank() if inplace else 0
         for i, recv_buf in enumerate(recv_buffers):
@@ -526,6 +573,33 @@ def _register_process_groups_to_cpp():
             data_num = recv_buf.numel() // world_size
             if not inplace:
                 send_tensor = send_buffers[i]
+                if _gloo_twin_policy.cpu_allgather_via_gloo(
+                    gloo_pg, recv_buf.is_cuda, send_tensor.is_cuda, inplace
+                ):
+                    # R20/C1 (DSV41_CPU_ALLGATHER_GLOO): pure-CPU payloads
+                    # allgather over the gloo twin — skips the pageable H2D
+                    # staging, the NCCL launch and the blocking D2H copy-back
+                    # (3 host syncs per call). Rank-ordered concatenation with
+                    # no arithmetic: gathered bytes are backend-independent.
+                    torch.distributed.all_gather_into_tensor(
+                        recv_buf.reshape(-1), send_tensor.reshape(-1), group=gloo_pg
+                    )
+                    _gloo_ag_count[0] += 1
+                    if mode not in _gloo_ag_modes:
+                        _gloo_ag_modes.add(mode)
+                        print(
+                            f"[GLOOAG] mode={mode} engaged "
+                            "(DSV41_CPU_ALLGATHER_GLOO=1)",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    elif _gloo_ag_count[0] % 4096 == 0:
+                        print(
+                            f"[GLOOAG] n={_gloo_ag_count[0]}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    continue
                 if (
                     not recv_on_cpu
                     and send_tensor.is_cuda
@@ -747,6 +821,9 @@ def destroy_distributed_environment():
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()
+    _gloo_twins.clear()
+    _gloo_ag_modes.clear()
+    _gloo_ag_count[0] = 0
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None

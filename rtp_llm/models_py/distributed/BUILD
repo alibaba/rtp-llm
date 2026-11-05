@@ -9,6 +9,15 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# R20/C1+C2: pure-stdlib routing policy for the CPU-allgather gloo twins
+# (flag + predicate semantics only; collective_torch owns the registry and
+# the wire calls). Zero deps so bare-shell CPU suites can load it.
+py_library(
+    name = "gloo_twin_policy",
+    srcs = ["_gloo_twin_policy.py"],
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "collective_torch",
     srcs = [
@@ -17,6 +26,7 @@ py_library(
         "symm_mem.py",
     ],
     deps = [
+        ":gloo_twin_policy",
         ":rank_layout",
         "//rtp_llm:torch",
     ],

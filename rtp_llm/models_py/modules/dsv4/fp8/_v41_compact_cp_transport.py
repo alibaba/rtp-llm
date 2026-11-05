@@ -1,10 +1,49 @@
 """Typed packet assembly for V4.1 compact CP; persistent installation is separate."""
 
+import os
+import sys
 from dataclasses import dataclass
 
 import torch
 
 from ._v41_compact_cp_plan import HEADER_BYTES, RECORD_BYTES, TAIL_RECORD_BYTES
+
+# R19/D2 (DSV41_PP_TRANSPORT_META_CACHE, default off): the per-round
+# metadata/validation H2D uploads are pure functions of the plan geometry,
+# which repeats verbatim across identical requests. A bounded worker-level
+# cache keyed on the exact upload values removes the three pageable
+# host->device syncs per round (top-4 hidden-sync family, ~15.5K per bench)
+# with zero numerics involvement: cached PacketMetadata/ValidationStack
+# tensors are read-only expectations consumed by pack/validate.
+_CACHE_FLAG = "DSV41_PP_TRANSPORT_META_CACHE"
+_META_CACHE: dict = {}
+_META_CACHE_LIMIT = 256
+_META_HITS = 0
+_META_ANNOUNCED = False
+
+
+def _meta_cache_enabled() -> bool:
+    return os.environ.get(_CACHE_FLAG, "0") == "1"
+
+
+def _meta_hit(kind, key):
+    global _META_HITS, _META_ANNOUNCED
+    hit = _META_CACHE.get((kind, key))
+    if hit is not None:
+        _META_HITS += 1
+        if not _META_ANNOUNCED:
+            _META_ANNOUNCED = True
+            print(
+                f"[TPMETA] transport metadata cache engaged pid={os.getpid()}",
+                file=sys.stderr,
+                flush=True,
+            )
+    return hit
+
+
+def _meta_store(kind, key, value):
+    if len(_META_CACHE) < _META_CACHE_LIMIT:
+        _META_CACHE[(kind, key)] = value
 
 
 @dataclass(frozen=True)
@@ -69,6 +108,12 @@ def prepare_metadata_batch(plans, device):
                 else (-1, 0, -1, 0)
             )
         offsets.append(begin)
+    cache_on = _meta_cache_enabled()
+    key = (str(device), tuple(values)) if cache_on else None
+    if cache_on:
+        hit = _meta_hit("md", key)
+        if hit is not None:
+            return hit
     storage = torch.tensor(values, dtype=torch.int64, device=device)
     result = []
     for plan, begin in zip(plans, offsets):
@@ -81,7 +126,10 @@ def prepare_metadata_batch(plans, device):
                 storage[end : end + 4].view(2, 2) if plan.ratio == 2 else None,
             )
         )
-    return tuple(result)
+    result = tuple(result)
+    if cache_on:
+        _meta_store("md", key, result)
+    return result
 
 
 def prepare_validation_stacks(plan_groups, device):
@@ -118,6 +166,16 @@ def prepare_validation_stacks(plan_groups, device):
                     else (-1, 0, -1, 0)
                 )
         slices.append((header_begin, positions_begin, tail_begin, rows))
+    cache_on = _meta_cache_enabled()
+    key = None
+    if cache_on:
+        exempts = tuple(
+            tuple(bool(pl.tail_count) for pl in plans) for plans in plan_groups
+        )
+        key = (str(device), tuple(values), exempts)
+        hit = _meta_hit("vs", key)
+        if hit is not None:
+            return hit
     storage = torch.tensor(values, dtype=torch.int64, device=device)
     result = []
     for plans, (header_begin, positions_begin, tail_begin, rows) in zip(
@@ -140,7 +198,10 @@ def prepare_validation_stacks(plan_groups, device):
                 tail_state_exempt,
             )
         )
-    return tuple(result)
+    result = tuple(result)
+    if cache_on:
+        _meta_store("vs", key, result)
+    return result
 
 
 def pack(

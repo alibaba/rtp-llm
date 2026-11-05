@@ -262,6 +262,14 @@ private:
     // Whether each round blocks the host on a main-stream event before posting
     // the activation send. Resolved from RTP_LLM_PP_ROUND_FWD_EVENT_SYNC.
     bool round_fwd_event_sync_ = true;
+    // R20/B1: skip the two per-round host drains above (forward_done event wait
+    // and device-wide sync) when DSV41_PP_NO_ROUND_SYNC is nonzero. Only takes
+    // effect with the V4.1 admission executor, whose retained pre-commit
+    // cudaSyncAndCheck drain still orders cache writes and cursor publication;
+    // the activation sends are stream-ordered after the worker stream's joined
+    // side-stream work. Default false keeps the qualified drains everywhere.
+    bool no_round_sync_ = false;
+    bool no_round_sync_announced_ = false;
 };
 
 }  // namespace rtp_llm

@@ -619,6 +619,25 @@ def forward_layers(
     if _fs_marks is not None:
         _fs_marks["meta"] = time.perf_counter()
 
+    # #19 CED (DSV41_CED, default off): exact upper-layer tail compaction
+    # for chunked 20/20 prefill. Rank-consistent voted decision; None keeps
+    # the untouched full path. Zero imports/cost when the flag is absent.
+    ced_plan = None
+    ced_original_ctx = cp_ctx
+    if v4.fp8_kv_cache and os.environ.get("DSV41_CED", "0") != "0":
+        from rtp_llm.models_py.modules.dsv4.prefill._v41_ced import plan_ced_chunk
+
+        ced_plan = plan_ced_chunk(
+            v4,
+            cp_ctx,
+            attn_inputs,
+            capture_aux=capture_aux,
+            cache_store_active=(
+                write_cache_store_impl is not None or bool(writers_by_tag)
+            ),
+            after_layers_fn=after_layers_fn,
+        )
+
     try:
         with (
             record_range_ctx(),
@@ -635,6 +654,55 @@ def forward_layers(
                 else v4.layers
             )
             for layer_idx, layer_call in enumerate(layer_calls):
+                if ced_plan is not None and layer_idx == 1:
+                    # Reference CED integration contract: after the COMPLETE
+                    # L20 block, before L21. This tree's clear_prefill_meta_
+                    # shared_fp8 also triggers _begin_forward's shared-state
+                    # reset (global/topk/candidates/sparse-config) — snapshot
+                    # the L20-produced state around it and reinstate after,
+                    # so L21+ sees the compact payloads, the full-row L20
+                    # globals and the same sparse-path configuration. The
+                    # derived caches (chunk_meta/candidate_mask/meta_common/
+                    # kv_workspace/index_plan) MUST stay dropped: they are
+                    # rebuilt against the tail geometry.
+                    ced_shared = v4.layers[0].attn._shared_attention
+                    h, input_ids = ced_plan.compact(v4, h, input_ids, ced_shared)
+                    _CED_KEEP = (
+                        "global",
+                        "topk",
+                        "candidates",
+                        "prefill_sparse_candidates",
+                    )
+                    ced_saved = {
+                        key: ced_shared[key] for key in _CED_KEEP if key in ced_shared
+                    }
+                    cp_ctx = ced_plan.context
+                    positions = cp_ctx.global_positions.to(
+                        device=positions.device, dtype=torch.long
+                    )
+                    cu_seqlens = ced_plan.cu_seqlens
+                    clear_prefill_meta_shared_fp8(v4)
+                    ced_shared.update(ced_saved)
+                    v4._propagate_cp_ctx(cp_ctx)
+                    if os.environ.get("DSV41_CED_NO_SWA_OVERRIDE", "0") != "1":
+                        ced_shared["ced_swa_start"] = cp_ctx.prefix_length
+                    ced_shared["ced_indexer_projection"] = ced_plan.indexer_projection
+                    build_and_propagate_prefill_meta_fp8(
+                        v4,
+                        h,
+                        int(positions[0].item()),
+                        kv_cache,
+                        block_tables_by_type,
+                        sp_per_req=cp_ctx.prefix_lengths,
+                        cu_seqlens=cu_seqlens,
+                        batch_size=1,
+                        input_lengths=cu_seqlens[1:],
+                        prefix_lengths=cp_ctx.prefix_lengths,
+                        position_ids=positions,
+                        req_id_per_token=cp_ctx.req_id_per_token,
+                        max_seqlen_q=cp_ctx.chunk_length,
+                        workspace=ws,
+                    )
                 h = layer_call(
                     h,  # [T, hc, dim]
                     input_ids,  # [T]
@@ -713,6 +781,14 @@ def forward_layers(
         # on a near-full card. ``clear`` is idempotent (sets None per layer).
         if v4.fp8_kv_cache:
             clear_prefill_meta_shared_fp8(v4)
+        if ced_plan is not None:
+            # CED keys live in the worker-persistent shared dict; drop them
+            # and restore the original CP context (reference contract: main
+            # restores plan.original_context and removes its marker).
+            ced_shared = v4.layers[0].attn._shared_attention
+            ced_shared.pop("ced_swa_start", None)
+            ced_shared.pop("ced_indexer_projection", None)
+            v4._propagate_cp_ctx(ced_original_ctx)
         if _fs_prof is not None:
             # __exit__ synchronises, so every kernel the loop launched is
             # captured even though the launches themselves are async.
@@ -757,6 +833,11 @@ def forward_layers(
         if _rt_on:
             _rt.record("prefill_hc_reduced", h)
         h = v4.norm(h)  # [T, dim]
+    if ced_plan is not None and ced_plan.compacted:
+        # Reference contract: restore AFTER the compact final HC reduction
+        # and norm. Rows outside the exact tail are zero-filled; the engine
+        # only reads this chunk's last-row logits/hidden (inside the tail).
+        h = ced_plan.restore_rows(h)
     if _rt_on:
         _rt.record("prefill_final_norm", h)
         if cp_ctx is None:

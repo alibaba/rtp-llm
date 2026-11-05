@@ -20,14 +20,30 @@ Flag: DSV41_MOE_DEVICE_SEGMENTS=1 (default off; host path untouched).
 """
 
 import os
+import sys
 
 import torch
 
 DEVICE_SEGMENTS_FLAG = "DSV41_MOE_DEVICE_SEGMENTS"
+_DSEG_ANNOUNCED = False
 
 
 def device_segments_enabled() -> bool:
     return os.environ.get(DEVICE_SEGMENTS_FLAG, "0") == "1"
+
+
+def announce_device_segments(detail: str = "") -> None:
+    """One-shot [DSEGM] engagement proof (R18/C): the flag alone does not
+    prove the device branch ran (it also requires the deepgemm backend and
+    the contiguous layout)."""
+    global _DSEG_ANNOUNCED
+    if not _DSEG_ANNOUNCED:
+        _DSEG_ANNOUNCED = True
+        print(
+            f"[DSEGM] device-side MoE segments engaged — no host count readback{detail}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def capacity_for(route_count: int, experts: int, align: int) -> int:
@@ -64,9 +80,9 @@ def device_segment_plan(
     seg_ends = aligned.cumsum(0)
     seg_starts = seg_ends - aligned
     total = seg_ends[experts - 1]
-    dest_active = seg_starts.index_select(
-        0, sorted_experts.clamp(max=experts - 1)
-    ) + offsets
+    dest_active = (
+        seg_starts.index_select(0, sorted_experts.clamp(max=experts - 1)) + offsets
+    )
     destinations = torch.where(
         active_sorted, dest_active, dest_active.new_full((), sink)
     )
