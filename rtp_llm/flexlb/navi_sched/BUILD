@@ -237,6 +237,7 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "//rtp_llm/flexlb/navi_sched/vendor/navi:navi",
+        "//rtp_llm/flexlb/navi_sched/vendor/navi:navi_headers",
         "//rtp_llm/flexlb/navi_sched/vendor/autil:file_recorder",
         "//rtp_llm/flexlb/navi_sched/vendor/autil:crc32c",
         "//rtp_llm/flexlb/navi_sched/vendor/autil:hash_base",
