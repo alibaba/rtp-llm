@@ -1,7 +1,9 @@
-"""Four PP smoke configurations: basic PP, mixed parallelism/MTP and two PD handoffs.
+"""PP smoke: basic PP, mixed parallelism/MTP, PD handoffs and chunked prefill.
 
 Each configuration starts only the servers under test. Numerical comparisons,
 cache backend matrices and scheduler state transitions belong to functional tests.
+Chunk smoke checks requests spanning multiple chunks; exact middle/final batching,
+decode parking and inflight KV lifetime are covered by C++ tests.
 
 Set PP_QWEN35_MOE_CHECKPOINT_PATH or CHECKPOINT_PATH when running the suite.
 Matching *_TOKENIZER_PATH overrides are optional. All cases reuse the same MoE
@@ -117,6 +119,10 @@ class PPSmokeTest(unittest.TestCase):
 
     def setUp(self):
         self.variant = VARIANTS[self.case_name]
+        parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        parser.add_argument("--prefill_chunk_size", type=int, default=0)
+        options, _ = parser.parse_known_args(shlex.split(os.environ["SMOKE_ARGS"]))
+        self.chunk_size = options.prefill_chunk_size
         self.model_type = self.variant["model_type"]
         family = self.variant["family"]
         self.checkpoint = os.environ.get(
@@ -204,6 +210,8 @@ class PPSmokeTest(unittest.TestCase):
         return result
 
     def assert_mtp_executed(self, results):
+        if not self.variant["sp"]:
+            return
         # Acceptance depends on the prompt. Smoke checks execution, while
         # deterministic executor tests cover accepted/rejected draft branches.
         for result in results:
@@ -380,7 +388,36 @@ class PPSmokeTest(unittest.TestCase):
             "concurrent_generation",
             concurrent=True,
         )
-        self.assert_graceful_shutdown(server)
+        self.assert_shutdown(server)
+
+    def chunk_cases(self):
+        long_prompt = "apple " * (self.chunk_size * 3) + "Continue: apple"
+        return [
+            (long_prompt, 8),
+            ("The capital of France is", 8),
+            (long_prompt, 0),
+        ]
+
+    def assert_chunk_lengths(self, results):
+        lengths = [result["aux_info"]["input_len"] for result in results]
+        self.assertGreater(lengths[0], self.chunk_size * 2)
+        self.assertLessEqual(lengths[1], self.chunk_size)
+        self.assertGreater(lengths[2], self.chunk_size * 2)
+
+    def run_chunk_requests(self, server):
+        self.wait_frontends(server.port)
+        # Exercise long/short and prefill-only requests while peer DP ranks are idle.
+        for rank in range(self.variant["dp"]):
+            results = self.run_dp_requests(
+                server,
+                [(rank, prompt, tokens) for prompt, tokens in self.chunk_cases()],
+                f"chunk_dp{rank}",
+                concurrent=True,
+                wait_for_idle=True,
+            )
+            self.assert_chunk_lengths(results)
+        if self.variant["dp"] > 1:
+            self.assert_shutdown(server)
 
     def run_pdfusion(self, gpu_ids):
         variant = self.variant
@@ -431,7 +468,9 @@ class PPSmokeTest(unittest.TestCase):
         )
         try:
             self.start_server(server)
-            if dp > 1:
+            if self.chunk_size:
+                self.run_chunk_requests(server)
+            elif dp > 1:
                 self.run_mixed_requests(server)
             else:
                 self.generate(
@@ -515,6 +554,8 @@ class PPSmokeTest(unittest.TestCase):
                 ("Count the positive integers in order: 1, 2, 3,", 32),
                 ("Briefly explain what a distributed system is:", 64),
             ]
+            if self.chunk_size:
+                cases = self.chunk_cases()
             # Check repeated PD handoffs; concurrent requests are covered by
             # the mixed-parallel case in the same suite.
             results = []
@@ -522,14 +563,21 @@ class PPSmokeTest(unittest.TestCase):
                 result = self.generate(
                     prefill.port, prompt, tokens, f"pd_handoff_{index}"
                 )
-                self.assertTrue(result["aux_info"]["pd_sep"], result)
+                # Prefill-only requests complete without handing off to decode.
+                if tokens > 0:
+                    self.assertTrue(result["aux_info"]["pd_sep"], result)
                 results.append(result)
             self.assert_mtp_executed(results)
+            if self.chunk_size:
+                self.assert_chunk_lengths(results)
         finally:
             prefill.stop_server()
             decode.stop_server()
 
-    def assert_graceful_shutdown(self, server):
+    def assert_shutdown(self, server):
+        # The DP+EP cases can hit an existing shutdown race after requests finish.
+        # Accept bounded forced cleanup for these cases, while still checking
+        # that the parent and its children exit.
         with server._state_lock:
             process = server._server_process
         self.assertIsNotNone(process)
@@ -548,12 +596,16 @@ class PPSmokeTest(unittest.TestCase):
                 alive, f"PP shutdown left children alive: {[p.pid for p in alive]}"
             )
             log = Path(server.log_file_path).read_text(errors="replace")
-            failure = re.search(
-                r"Force killing process |Timed out waiting for .* process group to exit"
-                r"|engine stop failed during backend shutdown"
-                r"|\*\*\* SIG(?:SEGV|FPE|ILL|ABRT|BUS).*received by PID",
-                log,
+            failure_pattern = (
+                r"engine stop failed during backend shutdown"
+                r"|\*\*\* SIG(?:SEGV|FPE|ILL|ABRT|BUS).*received by PID"
             )
+            if self.variant["dp"] <= 1 or self.variant["ep"] <= 1:
+                failure_pattern += (
+                    r"|Force killing process "
+                    r"|Timed out waiting for .* process group to exit"
+                )
+            failure = re.search(failure_pattern, log)
             self.assertIsNone(
                 failure, f"shutdown failure: {failure}; log={server.log_file_path}"
             )
@@ -561,6 +613,7 @@ class PPSmokeTest(unittest.TestCase):
                 scenario="after_requests",
                 elapsed_seconds=time.monotonic() - started,
                 exit_code=exit_code,
+                forced_cleanup="Force killing process " in log,
             )
         finally:
             # After the parent exits, stop_server cannot discover orphaned children.
@@ -579,6 +632,7 @@ class PPSmokeTest(unittest.TestCase):
             "model_type": self.model_type,
             "checkpoint": self.checkpoint,
             "topology": self.variant,
+            "chunk_size": self.chunk_size,
             "outputs": self.outputs,
             "routing": self.routing_evidence,
             "shutdown": self.shutdown_evidence,

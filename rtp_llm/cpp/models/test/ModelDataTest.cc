@@ -236,6 +236,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     inputs.kv_scale_stride_bytes     = 256;
     inputs.seq_size_per_block        = 64;
     inputs.kernel_seq_size_per_block = 16;
+    inputs.is_middle_chunk_only      = true;
 
     const auto hints = getModelInputShapeHints(inputs);
     const auto flags = static_cast<uint32_t>(hints[GptModelInputIndex::modelControlFlags]);
@@ -256,6 +257,7 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_EQ(hints[GptModelInputIndex::kvScaleStrideBytes], 256);
     EXPECT_EQ(hints[GptModelInputIndex::seqSizePerBlock], 64);
     EXPECT_EQ(hints[GptModelInputIndex::kernelSeqSizePerBlock], 16);
+    EXPECT_TRUE(has(GptModelInputControlFlag::kControlMiddleChunkOnly));
 }
 
 namespace {
@@ -303,6 +305,8 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
         inputs.kv_cache_update_mapping     = copies.clone();
         inputs.kv_cache_copy_token_lengths = empty_tables ? torch::Tensor() : torch::tensor({3, 0, 7}, torch::kInt32);
         inputs.cache_store_publish_start_tokens = torch::tensor({0, 8}, torch::kInt32);
+        // Exercise both setting and clearing the flag on the reused non-root inputs.
+        inputs.is_middle_chunk_only              = !empty_tables;
     }
     const auto        original_physical = inputs.kv_cache_block_id;
     const auto        original_kernel   = inputs.kv_cache_kernel_block_id;
@@ -344,6 +348,7 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     }
     expectIntTensor(inputs.combo_tokens, torch::tensor({7, 8}, torch::kInt32));
     expectIntTensor(inputs.cache_store_publish_start_tokens, torch::tensor({0, 8}, torch::kInt32));
+    EXPECT_EQ(inputs.is_middle_chunk_only, !empty_tables);
     if (rank == 0) {
         EXPECT_TRUE(inputs.kv_cache_block_id.is_same(original_physical));
         EXPECT_TRUE(inputs.kv_cache_kernel_block_id.is_same(original_kernel));
