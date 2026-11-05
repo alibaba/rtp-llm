@@ -12,7 +12,11 @@ uv run --locked mock-case compile <case目录>/case.yaml \
   --output <输出目录>/compiled.json
 ```
 
-每个 Case 保存自己的声明和角色配置。回放数据放在共享的 `data/traffic/`。例如 `requests_file: data/traffic/basic.jsonl` 默认从框架目录解析，也可以用 `--shared-root` 指定共享根。普通相对输入路径仍从 Case 目录解析。输入支持 JSONL 和 Protobuf + Zstd，编译阶段检查 Case 声明，播放时检查文件内容。
+每个 Case 保存自己的声明和角色配置。配置与数据必须按以下要求组织：
+
+- `config` 使用 Case 自己目录内的配置，文件统一放在 `configs/`，通过 `config: configs/master.yaml` 等相对路径引用；空配置可以直接写 `config: {}`。禁止跨 Case 引用配置，也不把角色配置放进共享 data；需要借用其他 Case 的配置时先复制到本 Case，再独立维护。
+- 回放 `data` 使用共享的 `data/traffic/`，不在各 Case 内复制流量文件。例如 `requests_file: data/traffic/deepseek.binpb.zst` 默认从框架目录解析，也可以用 `--shared-root` 指定共享根。输入支持 JSONL 和 Protobuf + Zstd，编译阶段检查 Case 声明，播放时检查文件内容。
+- 使用默认大盘时省略 `view`，框架自动使用 `views/default.json`；只有使用自定义大盘时才显式声明 `view`。
 
 顶层为 `id`、可选 `name`、`describe`、`environment`、`phases` 和可选 `view`。Phase 顺序执行。每个 Step 直接写 `interface` 与 `args`，可选 `expect`、`within`、`wait_after` 和 `background`。phase 必须有正的 `timeout`。ID 全局唯一，引用必须来自前置步骤或允许的全局发现字段。
 
@@ -79,6 +83,25 @@ phases:
 执行器固定每个 Step 的 `query_time`，指标实现记录实际查询点、表达式和时间范围，不重新取墙钟。缺点、缺实例、非有限数值或零分母均报错。`expect` 支持 eq、列表 count 或数值 gte/lte。eq 是结构相等，列表顺序参与比较；实例查询返回排序后的地址列表。普通数值返回 float，series 返回数值列表，不包装为 `{value, unit}`；单位在接口定义里。逐 Master 状态返回 `{master服务地址: [engine服务地址, ...]}`。
 
 原始 `prometheus/query` 只接受 promql，在固定 query_time 执行一次 instant query；历史窗口写进表达式。返回 `{samples: [{labels, value, sample_time}], query_time}`，不自动把它压成数值或对全部序列应用同一阈值。空 vector 保留为空；业务数值门禁使用语义接口，缺数据报错而不是补零。
+
+### 性能门禁接口
+
+`client/start` 的 `reuse_cache` 是请求级缓存复用开关，默认 false，转发到原生 GenerateConfig；Engine 的缓存策略配置同时需要允许复用。仍使用原来的 start 接口，不增加独立复用动作或 Engine RPC。
+
+以下查询均从 Runner 管理的 Prometheus 取数，支持上文的 range、mode 和实例 targets：
+
+| 接口 | 指标口径 |
+| --- | --- |
+| `client/qps` | Client 已发请求 counter 的增量 / 时长，不是成功完成速率。 |
+| `engine/prefill/tps` | Prefill 的 Real 同名 gauge `rtp_llm_context_tps`。 |
+| `engine/prefill/tps_with_cache` | Prefill 的 `rtp_llm_context_tps_with_cache`，吞吐包含复用 token。 |
+| `engine/decode/tps` | Decode 已提交输出 token counter 的增量 / 墙钟时长。 |
+| `engine/cache/hit_rate` | Prefill 实际复用 token / 查询输入 token 的增量比值。 |
+| `client/success_rate` | 成功终态 / 全部终态的增量比值，包括 error、timeout、cancelled。必须显式指定 range。 |
+| `client/ttft` | 调用开始到收到首 token 的延迟，包含所有收到首 token 的请求。 |
+| `client/tpot` | 首末 token 间隔 / 首 token 之后的 token 数，只统计成功且输出多于一个 token 的请求。 |
+
+TTFT、TPOT 查询支持 `statistic: mean`（默认）、`p95`、`p99`，返回单位为秒，断言可以写 `lte: 200ms`。吞吐单位为 tokens/s，QPS 为 requests/s，比率为 0–1。`client/stop` 收集全部已发请求的终态；区间成功率不能替代这项完整性检查。
 
 ## 本地运行与生命周期
 

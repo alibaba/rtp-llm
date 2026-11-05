@@ -6,7 +6,7 @@ environment:
   master:
     deployment:
       replicas: 2
-    config: ../master_ha_failover/configs/master.yaml
+    config: configs/master.yaml
   prefill:
     engine: rtp
     deployment:
@@ -169,4 +169,3 @@ phases:
     expect:
       gte: 0.99
     within: 30s
-view: ../../views/default.json
