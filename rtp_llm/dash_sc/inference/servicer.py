@@ -1189,6 +1189,10 @@ async def iter_real_model_stream_infer(
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
     runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
     log_input_output = request_controls.log_input_output
+    # The gateway may opt this request into the early first packet even when
+    # the process-wide default is off (and vice versa).
+    if request_controls.enable_estimated_usage is not None:
+        enable_fake_first_packet = request_controls.enable_estimated_usage
     logging.debug(
         "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
         tag,

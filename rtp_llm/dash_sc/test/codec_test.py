@@ -1277,6 +1277,29 @@ class DashScGrpcRequestTest(TestCase):
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
 
+    def test_parse_enable_estimated_usage(self) -> None:
+        for value, expected in (
+            ("true", True),
+            ("false", False),
+            ("1", True),
+            ("0", False),
+            (None, None),
+        ):
+            with self.subTest(value=value):
+                attrs = {}
+                if value is not None:
+                    attrs["x-dashscope-inner-enableestimatedusage"] = value
+                op = parse_request_controls(self._tpm_request(attrs))
+                self.assertEqual(op.enable_estimated_usage, expected)
+
+        op = parse_request_controls(
+            predict_v2_pb2.ModelInferRequest(),
+            invocation_metadata=(
+                ("x-dashscope-inner-enableestimatedusage", "true"),
+            ),
+        )
+        self.assertTrue(op.enable_estimated_usage)
+
     def _tpm_request(self, attrs):
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(attrs)
