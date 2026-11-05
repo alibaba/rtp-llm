@@ -149,49 +149,36 @@ def whl_deps():
             "fast-hadamard-transform@https://pkg.flytiger-eco.com/artifactory/pypi_generic/fast_hadamard_transform/1.1.0.post2+v0.1.0.ppu2.2.0/fast_hadamard_transform-1.1.0.post2+cu130torch2.11.0alios7u2ce-cp312-cp312-linux_x86_64.whl#sha256=a310e83135c8cc717a6568ead29fd004839aa192d8ddc0f0cf99d077b6dc2294",
         ],
         "@rtp_llm//:using_cuda13_x86": [
-            # torch 2.11+cu130 is only on the OSS mirror: artlab carries plain
-            # 2.11.0 without the +cu130 local version, so a version pin makes the
-            # production image install unresolvable.
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             # CI-built DeepGEMM: opt_glm5 with isolated SM120 GEMMs.
-            "deep_gemm==2.8.0+122e18b.cu132",
-            "flash-mla==1.0.0+9241ae3",
-            "deep-ep==2.1.0+a56d615",
-            "fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue",
-            "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
-            "flashinfer-python==0.6.9+8c4f4dcf",
-            "flashinfer-cubin==0.6.9+8c4f4dcf",
-            # Unified rtp_kernel from cuda_extension feat/port-nvfp4-xqa@94fd20eb;
-            # NVFP4 mm only (no XQA wrappers).
-            "rtp-kernel==0.1.0+94fd20eb.cu132",
-            # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
-            # (oss://rtp-maga/0502/).  Project name `fast-safetensors`; import name
-            # `fast_safetensors`.  Required by --load_method fastsafetensors smokes.
-            "fast-safetensors==0.7.3+torch2.11.cu130",
-            "fastsafetensors==0.1.20+ali",
+            "deep_gemm@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.0%2B122e18b.cu132-cp310-cp310-linux_x86_64.whl",
+            "flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
+            "deep-ep@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-cp310-cp310-linux_x86_64.whl",
+            "fast-hadamard-transform@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/fast-hadamard-transform/fast_hadamard_transform-1.1.0%2Be7706fa.cu132.torch2.11.cxx11abitrue-cp310-cp310-linux_x86_64.whl",
+            "flash_attn@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.3.post1%2Bcu13torch2.11cxx11abitrue.r1-cp310-cp310-linux_x86_64.whl",
+            "flashinfer-python@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl",
+            "flashinfer-cubin@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl",
+            "rtp-kernel@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B94fd20eb.cu132-cp310-cp310-linux_x86_64.whl",
+            "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
+            "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
-            # flash_attn_3 / nvidia_cutlass_dsl: deferred rebuild for
-            # torch2.11+cu130, omitted from cuda13 lock.
         ],
         "@rtp_llm//:using_cuda13_arm": [
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
-            # DeepGEMM opt_glm5 + SM12x, CI-built against torch 2.11+cu130.
-            "deep_gemm==2.8.1+057ca59",
-            "flash-mla==1.0.0+2e5429f",
-            "flash-mla-legacy==1.0.0+92fd68b.rtp1",
-            "deep-ep==2.1.0+a56d615",
-            "flashinfer-python==0.6.9+8c4f4dcf",
-            "flashinfer-cubin==0.6.9+8c4f4dcf",
-            "rtp-kernel==0.1.0+94fd20eb.cu132",
-            "fast-safetensors==0.7.3+torch2.11.cu130",
-            "fastsafetensors==0.1.20+ali",
-            "tilelang==0.1.15+cuda.gita35f8ddf",
+            "deep_gemm@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/deep_gemm-2.8.1%2B057ca59-cp310-cp310-linux_aarch64.whl",
+            "flash-mla@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_aarch64.whl",
+            "flash-mla-legacy@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/flash_mla_legacy-1.0.0%2B92fd68b.rtp1-cp310-cp310-linux_aarch64.whl",
+            "deep-ep@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-2-cp310-cp310-linux_aarch64.whl",
+            "flashinfer-python@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl",
+            "flashinfer-cubin@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl",
+            "rtp-kernel@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B94fd20eb.cu132-cp310-cp310-linux_aarch64.whl",
+            "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
+            "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl",
+            "tilelang@https://search-ad.oss-cn-zhangjiakou.aliyuncs.com/rtp-llm-deps/dsv41/20261009/tilelang-0.1.15%2Bcuda.gita35f8ddf-cp39-abi3-linux_aarch64.whl",
             "apache-tvm-ffi==0.1.12",
-            # flash_attn / flash_attn_3 / fast_hadamard / nvidia_cutlass_dsl
-            # remain deferred.
         ],
         "@rtp_llm//:using_cuda12_9_x86": [
             # torch 2.8.0+cu129: the upstream wheel (http.bzl torch_2.8_py310_cuda
