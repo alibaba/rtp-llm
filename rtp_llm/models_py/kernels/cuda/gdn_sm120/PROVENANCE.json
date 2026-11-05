@@ -1,10 +1,10 @@
 {
   "source": "Installed FlashInfer0.7.0 snapshot from the matched vLLM runtime",
   "license": "Apache-2.0",
-  "scope": "SM120 CP prefill with every page checkpoint; only Qwen4 Prefill adapter, Decode unchanged",
+  "scope": "SM120 CP prefill with every page checkpoint; currently admitted only by the Qwen4 prefill adapter",
   "adaptations": [
     "Redirect utility import to current FlashInfer0.6.9 shared cache/SM helpers",
-    "Namespace isolated under Qwen4; no global dependency replacement",
+    "Namespace isolated under kernels/cuda/gdn_sm120; no global dependency replacement",
     "Use cached host architecture queries and original FlashInfer scratch allocator for the CP kernel; bypass only the stale high-level checkpoint rejection, retaining kernel checkpoint arguments",
     "Remove the unused non-CP kernel; retain its geometry predicate in geometry.py for CP validation",
     "Remove unused SM90 helpers and non-CP dispatch/work-descriptor helpers",

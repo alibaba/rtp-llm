@@ -2,9 +2,7 @@
 
 import torch
 
-from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
-    sm120_prefill_prepared,
-)
+from rtp_llm.models_py.kernels.cuda.gdn_sm120.prefill import sm120_prefill_prepared
 from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 
 

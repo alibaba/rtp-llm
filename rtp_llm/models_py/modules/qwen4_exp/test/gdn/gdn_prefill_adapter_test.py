@@ -3,12 +3,10 @@ import unittest
 import torch
 import triton
 
-from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
-    _store_page_checkpoints,
-)
 from rtp_llm.models_py.modules.qwen4_exp.test.reference.gdn_prefill_reference import (
     sm120_prefill_with_checkpoints,
 )
+from rtp_llm.models_py.triton_kernels.fla.block import store_page_checkpoints_kernel
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
 from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 from rtp_llm.models_py.triton_kernels.fla.utils import assert_close
@@ -19,9 +17,7 @@ class GdnSm120PrefillTest(unittest.TestCase):
     def test_overwritten_cuda13_wheel_uses_native_prefill(self):
         from unittest.mock import patch
 
-        from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
-            sm120_dsl_available,
-        )
+        from rtp_llm.models_py.kernels.cuda.gdn_sm120.prefill import sm120_dsl_available
 
         sm120_dsl_available.cache_clear()
         self.assertTrue(
@@ -96,11 +92,11 @@ class GdnSm120PrefillTest(unittest.TestCase):
                 self.assertEqual(checkpoint_starts.dtype, torch.int64)
 
     def test_fused_post_conv_preparation_preserves_all_boundaries(self):
-        from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_prepare import (
-            prepare_sm120_prefill,
-        )
         from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
         from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+        from rtp_llm.models_py.triton_kernels.fla.gdn_prefill_prepare import (
+            prepare_sm120_prefill,
+        )
 
         for rows, kh, vh in ((129, 3, 6), (4096, 6, 12), (12288, 6, 12)):
             torch.manual_seed(7680 + rows)
@@ -128,11 +124,11 @@ class GdnSm120PrefillTest(unittest.TestCase):
                     torch.testing.assert_close(candidate, reference, rtol=0, atol=0)
 
     def test_fp32_ba_padded_rows_and_flat_weight_views(self):
-        from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_prepare import (
-            prepare_sm120_prefill,
-        )
         from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
         from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+        from rtp_llm.models_py.triton_kernels.fla.gdn_prefill_prepare import (
+            prepare_sm120_prefill,
+        )
 
         for rows, kh, vh in ((3850, 8, 24), (4096, 6, 12)):
             torch.manual_seed(79001 + rows)
@@ -213,7 +209,7 @@ class GdnSm120PrefillTest(unittest.TestCase):
                             else pages[int(starts[batch]) + page]
                         )
                         expected[block].copy_(source)
-            _store_page_checkpoints[(3, 3, triton.cdiv(heads * 128 * 128, 1024))](
+            store_page_checkpoints_kernel[(3, 3, triton.cdiv(heads * 128 * 128, 1024))](
                 pages,
                 final,
                 starts,
@@ -231,7 +227,7 @@ class GdnSm120PrefillTest(unittest.TestCase):
             # Allocator page zero is reserved even if a page table references it.
             table[0, 2] = 0
             before_zero = cache[0].clone()
-            _store_page_checkpoints[(3, 3, triton.cdiv(heads * 128 * 128, 1024))](
+            store_page_checkpoints_kernel[(3, 3, triton.cdiv(heads * 128 * 128, 1024))](
                 pages,
                 final,
                 starts,
