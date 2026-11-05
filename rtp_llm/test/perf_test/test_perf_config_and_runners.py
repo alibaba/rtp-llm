@@ -16,7 +16,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from rtp_llm.test.perf_test.batch_decode_test import _run_decode, _run_prefill
-from rtp_llm.test.perf_test.batch_perf_impl import _read_token_stream
+from rtp_llm.test.perf_test.batch_perf_impl import (
+    _curl_server_single_worker,
+    _read_token_stream,
+)
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
 from rtp_llm.test.perf_test.perf_config import prepare_config as _prepare_config
 from rtp_llm.test.perf_test.perf_utils import (
@@ -88,6 +91,38 @@ class TestPrepareConfig(unittest.TestCase):
             "data:[done]",
         ]
         self.assertFalse(_read_token_stream(response, 3).success)
+
+    def test_cpp_http_aux_list_preserves_wire_and_excludes_first_token(self):
+        response = MagicMock()
+        response.iter_lines.return_value = [
+            'data:{"finished":false,"aux_info":[{"output_len":1,"cost_time":1000}]}',
+            'data:{"finished":true,"aux_info":[{"output_len":2,"cost_time":1009}]}',
+            "data:[done]",
+        ]
+        result = _read_token_stream(response, 2)
+        self.assertTrue(result.success)
+        self.assertEqual(result.decode_time_per_token, 9)
+        self.assertIsInstance(result.raw_measurement["final"]["aux_info"], list)
+        self.assertNotIn(
+            "first_token_cost_time", result.raw_measurement["events"][0]["aux_info"]
+        )
+
+    def test_native_http_assigns_global_request_to_explicit_dp_owner(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.iter_lines.return_value = [
+            'data:{"finished":false,"aux_info":[{"output_len":1,"cost_time":10}]}',
+            'data:{"finished":true,"aux_info":[{"output_len":2,"cost_time":20}]}',
+            "data:[done]",
+        ]
+        with patch.dict(os.environ, {"PERF_DETAILED_LATENCIES": "1"}):
+            with patch("requests.post", return_value=response) as post:
+                result = _curl_server_single_worker(
+                    9, 20000, "hello", True, 2, 60, native_dp_size=8
+                )
+        self.assertTrue(result.success)
+        self.assertEqual(post.call_args.args[0], "http://127.0.0.1:20014")
+        self.assertEqual(result.raw_measurement["owner_rank"], 1)
 
     def test_grid_mode_explicit_bs(self):
         with patch.object(sys, "argv", ["prog", "--batch_size", "1,4,8"]):

@@ -11,7 +11,7 @@ if [[ "${1:-}" == contracts ]]; then
     exec "$v41_python" -B -m unittest rtp_llm.test.perf_test.test_perf_config_and_runners
 fi
 export MAGA_SERVER_WORK_DIR="$TEST_UNDECLARED_OUTPUTS_DIR"
-export PERF_GLOBAL_BATCH=1 PERF_DETAILED_LATENCIES=1
+export PERF_GLOBAL_BATCH=1 PERF_DETAILED_LATENCIES=1 PERF_NATIVE_HTTP=1
 export PERF_GRID_WARMUP_RUNS=1
 export RTP_V41_PERF_EVIDENCE_DIR="$TEST_UNDECLARED_OUTPUTS_DIR/rank-evidence"
 export RTP_PYTHON_BIN="$v41_python"
@@ -40,9 +40,15 @@ sys.argv = ["batch_decode_test", "--model_type", "deepseek_v41",
             "--checkpoint_path", checkpoint, "--tokenizer_path", checkpoint,
             "--input_len", "2048", "--batch_size",
             os.environ.get("RTP_V41_PERF_BATCHES", "1,8,16,32,64,128,256"),
-            "--dp_size", "8", "--partial", "1", "--decode_test_length", "129",
-            "--num_measures", "2", "--warmup_runs", "1", "--profile_runs", "0",
+            "--dp_size", "8", "--partial", "1", "--decode_test_length",
+            os.environ.get("RTP_V41_PERF_STEPS", "129"),
+            "--num_measures", os.environ.get("RTP_V41_PERF_MEASURE_RUNS", "2"),
+            "--warmup_runs", "1", "--profile_runs",
+            os.environ.get("RTP_V41_PERF_PROFILE_RUNS", "0"),
             "--result_dir", output, "--max_seq_len", "2304",
-            "--fake_balance_expert", "0", "--warm_up", "0", "--model_warm_up", "0"]
+            "--fake_balance_expert", "0", "--warm_up", "0", "--model_warm_up", "0",
+            "--frontend_pre_stop_drain_seconds", "0",
+            "--dash_sc_grpc_pre_stop_drain_seconds", "0",
+            "--backend_post_frontend_drain_seconds", "0"]
 main()
 PY

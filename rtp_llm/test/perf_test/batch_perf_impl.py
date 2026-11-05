@@ -29,6 +29,10 @@ def _read_token_stream(response, expected_tokens: int) -> ResponseInfo:
             break
         final = json.loads(payload)
         aux = final.get("aux_info", {})
+        if isinstance(aux, list):
+            if len(aux) != 1:
+                raise ValueError("detailed token timing requires one sequence")
+            aux = aux[0]
         events.append(
             {
                 "arrival_ns": time.monotonic_ns(),
@@ -36,12 +40,36 @@ def _read_token_stream(response, expected_tokens: int) -> ResponseInfo:
                 "finished": final.get("finished", False),
             }
         )
+    wire_final = final
+    final = dict(final)
+    aux = final.get("aux_info", {})
+    first_boundary_known = True
+    if isinstance(aux, list):
+        aux = dict(aux[0]) if len(aux) == 1 else {}
+        # Native C++ HTTP exposes cumulative cost_time but currently omits
+        # frozen TTFT. A captured single first token supplies the same boundary.
+        first = next(
+            (e["aux_info"] for e in events if e["aux_info"].get("output_len") == 1),
+            None,
+        )
+        if first is not None:
+            aux["first_token_cost_time"] = first["cost_time"]
+        else:
+            first_boundary_known = False
+        final["aux_info"] = aux
     ok = (
         bool(final.get("finished"))
         and int(final.get("aux_info", {}).get("output_len", 0)) == expected_tokens
+        and first_boundary_known
     )
     result = ResponseInfo(final, ok)
-    result.raw_measurement = {"events": events, "final": final, "success": ok}
+    result.raw_measurement = {
+        "events": events,
+        "final": wire_final,
+        "metric_response": final,
+        "success": ok,
+        "first_boundary_known": first_boundary_known,
+    }
     return result
 
 
@@ -101,6 +129,7 @@ def _curl_server_single_worker(
     profile: bool = False,
     generate_config: Optional[Dict[str, Any]] = None,
     profile_trace_name: str = "",
+    native_dp_size: int = 0,
 ) -> ResponseInfo:
     gen_config: Dict[str, Any] = {
         "max_new_tokens": decode_test_length if is_decode else 1,
@@ -126,6 +155,8 @@ def _curl_server_single_worker(
     if detailed:
         req["yield_generator"] = True
         gen_config["is_streaming"] = True
+        gen_config["aux_info"] = True
+        gen_config["return_output_ids"] = True
 
     profile_step = _effective_profile_steps(is_decode, decode_test_length)
     if profile:
@@ -139,8 +170,10 @@ def _curl_server_single_worker(
             req["profile_trace_name"] = profile_trace_name
             gen_config["profile_trace_name"] = profile_trace_name
     try:
+        owner = i % native_dp_size if native_dp_size else None
+        request_port = base_port + 5 + owner * 9 if native_dp_size else base_port
         response = requests.post(
-            f"http://127.0.0.1:{base_port}",
+            f"http://127.0.0.1:{request_port}",
             json=req,
             timeout=wait_time,
             stream=detailed,
@@ -150,7 +183,9 @@ def _curl_server_single_worker(
             return ResponseInfo({}, False)
         if detailed:
             try:
-                return _read_token_stream(response, decode_test_length)
+                result = _read_token_stream(response, decode_test_length)
+                result.raw_measurement.update(owner_rank=owner, http_port=request_port)
+                return result
             finally:
                 response.close()
         logging.debug(response.text)
@@ -170,6 +205,7 @@ def _curl_server_batch_worker(
     profile: bool = False,
     generate_config: Optional[Dict[str, Any]] = None,
     profile_trace_name: str = "",
+    native_dp_size: int = 0,
 ) -> List[ResponseInfo]:
     """Concurrently send requests, each with its own query string."""
     with ThreadPoolExecutor(max_workers=len(request_indices)) as executor:
@@ -186,6 +222,7 @@ def _curl_server_batch_worker(
                 profile,
                 generate_config,
                 profile_trace_name,
+                native_dp_size,
             )
             futures.append(future)
         return [f.result() for f in futures]
@@ -316,7 +353,9 @@ class BatchPerfImpl(object):
                         "started_ns": started_ns,
                         "ended_ns": ended_ns,
                         "responses": [
-                            getattr(r, "raw_measurement", {"success": False, "events": []})
+                            getattr(
+                                r, "raw_measurement", {"success": False, "events": []}
+                            )
                             for r in responses
                         ],
                     }
@@ -405,7 +444,10 @@ class BatchPerfImpl(object):
     def _set_concurrency(self):
         check_with_info(
             self.batch_size % self.dp_size == 0
-            or os.environ.get("PERF_GLOBAL_BATCH") == "1",
+            or (
+                os.environ.get("PERF_GLOBAL_BATCH") == "1"
+                and self.batch_size < self.dp_size
+            ),
             f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",
         )
         local_batch_size = (self.batch_size + self.dp_size - 1) // self.dp_size
@@ -460,6 +502,7 @@ class BatchPerfImpl(object):
                     profile,
                     self.generate_config,
                     self.profile_trace_name if profile else "",
+                    self.dp_size if os.environ.get("PERF_NATIVE_HTTP") == "1" else 0,
                 )
             )
 
