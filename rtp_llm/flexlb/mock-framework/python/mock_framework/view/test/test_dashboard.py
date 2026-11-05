@@ -97,6 +97,9 @@ def test_vit_and_shared_process_resources_are_not_faked():
     assert 'py_rtp_vit_download_rt' in items[310350]['targets'][0]['expr']
     assert all('role="vit"' in t['expr'] for p in vit['panels'] for t in p['targets'])
     assert not any('Host KV 容量' in p['title'] for p in panels())
+    assert not any('Memory KVCache' in row['title'] for row in rows)
+    assert not any('rtp_llm_kv_cache_memory_cache_' in target['expr']
+                   for panel in panels() for target in panel['targets'])
 
 
 def test_local_legends_use_prometheus_labels_and_respect_aggregation():
