@@ -1,4 +1,9 @@
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <thread>
+#include <ATen/record_function.h>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -9,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 #include <pybind11/pybind11.h>
@@ -45,9 +51,286 @@ struct PyWrappedModelTestPeer {
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
         return model.generation_prefill_graph_runner_ != nullptr;
     }
+
+    static HiddenStateCapturePublisher* capturePublisher(PyWrappedModel& model) {
+        return model.hidden_state_capture_publisher_.get();
+    }
+
+    static py::object captureStore(PyWrappedModel& model) {
+        auto* publisher = capturePublisher(model);
+        return publisher ? publisher->store_ : py::none();
+    }
+
+    static bool attentionInputsPrepared(const PyWrappedModel& model) {
+        return model.prepared_attention_inputs_.load(std::memory_order_acquire);
+    }
+
+    static py::dict preparedAttentionMetadata(const PyWrappedModel& model) {
+        py::dict result;
+        result["input_lengths"] = model.attention_inputs_.input_lengths.cpu().clone();
+        result["position_ids"] = model.attention_inputs_.combo_position_ids.cpu().clone();
+        result["kernel_block_ids"] = model.attention_inputs_.kv_cache_kernel_block_id_device.cpu().clone();
+        return result;
+    }
+
+    // Idle is not proof of successful publication or safe quota release.
+    static bool waitCaptureDrain(HiddenStateCapturePublisher& publisher, std::chrono::milliseconds timeout) {
+        std::optional<py::gil_scoped_release> release;
+        if (Py_IsInitialized() && PyGILState_Check()) {
+            release.emplace();
+        }
+        std::unique_lock<std::mutex> lock(publisher.state_mutex_);
+        const auto                  idle = [&] {
+            return publisher.pending_.empty() && !publisher.worker_active_ && !publisher.cleanup_requested_;
+        };
+        const bool                   ready =
+            publisher.state_changed_.wait_for(lock, timeout, [&] { return publisher.worker_finished_ || idle(); });
+        return ready && idle();
+    }
+
+    static bool pollCapture(HiddenStateCapturePublisher& publisher) {
+        {
+            std::lock_guard<std::mutex> lock(publisher.state_mutex_);
+            publisher.cleanup_requested_ = true;
+        }
+        publisher.state_changed_.notify_all();
+        return waitCaptureDrain(publisher, std::chrono::seconds(10));
+    }
+
+    static void drainCapture(PyWrappedModel& model) {
+        if (auto* publisher = capturePublisher(model)) {
+            if (!waitCaptureDrain(*publisher, std::chrono::seconds(10))) {
+                throw std::runtime_error("capture worker did not drain within 10 seconds");
+            }
+        }
+    }
+
+    static bool waitCaptureStopping(HiddenStateCapturePublisher& publisher, std::chrono::milliseconds timeout) {
+        std::optional<py::gil_scoped_release> release;
+        if (Py_IsInitialized() && PyGILState_Check()) {
+            release.emplace();
+        }
+        std::unique_lock<std::mutex> lock(publisher.state_mutex_);
+        return publisher.state_changed_.wait_for(lock, timeout, [&] { return publisher.stopping_; });
+    }
+
+    static HiddenStateCaptureStats captureStats(PyWrappedModel& model) {
+        auto* publisher = capturePublisher(model);
+        return publisher ? publisher->stats() : HiddenStateCaptureStats{};
+    }
+
+    static HiddenStateCaptureFatalState captureFatalState(PyWrappedModel& model) {
+        auto* publisher = capturePublisher(model);
+        return publisher ? publisher->fatalState() : HiddenStateCaptureFatalState{};
+    }
+
+    static std::string captureDiagnostic(PyWrappedModel& model) {
+        auto* publisher = capturePublisher(model);
+        return publisher ? publisher->diagnostic() : std::string{};
+    }
+
+    static void closeCapture(PyWrappedModel& model) {
+        if (auto* publisher = capturePublisher(model)) {
+            publisher->flushAndClose();
+        }
+    }
 };
 
 namespace {
+
+// Native gate inside the actual CPU-ID ATen transfer. Unlike a Python Event
+// wait, this callback does not release the GIL on the worker's behalf.
+struct CaptureAtenProbeState {
+    std::mutex              mutex;
+    std::condition_variable changed;
+    const std::thread::id   producer = std::this_thread::get_id();
+    bool                    entered{false};
+    bool                    resumed{false};
+    bool                    held_gil{true};
+    bool                    timed_out{false};
+};
+
+std::shared_ptr<CaptureAtenProbeState> capture_aten_probe;
+
+std::unique_ptr<at::ObserverContext> observeCaptureAten(const at::RecordFunction& fn) {
+    auto state = std::atomic_load(&capture_aten_probe);
+    if (!state || state->producer == std::this_thread::get_id()
+        || (std::strcmp(fn.name(), "aten::to") != 0 && std::strcmp(fn.name(), "aten::_to_copy") != 0)) {
+        return nullptr;
+    }
+    const auto inputs = fn.inputs();
+    if (inputs.empty() || !inputs[0].isTensor()) {
+        return nullptr;
+    }
+    const auto tensor = inputs[0].toTensor();
+    if (!tensor.device().is_cpu() || tensor.scalar_type() != torch::kInt32 || tensor.dim() != 1
+        || tensor.numel() != 5) {
+        return nullptr;
+    }
+    std::unique_lock<std::mutex> lock(state->mutex);
+    if (state->entered) {
+        return nullptr;
+    }
+    state->entered  = true;
+    state->held_gil = PyGILState_Check();
+    state->changed.notify_all();
+    state->timed_out = !state->changed.wait_for(lock, std::chrono::seconds(10), [&] { return state->resumed; });
+    return nullptr;
+}
+
+class CaptureAtenProbe {
+public:
+    CaptureAtenProbe(): state_(std::make_shared<CaptureAtenProbeState>()) {
+        // Tests install before creating the publisher and remove after its join,
+        // as required by RecordFunction's global callback lifecycle.
+        if (std::atomic_load(&capture_aten_probe)) {
+            throw std::runtime_error("capture ATen probe already installed");
+        }
+        std::atomic_store(&capture_aten_probe, state_);
+        try {
+            handle_ = at::addGlobalCallback(at::RecordFunctionCallback(&observeCaptureAten).needsInputs(true));
+        } catch (...) {
+            std::atomic_store(&capture_aten_probe, std::shared_ptr<CaptureAtenProbeState>());
+            throw;
+        }
+    }
+    ~CaptureAtenProbe() {
+        close();
+    }
+
+    py::dict wait() {
+        bool entered, held_gil, timed_out;
+        {
+            py::gil_scoped_release       release;
+            std::unique_lock<std::mutex> lock(state_->mutex);
+            entered   = state_->changed.wait_for(lock, std::chrono::seconds(10), [&] { return state_->entered; });
+            held_gil  = state_->held_gil;
+            timed_out = state_->timed_out;
+        }
+        py::dict result;
+        result["entered"]   = entered;
+        result["held_gil"]  = held_gil;
+        result["timed_out"] = timed_out;
+        return result;
+    }
+    void resume() {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->resumed = true;
+        state_->changed.notify_all();
+    }
+    void close() {
+        resume();
+        if (handle_) {
+            at::removeCallback(*handle_);
+            handle_.reset();
+            std::atomic_store(&capture_aten_probe, std::shared_ptr<CaptureAtenProbeState>());
+        }
+    }
+
+private:
+    std::shared_ptr<CaptureAtenProbeState> state_;
+    std::optional<at::CallbackHandle>      handle_;
+};
+
+// Observe real production scopes on the producer only. In particular, never
+// materialize a tensor value from inside a RecordFunction callback.
+class ATenProfilerTestPeer {
+public:
+    ATenProfilerTestPeer() {
+        if (active_ != nullptr) {
+            throw std::runtime_error("nested test ATen observer");
+        }
+        active_ = this;
+        try {
+            handle_ = at::addThreadLocalCallback(
+                at::RecordFunctionCallback(&enter, &exit).needsInputs(true).needsOutputs(true));
+        } catch (...) {
+            active_ = nullptr;
+            throw;
+        }
+    }
+
+    ~ATenProfilerTestPeer() {
+        at::removeCallback(handle_);
+        active_ = nullptr;
+    }
+
+    ATenProfilerTestPeer(const ATenProfilerTestPeer&) = delete;
+    ATenProfilerTestPeer& operator=(const ATenProfilerTestPeer&) = delete;
+
+    py::dict snapshot() const {
+        if (layout_depth_ != 0) {
+            throw std::runtime_error("layout status observer scope did not close");
+        }
+        py::dict result;
+        result["scopes"]                    = scopes_;
+        result["layout_aten_ops"]           = layout_aten_ops_;
+        result["layout_cuda_int32_inputs"]  = cuda_int32_inputs_;
+        result["layout_cuda_int32_outputs"] = cuda_int32_outputs_;
+        return result;
+    }
+
+private:
+    struct Context: at::ObserverContext {
+        Context(ATenProfilerTestPeer* observer, bool layout_scope): observer(observer), layout_scope(layout_scope) {}
+        ATenProfilerTestPeer* observer;
+        bool                  layout_scope;
+    };
+
+    static bool isCudaStatusTensor(const c10::IValue& value) {
+        if (!value.isTensor()) {
+            return false;
+        }
+        const auto tensor = value.toTensor();
+        return tensor.defined() && tensor.is_cuda() && tensor.scalar_type() == torch::kInt32 && tensor.dim() == 1
+               && tensor.numel() == 1;
+    }
+
+    static std::unique_ptr<at::ObserverContext> enter(const at::RecordFunction& fn) {
+        auto* observer = active_;
+        if (observer == nullptr) {
+            return nullptr;
+        }
+        const char* name = fn.name();
+        if (std::strncmp(name, "py_model.", 9) == 0 || std::strncmp(name, "cuda_graph.", 11) == 0) {
+            ++observer->scopes_[name];
+        }
+        if (std::strcmp(name, "py_model.capture_layout_status") == 0) {
+            ++observer->layout_depth_;
+            return std::make_unique<Context>(observer, true);
+        }
+        if (observer->layout_depth_ == 0 || std::strncmp(name, "aten::", 6) != 0) {
+            return nullptr;
+        }
+        observer->layout_aten_ops_.emplace_back(name);
+        for (const auto& input : fn.inputs()) {
+            observer->cuda_int32_inputs_ += isCudaStatusTensor(input);
+        }
+        return std::make_unique<Context>(observer, false);
+    }
+
+    static void exit(const at::RecordFunction& fn, at::ObserverContext* context) {
+        if (context == nullptr) {
+            return;
+        }
+        auto& observed = *static_cast<Context*>(context);
+        if (observed.layout_scope) {
+            --observed.observer->layout_depth_;
+        } else {
+            for (const auto& output : fn.outputs()) {
+                observed.observer->cuda_int32_outputs_ += isCudaStatusTensor(output);
+            }
+        }
+    }
+
+    inline static thread_local ATenProfilerTestPeer* active_{nullptr};
+    at::CallbackHandle                              handle_{0};
+    size_t                                          layout_depth_{0};
+    size_t                                          cuda_int32_inputs_{0};
+    size_t                                          cuda_int32_outputs_{0};
+    std::map<std::string, size_t>                    scopes_;
+    std::vector<std::string>                        layout_aten_ops_;
+};
 
 constexpr int    kLayerId        = 0;
 constexpr size_t kPhysicalBlocks = 8;
@@ -401,10 +684,12 @@ class TestContextParallelProcessor: public IContextParallelProcessor {
 public:
     explicit TestContextParallelProcessor(const ParallelismConfig& config,
                                           bool                     report_invalid_num_valid_tokens = false,
-                                          bool                     corrupt_restored_width          = false):
+                                          bool                     corrupt_restored_width          = false,
+                                          bool                     position_aware                  = false):
         IContextParallelProcessor(config),
         report_invalid_num_valid_tokens_(report_invalid_num_valid_tokens),
-        corrupt_restored_width_(corrupt_restored_width) {}
+        corrupt_restored_width_(corrupt_restored_width),
+        position_aware_(position_aware) {}
 
     size_t handleOutputs(torch::Tensor& hidden_states,
                          const GptModelInputs&,
@@ -429,17 +714,18 @@ public:
         std::vector<torch::Tensor> rank_chunks;
         rank_chunks.reserve(static_cast<size_t>(parallelism_config_.tp_size));
         for (int64_t rank = 0; rank < parallelism_config_.tp_size; ++rank) {
-            rank_chunks.push_back(hidden_states + rank * local_tokens);
+            rank_chunks.push_back(position_aware_ ? hidden_states + rank * local_tokens : hidden_states);
         }
         auto all_hidden      = torch::cat(rank_chunks, 0);
         auto restore_indices = cp_params.prefill_qkv_restore_indice.narrow(0, 0, expected_tokens);
         hidden_states        = all_hidden.index_select(0, restore_indices);
 
         const auto restored_tokens = static_cast<size_t>(hidden_states.size(0));
-        if (corrupt_restored_width_) {
+        const bool packed_capture  = hidden_states.size(1) > 1;
+        if (corrupt_restored_width_ && packed_capture) {
             hidden_states = hidden_states.narrow(1, 0, hidden_states.size(1) - 1);
         }
-        return report_invalid_num_valid_tokens_ ? restored_tokens - 1 : restored_tokens;
+        return report_invalid_num_valid_tokens_ && packed_capture ? restored_tokens - 1 : restored_tokens;
     }
 
     void handleOutputsLastHidden(torch::Tensor&,
@@ -484,6 +770,7 @@ protected:
 private:
     bool   report_invalid_num_valid_tokens_{false};
     bool   corrupt_restored_width_{false};
+    bool   position_aware_{false};
     size_t handle_outputs_call_count_{0};
 };
 
@@ -563,6 +850,7 @@ Scenario makeCaptureScenario(bool context_parallel, bool publisher_owner, bool f
     scenario.capture_layer_ids            = {0, 1};
     scenario.capture_dtype                = fp8 ? HiddenStateCaptureDtype::FP8_E4M3 : HiddenStateCaptureDtype::BF16;
     if (context_parallel) {
+        scenario.inputs.need_all_hidden_states        = true;
         scenario.parallelism.tp_size                  = 2;
         scenario.parallelism.tp_rank                  = 0;
         scenario.parallelism.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
@@ -570,6 +858,20 @@ Scenario makeCaptureScenario(bool context_parallel, bool publisher_owner, bool f
     } else if (!publisher_owner) {
         scenario.parallelism.tp_size = 2;
         scenario.parallelism.tp_rank = 1;
+    }
+    return scenario;
+}
+
+Scenario makeFinalNormParityScenario(bool capture_hidden_states) {
+    auto scenario                          = makeCaptureScenario(false, true, false);
+    scenario.hidden_size                   = 2;
+    scenario.install_final_layernorm       = true;
+    scenario.install_lm_head               = true;
+    scenario.inputs.skip_lm_head           = false;
+    scenario.inputs.need_all_hidden_states = true;
+    if (!capture_hidden_states) {
+        scenario.inputs.capture_hidden_states = false;
+        scenario.capture_layer_ids.clear();
     }
     return scenario;
 }
@@ -710,6 +1012,14 @@ Scenario makeScenario(const std::string& name) {
     if (name == "capture_bf16") {
         return makeCaptureScenario(false, true, false);
     }
+    if (name == "capture_cuda_lengths") {
+        auto scenario                 = makeCaptureScenario(false, true, false);
+        scenario.inputs.input_lengths = scenario.inputs.input_lengths.cuda();
+        return scenario;
+    }
+    if (name == "final_norm_parity_capture_off" || name == "final_norm_parity_capture_on") {
+        return makeFinalNormParityScenario(name == "final_norm_parity_capture_on");
+    }
     if (name == "capture_explicit_off") {
         auto scenario                         = makeCaptureScenario(false, true, false);
         scenario.inputs.capture_hidden_states = false;
@@ -749,8 +1059,10 @@ Scenario makeScenario(const std::string& name) {
         scenario.parallelism.tp_size = 2;
         return scenario;
     }
-    if (name == "capture_cp") {
-        return makeCaptureScenario(true, true, false);
+    if (name == "capture_cp" || name == "capture_cp_non_owner") {
+        auto scenario = makeCaptureScenario(true, true, false);
+        scenario.parallelism.tp_rank = name == "capture_cp_non_owner" ? 1 : 0;
+        return scenario;
     }
     if (name == "capture_cp_invalid_num_valid_tokens") {
         auto scenario                            = makeCaptureScenario(true, true, false);
@@ -840,12 +1152,13 @@ py::dict serializeResult(const RecordingCacheStore&              store,
     result["records"]        = std::move(records);
     result["base_addresses"] = std::move(bases);
     result["logits_defined"] = output.logits.defined();
+    result["logits"]         = output.logits.defined() ? py::cast(output.logits.cpu()) : py::none();
     result["hidden_width"]   = output.all_hidden_states.defined() ? output.all_hidden_states.size(1) : 0;
     return result;
 }
 
 // Exercise startup without a CUDA runtime; the Python fixture supplies the store.
-py::dict flushCapturePublisherWithoutClose() {
+py::dict drainCapturePublisherWithoutClose() {
     FakeMetricsReporter         fake_metrics_reporter;
     HiddenStateCapturePublisher publisher(/*layer_count=*/2,
                                           /*hidden_size=*/1,
@@ -853,10 +1166,16 @@ py::dict flushCapturePublisherWithoutClose() {
                                           torch::kFloat16,
                                           /*owner=*/true,
                                           /*local_rank=*/0,
-                                          fake_metrics_reporter.reporter());
-    publisher.flushPending();
-    py::dict result;
-    result["flushed"] = true;
+                                          fake_metrics_reporter.reporter(),
+                                          HiddenStateCaptureLimits{},
+                                          {0, 1});
+    py::dict                    result;
+    result["drained"] = PyWrappedModelTestPeer::waitCaptureDrain(publisher, std::chrono::seconds(10));
+    // Inspect before destruction invokes the real shutdown flush/close.
+    auto mooncake              = py::module_::import("torchspec.transfer.mooncake");
+    auto stores                = mooncake.attr("EagleMooncakeStore").attr("instances").cast<py::list>();
+    result["flushed_at_drain"] = stores[stores.size() - 1].attr("flushed");
+    result["closed_at_drain"]  = stores[stores.size() - 1].attr("closed");
     return result;
 }
 
@@ -868,7 +1187,9 @@ py::dict closeCapturePublisherWithoutGil() {
                                           torch::kFloat16,
                                           /*owner=*/true,
                                           /*local_rank=*/0,
-                                          fake_metrics_reporter.reporter());
+                                          fake_metrics_reporter.reporter(),
+                                          HiddenStateCaptureLimits{},
+                                          {0, 1});
     {
         py::gil_scoped_release release;
         publisher.flushAndClose();
@@ -890,7 +1211,13 @@ py::dict initializeCapturePublisher() {
                                               torch::kFloat16,
                                               /*owner=*/true,
                                               /*local_rank=*/0,
-                                              fake_metrics_reporter.reporter());
+                                              fake_metrics_reporter.reporter(),
+                                              HiddenStateCaptureLimits{},
+                                              {0, 1});
+        if (!PyWrappedModelTestPeer::waitCaptureDrain(publisher, std::chrono::seconds(10))) {
+            throw std::runtime_error("publisher initialization did not finish");
+        }
+        result["error"] = publisher.diagnostic();
         publisher.flushAndClose();
     } catch (const std::exception& error) {
         result["error"] = error.what();
@@ -971,9 +1298,11 @@ py::list runTpSyncModelInputsScenario(int64_t                                   
 py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                                              const std::string& scenario_name,
                                              size_t             forward_count,
-                                             bool               ignore_deferred_errors,
                                              bool               capture_only_first_forward,
-                                             bool               skip_first_deferred_error_take) {
+                                             py::object         after_forward,
+                                             bool               cancel_capture_after_admission,
+                                             bool               observe_aten,
+                                             py::object         after_capture_setup) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
         initRuntime(/*device_id=*/0);
@@ -982,8 +1311,10 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
     const bool cacheless_warmup = scenario_name == "cacheless_warmup";
-    const auto input_scenario   = cacheless_warmup ? "multi_tag" : scenario_name;
-    auto       scenario         = makeScenario(input_scenario);
+    const bool inspect_final_norm_parity =
+        scenario_name == "final_norm_parity_capture_off" || scenario_name == "final_norm_parity_capture_on";
+    const auto input_scenario = cacheless_warmup ? "multi_tag" : scenario_name;
+    auto       scenario       = makeScenario(input_scenario);
     auto                cache_store = std::make_shared<RecordingCacheStore>();
     FakeMetricsReporter fake_metrics_reporter;
     const auto&         metrics_reporter = fake_metrics_reporter.reporter();
@@ -1041,18 +1372,35 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
         scenario.inputs.kv_cache_kernel_block_id = torch::Tensor();
     }
 
-    GptModelOutputs            output;
-    HiddenStateCaptureStats    capture_stats;
-    size_t                     cp_handle_outputs_calls{0};
-    std::vector<torch::Tensor> forward_hidden_states;
-    std::vector<std::string>   deferred_capture_errors;
+    GptModelOutputs              output;
+    HiddenStateCaptureStats      capture_stats;
+    size_t                       cp_handle_outputs_calls{0};
+    std::vector<torch::Tensor>   forward_hidden_states;
+    std::vector<std::string>     capture_diagnostics;
+    std::vector<bool>            capture_admissions;
+    HiddenStateCaptureFatalState capture_fatal;
+    py::list                     all_hidden_layouts;
+    py::list                     aten_profiles;
+    py::list                     forward_logits;
+    std::vector<int64_t>         forward_capture_inflight_samples;
+    std::vector<int64_t>         forward_capture_inflight_bytes;
+    int64_t                      capture_inflight_samples{0};
+    int64_t                      capture_inflight_bytes{0};
+
     forward_hidden_states.reserve(forward_count);
     {
-        PyWrappedModel                model(params, std::move(py_model));
+        PyWrappedModel                model(params, py_model);
+        PyWrappedModelTestPeer::drainCapture(model);  // Deterministic test setup, never a serving barrier.
+        if (!after_capture_setup.is_none()) {
+            after_capture_setup(PyWrappedModelTestPeer::captureStore(model));
+        }
         TestContextParallelProcessor* test_cp_processor = nullptr;
         if (scenario.replace_cp_processor) {
-            auto processor = std::make_unique<TestContextParallelProcessor>(
-                scenario.parallelism, scenario.report_invalid_num_valid_tokens, scenario.corrupt_restored_width);
+            auto processor =
+                std::make_unique<TestContextParallelProcessor>(scenario.parallelism,
+                                                               scenario.report_invalid_num_valid_tokens,
+                                                               scenario.corrupt_restored_width,
+                                                               py::hasattr(py_model, "position_aware_hidden"));
             test_cp_processor = processor.get();
             PyWrappedModelTestPeer::replaceContextParallelProcessor(model, std::move(processor));
         }
@@ -1069,28 +1417,106 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                 forward_inputs.request_id = scenario.inputs.request_id.clone().pin_memory();
                 forward_inputs.request_id.add_(static_cast<int64_t>(i) * 1000);
             }
-            output = model.forward(forward_inputs);
-            if (!(skip_first_deferred_error_take && i == 0)) {
-                if (auto capture_error = model.takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
-                    if (!ignore_deferred_errors) {
-                        throw std::runtime_error(*capture_error);
+            std::vector<HiddenStateCaptureReservationPtr> reservations;
+            bool                                          admitted = false;
+            if (forward_inputs.capture_hidden_states && scenario.parallelism.tp_rank == 0
+                && forward_inputs.request_id.defined() && forward_inputs.input_lengths.defined()) {
+                const auto request_ids = forward_inputs.request_id.layout() == torch::kStrided ?
+                                             forward_inputs.request_id.cpu().contiguous() :
+                                             forward_inputs.request_id;
+                const auto lengths     = forward_inputs.input_lengths.cpu().contiguous();
+                // This direct-model harness supplies the synchronized capture
+                // bit explicitly, including intentional bad/stale-admission
+                // cases. Production gather sets it only after admission.
+                admitted = request_ids.layout() == torch::kStrided && request_ids.numel() == lengths.numel()
+                           && request_ids.numel() > 0;
+                if (admitted) {
+                    std::unordered_set<int64_t> seen;
+                    for (int64_t request = 0; request < request_ids.numel(); ++request) {
+                        const auto id = request_ids.data_ptr<int64_t>()[request];
+                        if (id >= 0 && seen.insert(id).second) {
+                            auto reservation =
+                                model.tryReserveHiddenStateCapture(id, lengths.data_ptr<int32_t>()[request]);
+                            admitted = static_cast<bool>(reservation) && admitted;
+                            if (reservation) {
+                                reservations.push_back(std::move(reservation));
+                            }
+                        } else {
+                            admitted = false;
+                        }
                     }
-                    deferred_capture_errors.push_back(*capture_error);
                 }
             }
+            capture_admissions.push_back(admitted);
+            if (cancel_capture_after_admission && forward_inputs.capture_hidden_states
+                && scenario.parallelism.tp_rank == 0) {
+                RTP_LLM_CHECK_WITH_INFO(admitted, "stale-admission scenario requires an actual reservation first");
+                for (const auto& reservation : reservations) {
+                    reservation->cancel();
+                }
+                // Preserve the already synchronized bit, as when cancellation
+                // or publisher failure races a real admitted forward.
+            }
+            {
+                std::optional<ATenProfilerTestPeer> observer;
+                if (observe_aten) {
+                    observer.emplace();
+                }
+                output = model.forward(forward_inputs);
+                if (observer) {
+                    aten_profiles.append(observer->snapshot());
+                }
+            }
+            if (!after_forward.is_none()) {
+                after_forward(i);
+            }
+            PyWrappedModelTestPeer::drainCapture(model);
+            capture_diagnostics.push_back(PyWrappedModelTestPeer::captureDiagnostic(model));
+            capture_fatal = PyWrappedModelTestPeer::captureFatalState(model);
+            forward_logits.append(output.logits.defined() ? py::cast(output.logits.detach().cpu()) : py::none());
+            if (auto* publisher = PyWrappedModelTestPeer::capturePublisher(model)) {
+                // Observe cancellation before the reservation tokens leave this iteration.
+                forward_capture_inflight_samples.push_back(publisher->inflightSamples());
+                forward_capture_inflight_bytes.push_back(publisher->inflightBytes());
+            }
             if (output.all_hidden_states.defined()) {
+                if (inspect_final_norm_parity) {
+                    // Snapshot the device layout before .cpu() can densify a strided output.
+                    py::dict layout;
+                    layout["sizes"]          = output.all_hidden_states.sizes().vec();
+                    layout["strides"]        = output.all_hidden_states.strides().vec();
+                    layout["storage_offset"] = output.all_hidden_states.storage_offset();
+                    layout["is_cuda"]        = output.all_hidden_states.is_cuda();
+                    layout["is_contiguous"]  = output.all_hidden_states.is_contiguous();
+                    layout["is_dense"]       = output.all_hidden_states.is_non_overlapping_and_dense();
+                    all_hidden_layouts.append(std::move(layout));
+                }
                 forward_hidden_states.push_back(output.all_hidden_states.detach().cpu());
             } else {
                 forward_hidden_states.emplace_back();
             }
         }
-        capture_stats = model.hiddenStateCaptureStats();
+        PyWrappedModelTestPeer::closeCapture(model);
+        capture_stats = PyWrappedModelTestPeer::captureStats(model);
+        capture_fatal = PyWrappedModelTestPeer::captureFatalState(model);
+        if (auto* publisher = PyWrappedModelTestPeer::capturePublisher(model)) {
+            capture_inflight_samples = publisher->inflightSamples();
+            capture_inflight_bytes   = publisher->inflightBytes();
+        }
         if (test_cp_processor != nullptr) {
             cp_handle_outputs_calls = test_cp_processor->handleOutputsCallCount();
         }
     }
 
-    auto result                    = serializeResult(*cache_store, scenario.base_addresses, output);
+    auto result = serializeResult(*cache_store, scenario.base_addresses, output);
+    if (scenario_name == "capture_cuda_lengths") {
+        result["source_input_lengths"] = scenario.inputs.input_lengths;
+    }
+    if (inspect_final_norm_parity) {
+        result["all_hidden_layouts"] = std::move(all_hidden_layouts);
+        result["selected_hidden_states"] =
+            output.hidden_states.defined() ? py::cast(output.hidden_states.detach().cpu()) : py::none();
+    }
     auto capture_metrics           = fake_metrics_reporter.snapshotHiddenStateCaptureMetrics();
     result["capture_metrics"]      = capture_metrics[0];
     result["capture_metric_types"] = capture_metrics[1];
@@ -1102,11 +1528,21 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
             serialized_forward_hidden_states.append(py::none());
         }
     }
-    result["forward_hidden_states"]          = std::move(serialized_forward_hidden_states);
-    result["deferred_capture_errors"]        = std::move(deferred_capture_errors);
+    result["forward_hidden_states"] = std::move(serialized_forward_hidden_states);
+    result["forward_logits"] = std::move(forward_logits);
+    result["forward_capture_inflight_samples"] = std::move(forward_capture_inflight_samples);
+    result["forward_capture_inflight_bytes"] = std::move(forward_capture_inflight_bytes);
+
+    result["capture_diagnostics"]            = std::move(capture_diagnostics);
+    result["capture_admissions"]             = std::move(capture_admissions);
+    result["capture_fatal"]                  = capture_fatal.failed;
+    result["capture_fatal_message"]          = capture_fatal.message;
     result["capture_failure_count"]          = py::int_(capture_stats.failure_count);
     result["capture_broken_rejection_count"] = py::int_(capture_stats.broken_rejection_count);
     result["cp_handle_outputs_calls"]        = py::int_(cp_handle_outputs_calls);
+    result["aten_profiles"]                  = std::move(aten_profiles);
+    result["capture_inflight_samples"]       = capture_inflight_samples;
+    result["capture_inflight_bytes"]         = capture_inflight_bytes;
     return result;
 }
 
@@ -1260,15 +1696,45 @@ py::dict runGenerationPrefillCaptureScenario(py::object                         
                                      config.group("full").seqSizePerBlock(),
                                      config.group("full").kvBlockStrideBytes());
             inputs.combo_tokens.add_(static_cast<int32_t>(i));
+            inputs.combo_position_ids = pinnedTensor(i % 2 == 0 ? std::vector<int32_t>{0, 1, 2} :
+                                                                 std::vector<int32_t>{2, 1, 0},
+                                                      {3});
             inputs.pd_separation         = false;
             inputs.skip_lm_head          = forward_flags[i].first;
             inputs.capture_hidden_states = forward_flags[i].second;
-            const auto calls_before      = py_model.attr("forward_calls").cast<int64_t>();
-            auto       output            = model.forward(inputs);
-            if (auto error = model.takeDeferredHiddenStateCaptureError(); error.has_value()) {
-                throw std::runtime_error(*error);
+            std::vector<HiddenStateCaptureReservationPtr> reservations;
+            if (inputs.capture_hidden_states) {
+                const auto request_ids = inputs.request_id.cpu().contiguous();
+                const auto lengths     = inputs.input_lengths.cpu().contiguous();
+                for (int64_t request = 0; request < request_ids.numel(); ++request) {
+                    auto reservation = model.tryReserveHiddenStateCapture(request_ids.data_ptr<int64_t>()[request],
+                                                                          lengths.data_ptr<int32_t>()[request]);
+                    if (!reservation) {
+                        inputs.capture_hidden_states = false;
+                        break;
+                    }
+                    reservations.push_back(std::move(reservation));
+                }
             }
-            py::dict forward;
+            const auto calls_before = py_model.attr("forward_calls").cast<int64_t>();
+            GptModelOutputs output;
+            py::dict        forward;
+            {
+                ATenProfilerTestPeer observer;
+                model.prepareAttentionInputs(inputs);
+                forward["prepared_after_prepare"] = PyWrappedModelTestPeer::attentionInputsPrepared(model);
+                forward["attention_metadata_after_prepare"] = PyWrappedModelTestPeer::preparedAttentionMetadata(model);
+                // Use a new table after fencing the prepare copy. A skipped refresh
+                // must not pass through an aliased host tensor or an H2D race.
+                inputs.kv_cache_kernel_block_id = pinnedTensor({static_cast<int32_t>(i + 1)}, {1, 1, 1});
+                model.updateKVCacheKernelBlockId(inputs);
+                forward["prepared_after_update"] = PyWrappedModelTestPeer::attentionInputsPrepared(model);
+                forward["attention_metadata"] = PyWrappedModelTestPeer::preparedAttentionMetadata(model);
+                output = model.forward(inputs);
+                forward["prepared_after_forward"] = PyWrappedModelTestPeer::attentionInputsPrepared(model);
+                forward["aten_profile"] = observer.snapshot();
+            }
+            PyWrappedModelTestPeer::drainCapture(model);
             forward["python_forward_calls"] = py_model.attr("forward_calls").cast<int64_t>() - calls_before;
             forward["replayed"] =
                 output.generation_prefill_cuda_graph_status == GenerationPrefillCudaGraphStatus::REPLAYED;
@@ -1396,8 +1862,77 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     rtp_llm::registerExecCtxOps(m);
+    using Publisher   = rtp_llm::HiddenStateCapturePublisher;
+    using Reservation = rtp_llm::HiddenStateCaptureReservation;
+    using Peer        = rtp_llm::test::PyWrappedModelTestPeer;
+    py::class_<Reservation, rtp_llm::HiddenStateCaptureReservationPtr>(m, "CaptureReservation")
+        .def("cancel", &Reservation::cancel, py::call_guard<py::gil_scoped_release>())
+        .def_property_readonly("active", &Reservation::active);
+    py::class_<Publisher>(m, "CapturePublisher")
+        .def(py::init([](int64_t            samples,
+                         int64_t            bytes,
+                         int64_t            tokens,
+                         int64_t            batches,
+                         const std::string& model_dtype,
+                         bool                       fp8,
+                         const std::vector<int64_t>& layer_ids,
+                         int64_t                    poll_interval_ms) {
+                 rtp_llm::HiddenStateCaptureLimits limits{samples, bytes, tokens, batches, poll_interval_ms};
+                 auto                              dtype = torch::kFloat16;
+                 if (model_dtype == "bfloat16")
+                     dtype = torch::kBFloat16;
+                 else if (model_dtype == "float32")
+                     dtype = torch::kFloat32;
+                 else if (model_dtype == "float64")
+                     dtype = torch::kFloat64;
+                 else if (model_dtype != "float16")
+                     throw std::invalid_argument("unsupported test model dtype");
+                 return std::make_unique<Publisher>(2,
+                                                    1,
+                                                    fp8 ? rtp_llm::HiddenStateCaptureDtype::FP8_E4M3 :
+                                                          rtp_llm::HiddenStateCaptureDtype::BF16,
+                                                    dtype,
+                                                    true,
+                                                    0,
+                                                    nullptr,
+                                                    limits,
+                                                    layer_ids);
+             }),
+             py::arg("samples")     = 64,
+             py::arg("bytes")       = 1073741824,
+             py::arg("tokens")      = 131072,
+             py::arg("batches")     = 8,
+             py::arg("model_dtype") = "float16",
+             py::arg("fp8")         = false,
+             py::arg("layer_ids")        = std::vector<int64_t>{0, 1},
+             py::arg("poll_interval_ms") = 1000)
+        .def("poll", &Peer::pollCapture)
+        .def("reserve", &Publisher::tryReserve)
+        .def("submit", &Publisher::trySubmit)
+        .def(
+            "drain",
+            [](Publisher& publisher, int64_t timeout_ms) {
+                if (timeout_ms < 0) {
+                    throw std::invalid_argument("capture drain timeout must be nonnegative");
+                }
+                return Peer::waitCaptureDrain(publisher, std::chrono::milliseconds(timeout_ms));
+            },
+            py::arg("timeout_ms") = 10000)
+        .def("wait_stopping",
+             [](Publisher& publisher) { return Peer::waitCaptureStopping(publisher, std::chrono::seconds(10)); })
+        .def("close", &Publisher::flushAndClose)
+        .def_property_readonly("inflight_samples", &Publisher::inflightSamples)
+        .def_property_readonly("inflight_bytes", &Publisher::inflightBytes)
+        .def_property_readonly("diagnostic", &Publisher::diagnostic)
+        .def_property_readonly("fatal", [](const Publisher& publisher) { return publisher.fatalState().failed; });
+    py::class_<rtp_llm::test::CaptureAtenProbe>(m, "CaptureAtenProbe")
+        .def(py::init<>())
+        .def("wait", &rtp_llm::test::CaptureAtenProbe::wait)
+        .def("resume", &rtp_llm::test::CaptureAtenProbe::resume)
+        .def("close", &rtp_llm::test::CaptureAtenProbe::close);
+    m.def("capture_gil_held", [] { return PyGILState_Check() != 0; });
     m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
-    m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
+    m.def("drain_capture_publisher_without_close", &rtp_llm::test::drainCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);
     m.def("initialize_capture_publisher", &rtp_llm::test::initializeCapturePublisher);
     m.def("run_tp_sync_model_inputs_scenario",
@@ -1413,9 +1948,11 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           py::arg("py_model"),
           py::arg("scenario_name"),
           py::arg("forward_count")                  = 1,
-          py::arg("ignore_deferred_errors")         = false,
           py::arg("capture_only_first_forward")     = false,
-          py::arg("skip_first_deferred_error_take") = false);
+          py::arg("after_forward")                  = py::none(),
+          py::arg("cancel_capture_after_admission") = false,
+          py::arg("observe_aten")                   = false,
+          py::arg("after_capture_setup")            = py::none());
     m.def("run_dirty_generation_prefill_capture_scenario",
           &rtp_llm::test::runDirtyGenerationPrefillCaptureScenario,
           py::arg("py_model"));

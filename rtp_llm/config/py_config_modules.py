@@ -4,7 +4,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -31,6 +31,9 @@ from rtp_llm.ops import (
     SpeculativeExecutionConfig,
     VitSeparation,
 )
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.libth_transformer_config import FfnDisAggregateConfig
 
 consume_s = time.time() - st
 print(f"import rtp_llm.ops took {consume_s:.2f}s")
@@ -738,6 +741,11 @@ class PyEnvConfigs:
         self.grammar_admission_config = GrammarAdmissionConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
+
+    @property
+    def ffn_disaggregate_config(self) -> "FfnDisAggregateConfig":
+        # Keep the compatibility view tied to the native config, including after pickle.
+        return self.parallelism_config.ffn_disaggregate_config
 
     def to_string(self):
         return (

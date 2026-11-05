@@ -53,6 +53,15 @@ struct PrefillCPConfig {
     }
     std::string to_string() const;
 };
+// Startup compatibility only; no FFN service topology or execution support.
+struct FfnDisAggregateConfig {
+    bool get_enable_ffn_disaggregate() const {
+        return false;
+    }
+    void        set_enable_ffn_disaggregate(bool enabled);
+    std::string to_string() const;
+};
+
 struct ParallelismConfig {
     int64_t tp_size          = 1;
     int64_t ep_size          = 1;
@@ -74,6 +83,8 @@ struct ParallelismConfig {
     // DeepSeekV4Model's mega-MoE token bound cap) does not have to read
     // os.environ["ROLE_TYPE"] anymore.
     RoleType role_type = RoleType::PDFUSION;
+
+    FfnDisAggregateConfig ffn_disaggregate_config;
 
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;

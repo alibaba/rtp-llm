@@ -96,6 +96,7 @@ dsv4_py_test(
         ] if name == "test_hc_impl" else []) + ([
             "//rtp_llm/models_py:models",
         ] if name == "test_prefill_fast_path" else []),
+        data = ["//rtp_llm/models_py:ppu_sources"] if name == "test_prefill_fast_path" else [],
     )
     for name in _MODEL_CONTRACT_TESTS + _GPU_TESTS
     if name not in _KNOWN_HANG_TESTS

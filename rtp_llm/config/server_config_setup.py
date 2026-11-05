@@ -3,7 +3,7 @@ import logging
 import os
 import socket
 import subprocess
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -16,6 +16,9 @@ from rtp_llm.ops import (
     SpeculativeType,
 )
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.libth_transformer_config import FfnDisAggregateConfig
 
 RUN_AFFINITY_TIMEOUT_SEC = 10
 
@@ -249,6 +252,7 @@ def set_parallelism_config(
     parallelism_config: ParallelismConfig,
     world_rank: Optional[int] = None,
     py_prefill_cp_config: Optional[PrefillCPConfig] = None,
+    py_ffn_disaggregate_config: Optional["FfnDisAggregateConfig"] = None,
 ) -> None:
     """Update rank-related fields in ParallelismConfig from a given world_rank.
 
@@ -258,7 +262,13 @@ def set_parallelism_config(
     Args:
         parallelism_config: ParallelismConfig to update in place
         world_rank: World rank to apply (local_rank = world_rank % local_world_size, etc.). Default 0.
+        py_ffn_disaggregate_config: Disabled-only compatibility config; enabling is unsupported.
     """
+    if py_ffn_disaggregate_config is not None:
+        parallelism_config.ffn_disaggregate_config.enable_ffn_disaggregate = (
+            py_ffn_disaggregate_config.enable_ffn_disaggregate
+        )
+
     world_size = parallelism_config.world_size
     need_local = world_size > 1 and parallelism_config.local_world_size == 1
     if need_local:

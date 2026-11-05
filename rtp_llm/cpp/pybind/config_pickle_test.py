@@ -2,13 +2,112 @@ import pickle
 import unittest
 
 from rtp_llm.ops import (
+    CPRotateMethod,
     GrammarConfig,
     HWKernelConfig,
     MoeConfig,
+    ParallelismConfig,
     PDSepConfig,
+    PrefillCPConfig,
     RoleType,
     RuntimeConfig,
 )
+
+
+class FfnDisaggregateConfigContractTest(unittest.TestCase):
+    def test_native_disabled_only_property_and_pickle(self):
+        parent = ParallelismConfig()
+        config = parent.ffn_disaggregate_config
+        self.assertEqual(type(config).__name__, "FfnDisAggregateConfig")
+        self.assertEqual(type(config).__module__, "libth_transformer_config")
+        for value in (False, 0):
+            with self.subTest(value=value):
+                config.enable_ffn_disaggregate = value
+                self.assertIs(config.enable_ffn_disaggregate, False)
+        for value in (True, 1):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "enable_ffn_disaggregate=true is unsupported"
+            ):
+                config.enable_ffn_disaggregate = value
+        self.assertIs(parent.ffn_disaggregate_config.enable_ffn_disaggregate, False)
+        self.assertEqual(config.__getstate__(), (False,))
+        restored = pickle.loads(pickle.dumps(config))
+        parent.ffn_disaggregate_config = restored
+        self.assertIs(parent.ffn_disaggregate_config.enable_ffn_disaggregate, False)
+        self.assertIn("enable_ffn_disaggregate: 0", parent.to_string())
+
+    def test_native_ffn_pickle_rejects_enabled_and_malformed_states(self):
+        config_type = type(ParallelismConfig().ffn_disaggregate_config)
+        for state, error, message in (
+            ((True,), ValueError, "enable_ffn_disaggregate=true is unsupported"),
+            ((), RuntimeError, "Invalid FfnDisAggregateConfig state"),
+            ((False, False), RuntimeError, "Invalid FfnDisAggregateConfig state"),
+        ):
+            with self.subTest(state=state), self.assertRaisesRegex(error, message):
+                config = config_type.__new__(config_type)
+                config.__setstate__(state)
+
+    def test_parallelism_pickle_preserves_disabled_layouts(self):
+        config = ParallelismConfig()
+        config.tp_size = 2
+        config.world_rank = 3
+        config.role_type = RoleType.PREFILL
+        state = config.__getstate__()
+        self.assertEqual(len(state), 17)
+        self.assertEqual(state[13], 0)
+        cp = PrefillCPConfig()
+        cp.method = CPRotateMethod.ALL_GATHER_WITH_OVERLAP
+        cp.comm_buffer_size = 4096
+        cp.kv_cache_sharded = True
+        cp.prefill_cp_size = 4
+        # Historical inputs must not be derived from the current serializer.
+        for legacy_state in (
+            (4, 12, 3, 2, 24, 11, 8, 1, 3, 11, 2, 2, 1, 0, cp, True),
+            (
+                4, 12, 3, 2, 24, 11, 8, 1, 3, 11, 2, 2, 1, 0, cp, True,
+                RoleType.PREFILL,
+            ),
+        ):
+            with self.subTest(size=len(legacy_state)):
+                restored = ParallelismConfig.__new__(ParallelismConfig)
+                restored.__setstate__(legacy_state)
+                self.assertIs(
+                    restored.ffn_disaggregate_config.enable_ffn_disaggregate, False
+                )
+                for field, expected in (
+                    ("tp_size", 4),
+                    ("ep_size", 12),
+                    ("dp_size", 3),
+                    ("pp_size", 2),
+                    ("world_size", 24),
+                    ("world_rank", 11),
+                    ("local_world_size", 8),
+                    ("tp_rank", 3),
+                    ("ep_rank", 11),
+                    ("dp_rank", 2),
+                    ("ffn_tp_size", 2),
+                    ("ffn_tp_rank", 1),
+                ):
+                    with self.subTest(field=field):
+                        self.assertEqual(getattr(restored, field), expected)
+                self.assertIs(restored.use_ub_comm, True)
+                self.assertEqual(
+                    restored.prefill_cp_config.method,
+                    CPRotateMethod.ALL_GATHER_WITH_OVERLAP,
+                )
+                self.assertEqual(restored.prefill_cp_config.comm_buffer_size, 4096)
+                self.assertIs(restored.prefill_cp_config.kv_cache_sharded, True)
+                self.assertEqual(restored.prefill_cp_config.prefill_cp_size, 4)
+                self.assertEqual(
+                    restored.role_type,
+                    RoleType.PREFILL if len(legacy_state) == 17 else RoleType.PDFUSION,
+                )
+        for enabled in (1, -1):
+            with self.subTest(enabled=enabled), self.assertRaisesRegex(
+                RuntimeError, "enable_ffn_disaggregate=true is unsupported"
+            ):
+                restored = ParallelismConfig.__new__(ParallelismConfig)
+                restored.__setstate__(state[:13] + (enabled,) + state[14:])
 
 
 class DecodeGraphConfigPickleTest(unittest.TestCase):

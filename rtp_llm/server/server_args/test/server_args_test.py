@@ -348,6 +348,79 @@ class DecodeGraphCapacityArgumentsTest(TestCase):
             self.create_engine(["--decode_cuda_graph_max_batch_size", "8"])
 
 
+class FfnDisaggregateArgumentsTest(TestCase):
+    def test_disabled_only_type_converter(self):
+        from rtp_llm.server.server_args.parallel_group_args import (
+            _disabled_ffn_disaggregate,
+        )
+
+        for value in (False, "false", "0", "off", "no", "f", "FALSE"):
+            with self.subTest(value=value):
+                self.assertIs(_disabled_ffn_disaggregate(value), False)
+        for value in (True, "true", "1", "on", "yes", "t", "TRUE", "invalid"):
+            with self.subTest(value=value), self.assertRaises(
+                argparse.ArgumentTypeError
+            ):
+                _disabled_ffn_disaggregate(value)
+
+    def test_disabled_default_cli_and_environment(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        cases = [(None, {}), ([], {})]
+        for value in ("false", "0", "off", "no", "f", "FALSE"):
+            cases.extend(
+                [
+                    (["--enable_ffn_disaggregate", value], {}),
+                    ([f"--enable_ffn_disaggregate={value}"], {}),
+                    (None, {"ENABLE_FFN_DISAGGREGATE": value}),
+                    ([], {"ENABLE_FFN_DISAGGREGATE": value}),
+                ]
+            )
+        cases.append(
+            (
+                ["--enable_ffn_disaggregate", "false"],
+                {"ENABLE_FFN_DISAGGREGATE": "true"},
+            )
+        )
+        for args, env in cases:
+            with self.subTest(args=args, env=env), patch.dict(
+                os.environ, env, clear=True
+            ), patch.object(sys, "argv", ["server"]):
+                configs = setup_args(args)
+                self.assertIs(
+                    configs.ffn_disaggregate_config,
+                    configs.parallelism_config.ffn_disaggregate_config,
+                )
+                self.assertIs(
+                    configs.ffn_disaggregate_config.enable_ffn_disaggregate, False
+                )
+
+    def test_rejects_enabled_and_invalid_values_before_binding(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for value in ("true", "1", "on", "yes", "t", "TRUE", "invalid"):
+            for args, env in (
+                (["--enable_ffn_disaggregate", value], {}),
+                ([f"--enable_ffn_disaggregate={value}"], {}),
+                (None, {"ENABLE_FFN_DISAGGREGATE": value}),
+                ([], {"ENABLE_FFN_DISAGGREGATE": value}),
+            ):
+                with self.subTest(value=value, args=args), patch.dict(
+                    os.environ, env, clear=True
+                ), patch.object(sys, "argv", ["server"]), patch(
+                    "sys.stderr", new_callable=io.StringIO
+                ) as stderr:
+                    with self.assertRaises(SystemExit) as raised:
+                        setup_args(args)
+                    self.assertEqual(raised.exception.code, 2)
+                    expected = (
+                        "Boolean value expected"
+                        if value == "invalid"
+                        else "enable_ffn_disaggregate=true is unsupported"
+                    )
+                    self.assertIn(expected, stderr.getvalue())
+
+
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
 

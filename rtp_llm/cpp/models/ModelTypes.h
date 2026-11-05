@@ -10,6 +10,8 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -74,6 +76,11 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+    int64_t                 hidden_state_capture_max_inflight_samples = 64;
+    int64_t                 hidden_state_capture_max_inflight_bytes   = 1073741824;
+    int64_t                 hidden_state_capture_max_inflight_tokens  = 131072;
+    int64_t                 hidden_state_capture_max_pending_batches  = 8;
+    int64_t                 hidden_state_capture_poll_interval_ms     = 1000;
 };
 
 enum GptModelInputIndex : size_t {
@@ -183,14 +190,54 @@ std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, in
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
+struct HiddenStateCaptureFatalState {
+    bool        failed{false};
+    std::string message;
+};
+
+// Shared by stream copies, but never owns an Executor/model. The cancellation
+// callback must be noexcept and may only release an unsubmitted reservation.
+class HiddenStateCaptureReservation final {
+public:
+    explicit HiddenStateCaptureReservation(std::function<void()> cancel_callback):
+        cancel_callback_(std::move(cancel_callback)) {}
+
+    ~HiddenStateCaptureReservation() {
+        cancel();
+    }
+
+    bool active() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<bool>(cancel_callback_);
+    }
+
+    void cancel() noexcept {
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            callback.swap(cancel_callback_);
+        }
+        if (callback) {
+            callback();
+        }
+    }
+
+private:
+    mutable std::mutex    mutex_;
+    std::function<void()> cancel_callback_;
+};
+
+using HiddenStateCaptureReservationPtr = std::shared_ptr<HiddenStateCaptureReservation>;
+
 class ModelBase {
 public:
-    virtual ~ModelBase()                                                     = default;
-    virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
-    virtual void                       releaseBuffers() {}
-    virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
-    virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
-        return std::nullopt;
+    virtual ~ModelBase()                                                           = default;
+    virtual GptModelOutputs                  forward(const GptModelInputs& inputs) = 0;
+    virtual void                             releaseBuffers() {}
+    virtual void                             prepareAttentionInputs(const GptModelInputs& inputs) {}
+    virtual HiddenStateCaptureReservationPtr tryReserveHiddenStateCapture(int64_t /*request_id*/,
+                                                                          int64_t /*valid_tokens*/) {
+        return {};
     }
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-

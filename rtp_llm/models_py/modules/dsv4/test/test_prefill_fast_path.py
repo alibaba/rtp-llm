@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
 from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
 from rtp_llm.models_py.utils import profiler as moe_profiler
+from rtp_llm.ops.compute_ops import PyModelOutputs
 
 _FakePrefillMeta = namedtuple("_FakePrefillMeta", ["workspace"])
 
@@ -109,6 +110,9 @@ class _FakeLayer(Block):
 
 
 class _FakeV4:
+    set_cp_info = V4Transformer.set_cp_info
+    _write_mtp_hidden_buffer = V4Transformer._write_mtp_hidden_buffer
+
     def __init__(self):
         self.calls = []
         self.fp8_kv_cache = True
@@ -216,6 +220,117 @@ class _PrefillForwardTestBase(unittest.TestCase):
 
 
 class PrefillFastPathTest(_PrefillForwardTestBase):
+    def test_prefill_capture_output_contract(self):
+        from rtp_llm.models_py.modules.dsv4.ppu.prefill import (
+            forward as ppu_prefill_forward,
+        )
+
+        # One case per distinct boundary, not a backend x MTP x capture product.
+        for forward, mtp_mode, capture_mode in (
+            (prefill_forward, "none", "disabled"),
+            (prefill_forward, "none", "success"),
+            (prefill_forward, "none", "missing_layer"),
+            (prefill_forward, "none", "fatal_final"),
+            (ppu_prefill_forward, "fixed", "success"),
+            (ppu_prefill_forward, "temporary", "layer_error"),
+        ):
+            with self.subTest(backend=forward.__name__, mtp=mtp_mode, capture=capture_mode):
+                v4 = _FakeV4()
+                v4.fp8_kv_cache = False
+                v4.hc_mult = 2
+                v4._hc_head_reduce = lambda h: h.mean(dim=-2)
+                v4._mtp_hidden_valid_tokens = 1
+                fixed_buffer = (
+                    None
+                    if mtp_mode == "none"
+                    else torch.full((1 if mtp_mode == "temporary" else 4, 4), -7.0)
+                )
+                v4._mtp_hidden_buffer = fixed_buffer
+                input_ids = torch.tensor([3, 4])
+                embedded = v4.embed(input_ids)
+                canonical = embedded + 121
+                attn = SimpleNamespace(
+                    cu_seqlens=torch.tensor([0, 2], dtype=torch.int32),
+                    cu_seqlens_device=None,
+                    input_lengths=torch.tensor([2], dtype=torch.int32),
+                    input_lengths_device=None,
+                    combo_position_ids=torch.tensor([7, 8]),
+                )
+                inputs = SimpleNamespace(input_ids=input_ids, attention_inputs=attn)
+                fatal_error = MemoryError("canonical final failure")
+
+                def canonical_layer(hidden, residual):
+                    if capture_mode == "layer_error":
+                        raise ValueError("capture failure")
+                    return DeepSeekV4Model._capture_canonical_layer(None, hidden, residual)
+
+                def canonical_final_hook(hidden, residual):
+                    torch.testing.assert_close(hidden, canonical)
+                    if capture_mode == "fatal_final":
+                        raise fatal_error
+                    return DeepSeekV4Model._capture_canonical_final(None, hidden, residual)
+
+                canonical_final = Mock(wraps=canonical_final_hook)
+                capture = CaptureContext.configured(
+                    [1, 0, 2] if capture_mode == "missing_layer" else [1, 0],
+                    canonical_layer,
+                    canonical_final,
+                ).for_forward(capture_mode != "disabled")
+                # Real forward boundaries and CaptureContext; only layers use
+                # lightweight math fixtures. The final hook is observed, not finalize.
+                with patch.object(forward._rt, "ENABLED", False), (
+                    self.assertRaises(MemoryError)
+                    if capture_mode == "fatal_final"
+                    else nullcontext()
+                ) as raised:
+                    outputs = forward.forward_prefill(
+                        v4, None, None, inputs, capture_context=capture
+                    )
+                self.assertEqual(
+                    canonical_final.call_count, int(capture_mode != "disabled")
+                )
+                if capture_mode == "fatal_final":
+                    self.assertIs(raised.exception, fatal_error)
+                    continue
+                self.assertIsInstance(outputs, PyModelOutputs)
+                torch.testing.assert_close(outputs.hidden_states, canonical)
+                if capture_mode == "success":
+                    torch.testing.assert_close(
+                        outputs.captured_hidden_states,
+                        torch.cat([embedded + 21, embedded + 10, canonical], dim=-1),
+                    )
+                    self.assertIsNone(outputs.capture_error)
+                else:
+                    self.assertIsNone(outputs.captured_hidden_states)
+                    if capture_mode == "layer_error":
+                        self.assertEqual(
+                            outputs.capture_error, "ValueError: capture failure"
+                        )
+                    elif capture_mode == "missing_layer":
+                        self.assertIn(
+                            "did not visit configured layers [2]", outputs.capture_error
+                        )
+                    else:
+                        self.assertIsNone(outputs.capture_error)
+                self.assertIs(v4._mtp_hidden_buffer, fixed_buffer)
+                if mtp_mode == "temporary":
+                    torch.testing.assert_close(
+                        outputs.mtp_target_hidden_states, (embedded + 21).repeat(1, 2)
+                    )
+                    self.assertEqual(v4._mtp_hidden_valid_tokens, 1)
+                    torch.testing.assert_close(fixed_buffer, torch.full((1, 4), -7.0))
+                else:
+                    self.assertIsNone(outputs.mtp_target_hidden_states)
+                    if mtp_mode == "fixed":
+                        target = DeepSeekV4Model.get_mtp_target_hidden_states(
+                            SimpleNamespace(v4=v4), 2
+                        )
+                        torch.testing.assert_close(target, (embedded + 21).repeat(1, 2))
+                        self.assertEqual(v4._mtp_hidden_valid_tokens, 2)
+                        torch.testing.assert_close(
+                            fixed_buffer[2:], torch.full((2, 4), -7.0)
+                        )
+
     def test_capture_ranges_survive_fast_path_suppression(self):
         for ranges_enabled, outer_disabled, fail_capture in (
             (True, False, False),
@@ -248,19 +363,22 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 model._capture_context = plan
                 inputs = SimpleNamespace(
                     input_ids=torch.tensor([3, 4]),
-                    attention_inputs=SimpleNamespace(is_prefill=True),
+                    attention_inputs=SimpleNamespace(
+                        is_prefill=True,
+                        cu_seqlens=torch.tensor([0, 2]),
+                        cu_seqlens_device=None,
+                        input_lengths=torch.tensor([2]),
+                        input_lengths_device=None,
+                        prefix_lengths=torch.tensor([7]),
+                        prefix_lengths_device=None,
+                        combo_position_ids=torch.tensor([7, 8]),
+                    ),
                     capture_hidden_states=True,
                 )
 
                 def forward_prefill(v4, kv_cache, parallelism, inputs, **kwargs):
-                    return prefill_forward.forward_layers(
-                        v4,
-                        kv_cache=None,
-                        input_ids=inputs.input_ids,
-                        positions=torch.tensor([7, 8]),
-                        cu_seqlens=torch.tensor([0, 2]),
-                        block_tables_by_type=None,
-                        capture_context=kwargs["capture_context"],
+                    return prefill_forward.forward_prefill(
+                        v4, None, parallelism, inputs, **kwargs
                     )
 
                 with patch.object(
@@ -289,12 +407,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                         if outer_disabled
                         else nullcontext()
                     ):
-                        with (
-                            self.assertRaisesRegex(RuntimeError, "capture failure")
-                            if fail_capture
-                            else nullcontext()
-                        ):
-                            result = model.forward(inputs)
+                        result = model.forward(inputs)
                     self.assertTrue(moe_profiler.record_function_ranges_enabled())
                 events = [
                     e
@@ -313,10 +426,15 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 self.assertTrue(all(not e.is_user_annotation for e in events))
                 self.assertTrue(hook_gates)
                 self.assertFalse(any(hook_gates))
-                if not fail_capture:
-                    embedded = v4.embed(torch.tensor([3, 4]))
+                embedded = v4.embed(torch.tensor([3, 4]))
+                torch.testing.assert_close(result.hidden_states, embedded + 103)
+                if fail_capture:
+                    self.assertIsNone(result.captured_hidden_states)
+                    self.assertEqual(result.capture_error, "RuntimeError: capture failure")
+                else:
+                    self.assertIsNone(result.capture_error)
                     torch.testing.assert_close(
-                        result,
+                        result.captured_hidden_states,
                         torch.cat([embedded + 3, embedded + 1, embedded + 103], dim=-1),
                     )
 
@@ -779,7 +897,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             "forward_layers",
             return_value=torch.zeros(2, 2),
         ) as forward_layers:
-            for capture_context in (None, object()):
+            for capture_context in (None, CaptureContext.unsupported()):
                 prefill_forward.forward_prefill(
                     v4,
                     None,
@@ -948,17 +1066,21 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 out, norm_calls = run(context)
                 self.assertEqual(norm_calls, 1)
                 self.assertEqual(canonical_layer.call_count, int(enabled))
-                self.assertEqual(canonical_final.call_count, int(enabled))
+                canonical_final.assert_not_called()
+                self.assertIsInstance(out, torch.Tensor)
+                torch.testing.assert_close(out, expected + 100)
+                self.assertEqual(tuple(out.shape), (2, 2))
                 if enabled:
+                    outputs = context.finalize(out)
+                    canonical_final.assert_called_once()
+                    torch.testing.assert_close(outputs.hidden_states, out)
                     torch.testing.assert_close(
-                        out, torch.cat((expected, expected + 100), dim=-1)
+                        outputs.captured_hidden_states,
+                        torch.cat((expected, expected + 100), dim=-1),
                     )
-                    self.assertEqual(tuple(out.shape), (2, 4))
-                else:
-                    torch.testing.assert_close(out, expected + 100)
-                    self.assertEqual(tuple(out.shape), (2, 2))
+                    self.assertIsNone(outputs.capture_error)
 
-    def test_forward_layers_keeps_aux_and_output_capture_independent(self):
+    def test_forward_prefill_keeps_aux_and_output_capture_independent(self):
         class LaneAwareLayer:
             def __init__(self, lane_increments):
                 self.lane_increments = torch.tensor(lane_increments).reshape(1, -1, 1)
@@ -996,8 +1118,13 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         cu_seqlens = torch.tensor([0, 2], dtype=torch.long)
         attn_inputs = SimpleNamespace(
             input_lengths=torch.tensor([2], dtype=torch.int32),
+            input_lengths_device=None,
             prefix_lengths=torch.tensor([7], dtype=torch.int32),
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_device=None,
+            combo_position_ids=positions,
         )
+        inputs = SimpleNamespace(input_ids=input_ids, attention_inputs=attn_inputs)
 
         # Layer 0 overlaps both transports, but only the legacy hook writes
         # the fixed buffer. Final hidden uses the distinct HC-head reduction.
@@ -1013,20 +1140,20 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             ), patch.object(prefill_forward._rt, "ENABLED", False), patch.object(
                 v4, "norm", wraps=v4.norm
             ) as norm:
-                out = prefill_forward.forward_layers(
+                out = prefill_forward.forward_prefill(
                     v4,
-                    kv_cache=None,
-                    input_ids=input_ids,
-                    positions=positions,
-                    cu_seqlens=cu_seqlens,
-                    block_tables_by_type=None,
-                    attn_inputs=attn_inputs,
+                    None,
+                    None,
+                    inputs,
                     capture_context=capture_context.for_forward(enabled),
                 )
                 norm.assert_called_once()
-                torch.testing.assert_close(
-                    out, expected if enabled else expected[:, -2:]
-                )
+                torch.testing.assert_close(out.hidden_states, expected[:, -2:])
+                self.assertIsNone(out.capture_error)
+                if enabled:
+                    torch.testing.assert_close(out.captured_hidden_states, expected)
+                else:
+                    self.assertIsNone(out.captured_hidden_states)
                 self.assertIs(v4._mtp_hidden_buffer, aux_buffer)
                 torch.testing.assert_close(aux_buffer[:2], expected[:, 2:4])
                 self.assertTrue(torch.isnan(aux_buffer[2:]).all())

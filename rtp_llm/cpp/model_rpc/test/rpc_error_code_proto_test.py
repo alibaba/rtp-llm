@@ -58,6 +58,32 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
                     self.assertEqual(parsed.prefill_only, prefill_only)
                     self.assertEqual(parsed.max_new_tokens, 0)
 
+    def test_capture_hidden_states_has_an_independent_opt_in_wire_field(self):
+        fields = GenerateConfigPB.DESCRIPTOR.fields_by_name
+        self.assertNotIn("export_hidden_states", fields)
+        field = fields["capture_hidden_states"]
+        self.assertEqual(field.number, 77)
+        self.assertEqual(field.type, FieldDescriptor.TYPE_BOOL)
+        self.assertFalse(GenerateConfigPB().capture_hidden_states)
+        self.assertEqual(
+            GenerateConfigPB(capture_hidden_states=True).SerializeToString(),
+            b"\xe8\x04\x01",
+        )
+        for max_new_tokens in (0, 7):
+            for enabled in (False, True):
+                with self.subTest(max_new_tokens=max_new_tokens, enabled=enabled):
+                    config = GenerateConfigPB(
+                        max_new_tokens=max_new_tokens,
+                        prefill_only=max_new_tokens == 0,
+                        capture_hidden_states=enabled,
+                    )
+                    parsed = GenerateConfigPB.FromString(config.SerializeToString())
+                    self.assertEqual(parsed.capture_hidden_states, enabled)
+                    self.assertEqual(parsed.max_new_tokens, max_new_tokens)
+                    self.assertEqual(parsed.prefill_only, max_new_tokens == 0)
+                    self.assertFalse(parsed.return_hidden_states)
+                    self.assertFalse(parsed.return_all_hidden_states)
+
     def test_prefill_only_disambiguates_plain_max_new_tokens_wire_zero(self):
         max_new_tokens = GenerateConfigPB.DESCRIPTOR.fields_by_name["max_new_tokens"]
         self.assertEqual(max_new_tokens.number, 1)

@@ -507,7 +507,30 @@ def _validate_prefill_only_response(
     if not input_py.generate_config.is_prefill_only():
         return
 
-    aux_infos = outputs_pb.flatten_output.aux_info
+    output_pb = outputs_pb.flatten_output
+    if output_pb.HasField("output_ids"):
+        # Validate raw tensors before trans_output skips scalar/empty frames.
+        # Reuse normal tensor decoding, including the legacy empty sentinel.
+        violation = None
+        try:
+            token_count = trans_tensor(output_pb.output_ids).numel()
+        except (ValueError, RuntimeError) as error:
+            violation = f"invalid output_ids: {error}"
+        else:
+            if token_count != 0:
+                violation = f"output_ids contains {token_count} tokens"
+        if violation is not None:
+            logger.error(
+                "prefill-only response contract violation: request_id=%s, %s",
+                input_py.request_id,
+                violation,
+            )
+            raise FtRuntimeException(
+                ExceptionType.EXECUTION_EXCEPTION,
+                f"prefill-only request [{input_py.request_id}] received {violation}",
+            )
+
+    aux_infos = output_pb.aux_info
     if not aux_infos:
         return
 
@@ -771,6 +794,9 @@ def trans_input(input_py: GenerateInput):
     )
     generate_config_pb.return_all_hidden_states = (
         input_py.generate_config.return_all_hidden_states
+    )
+    generate_config_pb.capture_hidden_states = (
+        input_py.generate_config.capture_hidden_states
     )
     generate_config_pb.hidden_states_cut_dim = (
         input_py.generate_config.hidden_states_cut_dim
@@ -1206,8 +1232,8 @@ class ModelRpcClient(object):
 
         # Initialize the channel pool
         self._channel_pool = GrpcHostChannelPool(
-            options=self._options, cleanup_interval=60  # clean up every minute
-        )
+            options=self._options, cleanup_interval=60
+        )  # clean up every minute
         logging.info(f"addresses: {self._addresses}")
 
     async def close(self) -> None:

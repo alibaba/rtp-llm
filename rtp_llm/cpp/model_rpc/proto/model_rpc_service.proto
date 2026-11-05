@@ -167,6 +167,8 @@ message GenerateConfigPB {
     // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
+    // Best-effort prompt capture requires reuse_cache=false. Bare zero-token prefill stays eligible.
+    bool capture_hidden_states = 77;
 }
 
 message MMPreprocessConfigPB {

@@ -4,7 +4,7 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HiddenStateCaptureDtype', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FfnDisAggregateConfig', 'FMHAConfig', 'FMHAType', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HiddenStateCaptureDtype', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
                       'MiscellaneousConfig', 'ModelConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
@@ -1027,6 +1027,11 @@ class ModelConfig:
     hidden_size: int
     hidden_state_capture_dtype: HiddenStateCaptureDtype
     hidden_state_capture_layer_ids: list[int]
+    hidden_state_capture_max_inflight_samples: int
+    hidden_state_capture_max_inflight_bytes: int
+    hidden_state_capture_max_inflight_tokens: int
+    hidden_state_capture_max_pending_batches: int
+    hidden_state_capture_poll_interval_ms: int
     hybrid_attention_config: HybridAttentionConfig
     input_embedding_scalar: float
     input_vocab_size: int
@@ -1233,7 +1238,17 @@ class PDSepConfig:
         ...
     def to_string(self) -> str:
         ...
+class FfnDisAggregateConfig:
+    """Disabled-only startup compatibility; assigning True raises ValueError."""
+
+    enable_ffn_disaggregate: bool
+
+    def __getstate__(self) -> tuple: ...
+    def __init__(self) -> None: ...
+    def __setstate__(self, arg0: tuple) -> None: ...
+    def to_string(self) -> str: ...
 class ParallelismConfig:
+    ffn_disaggregate_config: FfnDisAggregateConfig
     dp_rank: int
     dp_size: int
     ep_rank: int

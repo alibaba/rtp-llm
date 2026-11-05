@@ -8,6 +8,7 @@
 #include <string>
 #include <cctype>
 #include <regex>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -51,6 +52,16 @@ std::string PrefillCPConfig::to_string() const {
     return oss.str();
 }
 
+void FfnDisAggregateConfig::set_enable_ffn_disaggregate(bool enabled) {
+    if (enabled) {
+        throw std::invalid_argument("enable_ffn_disaggregate=true is unsupported; only false is supported");
+    }
+}
+
+std::string FfnDisAggregateConfig::to_string() const {
+    return "enable_ffn_disaggregate: 0\n";
+}
+
 // ParallelismConfig
 std::string ParallelismConfig::to_string() const {
     std::ostringstream oss;
@@ -68,6 +79,8 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "role_type: " << roleTypeToString(role_type) << "\n"
+        << "ffn_disaggregate_config: {\n"
+        << ffn_disaggregate_config.to_string() << "}\n"
         << "prefill_cp_config: {\n"
         << prefill_cp_config.to_string() << "}\n";
     return oss.str();

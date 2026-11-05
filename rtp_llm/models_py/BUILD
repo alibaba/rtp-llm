@@ -1,5 +1,14 @@
 load("@arch_config//:arch_select.bzl", "requirement")
 
+filegroup(
+    name = "hidden_state_capture_sources",
+    srcs = [
+        "model_desc/hidden_state_capture.py",
+        "utils/profiler.py",
+    ],
+    visibility = ["//rtp_llm/cpp/models/test:__pkg__"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([

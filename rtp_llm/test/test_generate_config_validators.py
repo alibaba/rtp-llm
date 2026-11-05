@@ -19,6 +19,7 @@
 策略：Python 侧硬编码期望值 + C++ 侧 static_assert，无需解析源码。
 """
 
+import json
 import logging
 import unittest
 from types import SimpleNamespace
@@ -41,10 +42,103 @@ from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.config.response_format import ResponseFormat
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.structure.request_constants import request_id_field_name
 from rtp_llm.structure.request_extractor import RequestExtractor
 
 
 class TestPrefillOnlyGenerateConfig(unittest.TestCase):
+
+    def test_capture_hidden_states_is_independent_of_response_and_prefill_mode(self):
+        self.assertNotIn("export_hidden_states", GenerateConfig.model_fields)
+        for max_new_tokens in (0, 7):
+            with self.subTest(max_new_tokens=max_new_tokens):
+                default = GenerateConfig(max_new_tokens=max_new_tokens)
+                self.assertFalse(default.capture_hidden_states)
+                for enabled in (False, True):
+                    config = GenerateConfig(
+                        max_new_tokens=max_new_tokens,
+                        capture_hidden_states=enabled,
+                        reuse_cache=False,
+                    )
+                    config.validate()
+                    restored = GenerateConfig.model_validate_json(
+                        config.model_dump_json()
+                    )
+                    self.assertEqual(restored.capture_hidden_states, enabled)
+                    self.assertEqual(restored.max_new_tokens, max_new_tokens)
+                    self.assertFalse(restored.reuse_cache)
+                    self.assertFalse(restored.return_hidden_states)
+                    self.assertFalse(restored.return_all_hidden_states)
+                    self.assertFalse(restored.return_logits)
+
+    def test_export_hidden_states_is_rejected_at_config_entry_points(self):
+        for entry, overrides in (
+            ("constructor", {}),
+            ("model_validate", {}),
+            ("model_validate_json", {}),
+            ("update", {}),
+            ("update_and_pop", {}),
+            ("create_generate_config", {}),
+            ("create_generate_config_kwargs", {"capture_hidden_states": True}),
+            ("constructor", {"export_hidden_states": False}),
+            (
+                "model_validate_json",
+                {"export_hidden_states": None, "max_new_tokens": 0},
+            ),
+        ):
+            with self.subTest(entry=entry, overrides=overrides):
+                values = {
+                    "max_new_tokens": 7,
+                    "reuse_cache": False,
+                    "export_hidden_states": True,
+                    **overrides,
+                }
+                original = values.copy()
+                config = GenerateConfig()
+                before = config.model_copy(deep=True)
+                calls = {
+                    "constructor": lambda: GenerateConfig(**values),
+                    "model_validate": lambda: GenerateConfig.model_validate(values),
+                    "model_validate_json": lambda: GenerateConfig.model_validate_json(json.dumps(values)),
+                    "update": lambda: config.update(values),
+                    "update_and_pop": lambda: config.update_and_pop(values),
+                    "create_generate_config": lambda: GenerateConfig.create_generate_config(values),
+                    "create_generate_config_kwargs": lambda: GenerateConfig.create_generate_config({}, **values),
+                }
+                wrapped = entry.startswith(("create_generate_config", "update"))
+                with self.assertRaisesRegex(
+                    FtRuntimeException if wrapped else ValidationError,
+                    "export_hidden_states is not supported; use capture_hidden_states",
+                ) as ctx:
+                    calls[entry]()
+                if wrapped:
+                    self.assertEqual(
+                        ctx.exception.exception_type,
+                        (
+                            ExceptionType.ERROR_GENERATE_CONFIG_FORMAT
+                            if entry.startswith("create_generate_config")
+                            else ExceptionType.ERROR_INPUT_FORMAT_ERROR
+                        ),
+                    )
+                self.assertEqual(config, before)
+                self.assertEqual(config.model_fields_set, before.model_fields_set)
+                self.assertEqual(values, original)
+
+    def test_update_and_pop_preserves_capture_hidden_states(self):
+        config = GenerateConfig(max_new_tokens=7)
+        self.assertEqual(
+            config.update_and_pop(
+                {"capture_hidden_states": True, "reuse_cache": False}
+            ),
+            {},
+        )
+        config.update({"max_new_tokens": 0})
+        self.assertTrue(config.capture_hidden_states)
+        self.assertFalse(config.reuse_cache)
+        self.assertTrue(config.is_prefill_only())
+        config.update({"capture_hidden_states": False})
+        self.assertFalse(config.capture_hidden_states)
+
     def test_prefill_only_preserves_cache_setting(self):
         config = GenerateConfig(max_new_tokens=0, reuse_cache=True)
 
@@ -93,6 +187,11 @@ class TestPrefillOnlyGenerateConfig(unittest.TestCase):
 
     def test_nested_extra_configs_reports_field_and_model_errors(self):
         for values, location, message in (
+            (
+                {"export_hidden_states": False, "capture_hidden_states": True},
+                ("extra_configs",),
+                "export_hidden_states.*capture_hidden_states",
+            ),
             (
                 {"max_new_tokens": -1},
                 ("extra_configs", "max_new_tokens"),
@@ -458,6 +557,70 @@ class TestGenerateConfigUpdates(unittest.TestCase):
 
 
 class TestRawGenerateConfigParsing(unittest.TestCase):
+    def test_extract_request_rejects_export_hidden_states(self):
+        extractor = RequestExtractor(GenerateConfig())
+        for values in (
+            {"export_hidden_states": True},
+            {"generate_config": {"export_hidden_states": False}},
+            {"generation_config": {"export_hidden_states": None}},
+            {
+                "generate_config": {
+                    "capture_hidden_states": True,
+                    "reuse_cache": False,
+                },
+                "generation_config": {"export_hidden_states": False},
+            },
+            {
+                "export_hidden_states": False,
+                "generate_config": {"capture_hidden_states": True},
+            },
+            {
+                "capture_hidden_states": True,
+                "generate_config": {"export_hidden_states": True},
+            },
+        ):
+            with self.subTest(values=values):
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "export_hidden_states.*capture_hidden_states"
+                ) as ctx:
+                    extractor.extract_request(
+                        {request_id_field_name: 1, "prompt": "hello", **values}
+                    )
+                self.assertEqual(
+                    ctx.exception.exception_type,
+                    ExceptionType.ERROR_GENERATE_CONFIG_FORMAT,
+                )
+                self.assertIsInstance(ctx.exception.__cause__, ValueError)
+
+    def test_extract_request_preserves_capture_and_bare_zero(self):
+        extractor = RequestExtractor(GenerateConfig())
+        for source in (None, "generate_config", "generation_config"):
+            for values in (
+                {"capture_hidden_states": True, "max_new_tokens": 7, "reuse_cache": False},
+                {"max_new_tokens": 0},
+            ):
+                with self.subTest(source=source, values=values):
+                    kwargs = {
+                        request_id_field_name: 1,
+                        "prompt": "hello",
+                        "unknown_top": "keep",
+                    }
+                    if source is None:
+                        kwargs.update(values)
+                    else:
+                        kwargs[source] = {**values, "unknown_nested": "discarded"}
+                    request, remain = extractor.extract_request(kwargs)
+                    config = request.generate_configs[0]
+                    self.assertEqual(
+                        config.capture_hidden_states, values.get("capture_hidden_states", False)
+                    )
+                    self.assertEqual(config.max_new_tokens, values["max_new_tokens"])
+                    self.assertEqual(config.reuse_cache, values.get("reuse_cache", True))
+                    self.assertEqual(
+                        remain, {request_id_field_name: 1, "unknown_top": "keep"}
+                    )
+                    config.validate()
+
     def test_memory_cache_is_canonical_request_field(self):
         config = GenerateConfig(enable_memory_cache=False)
         self.assertFalse(config.enable_memory_cache)

@@ -130,6 +130,34 @@ TEST_F(QueryConverterTest, PrefillOnlyFlagRejectsNonZeroMaxNewTokens) {
     }
 }
 
+TEST_F(QueryConverterTest, CaptureHiddenStatesPreservesGenerationAndResponseSettings) {
+    EXPECT_EQ(GenerateConfigPB::kCaptureHiddenStatesFieldNumber, 77);
+    EXPECT_FALSE(GenerateConfig().capture_hidden_states);
+    const GenerateConfigPB default_config;
+    EXPECT_FALSE(QueryConverter::transGenerateConfig(&default_config)->capture_hidden_states);
+    for (const int max_new_tokens : {0, 7}) {
+        for (const bool enabled : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "max_new_tokens=" << max_new_tokens << " enabled=" << enabled);
+            GenerateConfigPB config_pb;
+            config_pb.set_max_new_tokens(max_new_tokens);
+            config_pb.set_prefill_only(max_new_tokens == 0);
+            config_pb.set_capture_hidden_states(enabled);
+            config_pb.set_reuse_cache(false);
+            config_pb.set_is_streaming(true);
+
+            const auto config = QueryConverter::transGenerateConfig(&config_pb);
+
+            EXPECT_EQ(config->capture_hidden_states, enabled);
+            EXPECT_FALSE(config->reuse_cache);
+            EXPECT_EQ(config->max_new_tokens, max_new_tokens);
+            EXPECT_EQ(config->isPrefillOnly(), max_new_tokens == 0);
+            EXPECT_TRUE(config->is_streaming);
+            EXPECT_FALSE(config->return_hidden_states);
+            EXPECT_FALSE(config->return_all_hidden_states);
+        }
+    }
+}
+
 TEST_F(QueryConverterTest, PositiveMaxNewTokensRemainsNormalGeneration) {
     GenerateInputPB input;
     input.add_token_ids(0);

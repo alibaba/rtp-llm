@@ -794,8 +794,6 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
-    if capture_context is not None and capture_context.enabled:
-        return capture_context.finalize(h).hidden_states
     return h  # [T, dim]
 
 
@@ -930,5 +928,7 @@ def forward_prefill(
         attention_inputs=attn_inputs,
         prepare_hidden_fn=prepare_hidden_fn,
         capture_context=capture_context,
-    )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
+    )  # [T_total, dim]
+    if capture_context is not None and capture_context.enabled:
+        return capture_context.finalize(hidden)
     return PyModelOutputs(hidden)

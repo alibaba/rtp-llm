@@ -579,6 +579,32 @@ class ModelRpcClientTest(TestCase):
             "max_new_tokens", {field.name for field, _ in config_pb.ListFields()}
         )
 
+    def test_trans_input_round_trips_capture_hidden_states_without_changing_response(
+        self,
+    ):
+        self.assertFalse(
+            self._round_trip_generate_config(GenerateConfig()).capture_hidden_states
+        )
+        for max_new_tokens in (0, 7):
+            for enabled in (False, True):
+                with self.subTest(max_new_tokens=max_new_tokens, enabled=enabled):
+                    config = GenerateConfig(
+                        max_new_tokens=max_new_tokens,
+                        capture_hidden_states=enabled,
+                        reuse_cache=False,
+                        is_streaming=True,
+                    )
+                    before = config.model_dump()
+                    config_pb = self._round_trip_generate_config(config)
+                    self.assertEqual(config.model_dump(), before)
+                    self.assertEqual(config_pb.capture_hidden_states, enabled)
+                    self.assertFalse(config_pb.reuse_cache)
+                    self.assertEqual(config_pb.max_new_tokens, max_new_tokens)
+                    self.assertEqual(config_pb.prefill_only, max_new_tokens == 0)
+                    self.assertTrue(config_pb.is_streaming)
+                    self.assertFalse(config_pb.return_hidden_states)
+                    self.assertFalse(config_pb.return_all_hidden_states)
+
     def test_trans_input_round_trips_zero_max_new_tokens_with_prefill_flag(self):
         config_pb = self._round_trip_generate_config(GenerateConfig(max_new_tokens=0))
 
@@ -1076,6 +1102,164 @@ class ModelRpcClientTest(TestCase):
 
                 with self.assertRaisesRegex(ValueError, expected_message):
                     trans_tensor(tensor_pb)
+
+    def test_prefill_only_rejects_raw_output_ids_in_stream_and_native_batch(self):
+        cases = (
+            ("scalar", [], struct.pack("<i", 123456789), TensorPB.INT32, "contains 1 tokens"),
+            ("nonempty", [1, 1, 2], struct.pack("<ii", 7, 8), TensorPB.INT32, "contains 2 tokens"),
+            ("negative_dimension", [0, -1], b"", TensorPB.INT32, "non-negative"),
+            ("short_payload", [1, 1, 2], struct.pack("<i", 7), TensorPB.INT32, "expected 8 bytes, got 4"),
+            ("missing_payload", [1], b"", TensorPB.INT32, "expected 4 bytes, got 0"),
+            ("long_scalar_payload", [], struct.pack("<ii", 7, 8), TensorPB.INT32, "expected 4 bytes, got 8"),
+            ("zero_shape_with_data", [0], struct.pack("<i", 7), TensorPB.INT32, "payload must be empty"),
+            ("unknown_dtype", [0], b"", 999, "unsupported TensorPB data_type"),
+            (
+                "empty_stride_overflow",
+                [0, 2147483647, 2147483647, 2147483647],
+                b"",
+                TensorPB.INT32,
+                "overflow",
+            ),
+        )
+        for route in ("generate", "fetch", "batch"):
+            for name, shape, payload, dtype, message in cases:
+                with self.subTest(route=route, case=name):
+                    response = _make_response(output_len=0 if name == "nonempty" else None)
+                    if name != "nonempty":
+                        response.flatten_output.ClearField("finished")
+                    response.flatten_output.output_ids.CopyFrom(
+                        TensorPB(data_type=dtype, shape=shape, int32_data=payload)
+                    )
+                    response = GenerateOutputsPB.FromString(response.SerializeToString())
+                    client = self._make_batch_client()
+                    input_py = self._make_generate_input(
+                        GenerateConfig(max_new_tokens=0, aux_info=name == "nonempty")
+                    )
+                    input_py.enqueued_by_master = route == "fetch"
+                    input_py.generate_config.role_addrs = [_prefill_role_addr()]
+                    if route == "batch":
+                        batch_response = BatchGenerateOutputsPB()
+                        # Convert a valid sibling first; a later violation must
+                        # still fail the whole native RPC, not return partials.
+                        batch_response.results.add().final_output.CopyFrom(_make_response())
+                        batch_response.results.add().final_output.CopyFrom(response)
+                        stub = MagicMock()
+                        stub.BatchGenerateCall = AsyncMock(return_value=batch_response)
+                        peer = self._make_generate_input(
+                            GenerateConfig(max_new_tokens=0, aux_info=False)
+                        )
+                        peer.request_id = 2
+                    else:
+                        stub = _RoutingStub(
+                            generate_responses=[response] if route == "generate" else [],
+                            fetch_responses=[response] if route == "fetch" else [],
+                        )
+                    delivered = []
+
+                    async def consume():
+                        if route == "batch":
+                            delivered.extend(await client.batch_generate([peer, input_py]))
+                        else:
+                            async for output in client.enqueue(input_py):
+                                delivered.extend(output.generate_outputs)
+
+                    with (
+                        patch(
+                            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                            return_value=stub,
+                        ),
+                        self.assertLogs(
+                            "rtp_llm.cpp.model_rpc.model_rpc_client", level="ERROR"
+                        ) as logs,
+                        self.assertRaises(FtRuntimeException) as context,
+                    ):
+                        asyncio.run(consume())
+                    self.assertEqual(
+                        context.exception.exception_type, ExceptionType.EXECUTION_EXCEPTION
+                    )
+                    self.assertIn(message, context.exception.message)
+                    self.assertIn("output_ids", context.exception.message)
+                    self.assertNotIn("123456789", context.exception.message)
+                    log_text = "\n".join(logs.output)
+                    self.assertIn("request_id=1", log_text)
+                    self.assertNotIn("123456789", log_text)
+                    self.assertEqual(delivered, [])
+                    if route == "batch":
+                        stub.BatchGenerateCall.assert_awaited_once()
+                        stub.GenerateStreamCall.assert_not_called()
+                        stub.FetchResponse.assert_not_called()
+                    else:
+                        iterator = (
+                            stub.fetch_iterator if route == "fetch" else stub.generate_iterator
+                        )
+                        self.assertTrue(iterator.cancelled)
+
+    def test_prefill_only_accepts_raw_empty_output_ids_in_stream_and_native_batch(self):
+        cases = (
+            ("absent", None),
+            ("default_sentinel", TensorPB()),
+            ("typed_sentinel", TensorPB(data_type=TensorPB.INT32)),
+            ("empty_vector", TensorPB(data_type=TensorPB.FP32, shape=[0])),
+            ("empty_matrix", TensorPB(data_type=TensorPB.FP16, shape=[0, 4])),
+            ("empty_bf16", TensorPB(data_type=TensorPB.BF16, shape=[1, 1, 0])),
+            ("empty_token_ids", TensorPB(data_type=TensorPB.INT32, shape=[1, 1, 0])),
+        )
+        for route in ("generate", "fetch", "batch"):
+            for aux_info in (False, True):
+                for name, tensor in cases:
+                    with self.subTest(route=route, aux_info=aux_info, case=name):
+                        response = _make_response(output_len=0 if aux_info else None)
+                        if tensor is not None:
+                            response.flatten_output.output_ids.CopyFrom(tensor)
+                        response = GenerateOutputsPB.FromString(response.SerializeToString())
+                        client = self._make_batch_client()
+                        input_py = self._make_generate_input(
+                            GenerateConfig(max_new_tokens=0, aux_info=aux_info)
+                        )
+                        input_py.enqueued_by_master = route == "fetch"
+                        input_py.generate_config.role_addrs = [_prefill_role_addr()]
+                        if route == "batch":
+                            batch_response = BatchGenerateOutputsPB()
+                            batch_response.results.add().final_output.CopyFrom(response)
+                            stub = MagicMock()
+                            stub.BatchGenerateCall = AsyncMock(return_value=batch_response)
+                        else:
+                            responses = [
+                                GenerateOutputsPB(),
+                                _make_response(finished=False),
+                                response,
+                            ]
+                            stub = _RoutingStub(
+                                generate_responses=responses if route == "generate" else [],
+                                fetch_responses=responses if route == "fetch" else [],
+                            )
+                        with patch(
+                            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                            return_value=stub,
+                        ):
+                            if route == "batch":
+                                result = asyncio.run(client.batch_generate([input_py]))
+                                self.assertEqual(len(result), 1)
+                                outputs = result[0].generate_outputs
+                                self.assertEqual(len(outputs), 1)
+                                stub.BatchGenerateCall.assert_awaited_once()
+                                stub.GenerateStreamCall.assert_not_called()
+                                stub.FetchResponse.assert_not_called()
+                            else:
+                                outputs = asyncio.run(self._run(client, input_py))
+                                self.assertEqual([o.finished for o in outputs], [False, True])
+                                iterator = (
+                                    stub.fetch_iterator if route == "fetch" else stub.generate_iterator
+                                )
+                                self.assertFalse(iterator.cancelled)
+                        terminal = outputs[-1]
+                        self.assertTrue(terminal.finished)
+                        self.assertEqual(terminal.aux_info is not None, aux_info)
+                        if tensor is not None and list(tensor.shape) == [1, 1, 0]:
+                            self.assertEqual(tuple(terminal.output_ids.shape), (1, 0))
+                            self.assertEqual(terminal.output_ids.numel(), 0)
+                        else:
+                            self.assertIsNone(terminal.output_ids)
 
     def test_trans_output_accepts_prefill_only_empty_output_ids(self):
         input_py = self._make_generate_input(GenerateConfig(max_new_tokens=0))
@@ -2146,6 +2330,7 @@ class BatchTraceCleanupTest(TestCase):
 
 
 class ModelRpcClientGrpcMetadataTest(TestCase):
+
     def _check_fetch_response_teardown(
         self, status, *, finished=True, close_at_frame=False, trace_enabled=True
     ):
@@ -2589,6 +2774,7 @@ class ModelRpcClientGrpcMetadataTest(TestCase):
 
 
 class _FakeAux:
+
     def __init__(
         self, input_len, output_len, first_token_cost_time=8.5, cost_time=20.0
     ):
