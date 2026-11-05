@@ -43,11 +43,11 @@ public final class RoutingConfig {
         /** Include recently completed uncached tokens in ranking only; disabled by default. */
         private boolean enableWindow = false;
         private long windowMs = 10_000L;
-        /** Engine waiting-stream watermark; known queue pressure governs Prefill admission.
+        /** Actual Engine waiting-stream watermark; not an inflight or unobserved-dispatch quota.
          * Excludes Master queues and running requests. Null retains legacy admission limits.
          */
         private Long engineQueueAdmissionThreshold = 10L;
-        /** Consecutive observed time above the watermark before backpressure; zero disables debounce. */
+        /** Consecutive observed time above the watermark before sustained overload; actual waiting gates dispatch immediately. */
         private long engineQueueOverloadDurationMs = 5_000L;
         /** Optional rescue of small, aged requests to lightly loaded cache-eligible workers. */
         private HotspotRescueConfig hotspotRescue;

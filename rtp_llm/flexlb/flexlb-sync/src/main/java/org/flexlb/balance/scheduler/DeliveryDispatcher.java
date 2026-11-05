@@ -270,6 +270,24 @@ public class DeliveryDispatcher {
         catch (Throwable ignored) { }
     }
 
+    /** A route can outlive its local request; only a remote fence/cleanup returns that capacity. */
+    public void cancelUnobservedRoute(PrefillEndpoint endpoint, long requestId) {
+        try {
+            var reply = grpcClient.cancelAsync(endpoint.getIp(), endpoint.getGrpcPort(),
+                    CancelReason.CLIENT_CANCELLED.toRequest(requestId), CLEANUP_TIMEOUT_MS);
+            if (reply != null) {
+                reply.whenComplete((result, failure) -> {
+                    if (failure == null && (result == EngineGrpcClient.CancelReply.REQUEST_CLEANED
+                            || result == EngineGrpcClient.CancelReply.REQUEST_FENCED)) {
+                        endpoint.confirmUnobservedDispatchStopped(requestId, 0L);
+                    }
+                });
+            }
+        } catch (RuntimeException failure) {
+            logFailure("Unobserved route cleanup", 0L, failure);
+        }
+    }
+
     /** Accept the entire stop operation; callers do not drive retries or sender completion. */
     CompletableFuture<DeliveryCleanup.Result> stop(DeliveryClaim claim) {
         var runtime = claim.owner().data().getScheduler().runtime;

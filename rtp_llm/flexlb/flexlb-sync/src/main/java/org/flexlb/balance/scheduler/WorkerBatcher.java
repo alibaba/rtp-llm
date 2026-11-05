@@ -630,7 +630,7 @@ public final class WorkerBatcher {
             removeAndNotify(head, null, false);
             return BatcherCycleResult.NO_ACTION;
         }
-        if (prefillEndpoint.engineQueueCongested()) {
+        if (prefillEndpoint.engineQueueDispatchBlocked()) {
             return BatcherCycleResult.awaitingSchedulingChange(head, snapshot.queueVersion(),
                     snapshot.schedulingInputVersion(), head.expiresAtMs(), "Prefill Engine waiting streams above threshold");
         }
@@ -790,7 +790,7 @@ public final class WorkerBatcher {
     public void signal(boolean capacityOnly) {
         queueLock.lock();
         try {
-            if (!capacityOnly || capacityBlockedHead != null) {
+            if (!capacityOnly || capacityBlockedHead != null || !prefillState.engineQueueDispatchBlocked()) {
                 prefillState.schedulingInputsChangedLocked();
                 stateChanged.signal();
             }

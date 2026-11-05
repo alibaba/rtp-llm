@@ -121,7 +121,7 @@ class HotspotMigrationBudgetTest {
         var registry = mock(EndpointRegistry.class);
         var source = endpoint(0, false);
         var target = endpoint(1, true);
-        when(target.engineQueueCongested()).thenReturn(congested);
+        when(target.engineQueueDispatchBlocked()).thenReturn(congested);
         when(target.ownership.tokenWorkload()).thenReturn(new PrefillTokenWorkload.Snapshot(10_000, pending, planned));
         var route = route(1000, 1);
         when(route.prefillEp()).thenReturn(source);

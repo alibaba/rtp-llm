@@ -43,7 +43,13 @@ public final class PrefillObservation {
             outcome.successfulCompletion |= success;
             outcome.learningEligible &= success;
         }
-        reduction.engineTokenWork = state.prepareEngineTokenWork(observation, full);
+        reduction.finishedExecutions = new HashSet<>();
+        if (full) {
+            for (var task : observation.finishedTasks().values()) {
+                reduction.finishedExecutions.add(new EngineWorkKey(task.requestId(), task.batchId()));
+            }
+        }
+        reduction.engineTokenWork = state.prepareEngineTokenWork(observation, reduction.finishedExecutions);
         active(state, observation.engine(), reduction, statuses);
         boolean released = !reduction.terminals.isEmpty() || reduction.unknownRequests < state.unknownEngineRequestCount;
         reduction.nowMs = full ? nowMs : state.clock.getAsLong();
@@ -94,7 +100,8 @@ public final class PrefillObservation {
             StatusReduction reduction, List<PrefillRequestStatus> statuses) {
         Set<Long> unknown = new HashSet<>(), known = new HashSet<>();
         for (var task : engine.runningTaskList().values()) {
-            if (reduction.terminals.containsKey(task.requestId())) { continue; }
+            if (reduction.terminals.containsKey(task.requestId())
+                    || reduction.finishedExecutions.contains(new EngineWorkKey(task.requestId(), task.batchId()))) { continue; }
             var entry = state.requests.get(task.requestId());
             if (entry == null || entry.batch != null && (task.batchId() <= 0L || entry.batch.batchId != task.batchId())) {
                 if (!task.isPriorityCancelOverlayOnly()) { unknown.add(task.requestId()); }

@@ -45,6 +45,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
@@ -408,7 +410,7 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
-    void tokenBalanceCanUseCountFullWorkerWithLowEngineQueue() {
+    void tokenBalanceSkipsCountFullWorkerEvenWithLowEngineQueue() {
         registry.close();
         config.getDispatcher().setMaxInflightPerPrefillWorker(2);
         config.getRouter().getRoles().getPrefill().setTokenBalance(new RoutingConfig.TokenBalanceConfig());
@@ -433,10 +435,10 @@ class CostBasedPrefillSelectionMetricTest {
         var busyLease = b.ownership.reserveUnqueuedRoute(busy, 1, 2).reservation();
         assertTrue(busyLease != null);
         try (var selected = select()) {
-            assertEquals(a, selected.prefillEp(), "low Engine queue overrides the Master inflight limit");
+            assertEquals(b, selected.prefillEp(), "low Engine queue cannot bypass the hard inflight limit");
             var accepted = selected.prefillEp().ownership.reserveUnqueuedRoute(selected, 1, 2).reservation();
             assertTrue(accepted != null, "selected worker must accept without waiting for an unrelated completion");
-            a.ownership.release(accepted, null);
+            selected.prefillEp().ownership.release(accepted, null);
         } finally {
             for (var lease : leases) { a.ownership.release(lease, null); }
             b.ownership.release(busyLease, null);
@@ -451,6 +453,7 @@ class CostBasedPrefillSelectionMetricTest {
         var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
         var b = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
         var leases = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+        var tasks = new java.util.HashMap<String, org.flexlb.dao.master.TaskInfo>();
         try {
             for (long id = 0; id < a.requestLimit; id++) {
                 var busy = mock(RequestRoute.class);
@@ -458,6 +461,8 @@ class CostBasedPrefillSelectionMetricTest {
                 when(busy.seqLen()).thenReturn(10L);
                 var lease = a.ownership.reserveUnqueuedRoute(busy, 1, a.requestLimit).reservation();
                 assertTrue(lease != null); leases.add(lease);
+                tasks.put(Long.toString(8000L + id), runningTask(8000L + id, 10L));
+                updateEngineQueue(a, 0, tasks.size(), tasks);
             }
             updateEngineQueue(a, 1, 0);
             context.data().setRequest(context.data().getRequest().toBuilder()
@@ -497,7 +502,7 @@ class CostBasedPrefillSelectionMetricTest {
             var blocked = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
             assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
             // No completion, no decrease in total Engine count: waiting -> running must wake routing.
-            var change = updateEngineQueue(a, 0, 1);
+            var change = updateEngineQueue(a, 0, 1, Map.of("9000", runningTask(9000L, 2_100_000L)));
             assertTrue(change.reconciliation().capacityReleased());
             assertTrue(change.reconciliation().schedulingInputsChanged());
             assertTrue(a.engineQueueAllowsAdmission());
@@ -532,7 +537,7 @@ class CostBasedPrefillSelectionMetricTest {
             var blocked = StrategyTestSupport.select(strategy, context.data().getRequest(), context.data().getSchedulingMetadata(), RoleType.PREFILL, null);
             if (blocked.value() != null) { blocked.value().close(); }
             assertEquals(PlacementResult.Status.BLOCKED, blocked.status());
-            updateEngineQueue(a, 0, 1);
+            updateEngineQueue(a, 0, 1, Map.of("9000", runningTask(9000L, 2_100_000L)));
             try (var selected = select()) {
                 assertEquals(a, selected.prefillEp(), "low queue may bypass tokens only on a cache-eligible worker");
                 assertEquals(900L, selected.hitCache());
@@ -660,19 +665,26 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
-    void coldAdmissionUsesEngineQueueDespiteFullInflightAndTokenCounts() {
+    void coldAdmissionRetainsInflightCapWhileBypassingTokenWaterline() {
         configureEngineQueueAdmission();
         var a = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
         updateEngineQueue(a, 0, 0);
         var leases = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
+        var tasks = new java.util.HashMap<String, org.flexlb.dao.master.TaskInfo>();
         try {
             for (int i = 0; i < 10; i++) {
                 var busy = mock(RequestRoute.class);
                 when(busy.requestId()).thenReturn(23000L + i); when(busy.seqLen()).thenReturn(i == 0 ? 2_100_000L : 1L);
-                leases.add(a.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation());
+                var lease = a.ownership.reserveUnqueuedRoute(busy, 1, 0).reservation();
+                assertTrue(lease != null);
+                leases.add(lease);
+                tasks.put(Long.toString(23000L + i), runningTask(23000L + i, i == 0 ? 2_100_000L : 1L));
+                updateEngineQueue(a, 0, tasks.size(), tasks);
             }
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
             a.ownership.release(leases.removeLast(), null);
+            tasks.remove("23009");
+            updateEngineQueue(a, 0, tasks.size(), tasks);
             assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null), "Engine queue override admits full token backlog");
             updateEngineQueue(a, 1, 0);
             assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
@@ -781,24 +793,21 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
-    void engineQueueAcceptsDespiteFullInflightAndTokenLedger() {
+    void engineQueueCannotBypassReportedStreamsAtTheInflightLimit() {
         configureEngineQueueAdmission();
         var worker = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.1:8080");
         updateEngineQueue(worker, 0, 256);
-        var leases = new java.util.ArrayList<org.flexlb.balance.endpoint.PrefillState.RouteReservation>();
-        try {
-            for (int i = 0; i < 20; i++) {
-                var busy = mock(RequestRoute.class);
-                when(busy.requestId()).thenReturn(20000L + i);
-                when(busy.seqLen()).thenReturn(2_100_000L);
-                var lease = worker.ownership.reserveUnqueuedRoute(busy, 1, 10).reservation();
-                assertTrue(lease != null);
-                leases.add(lease);
-            }
-            try (var route = select()) { assertEquals(worker, route.prefillEp()); }
-            assertEquals(CostBasedPrefillStrategy.ColdAdmission.AVAILABLE, coldAdmission(null));
-            assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null));
-        } finally { for (var lease : leases) { worker.ownership.release(lease, null); } }
+        var busy = mock(RequestRoute.class);
+        when(busy.requestId()).thenReturn(20000L);
+        when(busy.seqLen()).thenReturn(2_100_000L);
+        assertNull(worker.ownership.reserveUnqueuedRoute(busy, 1, 10).reservation());
+        assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY, coldAdmission(null));
+        assertTrue(!strategy.hasEngineQueueAdmission(RoleType.PREFILL, null));
+        assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null), "inflight capacity is not proof of sustained queue congestion");
+        updateEngineQueue(worker, 0, 9);
+        var lease = worker.ownership.reserveUnqueuedRoute(busy, 1, 10).reservation();
+        assertNotNull(lease);
+        worker.ownership.release(lease, null);
     }
 
     @Test
@@ -809,7 +818,7 @@ class CostBasedPrefillSelectionMetricTest {
         for (int i = 1; i <= 4; i++) {
             var worker = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0." + i + ":8080");
             workers.add(worker);
-            updateEngineQueue(worker, 0, 256);
+            updateEngineQueue(worker, 0, 2);
         }
         updateEngineQueue(workers.get(0), 100, 0);
         assertTrue(!strategy.isClusterOverloaded(RoleType.PREFILL, null));
@@ -857,13 +866,28 @@ class CostBasedPrefillSelectionMetricTest {
                 SchedulingTestConfig.configService(config));
     }
 
+    private org.flexlb.dao.master.TaskInfo runningTask(long id, long tokens) {
+        var task = new org.flexlb.dao.master.TaskInfo();
+        task.setRequestId(id);
+        task.setBatchId(0L);
+        task.setInputLength(tokens);
+        task.setPhase(org.flexlb.enums.TaskPhase.RUNNING);
+        return task;
+    }
+
     private org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange.Prefill updateEngineQueue(
             PrefillEndpoint endpoint, long waiting, long running) {
+        return updateEngineQueue(endpoint, waiting, running, Map.of());
+    }
+
+    private org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange.Prefill updateEngineQueue(
+            PrefillEndpoint endpoint, long waiting, long running, Map<String, org.flexlb.dao.master.TaskInfo> tasks) {
         var status = endpoint.getStatus();
         var response = StrategyTestSupport.response(RoleType.PREFILL, true, 1_000_000L, 1_000_000L,
                 status.appliedStatusCursor().statusVersion() + 1L);
         response.setWaitingQueryLen(waiting);
         response.setRunningQueryLen(running);
+        response.setRunningTaskInfo(tasks);
         status.lock.lock();
         try {
             var change = endpoint.applyPreparedStatus(status,
@@ -982,6 +1006,7 @@ class CostBasedPrefillSelectionMetricTest {
         when(running.requestId()).thenReturn(99999L);
         when(running.seqLen()).thenReturn(targetPending);
         var lease = target.ownership.reserveUnqueuedRoute(running, 1, 0).reservation();
+        updateEngineQueue(target, 0, 1, Map.of("99999", runningTask(99999L, targetPending)));
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(
                 Map.of("10.0.0.1:8080", 9, "10.0.0.2:8080", targetHitBlocks));
         var ctx = new RequestContext(config);

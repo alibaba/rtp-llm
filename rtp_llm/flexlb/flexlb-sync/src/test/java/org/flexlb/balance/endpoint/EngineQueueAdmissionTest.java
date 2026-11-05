@@ -5,6 +5,20 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.flexlb.balance.endpoint.EngineQueueAdmission.State.*;
 
 class EngineQueueAdmissionTest {
+    @Test void dispatchWatermarkDoesNotWaitForOverloadTimer() {
+        var policy = new EngineQueueAdmission(10, 5000);
+        assertEquals(false, policy.dispatchBlocked());
+        policy.observe(0, 0); assertEquals(false, policy.dispatchBlocked());
+        policy.observe(10, 1); assertEquals(false, policy.dispatchBlocked());
+        policy.observe(11, 2);
+        assertEquals(AVAILABLE, policy.state());
+        assertEquals(true, policy.dispatchBlocked());
+        policy.observe(1000, 5002); assertEquals(CONGESTED, policy.state());
+        assertEquals(true, policy.dispatchBlocked());
+        policy.observe(9, 5003); assertEquals(false, policy.dispatchBlocked());
+        policy.observe(-1, 5004); assertEquals(false, policy.dispatchBlocked());
+    }
+
     @Test void requiresContinuousObservedPressureAndRecoversImmediately() {
         var policy = new EngineQueueAdmission(10, 5000);
         assertEquals(UNKNOWN, policy.state());
