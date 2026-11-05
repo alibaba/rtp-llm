@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from http import HTTPStatus
 from typing import Any
 
 from navi_sched.util import naviSchedModule
@@ -11,7 +12,7 @@ from navi_sched.util import naviSchedModule
 from .NaviSchedAdapterConfig import NaviSchedAdapterConfig
 from .NaviSchedClient import NaviSchedClient
 from .VLLMAdapterUtils import NAVI_SCHED_MEDIA_ERROR_PREFIX, make_kmon_tags
-from .VLLMCachePolicy import get_vllm_hash_block_size
+from .VLLMCachePolicy import get_vllm_hash_block_size, is_vllm_native_pd_prefill
 
 logger = logging.getLogger("vllm.navi_sched.client")
 
@@ -25,43 +26,63 @@ def _make_client_kmon_tags(client_index: int) -> dict[str, str]:
     return tags
 
 
+def _routing_error(message: str, status: HTTPStatus) -> Exception:
+    try:
+        from vllm.whale_vllm.vllm_server.utils.concurrency_controller import (
+            ConcurrencyException,
+        )
+    except ImportError:
+        from vllm.exceptions import GracefulHTTPError
+
+        return GracefulHTTPError(message, status)
+    return ConcurrencyException(message)
+
+
 def _make_route_rejection(decision: Any) -> Exception:
     reason = str(getattr(decision, "reason", "") or "")
-    from vllm.whale_vllm.vllm_server.utils.concurrency_controller import (
-        ConcurrencyException,
-    )
 
     if reason == "rate_limited":
-        return ConcurrencyException("NaviSched rate limited request")
+        return _routing_error(
+            "NaviSched rate limited request", HTTPStatus.TOO_MANY_REQUESTS
+        )
     if reason == "no_available_node":
-        return ConcurrencyException("NaviSched has no available node")
+        return _routing_error(
+            "NaviSched has no available node", HTTPStatus.SERVICE_UNAVAILABLE
+        )
     if reason == "reservation_failed":
-        return ConcurrencyException("NaviSched reservation failed")
+        return _routing_error(
+            "NaviSched reservation failed", HTTPStatus.SERVICE_UNAVAILABLE
+        )
     if reason == "master_restarting":
-        return ConcurrencyException("NaviSched master is restarting")
+        return _routing_error(
+            "NaviSched master is restarting", HTTPStatus.SERVICE_UNAVAILABLE
+        )
     detail = reason or "missing target"
-    return ConcurrencyException(f"NaviSched scheduling rejected request: {detail}")
+    return _routing_error(
+        f"NaviSched scheduling rejected request: {detail}",
+        HTTPStatus.SERVICE_UNAVAILABLE,
+    )
 
 
 def _make_route_failure(error: Exception) -> Exception:
-    from vllm.whale_vllm.vllm_server.utils.concurrency_controller import (
-        ConcurrencyException,
-    )
-
     message = str(error)
     if NAVI_SCHED_ADMISSION_TIMEOUT in message:
-        return ConcurrencyException(NAVI_SCHED_ADMISSION_TIMEOUT)
+        return _routing_error(NAVI_SCHED_ADMISSION_TIMEOUT, HTTPStatus.GATEWAY_TIMEOUT)
     if isinstance(error, TimeoutError):
-        return ConcurrencyException(
-            f"NaviSched routing timed out: {message or 'unknown timeout'}"
+        return _routing_error(
+            f"NaviSched routing timed out: {message or 'unknown timeout'}",
+            HTTPStatus.GATEWAY_TIMEOUT,
         )
-    return ConcurrencyException(
-        f"NaviSched routing failed: {message or 'unknown scheduling error'}"
+    return _routing_error(
+        f"NaviSched routing failed: {message or 'unknown scheduling error'}",
+        HTTPStatus.SERVICE_UNAVAILABLE,
     )
 
 
 class VLLMEngineTransport:
     """Routes requests and streaming EngineCoreOutputs through one Navi graph."""
+
+    _prefill_routing_policy: dict[str, bool] | None = None
 
     def __init__(self, vllm_config: Any, engine_core: Any):
         import msgspec
@@ -73,15 +94,19 @@ class VLLMEngineTransport:
         self._render_continuation = None
         self._render_init_lock = asyncio.Lock()
         self._msgspec = msgspec
-        self._adapter_config = NaviSchedAdapterConfig.from_env(
-            block_size=get_vllm_hash_block_size(vllm_config)
+        self._hybrid_cache = bool(
+            is_vllm_native_pd_prefill()
+            or (
+                getattr(getattr(vllm_config, "model_config", None), "is_hybrid", False)
+                and getattr(vllm_config, "kv_transfer_config", None) is not None
+            )
         )
+        self._client_init_lock = asyncio.Lock()
         client_index = int(getattr(engine_core, "client_index", 0))
-        self._client = NaviSchedClient(
-            self._adapter_config,
-            enable_agent_forward=True,
-            kmon_tags=_make_client_kmon_tags(client_index),
-        )
+        self._client_index = client_index
+        self._client = None
+        if not self._hybrid_cache:
+            self._initialize_client(get_vllm_hash_block_size(vllm_config))
         self._encoder = MsgpackEncoder()
         self._decoder = MsgpackDecoder(EngineCoreOutputs)
         self._engine_core_output_type = EngineCoreOutput
@@ -107,9 +132,91 @@ class VLLMEngineTransport:
         )
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._engine_core, name)
+        return getattr(object.__getattribute__(self, "_engine_core"), name)
+
+    def _initialize_client(self, block_size: int) -> None:
+        self._adapter_config = NaviSchedAdapterConfig.from_env(block_size=block_size)
+        self._client = NaviSchedClient(
+            self._adapter_config,
+            enable_agent_forward=True,
+            kmon_tags=_make_client_kmon_tags(self._client_index),
+        )
+
+    async def _ensure_client(self) -> None:
+        if getattr(self, "_client", None) is not None:
+            return
+        async with self._client_init_lock:
+            if self._client is None:
+                if is_vllm_native_pd_prefill():
+                    metadata = await self._engine_core.call_utility_async(
+                        "get_navi_sched_routing_metadata"
+                    )
+                    if (
+                        not isinstance(metadata, dict)
+                        or type(metadata.get("block_size")) is not int
+                        or metadata["block_size"] <= 0
+                        or type(metadata.get("trim_last_prompt_token")) is not bool
+                        or type(metadata.get("prefix_cache_lookup_enabled")) is not bool
+                    ):
+                        raise ValueError("invalid NaviSched runtime routing metadata")
+                    block_size = metadata["block_size"]
+                    self._prefill_routing_policy = {
+                        "trim_last_prompt_token": metadata["trim_last_prompt_token"],
+                        "prefix_cache_lookup_enabled": metadata[
+                            "prefix_cache_lookup_enabled"
+                        ],
+                    }
+                else:
+                    block_size = await self._engine_core.call_utility_async(
+                        "get_navi_sched_hash_block_size"
+                    )
+                self._initialize_client(int(block_size))
+
+    def _routing_prompt_token_ids(self, request: Any):
+        token_ids = request.prompt_token_ids
+        policy = self._prefill_routing_policy
+        sampling_params = getattr(request, "sampling_params", None)
+        extra_args = getattr(sampling_params, "extra_args", None) or {}
+        params = extra_args.get("kv_transfer_params") or {}
+        if (
+            policy is not None
+            and policy["trim_last_prompt_token"]
+            and len(token_ids) > 1
+            and not params.get("_p_side_truncated", False)
+        ):
+            # Only the scheduling view changes. The original payload still goes
+            # through the connector's normal admission/handoff transformation.
+            return token_ids[:-1]
+        return token_ids
+
+    def _routing_explicit_cache_checkpoint_position(
+        self, request, prompt_tokens: int
+    ) -> int:
+        policy = self._prefill_routing_policy
+        if policy is None or not policy["prefix_cache_lookup_enabled"]:
+            return 0
+        params = getattr(request, "sampling_params", None)
+        # r64 Request derives this flag from SamplingParams. In particular,
+        # explicit skip=False keeps lookup enabled even with prompt_logprobs.
+        if params is None or getattr(params, "skip_reading_prefix_cache", None):
+            return 0
+        extra = getattr(params, "extra_args", None)
+        control = extra.get("cache_control_params") if isinstance(extra, dict) else None
+        positions = (
+            control.get("token_positions") if isinstance(control, dict) else None
+        )
+        if not isinstance(positions, list):
+            return 0
+        # Use the P-side effective prompt length, exactly as the runtime patch
+        # filters positions after the connector's handoff transformation.
+        return max(
+            (p for p in positions if type(p) is int and 0 < p <= prompt_tokens),
+            default=0,
+        )
 
     async def add_request_async(self, request: Any) -> None:
+        if getattr(self, "_hybrid_cache", False):
+            await self._ensure_client()
         if request.prompt_token_ids is None:
             raise ValueError("NaviSched requires prompt token ids")
         external_request_id = str(request.request_id)
@@ -127,12 +234,20 @@ class VLLMEngineTransport:
         payload = self._msgspec.msgpack.encode(frames)
         self._request_ids[external_request_id] = request_id
         self._external_request_ids[request_id] = external_request_id
+        routing_token_ids = self._routing_prompt_token_ids(request)
+        checkpoint = self._routing_explicit_cache_checkpoint_position(
+            request, len(routing_token_ids)
+        )
+        route_options = (
+            {"explicit_cache_checkpoint_position": checkpoint} if checkpoint else {}
+        )
         route_task = asyncio.create_task(
             self._client.route_async(
-                request.prompt_token_ids,
+                routing_token_ids,
                 request_id=request_id,
                 block_hash_request=request,
                 forward_payload=payload,
+                **route_options,
             )
         )
         try:
@@ -162,6 +277,12 @@ class VLLMEngineTransport:
             raise _make_route_failure(error) from error
         if decision.target is None or not decision.target.address:
             self._forget_request(external_request_id, request_id)
+            if getattr(decision, "reason", None) in (
+                "no_available_node",
+                "master_restarting",
+            ):
+                await self._submit_local_fallback(request, decision.reason)
+                return
             raise _make_route_rejection(decision)
 
     async def get_output_async(self) -> Any:
@@ -194,7 +315,8 @@ class VLLMEngineTransport:
             if task is not None:
                 task.cancel()
         with self._response_poll_lock:
-            self._client.close()
+            if self._client is not None:
+                self._client.close()
         self._response_executor.shutdown(wait=True, cancel_futures=True)
         self._request_ids.clear()
         self._external_request_ids.clear()
@@ -404,4 +526,10 @@ class VLLMEngineTransport:
 
 
 def create_vllm_engine_transport(vllm_config: Any, engine_core: Any):
+    from vllm.v1.engine.async_llm import AsyncLLM
+    from vllm.v1.engine.output_processor import OutputProcessor
+
+    from .VLLMRequestRegistration import install_request_registration_rollback
+
+    install_request_registration_rollback(AsyncLLM, OutputProcessor)
     return VLLMEngineTransport(vllm_config, engine_core)

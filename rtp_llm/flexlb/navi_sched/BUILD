@@ -34,6 +34,7 @@ cc_library(
         "data/*.h",
     ]),
     deps = [
+        ":tpu_prefill_execution_policy",
         "//aios/navi:navi",
         "//aios/navi:navi_runtime_config",
         "//aios/autil:hash_util",
@@ -77,6 +78,8 @@ cc_binary(
         "resource/NonLinearPrefillModelR.h",
         "scheduler/AutoGrad.h",
         "test/LatencyOnlineReplay.cpp",
+        "test/legacy/LatencyLearningRateController.cpp",
+        "test/legacy/LatencyLearningRateController.h",
     ],
     copts = ["-fno-access-control"],
     linkopts = ["-Wl,-rpath,$$ORIGIN/navi_sched"],
@@ -150,6 +153,7 @@ cc_library(
     include_prefix = "navi_sched",
     strip_include_prefix = "common",
     deps = [
+        ":tpu_prefill_execution_policy",
         "//aios/navi:navi",
         "//aios/navi:navi_runtime_config",
     ],
@@ -232,6 +236,7 @@ cc_library(
     ]),
     alwayslink = True,
     deps = [
+        ":tpu_prefill_execution_policy",
         ":navi_sched_agent_header",
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
@@ -345,15 +350,39 @@ cc_test(
         "resource/RequestLatencyTrackerTest.cpp",
     ],
     deps = [
+        ":navi_sched_data_lib",
         "//aios/autil:lock",
         "//aios/unittest_framework",
+    ],
+)
+
+cc_library(
+    name = "execution_cache_source_state_migration",
+    srcs = ["packaging/dashllm_r50/ExecutionCacheSourceStateMigration.cpp"],
+    hdrs = ["packaging/dashllm_r50/ExecutionCacheSourceStateMigration.h"],
+    deps = [
+        ":navi_sched_role_lib",
+        "//aios/autil:crc32c",
+        "//aios/autil:json",
+    ],
+)
+
+cc_binary(
+    name = "migrate_execution_cache_source_state",
+    srcs = ["packaging/dashllm_r50/MigrateExecutionCacheSourceState.cpp"],
+    linkopts = ["-Wl,-rpath,$$ORIGIN/../py/navi_sched"],
+    deps = [
+        ":execution_cache_source_state_migration",
+        "//aios/autil:json",
     ],
 )
 
 cc_test(
     name = "agent_history_state_test",
     srcs = ["resource/AgentHistoryStateTest.cpp"],
+    data = [":migrate_execution_cache_source_state"],
     deps = [
+        ":execution_cache_source_state_migration",
         "//aios/navi:navi_ops_testlib",
         "//aios/unittest_framework",
         ":navi_sched_role_lib",
@@ -400,6 +429,18 @@ genrule(
     cmd = "cp -L $< $@",
 )
 
+config_setting(
+    name = "python312_wheel",
+    define_values = {"navi_sched_python": "3.12"},
+)
+
+genrule(
+    name = "wheel_python_runtime_py312",
+    srcs = ["@python3.12_header//:lib/libpython3.12.so.1.0"],
+    outs = ["navi_sched/libpython3.12.so.1.0"],
+    cmd = "cp -L $< $@",
+)
+
 pybind_extension(
     name = "navi_sched/_navi_sched_core",
     additional_linker_inputs = ["scripts/navi_sched_pybind.lds"],
@@ -424,15 +465,20 @@ pybind_extension(
     linkopts = [
         "-Wl,-rpath,\\$$ORIGIN",
         "-Wl,-rpath,\\$$ORIGIN/lib",
-        "-Wl,-rpath,/opt/conda310/lib",
+    ] + select({
+        ":python312_wheel": ["-Wl,-rpath,/usr/local/lib"],
+        "//conditions:default": ["-Wl,-rpath,/opt/conda310/lib"],
+    }) + [
         "-Wl,--version-script",
         "$(location scripts/navi_sched_pybind.lds)",
     ],
     copts = [
         "-fvisibility=hidden",
         "-fPIC",
-        "-I/usr/local/include/python3",
-    ],
+    ] + select({
+        ":python312_wheel": ["-I/usr/local/include/python3.12"],
+        "//conditions:default": ["-I/usr/local/include/python3"],
+    }),
 )
 
 py_library(
@@ -465,14 +511,20 @@ py_library(
         "navi_sched/adapters/vllm/VLLMBlockHash.py",
         "navi_sched/adapters/vllm/VLLMCachePolicy.py",
         "navi_sched/adapters/vllm/VLLMDeferredRenderer.py",
+        "navi_sched/adapters/vllm/ExecutionTimingProbe.py",
         "navi_sched/adapters/vllm/VLLMEngineObserver.py",
+        "navi_sched/adapters/vllm/VLLMExecutionGeometry.py",
         "navi_sched/adapters/vllm/VLLMEngineTransport.py",
         "navi_sched/adapters/vllm/VLLMImageCacheMap.py",
         "navi_sched/adapters/vllm/VLLMNativePreparation.py",
+        "navi_sched/adapters/vllm/VLLMWorkerObserver.py",
         "navi_sched/adapters/vllm/VLLMAdapterUtils.py",
         "navi_sched/client.py",
         "navi_sched/master.py",
         "navi_sched/master_process.py",
+        "navi_sched/spectrum_prefill_master.py",
+        "navi_sched/spectrum_kmon.py",
+        "navi_sched/spectrum_standalone_master.py",
         "navi_sched/replay_cli.py",
         "navi_sched/route_control.py",
         "navi_sched/util.py",
@@ -481,9 +533,11 @@ py_library(
     data = [
         ":navi_sched/_navi_sched_core.so",
         ":wheel_lockless_allocator",
-        ":wheel_python_runtime",
         "scripts/update_scheduler_config.sh",
-    ],
+    ] + select({
+        ":python312_wheel": [":wheel_python_runtime_py312"],
+        "//conditions:default": [":wheel_python_runtime"],
+    }),
     imports = ["."],
     srcs_version = "PY3",
 )
@@ -573,8 +627,29 @@ cc_test(
     name = "nonlinear_prefill_model_r_test",
     srcs = ["resource/NonLinearPrefillModelRTest.cpp"],
     copts = ["-fno-access-control"],
-    data = [":wheel_python_runtime"],
+    data = select({
+        ":python312_wheel": [":wheel_python_runtime_py312"],
+        "//conditions:default": [":wheel_python_runtime"],
+    }),
     deps = [
+        "//aios/navi:navi_ops_testlib",
+        "//aios/unittest_framework",
+        ":navi_sched_role_lib",
+    ],
+)
+
+cc_test(
+    name = "legacy_v76_fit_parity_test",
+    srcs = [
+        "resource/LegacyV76FitParityTest.cpp",
+        "resource/testdata/main_projection/MainProjectionReference.cpp",
+        "resource/testdata/main_projection/MainProjectionReference.h",
+        "resource/testdata/legacy_v76/LegacyV76NonLinearPrefillModelR.cpp",
+        "resource/testdata/legacy_v76/LegacyV76NonLinearPrefillModelR.h",
+    ],
+    copts = ["-fno-access-control"],
+    deps = [
+        "//aios/navi:navi_ops_testlib",
         "//aios/unittest_framework",
         ":navi_sched_role_lib",
     ],
@@ -606,7 +681,10 @@ cc_test(
         "test/ScheduleReplayRunner.h",
     ],
     copts = ["-fno-access-control"],
-    data = [":wheel_python_runtime", ":navi_sched_testdata"],
+    data = [":navi_sched_testdata"] + select({
+        ":python312_wheel": [":wheel_python_runtime_py312"],
+        "//conditions:default": [":wheel_python_runtime"],
+    }),
     deps = [
         "//aios/navi:navi",
         "//aios/navi:navi_ops_testlib",
@@ -806,6 +884,31 @@ py_test(
 )
 
 py_test(
+    name = "navi_sched_spectrum_standalone_master_test",
+    srcs = [
+        "navi_sched/spectrum_standalone_master.py",
+        "test/dashserving/SpectrumStandaloneMasterTest.py",
+    ],
+    main = "test/dashserving/SpectrumStandaloneMasterTest.py",
+    python_version = "PY3",
+)
+
+sh_test(
+    name = "navi_sched_standalone_master_bootstrap_test",
+    srcs = ["test/dashserving/test_standalone_master_bootstrap.sh"],
+    data = ["packaging/dashllm_r39/standalone_master_bootstrap.sh"],
+)
+
+sh_test(
+    name = "navi_sched_prefill_bootstrap_cold_test",
+    srcs = ["test/dashserving/test_prefill_bootstrap_cold.sh"],
+    data = [
+        "packaging/dashllm_r39/prefill_bootstrap.sh",
+        "packaging/dashllm_r39/Dockerfile",
+    ],
+)
+
+py_test(
     name = "navi_sched_rtp_llm_discovery_test",
     srcs = ["test/rtp_llm/RtpLLMDiscoveryTest.py"],
     main = "test/rtp_llm/RtpLLMDiscoveryTest.py",
@@ -828,6 +931,20 @@ py_test(
 )
 
 py_test(
+    name = "navi_sched_fixed_prefill_plan_test",
+    srcs = ["test/vllm/VLLMFixedPrefillPlanTest.py"],
+    main = "test/vllm/VLLMFixedPrefillPlanTest.py",
+    data = [
+        "packaging/dashllm_r50/runtime_overlay/vllm_torchtpu/core/pp_chunk_scheduler.py",
+        "packaging/dashllm_r50/runtime_overlay/vllm_torchtpu/core/raiden_pd.py",
+        "packaging/dashllm_r50/runtime_overlay/vllm_torchtpu/platforms/tpu_platform.py",
+        "packaging/dashllm_r50/runtime_overlay/vllm/v1/core/sched/scheduler.py",
+    ],
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
     name = "navi_sched_vllm_engine_observer_test",
     srcs = ["test/vllm/VLLMEngineObserverTest.py"],
     main = "test/vllm/VLLMEngineObserverTest.py",
@@ -835,6 +952,22 @@ py_test(
     env = {
         "LD_LIBRARY_PATH": "/opt/conda310/lib",
     },
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_python_gc_timing_probe_test",
+    srcs = ["test/vllm/PythonGcTimingProbeTest.py"],
+    main = "test/vllm/PythonGcTimingProbeTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_vllm_worker_observer_test",
+    srcs = ["test/vllm/VLLMWorkerObserverTest.py"],
+    main = "test/vllm/VLLMWorkerObserverTest.py",
+    python_version = "PY3",
     deps = [":py_sched_lib"],
 )
 
@@ -880,6 +1013,18 @@ py_test(
         "LD_LIBRARY_PATH": "/opt/conda310/lib",
     },
     tags = ["exclusive"],
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_vllm_request_registration_test",
+    srcs = ["test/vllm/VLLMRequestRegistrationTest.py"],
+    main = "test/vllm/VLLMRequestRegistrationTest.py",
+    data = [
+        "adapters/vllm/VLLMRequestRegistration.py",
+        "testdata/vllm/r64_frontend_registration.json",
+    ],
+    python_version = "PY3",
     deps = [":py_sched_lib"],
 )
 
@@ -945,6 +1090,7 @@ py_test(
 
 py_test(
     name = "compare_latency_online_rls_test",
+    imports = ["test"],
     srcs = [
         "test/CompareLatencyOnlineRls.py",
         "test/CompareLatencyOnlineRlsTest.py",
@@ -971,6 +1117,7 @@ py_test(
         "test/PlotLatencyShapeOperatingRange.py",
     ],
     main = "test/LatencyDownstreamScaleContractTest.py",
+    imports = ["test"],
     python_version = "PY3",
 )
 
@@ -985,11 +1132,13 @@ py_test(
         "test/LatencyIndependentScaleContractTest.py",
     ],
     main = "test/LatencyIndependentScaleContractTest.py",
+    imports = ["test"],
     python_version = "PY3",
 )
 
 py_test(
     name = "ablate_latency_online_rates_test",
+    imports = ["test"],
     srcs = [
         "test/AblateLatencyOnlineRates.py",
         "test/AblateLatencyOnlineRatesTest.py",
@@ -1000,6 +1149,7 @@ py_test(
 
 py_test(
     name = "analyze_latency_shortlist_robustness_test",
+    imports = ["test"],
     srcs = [
         "test/AnalyzeLatencyShortlistRobustness.py",
         "test/AnalyzeLatencyShortlistRobustnessTest.py",
@@ -1010,6 +1160,7 @@ py_test(
 
 py_test(
     name = "analyze_latency_adam_scale_test",
+    imports = ["test"],
     srcs = [
         "test/AnalyzeLatencyAdamScale.py",
         "test/AnalyzeLatencyAdamScaleTest.py",
@@ -1025,6 +1176,7 @@ py_test(
         "scripts/build_vllm_navi_images_test.py",
     ],
     main = "scripts/build_vllm_navi_images_test.py",
+    imports = ["scripts"],
     python_version = "PY3",
 )
 
@@ -1075,4 +1227,527 @@ filegroup(
     name = "navi_sched_testdata",
     testonly = True,
     srcs = glob(["testdata/**"]),
+)
+
+
+
+cc_test(
+    name = "navi_sched_agent_typed_cache_test",
+    srcs = ["test/AgentTypedCacheResourceTest.cpp"],
+    deps = [":navi_sched_role_lib", "//aios/unittest_framework"],
+)
+
+cc_test(
+    name = "navi_sched_master_typed_pending_cache_test",
+    srcs = ["test/MasterTypedPendingCacheTest.cpp"],
+    deps = [":navi_sched_role_lib", "//aios/unittest_framework"],
+)
+
+cc_test(
+    name = "navi_sched_master_typed_cache_state_test",
+    srcs = ["test/MasterTypedCacheStateTest.cpp"],
+    copts = ["-fno-access-control"],
+    deps = [":navi_sched_role_lib", "//aios/unittest_framework"],
+)
+
+cc_test(
+    name = "navi_sched_cache_key_type_test",
+    srcs = ["data/CacheKeyTypeTest.cpp"],
+    deps = [":navi_sched_data_lib", "//aios/unittest_framework"],
+)
+
+cc_test(
+    name = "navi_sched_agent_typed_cache_policy_test",
+    srcs = ["test/AgentTypedCachePolicyTest.cpp"],
+    copts = ["-fno-access-control"],
+    deps = [":navi_sched_role_lib", "//aios/unittest_framework"],
+)
+
+cc_test(
+    name = "navi_sched_typed_pending_caller_test",
+    srcs = ["test/TypedPendingCallerTest.cpp"],
+    copts = ["-fno-access-control"],
+    deps = [":navi_sched_role_lib", "//aios/unittest_framework"],
+)
+
+# Runtime policy arithmetic and its typed control-message representation.
+cc_library(
+    name = "tpu_prefill_execution_policy",
+    srcs = ["common/TPUPrefillExecutionPolicy.cpp"],
+    hdrs = ["common/TPUPrefillExecutionPolicy.h"],
+    deps = ["//aios/autil:data_buffer"],
+)
+
+cc_test(
+    name = "tpu_prefill_execution_policy_test",
+    srcs = ["test/TPUPrefillExecutionPolicyTest.cpp", "test/r50_split_goldens.h"],
+    deps = [":tpu_prefill_execution_policy", "//aios/unittest_framework"],
+)
+
+cc_test(
+    name = "geometry_integration_test",
+    srcs = ["resource/GeometryIntegrationTest.cpp", "test/DiscreteSearchBaseline.h"],
+    copts = ["-fno-access-control"],
+    deps = [
+        "//aios/navi:navi_ops_testlib",
+        ":navi_sched_role_lib",
+        "//aios/unittest_framework",
+    ],
+)
+
+py_test(
+    name = "navi_sched_vllm_fixed_pp_scheduler_test",
+    srcs = [
+        "test/vllm/VLLMFixedPpSchedulerTest.py",
+        "test/vllm/VLLMPDBatchPreparationTest.py",
+        "test/vllm/VLLMV6DLocalCoverageTest.py",
+    ],
+    main = "test/vllm/VLLMFixedPpSchedulerTest.py",
+    imports = ["test/vllm"],
+    data = [
+        ":navi_sched/_navi_sched_core.so",
+        "navi_sched/adapters/vllm/ExecutionTimingProbe.py",
+        "packaging/dashllm_r50/runtime_overlay/kvs_connector/v6d_object_connector.py",
+        "packaging/dashllm_r50/runtime_overlay/vllm/v1/core/sched/scheduler.py",
+        "packaging/dashllm_r50/runtime_overlay/vllm_torchtpu/core/pp_chunk_scheduler.py",
+    ],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_vllm_pd_batch_preparation_test",
+    srcs = ["test/vllm/VLLMPDBatchPreparationTest.py", "test/vllm/VLLMV6DLocalCoverageTest.py"],
+    main = "test/vllm/VLLMPDBatchPreparationTest.py",
+    imports = ["test/vllm"],
+    data = [
+        "packaging/dashllm_r50/runtime_overlay/kvs_connector/v6d_object_connector.py",
+        "packaging/dashllm_r50/runtime_overlay/vllm/v1/core/sched/scheduler.py",
+        "navi_sched/adapters/vllm/VLLMEngineTransport.py",
+    ],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_v6d_local_coverage_test",
+    srcs = ["test/vllm/VLLMV6DLocalCoverageTest.py"],
+    main = "test/vllm/VLLMV6DLocalCoverageTest.py",
+    data = ["packaging/dashllm_r50/runtime_overlay/kvs_connector/v6d_object_connector.py"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_v6d_lookup_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/lookup_audit_patch.py",
+        "packaging/dashllm_r50/preprocessing_audit_patch.py",
+        "packaging/dashllm_r50/test_lookup_audit_patch.py",
+        "packaging/dashllm_r50/test_preprocessing_audit_patch.py",
+    ],
+    main = "packaging/dashllm_r50/test_lookup_audit_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_v6d_read_plan_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/read_plan_audit_patch.py",
+        "packaging/dashllm_r50/preprocessing_audit_patch.py",
+        "packaging/dashllm_r50/test_read_plan_audit_patch.py",
+        "packaging/dashllm_r50/test_preprocessing_audit_patch.py",
+    ],
+    main = "packaging/dashllm_r50/test_read_plan_audit_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_v6d_read_plan_audit_test",
+    srcs = ["test/vllm/VLLMV6DReadPlanAuditTest.py"],
+    main = "test/vllm/VLLMV6DReadPlanAuditTest.py",
+    data = ["packaging/dashllm_r50/runtime_overlay/v6d/server/peers/tiered_vineyard/peer.py"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_fa_prefix_read_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/fa_prefix_read_patch.py",
+        "packaging/dashllm_r50/checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/preprocessing_audit_patch.py",
+        "packaging/dashllm_r50/test_preprocessing_audit_patch.py",
+        "packaging/dashllm_r50/test_fa_prefix_read_patch.py",
+    ],
+    main = "packaging/dashllm_r50/test_fa_prefix_read_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_v6d_lookup_audit_test",
+    srcs = ["test/vllm/VLLMV6DLookupAuditTest.py"],
+    main = "test/vllm/VLLMV6DLookupAuditTest.py",
+    data = [
+        "packaging/dashllm_r50/runtime_overlay/kvs_connector/v6d_object_connector.py",
+        "packaging/dashllm_r50/runtime_overlay/v6d/server/peers/tiered_vineyard/peer.py",
+        "packaging/dashllm_r50/runtime_overlay/v6d/client/client.py",
+    ],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_r50_publication_test",
+    srcs = ["test/vllm/VLLMR50PublicationTest.py"],
+    main = "test/vllm/VLLMR50PublicationTest.py",
+    data = ["packaging/dashllm_r50/runtime_overlay/kvs_connector/v6d_object_connector.py"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_vllm_cache_publication_test",
+    srcs = ["test/vllm/VLLMCachePublicationTest.py", "test/vllm/VLLMEngineObserverTest.py"],
+    main = "test/vllm/VLLMCachePublicationTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_r50_tracker_publication_test",
+    srcs = ["test/vllm/VLLMR50TrackerPublicationTest.py"],
+    main = "test/vllm/VLLMR50TrackerPublicationTest.py",
+    data = ["packaging/dashllm_r50/runtime_overlay/v6d/server/peers/tiered_vineyard/peer.py"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_r50_execution_geometry_test",
+    srcs = ["test/vllm/VLLMExecutionGeometryTest.py"],
+    main = "test/vllm/VLLMExecutionGeometryTest.py",
+    data = ["navi_sched/adapters/vllm/VLLMExecutionGeometry.py"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_r52_workspace_status_test",
+    srcs = ["packaging/dashllm_r50/test_workspace_status.py"],
+    main = "packaging/dashllm_r50/test_workspace_status.py",
+    data = ["packaging/dashllm_r50/workspace_status.py"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_r50_release_proof_test",
+    srcs = ["packaging/dashllm_r50/test_build_release.py"],
+    main = "packaging/dashllm_r50/test_build_release.py",
+    data = [
+        "packaging/dashllm_r50/build_release.py",
+        "packaging/dashllm_r50/image-dashllm_cmd.sh",
+        "packaging/dashllm_r50/base-launcher-manifest.json",
+    ],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_r50_stage_manifest_test",
+    srcs = ["packaging/dashllm_r50/test_stage_prefill.py"],
+    main = "packaging/dashllm_r50/test_stage_prefill.py",
+    data = ["packaging/dashllm_r50/stage_prefill.py", "packaging/dashllm_r50/capture_prefill.py",
+            "packaging/dashllm_r50/image-dashllm_cmd.sh", "packaging/dashllm_r50/build_release.py"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_source34_master_release_test",
+    srcs = [
+        "packaging/dashllm_r50/build_release.py",
+        "packaging/dashllm_r50/build_master_release.py",
+        "packaging/dashllm_r50/stage_prefill.py",
+        "packaging/dashllm_r50/stage_master.py",
+        "packaging/dashllm_r50/test_stage_master.py",
+        "packaging/dashllm_r50/migrate_master_pool.py",
+        "packaging/dashllm_r50/test_migrate_master_pool.py",
+    ],
+    main = "packaging/dashllm_r50/test_stage_master.py",
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_legacy_timing_probe_test",
+    srcs = ["packaging/dashllm_r50/test_timing_diagnostic.py", "packaging/dashllm_r50/timing_diagnostic.py"],
+    main = "packaging/dashllm_r50/test_timing_diagnostic.py",
+    data = ["navi_sched/adapters/vllm/ExecutionTimingProbe.py", "navi_sched/adapters/vllm/VLLMEngineObserver.py",
+            "packaging/dashllm_r50/stage_timing_diagnostic.py", "packaging/dashllm_r50/capture_prefill.py",
+            "packaging/dashllm_r50/stage_prefill.py",
+            "packaging/dashllm_r50/build_cache_snapshot_comparison.py",
+            "packaging/dashllm_r50/build_output_clock_overlay.py",
+        "packaging/dashllm_r50/build_fresh_legacy_overlay.py",
+            "packaging/dashllm_r39/prefill_bootstrap.sh",
+            "packaging/dashllm_r50/build_release.py"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_archived_v76_profile_test",
+    srcs = ["packaging/dashllm_r50/test_archived_v76_profile.py"],
+    main = "packaging/dashllm_r50/test_archived_v76_profile.py",
+    data = [
+        "packaging/dashllm_r50/archived_v76_profile.py",
+        "packaging/dashllm_r50/build_archived_v76_overlay.py",
+        "packaging/dashllm_r50/build_release.py",
+        "packaging/dashllm_r50/stage_timing_diagnostic.py",
+        "packaging/dashllm_r50/stage_prefill.py",
+        "packaging/dashllm_r50/capture_prefill.py",
+        "packaging/dashllm_r50/legacy_v76_sources/VLLMEngineObserver.py",
+        "packaging/dashllm_r50/legacy_v76_sources/VLLMCachePolicy.py",
+    ],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_model35_learning_profile_test",
+    srcs = ["packaging/dashllm_r50/test_learning_profile_update.py", "packaging/dashllm_r50/learning_profile_update.py"],
+    main = "packaging/dashllm_r50/test_learning_profile_update.py",
+    python_version = "PY3",
+    imports = ["packaging/dashllm_r50"],
+)
+
+py_test(
+    name = "navi_sched_peer_config_restore_test",
+    srcs = ["packaging/dashllm_r50/test_restore_peer_cache_config.py", "packaging/dashllm_r50/restore_peer_cache_config.py", "packaging/dashllm_r50/learning_profile_update.py"],
+    main = "packaging/dashllm_r50/test_restore_peer_cache_config.py",
+    python_version = "PY3",
+    imports = ["packaging/dashllm_r50"],
+)
+
+cc_binary(
+    name = "frozen_feature_predict",
+    testonly = True,
+    srcs = [
+        "resource/AgentSchedulerConfigR.h",
+        "resource/LatencyHistorySampler.cpp",
+        "resource/LatencyHistorySampler.h",
+        "resource/LatencyResidualModel.cpp",
+        "resource/LatencyResidualModel.h",
+        "resource/NonLinearPrefillModelR.cpp",
+        "resource/NonLinearPrefillModelR.h",
+        "scheduler/AutoGrad.h",
+        "test/FrozenFeaturePredict.cpp",
+    ],
+    deps = [
+        ":navi_sched_data_lib",
+        "@rapidjson//:rapidjson",
+        "//aios/kmonitor:kmonitor_client_cpp",
+        "//aios/kmonitor:metrics_report_navi_resource",
+        "//aios/navi:navi",
+        "//aios/network/gig:multi_call",
+    ],
+)
+
+py_test(
+    name = "frozen_feature_predict_test",
+    srcs = ["test/FrozenFeaturePredictTest.py"],
+    data = [":frozen_feature_predict"],
+    main = "test/FrozenFeaturePredictTest.py",
+    python_version = "PY3",
+)
+
+
+# Offline arithmetic replay of the deployed model35 cache-resolved projector.
+cc_binary(
+    name = "cache_resolved_geometry_replay",
+    testonly = True,
+    srcs = ["test/CacheResolvedGeometryReplay.cpp"],
+    deps = [":tpu_prefill_execution_policy", "@rapidjson//:rapidjson"],
+)
+
+py_test(
+    name = "cache_resolved_geometry_replay_test",
+    srcs = ["test/CacheResolvedGeometryReplayTest.py"],
+    data = [":cache_resolved_geometry_replay"],
+    main = "test/CacheResolvedGeometryReplayTest.py",
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_checkpoint_probe_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/preprocessing_audit_patch.py",
+        "packaging/dashllm_r50/test_checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/test_preprocessing_audit_patch.py",
+    ],
+    main = "packaging/dashllm_r50/test_checkpoint_probe_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_native_fifo_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/test_native_fifo_patch.py",
+        "packaging/dashllm_r50/native_fifo_patch.py",
+        "packaging/dashllm_r50/checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/stage_prefill.py",
+    ],
+    main = "packaging/dashllm_r50/test_native_fifo_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_tair_cold_read_policy_test",
+    srcs = ["packaging/dashllm_r50/test_tair_cold_read_policy.py"],
+    data = ["packaging/dashllm_r50/runtime_overlay/v6d/server/peers/tiered_vineyard/peer.py"],
+    main = "packaging/dashllm_r50/test_tair_cold_read_policy.py",
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_tair_cold_read_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/test_tair_cold_read_patch.py",
+        "packaging/dashllm_r50/tair_cold_read_patch.py",
+        "packaging/dashllm_r50/checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/stage_prefill.py",
+    ],
+    main = "packaging/dashllm_r50/test_tair_cold_read_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_gc_timing_audit_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/test_gc_timing_audit_patch.py",
+        "packaging/dashllm_r50/gc_timing_audit_patch.py",
+        "packaging/dashllm_r50/checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/stage_prefill.py",
+    ],
+    main = "packaging/dashllm_r50/test_gc_timing_audit_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_output_phase_timing_probe_test",
+    srcs = ["test/vllm/OutputPhaseTimingProbeTest.py"],
+    main = "test/vllm/OutputPhaseTimingProbeTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_output_phase_audit_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/test_output_phase_audit_patch.py",
+        "packaging/dashllm_r50/output_phase_audit_patch.py",
+        "packaging/dashllm_r50/checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/stage_prefill.py",
+    ],
+    main = "packaging/dashllm_r50/test_output_phase_audit_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_worker_startup_gc_sweep_test",
+    srcs = ["test/vllm/WorkerStartupGcSweepTest.py"],
+    main = "test/vllm/WorkerStartupGcSweepTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_worker_startup_gc_sweep_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/test_worker_startup_gc_sweep_patch.py",
+        "packaging/dashllm_r50/worker_startup_gc_sweep_patch.py",
+        "packaging/dashllm_r50/checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/stage_prefill.py",
+    ],
+    main = "packaging/dashllm_r50/test_worker_startup_gc_sweep_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_worker_sampling_stage_audit_test",
+    srcs = ["test/vllm/WorkerSamplingStageAuditTest.py"],
+    main = "test/vllm/WorkerSamplingStageAuditTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_worker_sampling_stage_audit_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/test_worker_sampling_stage_audit_patch.py",
+        "packaging/dashllm_r50/worker_sampling_stage_audit_patch.py",
+        "packaging/dashllm_r50/checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/stage_prefill.py",
+    ],
+    main = "packaging/dashllm_r50/test_worker_sampling_stage_audit_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_worker_draft_compile_audit_test",
+    srcs = ["test/vllm/WorkerDraftCompileAuditTest.py"],
+    main = "test/vllm/WorkerDraftCompileAuditTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_worker_draft_compile_audit_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/test_worker_draft_compile_audit_patch.py",
+        "packaging/dashllm_r50/worker_draft_compile_audit_patch.py",
+        "packaging/dashllm_r50/checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/stage_prefill.py",
+    ],
+    main = "packaging/dashllm_r50/test_worker_draft_compile_audit_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+py_test(
+    name = "navi_sched_async_diagnostic_logging_test",
+    srcs = ["test/vllm/AsyncDiagnosticLoggingTest.py"],
+    data = [
+        "testdata/vllm/observer_hot_paths_original_sync.py",
+        "testdata/vllm/observer_hot_paths_merged_sync.py",
+        "packaging/dashllm_r50/runtime_overlay/vllm/v1/engine/core.py",
+        "packaging/dashllm_r50/runtime_overlay/vllm_torchtpu/core/pp_chunk_scheduler.py",
+        "packaging/dashllm_r50/runtime_overlay/kvs_connector/v6d_object_connector.py",
+    ],
+    main = "test/vllm/AsyncDiagnosticLoggingTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
+    name = "navi_sched_async_diagnostic_logging_patch_test",
+    srcs = [
+        "packaging/dashllm_r50/test_async_diagnostic_logging_patch.py",
+        "packaging/dashllm_r50/async_diagnostic_logging_patch.py",
+        "packaging/dashllm_r50/checkpoint_probe_patch.py",
+        "packaging/dashllm_r50/stage_prefill.py",
+    ],
+    main = "packaging/dashllm_r50/test_async_diagnostic_logging_patch.py",
+    imports = ["packaging/dashllm_r50"],
+    python_version = "PY3",
+)
+
+# Historical replay controller fixture only; excluded from serving source globs.
+cc_test(
+    name = "latency_learning_rate_controller_test",
+    srcs = [
+        "test/legacy/LatencyLearningRateController.cpp",
+        "test/legacy/LatencyLearningRateController.h",
+        "test/legacy/LatencyLearningRateControllerTest.cpp",
+    ],
+    data = [":wheel_python_runtime"],
+    deps = ["//aios/unittest_framework", ":navi_sched_role_lib"],
 )

@@ -23,6 +23,8 @@ int64_t getNaviSchedRpcTimeoutMs(int64_t entryTimeoutMs)
 bool NaviSchedBatchRequest::valid() const
 {
     return requestId != 0 && predictedCacheHitTokenCount >= 0 &&
+           (cachePublicationTokenCount == -1 ||
+            cachePublicationTokenCount >= totalTokenCount) &&
            predictedCacheHitTokenCount <= totalTokenCount &&
            std::isfinite(predictedQueueLatencyMs) && predictedQueueLatencyMs >= 0.0 &&
            std::isfinite(predictedExecutionLatencyMs) &&
@@ -39,8 +41,8 @@ bool NaviSchedLatencyPrediction::valid() const
 
 void NaviSchedLatencyPrediction::serialize(autil::DataBuffer &dataBuffer) const
 {
-    dataBuffer.write(features);
-    dataBuffer.write(floorFeatures);
+    features.serializeWithExecutionCacheSource(dataBuffer);
+    floorFeatures.serializeWithExecutionCacheSource(dataBuffer);
     dataBuffer.write(fixedLatencyMs);
     dataBuffer.write(hasFloor);
     dataBuffer.write(recomputable);
@@ -48,8 +50,11 @@ void NaviSchedLatencyPrediction::serialize(autil::DataBuffer &dataBuffer) const
 
 void NaviSchedLatencyPrediction::deserialize(autil::DataBuffer &dataBuffer)
 {
-    dataBuffer.read(features);
-    dataBuffer.read(floorFeatures);
+    if (!features.deserializeWithExecutionCacheSource(dataBuffer) ||
+        !floorFeatures.deserializeWithExecutionCacheSource(dataBuffer)) {
+        AUTIL_LEGACY_THROW(autil::DataBufferCorruptedException,
+                           "invalid latency prediction execution features");
+    }
     dataBuffer.read(fixedLatencyMs);
     dataBuffer.read(hasFloor);
     dataBuffer.read(recomputable);
@@ -58,6 +63,8 @@ void NaviSchedLatencyPrediction::deserialize(autil::DataBuffer &dataBuffer)
 bool NaviSchedRequestStats::valid() const
 {
     return requestId != 0 && totalTokenCount >= 0 && cacheHitTokenCount >= 0 &&
+           executionExternalReadTokens >= -1 &&
+           executionExternalReadTokens <= cacheHitTokenCount &&
            cacheHitTokenCount <= totalTokenCount && predictedCacheHitTokenCount >= 0 &&
            predictedCacheHitTokenCount <= totalTokenCount &&
            std::isfinite(predictedQueueLatencyMs) && predictedQueueLatencyMs >= 0.0 &&
@@ -152,7 +159,7 @@ bool NaviSchedWorkloadSnapshot::valid() const
                std::isfinite(waitingCapacityContextRemainingPrefillTokenProductSum) &&
                waitingCapacityContextRemainingPrefillTokenProductSum >= 0.0 &&
                remainingPrefillRequestCount == runningCapacityPrefillRequestCount +
-                       waitingCapacityPrefillRequestCount &&
+                                                   waitingCapacityPrefillRequestCount &&
                remainingPrefillContextTokenCount ==
                    runningCapacityPrefillContextTokenCount +
                        waitingCapacityPrefillContextTokenCount &&
@@ -187,8 +194,7 @@ bool NaviSchedWorkloadSnapshot::valid() const
                    runningDecodeRemainingTokenBudget == 0)
                 : (runningDecodeRequestCount >= 0 &&
                    runningDecodeRequestCount <= runningRequestCount &&
-                   runningDecodeGeneratedTokenCount >=
-                       runningDecodeRequestCount &&
+                   runningDecodeGeneratedTokenCount >= runningDecodeRequestCount &&
                    runningDecodeRemainingTokenBudget >= 0 &&
                    (runningDecodeRequestCount > 0 ||
                     (runningDecodeGeneratedTokenCount == 0 &&
@@ -217,10 +223,8 @@ bool NaviSchedWorkloadSnapshot::sameWorkload(const NaviSchedWorkloadSnapshot &ot
            runningRequestCount == other.runningRequestCount &&
            runningElapsedTimeMs == other.runningElapsedTimeMs &&
            runningDecodeRequestCount == other.runningDecodeRequestCount &&
-           runningDecodeGeneratedTokenCount ==
-               other.runningDecodeGeneratedTokenCount &&
-           runningDecodeRemainingTokenBudget ==
-               other.runningDecodeRemainingTokenBudget &&
+           runningDecodeGeneratedTokenCount == other.runningDecodeGeneratedTokenCount &&
+           runningDecodeRemainingTokenBudget == other.runningDecodeRemainingTokenBudget &&
            waitingRequestCount == other.waitingRequestCount &&
            remainingPrefillContextTokenCount == other.remainingPrefillContextTokenCount &&
            remainingPrefillTokenCount == other.remainingPrefillTokenCount &&
@@ -590,6 +594,7 @@ void NaviSchedNodeInfo::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(lastRequestLatencyMs);
     dataBuffer.write(queueTotalPredictedLatencyMs);
     dataBuffer.write(queueDecayHeadRemainingMs);
+    dataBuffer.write(queueModel);
     dataBuffer.write(queueReportReceiveTimeUs);
     dataBuffer.write(online);
     dataBuffer.write(lastEventType);
@@ -613,6 +618,7 @@ void NaviSchedNodeInfo::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(schedulerConfigHash);
     dataBuffer.write(schedulerConfigJson);
     dataBuffer.write(latencyValidation);
+    dataBuffer.write(peerCacheEnabled);
 }
 
 void NaviSchedNodeInfo::deserialize(autil::DataBuffer &dataBuffer)
@@ -646,6 +652,7 @@ void NaviSchedNodeInfo::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(lastRequestLatencyMs);
     dataBuffer.read(queueTotalPredictedLatencyMs);
     dataBuffer.read(queueDecayHeadRemainingMs);
+    dataBuffer.read(queueModel);
     dataBuffer.read(queueReportReceiveTimeUs);
     dataBuffer.read(online);
     dataBuffer.read(lastEventType);
@@ -669,12 +676,14 @@ void NaviSchedNodeInfo::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(schedulerConfigHash);
     dataBuffer.read(schedulerConfigJson);
     dataBuffer.read(latencyValidation);
+    dataBuffer.read(peerCacheEnabled);
 }
 
 bool NaviSchedScheduleRequest::valid() const
 {
     return version == NAVI_SCHED_DATA_VERSION && requestId != 0 && !bizName.empty() &&
-           timeoutMs > 0 &&
+           timeoutMs > 0 && explicitCacheCheckpointPosition >= 0 &&
+           explicitCacheCheckpointPosition <= promptTokenCount &&
            BlockHashUtil::validTokenBlocks(promptTokenCount, blockSize, blockHashes);
 }
 
@@ -684,9 +693,11 @@ void NaviSchedScheduleRequest::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(requestId);
     dataBuffer.write(bizName);
     dataBuffer.write(promptTokenCount);
+    dataBuffer.write(explicitCacheCheckpointPosition);
     dataBuffer.write(blockSize);
     BlockHashUtil::write(dataBuffer, blockHashes);
     dataBuffer.write(timeoutMs);
+    dataBuffer.write(routeOnly);
 }
 
 void NaviSchedScheduleRequest::deserialize(autil::DataBuffer &dataBuffer)
@@ -698,9 +709,11 @@ void NaviSchedScheduleRequest::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(requestId);
     dataBuffer.read(bizName);
     dataBuffer.read(promptTokenCount);
+    dataBuffer.read(explicitCacheCheckpointPosition);
     dataBuffer.read(blockSize);
     BlockHashUtil::read(dataBuffer, blockHashes);
     dataBuffer.read(timeoutMs);
+    dataBuffer.read(routeOnly);
 }
 
 void NaviSchedScheduleItem::serialize(autil::DataBuffer &dataBuffer) const

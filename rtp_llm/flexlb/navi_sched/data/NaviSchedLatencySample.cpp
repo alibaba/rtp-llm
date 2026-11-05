@@ -9,30 +9,28 @@
 namespace navi_sched {
 
 namespace {
-bool validAggregate(int64_t batchCount, int64_t batchSize,
-                    int64_t cacheHitTokenCount, int64_t cacheMissTokenCount,
-                    double cacheMissTokenSquareSum,
+bool validAggregate(int64_t batchCount, int64_t batchSize, int64_t cacheHitTokenCount,
+                    int64_t cacheMissTokenCount, double cacheMissTokenSquareSum,
                     double cacheHitMissTokenProductSum)
 {
     return batchCount >= 0 && batchSize >= 0 && cacheHitTokenCount >= 0 &&
-           cacheMissTokenCount >= 0 &&
-           std::isfinite(cacheMissTokenSquareSum) &&
-           cacheMissTokenSquareSum >= 0.0 &&
-           std::isfinite(cacheHitMissTokenProductSum) &&
+           cacheMissTokenCount >= 0 && std::isfinite(cacheMissTokenSquareSum) &&
+           cacheMissTokenSquareSum >= 0.0 && std::isfinite(cacheHitMissTokenProductSum) &&
            cacheHitMissTokenProductSum >= 0.0;
 }
 }
 
-bool NaviSchedLatencyFeatures::appendAggregate(
-    int64_t batchCount, int64_t batchSize, int64_t cacheHitTokenCount,
-    int64_t cacheMissTokenCount, double cacheMissTokenSquareSum,
-    double cacheHitMissTokenProductSum)
+bool NaviSchedLatencyFeatures::appendAggregate(int64_t batchCount, int64_t batchSize,
+                                               int64_t cacheHitTokenCount,
+                                               int64_t cacheMissTokenCount,
+                                               double cacheMissTokenSquareSum,
+                                               double cacheHitMissTokenProductSum)
 {
-    if (!validAggregate(batchCount, batchSize, cacheHitTokenCount,
-                        cacheMissTokenCount, cacheMissTokenSquareSum,
-                        cacheHitMissTokenProductSum)) {
+    if (!validAggregate(batchCount, batchSize, cacheHitTokenCount, cacheMissTokenCount,
+                        cacheMissTokenSquareSum, cacheHitMissTokenProductSum)) {
         return false;
     }
+    clearExecutionGeometry();
     _batchCount += batchCount;
     _batchSize += batchSize;
     _cacheHitTokenCount += cacheHitTokenCount;
@@ -43,26 +41,22 @@ bool NaviSchedLatencyFeatures::appendAggregate(
 }
 
 bool NaviSchedLatencyFeatures::appendCapacitySplitAggregate(
-    int64_t batchCount, int64_t runningBatchSize,
-    int64_t runningCacheHitTokenCount, int64_t runningCacheMissTokenCount,
-    double runningCacheMissTokenSquareSum,
+    int64_t batchCount, int64_t runningBatchSize, int64_t runningCacheHitTokenCount,
+    int64_t runningCacheMissTokenCount, double runningCacheMissTokenSquareSum,
     double runningCacheHitMissTokenProductSum, int64_t waitingBatchSize,
     int64_t waitingCacheHitTokenCount, int64_t waitingCacheMissTokenCount,
-    double waitingCacheMissTokenSquareSum,
-    double waitingCacheHitMissTokenProductSum)
+    double waitingCacheMissTokenSquareSum, double waitingCacheHitMissTokenProductSum)
 {
-    if (!validAggregate(batchCount, runningBatchSize,
-                        runningCacheHitTokenCount,
-                        runningCacheMissTokenCount,
-                        runningCacheMissTokenSquareSum,
+    if (!validAggregate(batchCount, runningBatchSize, runningCacheHitTokenCount,
+                        runningCacheMissTokenCount, runningCacheMissTokenSquareSum,
                         runningCacheHitMissTokenProductSum) ||
         !validAggregate(0, waitingBatchSize, waitingCacheHitTokenCount,
-                        waitingCacheMissTokenCount,
-                        waitingCacheMissTokenSquareSum,
+                        waitingCacheMissTokenCount, waitingCacheMissTokenSquareSum,
                         waitingCacheHitMissTokenProductSum)) {
         return false;
     }
     _capacitySplit = true;
+    clearExecutionGeometry();
     _batchCount += batchCount;
     _batchSize += runningBatchSize;
     _cacheHitTokenCount += runningCacheHitTokenCount;
@@ -73,14 +67,14 @@ bool NaviSchedLatencyFeatures::appendCapacitySplitAggregate(
     _waitingCacheHitTokenCount += waitingCacheHitTokenCount;
     _waitingCacheMissTokenCount += waitingCacheMissTokenCount;
     _waitingCacheMissTokenSquareSum += waitingCacheMissTokenSquareSum;
-    _waitingCacheHitMissTokenProductSum +=
-        waitingCacheHitMissTokenProductSum;
+    _waitingCacheHitMissTokenProductSum += waitingCacheHitMissTokenProductSum;
     return true;
 }
 
-void NaviSchedLatencyFeatures::appendWaitingRequest(
-    int64_t cacheHitTokenCount, int64_t cacheMissTokenCount)
+void NaviSchedLatencyFeatures::appendWaitingRequest(int64_t cacheHitTokenCount,
+                                                    int64_t cacheMissTokenCount)
 {
+    clearExecutionGeometry();
     _capacitySplit = true;
     ++_waitingBatchSize;
     _waitingCacheHitTokenCount += cacheHitTokenCount;
@@ -96,16 +90,15 @@ bool NaviSchedLatencyFeatures::appendBatchCount(int64_t batchCount)
     if (batchCount < 0) {
         return false;
     }
+    clearExecutionGeometry();
     _batchCount += batchCount;
     return true;
 }
 
-bool NaviSchedLatencyFeatures::appendPrecedingRequestCount(
-    int64_t requestCount)
+bool NaviSchedLatencyFeatures::appendPrecedingRequestCount(int64_t requestCount)
 {
     if (requestCount < 0 ||
-        requestCount >
-            std::numeric_limits<int64_t>::max() - _precedingRequestCount) {
+        requestCount > std::numeric_limits<int64_t>::max() - _precedingRequestCount) {
         return false;
     }
     _precedingRequestCount += requestCount;
@@ -115,27 +108,24 @@ bool NaviSchedLatencyFeatures::appendPrecedingRequestCount(
 bool NaviSchedLatencyFeatures::appendRunningElapsedTimeMs(double elapsedTimeMs)
 {
     if (!std::isfinite(elapsedTimeMs) || elapsedTimeMs < 0.0 ||
-        elapsedTimeMs > std::numeric_limits<double>::max() -
-                            _runningElapsedTimeMs) {
+        elapsedTimeMs > std::numeric_limits<double>::max() - _runningElapsedTimeMs) {
         return false;
     }
     _runningElapsedTimeMs += elapsedTimeMs;
     return true;
 }
 
-bool NaviSchedLatencyFeatures::appendRunningDecodeProgress(
-    int64_t requestCount, int64_t generatedTokenCount,
-    int64_t remainingTokenBudget)
+bool NaviSchedLatencyFeatures::appendRunningDecodeProgress(int64_t requestCount,
+                                                           int64_t generatedTokenCount,
+                                                           int64_t remainingTokenBudget)
 {
     if (requestCount < 0 || generatedTokenCount < requestCount ||
-        remainingTokenBudget < 0 ||
-        (requestCount == 0 && remainingTokenBudget != 0) ||
-        requestCount > std::numeric_limits<int64_t>::max() -
-                           _runningDecodeRequestCount ||
-        generatedTokenCount > std::numeric_limits<int64_t>::max() -
-                                  _runningDecodeGeneratedTokenCount ||
-        remainingTokenBudget > std::numeric_limits<int64_t>::max() -
-                                   _runningDecodeRemainingTokenBudget) {
+        remainingTokenBudget < 0 || (requestCount == 0 && remainingTokenBudget != 0) ||
+        requestCount > std::numeric_limits<int64_t>::max() - _runningDecodeRequestCount ||
+        generatedTokenCount >
+            std::numeric_limits<int64_t>::max() - _runningDecodeGeneratedTokenCount ||
+        remainingTokenBudget >
+            std::numeric_limits<int64_t>::max() - _runningDecodeRemainingTokenBudget) {
         return false;
     }
     _runningDecodeRequestCount += requestCount;
@@ -150,20 +140,18 @@ bool NaviSchedLatencyFeatures::appendPrefillWorkload(
     if (workload.prefillCapacitySplit) {
         auto updated = *this;
         if (!updated.appendCapacitySplitAggregate(
-            workload.batchCount,
-            workload.runningCapacityPrefillRequestCount,
-            workload.runningCapacityPrefillContextTokenCount,
-            workload.runningCapacityPrefillTokenCount,
-            workload.runningCapacityPrefillTokenSquareSum,
-            workload.runningCapacityContextRemainingPrefillTokenProductSum,
-            workload.waitingCapacityPrefillRequestCount,
-            workload.waitingCapacityPrefillContextTokenCount,
-            workload.waitingCapacityPrefillTokenCount,
-            workload.waitingCapacityPrefillTokenSquareSum,
-            workload.waitingCapacityContextRemainingPrefillTokenProductSum) ||
+                workload.batchCount, workload.runningCapacityPrefillRequestCount,
+                workload.runningCapacityPrefillContextTokenCount,
+                workload.runningCapacityPrefillTokenCount,
+                workload.runningCapacityPrefillTokenSquareSum,
+                workload.runningCapacityContextRemainingPrefillTokenProductSum,
+                workload.waitingCapacityPrefillRequestCount,
+                workload.waitingCapacityPrefillContextTokenCount,
+                workload.waitingCapacityPrefillTokenCount,
+                workload.waitingCapacityPrefillTokenSquareSum,
+                workload.waitingCapacityContextRemainingPrefillTokenProductSum) ||
             !updated.appendPrecedingRequestCount(workload.requestCount) ||
-            !updated.appendRunningElapsedTimeMs(
-                workload.runningElapsedTimeMs) ||
+            !updated.appendRunningElapsedTimeMs(workload.runningElapsedTimeMs) ||
             !updated.appendRunningDecodeProgress(
                 workload.runningDecodeRequestCount,
                 workload.runningDecodeGeneratedTokenCount,
@@ -177,8 +165,7 @@ bool NaviSchedLatencyFeatures::appendPrefillWorkload(
     if (!updated.appendAggregate(
             workload.batchCount, workload.remainingPrefillRequestCount,
             workload.remainingPrefillContextTokenCount,
-            workload.remainingPrefillTokenCount,
-            workload.remainingPrefillTokenSquareSum,
+            workload.remainingPrefillTokenCount, workload.remainingPrefillTokenSquareSum,
             workload.contextRemainingPrefillTokenProductSum) ||
         !updated.appendRunningElapsedTimeMs(workload.runningElapsedTimeMs)) {
         return false;
@@ -189,10 +176,22 @@ bool NaviSchedLatencyFeatures::appendPrefillWorkload(
 
 bool NaviSchedLatencyFeatures::append(const NaviSchedLatencyFeatures &other)
 {
+    // A maximum is not additive. Rebuild source facts for the resulting batch.
+    const bool sourceFactsChanged =
+        hasExecutionCacheSource() || other.hasExecutionCacheSource();
+    if (((getBatchSize() > 0 || hasExecutionGeometry()) &&
+         (other.getBatchSize() > 0 || other.hasExecutionGeometry()) &&
+         hasExecutionGeometry() != other.hasExecutionGeometry()) ||
+        other._executionStepCount >
+            std::numeric_limits<int64_t>::max() - _executionStepCount ||
+        other._globalPaddedTokens >
+            std::numeric_limits<int64_t>::max() - _globalPaddedTokens) {
+        return false;
+    }
+
     const auto thisHasWorkload = getBatchSize() > 0;
     const auto otherHasWorkload = other.getBatchSize() > 0;
-    if (thisHasWorkload && otherHasWorkload &&
-        _capacitySplit != other._capacitySplit) {
+    if (thisHasWorkload && otherHasWorkload && _capacitySplit != other._capacitySplit) {
         return false;
     }
     if (other._precedingRequestCount < 0 ||
@@ -207,33 +206,29 @@ bool NaviSchedLatencyFeatures::append(const NaviSchedLatencyFeatures &other)
         return false;
     }
     if (other._runningDecodeRequestCount < 0 ||
-        other._runningDecodeGeneratedTokenCount <
-            other._runningDecodeRequestCount ||
+        other._runningDecodeGeneratedTokenCount < other._runningDecodeRequestCount ||
         other._runningDecodeRequestCount >
-            std::numeric_limits<int64_t>::max() -
-                _runningDecodeRequestCount ||
+            std::numeric_limits<int64_t>::max() - _runningDecodeRequestCount ||
         other._runningDecodeGeneratedTokenCount >
-            std::numeric_limits<int64_t>::max() -
-                _runningDecodeGeneratedTokenCount ||
+            std::numeric_limits<int64_t>::max() - _runningDecodeGeneratedTokenCount ||
         other._runningDecodeRemainingTokenBudget < 0 ||
         (other._runningDecodeRequestCount == 0 &&
          other._runningDecodeRemainingTokenBudget != 0) ||
         other._runningDecodeRemainingTokenBudget >
-            std::numeric_limits<int64_t>::max() -
-                _runningDecodeRemainingTokenBudget) {
+            std::numeric_limits<int64_t>::max() - _runningDecodeRemainingTokenBudget) {
         return false;
     }
     if (other._capacitySplit) {
         _capacitySplit = true;
     }
+    _executionStepCount += other._executionStepCount;
+    _globalPaddedTokens += other._globalPaddedTokens;
     _batchCount += other._batchCount;
     _precedingRequestCount += other._precedingRequestCount;
     _runningElapsedTimeMs += other._runningElapsedTimeMs;
     _runningDecodeRequestCount += other._runningDecodeRequestCount;
-    _runningDecodeGeneratedTokenCount +=
-        other._runningDecodeGeneratedTokenCount;
-    _runningDecodeRemainingTokenBudget +=
-        other._runningDecodeRemainingTokenBudget;
+    _runningDecodeGeneratedTokenCount += other._runningDecodeGeneratedTokenCount;
+    _runningDecodeRemainingTokenBudget += other._runningDecodeRemainingTokenBudget;
     _batchSize += other._batchSize;
     _cacheHitTokenCount += other._cacheHitTokenCount;
     _cacheMissTokenCount += other._cacheMissTokenCount;
@@ -243,22 +238,30 @@ bool NaviSchedLatencyFeatures::append(const NaviSchedLatencyFeatures &other)
     _waitingCacheHitTokenCount += other._waitingCacheHitTokenCount;
     _waitingCacheMissTokenCount += other._waitingCacheMissTokenCount;
     _waitingCacheMissTokenSquareSum += other._waitingCacheMissTokenSquareSum;
-    _waitingCacheHitMissTokenProductSum +=
-        other._waitingCacheHitMissTokenProductSum;
+    _waitingCacheHitMissTokenProductSum += other._waitingCacheHitMissTokenProductSum;
+    if (sourceFactsChanged) {
+        clearExecutionCacheSource();
+    }
     return true;
 }
 
 bool NaviSchedLatencyFeatures::subtract(const NaviSchedLatencyFeatures &other)
 {
-    if (_capacitySplit != other._capacitySplit ||
-        _batchCount < other._batchCount ||
+    if ((other.getBatchSize() > 0 &&
+         hasExecutionGeometry() != other.hasExecutionGeometry()) ||
+        _executionStepCount < other._executionStepCount ||
+        _globalPaddedTokens < other._globalPaddedTokens ||
+        ((_executionStepCount == other._executionStepCount) !=
+         (_globalPaddedTokens == other._globalPaddedTokens))) {
+        return false;
+    }
+
+    if (_capacitySplit != other._capacitySplit || _batchCount < other._batchCount ||
         _precedingRequestCount < other._precedingRequestCount ||
         _runningElapsedTimeMs < other._runningElapsedTimeMs ||
         _runningDecodeRequestCount < other._runningDecodeRequestCount ||
-        _runningDecodeGeneratedTokenCount <
-            other._runningDecodeGeneratedTokenCount ||
-        _runningDecodeRemainingTokenBudget <
-            other._runningDecodeRemainingTokenBudget ||
+        _runningDecodeGeneratedTokenCount < other._runningDecodeGeneratedTokenCount ||
+        _runningDecodeRemainingTokenBudget < other._runningDecodeRemainingTokenBudget ||
         _batchSize < other._batchSize ||
         _cacheHitTokenCount < other._cacheHitTokenCount ||
         _cacheMissTokenCount < other._cacheMissTokenCount ||
@@ -267,26 +270,24 @@ bool NaviSchedLatencyFeatures::subtract(const NaviSchedLatencyFeatures &other)
         _waitingBatchSize < other._waitingBatchSize ||
         _waitingCacheHitTokenCount < other._waitingCacheHitTokenCount ||
         _waitingCacheMissTokenCount < other._waitingCacheMissTokenCount ||
-        _waitingCacheMissTokenSquareSum <
-            other._waitingCacheMissTokenSquareSum ||
-        _waitingCacheHitMissTokenProductSum <
-            other._waitingCacheHitMissTokenProductSum) {
+        _waitingCacheMissTokenSquareSum < other._waitingCacheMissTokenSquareSum ||
+        _waitingCacheHitMissTokenProductSum < other._waitingCacheHitMissTokenProductSum) {
         return false;
     }
     const auto remainingDecodeRequestCount =
         _runningDecodeRequestCount - other._runningDecodeRequestCount;
     const auto remainingDecodeGeneratedTokenCount =
-        _runningDecodeGeneratedTokenCount -
-        other._runningDecodeGeneratedTokenCount;
+        _runningDecodeGeneratedTokenCount - other._runningDecodeGeneratedTokenCount;
     const auto remainingDecodeTokenBudget =
-        _runningDecodeRemainingTokenBudget -
-        other._runningDecodeRemainingTokenBudget;
+        _runningDecodeRemainingTokenBudget - other._runningDecodeRemainingTokenBudget;
     if (remainingDecodeGeneratedTokenCount < remainingDecodeRequestCount) {
         return false;
     }
     if (remainingDecodeRequestCount == 0 && remainingDecodeTokenBudget != 0) {
         return false;
     }
+    _executionStepCount -= other._executionStepCount;
+    _globalPaddedTokens -= other._globalPaddedTokens;
     _batchCount -= other._batchCount;
     _precedingRequestCount -= other._precedingRequestCount;
     _runningElapsedTimeMs -= other._runningElapsedTimeMs;
@@ -302,8 +303,8 @@ bool NaviSchedLatencyFeatures::subtract(const NaviSchedLatencyFeatures &other)
     _waitingCacheHitTokenCount -= other._waitingCacheHitTokenCount;
     _waitingCacheMissTokenCount -= other._waitingCacheMissTokenCount;
     _waitingCacheMissTokenSquareSum -= other._waitingCacheMissTokenSquareSum;
-    _waitingCacheHitMissTokenProductSum -=
-        other._waitingCacheHitMissTokenProductSum;
+    _waitingCacheHitMissTokenProductSum -= other._waitingCacheHitMissTokenProductSum;
+    clearExecutionCacheSource();
     return true;
 }
 
@@ -356,19 +357,12 @@ double NaviSchedLatencyFeatures::getCacheMissTokenSquareSum() const
 
 double NaviSchedLatencyFeatures::getCacheHitMissTokenProductSum() const
 {
-    return _cacheHitMissTokenProductSum +
-           _waitingCacheHitMissTokenProductSum;
+    return _cacheHitMissTokenProductSum + _waitingCacheHitMissTokenProductSum;
 }
 
-bool NaviSchedLatencyFeatures::usesCapacitySplit() const
-{
-    return _capacitySplit;
-}
+bool NaviSchedLatencyFeatures::usesCapacitySplit() const { return _capacitySplit; }
 
-int64_t NaviSchedLatencyFeatures::getRunningBatchSize() const
-{
-    return _batchSize;
-}
+int64_t NaviSchedLatencyFeatures::getRunningBatchSize() const { return _batchSize; }
 
 int64_t NaviSchedLatencyFeatures::getRunningCacheHitTokenCount() const
 {
@@ -438,6 +432,7 @@ void NaviSchedLatencyFeatures::serialize(autil::DataBuffer &dataBuffer) const
 
 void NaviSchedLatencyFeatures::deserialize(autil::DataBuffer &dataBuffer)
 {
+    clearExecutionGeometry();
     dataBuffer.read(_batchCount);
     dataBuffer.read(_batchSize);
     dataBuffer.read(_cacheHitTokenCount);
@@ -457,4 +452,100 @@ void NaviSchedLatencyFeatures::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(_runningDecodeRemainingTokenBudget);
 }
 
+bool NaviSchedLatencyFeatures::setExecutionGeometry(int64_t steps, int64_t tokens)
+{
+    if (steps <= 0 || tokens <= 0) {
+        return false;
+    }
+    _executionStepCount = steps;
+    _globalPaddedTokens = tokens;
+    return true;
 }
+
+void NaviSchedLatencyFeatures::clearExecutionGeometry()
+{
+    _executionStepCount = 0;
+    _globalPaddedTokens = 0;
+    clearExecutionCacheSource();
+}
+
+bool NaviSchedLatencyFeatures::hasExecutionGeometry() const
+{
+    return _executionStepCount > 0 && _globalPaddedTokens > 0;
+}
+
+void NaviSchedLatencyFeatures::serializeWithExecutionGeometry(
+    autil::DataBuffer &buffer) const
+{
+    serialize(buffer);
+    buffer.write(_executionStepCount);
+    buffer.write(_globalPaddedTokens);
+}
+
+bool NaviSchedLatencyFeatures::deserializeWithExecutionGeometry(autil::DataBuffer &buffer)
+{
+    NaviSchedLatencyFeatures decoded;
+    decoded.deserialize(buffer);
+    int64_t steps = 0, tokens = 0;
+    buffer.read(steps);
+    buffer.read(tokens);
+    if (steps < 0 || tokens < 0 || ((steps == 0) != (tokens == 0))) {
+        return false;
+    }
+    if (steps > 0 && !decoded.setExecutionGeometry(steps, tokens)) {
+        return false;
+    }
+    *this = decoded;
+    return true;
+}
+
+bool NaviSchedLatencyFeatures::setExecutionCacheSource(int64_t requests, int64_t tokens)
+{
+    if (_capacitySplit || requests < 0 || tokens < 0 ||
+        requests > getRunningBatchSize() || tokens > getRunningCacheHitTokenCount() ||
+        ((requests == 0) != (tokens == 0))) {
+        return false;
+    }
+    _externalReadRequestCount = requests;
+    _maxExternalReadTokens = tokens;
+    return true;
+}
+
+void NaviSchedLatencyFeatures::clearExecutionCacheSource()
+{
+    _externalReadRequestCount = -1;
+    _maxExternalReadTokens = -1;
+}
+
+bool NaviSchedLatencyFeatures::hasExecutionCacheSource() const
+{
+    return _externalReadRequestCount >= 0 && _maxExternalReadTokens >= 0;
+}
+
+void NaviSchedLatencyFeatures::serializeWithExecutionCacheSource(
+    autil::DataBuffer &buffer) const
+{
+    serializeWithExecutionGeometry(buffer);
+    buffer.write(_externalReadRequestCount);
+    buffer.write(_maxExternalReadTokens);
+}
+
+bool NaviSchedLatencyFeatures::deserializeWithExecutionCacheSource(
+    autil::DataBuffer &buffer)
+{
+    NaviSchedLatencyFeatures decoded;
+    if (!decoded.deserializeWithExecutionGeometry(buffer)) {
+        return false;
+    }
+    int64_t requests = -1, tokens = -1;
+    buffer.read(requests);
+    buffer.read(tokens);
+    if ((requests != -1 || tokens != -1) &&
+        !decoded.setExecutionCacheSource(requests, tokens)) {
+        return false;
+    }
+    *this = decoded;
+    return true;
+}
+
+} // namespace navi_sched

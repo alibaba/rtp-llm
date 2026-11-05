@@ -4,12 +4,15 @@
 #include "autil/Lock.h"
 #include "navi/engine/Resource.h"
 #include <unordered_set>
+#include <memory>
 
 namespace navi_sched {
 
 class AgentPendingCacheR;
+struct NaviSchedPendingCacheReservation;
 
 struct NaviSchedCacheUpdate {
+    NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL;
     int64_t totalBlocks = -1;
     bool fullSnapshot = false;
     NaviSchedBlockHashesConstPtr addedBlockHashes;
@@ -21,6 +24,10 @@ struct NaviSchedCacheUpdate {
     int64_t blockSize = -1;
     int64_t linearStep = -1;
     int8_t hybridTailRequired = -1;
+    int64_t fullAttentionQueryDropTokens = 0;
+    int8_t mambaReplayStopShift = -1;
+    int64_t mambaRetentionInterval = -1;
+    bool mambaAlign = false;
     int64_t eventTimeUs = 0;
     uint64_t revision = 0;
     int64_t cachedBlockCount = -1;
@@ -34,6 +41,15 @@ struct NaviSchedCacheUpdate {
 
 class AgentCacheR : public navi::Resource {
 public:
+    AgentCacheR &forKeyType(NaviSchedCacheKeyType cacheKeyType) const;
+    bool hasKeyType(NaviSchedCacheKeyType cacheKeyType) const;
+
+    struct PendingCoverage {
+        bool hybridTailRequired = false;
+        NaviSchedBlockHashes missingFullReadyBlockHashes;
+        NaviSchedBlockHashes missingTailReadyBlockHashes;
+    };
+
     struct State {
         uint64_t revision = 0;
         size_t cachedBlockCount = 0;
@@ -65,6 +81,8 @@ public:
                                   const AgentPendingCacheR *pendingCache) const;
     bool apply(const NaviSchedCacheUpdate &update, State &state);
     NaviSchedCacheUpdate makeSnapshot() const;
+    PendingCoverage getPendingCoverage(
+        const NaviSchedPendingCacheReservation &reservation) const;
     State getState() const;
     size_t getCachedBlockCount() const;
     navi::SummaryErrorCode getSummary(const std::string &query,
@@ -74,6 +92,9 @@ public:
     static const std::string RESOURCE_ID;
 
 private:
+    NaviSchedCacheKeyType _cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL;
+    mutable autil::ThreadMutex _typedCacheLock;
+    mutable std::unique_ptr<AgentCacheR> _v6dCache;
     mutable autil::ReadWriteLock _lock;
     std::unordered_set<uint64_t> _cachedBlockHashes;
     std::unordered_set<uint64_t> _fullReadyBlockHashes;

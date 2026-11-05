@@ -13,41 +13,49 @@ struct NaviSchedWorkloadSnapshot;
 
 class NaviSchedLatencyFeatures {
 public:
-    void appendRequest(int64_t cacheHitTokenCount,
-                       int64_t cacheMissTokenCount)
+    // Geometry belongs to complete execution batches, not individual requests.
+    bool setExecutionGeometry(int64_t executionStepCount, int64_t globalPaddedTokens);
+    void clearExecutionGeometry();
+    bool hasExecutionGeometry() const;
+    int64_t getExecutionStepCount() const { return _executionStepCount; }
+    int64_t getGlobalPaddedTokens() const { return _globalPaddedTokens; }
+    // Complete-batch V6D read facts. Unknown is distinct from a known local hit.
+    bool setExecutionCacheSource(int64_t readRequestCount, int64_t maxReadTokens);
+    void clearExecutionCacheSource();
+    bool hasExecutionCacheSource() const;
+    int64_t getExternalReadRequestCount() const { return _externalReadRequestCount; }
+    int64_t getMaxExternalReadTokens() const { return _maxExternalReadTokens; }
+    void serializeWithExecutionCacheSource(autil::DataBuffer &dataBuffer) const;
+    bool deserializeWithExecutionCacheSource(autil::DataBuffer &dataBuffer);
+    // Explicit outer-version-26 layout; legacy serialize remains byte-identical.
+    void serializeWithExecutionGeometry(autil::DataBuffer &dataBuffer) const;
+    bool deserializeWithExecutionGeometry(autil::DataBuffer &dataBuffer);
+    void appendRequest(int64_t cacheHitTokenCount, int64_t cacheMissTokenCount)
     {
+        clearExecutionGeometry();
         ++_batchSize;
         _cacheHitTokenCount += cacheHitTokenCount;
         _cacheMissTokenCount += cacheMissTokenCount;
         _cacheMissTokenSquareSum +=
-            static_cast<double>(cacheMissTokenCount) *
-            cacheMissTokenCount;
+            static_cast<double>(cacheMissTokenCount) * cacheMissTokenCount;
         _cacheHitMissTokenProductSum +=
-            static_cast<double>(cacheHitTokenCount) *
-            cacheMissTokenCount;
+            static_cast<double>(cacheHitTokenCount) * cacheMissTokenCount;
     }
     bool appendAggregate(int64_t batchCount, int64_t batchSize,
-                         int64_t cacheHitTokenCount,
-                         int64_t cacheMissTokenCount,
+                         int64_t cacheHitTokenCount, int64_t cacheMissTokenCount,
                          double cacheMissTokenSquareSum,
                          double cacheHitMissTokenProductSum);
     bool appendCapacitySplitAggregate(
-        int64_t batchCount, int64_t runningBatchSize,
-        int64_t runningCacheHitTokenCount,
-        int64_t runningCacheMissTokenCount,
-        double runningCacheMissTokenSquareSum,
-        double runningCacheHitMissTokenProductSum,
-        int64_t waitingBatchSize, int64_t waitingCacheHitTokenCount,
-        int64_t waitingCacheMissTokenCount,
-        double waitingCacheMissTokenSquareSum,
-        double waitingCacheHitMissTokenProductSum);
-    void appendWaitingRequest(int64_t cacheHitTokenCount,
-                              int64_t cacheMissTokenCount);
+        int64_t batchCount, int64_t runningBatchSize, int64_t runningCacheHitTokenCount,
+        int64_t runningCacheMissTokenCount, double runningCacheMissTokenSquareSum,
+        double runningCacheHitMissTokenProductSum, int64_t waitingBatchSize,
+        int64_t waitingCacheHitTokenCount, int64_t waitingCacheMissTokenCount,
+        double waitingCacheMissTokenSquareSum, double waitingCacheHitMissTokenProductSum);
+    void appendWaitingRequest(int64_t cacheHitTokenCount, int64_t cacheMissTokenCount);
     bool appendBatchCount(int64_t batchCount);
     bool appendPrecedingRequestCount(int64_t requestCount);
     bool appendRunningElapsedTimeMs(double elapsedTimeMs);
-    bool appendRunningDecodeProgress(int64_t requestCount,
-                                     int64_t generatedTokenCount,
+    bool appendRunningDecodeProgress(int64_t requestCount, int64_t generatedTokenCount,
                                      int64_t remainingTokenBudget = 0);
     bool appendPrefillWorkload(const NaviSchedWorkloadSnapshot &workload);
     bool append(const NaviSchedLatencyFeatures &other);
@@ -79,6 +87,10 @@ public:
 
 private:
     friend class NonLinearPrefillModelR;
+    int64_t _executionStepCount = 0;
+    int64_t _globalPaddedTokens = 0;
+    int64_t _externalReadRequestCount = -1;
+    int64_t _maxExternalReadTokens = -1;
     int64_t _batchCount = 0;
     int64_t _precedingRequestCount = 0;
     double _runningElapsedTimeMs = 0.0;

@@ -10,9 +10,14 @@ import fcntl
 import json
 import os
 
-from audit_replay_history import (HEADER, LEGACY_RECORD_VERSION, MAGIC,
-                                  RECORD_VERSION, classify, msgpack)
-
+from audit_replay_history import (
+    HEADER,
+    LEGACY_RECORD_VERSION,
+    MAGIC,
+    RECORD_VERSION,
+    classify,
+    msgpack,
+)
 
 MAX_RECORD_BYTES = 256 * 1024 * 1024
 MAX_OUTPUT_BYTES = 2 * 1024 * 1024 * 1024
@@ -42,8 +47,12 @@ def checked_record(source, offset, file_size):
     if len(header) != HEADER.size:
         raise ValueError("truncated record header at byte %d" % offset)
     magic, version, event, length, checksum = HEADER.unpack(header)
-    if (magic != MAGIC or version not in (LEGACY_RECORD_VERSION, RECORD_VERSION)
-            or event <= 0 or length > MAX_RECORD_BYTES):
+    if (
+        magic != MAGIC
+        or version not in (LEGACY_RECORD_VERSION, RECORD_VERSION)
+        or event <= 0
+        or length > MAX_RECORD_BYTES
+    ):
         raise ValueError("invalid record header at byte %d" % offset)
     end = offset + HEADER.size + length
     if end > file_size:
@@ -66,8 +75,9 @@ def checked_record(source, offset, file_size):
     return end, event, kind
 
 
-def filter_history(source_path, output_path, max_records=MAX_OUTPUT_RECORDS,
-                   max_bytes=MAX_OUTPUT_BYTES):
+def filter_history(
+    source_path, output_path, max_records=MAX_OUTPUT_RECORDS, max_bytes=MAX_OUTPUT_BYTES
+):
     if max_records <= 0 or max_bytes <= 0:
         raise ValueError("output limits must be positive")
     source_path = os.path.realpath(source_path)
@@ -101,7 +111,10 @@ def filter_history(source_path, output_path, max_records=MAX_OUTPUT_RECORDS,
                         earliest = event if earliest is None else min(earliest, event)
                         latest = event if latest is None else max(latest, event)
                         record_size = end - offset
-                        if counts["text"] > max_records or written + record_size > max_bytes:
+                        if (
+                            counts["text"] > max_records
+                            or written + record_size > max_bytes
+                        ):
                             raise ValueError("text-only history exceeds output limits")
                         source.seek(offset)
                         remaining = record_size
@@ -121,9 +134,13 @@ def filter_history(source_path, output_path, max_records=MAX_OUTPUT_RECORDS,
                 os.fsync(output.fileno())
         os.link(temporary, output_path)
         os.fsync(directory)
-        return {"counts": counts, "earliest_event_time_us": earliest,
-                "latest_event_time_us": latest, "output_bytes": written,
-                "output": output_path}
+        return {
+            "counts": counts,
+            "earliest_event_time_us": earliest,
+            "latest_event_time_us": latest,
+            "output_bytes": written,
+            "output": output_path,
+        }
     finally:
         if created:
             os.unlink(temporary)
@@ -137,8 +154,12 @@ def main():
     parser.add_argument("--max-records", type=int, default=MAX_OUTPUT_RECORDS)
     parser.add_argument("--max-bytes", type=int, default=MAX_OUTPUT_BYTES)
     args = parser.parse_args()
-    print(json.dumps(filter_history(args.source, args.output,
-                                    args.max_records, args.max_bytes), sort_keys=True))
+    print(
+        json.dumps(
+            filter_history(args.source, args.output, args.max_records, args.max_bytes),
+            sort_keys=True,
+        )
+    )
 
 
 if __name__ == "__main__":

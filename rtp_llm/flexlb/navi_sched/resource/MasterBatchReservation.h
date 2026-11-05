@@ -34,6 +34,7 @@ public:
         int64_t predictedCacheHitTokenCount = 0;
         NaviSchedBlockHashesConstPtr blockHashes;
         double predictedLatencyMs = 0.0;
+        int64_t explicitCacheCheckpointPosition = 0;
     };
 
     struct Transition {
@@ -70,6 +71,8 @@ public:
                                        int32_t maxRunningRequestCount,
                                        int32_t &runningCapacitySlotCount) const;
     bool setPredictedLatencyMs(double predictedLatencyMs);
+    // Before publication only: refresh queue without rebuilding cache promises.
+    bool adjustInitialRequestLatencyMs(double deltaMs);
     bool sameDefinition(const MasterBatchReservation &other) const;
 
     int64_t getBatchId() const;
@@ -84,11 +87,19 @@ public:
     bool isResolved() const;
     bool tracksPendingCache() const;
     bool hasPendingCacheReferences() const;
+    bool setPendingCachePolicy(NaviSchedCacheKeyType type,
+                               const NaviSchedCachePolicy &policy);
+    const std::map<NaviSchedCacheKeyType, NaviSchedCachePolicy> &getPendingCachePolicies()
+        const;
+    bool makePendingCacheReservation(NaviSchedCacheKeyType type,
+                                     NaviSchedPendingCacheReservation &reservation) const;
+    bool hasPrefixTree() const;
     bool containsRequest(uint64_t requestId) const;
     bool isDispatchAcknowledged(uint64_t requestId) const;
     bool isAwaitingBatchReady(uint64_t requestId) const;
     RequestState getRequestState(uint64_t requestId) const;
     const NaviSchedLatencyFeatures &getWaitingFeatures() const;
+    std::vector<Request> getWaitingRequests() const;
     const NaviSchedPendingCacheReservation &getPendingCacheReservation() const;
     RequestLatencyTracker::Snapshot getUnreportedInflightStats() const;
     autil::legacy::json::JsonMap makeReplayState() const;
@@ -132,10 +143,16 @@ private:
             using reference = const T &;
 
             ConstIterator(const SharedPages *owner, size_t index)
-                : _owner(owner), _index(index) {}
+                : _owner(owner), _index(index)
+            {
+            }
             reference operator*() const { return (*_owner)[_index]; }
             pointer operator->() const { return &**this; }
-            ConstIterator &operator++() { ++_index; return *this; }
+            ConstIterator &operator++()
+            {
+                ++_index;
+                return *this;
+            }
             ConstIterator operator++(int)
             {
                 auto previous = *this;
@@ -146,7 +163,10 @@ private:
             {
                 return _owner == other._owner && _index == other._index;
             }
-            bool operator!=(const ConstIterator &other) const { return !(*this == other); }
+            bool operator!=(const ConstIterator &other) const
+            {
+                return !(*this == other);
+            }
 
         private:
             const SharedPages *_owner;
@@ -157,7 +177,9 @@ private:
         SharedPages(const SharedPages &) = default;
         SharedPages &operator=(const SharedPages &) = default;
         SharedPages(SharedPages &&other) noexcept
-            : _groups(std::move(other._groups)), _size(std::exchange(other._size, 0)) {}
+            : _groups(std::move(other._groups)), _size(std::exchange(other._size, 0))
+        {
+        }
         SharedPages &operator=(SharedPages &&other) noexcept
         {
             if (this != &other) {
@@ -184,8 +206,9 @@ private:
         const T &operator[](size_t index) const
         {
             const auto pageIndex = index / PAGE_SIZE;
-            return (*(*_groups[pageIndex / PAGES_PER_GROUP])
-                         [pageIndex % PAGES_PER_GROUP])[index % PAGE_SIZE];
+            return (*(*_groups[pageIndex / PAGES_PER_GROUP])[pageIndex %
+                                                             PAGES_PER_GROUP])[index %
+                                                                               PAGE_SIZE];
         }
         T &writable(size_t index)
         {
@@ -241,6 +264,7 @@ private:
     int64_t _batchId = 0;
     int64_t _scheduleTimeUs = 0;
     double _predictedLatencyMs = 0.0;
+    std::map<NaviSchedCacheKeyType, NaviSchedCachePolicy> _pendingCachePolicies;
     NaviSchedCachePolicy _cachePolicy;
     bool _cacheTracked = false;
     size_t _waitingRequestCount = 0;
@@ -251,7 +275,8 @@ private:
     SharedPages<RequestEntry, 32> _requests;
     std::shared_ptr<const std::unordered_map<uint64_t, size_t>> _requestIndexes;
     NaviSchedLatencyFeatures _waitingFeatures;
-    mutable std::shared_ptr<const NaviSchedPendingCacheReservation> _pendingCacheReservation;
+    mutable std::shared_ptr<const NaviSchedPendingCacheReservation>
+        _pendingCacheReservation;
     mutable bool _pendingCacheDirty = false;
     RequestLatencyTracker::Snapshot _unreportedStats;
     long double _unreportedLatencySumMs = 0.0;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -61,6 +62,10 @@ public:
         Stats stats;
     };
     struct MatchBreakdown {
+        int64_t fullMatchedBlockCount = 0;
+        // Effective Full group hit after query policy/alignment, before Tail
+        // reconciliation.
+        int64_t effectiveFullMatchedBlockCount = 0;
         int64_t staticMatchedBlockCount = 0;
         int64_t matchedBlockCount = 0;
         int64_t firstPendingBlockSourceBatchId = 0;
@@ -98,16 +103,19 @@ public:
 
     bool reserve(uint64_t agentIdHash, int64_t batchId, int64_t scheduleTimeUs,
                  const std::vector<ReferencedRequest> &requests,
-                 const NaviSchedCachePolicy &policy);
+                 const NaviSchedCachePolicy &policy,
+                 NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL);
     bool updateScheduled(
-        uint64_t agentIdHash,
-        const NaviSchedPendingCacheReservation &reservation);
+        uint64_t agentIdHash, const NaviSchedPendingCacheReservation &reservation,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL);
+    bool retire(uint64_t agentIdHash, int64_t batchId,
+                NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL);
     bool removeScheduledBlocks(uint64_t agentIdHash, int64_t batchId,
                                const std::vector<uint64_t> &fullReadyBlockHashes,
-                               const std::vector<uint64_t> &tailReadyBlockHashes);
-    bool retire(uint64_t agentIdHash, int64_t batchId);
-    ApplyResult applyAgentUpdate(
-        uint64_t agentIdHash, const AgentPendingCacheToMasterData &update);
+                               const std::vector<uint64_t> &tailReadyBlockHashes,
+                               NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL);
+    ApplyResult applyAgentUpdate(uint64_t agentIdHash,
+                                 const AgentPendingCacheToMasterData &update);
     void clear(uint64_t agentIdHash);
     void remove(uint64_t agentIdHash);
     void clearAll();
@@ -116,35 +124,52 @@ public:
         uint64_t agentIdHash, const NaviSchedBlockHashes &blockHashes,
         const PhysicalBlockSet &cachedBlockHashes,
         const PhysicalBlockSet &fullReadyBlockHashes,
-        const PhysicalBlockSet &tailReadyBlockHashes,
-        bool hybridTailRequired,
-        size_t matchableBlockCount = std::numeric_limits<size_t>::max()) const;
+        const PhysicalBlockSet &tailReadyBlockHashes, bool hybridTailRequired,
+        size_t matchableBlockCount = std::numeric_limits<size_t>::max(),
+        int64_t fullAttentionQueryDropBlockCount = 0,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
     int64_t getMatchedBlockCountExcludingSchedule(
         uint64_t agentIdHash, int64_t excludedScheduleBatchId,
         const NaviSchedBlockHashes &blockHashes,
         const PhysicalBlockSet &cachedBlockHashes,
         const PhysicalBlockSet &fullReadyBlockHashes,
-        const PhysicalBlockSet &tailReadyBlockHashes,
-        bool hybridTailRequired,
-        size_t matchableBlockCount = std::numeric_limits<size_t>::max()) const;
+        const PhysicalBlockSet &tailReadyBlockHashes, bool hybridTailRequired,
+        size_t matchableBlockCount = std::numeric_limits<size_t>::max(),
+        int64_t fullAttentionQueryDropBlockCount = 0,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL,
+        size_t startBlock = 0, size_t alignmentBlocks = 1) const;
     MatchBreakdown getMatchBreakdown(
         uint64_t agentIdHash, const NaviSchedBlockHashes &blockHashes,
         const PhysicalBlockSet &cachedBlockHashes,
         const PhysicalBlockSet &fullReadyBlockHashes,
-        const PhysicalBlockSet &tailReadyBlockHashes,
-        bool hybridTailRequired,
-        size_t matchableBlockCount = std::numeric_limits<size_t>::max()) const;
+        const PhysicalBlockSet &tailReadyBlockHashes, bool hybridTailRequired,
+        size_t matchableBlockCount = std::numeric_limits<size_t>::max(),
+        int64_t fullAttentionQueryDropBlockCount = 0,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL,
+        size_t startBlock = 0, size_t alignmentBlocks = 1,
+        int64_t excludedScheduleBatchId = 0) const;
     uint64_t getMatchedBlockCounts(
-        uint64_t agentIdHash,
-        const std::vector<NaviSchedScheduleItem> &requests,
-        int64_t effectiveBlockSize,
-        const PhysicalBlockSet &cachedBlockHashes,
+        uint64_t agentIdHash, const std::vector<NaviSchedScheduleItem> &requests,
+        int64_t effectiveBlockSize, const PhysicalBlockSet &cachedBlockHashes,
         const PhysicalBlockSet &fullReadyBlockHashes,
-        const PhysicalBlockSet &tailReadyBlockHashes,
-        bool hybridTailRequired, int64_t *matchedBlockCounts,
-        BatchMatchTiming *timing = nullptr,
+        const PhysicalBlockSet &tailReadyBlockHashes, bool hybridTailRequired,
+        int64_t *matchedBlockCounts, int64_t fullAttentionQueryDropBlockCount = 0,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL,
+        int64_t *fullMatchedBlockCounts = nullptr,
+        int64_t *effectiveFullMatchedBlockCounts = nullptr,
+        const int64_t *startBlocks = nullptr,
+        const size_t *matchableBlockCounts = nullptr, size_t alignmentBlocks = 1,
+        bool includePending = true, BatchMatchTiming *timing = nullptr,
         const std::vector<size_t> *commonPrefixes = nullptr) const;
-    Stats getStats(uint64_t agentIdHash) const;
+    Stats getStats(uint64_t agentIdHash, NaviSchedCacheKeyType cacheKeyType =
+                                             NaviSchedCacheKeyType::BLOCK_POOL) const;
+    uint64_t getMatchedBlockCounts(
+        uint64_t agentIdHash, const std::vector<NaviSchedScheduleItem> &requests,
+        int64_t effectiveBlockSize, const PhysicalBlockSet &cachedBlockHashes,
+        const PhysicalBlockSet &fullReadyBlockHashes,
+        const PhysicalBlockSet &tailReadyBlockHashes, bool hybridTailRequired,
+        int64_t *matchedBlockCounts, BatchMatchTiming *timing,
+        const std::vector<size_t> *commonPrefixes = nullptr) const;
     ReplaySnapshot captureReplaySnapshot(uint64_t agentIdHash) const;
     autil::legacy::json::JsonMap makeReplayState(uint64_t agentIdHash) const;
     bool restoreReplayState(uint64_t agentIdHash,
@@ -167,28 +192,31 @@ private:
     };
     using NodeCachePtr = std::shared_ptr<NodeCache>;
 
-    NodeCachePtr getNodeCache(uint64_t agentIdHash) const;
-    NodeCachePtr getOrCreateNodeCache(uint64_t agentIdHash);
+    NodeCachePtr getNodeCache(uint64_t agentIdHash,
+                              NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+    NodeCachePtr getOrCreateNodeCache(uint64_t agentIdHash,
+                                      NaviSchedCacheKeyType cacheKeyType);
     static Stats getStatsLocked(const NodeCache &cache);
-    static bool validateAgentStateLocked(
-        const NodeCache &cache, const AgentPendingCacheToMasterData &update);
+    static bool validateAgentStateLocked(const NodeCache &cache,
+                                         const AgentPendingCacheToMasterData &update);
     static int64_t getMatchedBlockCountLocked(
         const NodeCache *cache, const NaviSchedBlockHashes &blockHashes,
         const PhysicalBlockSet &cachedBlockHashes,
         const PhysicalBlockSet &fullReadyBlockHashes,
-        const PhysicalBlockSet &tailReadyBlockHashes,
-        bool hybridTailRequired, size_t matchableBlockCount,
-        int64_t excludedScheduleBatchId = 0,
-        size_t initialMatchedBlockCount = 0,
-        size_t *fullMatchedBlockCount = nullptr);
-    static int64_t getPendingSourceBatchIdLocked(
-        const NodeCache &cache, uint64_t blockHash, bool tailReady);
+        const PhysicalBlockSet &tailReadyBlockHashes, bool hybridTailRequired,
+        size_t matchableBlockCount, int64_t excludedScheduleBatchId = 0,
+        int64_t fullAttentionQueryDropBlockCount = 0, size_t startBlock = 0,
+        size_t alignmentBlocks = 1, int64_t *fullMatchedBlockCount = nullptr,
+        int64_t *effectiveFullMatchedBlockCount = nullptr,
+        size_t initialMatchedBlockCount = 0);
+    static int64_t getPendingSourceBatchIdLocked(const NodeCache &cache,
+                                                 uint64_t blockHash, bool tailReady);
 
 private:
     mutable autil::ReadWriteLock _nodeLock;
-    std::unordered_map<uint64_t, NodeCachePtr> _nodeCaches;
+    std::array<std::unordered_map<uint64_t, NodeCachePtr>, 2> _nodeCaches;
 };
 
 NAVI_TYPEDEF_PTR(MasterPendingCacheR);
 
-}
+} // namespace navi_sched

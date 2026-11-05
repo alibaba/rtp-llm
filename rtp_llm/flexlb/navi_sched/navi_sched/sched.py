@@ -1,6 +1,13 @@
 from dataclasses import dataclass
 from typing import List, Optional
 
+
+class NaviSchedScheduleError(RuntimeError):
+    def __init__(self, error_code: int, message: str) -> None:
+        self.error_code = int(error_code)
+        super().__init__(message or "navi sched request failed")
+
+
 @dataclass
 class NaviSchedRequest:
     prompt_token_count: int
@@ -8,6 +15,7 @@ class NaviSchedRequest:
     request_id: int
     block_size: int = 256
     forward_payload: bytes = b""
+    explicit_cache_checkpoint_position: int = 0
 
 
 @dataclass
@@ -44,7 +52,7 @@ class NaviSchedDecision:
 
 def decisionFromNative(result) -> NaviSchedDecision:
     if result.error_code != 0:
-        raise RuntimeError(result.error_message or "navi sched request failed")
+        raise NaviSchedScheduleError(result.error_code, result.error_message)
     decision = result.decision
     target = None
     if decision.target.address:
@@ -85,6 +93,7 @@ def makeRequest(
     request_id: Optional[int] = None,
     block_size: int = 256,
     forward_payload: bytes = b"",
+    explicit_cache_checkpoint_position: int = 0,
 ) -> NaviSchedRequest:
     if request_id is None or not 0 < int(request_id) < (1 << 64):
         raise ValueError("request_id must be a nonzero uint64")
@@ -94,10 +103,17 @@ def makeRequest(
         raise ValueError("block_size must be positive")
     if len(block_hashes) > int(prompt_token_count) // int(block_size):
         raise ValueError("block_hashes exceed complete prompt blocks")
+    if type(
+        explicit_cache_checkpoint_position
+    ) is not int or not 0 <= explicit_cache_checkpoint_position <= int(
+        prompt_token_count
+    ):
+        raise ValueError("explicit cache checkpoint position must be within the prompt")
     return NaviSchedRequest(
         prompt_token_count=int(prompt_token_count),
         block_hashes=block_hashes,
         request_id=int(request_id),
         block_size=int(block_size),
         forward_payload=bytes(forward_payload),
+        explicit_cache_checkpoint_position=explicit_cache_checkpoint_position,
     )

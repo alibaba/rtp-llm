@@ -44,15 +44,14 @@ public:
               bool &fitOnStart,
               const LatencyResidualModel::RuntimeConfig &residualConfig);
     bool append(const NaviSchedLatencySample &sample,
-                NaviSchedLatencyTrainingPhase trainingPhase,
-                AppendResult &result);
+                NaviSchedLatencyTrainingPhase trainingPhase, AppendResult &result);
     bool append(const NaviSchedLatencySample &sample, bool &fitReady, bool &persistReady);
     std::vector<NaviSchedLatencySample> getFitBatch() const;
     std::vector<NaviSchedLatencySample> getOnlineFitBatch() const;
     std::vector<std::vector<NaviSchedLatencySample>> getOnlineFitBatches() const;
     void clearPendingFitSamples();
-    std::vector<std::vector<NaviSchedLatencySample>>
-    getOnlineFitReplayBatches(bool includePendingTail = false) const;
+    std::vector<std::vector<NaviSchedLatencySample>> getOnlineFitReplayBatches(
+        bool includePendingTail = false) const;
     HistoryConstPtr getHistory() const;
     size_t getSessionSampleCount() const;
     size_t getRetainedSampleCountAtMost(double latencyMs) const;
@@ -65,6 +64,7 @@ public:
         const NonLinearPrefillModelR::OptimizerState &optimizerState,
         std::string &payload) const;
     bool savePayload(const std::string &payload) const;
+    bool savePayload(const std::string &payload, int64_t binaryVersion) const;
     bool save(const std::shared_ptr<const NaviSchedLatencyModelSnapshot> &snapshot,
               const NonLinearPrefillModelR::OptimizerState &optimizerState) const;
     bool enabled() const;

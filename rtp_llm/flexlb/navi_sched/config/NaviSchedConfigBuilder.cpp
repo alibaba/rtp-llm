@@ -100,17 +100,25 @@ autil::legacy::json::JsonMap NaviSchedConfigBuilder::makeSubscribeConfig(
         vipConfig["query_full_api"] = true;
         subscribeConfig["vip"] = std::move(vipConfig);
     }
+    const auto &spectrum = config.spectrumSubscription;
+    if (!spectrum.serviceId.empty()) {
+        autil::legacy::json::JsonMap spectrumConfig;
+        spectrumConfig["service_id"] = spectrum.serviceId;
+        if (!spectrum.physicalServiceId.empty()) {
+            spectrumConfig["physical_service_id"] = spectrum.physicalServiceId;
+        }
+        spectrumConfig["grpc_port_diff"] = spectrum.grpcPortDiff;
+        subscribeConfig["spectrum"] = std::move(spectrumConfig);
+    }
     return subscribeConfig;
 }
 
-std::string NaviSchedConfigBuilder::build(const NaviSchedRuntimeConfig &config,
-                                          const std::vector<std::string> &kernelList,
-                                          bool createGigClient,
-                                          const NamedConfigs &kernelConfigs,
-                                          const NamedConfigs &bizResourceConfigs,
-                                          const std::vector<std::string> &bizResourceList,
-                                          size_t grpcClientIoThreadNum,
-                                          const std::map<std::string, size_t> &extraTaskQueueThreads)
+std::string NaviSchedConfigBuilder::build(
+    const NaviSchedRuntimeConfig &config, const std::vector<std::string> &kernelList,
+    bool createGigClient, const NamedConfigs &kernelConfigs,
+    const NamedConfigs &bizResourceConfigs,
+    const std::vector<std::string> &bizResourceList, size_t grpcClientIoThreadNum,
+    const std::map<std::string, size_t> &extraTaskQueueThreads)
 {
     if (config.bizName.empty()) {
         return "";

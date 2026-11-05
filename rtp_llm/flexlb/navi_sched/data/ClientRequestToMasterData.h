@@ -35,9 +35,12 @@ public:
     std::string bizName;
     int64_t timeoutMs = 0;
     int64_t promptTokenCount = 0;
+    // Explicit runtime checkpoint, before node-specific block alignment.
+    int64_t explicitCacheCheckpointPosition = 0;
     int64_t blockSize = 256;
     uint64_t requestId = 0;
     bool collectReplay = false;
+    bool routeOnly = false;
     NaviSchedBlockHashesConstPtr blockHashes;
     std::string forwardPayload;
     int64_t deserializeBeginTimeUs = 0;

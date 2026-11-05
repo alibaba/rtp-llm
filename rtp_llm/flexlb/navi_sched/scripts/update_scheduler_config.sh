@@ -56,6 +56,17 @@ Master 字段在 Master 内生效，Agent 字段通过已有的 Master->Agent �
   latency_fit_interval                在线拟合的额外触发间隔，0 表示使用默认批量触发。
   latency_learning_rate               延迟模型 Adam 基础学习率。
   latency_online_learning_rate_scale  在线更新时相对基础学习率的倍率。
+  latency_adaptive_learning_rate      在线学习率控制器对象，用 --patch-json 设置：
+    enabled                           是否启用控制器，true/false。
+    mode                              adaptive（默认）、error_rate 或 error_rate_hinge（超过阈值才加速）。
+    error_rate_base_gain              误差率到基础学习率倍率的增益，必须大于 0。
+    error_rate_base_power             基础误差率的幂次，1 为线性，2 为平方，范围 1-4。
+    error_rate_base_threshold         error_rate_hinge 的误差率阈值，范围 0-1，默认 0.1。
+    error_rate_normalizer_floor_ms    误差率分母下限，单位毫秒，默认 100。
+    error_rate_minimum_streak          error_rate_hinge 连续同方向大误差达到该次数才加速，范围 1-64，默认 1。
+    base_scale_minimum/maximum        基础学习率倍率的下限和上限。
+    residual_learning_rate_minimum/maximum  residual 学习率范围；两种 error_rate 模式要求两者相等。
+  latency_error_clip_ms             Absolute training error clip in ms; default 5000, 0 disables.
   latency_current_sample_weight      当前在线样本在 loss 中的相对权重。
   latency_nonlinear_scale             非线性延迟项中的 K 参数，必须为正。
   queue_learning_rate                 queue 模型学习率。

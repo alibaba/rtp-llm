@@ -7,19 +7,20 @@ from dataclasses import dataclass
 from typing import Mapping, Optional
 
 from .env import (
+    NAVI_MASTER_ARPC_PORT_ENV,
     NAVI_MASTER_BIZ_NAME_ENV,
     NAVI_MASTER_CONFIG_FILE_ENV,
     NAVI_MASTER_CONFIG_JSON_ENV,
-    NAVI_MASTER_VIP_SUBSCRIPTION_JSON_ENV,
     NAVI_MASTER_ENABLE_KMON_ENV,
-    NAVI_MASTER_HTTP_PORT_ENV,
-    NAVI_MASTER_ARPC_PORT_ENV,
     NAVI_MASTER_GRPC_PORT_ENV,
+    NAVI_MASTER_HTTP_PORT_ENV,
     NAVI_MASTER_LOG_FILE_ENV,
     NAVI_MASTER_NAME_ENV,
     NAVI_MASTER_SNAPSHOT_DIR_ENV,
+    NAVI_MASTER_VIP_SUBSCRIPTION_JSON_ENV,
 )
 from .master import NaviSchedMaster
+from .spectrum_kmon import spectrum_kmon_tags
 from .util import (
     DEFAULT_LOG_FILE_NAME,
     DEFAULT_MASTER_RUNTIME_NAME,
@@ -36,7 +37,9 @@ _RUNTIME_OPTION_NAMES = (
     "local_nodes",
     "cm2_subscriptions",
     "vip_subscription",
+    "spectrum_subscription",
 )
+
 
 def _read_bool(values: Mapping[str, str], name: str, default: bool) -> bool:
     value = values.get(name)
@@ -67,9 +70,7 @@ class MasterProcessConfig:
             master_biz_name=values.get(NAVI_MASTER_BIZ_NAME_ENV, "").strip(),
             config_file=values.get(NAVI_MASTER_CONFIG_FILE_ENV, "").strip(),
             config_json=values.get(NAVI_MASTER_CONFIG_JSON_ENV, "").strip(),
-            name=values.get(
-                NAVI_MASTER_NAME_ENV, DEFAULT_MASTER_RUNTIME_NAME
-            ).strip(),
+            name=values.get(NAVI_MASTER_NAME_ENV, DEFAULT_MASTER_RUNTIME_NAME).strip(),
             http_port=int(values.get(NAVI_MASTER_HTTP_PORT_ENV, "0") or 0),
             arpc_port=int(values.get(NAVI_MASTER_ARPC_PORT_ENV, "0") or 0),
             grpc_port=int(values.get(NAVI_MASTER_GRPC_PORT_ENV, "0") or 0),
@@ -79,9 +80,7 @@ class MasterProcessConfig:
             snapshot_dir=values.get(
                 NAVI_MASTER_SNAPSHOT_DIR_ENV, DEFAULT_MASTER_SNAPSHOT_DIR
             ).strip(),
-            enable_kmon=_read_bool(
-                values, NAVI_MASTER_ENABLE_KMON_ENV, True
-            ),
+            enable_kmon=_read_bool(values, NAVI_MASTER_ENABLE_KMON_ENV, True),
         )
 
     def validate(self) -> None:
@@ -163,6 +162,7 @@ def make_master_kmon_tags(options, environ=None):
     deployment_name = (
         values.get("DEPLOYMENT_NAME", "").strip()
         or values.get("HIPPO_ROLE", "").strip()
+        or values.get("SPECTRUM_DEPLOYMENT_NAME", "").strip()
     )
     if deployment_name:
         tags.setdefault("deployment_name", deployment_name)
@@ -176,6 +176,7 @@ def make_master_kmon_tags(options, environ=None):
         value = values.get(env_name, "").strip()
         if value:
             tags.setdefault(tag_name, value)
+    tags.update(spectrum_kmon_tags(values))
     physical_host_ip = values.get("HIPPO_SLAVE_IP", "").strip()
     instance_ip = values.get("POD_IP", "").strip() or physical_host_ip
     if instance_ip:
@@ -209,12 +210,14 @@ def run_master(config: MasterProcessConfig, role_options=None) -> None:
     runtime_config = make_runtime_config(role_options)
     kmon_tags = make_master_kmon_tags(role_options)
     gig = dict(role_options.pop("gig", {}))
-    gig.update({
-        "http_port": config.http_port,
-        "arpc_port": config.arpc_port,
-        "grpc_port": config.grpc_port,
-        "snapshot_log_dir": config.snapshot_dir,
-    })
+    gig.update(
+        {
+            "http_port": config.http_port,
+            "arpc_port": config.arpc_port,
+            "grpc_port": config.grpc_port,
+            "snapshot_log_dir": config.snapshot_dir,
+        }
+    )
     with NaviSchedMaster(
         config.master_biz_name,
         name=config.name,

@@ -8,6 +8,8 @@
 namespace navi_sched {
 
 struct AgentCacheToMasterData {
+    NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL;
+
 public:
     void serialize(autil::DataBuffer &dataBuffer) const;
     void deserialize(autil::DataBuffer &dataBuffer);

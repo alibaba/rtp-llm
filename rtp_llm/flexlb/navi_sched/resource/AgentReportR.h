@@ -29,6 +29,8 @@ public:
 public:
     void setAgentReportR(const std::shared_ptr<AgentReportR> &agentReportR);
     std::shared_ptr<AgentReportR> getAgentReportR() const;
+    void setControlConfig(const AgentControlToMasterData &config);
+    AgentControlToMasterData getControlConfig() const;
 
 public:
     static const std::string RESOURCE_ID;
@@ -36,6 +38,7 @@ public:
 private:
     mutable autil::ThreadMutex _lock;
     std::weak_ptr<AgentReportR> _agentReportR;
+    AgentControlToMasterData _controlConfig;
 };
 
 NAVI_TYPEDEF_PTR(AgentReportBridgeR);
@@ -88,9 +91,8 @@ public:
         const std::shared_ptr<ConcurrentRequestLatencyTracker> &tracker);
     bool setExecutionUtilizationSource(
         const std::shared_ptr<const std::atomic<double>> &source,
-    const std::shared_ptr<const std::atomic<double>> &busySource = nullptr);
-    std::shared_ptr<const NaviSchedLatencyModelSnapshot>
-    getLatencyModelSnapshot() const;
+        const std::shared_ptr<const std::atomic<double>> &busySource = nullptr);
+    std::shared_ptr<const NaviSchedLatencyModelSnapshot> getLatencyModelSnapshot() const;
     AgentSchedulerConfigR::Snapshot getSchedulerConfigSnapshot() const;
     bool setInflightStats(const RequestLatencyTracker::Snapshot &snapshot);
     RequestLatencyTracker::Snapshot getInflightStats() const;
@@ -98,25 +100,28 @@ public:
     size_t reportLatencyModelUpdated(
         const std::shared_ptr<const NaviSchedLatencyModelSnapshot> &snapshot,
         bool recomputeWaitingInflight = false);
-    uint64_t reportWorkloadUpdated(const NaviSchedWorkloadSnapshot &snapshot,
-                                   const std::vector<int64_t> &coveredNativeBatchIds = {});
+    uint64_t reportWorkloadUpdated(
+        const NaviSchedWorkloadSnapshot &snapshot,
+        const std::vector<int64_t> &coveredNativeBatchIds = {});
     bool reportNativeBatchReady(const NaviSchedBatchPtr &batch);
     bool reportNativeRequestReceived(const NaviSchedRequestStats &request,
-                                    int32_t batchWaitingRequests, int32_t queuedBatchRequests,
-                                    int32_t runningRequests, int64_t eventTimeUs);
+                                     int32_t batchWaitingRequests,
+                                     int32_t queuedBatchRequests, int32_t runningRequests,
+                                     int64_t eventTimeUs);
     bool reportNativeUnbatchedRequestsRemoved(const std::vector<uint64_t> &requestIds);
     bool reportNativeRequestsRemoved(int64_t localBatchId,
-                                    const std::vector<uint64_t> &requestIds);
+                                     const std::vector<uint64_t> &requestIds);
     bool reportNativeBatchRemoved(int64_t localBatchId);
-    bool reportNativeBatchCompleted(int64_t localBatchId, int64_t pendingBatchId);
+    bool reportNativeBatchCompleted(
+        int64_t localBatchId, int64_t pendingBatchId,
+        const std::vector<NaviSchedCacheKeyType> &pendingTypes);
     size_t reportSchedulerConfigUpdated(uint64_t requestGeneration,
                                         uint64_t appliedGeneration,
                                         const std::string &configHash,
                                         const std::string &configJson,
                                         const std::string &error) const;
     size_t reportRequestReceived(uint64_t requestId, int64_t promptTokenCount,
-                                 int32_t inflightRequests,
-                                 int32_t batchWaitingRequests,
+                                 int32_t inflightRequests, int32_t batchWaitingRequests,
                                  int32_t queuedBatchRequests, int32_t runningRequests,
                                  int64_t eventTimeUs) const;
     size_t reportExecutionLoad(int32_t batchWaitingRequests, int32_t queuedBatchRequests,
@@ -124,49 +129,70 @@ public:
                                double queueTotalPredictedLatencyMs,
                                double queueDecayHeadRemainingMs,
                                uint64_t batchTimeoutCount,
-                               uint64_t abnormalBatchFinishCount,
-                               int64_t eventTimeUs,
-                               const NaviSchedLocalBatchInfo &localBatch = {}) const;
-    size_t reportBatchFinished(int32_t inflightRequests, int32_t batchWaitingRequests,
-                               int32_t queuedBatchRequests, int32_t runningRequests,
-                               double latencyMs, double queueTotalPredictedLatencyMs,
-                               double queueDecayHeadRemainingMs,
-                               const NaviSchedCacheUpdate &cacheUpdate,
-                               int32_t completedRequestCount, int64_t cacheHitTokens,
-                               int64_t cacheMissTokens, uint64_t batchTimeoutCount,
-                               uint64_t abnormalBatchFinishCount,
-                               bool abnormalBatchFinished, int64_t eventTimeUs,
+                               uint64_t abnormalBatchFinishCount, int64_t eventTimeUs,
                                const NaviSchedLocalBatchInfo &localBatch = {},
-                               double agentPredictedExecutionLatencyMs = 0.0,
-                               double backendQueueLatencyMs = 0.0,
-                               const NaviSchedLatencyValidationStats &validationStats =
-                                   NaviSchedLatencyValidationStats()) const;
+                               const NaviSchedQueueModelState &queueModel = {}) const;
+    size_t reportBatchFinished(
+        int32_t inflightRequests, int32_t batchWaitingRequests,
+        int32_t queuedBatchRequests, int32_t runningRequests, double latencyMs,
+        double queueTotalPredictedLatencyMs, double queueDecayHeadRemainingMs,
+        const NaviSchedCacheUpdate &cacheUpdate, int32_t completedRequestCount,
+        int64_t cacheHitTokens, int64_t cacheMissTokens, uint64_t batchTimeoutCount,
+        uint64_t abnormalBatchFinishCount, bool abnormalBatchFinished,
+        int64_t eventTimeUs, const NaviSchedLocalBatchInfo &localBatch = {},
+        double agentPredictedExecutionLatencyMs = 0.0, double backendQueueLatencyMs = 0.0,
+        const NaviSchedLatencyValidationStats &validationStats =
+            NaviSchedLatencyValidationStats(),
+        const NaviSchedQueueModelState &queueModel = {}) const;
     bool latencyValidationEnabled() const;
     void setLatencyValidationEnabled(bool enabled);
     bool pdSeparated() const { return _pdSeparated; }
-    bool usesUnifiedLatencyPrediction() const {
-        return _unifiedLatencyPrediction;
-    }
+    bool usesUnifiedLatencyPrediction() const { return _unifiedLatencyPrediction; }
+    bool reportPeerCacheReadAvailable(bool available);
     size_t reportCacheUpdated(const NaviSchedCacheUpdate &update) const;
     bool reportPendingCacheReady(
-        const NaviSchedPendingCacheReservation &reservation) const;
-    bool reportPendingCacheCompleted(int64_t localBatchId) const;
-    bool reportPendingCacheAborted(int64_t localBatchId) const;
+        const NaviSchedPendingCacheReservation &reservation,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+    bool reportPendingCacheCompleted(
+        int64_t localBatchId,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+    bool reportPendingCacheAborted(
+        int64_t localBatchId,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+    bool removePendingCachePublications(int64_t batchId,
+                                        const NaviSchedBlockHashes &failedFull,
+                                        const NaviSchedBlockHashes &failedTail,
+                                        NaviSchedCacheKeyType type, bool &retired) const;
     bool replacePendingCache(
         int64_t localBatchId,
-        const NaviSchedPendingCacheReservation *remainingReservation) const;
+        const NaviSchedPendingCacheReservation *remainingReservation,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
     size_t reportBatchRequestsAborted(
         int32_t inflightRequests, int32_t batchWaitingRequests,
         int32_t queuedBatchRequests, int32_t runningRequests,
-        double queueTotalPredictedLatencyMs,
-        double queueDecayHeadRemainingMs, uint64_t batchTimeoutCount,
-        uint64_t abnormalBatchFinishCount, int32_t abortedRequestCount,
-        int64_t eventTimeUs,
-        const NaviSchedLocalBatchInfo &localBatch) const;
+        double queueTotalPredictedLatencyMs, double queueDecayHeadRemainingMs,
+        uint64_t batchTimeoutCount, uint64_t abnormalBatchFinishCount,
+        int32_t abortedRequestCount, int64_t eventTimeUs,
+        const NaviSchedLocalBatchInfo &localBatch,
+        const NaviSchedQueueModelState &queueModel = {}) const;
     bool reportPendingCacheSnapshot(const std::string &collectorId) const;
-    NaviSchedRequestStats makeRequestStats(const NaviSchedBatchRequest &request) const;
+    bool reportPendingCacheSnapshot(const std::string &collectorId,
+                                    NaviSchedCacheKeyType cacheKeyType) const;
+    NaviSchedRequestStats makeRequestStats(
+        const NaviSchedBatchRequest &request,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+    const std::string &getLatencyModelFingerprint() const
+    {
+        return _latencyModelFingerprint;
+    }
+    const TPUPrefillExecutionPolicyConfig &getPrefillExecutionPolicy() const
+    {
+        return _controlConfig.prefillExecutionPolicy;
+    }
+
     AgentCacheR::RequestAudit makeRequestAudit(
-        const NaviSchedBatchRequest &request) const;
+        const NaviSchedBatchRequest &request,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
     size_t beginStop(int64_t eventTimeUs);
     bool waitForStopAcks(int64_t timeoutUs);
     bool confirmStop(const std::string &collectorId);
@@ -183,9 +209,13 @@ public:
     LatencyValidationDiagnostics getLatencyValidationDiagnostics() const;
     NaviSchedWorkloadSnapshotConstPtr getWorkloadSnapshot() const;
     WorkloadPublishWindowStats takeWorkloadPublishWindowStats() const;
-    size_t getCachedBlockCount() const;
-    AgentCacheR::State getCacheState() const;
-    AgentPendingCacheR::State getPendingCacheState() const;
+    size_t getCachedBlockCount(
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+    bool hasCacheKeyType(NaviSchedCacheKeyType cacheKeyType) const;
+    AgentCacheR::State getCacheState(
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+    AgentPendingCacheR::State getPendingCacheState(
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
     navi::SummaryErrorCode getSummary(const std::string &query,
                                       navi::SummaryBuilder &builder) const override;
 
@@ -213,22 +243,23 @@ private:
 
     bool setHandshake(const AgentUpdateToMasterDataPtr &handshake);
     AgentUpdateToMasterDataPtr makeUpdate(NaviSchedAgentEvent::Type event,
-                                         int64_t eventTimeUs) const;
+                                          int64_t eventTimeUs) const;
     void attachInflightStats(const AgentUpdateToMasterDataPtr &update) const;
-    QueuedPublishPtr enqueueWorkloadLocked(NaviSchedWorkloadSnapshot &snapshot,
-                                          AgentUpdateToMasterDataPtr update = {},
-                                          std::vector<AgentUpdateToMasterDataPtr> trailingUpdates = {});
+    QueuedPublishPtr enqueueWorkloadLocked(
+        NaviSchedWorkloadSnapshot &snapshot, AgentUpdateToMasterDataPtr update = {},
+        std::vector<AgentUpdateToMasterDataPtr> trailingUpdates = {});
     void finishWorkloadPublish(const QueuedPublishPtr &task) const;
     NaviSchedWorkloadSnapshot observedWorkloadLocked() const;
-    bool retirePendingCacheLocked(int64_t localBatchId,
-                                  QueuedPublishPtr *publishTask = nullptr) const;
+    bool retirePendingCacheLocked(
+        int64_t localBatchId, QueuedPublishPtr *publishTask = nullptr,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
     AgentUpdateToMasterDataPtr makeHandshakeUpdate() const;
-    QueuedPublishPtr enqueuePublish(
-        const AgentUpdateToMasterDataPtr &update, bool trackStats = true) const;
-    QueuedPublishPtr enqueuePublishLocked(
-        std::vector<AgentUpdateToMasterDataPtr> updates,
-        std::vector<SubscriberPtr> subscribers, bool trackStats,
-        bool allowStopping = false) const;
+    QueuedPublishPtr enqueuePublish(const AgentUpdateToMasterDataPtr &update,
+                                    bool trackStats = true) const;
+    QueuedPublishPtr enqueuePublishLocked(std::vector<AgentUpdateToMasterDataPtr> updates,
+                                          std::vector<SubscriberPtr> subscribers,
+                                          bool trackStats,
+                                          bool allowStopping = false) const;
     void drainPublishQueue() const;
     size_t waitPublish(const QueuedPublishPtr &publishTask) const;
     void deliverPublish(const QueuedPublishPtr &publishTask) const;
@@ -274,9 +305,17 @@ private:
     int64_t _agentStartTimeUs = 0;
     bool _pdSeparated = true;
     bool _unifiedLatencyPrediction = false;
+    int64_t _fullAttentionQueryDropTokens = 0;
+    bool _mambaReplayStopShift = false;
+    int64_t _mambaRetentionInterval = -1;
+    bool _mambaAlign = false;
     std::atomic<bool> _latencyValidationEnabled{false};
     bool _workloadPublishTimingEnabled = false;
     std::string _latencyModelFingerprint;
+    AgentControlToMasterData _controlConfig;
+    mutable autil::ThreadMutex _peerCacheReadLock;
+    bool _peerCacheReadAvailable = false;
+    uint64_t _peerCacheReadRevision = 1;
     mutable std::map<std::string, SubscriberPtr> _subscribers;
     mutable std::set<std::string> _pendingStopAcks;
     bool _stopping = false;

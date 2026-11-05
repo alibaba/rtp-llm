@@ -100,6 +100,14 @@ navi::ErrorCode MasterScheduleContextKernel::compute(navi::KernelComputeContext 
         _queueOverloadFullCycleMultiplier =
             schedulerConfig.config.queueOverloadFullCycleMultiplier;
         _timeCompression = schedulerConfig.config.agent.timeCompression;
+        _peerCacheEnabled = schedulerConfig.config.peerCacheEnabled;
+        if (_peerCacheReadyConfigGeneration != schedulerConfig.generation) {
+            const auto &agents = schedulerConfig.config.peerCacheReadyAgents;
+            _peerCacheReadyAgents =
+                std::make_shared<const std::unordered_set<std::string>>(agents.begin(),
+                                                                        agents.end());
+            _peerCacheReadyConfigGeneration = schedulerConfig.generation;
+        }
     }
     if (!drainRequests()) {
         NAVI_KERNEL_LOG(ERROR, "drain Master schedule requests failed");
@@ -237,6 +245,8 @@ bool MasterScheduleContextKernel::shouldBuildContext(int64_t currentTimeUs) cons
     return getNextScheduleDelayMs(currentTimeUs) <= 0;
 }
 
+
+
 int64_t MasterScheduleContextKernel::getNextScheduleDelayMs(int64_t currentTimeUs) const
 {
     auto maxWaitUs = _maxWaitScheduleTimeMs * 1000;
@@ -315,6 +325,8 @@ void MasterScheduleContextKernel::buildReadyContexts(int64_t activationTimeUs)
             context->context->_scheduleTimeUs = scheduleTimeUs;
             context->context->_scheduleId = _nextScheduleId++;
             context->context->_timeCompression = _timeCompression;
+            context->context->_peerCacheEnabled = _peerCacheEnabled;
+            context->context->_peerCacheReadyAgents = _peerCacheReadyAgents;
         }
         auto waitTimeUs = std::max<int64_t>(0, currentTimeUs - request->enqueueTimeUs);
         totalWaitUs += waitTimeUs;
@@ -489,20 +501,32 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     if (0 == context.requestCount() || 0 == context.nodeCount()) {
         return context.requestCount() > 0;
     }
+    const auto healthyBacklogLatencyLimitMs =
+        static_cast<double>(_maxWaitScheduleTimeMs) * _queueOverloadStartCycleMultiplier;
     const auto coldStartAnalysis = _executionUtilizationLimitEnabled
                                        ? CostSchedulerColdStartStrategy::Analysis()
-                                       : CostSchedulerColdStartStrategy::analyze(context);
+                                       : CostSchedulerColdStartStrategy::analyze(
+                                             context, healthyBacklogLatencyLimitMs);
     const auto averagePredictedLatencyMs =
         coldStartAnalysis.trustedBacklogInflight > 0
             ? static_cast<double>(coldStartAnalysis.trustedBacklogLatencyWeightedSumMs /
                                   coldStartAnalysis.trustedBacklogInflight)
             : 0.0;
+    const auto bootstrapUntrustedNode = coldStartAnalysis.untrustedCapacity > 0;
     auto dropProbability =
         _executionUtilizationLimitEnabled
             ? 0.0
             : calculateQueueOverloadDropProbability(
                   averagePredictedLatencyMs, _maxWaitScheduleTimeMs,
                   _queueOverloadStartCycleMultiplier, _queueOverloadFullCycleMultiplier);
+    const auto initialDropProbability = dropProbability;
+    if (_schedulerKernelId == CostSchedulerKernel::KERNEL_ID && dropProbability > 0.0 &&
+        std::isfinite(coldStartAnalysis.minimumTrustedBacklogLatencyMs)) {
+        const auto recoveryProbability = calculateQueueOverloadDropProbability(
+            coldStartAnalysis.minimumTrustedBacklogLatencyMs, _maxWaitScheduleTimeMs,
+            _queueOverloadStartCycleMultiplier, _queueOverloadFullCycleMultiplier);
+        dropProbability = std::min(dropProbability, recoveryProbability);
+    }
     if (_executionUtilizationLimitEnabled) {
         const auto now = autil::TimeUtility::monotonicTimeUs();
         {
@@ -558,6 +582,46 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     context._queueOverloadAveragePredictedLatencyMs = averagePredictedLatencyMs;
     context._queueOverloadDropProbability = dropProbability;
     const auto requestCount = context.requestCount();
+    if (!_executionUtilizationLimitEnabled &&
+        (context._scheduleId < 10 || context._scheduleId % 100 == 0 ||
+         (initialDropProbability > 0.0 && context._scheduleId % 10 == 0))) {
+        const auto minNodeIndex = coldStartAnalysis.minimumTrustedBacklogNodeIndex;
+        const auto *minNode =
+            minNodeIndex < context.nodeCount() ? &context.getNode(minNodeIndex) : nullptr;
+        NAVI_KERNEL_LOG(
+            INFO,
+            "[navi-master-overload-evaluation] schedule_id=%lu schedule_time_us=%ld "
+            "requests=%lu trusted_nodes=%lu untrusted_nodes=%lu trusted_inflight=%ld "
+            "known_backlog_inflight=%ld average_predicted_latency_ms=%.3f "
+            "minimum_predicted_latency_ms=%.3f drop_probability=%.6f "
+            "schedule_cycle_ms=%ld start_multiplier=%ld full_multiplier=%ld "
+            "initial_drop_probability=%.6f trusted_unknown_busy_nodes=%lu "
+            "minimum_node_count=%lu "
+            "minimum_recovery_requests=%lu healthy_recovery_requests=%lu "
+            "minimum_agent=%s minimum_inflight=%d minimum_batch_waiting=%d "
+            "minimum_queued=%d minimum_running=%d minimum_workload_requests=%ld "
+            "minimum_workload_age_ms=%.3f minimum_batch_timeout_count=%lu "
+            "minimum_abnormal_batch_finish_count=%lu",
+            context._scheduleId, context._scheduleTimeUs, requestCount,
+            coldStartAnalysis.trustedNodeCount, coldStartAnalysis.untrustedNodeCount,
+            coldStartAnalysis.trustedInflight, coldStartAnalysis.trustedBacklogInflight,
+            averagePredictedLatencyMs, coldStartAnalysis.minimumTrustedBacklogLatencyMs,
+            dropProbability, _maxWaitScheduleTimeMs, _queueOverloadStartCycleMultiplier,
+            _queueOverloadFullCycleMultiplier, initialDropProbability,
+            coldStartAnalysis.trustedUnknownBusyNodeCount,
+            coldStartAnalysis.minimumTrustedBacklogNodeCount,
+            coldStartAnalysis.minimumTrustedBacklogRecoveryRequestCount,
+            coldStartAnalysis.healthyBacklogRecoveryRequestCount,
+            minNode ? minNode->getAgentId().c_str() : "none",
+            minNode ? minNode->getInflightRequests() : -1,
+            minNode ? minNode->getBatchWaitingRequests() : -1,
+            minNode ? minNode->getQueuedBatchRequests() : -1,
+            minNode ? minNode->getRunningRequests() : -1,
+            minNode ? minNode->getWorkloadFeatures().getPrecedingRequestCount() : -1L,
+            minNode ? minNode->getWorkloadReportAgeMs() : -1.0,
+            minNode ? minNode->getBatchTimeoutCount() : 0,
+            minNode ? minNode->getAbnormalBatchFinishCount() : 0);
+    }
     if (dropProbability <= 0.0) {
         _masterScheduleR->recordQueueOverload(requestCount, 0, averagePredictedLatencyMs,
                                               dropProbability);
@@ -580,8 +644,9 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
         auto &responseRequest = context._responseRequests[storageIndex];
         uint64_t randomSample = 0;
         const auto dropped =
+            !bootstrapRequest &&
             shouldDropRequest(dropProbability, &randomSample, randomDraw);
-        if (context.isCollectingReplay() && dropProbability > 0.0 &&
+        if (context.isCollectingReplay() && !bootstrapRequest && dropProbability > 0.0 &&
             dropProbability < 1.0) {
             context._queueOverloadRandomDecisions.push_back(
                 {storageIndex, randomSample, dropProbability, !dropped});
@@ -666,7 +731,8 @@ void MasterScheduleResultKernel::def(navi::KernelDefBuilder &builder) const
 
 MasterScheduleResultKernel::AdmissionPredictionAudit
 MasterScheduleResultKernel::getAdmissionPredictionAudit(
-    const NaviSchedScheduleContext &context, size_t requestIndex)
+    const NaviSchedScheduleContext &context, size_t requestIndex,
+    bool includeFrozenExecutionInputs)
 {
     AdmissionPredictionAudit audit;
     if (requestIndex >= context._decisions.size() ||
@@ -685,14 +751,12 @@ MasterScheduleResultKernel::getAdmissionPredictionAudit(
         return audit;
     }
 
-    audit.withWorkloadBaseMs =
-        NonLinearPrefillModelR::predict(prediction.features, parameters);
+    audit.withWorkloadBaseMs = node.predictBaseLatency(prediction.features);
     audit.withWorkloadFinalMs = node.applyLatencyResidual(audit.withWorkloadBaseMs);
     audit.baseExecutionMs = audit.withWorkloadBaseMs;
     audit.finalExecutionMs = audit.withWorkloadFinalMs;
     if (node.usesUnifiedLatencyPrediction() && prediction.hasFloor) {
-        audit.floorBaseMs =
-            NonLinearPrefillModelR::predict(prediction.floorFeatures, parameters);
+        audit.floorBaseMs = node.predictBaseLatency(prediction.floorFeatures);
         audit.floorFinalMs = node.applyLatencyResidual(audit.floorBaseMs);
         const auto executionFixedLatencyMs =
             prediction.fixedLatencyMs - decision.predictedQueueLatencyMs;
@@ -705,6 +769,27 @@ MasterScheduleResultKernel::getAdmissionPredictionAudit(
     audit.valid = std::isfinite(audit.baseExecutionMs) &&
                   std::isfinite(audit.finalExecutionMs) &&
                   std::isfinite(audit.correctionMs);
+    if (audit.valid && includeFrozenExecutionInputs && decision.batchId > 0) {
+        // Copy only the already-published forecast inputs. Logging must not
+        // perform another cache lookup against a later node state.
+        const auto inputs = std::atomic_load(&node._executionCacheInputs);
+        if (inputs) {
+            audit.cacheObservation = inputs->observation.pool;
+            for (size_t member = 0; member < context._decisions.size(); ++member) {
+                if (context._decisions[member].batchId != decision.batchId) {
+                    continue;
+                }
+                const auto storage = context.resolveRequestIndex(member);
+                if (storage < inputs->inputs.size()) {
+                    const auto &prefixes =
+                        inputs->observation.fullPrefixBlocksBeforeQueryDrop;
+                    audit.frozenExecutionInputs.push_back(
+                        {context._decisions[member].requestId, inputs->inputs[storage],
+                         storage < prefixes.size() ? prefixes[storage] : -1});
+                }
+            }
+        }
+    }
     return audit;
 }
 
@@ -723,7 +808,7 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
         if (nodeIndex >= context._scheduleNodes.size() || !decision.latencyPrediction) {
             continue;
         }
-        const auto audit = getAdmissionPredictionAudit(context, requestIndex);
+        const auto audit = getAdmissionPredictionAudit(context, requestIndex, true);
         if (!audit.valid) {
             NAVI_KERNEL_LOG(
                 WARN,
@@ -733,6 +818,39 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
             continue;
         }
         const auto &node = context._scheduleNodes[nodeIndex];
+        for (const auto &entry : audit.frozenExecutionInputs) {
+            const auto &input = entry.input;
+            const auto observation =
+                audit.cacheObservation.value_or(TPUPrefillCacheObservation{});
+            NAVI_KERNEL_LOG(
+                INFO,
+                "[navi-master-frozen-prefill-input] schedule_time_us=%ld "
+                "schedule_id=%lu schedule_batch_id=%ld request_id=%lu "
+                "agent=%s model_revision=%ld prompt_tokens=%ld computed_tokens=%ld "
+                "shared_prefix_boundary=%ld external_read_tokens=%ld "
+                "cache_observation_valid=%d block_pool_revision=%lu "
+                "block_pool_state_ready=%d "
+                "block_pool_cached_blocks=%lu block_pool_full_ready_blocks=%lu "
+                "block_pool_tail_ready_blocks=%lu block_pool_cached_checksum=%lu "
+                "block_pool_full_ready_checksum=%lu block_pool_tail_ready_checksum=%lu "
+                "full_prefix_before_query_drop_blocks=%ld",
+                context.getScheduleTimeUs(), decision.scheduleId, decision.batchId,
+                entry.requestId, node.getAgentId().c_str(),
+                node.getLatencyModelRevision(), input.promptTokens, input.computedTokens,
+                input.sharedPrefixBoundary, input.externalReadTokens,
+                int(audit.cacheObservation.has_value()), observation.revision,
+                int(observation.stateReady), observation.cachedBlocks,
+                observation.fullReadyBlocks, observation.tailReadyBlocks,
+                observation.cachedChecksum, observation.fullReadyChecksum,
+                observation.tailReadyChecksum, entry.fullPrefixBlocksBeforeQueryDrop);
+        }
+        const auto localCache = std::atomic_load(&node._localCacheBlockCounts);
+        const auto localHitTokens =
+            localCache ? (*localCache)[requestIndex] *
+                             context._requests[requestIndex].request.blockSize
+                       : decision.predictedCacheHitTokenCount;
+        const auto peerExtraTokens =
+            std::max<int64_t>(0, decision.predictedCacheHitTokenCount - localHitTokens);
         const auto &prediction = *decision.latencyPrediction;
         const auto &features = prediction.features;
         const auto &floor = prediction.floorFeatures;
@@ -740,16 +858,38 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
                                   : node.usesRunningElapsedProgress()
                                       ? "running_elapsed_progress"
                                       : "wall_clock_decay";
+        const auto geometrySuffix =
+            NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion())
+                ? std::string(" model_binary_version=") +
+                      std::to_string(node.getLatencyBinaryVersion()) +
+                      " execution_geometry_valid=" +
+                      (features.hasExecutionGeometry() ? "1" : "0") +
+                      " execution_step_count=" +
+                      std::to_string(features.getExecutionStepCount()) +
+                      " global_padded_tokens=" +
+                      std::to_string(features.getGlobalPaddedTokens()) +
+                      " execution_cache_source_valid=" +
+                      (features.hasExecutionCacheSource() ? "1" : "0") +
+                      " external_read_request_count=" +
+                      std::to_string(features.getExternalReadRequestCount()) +
+                      " max_external_read_tokens=" +
+                      std::to_string(features.getMaxExternalReadTokens())
+                : std::string();
         NAVI_KERNEL_LOG(
             INFO,
             "[navi-master-admission-prediction] schedule_time_us=%ld "
             "schedule_id=%lu schedule_batch_id=%ld request_id=%lu "
             "request_count=%ld agent=%s collector=%s unified=%d "
+            "peer_cache_read_available=%d peer_cache_read_revision=%lu "
+            "peer_cache_read_agent_start_time_us=%ld "
+            "local_hit_tokens=%ld peer_extra_hit_tokens=%ld total_hit_tokens=%ld "
             "model_revision=%ld session_sample_count=%lu trusted=%d "
             "residual_version=%d residual_last_update_time_us=%ld "
             "base_execution_ms=%.9f residual_correction_ms=%.9f "
             "final_execution_ms=%.9f decision_execution_ms=%.9f "
-            "queue_prediction_ms=%.9f with_base_ms=%.9f with_final_ms=%.9f "
+            "queue_prediction_ms=%.9f queue_prediction_time_us=%ld "
+            "queue_report_receive_time_us=%ld queue_snapshot_total_ms=%.9f "
+            "queue_snapshot_head_remaining_ms=%.9f with_base_ms=%.9f with_final_ms=%.9f "
             "floor_base_ms=%.9f floor_final_ms=%.9f has_floor=%d "
             "fixed_execution_ms=%.9f running_elapsed_time_ms=%.9f "
             "reported_running_elapsed_time_ms=%.9f "
@@ -786,15 +926,20 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
             "floor_waiting_batch_size=%ld floor_waiting_hit_tokens=%ld "
             "floor_waiting_miss_tokens=%ld "
             "floor_waiting_miss_square_sum=%.0f "
-            "floor_waiting_hit_miss_sum=%.0f",
+            "floor_waiting_hit_miss_sum=%.0f%s",
             decision.scheduleTimeUs, decision.scheduleId, decision.batchId,
             decision.requestId, decision.expectedBatchSize, node.getAgentId().c_str(),
             decision.target.agentAddress.c_str(),
-            node.usesUnifiedLatencyPrediction() ? 1 : 0, node.getLatencyModelRevision(),
+            node.usesUnifiedLatencyPrediction() ? 1 : 0,
+            int(node._peerCacheReadAvailable), node._peerCacheReadRevision,
+            node.getAgentStartTimeUs(), localHitTokens, peerExtraTokens,
+            decision.predictedCacheHitTokenCount, node.getLatencyModelRevision(),
             node.getLatencySessionSampleCount(), node.isLatencyModelTrusted() ? 1 : 0,
             node.getLatencyResidualVersion(), node.getLatencyResidualLastUpdateTimeUs(),
             audit.baseExecutionMs, audit.correctionMs, audit.finalExecutionMs,
             decision.predictedExecutionLatencyMs, decision.predictedQueueLatencyMs,
+            context._queuePredictionTimeUs, node._queueReportReceiveTimeUs,
+            node._queueTotalPredictedLatencyMs, node._queueDecayHeadRemainingMs,
             audit.withWorkloadBaseMs, audit.withWorkloadFinalMs, audit.floorBaseMs,
             audit.floorFinalMs, prediction.hasFloor ? 1 : 0,
             prediction.fixedLatencyMs - decision.predictedQueueLatencyMs,
@@ -834,7 +979,7 @@ void MasterScheduleResultKernel::logAdmissionPredictions(
             floor.getRunningDecodeRemainingTokenBudget(), floor.getWaitingBatchSize(),
             floor.getWaitingCacheHitTokenCount(), floor.getWaitingCacheMissTokenCount(),
             floor.getWaitingCacheMissTokenSquareSum(),
-            floor.getWaitingCacheHitMissTokenProductSum());
+            floor.getWaitingCacheHitMissTokenProductSum(), geometrySuffix.c_str());
         if (std::abs(audit.finalExecutionMs - decision.predictedExecutionLatencyMs) >
             1e-6) {
             NAVI_KERNEL_LOG(
@@ -1133,6 +1278,8 @@ void MasterScheduleResultKernel::recordReplayAdmission(NaviSchedScheduleContext 
         schedulerInfo["cold_start_minimum_ramped_target_inflight"] =
             context._coldStartRoutingStats.minimumRampedTargetInflight;
         schedulerInfo["cold_start_evaluated"] = context._coldStartRoutingStats.evaluated;
+        schedulerInfo["cold_start_bootstrap_request_count"] =
+            context._coldStartBootstrapRequestCount;
         schedulerInfo["queue_overload_evaluated"] = context._queueOverloadEvaluated;
         schedulerInfo["queue_overload_average_predicted_latency_ms"] =
             context._queueOverloadAveragePredictedLatencyMs;

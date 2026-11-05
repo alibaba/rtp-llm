@@ -1,6 +1,8 @@
 #pragma once
 
 #include "navi_sched/NaviSchedCommon.h"
+#include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -19,31 +21,56 @@ public:
     bool startBatch(const std::vector<uint64_t> &requestIds);
     bool startBatch(const std::vector<uint64_t> &requestIds,
                     int64_t executionStartTimeUs);
+    bool resolveExecutionCache(const std::vector<NaviSchedRequestStats> &requests);
     bool finishBatch(const std::vector<NaviSchedRequestStats> &requests);
     bool finishBatch(const std::vector<NaviSchedRequestStats> &requests,
                      double wallTimeMs, double executeModelTimeMs,
                      int64_t executionStepCount, int64_t prefillTokenCount,
-                     int64_t decodeRequestStepCount, int64_t decodeTokenCount,
-                     double admissionToFirstExecutionMs = -1.0);
+                     int64_t decodeRequestStepCount, int64_t decodeTokenCount);
     bool finishBatch(const std::vector<NaviSchedRequestStats> &requests,
                      double wallTimeMs, double executeModelTimeMs,
                      int64_t executionStepCount, int64_t prefillTokenCount,
                      int64_t decodeRequestStepCount, int64_t decodeTokenCount,
-                     double admissionToFirstExecutionMs, double nativePreparationMs);
+                     double admissionToFirstExecutionMs,
+                     int64_t executionFinishTimeUs = 0);
+    bool finishBatchWithExecutionGeometry(
+        const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
+        double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+        int64_t decodeRequestStepCount, int64_t decodeTokenCount,
+        double admissionToFirstExecutionMs, int64_t globalPaddedTokens,
+        int64_t executionFinishTimeUs = 0, double nativePreparationMs = 0.0);
+    bool finishBatchWithProjectedExecutionGeometry(
+        const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
+        double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+        int64_t decodeRequestStepCount, int64_t decodeTokenCount,
+        double admissionToFirstExecutionMs, int64_t globalPaddedTokens,
+        int64_t projectedExecutionStepCount, int64_t projectedGlobalPaddedTokens,
+        int64_t executionFinishTimeUs = 0, double nativePreparationMs = 0.0);
+    bool finishBatch(const std::vector<NaviSchedRequestStats> &requests,
+                     double wallTimeMs, double executeModelTimeMs,
+                     int64_t executionStepCount, int64_t prefillTokenCount,
+                     int64_t decodeRequestStepCount, int64_t decodeTokenCount,
+                     double admissionToFirstExecutionMs, double nativePreparationMs,
+                     int64_t executionFinishTimeUs = 0);
     bool finishBatchWithUnifiedLatency(
         const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
-        double executeModelTimeMs, int64_t executionStepCount,
-        int64_t prefillTokenCount, int64_t decodeRequestStepCount,
-        int64_t decodeTokenCount, const NaviSchedLatencyFeatures &precedingFeatures,
-        double unifiedLatencyMs, double admissionToFirstExecutionMs = -1.0);
+        double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+        int64_t decodeRequestStepCount, int64_t decodeTokenCount,
+        const NaviSchedLatencyFeatures &precedingFeatures, double unifiedLatencyMs,
+        double admissionToFirstExecutionMs = -1.0);
     bool finishBatchWithUnifiedLatency(
         const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
-        double executeModelTimeMs, int64_t executionStepCount,
-        int64_t prefillTokenCount, int64_t decodeRequestStepCount,
-        int64_t decodeTokenCount, const NaviSchedLatencyFeatures &precedingFeatures,
-        double unifiedLatencyMs, double admissionToFirstExecutionMs,
-        double nativePreparationMs);
+        double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+        int64_t decodeRequestStepCount, int64_t decodeTokenCount,
+        const NaviSchedLatencyFeatures &precedingFeatures, double unifiedLatencyMs,
+        double admissionToFirstExecutionMs, double nativePreparationMs);
     bool abortRequests(const std::vector<uint64_t> &requestIds);
+    bool reportCachePublicationFailed(NaviSchedCacheKeyType type,
+                                      const std::vector<uint64_t> &full,
+                                      const std::vector<uint64_t> &tail);
+    std::function<bool(NaviSchedCacheKeyType, const std::vector<uint64_t> &,
+                       const std::vector<uint64_t> &)>
+    makeCachePublicationFailureCallback() const;
 
 private:
     friend class NaviSchedAgentImpl;
@@ -66,43 +93,45 @@ public:
                          int64_t expectedBatchSize,
                          const NaviSchedReadyBatchCallback &callback);
     bool abortPendingBatch(int64_t scheduleBatchId);
-    bool setForwardBatchHandler(const NaviSchedForwardBatchHandler &handler,
-                                bool streamResponse = true,
-                                const NaviSchedForwardRequestAcceptedHandler
-                                    &requestAcceptedHandler = {});
+    bool setForwardBatchHandler(
+        const NaviSchedForwardBatchHandler &handler, bool streamResponse = true,
+        const NaviSchedForwardRequestAcceptedHandler &requestAcceptedHandler = {});
     bool publishForwardResponse(uint64_t requestId, std::vector<std::string> frames,
                                 bool terminal);
     bool failForwardResponse(uint64_t requestId, const std::string &errorMessage);
     void setForwardCancelHandler(const std::function<void(uint64_t)> &handler);
-    bool recordObservedBatch(const std::vector<NaviSchedRequestStats> &requests,
-                             double latencyMs, int64_t eventTimeUs,
-                             const std::vector<NaviSchedBatchFinishReporterPtr>
-                                 &finishReporters = {}) const;
-    bool reportObservedExecutionLoad(int32_t queuedBatchRequests,
-                                     int32_t runningRequests,
+    bool recordObservedBatch(
+        const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
+        int64_t eventTimeUs,
+        const std::vector<NaviSchedBatchFinishReporterPtr> &finishReporters = {}) const;
+    bool reportObservedExecutionLoad(int32_t queuedBatchRequests, int32_t runningRequests,
                                      int64_t eventTimeUs) const;
+    bool reportPeerCacheReadAvailable(bool available) const;
     bool reportObservedWorkload(const NaviSchedWorkloadSnapshot &snapshot) const;
     bool reportObservedWorkload(const NaviSchedWorkloadSnapshot &snapshot,
-                               const std::vector<int64_t> &coveredNativeBatchIds) const;
-    bool beginObservedBackendExecution(int32_t requestCount = 0) const;
-    bool endObservedBackendExecution() const;
+                                const std::vector<int64_t> &coveredNativeBatchIds) const;
+    bool beginObservedBackendExecution(int64_t eventTimeUs = 0, int32_t requestCount = 0) const;
+    bool endObservedBackendExecution(int64_t eventTimeUs = 0) const;
     bool reportObservedExecutionStep(double elapsedMs, int64_t prefillTokens,
                                      int64_t decodeTokens) const;
     bool reportObservedCoreStep(double elapsedMs, bool futureWait) const;
-    void reportCacheInserted(const NaviSchedBlockHashesConstPtr &blockHashes) const;
-    void reportCacheRemoved(const NaviSchedBlockHashesConstPtr &blockHashes) const;
-    void reportCacheUpdated(int64_t totalBlocks,
-                            int64_t blockSize,
-                            int64_t linearStep,
-                            const NaviSchedBlockHashesConstPtr &addedBlockHashes,
-                            const NaviSchedBlockHashesConstPtr &removedBlockHashes,
-                            const NaviSchedBlockHashesConstPtr &addedFullReadyBlockHashes,
-                            const NaviSchedBlockHashesConstPtr &removedFullReadyBlockHashes,
-                            const NaviSchedBlockHashesConstPtr &addedTailReadyBlockHashes,
-                            const NaviSchedBlockHashesConstPtr &removedTailReadyBlockHashes,
-                            int8_t hybridTailRequired,
-                            int64_t eventTimeUs,
-                            int64_t rtpCachedBlockCount = -1) const;
+    void reportCacheInserted(
+        const NaviSchedBlockHashesConstPtr &blockHashes,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+    void reportCacheRemoved(
+        const NaviSchedBlockHashesConstPtr &blockHashes,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+    void reportCacheUpdated(
+        int64_t totalBlocks, int64_t blockSize, int64_t linearStep,
+        const NaviSchedBlockHashesConstPtr &addedBlockHashes,
+        const NaviSchedBlockHashesConstPtr &removedBlockHashes,
+        const NaviSchedBlockHashesConstPtr &addedFullReadyBlockHashes,
+        const NaviSchedBlockHashesConstPtr &removedFullReadyBlockHashes,
+        const NaviSchedBlockHashesConstPtr &addedTailReadyBlockHashes,
+        const NaviSchedBlockHashesConstPtr &removedTailReadyBlockHashes,
+        int8_t hybridTailRequired, int64_t eventTimeUs, int64_t rtpCachedBlockCount = -1,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL,
+        const NaviSchedCachePolicy *typedPolicy = nullptr) const;
     void stop();
     int32_t getGrpcPort() const;
 

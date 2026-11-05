@@ -54,8 +54,8 @@ struct ValidationWindowTotals {
     double predictedTotalMs = 0.0;
     double actualTotalMs = 0.0;
 
-    static double deltaSum(double currentMean, uint64_t currentCount,
-                           double previousMean, uint64_t previousCount)
+    static double deltaSum(double currentMean, uint64_t currentCount, double previousMean,
+                           uint64_t previousCount)
     {
         return currentMean * currentCount - previousMean * previousCount;
     }
@@ -73,34 +73,30 @@ struct ValidationWindowTotals {
             unmatchedBatchCount +=
                 current.unmatchedBatchCount - previous.unmatchedBatchCount;
         }
-        const auto addSampleSum = [count, previousCount](double currentMean,
-                                                         double previousMean,
-                                                         double &sum) {
-            sum += deltaSum(currentMean, count, previousMean, previousCount);
-        };
+        const auto addSampleSum =
+            [count, previousCount](double currentMean, double previousMean, double &sum) {
+                sum += deltaSum(currentMean, count, previousMean, previousCount);
+            };
         addSampleSum(current.batchRequestCountMean, previous.batchRequestCountMean,
                      batchRequestCount);
         addSampleSum(current.predictedCacheHitTokensMean,
                      previous.predictedCacheHitTokensMean, predictedCacheHitTokens);
-        addSampleSum(current.actualCacheHitTokensMean,
-                     previous.actualCacheHitTokensMean, actualCacheHitTokens);
+        addSampleSum(current.actualCacheHitTokensMean, previous.actualCacheHitTokensMean,
+                     actualCacheHitTokens);
         addSampleSum(current.masterPredictedQueueMeanMs,
                      previous.masterPredictedQueueMeanMs, predictedQueueMs);
         addSampleSum(current.actualQueueMeanMs, previous.actualQueueMeanMs,
                      actualQueueMs);
-        addSampleSum(current.queueRawPredictedMeanMs,
-                     previous.queueRawPredictedMeanMs, queueRawPredictedMs);
+        addSampleSum(current.queueRawPredictedMeanMs, previous.queueRawPredictedMeanMs,
+                     queueRawPredictedMs);
         addSampleSum(current.agentPredictedQueueMeanMs,
                      previous.agentPredictedQueueMeanMs, agentPredictedQueueMs);
         addSampleSum(current.queueFeatureBatchCountMean,
-                     previous.queueFeatureBatchCountMean,
-                     queueFeatureBatchCount);
+                     previous.queueFeatureBatchCountMean, queueFeatureBatchCount);
         addSampleSum(current.masterPredictedExecutionMeanMs,
-                     previous.masterPredictedExecutionMeanMs,
-                     masterPredictedExecutionMs);
+                     previous.masterPredictedExecutionMeanMs, masterPredictedExecutionMs);
         addSampleSum(current.agentPredictedExecutionMeanMs,
-                     previous.agentPredictedExecutionMeanMs,
-                     agentPredictedExecutionMs);
+                     previous.agentPredictedExecutionMeanMs, agentPredictedExecutionMs);
         addSampleSum(current.actualExecutionMeanMs, previous.actualExecutionMeanMs,
                      actualExecutionMs);
         addSampleSum(current.masterPredictedTotalMeanMs,
@@ -113,19 +109,18 @@ struct ValidationWindowTotals {
             const auto zeroCount = current.zeroPredictedQueueSampleCount;
             const auto previousZeroCount = previous.zeroPredictedQueueSampleCount;
             zeroQueueSampleCount += zeroCount - previousZeroCount;
-            zeroQueueActualMs += deltaSum(
-                current.zeroPredictedQueueActualMeanMs, zeroCount,
-                previous.zeroPredictedQueueActualMeanMs, previousZeroCount);
+            zeroQueueActualMs +=
+                deltaSum(current.zeroPredictedQueueActualMeanMs, zeroCount,
+                         previous.zeroPredictedQueueActualMeanMs, previousZeroCount);
         }
         if (current.positivePredictedQueueSampleCount >=
             previous.positivePredictedQueueSampleCount) {
             const auto positiveCount = current.positivePredictedQueueSampleCount;
-            const auto previousPositiveCount =
-                previous.positivePredictedQueueSampleCount;
+            const auto previousPositiveCount = previous.positivePredictedQueueSampleCount;
             positiveQueueSampleCount += positiveCount - previousPositiveCount;
-            positivePredictedQueueMs += deltaSum(
-                current.positivePredictedQueueMeanMs, positiveCount,
-                previous.positivePredictedQueueMeanMs, previousPositiveCount);
+            positivePredictedQueueMs +=
+                deltaSum(current.positivePredictedQueueMeanMs, positiveCount,
+                         previous.positivePredictedQueueMeanMs, previousPositiveCount);
             positiveActualQueueMs += deltaSum(
                 current.positivePredictedQueueActualMeanMs, positiveCount,
                 previous.positivePredictedQueueActualMeanMs, previousPositiveCount);
@@ -135,11 +130,31 @@ struct ValidationWindowTotals {
 
 }
 
-NaviSchedMasterNodeSummary NaviSchedMaster::makeNodeSummary(const NaviSchedNodeInfo &node,
-                                                            const MasterStateR::CacheSyncStats &cacheStats,
-                                                            uint64_t sentRequestCount,
-                                                            uint64_t sentBatchCount,
-                                                            double timeCompression)
+std::map<std::string, uint64_t> NaviSchedMaster::makeCacheStateSummary(
+    const MasterStateR::CacheSyncStats &stats)
+{
+    return {
+        {"cached_block_count", stats.masterCachedBlockCount},
+        {"full_ready_block_count", stats.masterFullReadyBlockCount},
+        {"tail_ready_block_count", stats.masterTailReadyBlockCount},
+        {"pending_cache_batch_count", stats.pendingCacheBatchCount},
+        {"pending_cache_agent_batch_count", stats.pendingCacheAgentBatchCount},
+        {"pending_cache_scheduled_batch_count", stats.pendingCacheScheduledBatchCount},
+        {"pending_cache_block_count", stats.pendingCacheBlockCount},
+        {"pending_cache_tail_ready_block_count", stats.pendingCacheTailReadyBlockCount},
+        {"cache_revision_gap_total", stats.revisionGapCount},
+        {"cache_state_mismatch_total", stats.stateMismatchCount},
+        {"pending_cache_revision_gap_total", stats.pendingCacheRevisionGapCount},
+        {"pending_cache_state_mismatch_total", stats.pendingCacheStateMismatchCount},
+        {"pending_cache_resync_trigger_total", stats.pendingCacheResyncTriggerCount},
+        {"cache_ready_node_count", stats.cacheStateReady},
+        {"pending_cache_ready_node_count", stats.pendingCacheSnapshotReady},
+    };
+}
+
+NaviSchedMasterNodeSummary NaviSchedMaster::makeNodeSummary(
+    const NaviSchedNodeInfo &node, const MasterStateR::CacheSyncStats &cacheStats,
+    uint64_t sentRequestCount, uint64_t sentBatchCount, double timeCompression)
 {
     NaviSchedMasterNodeSummary summary;
     summary.agentIdHash = node.agentIdHash;
@@ -151,6 +166,10 @@ NaviSchedMasterNodeSummary NaviSchedMaster::makeNodeSummary(const NaviSchedNodeI
     summary.serverAddress = node.serverAddress;
     summary.online = node.online;
     summary.pdSeparated = node.pdSeparated;
+    summary.peerCacheEnabled = node.peerCacheEnabled;
+    summary.peerCacheReadAvailable = node.peerCacheReadAvailable;
+    summary.peerCacheReadRevision = node.peerCacheReadRevision;
+    summary.peerCacheReadAgentStartTimeUs = node.peerCacheReadAgentStartTimeUs;
     summary.totalBlocks = node.totalBlocks;
     summary.cachedBlockCount = cacheStats.masterCachedBlockCount;
     summary.agentCacheRevision = cacheStats.agentRevision;
@@ -172,22 +191,17 @@ NaviSchedMasterNodeSummary NaviSchedMaster::makeNodeSummary(const NaviSchedNodeI
     summary.rtpCacheMirrorMismatchCount = cacheStats.rtpMirrorMismatchCount;
     summary.pendingCacheBatchCount = cacheStats.pendingCacheBatchCount;
     summary.pendingCacheBlockCount = cacheStats.pendingCacheBlockCount;
-    summary.pendingCacheScheduledBatchCount =
-        cacheStats.pendingCacheScheduledBatchCount;
+    summary.pendingCacheScheduledBatchCount = cacheStats.pendingCacheScheduledBatchCount;
     summary.pendingCacheAgentBatchCount = cacheStats.pendingCacheAgentBatchCount;
     summary.pendingCacheAgentRevision = cacheStats.pendingCacheAgentRevision;
     summary.pendingCacheAgentChecksum = cacheStats.pendingCacheAgentChecksum;
-    summary.pendingCacheRevisionGapCount =
-        cacheStats.pendingCacheRevisionGapCount;
-    summary.pendingCacheStateMismatchCount =
-        cacheStats.pendingCacheStateMismatchCount;
-    summary.pendingCacheResyncTriggerCount =
-        cacheStats.pendingCacheResyncTriggerCount;
+    summary.pendingCacheRevisionGapCount = cacheStats.pendingCacheRevisionGapCount;
+    summary.pendingCacheStateMismatchCount = cacheStats.pendingCacheStateMismatchCount;
+    summary.pendingCacheResyncTriggerCount = cacheStats.pendingCacheResyncTriggerCount;
     summary.pendingCacheSnapshotReady = cacheStats.pendingCacheSnapshotReady;
     summary.inflightStatsRevision = node.inflightStatsRevision;
     summary.inflightRequests = node.inflightRequests;
-    summary.inflightPredictedLatencySumMs =
-        node.inflightPredictedLatencySumMs;
+    summary.inflightPredictedLatencySumMs = node.inflightPredictedLatencySumMs;
     summary.batchWaitingRequests = node.batchWaitingRequests;
     summary.queuedBatchRequests = node.queuedBatchRequests;
     summary.runningRequests = node.runningRequests;
@@ -196,23 +210,20 @@ NaviSchedMasterNodeSummary NaviSchedMaster::makeNodeSummary(const NaviSchedNodeI
     summary.masterSentRequestCount = sentRequestCount;
     summary.masterSentBatchCount = sentBatchCount;
     summary.masterSentRequestsPerBatchMean =
-        sentBatchCount > 0
-            ? static_cast<double>(sentRequestCount) / sentBatchCount
-            : 0.0;
+        sentBatchCount > 0 ? static_cast<double>(sentRequestCount) / sentBatchCount : 0.0;
     summary.lastRequestLatencyMs = node.lastRequestLatencyMs;
     summary.queueTotalPredictedLatencyMs = node.queueTotalPredictedLatencyMs;
+    summary.queueRawDecayFactor = node.queueModel.rawDecayFactor;
     summary.queueReportReceiveTimeUs = node.queueReportReceiveTimeUs;
     summary.workload = node.workload;
     summary.workloadReportReceiveTimeUs = node.workloadReportReceiveTimeUs;
-    summary.workloadEffectiveRunningElapsedTimeMs =
-        node.workload.runningElapsedTimeMs;
+    summary.workloadEffectiveRunningElapsedTimeMs = node.workload.runningElapsedTimeMs;
     if (node.workloadReportReceiveTimeUs > 0 &&
         node.workload.runningCapacityPrefillRequestCount > 0) {
         summary.workloadEffectiveRunningElapsedTimeMs +=
-            std::max<int64_t>(0, autil::TimeUtility::currentTime() -
-                                    node.workloadReportReceiveTimeUs) /
-            1000.0 * node.workload.runningCapacityPrefillRequestCount *
-            timeCompression;
+            std::max<int64_t>(
+                0, autil::TimeUtility::currentTime() - node.workloadReportReceiveTimeUs) /
+            1000.0 * node.workload.runningCapacityPrefillRequestCount * timeCompression;
     }
     summary.workloadStaleUpdateCount = node.workloadStaleUpdateCount;
     summary.lastEventType = node.lastEventType;
@@ -227,8 +238,7 @@ NaviSchedMasterNodeSummary NaviSchedMaster::makeNodeSummary(const NaviSchedNodeI
     summary.latencyParameters = node.latencyParameters;
     summary.latencyResidualVersion = node.latencyResidualVersion;
     summary.latencyResidualParameters = node.latencyResidualParameters;
-    summary.latencyResidualLastUpdateTimeUs =
-        node.latencyResidualLastUpdateTimeUs;
+    summary.latencyResidualLastUpdateTimeUs = node.latencyResidualLastUpdateTimeUs;
     summary.latencyModelFingerprint = node.latencyModelFingerprint;
     summary.latencyModelTrusted = node.latencyModelTrusted;
     summary.latencyModelWarmStarted = node.latencyModelWarmStarted;
@@ -252,16 +262,14 @@ NaviSchedMaster::NaviSchedMaster(const NaviSchedMasterConfig &config)
     , _configuredMaxWaitScheduleTimeMs(config.maxWaitScheduleTimeMs)
     , _configuredQueueOverloadStartCycleMultiplier(
           config.queueOverloadStartCycleMultiplier)
-    , _configuredQueueOverloadFullCycleMultiplier(
-          config.queueOverloadFullCycleMultiplier)
+    , _configuredQueueOverloadFullCycleMultiplier(config.queueOverloadFullCycleMultiplier)
     , _configuredSchedulerName(config.schedulerName)
     , _configuredSchedulerConfig(config.schedulerConfig)
     , _configuredTimeCompression(config.timeCompression)
     , _configuredLatencyModelPoolStateFile(config.latencyModelPoolStateFile)
     , _configuredLatencyModelPoolSourceMinRevision(
           config.latencyModelPoolSourceMinRevision)
-    , _configuredLatencyModelPoolMaxCandidates(
-          config.latencyModelPoolMaxCandidates)
+    , _configuredLatencyModelPoolMaxCandidates(config.latencyModelPoolMaxCandidates)
     , _configuredLatencyModelPoolPersistIntervalMs(
           config.latencyModelPoolPersistIntervalMs)
 {
@@ -276,10 +284,11 @@ bool NaviSchedMaster::init()
     }
     const auto &config = _masterConfig;
     if ((_collectorThreadNum == 0) != (_collectorQueueCount == 0) ||
-        (_collectorThreadNum > 0 &&
-         (_collectorThreadNum >= config.threadNum ||
-          _collectorQueueCount > _collectorThreadNum))) {
-        AUTIL_LOG(ERROR, "invalid collector queues, total threads [%lu], collector threads [%lu], queues [%lu]",
+        (_collectorThreadNum > 0 && (_collectorThreadNum >= config.threadNum ||
+                                     _collectorQueueCount > _collectorThreadNum))) {
+        AUTIL_LOG(ERROR,
+                  "invalid collector queues, total threads [%lu], collector threads "
+                  "[%lu], queues [%lu]",
                   config.threadNum, _collectorThreadNum, _collectorQueueCount);
         stop();
         return false;
@@ -299,8 +308,7 @@ bool NaviSchedMaster::init()
         _configuredQueueOverloadStartCycleMultiplier == 0 ||
         _configuredQueueOverloadFullCycleMultiplier == 0;
     if (0 == _configuredMaxWaitScheduleCount || _configuredMaxWaitScheduleTimeMs < 0 ||
-        !std::isfinite(_configuredTimeCompression) ||
-        _configuredTimeCompression <= 0.0 ||
+        !std::isfinite(_configuredTimeCompression) || _configuredTimeCompression <= 0.0 ||
         _configuredQueueOverloadStartCycleMultiplier < 0 ||
         _configuredQueueOverloadFullCycleMultiplier < 0 ||
         (!queueOverloadLimitDisabled &&
@@ -337,17 +345,15 @@ bool NaviSchedMaster::init()
             return false;
         }
         if (costConfig.parallelism == 0) {
-            schedulerConfig["parallelism"] = static_cast<int32_t>(
-                std::max<size_t>(1, std::min<size_t>(runtimeConfig.threadNum,
-                    CostSchedulerConfig::MAX_PARALLELISM)));
+            schedulerConfig["parallelism"] = static_cast<int32_t>(std::max<size_t>(
+                1, std::min<size_t>(runtimeConfig.threadNum,
+                                    CostSchedulerConfig::MAX_PARALLELISM)));
         }
-        if (_maxWaitScheduleTimeMs >
-            std::numeric_limits<int64_t>::max() / 1000) {
+        if (_maxWaitScheduleTimeMs > std::numeric_limits<int64_t>::max() / 1000) {
             stop();
             return false;
         }
-        schedulerConfig["optimization_time_budget_us"] =
-            _maxWaitScheduleTimeMs * 800;
+        schedulerConfig["optimization_time_budget_us"] = _maxWaitScheduleTimeMs * 800;
     }
     autil::legacy::json::JsonMap contextConfig;
     contextConfig["max_wait_schedule_count"] = _configuredMaxWaitScheduleCount;
@@ -383,17 +389,19 @@ bool NaviSchedMaster::init()
     dynamicConfig.queueOverloadFullCycleMultiplier =
         _configuredQueueOverloadFullCycleMultiplier;
     dynamicConfig.overloadControlStrategy =
-        (_configuredQueueOverloadStartCycleMultiplier > 0 || _configuredQueueOverloadFullCycleMultiplier > 0)
-            ? "latency" : "execution_utilization";
-    dynamicConfig.agent = AgentSchedulerConfig::fromServiceConfig(
-        getConfig(), _configuredTimeCompression);
+        (_configuredQueueOverloadStartCycleMultiplier > 0 ||
+         _configuredQueueOverloadFullCycleMultiplier > 0)
+            ? "latency"
+            : "execution_utilization";
+    dynamicConfig.agent =
+        AgentSchedulerConfig::fromServiceConfig(getConfig(), _configuredTimeCompression);
     if (CostSchedulerKernel::KERNEL_ID == _schedulerKernelId) {
         try {
-            autil::legacy::FromJsonString(dynamicConfig,
-                                          _schedulerKernelConfig);
+            autil::legacy::FromJsonString(dynamicConfig, _schedulerKernelConfig);
             const auto admission = schedulerConfig.find("admission_timeout_ms");
             if (admission != schedulerConfig.end()) {
-                autil::legacy::FromJson(dynamicConfig.admissionTimeoutMs, admission->second);
+                autil::legacy::FromJson(dynamicConfig.admissionTimeoutMs,
+                                        admission->second);
             }
         } catch (...) {
             stop();
@@ -401,22 +409,18 @@ bool NaviSchedMaster::init()
         }
     }
     autil::legacy::json::JsonMap dynamicResourceConfig;
-    dynamicResourceConfig["config_json"] =
-        SchedulerConfigR::toJson(dynamicConfig);
+    dynamicResourceConfig["config_json"] = SchedulerConfigR::toJson(dynamicConfig);
     autil::legacy::json::JsonMap latencyModelPoolConfig;
-    latencyModelPoolConfig["state_file"] =
-        _configuredLatencyModelPoolStateFile;
+    latencyModelPoolConfig["state_file"] = _configuredLatencyModelPoolStateFile;
     latencyModelPoolConfig["trust_min_revision"] =
         dynamicConfig.agent.latencyModelTrustMinRevision;
     latencyModelPoolConfig["source_min_revision"] =
         _configuredLatencyModelPoolSourceMinRevision;
-    latencyModelPoolConfig["max_candidates"] =
-        _configuredLatencyModelPoolMaxCandidates;
+    latencyModelPoolConfig["max_candidates"] = _configuredLatencyModelPoolMaxCandidates;
     latencyModelPoolConfig["persist_interval_ms"] =
         _configuredLatencyModelPoolPersistIntervalMs;
     auto configStr = NaviSchedConfigBuilder::build(
-        runtimeConfig, kernels,
-        true,
+        runtimeConfig, kernels, true,
         {
             {MasterScheduleContextKernel::KERNEL_ID, _contextKernelConfig},
             {_schedulerKernelId, _schedulerKernelConfig},
@@ -518,20 +522,16 @@ bool NaviSchedMaster::onUpdated()
 {
     navi::ResourceMap resourceMap;
     std::set<std::string> resources = {
-        navi::GigClientR::RESOURCE_ID,
-        MasterScheduleR::RESOURCE_ID,
-        MasterStateR::RESOURCE_ID,
-        MasterLatencyModelR::RESOURCE_ID,
-        SchedulerConfigR::RESOURCE_ID,
-        ReplayControlR::RESOURCE_ID,
+        navi::GigClientR::RESOURCE_ID, MasterScheduleR::RESOURCE_ID,
+        MasterStateR::RESOURCE_ID,     MasterLatencyModelR::RESOURCE_ID,
+        SchedulerConfigR::RESOURCE_ID, ReplayControlR::RESOURCE_ID,
     };
     const auto &navi = getNavi();
     if (!navi->createResource(_masterBizName, 1, 0, resources, resourceMap)) {
         return false;
     }
     auto stateIt = resourceMap.getMap().find(MasterStateR::RESOURCE_ID);
-    auto latencyModelIt =
-        resourceMap.getMap().find(MasterLatencyModelR::RESOURCE_ID);
+    auto latencyModelIt = resourceMap.getMap().find(MasterLatencyModelR::RESOURCE_ID);
     auto scheduleIt = resourceMap.getMap().find(MasterScheduleR::RESOURCE_ID);
     auto configIt = resourceMap.getMap().find(SchedulerConfigR::RESOURCE_ID);
     auto replayIt = resourceMap.getMap().find(ReplayControlR::RESOURCE_ID);
@@ -546,24 +546,22 @@ bool NaviSchedMaster::onUpdated()
     _masterLatencyModelR =
         std::dynamic_pointer_cast<MasterLatencyModelR>(latencyModelIt->second);
     _masterScheduleR = std::dynamic_pointer_cast<MasterScheduleR>(scheduleIt->second);
-    _schedulerConfigR =
-        std::dynamic_pointer_cast<SchedulerConfigR>(configIt->second);
-    _replayControlR =
-        std::dynamic_pointer_cast<ReplayControlR>(replayIt->second);
+    _schedulerConfigR = std::dynamic_pointer_cast<SchedulerConfigR>(configIt->second);
+    _replayControlR = std::dynamic_pointer_cast<ReplayControlR>(replayIt->second);
     if (!_masterStateR || !_masterLatencyModelR || !_masterScheduleR ||
         !_schedulerConfigR || !_replayControlR) {
         return false;
     }
     _scheduleGraph = std::make_shared<MasterScheduleGraph>(
-        navi, _masterScheduleR, _schedulerConfigR, _masterBizName,
-        _contextKernelConfig, _schedulerKernelId, _schedulerKernelConfig,
-        getConfig().enableVis);
+        navi, _masterScheduleR, _schedulerConfigR, _masterBizName, _contextKernelConfig,
+        _schedulerKernelId, _schedulerKernelConfig, getConfig().enableVis);
     if (!_scheduleGraph->start()) {
         _scheduleGraph.reset();
         return false;
     }
     _collectorManager = std::make_shared<MasterCollectorManager>(
-        navi, _masterStateR, _masterBizName, getConfig().enableVis, _collectorTaskQueueNames);
+        navi, _masterStateR, _masterBizName, getConfig().enableVis,
+        _collectorTaskQueueNames);
     auto gigIt = resourceMap.getMap().find(navi::GigClientR::RESOURCE_ID);
     if (resourceMap.getMap().end() == gigIt) {
         return false;
@@ -594,8 +592,8 @@ std::string NaviSchedMaster::makeSnapshot() const
     summary.schedulePendingRequestCount = schedulePendingRequestCount;
     summary.scheduleProcessingRequestCount =
         _masterScheduleR ? _masterScheduleR->getSchedulingRequestCount() : 0;
-    summary.activeRequestCount = summary.schedulePendingRequestCount +
-                                summary.scheduleProcessingRequestCount;
+    summary.activeRequestCount =
+        summary.schedulePendingRequestCount + summary.scheduleProcessingRequestCount;
     const auto fillQueueOverloadSummary = [this, &summary]() {
         if (!_masterScheduleR) {
             return;
@@ -610,32 +608,25 @@ std::string NaviSchedMaster::makeSnapshot() const
         summary.executionUtilizationIntegral = execution.integral;
         summary.executionUtilizationReportingNodes = execution.reportingNodes;
         const auto overloadStats = _masterScheduleR->getQueueOverloadStats();
-        summary.queueOverloadEvaluatedRoundCount =
-            overloadStats.evaluatedRoundCount;
-        summary.queueOverloadEvaluatedRequestCount =
-            overloadStats.evaluatedRequestCount;
-        summary.queueOverloadRejectedRequestCount =
-            overloadStats.rejectedRequestCount;
+        summary.queueOverloadEvaluatedRoundCount = overloadStats.evaluatedRoundCount;
+        summary.queueOverloadEvaluatedRequestCount = overloadStats.evaluatedRequestCount;
+        summary.queueOverloadRejectedRequestCount = overloadStats.rejectedRequestCount;
         summary.queueOverloadLatestAveragePredictedLatencyMs =
             overloadStats.latestAveragePredictedLatencyMs;
-        summary.queueOverloadLatestDropProbability =
-            overloadStats.latestDropProbability;
+        summary.queueOverloadLatestDropProbability = overloadStats.latestDropProbability;
     };
     auto timeCompression = _configuredTimeCompression;
     if (_schedulerConfigR) {
         const auto schedulerConfig = _schedulerConfigR->get();
-        summary.maxWaitScheduleCount =
-            schedulerConfig.config.maxWaitScheduleCount;
-        summary.maxWaitScheduleTimeMs =
-            schedulerConfig.config.maxWaitScheduleTimeMs;
+        summary.maxWaitScheduleCount = schedulerConfig.config.maxWaitScheduleCount;
+        summary.maxWaitScheduleTimeMs = schedulerConfig.config.maxWaitScheduleTimeMs;
         summary.queueOverloadStartCycleMultiplier =
             schedulerConfig.config.queueOverloadStartCycleMultiplier;
         summary.queueOverloadFullCycleMultiplier =
             schedulerConfig.config.queueOverloadFullCycleMultiplier;
         summary.schedulerConfigGeneration = schedulerConfig.generation;
         summary.schedulerConfigHash = schedulerConfig.agentConfigHash;
-        summary.schedulerConfigJson =
-            SchedulerConfigR::toJson(schedulerConfig.config);
+        summary.schedulerConfigJson = SchedulerConfigR::toJson(schedulerConfig.config);
         timeCompression = schedulerConfig.config.agent.timeCompression;
     } else {
         summary.maxWaitScheduleCount = _maxWaitScheduleCount;
@@ -654,15 +645,13 @@ std::string NaviSchedMaster::makeSnapshot() const
     summary.scheduleRoundRequestCount = scheduleStats.requestCount;
     summary.scheduleRoundRequestsMean =
         scheduleStats.roundCount > 0
-            ? static_cast<double>(scheduleStats.requestCount) /
-                  scheduleStats.roundCount
+            ? static_cast<double>(scheduleStats.requestCount) / scheduleStats.roundCount
             : 0.0;
     summary.scheduleRoundRequestsMin = scheduleStats.minRequestCount;
     summary.scheduleRoundRequestsMax = scheduleStats.maxRequestCount;
-    for (const auto &[requestCount, roundCount] :
-         scheduleStats.requestCountHistogram) {
-        summary.scheduleRoundRequestCountHistogram.emplace(
-            std::to_string(requestCount), roundCount);
+    for (const auto &[requestCount, roundCount] : scheduleStats.requestCountHistogram) {
+        summary.scheduleRoundRequestCountHistogram.emplace(std::to_string(requestCount),
+                                                           roundCount);
     }
     auto requestStats = _masterStateR->getAgentRequestStats();
     summary.agentRequestReceivedCount = requestStats.receivedCount;
@@ -676,22 +665,25 @@ std::string NaviSchedMaster::makeSnapshot() const
         const auto reservationStats = state->getReservationStats();
         const auto info = state->getInfo();
         auto nodeSummary =
-            makeNodeSummary(info, state->getCacheSyncStats(),
-                            dispatchStats.requestCount, dispatchStats.batchCount,
-                            timeCompression);
+            makeNodeSummary(info, state->getCacheSyncStats(), dispatchStats.requestCount,
+                            dispatchStats.batchCount, timeCompression);
+        NaviSchedCachePolicy v6dPolicy;
+        if (state->getCachePolicy(v6dPolicy, NaviSchedCacheKeyType::V6D) &&
+            v6dPolicy.valid(NaviSchedCacheKeyType::V6D)) {
+            nodeSummary.v6dCacheStats = makeCacheStateSummary(
+                state->getCacheSyncStats(NaviSchedCacheKeyType::V6D));
+        }
         nodeSummary.reservationBatchCount = reservationStats.batchCount;
         nodeSummary.executionUtilization = state->getExecutionUtilization();
         nodeSummary.executionBusyUtilization = state->getExecutionBusyUtilization();
         nodeSummary.reservationRequestCount = reservationStats.requestCount;
         summary.activeRequestCount += reservationStats.waitingRequestCount +
                                       reservationStats.dispatchedRequestCount;
-        nodeSummary.reservationWaitingRequestCount =
-            reservationStats.waitingRequestCount;
+        nodeSummary.reservationWaitingRequestCount = reservationStats.waitingRequestCount;
         nodeSummary.reservationDispatchedRequestCount =
             reservationStats.dispatchedRequestCount;
         nodeSummary.dispatchWaiterCount = reservationStats.dispatchWaiterCount;
-        nodeSummary.liveDispatchWaiterCount =
-            reservationStats.liveDispatchWaiterCount;
+        nodeSummary.liveDispatchWaiterCount = reservationStats.liveDispatchWaiterCount;
         summary.nodes.emplace_back(std::move(nodeSummary));
     }
     fillQueueOverloadSummary();
@@ -701,7 +693,8 @@ std::string NaviSchedMaster::makeSnapshot() const
 void NaviSchedMaster::reportMetrics() const
 {
     NaviSchedRole::reportMetrics();
-    reportMetric("master.collector_count", _collectorManager ? _collectorManager->size() : 0);
+    reportMetric("master.collector_count",
+                 _collectorManager ? _collectorManager->size() : 0);
     reportMetric("master.schedule_submit_total",
                  _masterScheduleR ? _masterScheduleR->getSubmitCount() : 0);
     reportMetric("master.schedule_graph_running",
@@ -709,9 +702,7 @@ void NaviSchedMaster::reportMetrics() const
     reportMetric("master.schedule_graph_restart_total",
                  _scheduleGraph ? _scheduleGraph->getRestartCount() : 0);
     reportMetric("master.schedule_request_pipe_generation",
-                 _masterScheduleR
-                     ? _masterScheduleR->getRequestPipeGeneration()
-                     : 0);
+                 _masterScheduleR ? _masterScheduleR->getRequestPipeGeneration() : 0);
     const auto schedulePendingRequestCount =
         _masterScheduleR ? _masterScheduleR->getPendingRequestCount() : 0;
     reportMetric("master.schedule_pending_requests", schedulePendingRequestCount);
@@ -729,8 +720,7 @@ void NaviSchedMaster::reportMetrics() const
         const auto stats = _masterLatencyModelR->getStats();
         reportMetric("master.latency_model_pool_fingerprint_count",
                      stats.fingerprintCount);
-        reportMetric("master.latency_model_pool_candidate_count",
-                     stats.candidateCount);
+        reportMetric("master.latency_model_pool_candidate_count", stats.candidateCount);
         reportMetric("master.latency_model_pool_accepted_update_total",
                      stats.acceptedUpdateCount);
         reportMetric("master.latency_model_pool_rejected_update_total",
@@ -739,9 +729,8 @@ void NaviSchedMaster::reportMetrics() const
                      stats.warmupResponseCount);
         reportMetric("master.latency_model_pool_warmup_notification_total",
                      stats.warmupNotificationCount);
-        reportMetric(
-            "master.latency_model_pool_warmup_notification_failure_total",
-            stats.warmupNotificationFailureCount);
+        reportMetric("master.latency_model_pool_warmup_notification_failure_total",
+                     stats.warmupNotificationFailureCount);
         reportMetric("master.latency_model_pool_warmup_subscriber_count",
                      stats.warmupSubscriberCount);
         reportMetric("master.latency_model_pool_persist_success_total",
@@ -754,21 +743,21 @@ void NaviSchedMaster::reportMetrics() const
                      stats.globalZeroPointGroupCount);
         reportMetric("master.latency_model_global_zero_point_refresh_total",
                      stats.globalZeroPointRefreshCount);
-        for (const auto parameterCount : {
-                 NonLinearPrefillModelR::PARAMETER_COUNT,
-                 NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT}) {
-            const auto diagnostics =
-                _masterLatencyModelR->getGlobalZeroPointDiagnostics(
-                    NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL,
-                    NonLinearPrefillModelR::BINARY_VERSION, parameterCount);
+        for (const auto parameterCount :
+             {NonLinearPrefillModelR::PARAMETER_COUNT,
+              NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT}) {
+            const auto diagnostics = _masterLatencyModelR->getGlobalZeroPointDiagnostics(
+                NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL,
+                NonLinearPrefillModelR::BINARY_VERSION, parameterCount);
             const auto suffix = std::to_string(parameterCount);
             reportMetric("master.latency_model_global_zero_point_available_" + suffix,
                          diagnostics.available() ? 1 : 0);
-            reportMetric("master.latency_model_global_zero_point_invalid_reason_" + suffix,
-                         static_cast<int>(diagnostics.invalidReason));
-            reportMetric("master.latency_model_global_zero_point_group_live_node_count_" +
-                             suffix,
-                         diagnostics.groupLiveNodeCount);
+            reportMetric(
+                "master.latency_model_global_zero_point_invalid_reason_" + suffix,
+                static_cast<int>(diagnostics.invalidReason));
+            reportMetric(
+                "master.latency_model_global_zero_point_group_live_node_count_" + suffix,
+                diagnostics.groupLiveNodeCount);
             reportMetric(
                 "master.latency_model_global_zero_point_group_trusted_node_count_" +
                     suffix,
@@ -795,21 +784,25 @@ void NaviSchedMaster::reportMetrics() const
             return;
         }
         const auto execution = _masterScheduleR->getExecutionUtilizationStats();
-        reportMetric("master.execution_utilization_average_pct", execution.average * 100.0);
-        reportMetric("master.execution_utilization_raw_average_pct", execution.rawAverage * 100.0);
+        reportMetric("master.execution_utilization_average_pct",
+                     execution.average * 100.0);
+        reportMetric("master.execution_utilization_raw_average_pct",
+                     execution.rawAverage * 100.0);
         reportMetric("master.execution_utilization_running_requests", execution.running);
         reportMetric("master.execution_utilization_waiting_requests", execution.waiting);
-        reportMetric("master.execution_utilization_global_scaling", execution.globalScaling ? 1 : 0);
+        reportMetric("master.execution_utilization_global_scaling",
+                     execution.globalScaling ? 1 : 0);
         reportMetric("master.execution_utilization_integral", execution.integral);
-        reportMetric("master.execution_utilization_reporting_nodes", execution.reportingNodes);
-        reportMetric("master.execution_utilization_control_enabled", execution.enabled ? 1 : 0);
+        reportMetric("master.execution_utilization_reporting_nodes",
+                     execution.reportingNodes);
+        reportMetric("master.execution_utilization_control_enabled",
+                     execution.enabled ? 1 : 0);
         const auto overloadStats = _masterScheduleR->getQueueOverloadStats();
         reportMetric("master.queue_overload_average_predicted_latency_ms",
                      overloadStats.latestAveragePredictedLatencyMs);
         reportMetric("master.queue_overload_drop_probability",
                      overloadStats.latestDropProbability);
-        reportMetric("master.queue_overload_active",
-                     overloadStats.active ? 1 : 0);
+        reportMetric("master.queue_overload_active", overloadStats.active ? 1 : 0);
         reportMetric("master.queue_overload_evaluated_round_total",
                      overloadStats.evaluatedRoundCount);
         reportMetric("master.queue_overload_evaluated_request_total",
@@ -822,8 +815,7 @@ void NaviSchedMaster::reportMetrics() const
                                overloadStats.rejectedRequestCount);
     };
     if (_masterScheduleR) {
-        const auto coldStartStats =
-            _masterScheduleR->getColdStartRoutingStats();
+        const auto coldStartStats = _masterScheduleR->getColdStartRoutingStats();
         reportMetric("master.cold_start_latest_target_inflight",
                      coldStartStats.latestTargetInflight);
         reportMetric("master.cold_start_latest_trusted_node_count",
@@ -834,12 +826,10 @@ void NaviSchedMaster::reportMetrics() const
                      coldStartStats.latestUntrustedCapacity);
         reportMetric("master.cold_start_latest_ramping_node_count",
                      coldStartStats.latestRampingNodeCount);
-        reportMetric(
-            "master.cold_start_latest_unsafe_waiting_marginal_node_count",
-            coldStartStats.latestUnsafeWaitingMarginalNodeCount);
-        reportMetric(
-            "master.cold_start_unsafe_waiting_marginal_node_observation_total",
-            coldStartStats.unsafeWaitingMarginalNodeObservationCount);
+        reportMetric("master.cold_start_latest_unsafe_waiting_marginal_node_count",
+                     coldStartStats.latestUnsafeWaitingMarginalNodeCount);
+        reportMetric("master.cold_start_unsafe_waiting_marginal_node_observation_total",
+                     coldStartStats.unsafeWaitingMarginalNodeObservationCount);
         reportCounterQpsMetric(
             "master.cold_start_unsafe_waiting_marginal_node_observation_qps",
             coldStartStats.unsafeWaitingMarginalNodeObservationCount);
@@ -875,6 +865,20 @@ void NaviSchedMaster::reportMetrics() const
     reportCounterQpsMetric("master.schedule_round_qps", scheduleStats.roundCount);
     reportCounterQpsMetric("master.schedule_request_qps", scheduleStats.requestCount);
     const auto requestStats = _masterStateR->getAgentRequestStats();
+    const auto cacheTokenReportTimeUs = autil::TimeUtility::monotonicTimeUs();
+    const auto cacheHitTokens =
+        reportCounterQpsMetricAt("master.kv_cache_hit_tokens_qps",
+                                 requestStats.cacheHitTokens, cacheTokenReportTimeUs);
+    const auto cacheMissTokens =
+        reportCounterQpsMetricAt("master.kv_cache_miss_tokens_qps",
+                                 requestStats.cacheMissTokens, cacheTokenReportTimeUs);
+    const auto cachePromptTokens = static_cast<double>(cacheHitTokens) + cacheMissTokens;
+    if (cachePromptTokens > 0.0) {
+        reportSampleMetric("master.kv_cache_hit_rate_pct",
+                           100.0 * cacheHitTokens / cachePromptTokens);
+    }
+    reportMetric("master.kv_cache_hit_tokens_total", requestStats.cacheHitTokens);
+    reportMetric("master.kv_cache_miss_tokens_total", requestStats.cacheMissTokens);
     reportMetric("master.agent_request_received_total", requestStats.receivedCount);
     reportMetric("master.agent_request_finished_total", requestStats.finishedCount);
     reportCounterQpsMetric("master.agent_request_received_qps",
@@ -939,6 +943,8 @@ void NaviSchedMaster::reportMetrics() const
     uint64_t rtpCacheMirrorSampleCount = 0;
     uint64_t rtpCacheMirrorMismatchCount = 0;
     uint64_t rtpCacheMirrorDivergedNodeCount = 0;
+    std::map<std::string, uint64_t> v6dCacheTotals;
+    uint64_t v6dCacheNodeCount = 0;
     uint64_t pendingCacheBatchCount = 0;
     uint64_t pendingCacheBlockCount = 0;
     uint64_t pendingCacheRevisionGapCount = 0;
@@ -954,6 +960,7 @@ void NaviSchedMaster::reportMetrics() const
     uint64_t workloadStaleUpdateCount = 0;
     uint64_t workloadReadyNodeCount = 0;
     uint64_t pdSeparatedNodeCount = 0;
+    uint64_t peerCacheEnabledNodeCount = 0;
     int64_t workloadBatchCount = 0;
     int64_t workloadRequestCount = 0;
     int64_t workloadRemainingPrefillRequestCount = 0;
@@ -994,9 +1001,8 @@ void NaviSchedMaster::reportMetrics() const
     int64_t workloadMaxTransportLagUs = std::numeric_limits<int64_t>::min();
     const auto reportTimeUs = autil::TimeUtility::currentTime();
     const auto timeCompression =
-        _schedulerConfigR
-            ? _schedulerConfigR->get().config.agent.timeCompression
-            : _configuredTimeCompression;
+        _schedulerConfigR ? _schedulerConfigR->get().config.agent.timeCompression
+                          : _configuredTimeCompression;
     ValidationWindowTotals validationWindow;
     std::unordered_set<std::string> activeAgentIds;
     for (const auto &state : _masterStateR->getNodeStates()) {
@@ -1005,35 +1011,36 @@ void NaviSchedMaster::reportMetrics() const
         if (info.online && utilization >= 0.0) {
             kmonitor::MetricsTags tags("agent_id", info.agentId);
             tags.AddTag("host_ip", info.serverInfo.ip);
-            reportMetric("master.agent_execution_utilization_pct", utilization * 100.0, tags);
+            reportMetric("master.agent_execution_utilization_pct", utilization * 100.0,
+                         tags);
         }
-        if (info.online && LatencyResidualModel::validateParameters(
-                info.latencyResidualParameters)) {
+        if (info.online &&
+            LatencyResidualModel::validateParameters(info.latencyResidualParameters)) {
             const auto residualDecay = LatencyResidualModel::decayFactor(
                 info.latencyResidualLastUpdateTimeUs, reportTimeUs,
                 state->getResidualRuntimeConfig());
             kmonitor::MetricsTags residualNodeTags("agent_id", info.agentId);
             residualNodeTags.AddTag("host_ip", info.serverInfo.ip);
-            const auto residualAgeMs = info.latencyResidualLastUpdateTimeUs > 0
-                ? std::max<int64_t>(
-                      0, reportTimeUs - info.latencyResidualLastUpdateTimeUs) /
-                      1000.0
-                : 0.0;
+            const auto residualAgeMs =
+                info.latencyResidualLastUpdateTimeUs > 0
+                    ? std::max<int64_t>(
+                          0, reportTimeUs - info.latencyResidualLastUpdateTimeUs) /
+                          1000.0
+                    : 0.0;
             reportMetric("master.latency_residual_age_ms", residualAgeMs,
                          residualNodeTags);
             reportMetric("master.latency_residual_decay_factor", residualDecay,
                          residualNodeTags);
             reportMetric("master.latency_residual_model_revision",
                          info.latencyModelRevision, residualNodeTags);
-            for (size_t index = 0;
-                 index < info.latencyResidualParameters.size(); ++index) {
+            for (size_t index = 0; index < info.latencyResidualParameters.size();
+                 ++index) {
                 auto residualBucketTags = residualNodeTags;
                 residualBucketTags.AddTag(
                     "residual_bucket",
                     std::to_string(LatencyResidualModel::MIN_BUCKET + index));
                 reportMetric("master.latency_residual_parameter_ms",
-                             info.latencyResidualParameters[index],
-                             residualBucketTags);
+                             info.latencyResidualParameters[index], residualBucketTags);
                 reportMetric("master.latency_residual_effective_parameter_ms",
                              info.latencyResidualParameters[index] * residualDecay,
                              residualBucketTags);
@@ -1041,17 +1048,25 @@ void NaviSchedMaster::reportMetrics() const
         }
         if (info.online) {
             const auto validLatencyModel =
-                NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL ==
-                    info.latencyFormula &&
-                NonLinearPrefillModelR::BINARY_VERSION ==
-                    info.latencyBinaryVersion &&
+                NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL == info.latencyFormula &&
+                NonLinearPrefillModelR::supportsBinaryVersion(
+                    info.latencyBinaryVersion) &&
                 info.latencyModelRevision > 0 &&
-                NonLinearPrefillModelR::validateParameters(
-                    info.latencyParameters);
+                NonLinearPrefillModelR::validateParametersForVersion(
+                    info.latencyParameters, info.latencyBinaryVersion);
             if (validLatencyModel && info.latencyModelTrusted) {
                 ++trustedLatencyModelNodes;
             } else {
                 ++untrustedLatencyModelNodes;
+            }
+        }
+        NaviSchedCachePolicy v6dPolicy;
+        if (info.online && state->getCachePolicy(v6dPolicy, NaviSchedCacheKeyType::V6D) &&
+            v6dPolicy.valid(NaviSchedCacheKeyType::V6D)) {
+            ++v6dCacheNodeCount;
+            for (const auto &[name, value] : makeCacheStateSummary(
+                     state->getCacheSyncStats(NaviSchedCacheKeyType::V6D))) {
+                v6dCacheTotals[name] += value;
             }
         }
         const auto cacheStats = state->getCacheSyncStats();
@@ -1062,23 +1077,20 @@ void NaviSchedMaster::reportMetrics() const
         pendingCacheBatchCount += cacheStats.pendingCacheBatchCount;
         pendingCacheBlockCount += cacheStats.pendingCacheBlockCount;
         pendingCacheRevisionGapCount += cacheStats.pendingCacheRevisionGapCount;
-        pendingCacheStateMismatchCount +=
-            cacheStats.pendingCacheStateMismatchCount;
-        pendingCacheResyncTriggerCount +=
-            cacheStats.pendingCacheResyncTriggerCount;
+        pendingCacheStateMismatchCount += cacheStats.pendingCacheStateMismatchCount;
+        pendingCacheResyncTriggerCount += cacheStats.pendingCacheResyncTriggerCount;
         pendingCacheNotReadyNodeCount +=
             info.online && !cacheStats.pendingCacheSnapshotReady ? 1 : 0;
         const auto reservationStats = state->getReservationStats();
         reservationBatchCount += reservationStats.batchCount;
         reservationRequestCount += reservationStats.requestCount;
-        reservationWaitingRequestCount +=
-            reservationStats.waitingRequestCount;
-        reservationDispatchedRequestCount +=
-            reservationStats.dispatchedRequestCount;
+        reservationWaitingRequestCount += reservationStats.waitingRequestCount;
+        reservationDispatchedRequestCount += reservationStats.dispatchedRequestCount;
         dispatchWaiterCount += reservationStats.dispatchWaiterCount;
         liveDispatchWaiterCount += reservationStats.liveDispatchWaiterCount;
         workloadStaleUpdateCount += info.workloadStaleUpdateCount;
         pdSeparatedNodeCount += info.pdSeparated ? 1 : 0;
+        peerCacheEnabledNodeCount += info.online && info.peerCacheEnabled ? 1 : 0;
         if (info.workload.valid()) {
             ++workloadReadyNodeCount;
             workloadBatchCount += info.workload.batchCount;
@@ -1087,8 +1099,7 @@ void NaviSchedMaster::reportMetrics() const
                 info.workload.remainingPrefillRequestCount;
             workloadRunningRequestCount += info.workload.runningRequestCount;
             workloadRunningElapsedTimeMs += info.workload.runningElapsedTimeMs;
-            workloadRunningDecodeRequestCount +=
-                info.workload.runningDecodeRequestCount;
+            workloadRunningDecodeRequestCount += info.workload.runningDecodeRequestCount;
             workloadRunningDecodeGeneratedTokens +=
                 info.workload.runningDecodeGeneratedTokenCount;
             workloadRunningDecodeRemainingTokenBudget +=
@@ -1096,27 +1107,22 @@ void NaviSchedMaster::reportMetrics() const
             if (info.workloadReportReceiveTimeUs > 0 &&
                 info.workload.runningCapacityPrefillRequestCount > 0) {
                 workloadRunningElapsedTimeMs +=
-                    std::max<int64_t>(0, reportTimeUs -
-                                            info.workloadReportReceiveTimeUs) /
-                    1000.0 *
-                    info.workload.runningCapacityPrefillRequestCount *
+                    std::max<int64_t>(0,
+                                      reportTimeUs - info.workloadReportReceiveTimeUs) /
+                    1000.0 * info.workload.runningCapacityPrefillRequestCount *
                     timeCompression;
             }
             workloadWaitingRequestCount += info.workload.waitingRequestCount;
             workloadRemainingPrefillContextTokens +=
                 info.workload.remainingPrefillContextTokenCount;
-            workloadRemainingPrefillTokens +=
-                info.workload.remainingPrefillTokenCount;
+            workloadRemainingPrefillTokens += info.workload.remainingPrefillTokenCount;
             workloadRemainingPrefillTokenSquareSum +=
                 info.workload.remainingPrefillTokenSquareSum;
             workloadContextRemainingPrefillProductSum +=
                 info.workload.contextRemainingPrefillTokenProductSum;
-            workloadCapacitySplitNodeCount +=
-                info.workload.prefillCapacitySplit ? 1 : 0;
-            workloadMaxRunningRequestCount +=
-                info.workload.maxRunningRequestCount;
-            workloadRunningCapacitySlotCount +=
-                info.workload.runningCapacitySlotCount;
+            workloadCapacitySplitNodeCount += info.workload.prefillCapacitySplit ? 1 : 0;
+            workloadMaxRunningRequestCount += info.workload.maxRunningRequestCount;
+            workloadRunningCapacitySlotCount += info.workload.runningCapacitySlotCount;
             workloadRunningCapacityPrefillRequestCount +=
                 info.workload.runningCapacityPrefillRequestCount;
             workloadRunningCapacityPrefillContextTokens +=
@@ -1126,8 +1132,7 @@ void NaviSchedMaster::reportMetrics() const
             workloadRunningCapacityPrefillTokenSquareSum +=
                 info.workload.runningCapacityPrefillTokenSquareSum;
             workloadRunningCapacityPrefillProductSum +=
-                info.workload
-                    .runningCapacityContextRemainingPrefillTokenProductSum;
+                info.workload.runningCapacityContextRemainingPrefillTokenProductSum;
             workloadWaitingCapacityPrefillRequestCount +=
                 info.workload.waitingCapacityPrefillRequestCount;
             workloadWaitingCapacityPrefillContextTokens +=
@@ -1137,8 +1142,7 @@ void NaviSchedMaster::reportMetrics() const
             workloadWaitingCapacityPrefillTokenSquareSum +=
                 info.workload.waitingCapacityPrefillTokenSquareSum;
             workloadWaitingCapacityPrefillProductSum +=
-                info.workload
-                    .waitingCapacityContextRemainingPrefillTokenProductSum;
+                info.workload.waitingCapacityContextRemainingPrefillTokenProductSum;
             workloadRemainingTotalContextTokens +=
                 info.workload.remainingTotalContextTokenCount;
             workloadRemainingTotalTokens += info.workload.remainingTotalTokenCount;
@@ -1147,8 +1151,7 @@ void NaviSchedMaster::reportMetrics() const
             workloadContextRemainingTotalProductSum +=
                 info.workload.contextRemainingTotalTokenProductSum;
             workloadTotalPromptTokens += info.workload.totalPromptTokenCount;
-            workloadInFlightScheduledTokens +=
-                info.workload.inFlightScheduledTokenCount;
+            workloadInFlightScheduledTokens += info.workload.inFlightScheduledTokenCount;
             const auto ageUs = reportTimeUs - info.workload.eventTimeUs;
             workloadAgeUs += ageUs;
             workloadMinAgeUs = std::min(workloadMinAgeUs, ageUs);
@@ -1163,8 +1166,7 @@ void NaviSchedMaster::reportMetrics() const
         }
         rtpCacheMirrorDivergedNodeCount +=
             cacheStats.rtpCachedBlockCount >= 0 &&
-                    cacheStats.rtpCachedBlockCount !=
-                        cacheStats.agentCachedBlockCount
+                    cacheStats.rtpCachedBlockCount != cacheStats.agentCachedBlockCount
                 ? 1
                 : 0;
         cacheDivergedNodeCount +=
@@ -1208,10 +1210,8 @@ void NaviSchedMaster::reportMetrics() const
         agentPredictedQueueMs += validation.agentPredictedQueueMeanMs * samples;
         queueFeatureBatchCount += validation.queueFeatureBatchCountMean * samples;
         batchRequestCount += validation.batchRequestCountMean * samples;
-        masterPredictedExecutionMs +=
-            validation.masterPredictedExecutionMeanMs * samples;
-        agentPredictedExecutionMs +=
-            validation.agentPredictedExecutionMeanMs * samples;
+        masterPredictedExecutionMs += validation.masterPredictedExecutionMeanMs * samples;
+        agentPredictedExecutionMs += validation.agentPredictedExecutionMeanMs * samples;
         actualExecutionMs += validation.actualExecutionMeanMs * samples;
         predictedTotalMs += validation.masterPredictedTotalMeanMs * samples;
         actualTotalMs += validation.actualTotalMeanMs * samples;
@@ -1232,8 +1232,7 @@ void NaviSchedMaster::reportMetrics() const
         positiveActualQueueMs +=
             validation.positivePredictedQueueActualMeanMs * positiveSamples;
     }
-    for (auto it = _lastValidationStats.begin();
-         it != _lastValidationStats.end();) {
+    for (auto it = _lastValidationStats.begin(); it != _lastValidationStats.end();) {
         if (activeAgentIds.count(it->first) == 0) {
             it = _lastValidationStats.erase(it);
         } else {
@@ -1241,14 +1240,17 @@ void NaviSchedMaster::reportMetrics() const
         }
     }
     const bool hasValidationWindowData =
-        validationWindow.sampleCount > 0 ||
-        validationWindow.unmatchedBatchCount > 0;
+        validationWindow.sampleCount > 0 || validationWindow.unmatchedBatchCount > 0;
     reportQueueOverloadMetrics();
+    if (v6dCacheNodeCount > 0) {
+        reportMetric("master.v6d_cache_node_count", v6dCacheNodeCount);
+        for (const auto &[name, value] : v6dCacheTotals) {
+            reportMetric("master.v6d_" + name, value);
+        }
+    }
     reportMetric("master.online_node_count", onlineNodes);
-    reportMetric("master.latency_model_trusted_node_count",
-                 trustedLatencyModelNodes);
-    reportMetric("master.latency_model_untrusted_node_count",
-                 untrustedLatencyModelNodes);
+    reportMetric("master.latency_model_trusted_node_count", trustedLatencyModelNodes);
+    reportMetric("master.latency_model_untrusted_node_count", untrustedLatencyModelNodes);
     reportMetric("master.requests_inflight", inflightRequests);
     reportMetric("master.requests_queued_for_execution", queuedBatchRequests);
     reportMetric("master.requests_running", runningRequests);
@@ -1256,20 +1258,17 @@ void NaviSchedMaster::reportMetrics() const
     reportMetric("master.cache_sync_diverged_node_count", cacheDivergedNodeCount);
     reportMetric("master.cache_sync_revision_gap_total", cacheRevisionGapCount);
     reportMetric("master.cache_sync_state_mismatch_total", cacheStateMismatchCount);
-    reportMetric("master.rtp_cache_mirror_mismatch_total",
-                 rtpCacheMirrorMismatchCount);
-    reportMetric("master.rtp_cache_mirror_sample_total",
-                 rtpCacheMirrorSampleCount);
-    reportMetric("master.rtp_cache_mirror_mismatch_ratio",
-                 rtpCacheMirrorSampleCount > 0
-                     ? static_cast<double>(rtpCacheMirrorMismatchCount) /
-                           rtpCacheMirrorSampleCount
-                     : 0.0);
+    reportMetric("master.rtp_cache_mirror_mismatch_total", rtpCacheMirrorMismatchCount);
+    reportMetric("master.rtp_cache_mirror_sample_total", rtpCacheMirrorSampleCount);
+    reportMetric(
+        "master.rtp_cache_mirror_mismatch_ratio",
+        rtpCacheMirrorSampleCount > 0
+            ? static_cast<double>(rtpCacheMirrorMismatchCount) / rtpCacheMirrorSampleCount
+            : 0.0);
     reportMetric("master.rtp_cache_mirror_diverged_node_count",
                  rtpCacheMirrorDivergedNodeCount);
     reportMetric("master.pending_cache_batch_count", pendingCacheBatchCount);
-    reportMetric("master.pending_cache_unique_block_count",
-                 pendingCacheBlockCount);
+    reportMetric("master.pending_cache_unique_block_count", pendingCacheBlockCount);
     reportMetric("master.pending_cache_sync_revision_gap_total",
                  pendingCacheRevisionGapCount);
     reportMetric("master.pending_cache_sync_state_mismatch_total",
@@ -1283,12 +1282,13 @@ void NaviSchedMaster::reportMetrics() const
     const auto schedulingRequestCount =
         _masterScheduleR ? _masterScheduleR->getSchedulingRequestCount() : 0;
     reportMetric("master.schedule_processing_requests", schedulingRequestCount);
-    const auto reservationActiveRequestCount = reservationWaitingRequestCount +
-                                               reservationDispatchedRequestCount;
+    const auto reservationActiveRequestCount =
+        reservationWaitingRequestCount + reservationDispatchedRequestCount;
     reportMetric("master.reservation_active_request_count",
                  reservationActiveRequestCount);
     reportMetric("master.requests_active", schedulePendingRequestCount +
-                 schedulingRequestCount + reservationActiveRequestCount);
+                                               schedulingRequestCount +
+                                               reservationActiveRequestCount);
     reportMetric("master.reservation_waiting_request_count",
                  reservationWaitingRequestCount);
     reportMetric("master.reservation_dispatched_request_count",
@@ -1296,24 +1296,22 @@ void NaviSchedMaster::reportMetrics() const
     reportMetric("master.dispatch_waiter_count", dispatchWaiterCount);
     reportMetric("master.live_dispatch_waiter_count", liveDispatchWaiterCount);
     reportMetric("master.pd_separated_node_count", pdSeparatedNodeCount);
+    reportMetric("master.peer_cache_enabled_node_count", peerCacheEnabledNodeCount);
     reportMetric("master.workload_ready_node_count", workloadReadyNodeCount);
     reportMetric("master.workload_stale_update_total", workloadStaleUpdateCount);
     reportMetric("master.workload_batch_count", workloadBatchCount);
     reportMetric("master.workload_request_count", workloadRequestCount);
     reportMetric("master.workload_remaining_prefill_request_count",
                  workloadRemainingPrefillRequestCount);
-    reportMetric("master.workload_running_request_count",
-                 workloadRunningRequestCount);
-    reportMetric("master.workload_running_elapsed_time_ms",
-                 workloadRunningElapsedTimeMs);
+    reportMetric("master.workload_running_request_count", workloadRunningRequestCount);
+    reportMetric("master.workload_running_elapsed_time_ms", workloadRunningElapsedTimeMs);
     reportMetric("master.workload_running_decode_request_count",
                  workloadRunningDecodeRequestCount);
     reportMetric("master.workload_running_decode_generated_tokens",
                  workloadRunningDecodeGeneratedTokens);
     reportMetric("master.workload_running_decode_remaining_token_budget",
                  workloadRunningDecodeRemainingTokenBudget);
-    reportMetric("master.workload_waiting_request_count",
-                 workloadWaitingRequestCount);
+    reportMetric("master.workload_waiting_request_count", workloadWaitingRequestCount);
     reportMetric("master.workload_remaining_prefill_context_tokens",
                  workloadRemainingPrefillContextTokens);
     reportMetric("master.workload_remaining_prefill_tokens",
@@ -1350,44 +1348,36 @@ void NaviSchedMaster::reportMetrics() const
                  workloadWaitingCapacityPrefillProductSum);
     reportMetric("master.workload_remaining_total_context_tokens",
                  workloadRemainingTotalContextTokens);
-    reportMetric("master.workload_remaining_total_tokens",
-                 workloadRemainingTotalTokens);
+    reportMetric("master.workload_remaining_total_tokens", workloadRemainingTotalTokens);
     reportMetric("master.workload_remaining_total_token_square_sum",
                  workloadRemainingTotalTokenSquareSum);
     reportMetric("master.workload_context_remaining_total_product_sum",
                  workloadContextRemainingTotalProductSum);
-    reportMetric("master.workload_total_prompt_tokens",
-                 workloadTotalPromptTokens);
+    reportMetric("master.workload_total_prompt_tokens", workloadTotalPromptTokens);
     reportMetric("master.workload_inflight_scheduled_tokens",
                  workloadInFlightScheduledTokens);
-    reportMetric(
-        "master.workload_age_mean_ms",
-        workloadReadyNodeCount > 0
-            ? workloadAgeUs / 1000.0 / workloadReadyNodeCount
-            : 0.0);
-    reportMetric(
-        "master.workload_age_min_ms",
-        workloadReadyNodeCount > 0 ? workloadMinAgeUs / 1000.0 : 0.0);
-    reportMetric(
-        "master.workload_age_max_ms",
-        workloadReadyNodeCount > 0 ? workloadMaxAgeUs / 1000.0 : 0.0);
-    reportMetric(
-        "master.workload_transport_lag_mean_ms",
-        workloadReadyNodeCount > 0
-            ? workloadTransportLagUs / 1000.0 / workloadReadyNodeCount
-            : 0.0);
-    reportMetric(
-        "master.workload_transport_lag_min_ms",
-        workloadReadyNodeCount > 0 ? workloadMinTransportLagUs / 1000.0 : 0.0);
-    reportMetric(
-        "master.workload_transport_lag_max_ms",
-        workloadReadyNodeCount > 0 ? workloadMaxTransportLagUs / 1000.0 : 0.0);
-    const auto reportValidationMetric =
-        [this, hasValidationWindowData](const std::string &name, double value) {
-            if (hasValidationWindowData) {
-                reportSampleMetric(name, value);
-            }
-        };
+    reportMetric("master.workload_age_mean_ms",
+                 workloadReadyNodeCount > 0
+                     ? workloadAgeUs / 1000.0 / workloadReadyNodeCount
+                     : 0.0);
+    reportMetric("master.workload_age_min_ms",
+                 workloadReadyNodeCount > 0 ? workloadMinAgeUs / 1000.0 : 0.0);
+    reportMetric("master.workload_age_max_ms",
+                 workloadReadyNodeCount > 0 ? workloadMaxAgeUs / 1000.0 : 0.0);
+    reportMetric("master.workload_transport_lag_mean_ms",
+                 workloadReadyNodeCount > 0
+                     ? workloadTransportLagUs / 1000.0 / workloadReadyNodeCount
+                     : 0.0);
+    reportMetric("master.workload_transport_lag_min_ms",
+                 workloadReadyNodeCount > 0 ? workloadMinTransportLagUs / 1000.0 : 0.0);
+    reportMetric("master.workload_transport_lag_max_ms",
+                 workloadReadyNodeCount > 0 ? workloadMaxTransportLagUs / 1000.0 : 0.0);
+    const auto reportValidationMetric = [this, hasValidationWindowData](
+                                            const std::string &name, double value) {
+        if (hasValidationWindowData) {
+            reportSampleMetric(name, value);
+        }
+    };
     reportValidationMetric("master.validation_samples", validationSamples);
     reportValidationMetric("master.validation_unmatched_batches", unmatchedBatches);
     const auto validationCount = static_cast<double>(validationSamples);
@@ -1395,31 +1385,31 @@ void NaviSchedMaster::reportMetrics() const
         return validationCount > 0.0 ? sum / validationCount : 0.0;
     };
     reportValidationMetric("master.validation_cache_hit_tokens_predicted_mean",
-                 validationMean(predictedCacheHitTokens));
+                           validationMean(predictedCacheHitTokens));
     reportValidationMetric("master.validation_cache_hit_tokens_actual_mean",
-                 validationMean(actualCacheHitTokens));
+                           validationMean(actualCacheHitTokens));
     reportValidationMetric("master.validation_queue_predicted_mean_ms",
-                 validationMean(predictedQueueMs));
+                           validationMean(predictedQueueMs));
     reportValidationMetric("master.validation_queue_actual_mean_ms",
-                 validationMean(actualQueueMs));
+                           validationMean(actualQueueMs));
     reportValidationMetric("master.queue_model_raw_prediction_mean_ms",
-                 validationMean(queueRawPredictedMs));
+                           validationMean(queueRawPredictedMs));
     reportValidationMetric("master.queue_model_prediction_mean_ms",
-                 validationMean(agentPredictedQueueMs));
+                           validationMean(agentPredictedQueueMs));
     reportValidationMetric("master.queue_model_preceding_batch_count_mean",
-                 validationMean(queueFeatureBatchCount));
+                           validationMean(queueFeatureBatchCount));
     reportValidationMetric("master.validation_batch_request_count_mean",
-                 validationMean(batchRequestCount));
+                           validationMean(batchRequestCount));
     reportValidationMetric("master.validation_execution_predicted_mean_ms",
-                 validationMean(masterPredictedExecutionMs));
+                           validationMean(masterPredictedExecutionMs));
     reportValidationMetric("master.validation_execution_agent_predicted_mean_ms",
-                 validationMean(agentPredictedExecutionMs));
+                           validationMean(agentPredictedExecutionMs));
     reportValidationMetric("master.validation_execution_actual_mean_ms",
-                 validationMean(actualExecutionMs));
+                           validationMean(actualExecutionMs));
     reportValidationMetric("master.validation_total_predicted_mean_ms",
-                 validationMean(predictedTotalMs));
+                           validationMean(predictedTotalMs));
     reportValidationMetric("master.validation_total_actual_mean_ms",
-                 validationMean(actualTotalMs));
+                           validationMean(actualTotalMs));
     reportMetric("master.agent_report_lag_mean_ms",
                  reportLagCount > 0
                      ? reportLagUs / 1000.0 / static_cast<double>(reportLagCount)
@@ -1427,80 +1417,79 @@ void NaviSchedMaster::reportMetrics() const
     reportMetric("master.agent_report_lag_max_ms", maxReportLagUs / 1000.0);
     reportValidationMetric("master.validation_queue_zero_samples", zeroQueueSamples);
     const auto zeroQueueCount = static_cast<double>(zeroQueueSamples);
-    reportValidationMetric("master.validation_queue_zero_actual_mean_ms",
-                 zeroQueueCount > 0.0 ? zeroQueueActualMs / zeroQueueCount : 0.0);
-    reportValidationMetric("master.validation_queue_positive_samples", positiveQueueSamples);
+    reportValidationMetric(
+        "master.validation_queue_zero_actual_mean_ms",
+        zeroQueueCount > 0.0 ? zeroQueueActualMs / zeroQueueCount : 0.0);
+    reportValidationMetric("master.validation_queue_positive_samples",
+                           positiveQueueSamples);
     const auto positiveQueueCount = static_cast<double>(positiveQueueSamples);
-    reportValidationMetric("master.validation_queue_positive_predicted_mean_ms",
-                 positiveQueueCount > 0.0
-                     ? positivePredictedQueueMs / positiveQueueCount
-                     : 0.0);
-    reportValidationMetric("master.validation_queue_positive_actual_mean_ms",
-                 positiveQueueCount > 0.0
-                     ? positiveActualQueueMs / positiveQueueCount
-                     : 0.0);
+    reportValidationMetric(
+        "master.validation_queue_positive_predicted_mean_ms",
+        positiveQueueCount > 0.0 ? positivePredictedQueueMs / positiveQueueCount : 0.0);
+    reportValidationMetric(
+        "master.validation_queue_positive_actual_mean_ms",
+        positiveQueueCount > 0.0 ? positiveActualQueueMs / positiveQueueCount : 0.0);
 
     if (!hasValidationWindowData) {
         return;
     }
-    const auto reportWindowMetric =
-        [this](const std::string &name, double value) {
-            reportSampleMetric(name, value);
-        };
+    const auto reportWindowMetric = [this](const std::string &name, double value) {
+        reportSampleMetric(name, value);
+    };
     const auto windowCount = static_cast<double>(validationWindow.sampleCount);
     const auto windowMean = [windowCount](double sum) {
         return windowCount > 0.0 ? sum / windowCount : 0.0;
     };
     reportWindowMetric("master.validation_window_samples", validationWindow.sampleCount);
     reportWindowMetric("master.validation_window_unmatched_batches",
-                 validationWindow.unmatchedBatchCount);
+                       validationWindow.unmatchedBatchCount);
     reportWindowMetric("master.validation_window_batch_request_count_mean",
-                 windowMean(validationWindow.batchRequestCount));
+                       windowMean(validationWindow.batchRequestCount));
     reportWindowMetric("master.validation_window_cache_hit_tokens_predicted_mean",
-                 windowMean(validationWindow.predictedCacheHitTokens));
+                       windowMean(validationWindow.predictedCacheHitTokens));
     reportWindowMetric("master.validation_window_cache_hit_tokens_actual_mean",
-                 windowMean(validationWindow.actualCacheHitTokens));
+                       windowMean(validationWindow.actualCacheHitTokens));
     reportWindowMetric("master.validation_window_queue_predicted_mean_ms",
-                 windowMean(validationWindow.predictedQueueMs));
+                       windowMean(validationWindow.predictedQueueMs));
     reportWindowMetric("master.validation_window_queue_actual_mean_ms",
-                 windowMean(validationWindow.actualQueueMs));
+                       windowMean(validationWindow.actualQueueMs));
     reportWindowMetric("master.queue_model_window_raw_prediction_mean_ms",
-                 windowMean(validationWindow.queueRawPredictedMs));
+                       windowMean(validationWindow.queueRawPredictedMs));
     reportWindowMetric("master.queue_model_window_prediction_mean_ms",
-                 windowMean(validationWindow.agentPredictedQueueMs));
+                       windowMean(validationWindow.agentPredictedQueueMs));
     reportWindowMetric("master.queue_model_window_preceding_batch_count_mean",
-                 windowMean(validationWindow.queueFeatureBatchCount));
+                       windowMean(validationWindow.queueFeatureBatchCount));
     reportWindowMetric("master.validation_window_execution_predicted_mean_ms",
-                 windowMean(validationWindow.masterPredictedExecutionMs));
+                       windowMean(validationWindow.masterPredictedExecutionMs));
     reportWindowMetric("master.validation_window_execution_agent_predicted_mean_ms",
-                 windowMean(validationWindow.agentPredictedExecutionMs));
+                       windowMean(validationWindow.agentPredictedExecutionMs));
     reportWindowMetric("master.validation_window_execution_actual_mean_ms",
-                 windowMean(validationWindow.actualExecutionMs));
+                       windowMean(validationWindow.actualExecutionMs));
     reportWindowMetric("master.validation_window_total_predicted_mean_ms",
-                 windowMean(validationWindow.predictedTotalMs));
+                       windowMean(validationWindow.predictedTotalMs));
     reportWindowMetric("master.validation_window_total_actual_mean_ms",
-                 windowMean(validationWindow.actualTotalMs));
+                       windowMean(validationWindow.actualTotalMs));
     const auto windowZeroCount =
         static_cast<double>(validationWindow.zeroQueueSampleCount);
     reportWindowMetric("master.validation_window_queue_zero_samples",
-                 validationWindow.zeroQueueSampleCount);
+                       validationWindow.zeroQueueSampleCount);
     reportWindowMetric("master.validation_window_queue_zero_actual_mean_ms",
-                 windowZeroCount > 0.0
-                     ? validationWindow.zeroQueueActualMs / windowZeroCount
-                     : 0.0);
+                       windowZeroCount > 0.0
+                           ? validationWindow.zeroQueueActualMs / windowZeroCount
+                           : 0.0);
     const auto windowPositiveCount =
         static_cast<double>(validationWindow.positiveQueueSampleCount);
     reportWindowMetric("master.validation_window_queue_positive_samples",
-                 validationWindow.positiveQueueSampleCount);
-    reportWindowMetric("master.validation_window_queue_positive_predicted_mean_ms",
-                 windowPositiveCount > 0.0
-                     ? validationWindow.positivePredictedQueueMs /
-                           windowPositiveCount
-                     : 0.0);
+                       validationWindow.positiveQueueSampleCount);
+    reportWindowMetric(
+        "master.validation_window_queue_positive_predicted_mean_ms",
+        windowPositiveCount > 0.0
+            ? validationWindow.positivePredictedQueueMs / windowPositiveCount
+            : 0.0);
     reportWindowMetric("master.validation_window_queue_positive_actual_mean_ms",
-                 windowPositiveCount > 0.0
-                     ? validationWindow.positiveActualQueueMs / windowPositiveCount
-                     : 0.0);
+                       windowPositiveCount > 0.0
+                           ? validationWindow.positiveActualQueueMs / windowPositiveCount
+                           : 0.0);
 }
 
 }

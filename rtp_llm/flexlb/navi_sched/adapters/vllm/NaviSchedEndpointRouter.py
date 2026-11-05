@@ -68,8 +68,12 @@ class NaviSchedEndpointRouter:
         timeout_ms: int | None = None,
         forward_payload: bytes = b"",
         block_hash_request=None,
+        route_only: bool = False,
+        explicit_cache_checkpoint_position: int = 0,
     ):
-        effective_timeout_ms = self._timeout_ms if timeout_ms is None else int(timeout_ms)
+        effective_timeout_ms = (
+            self._timeout_ms if timeout_ms is None else int(timeout_ms)
+        )
         if effective_timeout_ms <= 0:
             raise ValueError("timeout_ms must be positive")
         options = {
@@ -77,7 +81,19 @@ class NaviSchedEndpointRouter:
             "timeout_ms": effective_timeout_ms,
             "request_id": request_id,
         }
+        if route_only:
+            options["route_only"] = True
+        if explicit_cache_checkpoint_position:
+            options["explicit_cache_checkpoint_position"] = (
+                explicit_cache_checkpoint_position
+            )
         token_ids = [int(token_id) for token_id in prompt_token_ids]
+        if type(
+            explicit_cache_checkpoint_position
+        ) is not int or not 0 <= explicit_cache_checkpoint_position <= len(token_ids):
+            raise ValueError(
+                "explicit cache checkpoint position must be within the prompt"
+            )
         hashes = (
             calculate_vllm_block_hashes(
                 token_ids,
@@ -118,11 +134,15 @@ class NaviSchedEndpointRouter:
                 self._replay_log_slots.release()
             else:
                 try:
-                    future = self._replay_log_executor.submit(self._log_replay, decision)
+                    future = self._replay_log_executor.submit(
+                        self._log_replay, decision
+                    )
                 except Exception:
                     self._replay_log_slots.release()
-                    logger.exception("navi-replay-sample submit failed request_id=%s",
-                                     decision.request_id)
+                    logger.exception(
+                        "navi-replay-sample submit failed request_id=%s",
+                        decision.request_id,
+                    )
                 else:
                     future.add_done_callback(
                         lambda unused: self._replay_log_slots.release()
@@ -134,26 +154,40 @@ class NaviSchedEndpointRouter:
         try:
             raw = decision.replay.to_json().encode("utf-8")
             if len(raw) > _MAX_REPLAY_BYTES:
-                logger.warning("navi-replay-sample skipped request_id=%s reason=oversized size=%s",
-                               decision.request_id, len(raw))
+                logger.warning(
+                    "navi-replay-sample skipped request_id=%s reason=oversized size=%s",
+                    decision.request_id,
+                    len(raw),
+                )
                 return
             compressed = zlib.compress(raw, level=1)
             if len(compressed) > _MAX_COMPRESSED_REPLAY_BYTES:
-                logger.warning("navi-replay-sample skipped request_id=%s reason=compressed_oversized size=%s",
-                               decision.request_id, len(compressed))
+                logger.warning(
+                    "navi-replay-sample skipped request_id=%s reason=compressed_oversized size=%s",
+                    decision.request_id,
+                    len(compressed),
+                )
                 return
             encoded = base64.b64encode(compressed).decode("ascii")
             digest = hashlib.sha256(raw).hexdigest()
-            parts = [encoded[index:index + _REPLAY_LOG_CHUNK_BYTES]
-                     for index in range(0, len(encoded), _REPLAY_LOG_CHUNK_BYTES)]
+            parts = [
+                encoded[index : index + _REPLAY_LOG_CHUNK_BYTES]
+                for index in range(0, len(encoded), _REPLAY_LOG_CHUNK_BYTES)
+            ]
             for index, part in enumerate(parts, start=1):
                 logger.info(
                     "navi-replay-sample request_id=%s schedule_id=%s part=%s total=%s sha256=%s data=%s",
-                    decision.request_id, decision.schedule_id, index,
-                    len(parts), digest, part,
+                    decision.request_id,
+                    decision.schedule_id,
+                    index,
+                    len(parts),
+                    digest,
+                    part,
                 )
         except Exception:
-            logger.exception("navi-replay-sample failed request_id=%s", decision.request_id)
+            logger.exception(
+                "navi-replay-sample failed request_id=%s", decision.request_id
+            )
 
     async def route_async(self, prompt_token_ids: Sequence[int], **options):
         return await asyncio.wrap_future(

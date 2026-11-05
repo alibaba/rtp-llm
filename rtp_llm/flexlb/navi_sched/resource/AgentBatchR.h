@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -28,6 +29,7 @@ public:
         int64_t agentPhysicalToRtpErrorTokens = 0;
         int64_t masterToAgentPendingAwareErrorTokens = 0;
         int64_t agentPendingAwareToRtpErrorTokens = 0;
+        // Final Bias uses predicted - actual: positive is overprediction.
         int64_t masterToRtpErrorTokens = 0;
         bool blockAligned = false;
     };
@@ -41,6 +43,7 @@ public:
         int64_t scheduleBatchId = 0;
         std::vector<uint64_t> requestIds;
         NaviSchedLocalBatchInfo localBatch;
+        std::vector<NaviSchedCacheKeyType> pendingCacheTypes;
         int64_t eventTimeUs = 0;
         double batchLatencyMs = 0.0;
         double backendQueueLatencyMs = 0.0;
@@ -90,6 +93,10 @@ public:
         int64_t decodeRequestStepCount = 0;
         int64_t decodeTokenCount = 0;
         int64_t admissionToFirstExecutionTimeUs = -1;
+        int64_t globalPaddedTokens = 0;
+        int64_t projectedExecutionStepCount = 0;
+        int64_t projectedGlobalPaddedTokens = 0;
+        int64_t executionFinishTimeUs = 0;
     };
 
     struct BackendBatchExecutionStats {
@@ -137,6 +144,7 @@ public:
     };
 
     struct CacheHitPathStats {
+        int64_t promptTokens = 0;
         uint64_t batchCount = 0;
         uint64_t requestCount = 0;
         int64_t masterPredictedTokens = 0;
@@ -167,6 +175,7 @@ public:
 
     struct CacheKeyAudit {
         NaviSchedBlockHashesConstPtr blockHashes;
+        int64_t cachePublicationTokenCount = -1;
         int64_t physicalCacheHitTokenCount = -1;
         int64_t arrivalTimeUs = 0;
         uint64_t cacheRevision = 0;
@@ -207,6 +216,9 @@ public:
                     ExecutionState &state);
     bool startBatch(int64_t batchId, const std::vector<uint64_t> &requestIds,
                     int64_t executionStartTimeUs, ExecutionState &state);
+    bool resolveExecutionCache(int64_t batchId,
+                               const std::vector<NaviSchedRequestStats> &requests,
+                               ExecutionState &state, NaviSchedBatchPtr &resolved);
     bool recordCacheStateAtStart(int64_t batchId, uint64_t cacheRevision,
                                  size_t cachedBlockCount, uint64_t cacheHashChecksum,
                                  size_t fullReadyBlockCount,
@@ -214,18 +226,25 @@ public:
                                  size_t tailReadyBlockCount,
                                  uint64_t tailReadyHashChecksum,
                                  int64_t rtpCachedBlockCount);
-    bool makePendingCacheReservation(int64_t batchId, const NaviSchedCachePolicy &policy,
-                                     NaviSchedPendingCacheReservation &reservation) const;
-    bool markPendingCacheTracked(int64_t batchId);
+    bool makePendingCacheReservation(
+        int64_t batchId, const NaviSchedCachePolicy &policy,
+        NaviSchedPendingCacheReservation &reservation,
+        NaviSchedCacheKeyType type = NaviSchedCacheKeyType::BLOCK_POOL,
+        const std::map<uint64_t, int64_t> &publicationStarts = {}) const;
+    bool markPendingCacheTracked(
+        int64_t batchId, NaviSchedCacheKeyType type = NaviSchedCacheKeyType::BLOCK_POOL);
+    bool unmarkPendingCacheTracked(int64_t batchId, NaviSchedCacheKeyType type);
     bool finishBatch(int64_t batchId, const std::vector<NaviSchedRequestStats> &requests,
                      ExecutionState &state,
                      std::vector<NaviSchedRequestStats> *completedRequests = nullptr,
-                     double nativePreparationMs = 0.0);
-    bool abortBatchRequests(int64_t batchId, const std::vector<uint64_t> &requestIds,
-                            ExecutionState &state,
-                            std::vector<NaviSchedRequestStats> &abortedRequests,
-                            NaviSchedBatchPtr &remainingBatch,
-                            NaviSchedPendingCacheReservation &remainingPendingCache);
+                     double nativePreparationMs = 0.0, int64_t executionFinishTimeUs = 0);
+    bool abortBatchRequests(
+        int64_t batchId, const std::vector<uint64_t> &requestIds, ExecutionState &state,
+        std::vector<NaviSchedRequestStats> &abortedRequests,
+        NaviSchedBatchPtr &remainingBatch,
+        NaviSchedPendingCacheReservation &remainingPendingCache,
+        std::map<NaviSchedCacheKeyType, NaviSchedPendingCacheReservation>
+            *typedRemaining = nullptr);
     bool abortPendingBatch(int64_t scheduleBatchId, ExecutionState &state);
     bool abortBatch(int64_t batchId, ExecutionState &state);
     bool getExecutionState(ExecutionState &state) const;
@@ -334,6 +353,8 @@ private:
         size_t pendingAcceptedRequestCount = 0;
         bool pendingCacheTracked = false;
         NaviSchedCachePolicy pendingCachePolicy;
+        std::map<NaviSchedCacheKeyType, NaviSchedCachePolicy> pendingCachePolicies;
+        std::set<NaviSchedCacheKeyType> trackedPendingCacheTypes;
         bool abortRequested = false;
         bool callbackDispatched = false;
         bool executionBusy = false;

@@ -20,6 +20,7 @@ void AgentRequestEventToMasterData::serialize(autil::DataBuffer &dataBuffer) con
     dataBuffer.write(latencyMs);
     dataBuffer.write(queueTotalPredictedLatencyMs);
     dataBuffer.write(queueDecayHeadRemainingMs);
+    dataBuffer.write(queueModel);
     dataBuffer.write(latencyValidation);
     dataBuffer.write(localBatch);
     dataBuffer.write(agentPredictedExecutionLatencyMs);
@@ -45,6 +46,7 @@ void AgentRequestEventToMasterData::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(latencyMs);
     dataBuffer.read(queueTotalPredictedLatencyMs);
     dataBuffer.read(queueDecayHeadRemainingMs);
+    dataBuffer.read(queueModel);
     dataBuffer.read(latencyValidation);
     dataBuffer.read(localBatch);
     dataBuffer.read(agentPredictedExecutionLatencyMs);

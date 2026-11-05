@@ -20,6 +20,7 @@ public:
         WORKLOAD_UPDATED = 9,
         BATCH_REQUESTS_ABORTED = 10,
         SCHEDULER_CONFIG_UPDATED = 11,
+        PEER_CACHE_READ_UPDATED = 12,
     };
 
 public:

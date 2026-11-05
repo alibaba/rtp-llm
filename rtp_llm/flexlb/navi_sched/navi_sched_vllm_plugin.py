@@ -8,6 +8,14 @@ def register_vllm_plugin() -> None:
     if enabled == "0":
         return
 
+    # DashLLM's Decode engine is fed by its own P/D orchestration. Routing it
+    # through the Prefill Agent would send Decode requests to the wrong role.
+    if (
+        os.environ.get("DS_ENABLE_DSERV") == "1"
+        and os.environ.get("TPU_RAIDEN_JOB_NAME", "").strip().lower() == "decode"
+    ):
+        return
+
     from navi_sched.adapters.vllm.NaviSchedVLLMPlugin import (
         register_enabled_vllm_plugin,
     )

@@ -1,6 +1,6 @@
-from . import _navi_sched_core
 from collections.abc import Mapping
 
+from . import _navi_sched_core
 
 navi_sched = _navi_sched_core
 DEFAULT_LOG_FILE_NAME = "./logs/navi_sched.log"
@@ -25,13 +25,17 @@ def makeServiceConfig(navi_sched, name, options):
     gig_options = options.pop("gig", {})
     if not isinstance(gig_options, Mapping):
         raise TypeError("gig must be a mapping")
-    _setFields(config, {
-        key: value for key, value in options.items() if value is not None
-    }, "service config")
+    _setFields(
+        config,
+        {key: value for key, value in options.items() if value is not None},
+        "service config",
+    )
     gig = navi_sched.NaviSchedGigConfig()
-    _setFields(gig, {
-        key: value for key, value in gig_options.items() if value is not None
-    }, "gig config")
+    _setFields(
+        gig,
+        {key: value for key, value in gig_options.items() if value is not None},
+        "gig config",
+    )
     config.gig = gig
     return config
 
@@ -50,17 +54,21 @@ def _makeRuntimeDetails(navi, values):
         raise TypeError("runtime_config must be a mapping")
     values = dict(values)
     runtime = navi.NaviRuntimeConfig()
-    _setFields(runtime, {
-        name: values.pop(name)
-        for name in (
-            "thread_num",
-            "queue_size",
-            "processing_size",
-            "disable_perf",
-            "disable_symbol_table",
-        )
-        if name in values
-    }, "runtime_config")
+    _setFields(
+        runtime,
+        {
+            name: values.pop(name)
+            for name in (
+                "thread_num",
+                "queue_size",
+                "processing_size",
+                "disable_perf",
+                "disable_symbol_table",
+            )
+            if name in values
+        },
+        "runtime_config",
+    )
 
     nodes = []
     for fields in values.pop("local_nodes", []):
@@ -87,10 +95,15 @@ def _makeRuntimeDetails(navi, values):
         vip = navi.NaviVipSubscription()
         _setFields(vip, vip_fields, "VIP subscription")
         runtime.vip_subscription = vip
+    spectrum_fields = values.pop("spectrum_subscription", {})
+    if not isinstance(spectrum_fields, Mapping):
+        raise TypeError("spectrum_subscription must be a mapping")
+    if spectrum_fields:
+        spectrum = navi.NaviSpectrumSubscription()
+        _setFields(spectrum, spectrum_fields, "Spectrum subscription")
+        runtime.spectrum_subscription = spectrum
     if values:
-        raise ValueError(
-            f"unknown runtime_config option: {next(iter(values))}"
-        )
+        raise ValueError(f"unknown runtime_config option: {next(iter(values))}")
     return runtime
 
 

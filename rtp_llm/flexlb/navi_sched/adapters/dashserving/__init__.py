@@ -1,4 +1,6 @@
 from .navi_sched_dashserving_adapter import (
+    DashServingMasterBizAbsent,
+    DashServingMasterUnavailable,
     DashServingRequestError,
     DashServingRoute,
     DashServingRoutingError,
@@ -9,6 +11,8 @@ from .navi_sched_dashserving_adapter import (
 
 __all__ = [
     "DashServingRequestError",
+    "DashServingMasterBizAbsent",
+    "DashServingMasterUnavailable",
     "DashServingRoute",
     "DashServingRoutingError",
     "NaviSchedDashServingRouter",

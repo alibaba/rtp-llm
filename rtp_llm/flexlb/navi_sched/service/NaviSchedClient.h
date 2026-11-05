@@ -81,8 +81,7 @@ private:
         const std::string &masterBizName, int64_t timeoutMs);
     void abortReplayRequests();
     bool replayAbortOccurredSince(uint64_t generation) const;
-    void abortReplayRequestLaunchedAcrossStop(uint64_t requestId,
-                                              uint64_t generation);
+    void abortReplayRequestLaunchedAcrossStop(uint64_t requestId, uint64_t generation);
     void recordScheduleResult(
         const std::shared_ptr<const ClientRequestToMasterData> &request,
         const std::string &masterBizName, ClientGraphRunResult &result,

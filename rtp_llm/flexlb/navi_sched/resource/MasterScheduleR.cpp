@@ -20,11 +20,13 @@ ClientRequestToMasterDataConstPtr makeCanonicalRequest(
     output->bizName = request.bizName;
     output->timeoutMs = request.timeoutMs;
     output->promptTokenCount = request.promptTokenCount;
+    output->explicitCacheCheckpointPosition = request.explicitCacheCheckpointPosition;
     output->blockSize = request.blockSize;
     output->requestId = requestId;
     output->collectReplay = request.collectReplay;
     output->blockHashes = request.blockHashes;
     output->forwardPayload = request.forwardPayload;
+    output->routeOnly = request.routeOnly;
     return output;
 }
 
@@ -75,8 +77,7 @@ uint64_t MasterScheduleR::beginRequestPipeGeneration()
         if (_stopped) {
             return 0;
         }
-        generation =
-            _requestPipeGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
+        generation = _requestPipeGeneration.fetch_add(1, std::memory_order_relaxed) + 1;
         _requestPipeOwnerGeneration = generation;
         _kernelPendingRequestCount = 0;
         _requestPipe.reset();
@@ -84,8 +85,8 @@ uint64_t MasterScheduleR::beginRequestPipeGeneration()
     return generation;
 }
 
-bool MasterScheduleR::setRequestPipe(
-    uint64_t generation, const navi::AsyncPipePtr &requestPipe)
+bool MasterScheduleR::setRequestPipe(uint64_t generation,
+                                     const navi::AsyncPipePtr &requestPipe)
 {
     if (0 == generation || !requestPipe) {
         NAVI_KERNEL_LOG(ERROR,
@@ -98,13 +99,13 @@ bool MasterScheduleR::setRequestPipe(
         autil::ScopedWriteLock lock(_lock);
         if (_stopped || _requestPipeOwnerGeneration != generation ||
             (_requestPipe && _requestPipe != requestPipe)) {
-            NAVI_KERNEL_LOG(ERROR,
-                            "reject stale Master schedule request pipe, generation [%lu], "
-                            "ownerGeneration [%lu], stopped [%d], currentPipe [%p], "
-                            "incomingPipe [%p]",
-                            generation, _requestPipeOwnerGeneration,
-                            static_cast<int>(_stopped), _requestPipe.get(),
-                            requestPipe.get());
+            NAVI_KERNEL_LOG(
+                ERROR,
+                "reject stale Master schedule request pipe, generation [%lu], "
+                "ownerGeneration [%lu], stopped [%d], currentPipe [%p], "
+                "incomingPipe [%p]",
+                generation, _requestPipeOwnerGeneration, static_cast<int>(_stopped),
+                _requestPipe.get(), requestPipe.get());
             return false;
         }
         _requestPipe = requestPipe;
@@ -112,15 +113,13 @@ bool MasterScheduleR::setRequestPipe(
     return true;
 }
 
-bool MasterScheduleR::waitRequestPipe(uint64_t generation,
-                                      int64_t timeoutMs) const
+bool MasterScheduleR::waitRequestPipe(uint64_t generation, int64_t timeoutMs) const
 {
     if (0 == generation || timeoutMs < 0) {
         return false;
     }
     constexpr int64_t READY_POLL_INTERVAL_US = 10 * 1000;
-    const auto deadlineUs =
-        autil::TimeUtility::monotonicTimeUs() + timeoutMs * 1000;
+    const auto deadlineUs = autil::TimeUtility::monotonicTimeUs() + timeoutMs * 1000;
     while (true) {
         {
             autil::ScopedReadLock lock(_lock);
@@ -131,13 +130,12 @@ bool MasterScheduleR::waitRequestPipe(uint64_t generation,
                 return true;
             }
         }
-        const auto remainingUs =
-            deadlineUs - autil::TimeUtility::monotonicTimeUs();
+        const auto remainingUs = deadlineUs - autil::TimeUtility::monotonicTimeUs();
         if (remainingUs <= 0) {
             return false;
         }
-        std::this_thread::sleep_for(std::chrono::microseconds(
-            std::min(remainingUs, READY_POLL_INTERVAL_US)));
+        std::this_thread::sleep_for(
+            std::chrono::microseconds(std::min(remainingUs, READY_POLL_INTERVAL_US)));
     }
 }
 
@@ -184,8 +182,9 @@ void MasterScheduleR::rejectUnavailable(
     }
 }
 
-MasterScheduleRequestDataPtr MasterScheduleR::submit(const ClientRequestToMasterDataConstPtr &request,
-                             const navi::AsyncPipePtr &responsePipe)
+MasterScheduleRequestDataPtr MasterScheduleR::submit(
+    const ClientRequestToMasterDataConstPtr &request,
+    const navi::AsyncPipePtr &responsePipe)
 {
     if (!request || !responsePipe) {
         NAVI_KERNEL_LOG(ERROR,
@@ -196,8 +195,8 @@ MasterScheduleRequestDataPtr MasterScheduleR::submit(const ClientRequestToMaster
     }
     const auto canonicalRequestId = nextRequestId();
     auto canonicalRequest = makeCanonicalRequest(*request, canonicalRequestId);
-    auto data = std::make_shared<MasterScheduleRequestData>(canonicalRequest,
-                                                            responsePipe);
+    auto data =
+        std::make_shared<MasterScheduleRequestData>(canonicalRequest, responsePipe);
     navi::AsyncPipePtr failedRequestPipe;
     uint64_t failedRequestPipeGeneration = 0;
     bool rejectedWhileStopped = false;
@@ -223,8 +222,7 @@ MasterScheduleRequestDataPtr MasterScheduleR::submit(const ClientRequestToMaster
                         "reject Master schedule request, requestId [%lu], "
                         "reason [%s]",
                         request->requestId,
-                        rejectedWhileStopped ? "resource_stopped"
-                                             : "no_active_pipe");
+                        rejectedWhileStopped ? "resource_stopped" : "no_active_pipe");
         rejectUnavailable(request, responsePipe, data);
         return nullptr;
     }
@@ -253,8 +251,8 @@ MasterScheduleRequestDataPtr MasterScheduleR::submit(const ClientRequestToMaster
                     "reject Master schedule request after pipe failure, "
                     "requestId [%lu], failedGeneration [%lu], ownerGeneration [%lu], "
                     "stopped [%d]",
-                    request->requestId, failedRequestPipeGeneration,
-                    ownerGeneration, static_cast<int>(stoppedAfterPipeFailure));
+                    request->requestId, failedRequestPipeGeneration, ownerGeneration,
+                    static_cast<int>(stoppedAfterPipeFailure));
     rejectUnavailable(request, responsePipe, data);
     return nullptr;
 }
@@ -303,9 +301,10 @@ size_t MasterScheduleR::getSchedulingRequestCount() const
 std::shared_ptr<void> MasterScheduleR::trackSchedulingRequests(size_t count)
 {
     _schedulingRequestCount->fetch_add(count, std::memory_order_relaxed);
-    return std::shared_ptr<void>(nullptr, [counter = _schedulingRequestCount, count](void *) {
-        counter->fetch_sub(count, std::memory_order_relaxed);
-    });
+    return std::shared_ptr<void>(nullptr,
+                                 [counter = _schedulingRequestCount, count](void *) {
+                                     counter->fetch_sub(count, std::memory_order_relaxed);
+                                 });
 }
 
 void MasterScheduleR::recordKernelPendingRequests(uint64_t generation, size_t count)
@@ -356,14 +355,15 @@ void MasterScheduleR::recordQueueOverload(size_t requestCount,
                                                   std::memory_order_relaxed);
     _queueOverloadRejectedRequestCount.fetch_add(rejectedRequestCount,
                                                  std::memory_order_relaxed);
-    _queueOverloadLatestAveragePredictedLatencyMs.store(
-        averagePredictedLatencyMs, std::memory_order_relaxed);
-    _queueOverloadLatestDropProbability.store(dropProbability,
-                                              std::memory_order_relaxed);
+    _queueOverloadLatestAveragePredictedLatencyMs.store(averagePredictedLatencyMs,
+                                                        std::memory_order_relaxed);
+    _queueOverloadLatestDropProbability.store(dropProbability, std::memory_order_relaxed);
 }
 
-void MasterScheduleR::recordExecutionUtilization(double average, double integral, size_t reportingNodes, bool enabled,
-    double rawAverage, uint64_t running, uint64_t waiting, bool globalScaling)
+void MasterScheduleR::recordExecutionUtilization(double average, double integral,
+                                                 size_t reportingNodes, bool enabled,
+                                                 double rawAverage, uint64_t running,
+                                                 uint64_t waiting, bool globalScaling)
 {
     _executionRawAverage.store(rawAverage, std::memory_order_relaxed);
     _executionRunning.store(running, std::memory_order_relaxed);
@@ -375,7 +375,8 @@ void MasterScheduleR::recordExecutionUtilization(double average, double integral
     _executionUtilizationEnabled.store(enabled, std::memory_order_relaxed);
 }
 
-MasterScheduleR::ExecutionUtilizationStats MasterScheduleR::getExecutionUtilizationStats() const
+MasterScheduleR::ExecutionUtilizationStats MasterScheduleR::getExecutionUtilizationStats()
+    const
 {
     ExecutionUtilizationStats stats;
     stats.rawAverage = _executionRawAverage.load(std::memory_order_relaxed);
@@ -384,7 +385,8 @@ MasterScheduleR::ExecutionUtilizationStats MasterScheduleR::getExecutionUtilizat
     stats.globalScaling = _executionGlobalScaling.load(std::memory_order_relaxed);
     stats.average = _executionUtilizationAverage.load(std::memory_order_relaxed);
     stats.integral = _executionUtilizationIntegral.load(std::memory_order_relaxed);
-    stats.reportingNodes = _executionUtilizationReportingNodes.load(std::memory_order_relaxed);
+    stats.reportingNodes =
+        _executionUtilizationReportingNodes.load(std::memory_order_relaxed);
     stats.enabled = _executionUtilizationEnabled.load(std::memory_order_relaxed);
     return stats;
 }
@@ -399,35 +401,32 @@ MasterScheduleR::QueueOverloadStats MasterScheduleR::getQueueOverloadStats() con
     stats.rejectedRequestCount =
         _queueOverloadRejectedRequestCount.load(std::memory_order_relaxed);
     stats.latestAveragePredictedLatencyMs =
-        _queueOverloadLatestAveragePredictedLatencyMs.load(
-            std::memory_order_relaxed);
+        _queueOverloadLatestAveragePredictedLatencyMs.load(std::memory_order_relaxed);
     stats.latestDropProbability =
         _queueOverloadLatestDropProbability.load(std::memory_order_relaxed);
     stats.active = stats.evaluatedRoundCount > 0;
     return stats;
 }
 
-void MasterScheduleR::recordColdStartRouting(
-    const NaviSchedColdStartRoutingStats &stats)
+void MasterScheduleR::recordColdStartRouting(const NaviSchedColdStartRoutingStats &stats)
 {
     if (!stats.evaluated) {
         return;
     }
     _coldStartEvaluatedRoundCount.fetch_add(1, std::memory_order_relaxed);
-    _coldStartTrustedRequestCount.fetch_add(
-        stats.trustedRequestCount, std::memory_order_relaxed);
-    _coldStartUntrustedRequestCount.fetch_add(
-        stats.untrustedRequestCount, std::memory_order_relaxed);
-    _coldStartRejectedRequestCount.fetch_add(
-        stats.rejectedRequestCount, std::memory_order_relaxed);
-    _coldStartLatestTargetInflight.store(stats.targetInflight,
-                                         std::memory_order_relaxed);
+    _coldStartTrustedRequestCount.fetch_add(stats.trustedRequestCount,
+                                            std::memory_order_relaxed);
+    _coldStartUntrustedRequestCount.fetch_add(stats.untrustedRequestCount,
+                                              std::memory_order_relaxed);
+    _coldStartRejectedRequestCount.fetch_add(stats.rejectedRequestCount,
+                                             std::memory_order_relaxed);
+    _coldStartLatestTargetInflight.store(stats.targetInflight, std::memory_order_relaxed);
     _coldStartLatestTrustedNodeCount.store(stats.trustedNodeCount,
                                            std::memory_order_relaxed);
     _coldStartLatestUntrustedNodeCount.store(stats.untrustedNodeCount,
                                              std::memory_order_relaxed);
     _coldStartLatestUntrustedCapacity.store(stats.untrustedCapacity,
-                                             std::memory_order_relaxed);
+                                            std::memory_order_relaxed);
     _coldStartLatestRampingNodeCount.store(stats.rampingNodeCount,
                                            std::memory_order_relaxed);
     _coldStartLatestUnsafeWaitingMarginalNodeCount.store(
@@ -435,13 +434,12 @@ void MasterScheduleR::recordColdStartRouting(
     _coldStartUnsafeWaitingMarginalNodeObservationCount.fetch_add(
         stats.unsafeWaitingMarginalNodeCount, std::memory_order_relaxed);
     _coldStartLatestMinimumRampProgress.store(stats.minimumRampProgress,
-                                               std::memory_order_relaxed);
-    _coldStartLatestMinimumRampedTargetInflight.store(
-        stats.minimumRampedTargetInflight, std::memory_order_relaxed);
+                                              std::memory_order_relaxed);
+    _coldStartLatestMinimumRampedTargetInflight.store(stats.minimumRampedTargetInflight,
+                                                      std::memory_order_relaxed);
 }
 
-MasterScheduleR::ColdStartRoutingStats
-MasterScheduleR::getColdStartRoutingStats() const
+MasterScheduleR::ColdStartRoutingStats MasterScheduleR::getColdStartRoutingStats() const
 {
     ColdStartRoutingStats stats;
     stats.evaluatedRoundCount =
@@ -463,16 +461,14 @@ MasterScheduleR::getColdStartRoutingStats() const
     stats.latestRampingNodeCount =
         _coldStartLatestRampingNodeCount.load(std::memory_order_relaxed);
     stats.latestUnsafeWaitingMarginalNodeCount =
-        _coldStartLatestUnsafeWaitingMarginalNodeCount.load(
-            std::memory_order_relaxed);
+        _coldStartLatestUnsafeWaitingMarginalNodeCount.load(std::memory_order_relaxed);
     stats.unsafeWaitingMarginalNodeObservationCount =
         _coldStartUnsafeWaitingMarginalNodeObservationCount.load(
             std::memory_order_relaxed);
     stats.latestMinimumRampProgress =
         _coldStartLatestMinimumRampProgress.load(std::memory_order_relaxed);
     stats.latestMinimumRampedTargetInflight =
-        _coldStartLatestMinimumRampedTargetInflight.load(
-            std::memory_order_relaxed);
+        _coldStartLatestMinimumRampedTargetInflight.load(std::memory_order_relaxed);
     return stats;
 }
 
@@ -487,8 +483,7 @@ navi::SummaryErrorCode MasterScheduleR::getSummary(const std::string &query,
     auto table = builder.newTable("NaviSchedMasterScheduleOverview");
     TABLE_ADD_COLUMN_VALUE(table, "ready", ready);
     TABLE_ADD_COLUMN_VALUE(table, "submit_count", getSubmitCount());
-    TABLE_ADD_COLUMN_VALUE(table, "request_pipe_generation",
-                           getRequestPipeGeneration());
+    TABLE_ADD_COLUMN_VALUE(table, "request_pipe_generation", getRequestPipeGeneration());
     TABLE_ADD_COLUMN_VALUE(table, "pending_request_count", getPendingRequestCount());
     const auto overloadStats = getQueueOverloadStats();
     TABLE_ADD_COLUMN_VALUE(table, "queue_overload_evaluated_round_count",
@@ -497,18 +492,21 @@ navi::SummaryErrorCode MasterScheduleR::getSummary(const std::string &query,
                            overloadStats.evaluatedRequestCount);
     TABLE_ADD_COLUMN_VALUE(table, "queue_overload_rejected_request_count",
                            overloadStats.rejectedRequestCount);
-    TABLE_ADD_COLUMN_VALUE(
-        table, "queue_overload_latest_average_predicted_latency_ms",
-        overloadStats.latestAveragePredictedLatencyMs);
+    TABLE_ADD_COLUMN_VALUE(table, "queue_overload_latest_average_predicted_latency_ms",
+                           overloadStats.latestAveragePredictedLatencyMs);
     TABLE_ADD_COLUMN_VALUE(table, "queue_overload_latest_drop_probability",
                            overloadStats.latestDropProbability);
     const auto executionUtilization = getExecutionUtilizationStats();
     TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_control_enabled",
                            executionUtilization.enabled);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_raw_average", executionUtilization.rawAverage);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_running", executionUtilization.running);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_waiting", executionUtilization.waiting);
-    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_global_scaling", executionUtilization.globalScaling);
+    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_raw_average",
+                           executionUtilization.rawAverage);
+    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_running",
+                           executionUtilization.running);
+    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_waiting",
+                           executionUtilization.waiting);
+    TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_global_scaling",
+                           executionUtilization.globalScaling);
     TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_average",
                            executionUtilization.average);
     TABLE_ADD_COLUMN_VALUE(table, "execution_utilization_integral",
@@ -534,17 +532,15 @@ navi::SummaryErrorCode MasterScheduleR::getSummary(const std::string &query,
                            coldStartStats.latestUntrustedCapacity);
     TABLE_ADD_COLUMN_VALUE(table, "cold_start_latest_ramping_node_count",
                            coldStartStats.latestRampingNodeCount);
-    TABLE_ADD_COLUMN_VALUE(
-        table, "cold_start_latest_unsafe_waiting_marginal_node_count",
-        coldStartStats.latestUnsafeWaitingMarginalNodeCount);
-    TABLE_ADD_COLUMN_VALUE(
-        table, "cold_start_unsafe_waiting_marginal_node_observation_count",
-        coldStartStats.unsafeWaitingMarginalNodeObservationCount);
+    TABLE_ADD_COLUMN_VALUE(table, "cold_start_latest_unsafe_waiting_marginal_node_count",
+                           coldStartStats.latestUnsafeWaitingMarginalNodeCount);
+    TABLE_ADD_COLUMN_VALUE(table,
+                           "cold_start_unsafe_waiting_marginal_node_observation_count",
+                           coldStartStats.unsafeWaitingMarginalNodeObservationCount);
     TABLE_ADD_COLUMN_VALUE(table, "cold_start_latest_minimum_ramp_progress",
                            coldStartStats.latestMinimumRampProgress);
-    TABLE_ADD_COLUMN_VALUE(
-        table, "cold_start_latest_minimum_ramped_target_inflight",
-        coldStartStats.latestMinimumRampedTargetInflight);
+    TABLE_ADD_COLUMN_VALUE(table, "cold_start_latest_minimum_ramped_target_inflight",
+                           coldStartStats.latestMinimumRampedTargetInflight);
     return navi::SEC_OK;
 }
 

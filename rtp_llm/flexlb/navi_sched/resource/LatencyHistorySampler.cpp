@@ -93,12 +93,12 @@ void LatencyHistorySampler::append(const NaviSchedLatencySample &sample)
     while (bucket.size() > _bucketCapacity) {
         bucket.pop_front();
     }
-    NAVI_KERNEL_LOG(
-        INFO,
-        "[latency-history-append] sequence=%lu bucket=%d local_batch_id=%ld "
-        "event_time_us=%ld latency_ms=%.9f history_size=%lu bucket_size=%lu",
-        sequence, getBucketIndex(sample.latencyMs), sample.localBatchId,
-        sample.eventTimeUs, sample.latencyMs, _history->size(), bucket.size());
+    NAVI_KERNEL_LOG(INFO,
+                    "[latency-history-append] sequence=%lu bucket=%d local_batch_id=%ld "
+                    "event_time_us=%ld latency_ms=%.9f history_size=%lu bucket_size=%lu",
+                    sequence, getBucketIndex(sample.latencyMs), sample.localBatchId,
+                    sample.eventTimeUs, sample.latencyMs, _history->size(),
+                    bucket.size());
 }
 
 std::vector<NaviSchedLatencySample> LatencyHistorySampler::getFitBatch(
@@ -112,7 +112,8 @@ std::vector<NaviSchedLatencySample> LatencyHistorySampler::getFitBatch(
     for (size_t index = firstIndex; index < _historySequences.size(); ++index) {
         selectedSequences.emplace_back(_historySequences[index]);
     }
-    NAVI_KERNEL_LOG(INFO, "[latency-history-fit] mode=recent sample_count=%lu "
+    NAVI_KERNEL_LOG(INFO,
+                    "[latency-history-fit] mode=recent sample_count=%lu "
                     "sequence_ids=%s",
                     selectedSequences.size(),
                     formatSequenceList(selectedSequences).c_str());
@@ -125,9 +126,9 @@ std::vector<NaviSchedLatencySample> LatencyHistorySampler::getOnlineFitBatch() c
     std::vector<uint64_t> selectedSequences;
     const auto selectionContext =
         _historySequences.empty() ? 0 : _historySequences.back();
-    appendBucketSamples({}, std::nullopt, result, selectionContext,
-                        &selectedSequences);
-    NAVI_KERNEL_LOG(INFO, "[latency-history-fit] mode=one_per_bucket "
+    appendBucketSamples({}, std::nullopt, result, selectionContext, &selectedSequences);
+    NAVI_KERNEL_LOG(INFO,
+                    "[latency-history-fit] mode=one_per_bucket "
                     "selection_context=%lu sample_count=%lu sequence_ids=%s",
                     selectionContext, selectedSequences.size(),
                     formatSequenceList(selectedSequences).c_str());
@@ -141,8 +142,8 @@ LatencyHistorySampler::getOnlineFitBatches(size_t currentSampleCount) const
 }
 
 std::vector<std::vector<NaviSchedLatencySample>>
-LatencyHistorySampler::getOnlineFitBatches(
-    size_t currentSampleCount, size_t currentBucketSampleCount) const
+LatencyHistorySampler::getOnlineFitBatches(size_t currentSampleCount,
+                                           size_t currentBucketSampleCount) const
 {
     std::vector<std::vector<NaviSchedLatencySample>> batches;
     currentSampleCount = std::min(currentSampleCount, _history->size());
@@ -165,23 +166,66 @@ LatencyHistorySampler::getOnlineFitBatches(
         const auto currentBucket = getBucketIndex(current.latencyMs);
         std::vector<uint64_t> selectedSequences;
         const auto currentSequence = _historySequences[historyBegin + index];
-        appendBucketSamples(currentSequences, currentBucket, batch,
-                            currentSequence, &selectedSequences, 1);
+        appendBucketSamples(currentSequences, currentBucket, batch, currentSequence,
+                            &selectedSequences, 1);
         if (currentBucketSampleCount > 0) {
-            appendBucketSamples(currentSequences, std::nullopt, batch,
-                                currentSequence, &selectedSequences,
-                                currentBucketSampleCount, currentBucket);
+            appendBucketSamples(currentSequences, std::nullopt, batch, currentSequence,
+                                &selectedSequences, currentBucketSampleCount,
+                                currentBucket);
         }
         batch.emplace_back(current);
         selectedSequences.emplace_back(currentSequence);
-        NAVI_KERNEL_LOG(
-            INFO,
-            "[latency-history-fit] mode=online_batch index=%lu "
-            "current_sequence=%lu current_bucket=%d sample_count=%lu "
-            "sequence_ids=%s",
-            index, currentSequence, currentBucket, selectedSequences.size(),
-            formatSequenceList(selectedSequences).c_str());
+        NAVI_KERNEL_LOG(INFO,
+                        "[latency-history-fit] mode=online_batch index=%lu "
+                        "current_sequence=%lu current_bucket=%d sample_count=%lu "
+                        "sequence_ids=%s",
+                        index, currentSequence, currentBucket, selectedSequences.size(),
+                        formatSequenceList(selectedSequences).c_str());
         currentSequences.erase(currentSequence);
+    }
+    return batches;
+}
+
+std::vector<std::vector<NaviSchedLatencySample>>
+LatencyHistorySampler::getRecentUniformFitBatches(size_t currentSampleCount,
+                                                  size_t historySampleCount) const
+{
+    std::vector<std::vector<NaviSchedLatencySample>> batches;
+    currentSampleCount = std::min(currentSampleCount, _history->size());
+    const auto currentBegin = _history->size() - currentSampleCount;
+    batches.reserve(currentSampleCount);
+    for (size_t currentIndex = currentBegin; currentIndex < _history->size();
+         ++currentIndex) {
+        const auto currentSequence = _historySequences[currentIndex];
+        std::vector<std::pair<uint64_t, size_t>> ranked;
+        ranked.reserve(currentIndex);
+        // Only earlier entries in the recent FIFO are eligible. In particular,
+        // later completions from this pending group cannot train earlier ones.
+        for (size_t index = 0; index < currentIndex; ++index) {
+            const auto sequence = _historySequences[index];
+            ranked.emplace_back(mix(_randomSeed ^ mix(currentSequence) ^ mix(sequence)),
+                                index);
+        }
+        const auto selectedCount = std::min(historySampleCount, ranked.size());
+        std::partial_sort(ranked.begin(), ranked.begin() + selectedCount, ranked.end());
+        auto &batch = batches.emplace_back();
+        std::vector<uint64_t> selectedSequences;
+        batch.reserve(selectedCount + 1);
+        selectedSequences.reserve(selectedCount + 1);
+        for (size_t index = 0; index < selectedCount; ++index) {
+            const auto historyIndex = ranked[index].second;
+            batch.emplace_back((*_history)[historyIndex]);
+            selectedSequences.emplace_back(_historySequences[historyIndex]);
+        }
+        batch.emplace_back((*_history)[currentIndex]);
+        selectedSequences.emplace_back(currentSequence);
+        NAVI_KERNEL_LOG(INFO,
+                        "[latency-history-fit] mode=online_batch index=%lu "
+                        "current_sequence=%lu current_bucket=%d sample_count=%lu "
+                        "sequence_ids=%s history_policy=recent_uniform",
+                        currentIndex - currentBegin, currentSequence,
+                        getBucketIndex(batch.back().latencyMs), batch.size(),
+                        formatSequenceList(selectedSequences).c_str());
     }
     return batches;
 }
@@ -218,23 +262,22 @@ void LatencyHistorySampler::appendBucketSamples(
                 }
             }
         }
-        NAVI_KERNEL_LOG(
-            INFO,
-            "[latency-history-bucket] context=%lu key=%lu bucket=%d "
-            "bucket_size=%lu entry_offset=%lu samples_per_bucket=%lu "
-            "excluded_bucket=%d only_bucket=%d selected_sequences=%s",
-            selectionContext, selectionKey, bucketIndex, bucket.size(), entryOffset,
-            samplesPerBucket, excludedBucket.value_or(std::numeric_limits<int32_t>::min()),
-            onlyBucket.value_or(std::numeric_limits<int32_t>::min()),
-            formatSequenceList(bucketSelections).c_str());
+        NAVI_KERNEL_LOG(INFO,
+                        "[latency-history-bucket] context=%lu key=%lu bucket=%d "
+                        "bucket_size=%lu entry_offset=%lu samples_per_bucket=%lu "
+                        "excluded_bucket=%d only_bucket=%d selected_sequences=%s",
+                        selectionContext, selectionKey, bucketIndex, bucket.size(),
+                        entryOffset, samplesPerBucket,
+                        excludedBucket.value_or(std::numeric_limits<int32_t>::min()),
+                        onlyBucket.value_or(std::numeric_limits<int32_t>::min()),
+                        formatSequenceList(bucketSelections).c_str());
     }
 }
 
 uint64_t LatencyHistorySampler::makeSelectionKey(uint64_t selectionContext,
-                                                  int32_t bucketIndex) const
+                                                 int32_t bucketIndex) const
 {
-    const auto bucketKey = static_cast<uint64_t>(
-        static_cast<int64_t>(bucketIndex));
+    const auto bucketKey = static_cast<uint64_t>(static_cast<int64_t>(bucketIndex));
     return mix(_randomSeed ^ mix(selectionContext + 0x9e3779b97f4a7c15ULL) ^
                mix(bucketKey + 0xd1b54a32d192ed03ULL));
 }
@@ -268,10 +311,7 @@ LatencyHistorySampler::HistoryConstPtr LatencyHistorySampler::getHistory() const
 
 size_t LatencyHistorySampler::historySize() const { return _history->size(); }
 
-size_t LatencyHistorySampler::sessionSampleCount() const
-{
-    return _sessionSampleCount;
-}
+size_t LatencyHistorySampler::sessionSampleCount() const { return _sessionSampleCount; }
 
 size_t LatencyHistorySampler::bucketCount() const { return _buckets.size(); }
 
@@ -299,11 +339,50 @@ size_t LatencyHistorySampler::sampleCountAtMost(double latencyMs) const
 
 void LatencyHistorySampler::serialize(autil::DataBuffer &dataBuffer) const
 {
+    serializeImpl(dataBuffer, false);
+}
+
+bool LatencyHistorySampler::serializeWithExecutionGeometry(
+    autil::DataBuffer &dataBuffer) const
+{
+    return serializeImpl(dataBuffer, true);
+}
+
+bool LatencyHistorySampler::serializeWithExecutionCacheSource(
+    autil::DataBuffer &buffer) const
+{
+    return serializeImpl(buffer, true, true);
+}
+
+bool LatencyHistorySampler::deserializeWithExecutionCacheSource(autil::DataBuffer &buffer)
+{
+    return deserializeImpl(buffer, true, true);
+}
+
+bool LatencyHistorySampler::serializeImpl(autil::DataBuffer &dataBuffer, bool geometry,
+                                          bool cacheSource) const
+{
+    if (geometry) {
+        for (const auto &sample : *_history) {
+            if (!sample.features.hasExecutionGeometry() ||
+                (cacheSource && !sample.features.hasExecutionCacheSource())) {
+                return false;
+            }
+        }
+        for (const auto &[unused, bucket] : _buckets) {
+            for (const auto &entry : bucket) {
+                if (!entry.sample.features.hasExecutionGeometry() ||
+                    (cacheSource && !entry.sample.features.hasExecutionCacheSource())) {
+                    return false;
+                }
+            }
+        }
+    }
     dataBuffer.write(_nextSequence);
     dataBuffer.write(uint32_t(_history->size()));
     for (size_t index = 0; index < _history->size(); ++index) {
         dataBuffer.write(_historySequences[index]);
-        writeSample(dataBuffer, (*_history)[index]);
+        writeSampleImpl(dataBuffer, (*_history)[index], geometry, cacheSource);
     }
     dataBuffer.write(uint32_t(_buckets.size()));
     for (const auto &[bucketIndex, bucket] : _buckets) {
@@ -311,21 +390,35 @@ void LatencyHistorySampler::serialize(autil::DataBuffer &dataBuffer) const
         dataBuffer.write(uint32_t(bucket.size()));
         for (const auto &entry : bucket) {
             dataBuffer.write(entry.sequence);
-            writeSample(dataBuffer, entry.sample);
+            writeSampleImpl(dataBuffer, entry.sample, geometry, cacheSource);
         }
     }
+    return true;
 }
 
 bool LatencyHistorySampler::deserialize(autil::DataBuffer &dataBuffer)
 {
+    return deserializeImpl(dataBuffer, false);
+}
+
+bool LatencyHistorySampler::deserializeWithExecutionGeometry(
+    autil::DataBuffer &dataBuffer)
+{
+    return deserializeImpl(dataBuffer, true);
+}
+
+bool LatencyHistorySampler::deserializeImpl(autil::DataBuffer &dataBuffer, bool geometry,
+                                            bool cacheSource)
+{
     try {
-        return deserializeUnchecked(dataBuffer);
+        return deserializeUnchecked(dataBuffer, geometry, cacheSource);
     } catch (const autil::DataBufferCorruptedException &) {
         return false;
     }
 }
 
-bool LatencyHistorySampler::deserializeUnchecked(autil::DataBuffer &dataBuffer)
+bool LatencyHistorySampler::deserializeUnchecked(autil::DataBuffer &dataBuffer,
+                                                 bool geometry, bool cacheSource)
 {
     uint64_t nextSequence = 0;
     uint32_t historySize = 0;
@@ -343,7 +436,9 @@ bool LatencyHistorySampler::deserializeUnchecked(autil::DataBuffer &dataBuffer)
         uint64_t sequence = 0;
         NaviSchedLatencySample sample;
         dataBuffer.read(sequence);
-        readSample(dataBuffer, sample);
+        if (!readSampleImpl(dataBuffer, sample, geometry, cacheSource)) {
+            return false;
+        }
         if (sequence <= previousHistorySequence || !validSample(sample)) {
             return false;
         }
@@ -379,7 +474,9 @@ bool LatencyHistorySampler::deserializeUnchecked(autil::DataBuffer &dataBuffer)
         for (uint32_t entryNumber = 0; entryNumber < entryCount; ++entryNumber) {
             Entry entry;
             dataBuffer.read(entry.sequence);
-            readSample(dataBuffer, entry.sample);
+            if (!readSampleImpl(dataBuffer, entry.sample, geometry, cacheSource)) {
+                return false;
+            }
             if (entry.sequence <= previousBucketSequence || !validSample(entry.sample) ||
                 getBucketIndex(entry.sample.latencyMs) != bucketIndex ||
                 !bucketSequences.emplace(entry.sequence).second) {
@@ -424,17 +521,51 @@ int32_t LatencyHistorySampler::getBucketIndex(double latencyMs)
 void LatencyHistorySampler::writeSample(autil::DataBuffer &dataBuffer,
                                         const NaviSchedLatencySample &sample)
 {
-    sample.features.serialize(dataBuffer);
-    dataBuffer.write(sample.latencyMs);
-    dataBuffer.write(sample.eventTimeUs);
+    writeSampleImpl(dataBuffer, sample, false);
 }
 
 void LatencyHistorySampler::readSample(autil::DataBuffer &dataBuffer,
                                        NaviSchedLatencySample &sample)
 {
-    sample.features.deserialize(dataBuffer);
+    readSampleImpl(dataBuffer, sample, false);
+}
+
+void LatencyHistorySampler::writeSampleImpl(autil::DataBuffer &dataBuffer,
+                                            const NaviSchedLatencySample &sample,
+                                            bool geometry, bool cacheSource)
+{
+    if (cacheSource) {
+        sample.features.serializeWithExecutionCacheSource(dataBuffer);
+    } else if (geometry) {
+        sample.features.serializeWithExecutionGeometry(dataBuffer);
+    } else {
+        sample.features.serialize(dataBuffer);
+    }
+    dataBuffer.write(sample.latencyMs);
+    dataBuffer.write(sample.eventTimeUs);
+}
+
+bool LatencyHistorySampler::readSampleImpl(autil::DataBuffer &dataBuffer,
+                                           NaviSchedLatencySample &sample, bool geometry,
+                                           bool cacheSource)
+{
+    if (cacheSource) {
+        if (!sample.features.deserializeWithExecutionCacheSource(dataBuffer) ||
+            !sample.features.hasExecutionGeometry() ||
+            !sample.features.hasExecutionCacheSource()) {
+            return false;
+        }
+    } else if (geometry) {
+        if (!sample.features.deserializeWithExecutionGeometry(dataBuffer) ||
+            !sample.features.hasExecutionGeometry()) {
+            return false;
+        }
+    } else {
+        sample.features.deserialize(dataBuffer);
+    }
     dataBuffer.read(sample.latencyMs);
     dataBuffer.read(sample.eventTimeUs);
+    return true;
 }
 
 }

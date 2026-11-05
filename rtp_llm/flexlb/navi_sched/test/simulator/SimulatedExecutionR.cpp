@@ -18,11 +18,12 @@
 namespace navi_sched::test {
 const std::vector<double> SIMULATED_FORMULA_PARAMETERS = [] {
     const double zeroLinear = -964.0 / 320.0;
-    const double zeroShape = 4.0 / (std::sqrt(zeroLinear * zeroLinear + 4.0) - zeroLinear);
+    const double zeroShape =
+        4.0 / (std::sqrt(zeroLinear * zeroLinear + 4.0) - zeroLinear);
     std::vector<double> parameters = {
         -964.0 / 30.0, 10.0 / 30.0, 1.4 / 30.0, 20.0 / 30.0,
-        0.1 / 30.0, 0.09 / 30.0, 0.0, 280.0 + 50.0 * zeroShape,
-        4.0 / 900.0, 0.0,
+        0.1 / 30.0,    0.09 / 30.0, 0.0,        280.0 + 50.0 * zeroShape,
+        4.0 / 900.0,   0.0,
     };
     for (size_t index = 0; index < parameters.size(); ++index) {
         parameters[index] /= NonLinearPrefillModelR::getParameterScale(index);
@@ -232,18 +233,15 @@ bool SimulatedExecutionR::submitBatchRequest(SimulatedRequest request, int64_t b
                     AgentBatchR::ExecutionState state;
                     _agentBatchR->getExecutionState(state);
                     if (!_agentLatencyInputR->submitBatchReady(
-                            batch, state.batchWaitingRequests,
-                            state.queuedBatchRequests, state.runningRequests,
-                            state.eventTimeUs)) {
-                        NAVI_KERNEL_LOG(
-                            ERROR,
-                            "submit simulated ready batch failed, "
-                            "scheduleBatchId [%ld], localBatchId [%ld], "
-                            "requestCount [%lu]",
-                            batch->scheduleBatchId, batch->batchId,
-                            batch->requestIds.size());
-                        throw std::runtime_error(
-                            "submit simulated ready batch failed");
+                            batch, state.batchWaitingRequests, state.queuedBatchRequests,
+                            state.runningRequests, state.eventTimeUs)) {
+                        NAVI_KERNEL_LOG(ERROR,
+                                        "submit simulated ready batch failed, "
+                                        "scheduleBatchId [%ld], localBatchId [%ld], "
+                                        "requestCount [%lu]",
+                                        batch->scheduleBatchId, batch->batchId,
+                                        batch->requestIds.size());
+                        throw std::runtime_error("submit simulated ready batch failed");
                     }
                     if (!enqueueBatch(batch)) {
                         rejectBatch(batch);
@@ -411,8 +409,8 @@ bool SimulatedExecutionR::startBatch(std::vector<SimulatedRequest> &requests)
     {
         autil::ScopedLock lock(_stateLock);
         previousWaiting = _waitingRequestCount;
-        authoritativeWaiting = static_cast<size_t>(
-            executionState.batchWaitingRequests + executionState.queuedBatchRequests);
+        authoritativeWaiting = static_cast<size_t>(executionState.batchWaitingRequests +
+                                                   executionState.queuedBatchRequests);
         waitingMismatch = previousWaiting < requests.size() ||
                           previousWaiting - requests.size() != authoritativeWaiting;
         _waitingRequestCount = authoritativeWaiting;
@@ -580,8 +578,8 @@ void SimulatedExecutionR::abortBatch(const std::vector<SimulatedRequest> &reques
     {
         autil::ScopedLock lock(_stateLock);
         previousWaiting = _waitingRequestCount;
-        authoritativeWaiting = static_cast<size_t>(
-            executionState.batchWaitingRequests + executionState.queuedBatchRequests);
+        authoritativeWaiting = static_cast<size_t>(executionState.batchWaitingRequests +
+                                                   executionState.queuedBatchRequests);
         waitingMismatch = previousWaiting < requests.size() ||
                           previousWaiting - requests.size() != authoritativeWaiting;
         _waitingRequestCount = authoritativeWaiting;

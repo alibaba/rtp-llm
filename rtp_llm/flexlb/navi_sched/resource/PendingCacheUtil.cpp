@@ -20,42 +20,55 @@ uint64_t mix(uint64_t value)
 
 bool PendingCacheUtil::makeReservation(
     int64_t batchId, const std::vector<PendingCacheReferencedRequest> &requests,
-    const NaviSchedCachePolicy &policy,
-    NaviSchedPendingCacheReservation &reservation)
+    const NaviSchedCachePolicy &policy, NaviSchedPendingCacheReservation &reservation,
+    NaviSchedCacheKeyType type)
 {
-    if (batchId <= 0 || requests.empty() || !policy.valid()) {
+    if (batchId <= 0 || requests.empty() || !policy.valid(type)) {
         return false;
     }
     absl::flat_hash_set<uint64_t> fullReady;
     absl::flat_hash_set<uint64_t> tailReady;
     for (const auto &request : requests) {
         if (!request.blockHashes || request.blockSize != policy.blockSize ||
-            request.totalTokenCount < 0 ||
-            request.blockHashes->size() != static_cast<size_t>(
-                request.totalTokenCount / request.blockSize)) {
+            request.totalTokenCount < 0 || request.cachePublicationStartTokenCount < 0 ||
+            request.cachePublicationStartTokenCount > request.totalTokenCount ||
+            (request.cachePublicationTokenCount != -1 &&
+             request.cachePublicationTokenCount < request.totalTokenCount) ||
+            request.blockHashes->size() !=
+                static_cast<size_t>(request.totalTokenCount / request.blockSize)) {
             return false;
         }
         const auto &blockHashes = *request.blockHashes;
         const auto blockCount = blockHashes.size();
-        const bool blockAligned =
-            request.totalTokenCount % request.blockSize == 0;
         for (size_t blockIndex = 0; blockIndex < blockCount; ++blockIndex) {
+            if (blockIndex < static_cast<size_t>(request.cachePublicationStartTokenCount /
+                                                 policy.blockSize)) {
+                continue;
+            }
+            if (type == NaviSchedCacheKeyType::V6D &&
+                blockIndex >=
+                    static_cast<size_t>(
+                        std::max<int64_t>(0, request.totalTokenCount -
+                                                 policy.fullAttentionQueryDropTokens) /
+                        policy.blockSize)) {
+                break;
+            }
             const auto blockHash = blockHashes[blockIndex];
             fullReady.emplace(blockHash);
             if (!policy.hybridTailRequired) {
                 continue;
             }
-            const bool periodicTail =
-                (blockIndex + 1) % policy.linearStep == 0;
-            const bool finalBlock = blockIndex + 1 == blockCount;
-            const bool alignedPreviousBlock =
-                blockAligned && blockCount >= 2 && blockIndex + 2 == blockCount;
-            if (periodicTail || finalBlock || alignedPreviousBlock) {
+            const auto publicationTokens = policy.mambaAlign &&
+                                                   policy.mambaRetentionInterval >= 0 &&
+                                                   request.cachePublicationTokenCount >= 0
+                                               ? request.cachePublicationTokenCount
+                                               : request.totalTokenCount;
+            if (isTailReady(publicationTokens, blockIndex + 1, policy, type)) {
                 tailReady.emplace(blockHash);
             }
         }
     }
-    if (fullReady.empty()) {
+    if (fullReady.empty() && type == NaviSchedCacheKeyType::BLOCK_POOL) {
         return false;
     }
     reservation.batchId = batchId;
@@ -67,6 +80,35 @@ bool PendingCacheUtil::makeReservation(
     std::sort(reservation.tailReadyBlockHashes.begin(),
               reservation.tailReadyBlockHashes.end());
     return true;
+}
+
+bool PendingCacheUtil::isTailReady(int64_t totalTokens, size_t depth,
+                                   const NaviSchedCachePolicy &policy,
+                                   NaviSchedCacheKeyType type)
+{
+    if (!policy.valid(type) || !policy.hybridTailRequired || depth == 0 ||
+        totalTokens <= 0 || depth > static_cast<size_t>(totalTokens / policy.blockSize)) {
+        return false;
+    }
+    if (policy.mambaAlign && policy.mambaRetentionInterval >= 0) {
+        const auto schedulerBlockSize = policy.blockSize * policy.linearStep;
+        const auto boundary = static_cast<int64_t>(depth) * policy.blockSize;
+        const auto replayBoundary =
+            ((totalTokens - 1) / schedulerBlockSize) * schedulerBlockSize;
+        const auto lastStop =
+            std::max<int64_t>((totalTokens / schedulerBlockSize -
+                               static_cast<int64_t>(policy.mambaReplayStopShift)) *
+                                  schedulerBlockSize,
+                              0);
+        const bool retained =
+            boundary == replayBoundary || (policy.mambaRetentionInterval > 0 &&
+                                           boundary % policy.mambaRetentionInterval == 0);
+        return retained && boundary == lastStop;
+    }
+    const auto blockCount = static_cast<size_t>(totalTokens / policy.blockSize);
+    return depth % policy.linearStep == 0 || depth == blockCount ||
+           (totalTokens % policy.blockSize == 0 && blockCount >= 2 &&
+            depth + 1 == blockCount);
 }
 
 bool PendingCacheUtil::validReservation(
@@ -86,15 +128,13 @@ bool PendingCacheUtil::validReservation(
             reservation.tailReadyBlockHashes.end()) {
         return false;
     }
-    return std::includes(reservation.fullReadyBlockHashes.begin(),
-                         reservation.fullReadyBlockHashes.end(),
-                         reservation.tailReadyBlockHashes.begin(),
-                         reservation.tailReadyBlockHashes.end());
+    return std::includes(
+        reservation.fullReadyBlockHashes.begin(), reservation.fullReadyBlockHashes.end(),
+        reservation.tailReadyBlockHashes.begin(), reservation.tailReadyBlockHashes.end());
 }
 
-bool PendingCacheUtil::equalReservation(
-    const NaviSchedPendingCacheReservation &left,
-    const NaviSchedPendingCacheReservation &right)
+bool PendingCacheUtil::equalReservation(const NaviSchedPendingCacheReservation &left,
+                                        const NaviSchedPendingCacheReservation &right)
 {
     return left.batchId == right.batchId &&
            left.scheduleBatchId == right.scheduleBatchId &&
@@ -108,8 +148,7 @@ uint64_t PendingCacheUtil::reservationChecksum(
     const auto batchHash = mix(static_cast<uint64_t>(reservation.batchId));
     const auto scheduleBatchHash =
         mix(static_cast<uint64_t>(reservation.scheduleBatchId));
-    uint64_t checksum =
-        mix(batchHash ^ scheduleBatchHash ^ 0x6f4f3b2a1908d7c6ULL);
+    uint64_t checksum = mix(batchHash ^ scheduleBatchHash ^ 0x6f4f3b2a1908d7c6ULL);
     for (auto blockHash : reservation.fullReadyBlockHashes) {
         checksum ^= mix(batchHash ^ blockHash ^ 0x46a532f9d8127b01ULL);
     }
@@ -119,8 +158,7 @@ uint64_t PendingCacheUtil::reservationChecksum(
     return checksum;
 }
 
-uint64_t PendingCacheUtil::reservationBlockChecksum(int64_t batchId,
-                                                    uint64_t blockHash,
+uint64_t PendingCacheUtil::reservationBlockChecksum(int64_t batchId, uint64_t blockHash,
                                                     bool tailReady)
 {
     return mix(mix(static_cast<uint64_t>(batchId)) ^ blockHash ^
@@ -135,8 +173,8 @@ PendingCacheState::BlockOwners::BlockOwners(const BlockOwners &other)
 {
 }
 
-PendingCacheState::BlockOwners &
-PendingCacheState::BlockOwners::operator=(const BlockOwners &other)
+PendingCacheState::BlockOwners &PendingCacheState::BlockOwners::operator=(
+    const BlockOwners &other)
 {
     if (this != &other) {
         BlockOwners copy(other);
@@ -187,10 +225,10 @@ bool PendingCacheState::BlockOwners::contains(int64_t batchId) const
                           : singleBatchId == batchId;
 }
 
-bool PendingCacheState::upsert(
-    const NaviSchedPendingCacheReservation &reservation, bool replaceExisting,
-    bool &changed, const PendingCacheState *other,
-    PendingCacheStateStats *overlap)
+bool PendingCacheState::upsert(const NaviSchedPendingCacheReservation &reservation,
+                               bool replaceExisting, bool &changed,
+                               const PendingCacheState *other,
+                               PendingCacheStateStats *overlap)
 {
     changed = false;
     if (!PendingCacheUtil::validReservation(reservation)) {
@@ -201,8 +239,7 @@ bool PendingCacheState::upsert(
 
 bool PendingCacheState::upsertGenerated(
     const NaviSchedPendingCacheReservation &reservation, bool replaceExisting,
-    bool &changed, const PendingCacheState *other,
-    PendingCacheStateStats *overlap)
+    bool &changed, const PendingCacheState *other, PendingCacheStateStats *overlap)
 {
     changed = false;
     if ((other == nullptr) != (overlap == nullptr) || other == this) {
@@ -235,11 +272,13 @@ bool PendingCacheState::upsertGenerated(
                         continue;
                     }
                     const bool removing = oldIndex < oldHashes.size() &&
-                        (newIndex == newHashes.size() ||
-                         oldHashes[oldIndex] < newHashes[newIndex]);
-                    const auto hash = removing ? oldHashes[oldIndex++] : newHashes[newIndex++];
-                    const bool inOther = other && (tailReady
-                        ? other->containsTailReady(hash) : other->containsFullReady(hash));
+                                          (newIndex == newHashes.size() ||
+                                           oldHashes[oldIndex] < newHashes[newIndex]);
+                    const auto hash =
+                        removing ? oldHashes[oldIndex++] : newHashes[newIndex++];
+                    const bool inOther =
+                        other && (tailReady ? other->containsTailReady(hash)
+                                            : other->containsFullReady(hash));
                     if (removing) {
                         auto ref = owners.find(hash);
                         ref->second.remove(reservation.batchId);
@@ -260,12 +299,13 @@ bool PendingCacheState::upsertGenerated(
                     }
                 }
             };
-            updateOwners(it->second.fullReadyBlockHashes, reservation.fullReadyBlockHashes,
-                         _fullReadyOwners, false);
-            updateOwners(it->second.tailReadyBlockHashes, reservation.tailReadyBlockHashes,
-                         _tailReadyOwners, true);
+            updateOwners(it->second.fullReadyBlockHashes,
+                         reservation.fullReadyBlockHashes, _fullReadyOwners, false);
+            updateOwners(it->second.tailReadyBlockHashes,
+                         reservation.tailReadyBlockHashes, _tailReadyOwners, true);
             auto &checksum = _reservationChecksums.at(reservation.batchId);
-            const auto replacementChecksum = PendingCacheUtil::reservationChecksum(reservation);
+            const auto replacementChecksum =
+                PendingCacheUtil::reservationChecksum(reservation);
             _checksum ^= checksum ^ replacementChecksum;
             checksum = replacementChecksum;
             it->second = reservation;
@@ -281,8 +321,8 @@ bool PendingCacheState::upsertGenerated(
 
 bool PendingCacheState::removeGeneratedBlocks(
     int64_t batchId, const std::vector<uint64_t> &fullReadyBlockHashes,
-    const std::vector<uint64_t> &tailReadyBlockHashes,
-    const PendingCacheState *other, PendingCacheStateStats *overlap)
+    const std::vector<uint64_t> &tailReadyBlockHashes, const PendingCacheState *other,
+    PendingCacheStateStats *overlap)
 {
     if ((other == nullptr) != (overlap == nullptr) || other == this) {
         return false;
@@ -303,13 +343,14 @@ bool PendingCacheState::removeGeneratedBlocks(
             owner->second.remove(batchId);
             if (owner->second.size() == 0) {
                 if (other && (tailReady ? other->containsTailReady(hash)
-                                       : other->containsFullReady(hash))) {
+                                        : other->containsFullReady(hash))) {
                     --(tailReady ? overlap->uniqueTailReadyBlockCount
                                  : overlap->uniqueBlockCount);
                 }
                 owners.erase(owner);
             }
-            const auto checksum = PendingCacheUtil::reservationBlockChecksum(batchId, hash, tailReady);
+            const auto checksum =
+                PendingCacheUtil::reservationBlockChecksum(batchId, hash, tailReady);
             _checksum ^= checksum;
             batchChecksum ^= checksum;
         }
@@ -378,8 +419,8 @@ bool PendingCacheState::containsTailReady(uint64_t blockHash) const
     return _tailReadyOwners.end() != _tailReadyOwners.find(blockHash);
 }
 
-bool PendingCacheState::containsFullReadyExcludingSchedule(
-    uint64_t blockHash, int64_t scheduleBatchId) const
+bool PendingCacheState::containsFullReadyExcludingSchedule(uint64_t blockHash,
+                                                           int64_t scheduleBatchId) const
 {
     auto ref = _fullReadyOwners.find(blockHash);
     if (ref == _fullReadyOwners.end()) {
@@ -388,8 +429,8 @@ bool PendingCacheState::containsFullReadyExcludingSchedule(
     return hasOwnerOutsideSchedule(ref->second, scheduleBatchId);
 }
 
-bool PendingCacheState::containsTailReadyExcludingSchedule(
-    uint64_t blockHash, int64_t scheduleBatchId) const
+bool PendingCacheState::containsTailReadyExcludingSchedule(uint64_t blockHash,
+                                                           int64_t scheduleBatchId) const
 {
     auto ref = _tailReadyOwners.find(blockHash);
     if (ref == _tailReadyOwners.end()) {
@@ -398,15 +439,14 @@ bool PendingCacheState::containsTailReadyExcludingSchedule(
     return hasOwnerOutsideSchedule(ref->second, scheduleBatchId);
 }
 
-bool PendingCacheState::hasOwnerOutsideSchedule(
-    const BlockOwners &owners, int64_t scheduleBatchId) const
+bool PendingCacheState::hasOwnerOutsideSchedule(const BlockOwners &owners,
+                                                int64_t scheduleBatchId) const
 {
     if (!owners.sharedBatchIds) {
         return _reservations.at(owners.singleBatchId).scheduleBatchId != scheduleBatchId;
     }
     const auto batches = _scheduleBatchIds.find(scheduleBatchId);
-    if (batches == _scheduleBatchIds.end() ||
-        owners.size() > batches->second.size()) {
+    if (batches == _scheduleBatchIds.end() || owners.size() > batches->second.size()) {
         return true;
     }
     for (auto batchId : *owners.sharedBatchIds) {
@@ -427,10 +467,13 @@ bool PendingCacheState::getReservation(
     reservation = it->second;
     if (_reducedReservations.count(batchId)) {
         auto removeRetired = [batchId](auto &hashes, const auto &owners) {
-            hashes.erase(std::remove_if(hashes.begin(), hashes.end(), [&](uint64_t hash) {
-                auto it = owners.find(hash);
-                return it == owners.end() || !it->second.contains(batchId);
-            }), hashes.end());
+            hashes.erase(std::remove_if(hashes.begin(), hashes.end(),
+                                        [&](uint64_t hash) {
+                                            auto it = owners.find(hash);
+                                            return it == owners.end() ||
+                                                   !it->second.contains(batchId);
+                                        }),
+                         hashes.end());
         };
         removeRetired(reservation.fullReadyBlockHashes, _fullReadyOwners);
         removeRetired(reservation.tailReadyBlockHashes, _tailReadyOwners);
@@ -438,8 +481,7 @@ bool PendingCacheState::getReservation(
     return true;
 }
 
-int64_t PendingCacheState::getSourceBatchId(uint64_t blockHash,
-                                            bool tailReady) const
+int64_t PendingCacheState::getSourceBatchId(uint64_t blockHash, bool tailReady) const
 {
     const auto &owners = tailReady ? _tailReadyOwners : _fullReadyOwners;
     const auto it = owners.find(blockHash);
@@ -448,8 +490,8 @@ int64_t PendingCacheState::getSourceBatchId(uint64_t blockHash,
 
 PendingCacheStateStats PendingCacheState::getStats() const
 {
-    return {_reservations.size(), _fullReadyOwners.size(),
-            _tailReadyOwners.size(), _checksum};
+    return {_reservations.size(), _fullReadyOwners.size(), _tailReadyOwners.size(),
+            _checksum};
 }
 
 size_t PendingCacheState::countBatchOverlap(const PendingCacheState &other) const
@@ -466,8 +508,7 @@ size_t PendingCacheState::countBatchOverlap(const PendingCacheState &other) cons
     return count;
 }
 
-size_t PendingCacheState::countFullReadyOverlap(
-    const PendingCacheState &other) const
+size_t PendingCacheState::countFullReadyOverlap(const PendingCacheState &other) const
 {
     const auto *smaller = &_fullReadyOwners;
     const auto *larger = &other._fullReadyOwners;
@@ -481,8 +522,7 @@ size_t PendingCacheState::countFullReadyOverlap(
     return count;
 }
 
-size_t PendingCacheState::countTailReadyOverlap(
-    const PendingCacheState &other) const
+size_t PendingCacheState::countTailReadyOverlap(const PendingCacheState &other) const
 {
     const auto *smaller = &_tailReadyOwners;
     const auto *larger = &other._tailReadyOwners;
@@ -506,7 +546,8 @@ bool PendingCacheState::sameReservations(const PendingCacheState &other) const
         if (it == other._reservations.end()) {
             return false;
         }
-        if (_reducedReservations.count(batchId) || other._reducedReservations.count(batchId)) {
+        if (_reducedReservations.count(batchId) ||
+            other._reducedReservations.count(batchId)) {
             NaviSchedPendingCacheReservation left, right;
             getReservation(batchId, left);
             other.getReservation(batchId, right);
@@ -518,8 +559,7 @@ bool PendingCacheState::sameReservations(const PendingCacheState &other) const
     return true;
 }
 
-std::vector<NaviSchedPendingCacheReservation>
-PendingCacheState::makeSnapshot() const
+std::vector<NaviSchedPendingCacheReservation> PendingCacheState::makeSnapshot() const
 {
     std::vector<NaviSchedPendingCacheReservation> reservations;
     reservations.reserve(_reservations.size());
@@ -528,16 +568,15 @@ PendingCacheState::makeSnapshot() const
         getReservation(entry.first, reservation);
         reservations.emplace_back(std::move(reservation));
     }
-    std::sort(reservations.begin(), reservations.end(),
-              [](const auto &left, const auto &right) {
-                  return left.batchId < right.batchId;
-              });
+    std::sort(
+        reservations.begin(), reservations.end(),
+        [](const auto &left, const auto &right) { return left.batchId < right.batchId; });
     return reservations;
 }
 
-void PendingCacheState::add(
-    const NaviSchedPendingCacheReservation &reservation,
-    const PendingCacheState *other, PendingCacheStateStats *overlap)
+void PendingCacheState::add(const NaviSchedPendingCacheReservation &reservation,
+                            const PendingCacheState *other,
+                            PendingCacheStateStats *overlap)
 {
     _reservations.emplace(reservation.batchId, reservation);
     if (other && other->_reservations.count(reservation.batchId)) {
@@ -553,16 +592,14 @@ void PendingCacheState::add(
     for (auto blockHash : reservation.fullReadyBlockHashes) {
         auto &owners = _fullReadyOwners[blockHash];
         owners.add(reservation.batchId);
-        if (owners.size() == 1 && other &&
-            other->containsFullReady(blockHash)) {
+        if (owners.size() == 1 && other && other->containsFullReady(blockHash)) {
             ++overlap->uniqueBlockCount;
         }
     }
     for (auto blockHash : reservation.tailReadyBlockHashes) {
         auto &owners = _tailReadyOwners[blockHash];
         owners.add(reservation.batchId);
-        if (owners.size() == 1 && other &&
-            other->containsTailReady(blockHash)) {
+        if (owners.size() == 1 && other && other->containsTailReady(blockHash)) {
             ++overlap->uniqueTailReadyBlockCount;
         }
     }
@@ -578,7 +615,8 @@ void PendingCacheState::remove(
     const bool reduced = _reducedReservations.count(it->first) != 0;
     for (auto blockHash : it->second.fullReadyBlockHashes) {
         auto ref = _fullReadyOwners.find(blockHash);
-        if (reduced && (ref == _fullReadyOwners.end() || !ref->second.contains(it->first))) {
+        if (reduced &&
+            (ref == _fullReadyOwners.end() || !ref->second.contains(it->first))) {
             continue;
         }
         ref->second.remove(it->first);
@@ -591,7 +629,8 @@ void PendingCacheState::remove(
     }
     for (auto blockHash : it->second.tailReadyBlockHashes) {
         auto ref = _tailReadyOwners.find(blockHash);
-        if (reduced && (ref == _tailReadyOwners.end() || !ref->second.contains(it->first))) {
+        if (reduced &&
+            (ref == _tailReadyOwners.end() || !ref->second.contains(it->first))) {
             continue;
         }
         ref->second.remove(it->first);

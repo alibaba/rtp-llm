@@ -38,7 +38,7 @@ struct AgentConfig : autil::legacy::Jsonizable {
     double latencyOnlineLearningRateScale = 1.0;
     double latencyCurrentSampleWeight = 4.0;
     double latencyNonlinearScale = 1500.0;
-    double queueLearningRate = 0.02;
+    double queueLearningRate = 0.002;
     size_t latencyColdStartFitEpochs = 100;
     size_t latencyHistoryLimit = 2000;
     size_t latencyHistoryBucketCapacity = 64;
@@ -67,8 +67,7 @@ struct AgentConfig : autil::legacy::Jsonizable {
         json.Jsonize("latency_fit_batch_size", latencyFitBatchSize, latencyFitBatchSize);
         json.Jsonize("latency_fit_interval", latencyFitInterval, latencyFitInterval);
         json.Jsonize("latency_learning_rate", latencyLearningRate, latencyLearningRate);
-        json.Jsonize("latency_online_learning_rate_scale",
-                     latencyOnlineLearningRateScale,
+        json.Jsonize("latency_online_learning_rate_scale", latencyOnlineLearningRateScale,
                      latencyOnlineLearningRateScale);
         json.Jsonize("latency_current_sample_weight", latencyCurrentSampleWeight,
                      latencyCurrentSampleWeight);
@@ -80,8 +79,7 @@ struct AgentConfig : autil::legacy::Jsonizable {
         json.Jsonize("latency_cold_start_fit_epochs", latencyColdStartFitEpochs,
                      latencyColdStartFitEpochs);
         json.Jsonize("latency_history_limit", latencyHistoryLimit, latencyHistoryLimit);
-        json.Jsonize("latency_history_bucket_capacity",
-                     latencyHistoryBucketCapacity,
+        json.Jsonize("latency_history_bucket_capacity", latencyHistoryBucketCapacity,
                      latencyHistoryBucketCapacity);
         json.Jsonize("latency_persist_interval", latencyPersistInterval,
                      latencyPersistInterval);
@@ -97,8 +95,8 @@ struct AgentConfig : autil::legacy::Jsonizable {
                      latencyValidationEnabled);
         json.Jsonize("residual_learning_rate", residualLearningRate,
                      residualLearningRate);
-        json.Jsonize("residual_update_error_floor_ms",
-                     residualUpdateErrorFloorMs, residualUpdateErrorFloorMs);
+        json.Jsonize("residual_update_error_floor_ms", residualUpdateErrorFloorMs,
+                     residualUpdateErrorFloorMs);
         json.Jsonize("residual_update_error_ratio", residualUpdateErrorRatio,
                      residualUpdateErrorRatio);
         json.Jsonize("residual_idle_decay_start_ms", residualIdleDecayStartMs,
@@ -371,15 +369,13 @@ std::shared_ptr<NaviSchedAgent> createAgent(const AgentConfig &agentConfig,
     config.latencyFitBatchSize = agentConfig.latencyFitBatchSize;
     config.latencyFitInterval = agentConfig.latencyFitInterval;
     config.latencyLearningRate = agentConfig.latencyLearningRate;
-    config.latencyOnlineLearningRateScale =
-        agentConfig.latencyOnlineLearningRateScale;
+    config.latencyOnlineLearningRateScale = agentConfig.latencyOnlineLearningRateScale;
     config.latencyCurrentSampleWeight = agentConfig.latencyCurrentSampleWeight;
     config.latencyNonlinearScale = agentConfig.latencyNonlinearScale;
     config.queueLearningRate = agentConfig.queueLearningRate;
     config.latencyColdStartFitEpochs = agentConfig.latencyColdStartFitEpochs;
     config.latencyHistoryLimit = agentConfig.latencyHistoryLimit;
-    config.latencyHistoryBucketCapacity =
-        agentConfig.latencyHistoryBucketCapacity;
+    config.latencyHistoryBucketCapacity = agentConfig.latencyHistoryBucketCapacity;
     config.latencyPersistInterval = agentConfig.latencyPersistInterval;
     config.latencyPersistIntervalMs = agentConfig.latencyPersistIntervalMs;
     config.latencyWarmupSampleCount = agentConfig.latencyWarmupSampleCount;
@@ -445,7 +441,7 @@ RtpLLMAgentInitStatus createRtpLLMAgentFromEnvironment(
     config.latencyNonlinearScale = autil::EnvUtil::getEnv<double>(
         "RTP_LLM_NAVI_SCHED_LATENCY_NONLINEAR_SCALE", 1500.0);
     config.queueLearningRate =
-        autil::EnvUtil::getEnv<double>("RTP_LLM_NAVI_SCHED_QUEUE_LEARNING_RATE", 0.02);
+        autil::EnvUtil::getEnv<double>("RTP_LLM_NAVI_SCHED_QUEUE_LEARNING_RATE", 0.002);
     config.latencyPredictionMode = autil::EnvUtil::getEnv(
         "RTP_LLM_NAVI_SCHED_LATENCY_PREDICTION_MODE", std::string("split"));
     config.latencyColdStartFitEpochs = autil::EnvUtil::getEnv<size_t>(
@@ -466,8 +462,8 @@ RtpLLMAgentInitStatus createRtpLLMAgentFromEnvironment(
         "RTP_LLM_NAVI_SCHED_LATENCY_ZERO_ANCHOR_MIN_SAMPLES", 8);
     config.latencyValidationEnabled =
         autil::EnvUtil::getEnv("RTP_LLM_NAVI_SCHED_LATENCY_VALIDATION", false);
-    config.residualLearningRate = autil::EnvUtil::getEnv<double>(
-        "RTP_LLM_NAVI_SCHED_RESIDUAL_LEARNING_RATE", 0.03);
+    config.residualLearningRate =
+        autil::EnvUtil::getEnv<double>("RTP_LLM_NAVI_SCHED_RESIDUAL_LEARNING_RATE", 0.03);
     config.residualUpdateErrorFloorMs = autil::EnvUtil::getEnv<double>(
         "RTP_LLM_NAVI_SCHED_RESIDUAL_UPDATE_ERROR_FLOOR_MS", 100.0);
     config.residualUpdateErrorRatio = autil::EnvUtil::getEnv<double>(
@@ -524,15 +520,13 @@ RtpLLMAgentInitStatus createRtpLLMAgentFromEnvironment(
         config.latencyCurrentSampleWeight <= 0.0 ||
         config.latencyHistoryBucketCapacity == 0 ||
         !std::isfinite(config.latencyZeroAnchorMaxMs) ||
-        config.latencyZeroAnchorMaxMs <= 0.0 ||
-        config.latencyZeroAnchorMinSamples == 0 ||
+        config.latencyZeroAnchorMaxMs <= 0.0 || config.latencyZeroAnchorMinSamples == 0 ||
         !std::isfinite(config.residualLearningRate) ||
         config.residualLearningRate <= 0.0 || config.residualLearningRate > 1.0 ||
         !std::isfinite(config.residualUpdateErrorFloorMs) ||
         config.residualUpdateErrorFloorMs < 0.0 ||
         !std::isfinite(config.residualUpdateErrorRatio) ||
-        config.residualUpdateErrorRatio < 0.0 ||
-        config.residualIdleDecayStartMs < 0 ||
+        config.residualUpdateErrorRatio < 0.0 || config.residualIdleDecayStartMs < 0 ||
         config.residualIdleDecayEndMs <= config.residualIdleDecayStartMs) {
         errorMessage = "invalid RTP-LLM NaviSched Agent runtime config";
         return RtpLLMAgentInitStatus::INVALID_CONFIG;
@@ -553,8 +547,7 @@ RtpLLMAgentInitStatus createRtpLLMAgentFromEnvironment(
         return RtpLLMAgentInitStatus::INVALID_CONFIG;
     }
     if (config.latencyPersistIntervalMs <= 0) {
-        errorMessage =
-            "RTP_LLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL_MS must be positive";
+        errorMessage = "RTP_LLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL_MS must be positive";
         return RtpLLMAgentInitStatus::INVALID_CONFIG;
     }
     autil::legacy::json::JsonMap effectiveConfig;
@@ -572,8 +565,7 @@ RtpLLMAgentInitStatus createRtpLLMAgentFromEnvironment(
     effectiveConfig["latency_learning_rate"] = config.latencyLearningRate;
     effectiveConfig["latency_online_learning_rate_scale"] =
         config.latencyOnlineLearningRateScale;
-    effectiveConfig["latency_current_sample_weight"] =
-        config.latencyCurrentSampleWeight;
+    effectiveConfig["latency_current_sample_weight"] = config.latencyCurrentSampleWeight;
     effectiveConfig["latency_nonlinear_scale"] = config.latencyNonlinearScale;
     effectiveConfig["queue_learning_rate"] = config.queueLearningRate;
     effectiveConfig["latency_cold_start_fit_epochs"] = config.latencyColdStartFitEpochs;
@@ -581,22 +573,17 @@ RtpLLMAgentInitStatus createRtpLLMAgentFromEnvironment(
     effectiveConfig["latency_history_bucket_capacity"] =
         config.latencyHistoryBucketCapacity;
     effectiveConfig["latency_persist_interval"] = config.latencyPersistInterval;
-    effectiveConfig["latency_persist_interval_ms"] =
-        config.latencyPersistIntervalMs;
+    effectiveConfig["latency_persist_interval_ms"] = config.latencyPersistIntervalMs;
     effectiveConfig["latency_warmup_sample_count"] = config.latencyWarmupSampleCount;
     effectiveConfig["latency_zero_anchor_max_ms"] = config.latencyZeroAnchorMaxMs;
     effectiveConfig["latency_zero_anchor_min_samples"] =
         config.latencyZeroAnchorMinSamples;
     effectiveConfig["latency_validation"] = config.latencyValidationEnabled;
     effectiveConfig["residual_learning_rate"] = config.residualLearningRate;
-    effectiveConfig["residual_update_error_floor_ms"] =
-        config.residualUpdateErrorFloorMs;
-    effectiveConfig["residual_update_error_ratio"] =
-        config.residualUpdateErrorRatio;
-    effectiveConfig["residual_idle_decay_start_ms"] =
-        config.residualIdleDecayStartMs;
-    effectiveConfig["residual_idle_decay_end_ms"] =
-        config.residualIdleDecayEndMs;
+    effectiveConfig["residual_update_error_floor_ms"] = config.residualUpdateErrorFloorMs;
+    effectiveConfig["residual_update_error_ratio"] = config.residualUpdateErrorRatio;
+    effectiveConfig["residual_idle_decay_start_ms"] = config.residualIdleDecayStartMs;
+    effectiveConfig["residual_idle_decay_end_ms"] = config.residualIdleDecayEndMs;
     effectiveConfig["batch_timeout_ms"] = config.batchTimeoutMs;
     effectiveConfig["cache_total_blocks"] = config.totalBlocks;
     const auto effectiveConfigJson = autil::legacy::ToJsonString(effectiveConfig, true);
@@ -918,8 +905,8 @@ void reportRtpLLMCacheStateChanged(
     const NaviSchedBlockHashesConstPtr &changedBlockHashes,
     const NaviSchedBlockHashesConstPtr &flatPresentBlockHashes,
     const NaviSchedBlockHashesConstPtr &fullReadyBlockHashes,
-    const NaviSchedBlockHashesConstPtr &tailReadyBlockHashes,
-    bool                         , int64_t eventTimeUs, int64_t rtpCachedBlockCount)
+    const NaviSchedBlockHashesConstPtr &tailReadyBlockHashes, bool, int64_t eventTimeUs,
+    int64_t rtpCachedBlockCount)
 {
     if (agent) {
         const auto beginUs = autil::TimeUtility::currentTimeInMicroSeconds();

@@ -22,39 +22,31 @@ void AgentSchedulerConfig::Jsonize(JsonWrapper &json)
 {
     json.Jsonize("batch_timeout_ms", batchTimeoutMs, batchTimeoutMs);
     json.Jsonize("closed_batch_keep_ms", closedBatchKeepMs, closedBatchKeepMs);
-    json.Jsonize("latency_fit_batch_size", latencyFitBatchSize,
-                 latencyFitBatchSize);
-    json.Jsonize("latency_fit_interval", latencyFitInterval,
-                 latencyFitInterval);
-    json.Jsonize("latency_learning_rate", latencyLearningRate,
-                 latencyLearningRate);
-    json.Jsonize("latency_online_learning_rate_scale",
-                 latencyOnlineLearningRateScale,
+    json.Jsonize("latency_fit_batch_size", latencyFitBatchSize, latencyFitBatchSize);
+    json.Jsonize("latency_fit_interval", latencyFitInterval, latencyFitInterval);
+    json.Jsonize("latency_learning_rate", latencyLearningRate, latencyLearningRate);
+    json.Jsonize("latency_online_learning_rate_scale", latencyOnlineLearningRateScale,
                  latencyOnlineLearningRateScale);
     json.Jsonize("latency_current_sample_weight", latencyCurrentSampleWeight,
                  latencyCurrentSampleWeight);
+    json.Jsonize("latency_error_clip_ms", latencyErrorClipMs, latencyErrorClipMs);
     json.Jsonize("latency_parameter_learning_rate_scales",
-                 latencyParameterLearningRateScales,
-                 latencyParameterLearningRateScales);
-    json.Jsonize("latency_nonlinear_scale", latencyNonlinearScale,
-                 latencyNonlinearScale);
+                 latencyParameterLearningRateScales, latencyParameterLearningRateScales);
+    json.Jsonize("latency_nonlinear_scale", latencyNonlinearScale, latencyNonlinearScale);
     json.Jsonize("queue_learning_rate", queueLearningRate, queueLearningRate);
-    json.Jsonize("latency_check_gradient", latencyCheckGradient,
-                 latencyCheckGradient);
+    json.Jsonize("latency_check_gradient", latencyCheckGradient, latencyCheckGradient);
     json.Jsonize("latency_cold_start_fit_epochs", latencyColdStartFitEpochs,
                  latencyColdStartFitEpochs);
-    json.Jsonize("latency_history_limit", latencyHistoryLimit,
-                 latencyHistoryLimit);
-    json.Jsonize("latency_history_bucket_capacity",
-                 latencyHistoryBucketCapacity, latencyHistoryBucketCapacity);
+    json.Jsonize("latency_history_limit", latencyHistoryLimit, latencyHistoryLimit);
+    json.Jsonize("latency_history_bucket_capacity", latencyHistoryBucketCapacity,
+                 latencyHistoryBucketCapacity);
     json.Jsonize("latency_persist_interval", latencyPersistInterval,
                  latencyPersistInterval);
     json.Jsonize("latency_persist_interval_ms", latencyPersistIntervalMs,
                  latencyPersistIntervalMs);
     json.Jsonize("latency_warmup_sample_count", latencyWarmupSampleCount,
                  latencyWarmupSampleCount);
-    json.Jsonize("latency_model_trust_min_revision",
-                 latencyModelTrustMinRevision,
+    json.Jsonize("latency_model_trust_min_revision", latencyModelTrustMinRevision,
                  latencyModelTrustMinRevision);
     json.Jsonize("latency_zero_anchor_max_ms", latencyZeroAnchorMaxMs,
                  latencyZeroAnchorMaxMs);
@@ -62,8 +54,7 @@ void AgentSchedulerConfig::Jsonize(JsonWrapper &json)
                  latencyZeroAnchorMinSamples);
     json.Jsonize("latency_validation_enabled", latencyValidationEnabled,
                  latencyValidationEnabled);
-    json.Jsonize("residual_learning_rate", residualLearningRate,
-                 residualLearningRate);
+    json.Jsonize("residual_learning_rate", residualLearningRate, residualLearningRate);
     json.Jsonize("residual_update_error_floor_ms", residualUpdateErrorFloorMs,
                  residualUpdateErrorFloorMs);
     json.Jsonize("residual_update_error_ratio", residualUpdateErrorRatio,
@@ -75,10 +66,7 @@ void AgentSchedulerConfig::Jsonize(JsonWrapper &json)
     json.Jsonize("time_compression", timeCompression, timeCompression);
 }
 
-bool AgentSchedulerConfig::valid() const
-{
-    return validationError().empty();
-}
+bool AgentSchedulerConfig::valid() const { return validationError().empty(); }
 
 std::string AgentSchedulerConfig::validationError() const
 {
@@ -94,23 +82,35 @@ std::string AgentSchedulerConfig::validationError() const
         latencyOnlineLearningRateScale <= 0.0) {
         return "latency_online_learning_rate_scale must be finite and positive";
     }
-    if (!std::isfinite(latencyCurrentSampleWeight) ||
-        latencyCurrentSampleWeight <= 0.0) {
+    if (!std::isfinite(latencyCurrentSampleWeight) || latencyCurrentSampleWeight <= 0.0) {
         return "latency_current_sample_weight must be finite and positive";
+    }
+    if (!std::isfinite(latencyErrorClipMs) || latencyErrorClipMs < 0.0) {
+        return "latency_error_clip_ms must be finite and nonnegative";
     }
     const auto scaleCount = latencyParameterLearningRateScales.size();
     if (scaleCount != 0 && scaleCount != NonLinearPrefillModelR::PARAMETER_COUNT &&
-        scaleCount != NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT) {
+        scaleCount != NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT &&
+        scaleCount != NonLinearPrefillModelR::CACHE_SOURCE_PARAMETER_COUNT) {
         return "latency_parameter_learning_rate_scales has invalid length";
     }
     for (size_t index = 0; index < scaleCount; ++index) {
         const double scale = latencyParameterLearningRateScales[index];
+        if (scaleCount == NonLinearPrefillModelR::CACHE_SOURCE_PARAMETER_COUNT) {
+            const bool inactive = index >= NonLinearPrefillModelR::PARAMETER_COUNT &&
+                                  index < NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT;
+            if (!std::isfinite(scale) || (inactive ? scale != 0.0 : scale <= 0.0)) {
+                return "latency_parameter_learning_rate_scales[" + std::to_string(index) +
+                       (inactive ? "] must be zero for inactive cache-source coordinates"
+                                 : "] must be finite and positive");
+            }
+            continue;
+        }
         if (!std::isfinite(scale) ||
             (scale <= 0.0 &&
              (scale < 0.0 || index < NonLinearPrefillModelR::
-                                       RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX))) {
-            return "latency_parameter_learning_rate_scales[" +
-                   std::to_string(index) +
+                                         RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX))) {
+            return "latency_parameter_learning_rate_scales[" + std::to_string(index) +
                    (index < NonLinearPrefillModelR::
                                 RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX
                         ? "] must be finite and positive"
@@ -123,7 +123,8 @@ std::string AgentSchedulerConfig::validationError() const
     if (!std::isfinite(queueLearningRate) || queueLearningRate <= 0.0) {
         return "queue_learning_rate must be finite and positive";
     }
-    if (latencyColdStartFitEpochs == 0) return "latency_cold_start_fit_epochs must be positive";
+    if (latencyColdStartFitEpochs == 0)
+        return "latency_cold_start_fit_epochs must be positive";
     if (latencyHistoryLimit < latencyFitBatchSize) {
         return "latency_history_limit must be >= latency_fit_batch_size";
     }
@@ -131,7 +132,8 @@ std::string AgentSchedulerConfig::validationError() const
         return "latency_history_bucket_capacity must be positive";
     }
     if (latencyPersistInterval == 0) return "latency_persist_interval must be positive";
-    if (latencyPersistIntervalMs <= 0) return "latency_persist_interval_ms must be positive";
+    if (latencyPersistIntervalMs <= 0)
+        return "latency_persist_interval_ms must be positive";
     if (latencyModelTrustMinRevision <= 1) {
         return "latency_model_trust_min_revision must be > 1";
     }
@@ -145,12 +147,10 @@ std::string AgentSchedulerConfig::validationError() const
         residualLearningRate > 1.0) {
         return "residual_learning_rate must be finite and within [0, 1]";
     }
-    if (!std::isfinite(residualUpdateErrorFloorMs) ||
-        residualUpdateErrorFloorMs < 0.0) {
+    if (!std::isfinite(residualUpdateErrorFloorMs) || residualUpdateErrorFloorMs < 0.0) {
         return "residual_update_error_floor_ms must be finite and nonnegative";
     }
-    if (!std::isfinite(residualUpdateErrorRatio) ||
-        residualUpdateErrorRatio < 0.0) {
+    if (!std::isfinite(residualUpdateErrorRatio) || residualUpdateErrorRatio < 0.0) {
         return "residual_update_error_ratio must be finite and nonnegative";
     }
     if (residualIdleDecayStartMs < 0) {
@@ -166,12 +166,10 @@ std::string AgentSchedulerConfig::validationError() const
     return {};
 }
 
-LatencyResidualModel::RuntimeConfig
-AgentSchedulerConfig::residualRuntimeConfig() const
+LatencyResidualModel::RuntimeConfig AgentSchedulerConfig::residualRuntimeConfig() const
 {
-    return {residualLearningRate, residualUpdateErrorFloorMs,
-            residualUpdateErrorRatio, residualIdleDecayStartMs * 1000,
-            residualIdleDecayEndMs * 1000};
+    return {residualLearningRate, residualUpdateErrorFloorMs, residualUpdateErrorRatio,
+            residualIdleDecayStartMs * 1000, residualIdleDecayEndMs * 1000};
 }
 
 AgentSchedulerConfig AgentSchedulerConfig::fromServiceConfig(
@@ -183,23 +181,20 @@ AgentSchedulerConfig AgentSchedulerConfig::fromServiceConfig(
     result.latencyFitBatchSize = config.latencyFitBatchSize;
     result.latencyFitInterval = config.latencyFitInterval;
     result.latencyLearningRate = config.latencyLearningRate;
-    result.latencyOnlineLearningRateScale =
-        config.latencyOnlineLearningRateScale;
+    result.latencyOnlineLearningRateScale = config.latencyOnlineLearningRateScale;
     result.latencyCurrentSampleWeight = config.latencyCurrentSampleWeight;
-    result.latencyParameterLearningRateScales =
-        config.latencyParameterLearningRateScales;
+    result.latencyErrorClipMs = config.latencyErrorClipMs;
+    result.latencyParameterLearningRateScales = config.latencyParameterLearningRateScales;
     result.latencyNonlinearScale = config.latencyNonlinearScale;
     result.queueLearningRate = config.queueLearningRate;
     result.latencyCheckGradient = config.latencyCheckGradient;
     result.latencyColdStartFitEpochs = config.latencyColdStartFitEpochs;
     result.latencyHistoryLimit = config.latencyHistoryLimit;
-    result.latencyHistoryBucketCapacity =
-        config.latencyHistoryBucketCapacity;
+    result.latencyHistoryBucketCapacity = config.latencyHistoryBucketCapacity;
     result.latencyPersistInterval = config.latencyPersistInterval;
     result.latencyPersistIntervalMs = config.latencyPersistIntervalMs;
     result.latencyWarmupSampleCount = config.latencyWarmupSampleCount;
-    result.latencyModelTrustMinRevision =
-        config.latencyModelTrustMinRevision;
+    result.latencyModelTrustMinRevision = config.latencyModelTrustMinRevision;
     result.latencyZeroAnchorMaxMs = config.latencyZeroAnchorMaxMs;
     result.latencyZeroAnchorMinSamples = config.latencyZeroAnchorMinSamples;
     result.latencyValidationEnabled = config.latencyValidationEnabled;
@@ -240,12 +235,11 @@ navi::ErrorCode AgentSchedulerConfigR::init(navi::ResourceInitContext &)
         _snapshot.configHash = hashJson(_snapshot.configJson);
         _snapshot.generation = 1;
     }
-    NAVI_KERNEL_LOG(
-        INFO,
-        "[navi-scheduler-config-update] role [agent], status [initialized], "
-        "generation [%lu], hash [%s], effectiveConfig [%s]",
-        _snapshot.generation, _snapshot.configHash.c_str(),
-        _snapshot.configJson.c_str());
+    NAVI_KERNEL_LOG(INFO,
+                    "[navi-scheduler-config-update] role [agent], status [initialized], "
+                    "generation [%lu], hash [%s], effectiveConfig [%s]",
+                    _snapshot.generation, _snapshot.configHash.c_str(),
+                    _snapshot.configJson.c_str());
     return navi::EC_NONE;
 }
 
@@ -256,9 +250,8 @@ AgentSchedulerConfigR::Snapshot AgentSchedulerConfigR::get() const
 }
 
 AgentSchedulerConfigR::ApplyResult AgentSchedulerConfigR::apply(
-    uint64_t generation, const std::string &configHash,
-    const std::string &configJson, Snapshot &snapshot,
-    std::string &errorMessage)
+    uint64_t generation, const std::string &configHash, const std::string &configJson,
+    Snapshot &snapshot, std::string &errorMessage)
 {
     AgentSchedulerConfig updated;
     if (generation == 0 || configHash.empty() ||
@@ -276,8 +269,7 @@ AgentSchedulerConfigR::ApplyResult AgentSchedulerConfigR::apply(
     Snapshot previous;
     {
         autil::ScopedLock lock(_lock);
-        if (configHash == _snapshot.configHash ||
-            generation <= _snapshot.generation) {
+        if (configHash == _snapshot.configHash || generation <= _snapshot.generation) {
             snapshot = _snapshot;
             return ApplyResult::STALE;
         }
@@ -296,14 +288,13 @@ AgentSchedulerConfigR::ApplyResult AgentSchedulerConfigR::apply(
             }
         }
     }
-    NAVI_KERNEL_LOG(
-        INFO,
-        "[navi-scheduler-config-update] role [agent], status [applied], "
-        "previousGeneration [%lu], generation [%lu], previousHash [%s], "
-        "hash [%s], previousConfig [%s], effectiveConfig [%s]",
-        previous.generation, snapshot.generation, previous.configHash.c_str(),
-        snapshot.configHash.c_str(), previous.configJson.c_str(),
-        snapshot.configJson.c_str());
+    NAVI_KERNEL_LOG(INFO,
+                    "[navi-scheduler-config-update] role [agent], status [applied], "
+                    "previousGeneration [%lu], generation [%lu], previousHash [%s], "
+                    "hash [%s], previousConfig [%s], effectiveConfig [%s]",
+                    previous.generation, snapshot.generation, previous.configHash.c_str(),
+                    snapshot.configHash.c_str(), previous.configJson.c_str(),
+                    snapshot.configJson.c_str());
     for (const auto &pipe : notificationPipes) {
         if (!pipe || navi::EC_NONE != pipe->setDataOverride(nullptr, true, true)) {
             NAVI_KERNEL_LOG(WARN,
@@ -315,9 +306,8 @@ AgentSchedulerConfigR::ApplyResult AgentSchedulerConfigR::apply(
     return ApplyResult::APPLIED;
 }
 
-bool AgentSchedulerConfigR::subscribe(
-    const std::string &subscriberId,
-    const navi::AsyncPipePtr &notificationPipe)
+bool AgentSchedulerConfigR::subscribe(const std::string &subscriberId,
+                                      const navi::AsyncPipePtr &notificationPipe)
 {
     if (subscriberId.empty() || !notificationPipe) {
         return false;
@@ -327,9 +317,8 @@ bool AgentSchedulerConfigR::subscribe(
     return true;
 }
 
-void AgentSchedulerConfigR::unsubscribe(
-    const std::string &subscriberId,
-    const navi::AsyncPipePtr &notificationPipe)
+void AgentSchedulerConfigR::unsubscribe(const std::string &subscriberId,
+                                        const navi::AsyncPipePtr &notificationPipe)
 {
     autil::ScopedLock lock(_lock);
     auto it = _subscribers.find(subscriberId);
@@ -343,8 +332,7 @@ void AgentSchedulerConfigR::unsubscribe(
 }
 
 bool AgentSchedulerConfigR::parse(const std::string &configJson,
-                                  AgentSchedulerConfig &config,
-                                  std::string &errorMessage)
+                                  AgentSchedulerConfig &config, std::string &errorMessage)
 {
     try {
         AgentSchedulerConfig parsed;
@@ -370,17 +358,15 @@ std::string AgentSchedulerConfigR::toJson(const AgentSchedulerConfig &config)
     return autil::legacy::ToJsonString(config, true);
 }
 
-std::string AgentSchedulerConfigR::hashConfig(
-    const AgentSchedulerConfig &config)
+std::string AgentSchedulerConfigR::hashConfig(const AgentSchedulerConfig &config)
 {
     return hashJson(toJson(config));
 }
 
-std::string AgentSchedulerConfigR::hashJson(
-    const std::string &canonicalConfigJson)
+std::string AgentSchedulerConfigR::hashJson(const std::string &canonicalConfigJson)
 {
-    const auto value = autil::HashAlgorithm::hashString64(
-        canonicalConfigJson.data(), canonicalConfigJson.size());
+    const auto value = autil::HashAlgorithm::hashString64(canonicalConfigJson.data(),
+                                                          canonicalConfigJson.size());
     std::ostringstream stream;
     stream << std::hex << std::setfill('0') << std::setw(16) << value;
     return stream.str();

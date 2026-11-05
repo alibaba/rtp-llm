@@ -12,6 +12,7 @@
 #include <atomic>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 class NaviSchedResourceTest;
 
@@ -44,7 +45,9 @@ private:
         double rawLatencyMs = 0.0;
         double precedingBatchCount = 0.0;
         double predictedLatencyMs = 0.0;
-        std::array<double, 3> weights{};
+        NaviSchedQueueModel::Parameters weights{};
+        double cacheHitMemberFraction = 0.0;
+        double lookupMemberFraction = 0.0;
         uint64_t fitStep = 0;
         int64_t readyTimeUs = 0;
         int64_t queueEndCanRunTimeUs = 0;
@@ -63,6 +66,7 @@ private:
     struct QueueLoadPrediction {
         double totalLatencyMs = 0.0;
         double decayHeadRemainingMs = 0.0;
+        NaviSchedQueueModelState model;
     };
 
     struct FitInflightAudit {
@@ -144,16 +148,20 @@ private:
     int64_t _executionUtilizationActivationCount = 0;
     std::atomic<int64_t> _queueLatencyUs{0};
     std::unordered_map<int64_t, int64_t> _batchLatencyUs;
+    // Missing estimates remain explicit while lifecycle events continue.
+    std::unordered_set<int64_t> _unknownQueueBatches;
+    mutable uint64_t _queueProjectionFallbackCount = 0;
+    mutable uint64_t _queueProjectionUnknownCount = 0;
     std::unordered_map<int64_t, QueueFeatures> _batchQueueFeatures;
     std::unordered_map<int64_t, NaviSchedLocalBatchInfo> _batchLocalInfos;
     std::unordered_map<int64_t, RunningBatch> _runningBatches;
     NaviSchedLatencyFeatures _unifiedWorkloadFeatures;
     int32_t _unifiedRemainingPrefillRequestCount = 0;
-    std::array<double, 3> _queueWeights{};
-    std::array<double, 3> _queueAdamMoment1{};
-    std::array<double, 3> _queueAdamMoment2{};
+    NaviSchedQueueModel::Parameters _queueWeights{};
+    NaviSchedQueueModel::Parameters _queueAdamMoment1{};
+    NaviSchedQueueModel::Parameters _queueAdamMoment2{};
     uint64_t _queueFitStep = 1;
-    double _queueLearningRate = 0.02;
+    double _queueLearningRate = 0.002;
     double _timeCompression = 1.0;
     int32_t _latestBatchWaitingRequests = 0;
     int32_t _latestQueuedBatchRequests = 0;

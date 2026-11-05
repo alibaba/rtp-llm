@@ -3,6 +3,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace navi_sched {
 constexpr size_t LINEAR_PARAMETER_COUNT = 7;
@@ -20,8 +21,7 @@ void reportOptimizerStep(
         return;
     }
     reporter->report(1, "agent.latency_model_optimizer_step_qps",
-                     kmonitor::MetricType::QPS, nullptr,
-                     kmonitor::MetricLevel::FATAL);
+                     kmonitor::MetricType::QPS, nullptr, kmonitor::MetricLevel::FATAL);
     for (size_t index = 0; index < diagnostics.parameterCount; ++index) {
         const kmonitor::MetricsTags tags("parameter_index", std::to_string(index));
         const auto report = [&](const char *name, double value) {
@@ -49,8 +49,7 @@ double valueOf(const Value &value)
     return value.value();
 }
 
-const std::array<double, NonLinearPrefillModelR::PARAMETER_COUNT>
-    INITIAL_PARAMETERS = {
+const std::array<double, NonLinearPrefillModelR::PARAMETER_COUNT> INITIAL_PARAMETERS = {
     -36.56241493030776,
     2.7998347700525095,
     0.5296454912518096,
@@ -83,7 +82,7 @@ const std::array<double, NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT>
         0.0,
         0.0,
         0.0,
-    };
+};
 
 const std::string NonLinearPrefillModelR::RESOURCE_ID =
     "navi_sched.non_linear_prefill_model_r";
@@ -95,17 +94,26 @@ void NonLinearPrefillModelR::def(navi::ResourceDefBuilder &builder) const
 
 bool NonLinearPrefillModelR::config(navi::ResourceConfigContext &ctx)
 {
+    NAVI_JSONIZE(ctx, "pd_separated", _pdSeparated, _pdSeparated);
+    NAVI_JSONIZE(ctx, "execution_geometry_enabled", _executionGeometryEnabled,
+                 _executionGeometryEnabled);
+    NAVI_JSONIZE(ctx, "projected_execution_geometry_enabled",
+                 _projectedExecutionGeometryEnabled, _projectedExecutionGeometryEnabled);
+    NAVI_JSONIZE(ctx, "execution_cache_source_enabled", _executionCacheSourceEnabled,
+                 _executionCacheSourceEnabled);
     NAVI_JSONIZE(ctx, "learning_rate", _learningRate, _learningRate);
+    NAVI_JSONIZE(ctx, "error_clip_ms", _errorClipMs, _errorClipMs);
     NAVI_JSONIZE(ctx, "nonlinear_scale", _nonlinearScale, _nonlinearScale);
-    NAVI_JSONIZE(ctx, "zero_anchor_max_ms", _zeroAnchorMaxMs,
-                 _zeroAnchorMaxMs);
+    NAVI_JSONIZE(ctx, "zero_anchor_max_ms", _zeroAnchorMaxMs, _zeroAnchorMaxMs);
     NAVI_JSONIZE(ctx, "check_gradient", _checkGradient, _checkGradient);
     NAVI_JSONIZE(ctx, "use_batch_count_feature", _useBatchCountFeature,
                  _useBatchCountFeature);
     NAVI_JSONIZE(ctx, "use_capacity_split_feature", _useCapacitySplitFeature,
                  _useCapacitySplitFeature);
-    return std::isfinite(_learningRate) && _learningRate > 0.0 &&
+    return (!_executionCacheSourceEnabled || usesExecutionGeometry()) &&
+           std::isfinite(_learningRate) && _learningRate > 0.0 &&
            std::isfinite(_nonlinearScale) && _nonlinearScale > 0.0 &&
+           std::isfinite(_errorClipMs) && _errorClipMs >= 0.0 &&
            std::isfinite(_zeroAnchorMaxMs) && _zeroAnchorMaxMs > 0.0;
 }
 
@@ -119,7 +127,87 @@ int32_t NonLinearPrefillModelR::getFormula() const
     return NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL;
 }
 
-int64_t NonLinearPrefillModelR::getBinaryVersion() const { return BINARY_VERSION; }
+bool NonLinearPrefillModelR::usesPdCoordinates() const
+{
+    return _pdSeparated && !_useCapacitySplitFeature;
+}
+
+int64_t NonLinearPrefillModelR::getBinaryVersion() const
+{
+    if (usesExecutionCacheSource()) {
+        return usesProjectedExecutionGeometry() ? CACHE_SOURCE_BINARY_VERSION
+                                                : MEASURED_CACHE_SOURCE_BINARY_VERSION;
+    }
+    if (usesProjectedExecutionGeometry()) {
+        return PROJECTED_GEOMETRY_BINARY_VERSION;
+    }
+    return usesExecutionGeometry()
+               ? GEOMETRY_BINARY_VERSION
+               : (usesPdCoordinates() ? PD_BINARY_VERSION : BINARY_VERSION);
+}
+
+const NonLinearPrefillModelR::ParameterScales &
+NonLinearPrefillModelR::getConfiguredParameterScales() const
+{
+    return usesPdCoordinates() ? PD_PARAMETER_SCALES : PARAMETER_SCALES;
+}
+
+bool NonLinearPrefillModelR::supportsBinaryVersion(int64_t version)
+{
+    return version == BINARY_VERSION || version == PD_BINARY_VERSION ||
+           usesGeometryForVersion(version);
+}
+
+std::vector<double> NonLinearPrefillModelR::parametersForLegacyPrediction(
+    const std::vector<double> &parameters, int64_t version)
+{
+    if (!supportsBinaryVersion(version) ||
+        (version == BINARY_VERSION &&
+         parameters.size() == CACHE_SOURCE_PARAMETER_COUNT) ||
+        ((version == PD_BINARY_VERSION || usesGeometryForVersion(version)) &&
+         parameters.size() != (usesCacheSourceForVersion(version)
+                                   ? CACHE_SOURCE_PARAMETER_COUNT
+                                   : PARAMETER_COUNT))) {
+        return {};
+    }
+    auto result = parameters;
+    if (version == PD_BINARY_VERSION || usesGeometryForVersion(version)) {
+        for (size_t index = 0; index < result.size(); ++index) {
+            result[index] *= PD_PARAMETER_SCALES[index] / PARAMETER_SCALES[index];
+        }
+    }
+    return result;
+}
+
+bool NonLinearPrefillModelR::validateParametersForVersion(
+    const std::vector<double> &parameters, int64_t version)
+{
+    if (!supportsBinaryVersion(version)) {
+        return false;
+    }
+    if (version == BINARY_VERSION) {
+        return parameters.size() != CACHE_SOURCE_PARAMETER_COUNT &&
+               validateParameters(parameters);
+    }
+    const auto count = usesCacheSourceForVersion(version) ? CACHE_SOURCE_PARAMETER_COUNT
+                                                          : PARAMETER_COUNT;
+    if (parameters.size() != count) {
+        return false;
+    }
+    std::vector<double> scaled(count);
+    for (size_t index = 0; index < scaled.size(); ++index) {
+        // Preserve the conversion's operation order at validation boundaries.
+        scaled[index] = parameters[index];
+        scaled[index] *= PD_PARAMETER_SCALES[index] / PARAMETER_SCALES[index];
+    }
+    return validateParameterValues(scaled.data(), scaled.size());
+}
+
+bool NonLinearPrefillModelR::validateConfiguredParameters(
+    const std::vector<double> &parameters) const
+{
+    return validateParametersForVersion(parameters, getBinaryVersion());
+}
 
 std::vector<double> NonLinearPrefillModelR::getInitialParameters() const
 {
@@ -127,8 +215,7 @@ std::vector<double> NonLinearPrefillModelR::getInitialParameters() const
         _useCapacitySplitFeature
             ? std::vector<double>(CAPACITY_SPLIT_INITIAL_PARAMETERS.begin(),
                                   CAPACITY_SPLIT_INITIAL_PARAMETERS.end())
-            : std::vector<double>(INITIAL_PARAMETERS.begin(),
-                                  INITIAL_PARAMETERS.end());
+            : std::vector<double>(INITIAL_PARAMETERS.begin(), INITIAL_PARAMETERS.end());
     if (_useBatchCountFeature) {
         parameters[BATCH_COUNT_PARAMETER_INDEX] =
             positiveParameterFloor(BATCH_COUNT_PARAMETER_INDEX, 1.0);
@@ -136,6 +223,14 @@ std::vector<double> NonLinearPrefillModelR::getInitialParameters() const
     if (_useCapacitySplitFeature && _useRunningDecodeRequestCountFeature) {
         parameters[RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX] =
             1e-6 / PARAMETER_SCALES[RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX];
+    }
+    if (usesPdCoordinates()) {
+        for (size_t index = 0; index < parameters.size(); ++index) {
+            parameters[index] *= PARAMETER_SCALES[index] / PD_PARAMETER_SCALES[index];
+        }
+    }
+    if (usesExecutionCacheSource()) {
+        parameters.resize(CACHE_SOURCE_PARAMETER_COUNT, 0.0);
     }
     return parameters;
 }
@@ -147,26 +242,40 @@ double NonLinearPrefillModelR::getParameterScale(size_t index)
 
 bool NonLinearPrefillModelR::validateParameters(const std::vector<double> &parameters)
 {
-    if (PARAMETER_COUNT != parameters.size() &&
-        CAPACITY_SPLIT_PARAMETER_COUNT != parameters.size()) {
+    return validateParameterValues(parameters.data(), parameters.size());
+}
+
+bool NonLinearPrefillModelR::validateParameterValues(const double *parameters,
+                                                     size_t parameterCount)
+{
+    if (PARAMETER_COUNT != parameterCount &&
+        CAPACITY_SPLIT_PARAMETER_COUNT != parameterCount &&
+        CACHE_SOURCE_PARAMETER_COUNT != parameterCount) {
         return false;
     }
-    for (auto value : parameters) {
-        if (!std::isfinite(value)) {
+    for (size_t index = PARAMETER_COUNT; parameterCount == CACHE_SOURCE_PARAMETER_COUNT &&
+                                         index < CAPACITY_SPLIT_PARAMETER_COUNT;
+         ++index) {
+        if (parameters[index] != 0.0) {
+            return false;
+        }
+    }
+    for (size_t index = 0; index < parameterCount; ++index) {
+        if (!std::isfinite(parameters[index])) {
             return false;
         }
     }
     for (const auto index : POSITIVE_PARAMETER_INDEXES) {
-        if (index < parameters.size() && parameters[index] < 0.0) {
+        if (index < parameterCount && parameters[index] < 0.0) {
             return false;
         }
     }
-    if (parameters[NONLINEAR_CURVATURE_PARAMETER_INDEX] * PARAMETER_SCALES
-                    [NONLINEAR_CURVATURE_PARAMETER_INDEX] <
+    if (parameters[NONLINEAR_CURVATURE_PARAMETER_INDEX] *
+                PARAMETER_SCALES[NONLINEAR_CURVATURE_PARAMETER_INDEX] <
             MIN_NONLINEAR_CURVATURE ||
-        (usesCapacitySplitParameters(parameters) &&
-         parameters[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] * PARAMETER_SCALES
-                     [PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] <
+        (parameterCount == CAPACITY_SPLIT_PARAMETER_COUNT &&
+         parameters[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
+                 PARAMETER_SCALES[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] <
              MIN_PRECEDING_REQUEST_COEFFICIENT_MS)) {
         return false;
     }
@@ -182,41 +291,103 @@ bool NonLinearPrefillModelR::usesCapacitySplitParameters(
 bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samples,
                                  const std::vector<double> &currentParameters,
                                  std::vector<double> &newParameters,
-                                 double learningRateScale,
-                                 double currentSampleWeight,
+                                 double learningRateScale, double currentSampleWeight,
                                  const std::vector<double> *parameterLearningRateScales,
                                  bool rejectNonPositiveWaitingCandidate) const
 {
-    const auto parameterCount =
-        _useCapacitySplitFeature ? CAPACITY_SPLIT_PARAMETER_COUNT : PARAMETER_COUNT;
-    if (samples.empty() || !validateParameters(currentParameters) ||
-        currentParameters.size() != parameterCount ||
-        !std::isfinite(learningRateScale) || learningRateScale <= 0.0 ||
-        !std::isfinite(currentSampleWeight) || currentSampleWeight <= 0.0 ||
+    return fitImpl(samples, currentParameters, newParameters, learningRateScale,
+                   currentSampleWeight, parameterLearningRateScales, nullptr,
+                   rejectNonPositiveWaitingCandidate);
+}
+
+bool NonLinearPrefillModelR::fitStepCompositionForReplay(
+    const std::vector<NaviSchedLatencySample> &samples,
+    const std::vector<std::vector<NaviSchedLatencyFeatures>> &steps,
+    const std::vector<double> &currentParameters, std::vector<double> &newParameters,
+    double learningRateScale, double currentSampleWeight,
+    const std::vector<double> *parameterLearningRateScales) const
+{
+    if (getBinaryVersion() != MEASURED_CACHE_SOURCE_BINARY_VERSION ||
+        steps.size() != samples.size() || samples.empty()) {
+        return false;
+    }
+    std::vector<std::vector<Input>> inputs(samples.size());
+    for (size_t index = 0; index < samples.size(); ++index) {
+        if (!makeStepCompositionInputs(samples[index].features, steps[index],
+                                       inputs[index])) {
+            return false;
+        }
+        if (!_useBatchCountFeature) {
+            for (auto &step : inputs[index]) step[BATCH_COUNT_PARAMETER_INDEX] = 0.0;
+        }
+    }
+    return fitImpl(samples, currentParameters, newParameters, learningRateScale,
+                   currentSampleWeight, parameterLearningRateScales, &inputs);
+}
+
+bool NonLinearPrefillModelR::fitImpl(
+    const std::vector<NaviSchedLatencySample> &samples,
+    const std::vector<double> &currentParameters, std::vector<double> &newParameters,
+    double learningRateScale, double currentSampleWeight,
+    const std::vector<double> *parameterLearningRateScales,
+    const std::vector<std::vector<Input>> *stepInputs,
+    bool rejectNonPositiveWaitingCandidate) const
+{
+    const auto parameterCount = getParameterCount();
+    if (samples.empty() || !validateConfiguredParameters(currentParameters) ||
+        currentParameters.size() != parameterCount || !std::isfinite(learningRateScale) ||
+        learningRateScale <= 0.0 || !std::isfinite(currentSampleWeight) ||
+        currentSampleWeight <= 0.0 ||
         (parameterLearningRateScales &&
          ((parameterLearningRateScales->size() != parameterCount &&
            !(parameterCount == PARAMETER_COUNT &&
-             parameterLearningRateScales->size() ==
-                 CAPACITY_SPLIT_PARAMETER_COUNT)) ||
-          std::any_of(
-              parameterLearningRateScales->begin(),
-              parameterLearningRateScales->end(),
-              [index = size_t{0}](double scale) mutable {
-                  const auto current = index++;
-                  return !std::isfinite(scale) || scale < 0.0 ||
-                         (scale == 0.0 &&
-                          current <
-                              RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX);
-              })))) {
+             parameterLearningRateScales->size() == CAPACITY_SPLIT_PARAMETER_COUNT)) ||
+          std::any_of(parameterLearningRateScales->begin(),
+                      parameterLearningRateScales->end(),
+                      [index = size_t{0},
+                       source = parameterCount ==
+                                CACHE_SOURCE_PARAMETER_COUNT](double scale) mutable {
+                          const auto current = index++;
+                          if (source) {
+                              return !std::isfinite(scale) ||
+                                     (current >= PARAMETER_COUNT &&
+                                              current < CAPACITY_SPLIT_PARAMETER_COUNT
+                                          ? scale != 0.0
+                                          : scale <= 0.0);
+                          }
+                          return !std::isfinite(scale) || scale < 0.0 ||
+                                 (scale == 0.0 &&
+                                  current < RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX);
+                      })))) {
         return false;
     }
+    if ((usesExecutionCacheSource() &&
+         std::any_of(samples.begin(), samples.end(),
+                     [](const auto &sample) {
+                         return !sample.features.hasExecutionCacheSource();
+                     })) ||
+        (usesExecutionGeometry() &&
+         std::any_of(samples.begin(), samples.end(), [](const auto &sample) {
+             return !sample.features.hasExecutionGeometry();
+         }))) {
+        return false;
+    }
+    const auto &scales = getConfiguredParameterScales();
+    const auto predictSample = [&](size_t sampleIndex, const Input &input,
+                                   const Values &weights, size_t count, Values *gradient,
+                                   double scale, const ParameterScales &parameterScales) {
+        return stepInputs
+                   ? predictStepComposition(input, (*stepInputs)[sampleIndex], weights,
+                                            count, gradient, scale, parameterScales)
+                   : predict(input, weights, count, gradient, scale, parameterScales);
+    };
     autil::ScopedLock lock(_lock);
     auto weights = toValues(currentParameters);
     auto adamMoment1 = _adamMoment1;
     auto adamMoment2 = _adamMoment2;
     const auto nonlinearScale = _nonlinearScale;
-    reparameterize(weights, adamMoment1, adamMoment2, parameterCount,
-                   NONLINEAR_SCALE, nonlinearScale);
+    reparameterize(weights, adamMoment1, adamMoment2, parameterCount, NONLINEAR_SCALE,
+                   nonlinearScale);
     if (!_useBatchCountFeature) {
         weights[BATCH_COUNT_PARAMETER_INDEX] = 0.0;
         adamMoment1[BATCH_COUNT_PARAMETER_INDEX] = 0.0;
@@ -240,7 +411,8 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
         if (sample.features.usesCapacitySplit() != _useCapacitySplitFeature) {
             return false;
         }
-        auto input = makeInput(sample.features);
+        auto input = makeInput(sample.features, usesExecutionGeometry(),
+                               usesExecutionCacheSource());
         if (!_useBatchCountFeature) {
             input[BATCH_COUNT_PARAMETER_INDEX] = 0.0;
         }
@@ -252,8 +424,13 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
         }
         if (_checkGradient) {
             size_t failedIndex = 0;
-            if (!checkGradient(input, weights, parameterCount, &failedIndex,
-                               nonlinearScale)) {
+            const auto gradientValid =
+                stepInputs ? checkStepCompositionGradient(
+                                 input, (*stepInputs)[sampleIndex], weights,
+                                 parameterCount, &failedIndex, nonlinearScale, scales)
+                           : checkGradient(input, weights, parameterCount, &failedIndex,
+                                           nonlinearScale, scales);
+            if (!gradientValid) {
                 NAVI_KERNEL_LOG(
                     ERROR,
                     "gradient check failed, sampleIndex [%lu], parameterIndex [%lu]",
@@ -262,30 +439,29 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
             }
         }
         Values predictionGradient{};
-        auto prediction =
-            predict(input, weights, parameterCount, &predictionGradient,
-                    nonlinearScale);
+        auto prediction = predictSample(sampleIndex, input, weights, parameterCount,
+                                        &predictionGradient, nonlinearScale, scales);
         if (!std::isfinite(sample.latencyMs) || sample.latencyMs < 0.0 ||
             !std::isfinite(prediction) || prediction < 0.0) {
             ++_invalidCandidateRecoveryCount;
-            NAVI_KERNEL_LOG(
-                WARN,
-                "skip latency model update with invalid current prediction, "
-                "prediction [%f], sample_latency_ms [%f]",
-                prediction, sample.latencyMs);
+            NAVI_KERNEL_LOG(WARN,
+                            "skip latency model update with invalid current prediction, "
+                            "prediction [%f], sample_latency_ms [%f]",
+                            prediction, sample.latencyMs);
             newParameters = currentParameters;
             return true;
         }
-        const auto logResidual =
-            std::log1p(prediction) - std::log1p(sample.latencyMs);
-        const auto difference = logResidual / (1.0 + prediction);
-        const auto sampleWeight = sampleIndex + 1 == samples.size()
-                                      ? currentSampleWeight
-                                      : 1.0;
+        const auto logResidual = std::log1p(prediction) - std::log1p(sample.latencyMs);
+        auto difference = logResidual / (1.0 + prediction);
+        const auto absoluteErrorMs = std::abs(prediction - sample.latencyMs);
+        if (_errorClipMs > 0.0 && absoluteErrorMs > _errorClipMs) {
+            difference *= _errorClipMs / absoluteErrorMs;
+        }
+        const auto sampleWeight =
+            sampleIndex + 1 == samples.size() ? currentSampleWeight : 1.0;
         totalSampleWeight += sampleWeight;
         for (size_t index = 0; index < parameterCount; ++index) {
-            gradient[index] +=
-                sampleWeight * difference * predictionGradient[index];
+            gradient[index] += sampleWeight * difference * predictionGradient[index];
         }
     }
     const auto scaleRatio = NONLINEAR_SCALE / nonlinearScale;
@@ -304,8 +480,7 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
         adamMoment2[index] = BETA_2 * adamMoment2[index] +
                              (1.0 - BETA_2) * gradient[index] * gradient[index];
         const auto parameterScale =
-            parameterLearningRateScales &&
-                    index < parameterLearningRateScales->size()
+            parameterLearningRateScales && index < parameterLearningRateScales->size()
                 ? (*parameterLearningRateScales)[index]
                 : 1.0;
         const auto update = correction * parameterScale * adamMoment1[index] /
@@ -332,8 +507,7 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
                     reporter->report(
                         1,
                         "agent.latency_model_nonpositive_waiting_candidate_rejected_qps",
-                        kmonitor::MetricType::QPS, nullptr,
-                        kmonitor::MetricLevel::FATAL);
+                        kmonitor::MetricType::QPS, nullptr, kmonitor::MetricLevel::FATAL);
                 }
             }
             rejectedWaitingCandidate = true;
@@ -344,20 +518,19 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
         }
     }
     const auto updatedOutputParameters = weights;
-    const auto minimumCurvature =
-        MIN_NONLINEAR_CURVATURE * scaleRatio * scaleRatio /
-        PARAMETER_SCALES[NONLINEAR_CURVATURE_PARAMETER_INDEX];
-    projectOutputParameters(weights, adamMoment1, adamMoment2,
-                            minimumCurvature, scaleRatio);
+    const auto minimumCurvature = MIN_NONLINEAR_CURVATURE * scaleRatio * scaleRatio /
+                                  scales[NONLINEAR_CURVATURE_PARAMETER_INDEX];
+    projectOutputParameters(weights, adamMoment1, adamMoment2, minimumCurvature,
+                            scaleRatio);
     if (updatedOutputParameters[BASE_LATENCY_PARAMETER_INDEX] !=
             weights[BASE_LATENCY_PARAMETER_INDEX] ||
         updatedOutputParameters[NONLINEAR_CURVATURE_PARAMETER_INDEX] !=
             weights[NONLINEAR_CURVATURE_PARAMETER_INDEX]) {
-        _outputParameterProjectionRecoveryCount.fetch_add(
-            1, std::memory_order_relaxed);
+        _outputParameterProjectionRecoveryCount.fetch_add(1, std::memory_order_relaxed);
     }
     const auto &latestSample = samples.back();
-    auto latestInput = makeInput(latestSample.features);
+    auto latestInput = makeInput(latestSample.features, usesExecutionGeometry(),
+                                 usesExecutionCacheSource());
     if (!_useBatchCountFeature) {
         latestInput[BATCH_COUNT_PARAMETER_INDEX] = 0.0;
     }
@@ -367,8 +540,8 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
     if (!_useRunningDecodeGeneratedTokenCountFeature) {
         latestInput[15] = 0.0;
     }
-    reparameterize(weights, adamMoment1, adamMoment2, parameterCount,
-                   nonlinearScale, NONLINEAR_SCALE);
+    reparameterize(weights, adamMoment1, adamMoment2, parameterCount, nonlinearScale,
+                   NONLINEAR_SCALE);
     for (size_t offset = 0; offset < WAITING_PARAMETER_COUNT; ++offset) {
         if (retainedWaitingParameters[offset]) {
             const auto index = WAITING_PARAMETER_OFFSET + offset;
@@ -380,31 +553,30 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
     const auto candidateOutputParameters = weights;
     std::vector<double> outputParameters(weights.begin(),
                                          weights.begin() + parameterCount);
-    if (!validateParameters(outputParameters)) {
+    if (!validateConfiguredParameters(outputParameters)) {
         return false;
     }
     bool resetUnsafeWaitingState = false;
+    size_t candidateSampleIndex = 0;
     for (const auto &sample : samples) {
+        const auto currentIndex = candidateSampleIndex++;
         double waitingCost = 0.0;
-        if (!hasNonNegativeWaitingWorkloadCost(
-                outputParameters, sample.features, &waitingCost)) {
-            _unsafeWaitingCandidateRecoveryCount.fetch_add(
-                1, std::memory_order_relaxed);
-            NAVI_KERNEL_LOG(
-                WARN,
-                "skip latency model update with negative waiting workload "
-                "cost, waiting_cost [%f], waiting_batch_size [%ld], "
-                "sample_latency_ms [%f]",
-                waitingCost, sample.features.getWaitingBatchSize(),
-                sample.latencyMs);
+        if (_useCapacitySplitFeature &&
+            !hasNonNegativeWaitingWorkloadCost(outputParameters, sample.features,
+                                               &waitingCost)) {
+            _unsafeWaitingCandidateRecoveryCount.fetch_add(1, std::memory_order_relaxed);
+            NAVI_KERNEL_LOG(WARN,
+                            "skip latency model update with negative waiting workload "
+                            "cost, waiting_cost [%f], waiting_batch_size [%ld], "
+                            "sample_latency_ms [%f]",
+                            waitingCost, sample.features.getWaitingBatchSize(),
+                            sample.latencyMs);
             if (_metricsReporterR) {
                 const auto &reporter = _metricsReporterR->getReporter();
                 if (reporter) {
                     reporter->report(
-                        1,
-                        "agent.latency_model_unsafe_waiting_candidate_recovery_qps",
-                        kmonitor::MetricType::QPS, nullptr,
-                        kmonitor::MetricLevel::FATAL);
+                        1, "agent.latency_model_unsafe_waiting_candidate_recovery_qps",
+                        kmonitor::MetricType::QPS, nullptr, kmonitor::MetricLevel::FATAL);
                 }
             }
             double currentWaitingCost = 0.0;
@@ -415,8 +587,7 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
             for (size_t index = 0; index < WAITING_PARAMETER_COUNT; ++index) {
                 const auto parameterIndex = WAITING_PARAMETER_OFFSET + index;
                 weights[parameterIndex] = replacementParameters[parameterIndex];
-                outputParameters[parameterIndex] =
-                    replacementParameters[parameterIndex];
+                outputParameters[parameterIndex] = replacementParameters[parameterIndex];
                 adamMoment1[parameterIndex] =
                     currentSafe ? _adamMoment1[parameterIndex] : 0.0;
                 adamMoment2[parameterIndex] =
@@ -424,32 +595,35 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
             }
             if (!currentSafe && !resetUnsafeWaitingState) {
                 resetUnsafeWaitingState = true;
-                _unsafeWaitingStateResetCount.fetch_add(
-                    1, std::memory_order_relaxed);
-                NAVI_KERNEL_LOG(
-                    ERROR,
-                    "reset unsafe waiting latency parameters, "
-                    "current_waiting_cost [%f], candidate_waiting_cost [%f], "
-                    "waiting_batch_size [%ld]",
-                    currentWaitingCost, waitingCost,
-                    sample.features.getWaitingBatchSize());
+                _unsafeWaitingStateResetCount.fetch_add(1, std::memory_order_relaxed);
+                NAVI_KERNEL_LOG(ERROR,
+                                "reset unsafe waiting latency parameters, "
+                                "current_waiting_cost [%f], candidate_waiting_cost [%f], "
+                                "waiting_batch_size [%ld]",
+                                currentWaitingCost, waitingCost,
+                                sample.features.getWaitingBatchSize());
                 if (_metricsReporterR) {
                     const auto &reporter = _metricsReporterR->getReporter();
                     if (reporter) {
                         reporter->report(
-                            1,
-                            "agent.latency_model_unsafe_waiting_state_reset_qps",
+                            1, "agent.latency_model_unsafe_waiting_state_reset_qps",
                             kmonitor::MetricType::QPS, nullptr,
                             kmonitor::MetricLevel::FATAL);
                     }
                 }
             }
-            if (!hasNonNegativeWaitingWorkloadCost(
-                    outputParameters, sample.features, &waitingCost)) {
+            if (_useCapacitySplitFeature &&
+                !hasNonNegativeWaitingWorkloadCost(outputParameters, sample.features,
+                                                   &waitingCost)) {
                 return false;
             }
         }
-        const auto candidatePrediction = predict(sample.features, outputParameters);
+        const auto candidatePrediction =
+            stepInputs
+                ? predictSample(currentIndex, makeInput(sample.features, true, true),
+                                toValues(outputParameters), parameterCount, nullptr,
+                                NONLINEAR_SCALE, scales)
+                : predictConfigured(sample.features, outputParameters);
         if (!std::isfinite(candidatePrediction) || candidatePrediction < 0.0) {
             ++_invalidCandidateRecoveryCount;
             NAVI_KERNEL_LOG(
@@ -470,7 +644,8 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
     diagnostics.step = _step;
     const auto previousParameters = toValues(currentParameters);
     const auto predictionBefore =
-        predict(latestInput, previousParameters, parameterCount, nullptr);
+        predictSample(samples.size() - 1, latestInput, previousParameters, parameterCount,
+                      nullptr, NONLINEAR_SCALE, scales);
     for (size_t index = 0; index < parameterCount; ++index) {
         diagnostics.rawGradient[index] = gradient[index];
         diagnostics.adamMoment1[index] = adamMoment1[index];
@@ -479,12 +654,12 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
             adamMoment1[index] / std::sqrt(adamMoment2[index] + EPSILON);
         diagnostics.candidateUpdate[index] =
             candidateOutputParameters[index] - previousParameters[index];
-        diagnostics.actualUpdate[index] =
-            weights[index] - previousParameters[index];
+        diagnostics.actualUpdate[index] = weights[index] - previousParameters[index];
         auto oneParameterUpdated = previousParameters;
         oneParameterUpdated[index] = weights[index];
         diagnostics.predictionShiftMs[index] =
-            predict(latestInput, oneParameterUpdated, parameterCount, nullptr) -
+            predictSample(samples.size() - 1, latestInput, oneParameterUpdated,
+                          parameterCount, nullptr, NONLINEAR_SCALE, scales) -
             predictionBefore;
     }
     _adamMoment1 = adamMoment1;
@@ -498,12 +673,12 @@ bool NonLinearPrefillModelR::fit(const std::vector<NaviSchedLatencySample> &samp
     return true;
 }
 
-void NonLinearPrefillModelR::applyRuntimeConfig(
-    const AgentSchedulerConfig &config)
+void NonLinearPrefillModelR::applyRuntimeConfig(const AgentSchedulerConfig &config)
 {
     autil::ScopedLock lock(_lock);
     _learningRate = config.latencyLearningRate;
     _checkGradient = config.latencyCheckGradient;
+    _errorClipMs = config.latencyErrorClipMs;
     _nonlinearScale = config.latencyNonlinearScale;
     _zeroAnchorMaxMs = config.latencyZeroAnchorMaxMs;
     const auto &scales = config.latencyParameterLearningRateScales;
@@ -535,7 +710,7 @@ bool NonLinearPrefillModelR::fitHistory(const std::deque<NaviSchedLatencySample>
                                         std::vector<double> &newParameters) const
 {
     if (history.empty() || fitBatchSize == 0 || epochCount == 0 ||
-        !validateParameters(currentParameters)) {
+        !validateConfiguredParameters(currentParameters)) {
         return false;
     }
     auto parameters = currentParameters;
@@ -560,49 +735,142 @@ bool NonLinearPrefillModelR::fitHistory(const std::deque<NaviSchedLatencySample>
     if (batch.empty()) {
         newParameters = std::move(parameters);
     }
-    return validateParameters(newParameters);
+    return validateConfiguredParameters(newParameters);
 }
 
 double NonLinearPrefillModelR::predict(const NaviSchedLatencyFeatures &features,
                                        const std::vector<double> &parameters)
 {
-    if (!validateParameters(parameters) ||
-        features.usesCapacitySplit() !=
-            usesCapacitySplitParameters(parameters)) {
+    if (parameters.size() == CACHE_SOURCE_PARAMETER_COUNT ||
+        !validateParameters(parameters) ||
+        features.usesCapacitySplit() != usesCapacitySplitParameters(parameters)) {
         return 0.0;
     }
-    return predict(makeInput(features), toValues(parameters), parameters.size(),
-                   nullptr);
+    return predict(makeInput(features), toValues(parameters), parameters.size(), nullptr);
+}
+
+double NonLinearPrefillModelR::predictForVersion(const NaviSchedLatencyFeatures &features,
+                                                 const std::vector<double> &parameters,
+                                                 int64_t binaryVersion)
+{
+    const bool geometry = usesGeometryForVersion(binaryVersion);
+    if (!validateParametersForVersion(parameters, binaryVersion) ||
+        features.usesCapacitySplit() != usesCapacitySplitParameters(parameters) ||
+        (geometry && !features.hasExecutionGeometry()) ||
+        (usesCacheSourceForVersion(binaryVersion) &&
+         !features.hasExecutionCacheSource())) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    const auto &scales =
+        binaryVersion == BINARY_VERSION ? PARAMETER_SCALES : PD_PARAMETER_SCALES;
+    return predict(
+        makeInput(features, geometry, usesCacheSourceForVersion(binaryVersion)),
+        toValues(parameters), parameters.size(), nullptr, NONLINEAR_SCALE, scales);
+}
+
+bool NonLinearPrefillModelR::makeStepCompositionInputs(
+    const NaviSchedLatencyFeatures &features,
+    const std::vector<NaviSchedLatencyFeatures> &steps, std::vector<Input> &inputs)
+{
+    inputs.clear();
+    if (features.usesCapacitySplit() || !features.hasExecutionGeometry() ||
+        !features.hasExecutionCacheSource() || features.getBatchSize() <= 0 ||
+        features.getCacheMissTokenCount() < 0 || steps.empty() ||
+        steps.size() != static_cast<size_t>(features.getExecutionStepCount()) ||
+        features.getPrecedingRequestCount() != 0 ||
+        features.getRunningElapsedTimeMs() != 0.0 ||
+        features.getRunningDecodeRequestCount() != 0 ||
+        features.getRunningDecodeGeneratedTokenCount() != 0) {
+        return false;
+    }
+    int64_t miss = 0;
+    int64_t padding = 0;
+    for (const auto &step : steps) {
+        if (step.usesCapacitySplit() || !step.hasExecutionGeometry() ||
+            step.getExecutionStepCount() != 1 || step.getBatchSize() <= 0 ||
+            step.getCacheMissTokenCount() <= 0 ||
+            step.getCacheMissTokenCount() > features.getCacheMissTokenCount() - miss ||
+            step.getGlobalPaddedTokens() > features.getGlobalPaddedTokens() - padding ||
+            step.getPrecedingRequestCount() != 0 ||
+            step.getRunningElapsedTimeMs() != 0.0 ||
+            step.getRunningDecodeRequestCount() != 0 ||
+            step.getRunningDecodeGeneratedTokenCount() != 0) {
+            return false;
+        }
+        miss += step.getCacheMissTokenCount();
+        padding += step.getGlobalPaddedTokens();
+        inputs.push_back(makeInput(step, true, false));
+    }
+    if (miss != features.getCacheMissTokenCount() ||
+        padding != features.getGlobalPaddedTokens()) {
+        return false;
+    }
+    if (steps.size() == 1) {
+        const auto global = makeInput(features, true, true);
+        for (size_t index = 0; index < 16; ++index) {
+            if (inputs[0][index] != global[index]) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+double NonLinearPrefillModelR::predictStepCompositionForReplay(
+    const NaviSchedLatencyFeatures &features,
+    const std::vector<NaviSchedLatencyFeatures> &steps,
+    const std::vector<double> &parameters, std::vector<double> *gradient)
+{
+    if (gradient) {
+        gradient->clear();
+    }
+    std::vector<Input> inputs;
+    if (!validateParametersForVersion(parameters, MEASURED_CACHE_SOURCE_BINARY_VERSION) ||
+        !makeStepCompositionInputs(features, steps, inputs)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    Values derivative{};
+    const auto result = predictStepComposition(
+        makeInput(features, true, true), inputs, toValues(parameters), parameters.size(),
+        gradient ? &derivative : nullptr, NONLINEAR_SCALE, PD_PARAMETER_SCALES);
+    if (gradient) {
+        gradient->assign(derivative.begin(), derivative.begin() + parameters.size());
+    }
+    return result;
 }
 
 double NonLinearPrefillModelR::calculateZeroPoint(const std::vector<double> &parameters,
-                                                  std::vector<double> *gradient)
+                                                  std::vector<double> *gradient,
+                                                  int64_t binaryVersion)
 {
-    if (!validateParameters(parameters)) {
+    if (!validateParametersForVersion(parameters, binaryVersion)) {
         if (gradient) {
             gradient->clear();
         }
         return 0.0;
     }
+    const auto &scales =
+        (binaryVersion == PD_BINARY_VERSION || usesGeometryForVersion(binaryVersion))
+            ? PD_PARAMETER_SCALES
+            : PARAMETER_SCALES;
     if (gradient) {
         gradient->assign(parameters.size(), 0.0);
-        (*gradient)[ZERO_POINT_PARAMETER_INDEX] =
-            PARAMETER_SCALES[ZERO_POINT_PARAMETER_INDEX];
+        (*gradient)[ZERO_POINT_PARAMETER_INDEX] = scales[ZERO_POINT_PARAMETER_INDEX];
     }
-    return parameters[ZERO_POINT_PARAMETER_INDEX] *
-           PARAMETER_SCALES[ZERO_POINT_PARAMETER_INDEX];
+    return parameters[ZERO_POINT_PARAMETER_INDEX] * scales[ZERO_POINT_PARAMETER_INDEX];
 }
 
-double NonLinearPrefillModelR::predictConfigured(
-    const NaviSchedLatencyFeatures &features,
-    const std::vector<double> &parameters) const
+bool NonLinearPrefillModelR::checkGradientConfigured(
+    const NaviSchedLatencyFeatures &features, const std::vector<double> &parameters) const
 {
-    if (!validateParameters(parameters) ||
+    if (!validateConfiguredParameters(parameters) ||
         features.usesCapacitySplit() != _useCapacitySplitFeature ||
-        parameters.size() != getInitialParameters().size()) {
-        return 0.0;
+        parameters.size() != getParameterCount() ||
+        (usesExecutionGeometry() && !features.hasExecutionGeometry()) ||
+        (usesExecutionCacheSource() && !features.hasExecutionCacheSource())) {
+        return false;
     }
-    auto input = makeInput(features);
+    auto input = makeInput(features, usesExecutionGeometry(), usesExecutionCacheSource());
     if (!_useBatchCountFeature) {
         input[BATCH_COUNT_PARAMETER_INDEX] = 0.0;
     }
@@ -612,20 +880,50 @@ double NonLinearPrefillModelR::predictConfigured(
     if (!_useRunningDecodeGeneratedTokenCountFeature) {
         input[15] = 0.0;
     }
-    return predict(input, toValues(parameters), parameters.size(), nullptr);
+    return checkGradient(input, toValues(parameters), parameters.size(), nullptr,
+                         NONLINEAR_SCALE, getConfiguredParameterScales());
+}
+
+double NonLinearPrefillModelR::predictConfigured(
+    const NaviSchedLatencyFeatures &features, const std::vector<double> &parameters) const
+{
+    if ((usesExecutionGeometry() && !features.hasExecutionGeometry()) ||
+        (usesExecutionCacheSource() && !features.hasExecutionCacheSource())) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    if (!validateConfiguredParameters(parameters) ||
+        features.usesCapacitySplit() != _useCapacitySplitFeature ||
+        parameters.size() != getParameterCount()) {
+        return 0.0;
+    }
+    auto input = makeInput(features, usesExecutionGeometry(), usesExecutionCacheSource());
+    if (!_useBatchCountFeature) {
+        input[BATCH_COUNT_PARAMETER_INDEX] = 0.0;
+    }
+    if (!_useRunningDecodeRequestCountFeature) {
+        input[14] = 0.0;
+    }
+    if (!_useRunningDecodeGeneratedTokenCountFeature) {
+        input[15] = 0.0;
+    }
+    return predict(input, toValues(parameters), parameters.size(), nullptr,
+                   NONLINEAR_SCALE, getConfiguredParameterScales());
 }
 
 std::optional<NonLinearPrefillModelR::NonlinearOperatingPoint>
 NonLinearPrefillModelR::getNonlinearOperatingPointConfigured(
-    const NaviSchedLatencyFeatures &features,
-    const std::vector<double> &parameters) const
+    const NaviSchedLatencyFeatures &features, const std::vector<double> &parameters) const
 {
-    if (!validateParameters(parameters) ||
-        features.usesCapacitySplit() != _useCapacitySplitFeature ||
-        parameters.size() != getInitialParameters().size()) {
+    if ((usesExecutionGeometry() && !features.hasExecutionGeometry()) ||
+        (usesExecutionCacheSource() && !features.hasExecutionCacheSource())) {
         return std::nullopt;
     }
-    auto input = makeInput(features);
+    if (!validateConfiguredParameters(parameters) ||
+        features.usesCapacitySplit() != _useCapacitySplitFeature ||
+        parameters.size() != getParameterCount()) {
+        return std::nullopt;
+    }
+    auto input = makeInput(features, usesExecutionGeometry(), usesExecutionCacheSource());
     if (!_useBatchCountFeature) {
         input[BATCH_COUNT_PARAMETER_INDEX] = 0.0;
     }
@@ -636,16 +934,15 @@ NonLinearPrefillModelR::getNonlinearOperatingPointConfigured(
         input[15] = 0.0;
     }
     const auto weights = toValues(parameters);
-    const auto u = evaluateLinear(input, weights);
+    const auto u = evaluateLinear(input, weights, getConfiguredParameterScales());
     const auto curvature =
         weights[NONLINEAR_CURVATURE_PARAMETER_INDEX] *
-        PARAMETER_SCALES[NONLINEAR_CURVATURE_PARAMETER_INDEX];
+        getConfiguredParameterScales()[NONLINEAR_CURVATURE_PARAMETER_INDEX];
     const auto r = u / std::sqrt(curvature);
     if (!std::isfinite(r)) {
         return std::nullopt;
     }
-    return NonlinearOperatingPoint{u, curvature, r,
-                                   r < -3.0 ? -1 : (r > 3.0 ? 1 : 0)};
+    return NonlinearOperatingPoint{u, curvature, r, r < -3.0 ? -1 : (r > 3.0 ? 1 : 0)};
 }
 
 double NonLinearPrefillModelR::calculateRequestLinearCost(
@@ -656,8 +953,7 @@ double NonLinearPrefillModelR::calculateRequestLinearCost(
         return 0.0;
     }
     NaviSchedLatencyFeatures features;
-    features.appendRequest(cacheHitTokenCount,
-                           totalTokenCount - cacheHitTokenCount);
+    features.appendRequest(cacheHitTokenCount, totalTokenCount - cacheHitTokenCount);
     return calculateLinearCost(weights, features);
 }
 
@@ -666,8 +962,7 @@ double NonLinearPrefillModelR::calculateWaitingRequestLinearCost(
     int64_t cacheHitTokenCount)
 {
     if (!usesCapacitySplitParameters(weights)) {
-        return calculateRequestLinearCost(weights, totalTokenCount,
-                                          cacheHitTokenCount);
+        return calculateRequestLinearCost(weights, totalTokenCount, cacheHitTokenCount);
     }
     NaviSchedLatencyFeatures features;
     features.appendWaitingRequest(cacheHitTokenCount,
@@ -684,12 +979,9 @@ std::pair<double, double> NonLinearPrefillModelR::calculateRequestLinearCosts(
     }
     const auto miss = totalTokenCount - cacheHitTokenCount;
     const std::array<double, WAITING_PARAMETER_COUNT> input = {
-        1.0,
-        cacheHitTokenCount / TOKEN_SCALE,
-        miss / TOKEN_SCALE,
+        1.0, cacheHitTokenCount / TOKEN_SCALE, miss / TOKEN_SCALE,
         (static_cast<double>(miss) * miss) / (TOKEN_SCALE * TOKEN_SCALE),
-        (static_cast<double>(cacheHitTokenCount) * miss) /
-            (TOKEN_SCALE * TOKEN_SCALE)};
+        (static_cast<double>(cacheHitTokenCount) * miss) / (TOKEN_SCALE * TOKEN_SCALE)};
     double running = 0.0;
     for (size_t index = 0; index < input.size(); ++index) {
         running += input[index] * weights[index + 1] * PARAMETER_SCALES[index + 1];
@@ -705,7 +997,8 @@ std::pair<double, double> NonLinearPrefillModelR::calculateRequestLinearCosts(
     }
     for (size_t index = 0; index < input.size(); ++index) {
         const auto parameterIndex = WAITING_PARAMETER_OFFSET + index;
-        waiting += input[index] * weights[parameterIndex] * PARAMETER_SCALES[parameterIndex];
+        waiting +=
+            input[index] * weights[parameterIndex] * PARAMETER_SCALES[parameterIndex];
     }
     for (const auto index : {RUNNING_ELAPSED_TIME_PARAMETER_INDEX,
                              RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX,
@@ -724,34 +1017,27 @@ double NonLinearPrefillModelR::calculateLinearCost(
     auto input = makeInput(features);
     double cost = 0.0;
     for (size_t index = 1; index < LINEAR_PARAMETER_COUNT; ++index) {
-        cost += input[index] * weights[index] *
-                PARAMETER_SCALES[index];
+        cost += input[index] * weights[index] * PARAMETER_SCALES[index];
     }
     if (usesCapacitySplitParameters(weights) && features.usesCapacitySplit()) {
         for (size_t index = 0; index < WAITING_PARAMETER_COUNT; ++index) {
             const auto parameterIndex = WAITING_PARAMETER_OFFSET + index;
-            cost += input[LINEAR_PARAMETER_COUNT + index] *
-                    weights[parameterIndex] *
+            cost += input[LINEAR_PARAMETER_COUNT + index] * weights[parameterIndex] *
                     PARAMETER_SCALES[parameterIndex];
         }
         cost += input[13] * weights[RUNNING_ELAPSED_TIME_PARAMETER_INDEX] *
-                PARAMETER_SCALES
-                    [RUNNING_ELAPSED_TIME_PARAMETER_INDEX];
-        cost += input[14] *
-                weights[RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX] *
-                PARAMETER_SCALES
-                    [RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX];
+                PARAMETER_SCALES[RUNNING_ELAPSED_TIME_PARAMETER_INDEX];
+        cost += input[14] * weights[RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX] *
+                PARAMETER_SCALES[RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX];
         cost += input[15] *
                 weights[RUNNING_DECODE_GENERATED_TOKEN_COUNT_PARAMETER_INDEX] *
-                PARAMETER_SCALES
-                    [RUNNING_DECODE_GENERATED_TOKEN_COUNT_PARAMETER_INDEX];
+                PARAMETER_SCALES[RUNNING_DECODE_GENERATED_TOKEN_COUNT_PARAMETER_INDEX];
     }
     return cost;
 }
 
 bool NonLinearPrefillModelR::hasNonNegativeWaitingWorkloadCost(
-    const std::vector<double> &weights,
-    const NaviSchedLatencyFeatures &features,
+    const std::vector<double> &weights, const NaviSchedLatencyFeatures &features,
     double *waitingCost)
 {
     if (waitingCost) {
@@ -770,8 +1056,7 @@ bool NonLinearPrefillModelR::hasNonNegativeWaitingWorkloadCost(
     for (size_t index = 0; index < WAITING_PARAMETER_COUNT; ++index) {
         const auto parameterIndex = WAITING_PARAMETER_OFFSET + index;
         const auto term = input[LINEAR_PARAMETER_COUNT + index] *
-                          weights[parameterIndex] *
-                          PARAMETER_SCALES[parameterIndex];
+                          weights[parameterIndex] * PARAMETER_SCALES[parameterIndex];
         cost += term;
         absoluteTermSum += std::abs(term);
     }
@@ -782,29 +1067,23 @@ bool NonLinearPrefillModelR::hasNonNegativeWaitingWorkloadCost(
     return std::isfinite(cost) && cost >= -tolerance;
 }
 
-AutoGradTape::Value
-NonLinearPrefillModelR::calculateLatencyFromRequestCostSum(
-    const std::vector<double> &weights,
-    const AutoGradTape::Value &requestCostSum,
-    const AutoGradTape::Value &totalPromptTokenCount,
-    double precedingRequestCount)
+AutoGradTape::Value NonLinearPrefillModelR::calculateLatencyFromRequestCostSum(
+    const std::vector<double> &weights, const AutoGradTape::Value &requestCostSum,
+    const AutoGradTape::Value &totalPromptTokenCount, double precedingRequestCount)
 {
-    auto linear =
-        (requestCostSum +
-         weights[0] * PARAMETER_SCALES[0] +
-         weights[BATCH_COUNT_PARAMETER_INDEX] *
-             PARAMETER_SCALES[BATCH_COUNT_PARAMETER_INDEX]) /
-        COEFFICIENT_3;
-    const auto precedingRequestLatency = usesCapacitySplitParameters(weights)
-        ? weights[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
-              PARAMETER_SCALES
-                  [PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
-              precedingRequestCount
-        : 0.0;
+    auto linear = (requestCostSum + weights[0] * PARAMETER_SCALES[0] +
+                   weights[BATCH_COUNT_PARAMETER_INDEX] *
+                       PARAMETER_SCALES[BATCH_COUNT_PARAMETER_INDEX]) /
+                  COEFFICIENT_3;
+    const auto precedingRequestLatency =
+        usesCapacitySplitParameters(weights)
+            ? weights[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
+                  PARAMETER_SCALES[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
+                  precedingRequestCount
+            : 0.0;
     auto latency = evaluateNonLinear(linear, weights) +
                    weights[TOTAL_PROMPT_PARAMETER_INDEX] *
-                       PARAMETER_SCALES
-                           [TOTAL_PROMPT_PARAMETER_INDEX] *
+                       PARAMETER_SCALES[TOTAL_PROMPT_PARAMETER_INDEX] *
                        totalPromptTokenCount / TOKEN_SCALE +
                    precedingRequestLatency;
     return latency.value() < 0.0 ? AutoGradTape::Value(0.0) : latency;
@@ -815,17 +1094,16 @@ double NonLinearPrefillModelR::calculateLatencyFromRequestCostSum(
     double totalPromptTokenCount, double precedingRequestCount)
 {
     const AutoGrad<0> requestCost(requestCostSum);
-    const auto linear =
-        (requestCost +
-         weights[0] * PARAMETER_SCALES[0] +
-         weights[BATCH_COUNT_PARAMETER_INDEX] *
-             PARAMETER_SCALES[BATCH_COUNT_PARAMETER_INDEX]) /
-        COEFFICIENT_3;
-    const auto precedingRequestLatency = usesCapacitySplitParameters(weights)
-        ? weights[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
-              PARAMETER_SCALES[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
-              precedingRequestCount
-        : 0.0;
+    const auto linear = (requestCost + weights[0] * PARAMETER_SCALES[0] +
+                         weights[BATCH_COUNT_PARAMETER_INDEX] *
+                             PARAMETER_SCALES[BATCH_COUNT_PARAMETER_INDEX]) /
+                        COEFFICIENT_3;
+    const auto precedingRequestLatency =
+        usesCapacitySplitParameters(weights)
+            ? weights[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
+                  PARAMETER_SCALES[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
+                  precedingRequestCount
+            : 0.0;
     const auto latency = evaluateNonLinear(linear, weights).value() +
                          weights[TOTAL_PROMPT_PARAMETER_INDEX] *
                              PARAMETER_SCALES[TOTAL_PROMPT_PARAMETER_INDEX] *
@@ -837,32 +1115,27 @@ double NonLinearPrefillModelR::calculateLatencyFromRequestCostSum(
 double NonLinearPrefillModelR::calculateLatencyAndDerivativesFromRequestCostSum(
     const std::vector<double> &weights, double requestCostSum,
     double totalPromptTokenCount, double precedingRequestCount,
-    double &requestCostDerivative,
-    double &totalPromptTokenDerivative)
+    double &requestCostDerivative, double &totalPromptTokenDerivative)
 {
     auto requestCost = AutoGrad<1>::parameter(requestCostSum, 0);
-    auto linear =
-        (requestCost +
-         weights[0] * PARAMETER_SCALES[0] +
-         weights[BATCH_COUNT_PARAMETER_INDEX] *
-             PARAMETER_SCALES[BATCH_COUNT_PARAMETER_INDEX]) /
-        COEFFICIENT_3;
+    auto linear = (requestCost + weights[0] * PARAMETER_SCALES[0] +
+                   weights[BATCH_COUNT_PARAMETER_INDEX] *
+                       PARAMETER_SCALES[BATCH_COUNT_PARAMETER_INDEX]) /
+                  COEFFICIENT_3;
     auto nonlinearLatency = evaluateNonLinear(linear, weights);
     requestCostDerivative = nonlinearLatency.gradient(0);
-    totalPromptTokenDerivative =
-        weights[TOTAL_PROMPT_PARAMETER_INDEX] *
-        PARAMETER_SCALES[TOTAL_PROMPT_PARAMETER_INDEX] /
-        TOKEN_SCALE;
-    const auto precedingRequestLatency = usesCapacitySplitParameters(weights)
-        ? weights[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
-              PARAMETER_SCALES
-                  [PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
-              precedingRequestCount
-        : 0.0;
+    totalPromptTokenDerivative = weights[TOTAL_PROMPT_PARAMETER_INDEX] *
+                                 PARAMETER_SCALES[TOTAL_PROMPT_PARAMETER_INDEX] /
+                                 TOKEN_SCALE;
+    const auto precedingRequestLatency =
+        usesCapacitySplitParameters(weights)
+            ? weights[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
+                  PARAMETER_SCALES[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
+                  precedingRequestCount
+            : 0.0;
     auto latency = nonlinearLatency.value() +
                    weights[TOTAL_PROMPT_PARAMETER_INDEX] *
-                       PARAMETER_SCALES
-                           [TOTAL_PROMPT_PARAMETER_INDEX] *
+                       PARAMETER_SCALES[TOTAL_PROMPT_PARAMETER_INDEX] *
                        totalPromptTokenCount / TOKEN_SCALE +
                    precedingRequestLatency;
     if (latency < 0.0) {
@@ -876,13 +1149,13 @@ double NonLinearPrefillModelR::calculateLatencyAndDerivativesFromRequestCostSum(
 bool NonLinearPrefillModelR::checkGradient(const NaviSchedLatencyFeatures &features,
                                            const std::vector<double> &parameters)
 {
-    if (!validateParameters(parameters) ||
-        features.usesCapacitySplit() !=
-            usesCapacitySplitParameters(parameters)) {
+    if (parameters.size() == CACHE_SOURCE_PARAMETER_COUNT ||
+        !validateParameters(parameters) ||
+        features.usesCapacitySplit() != usesCapacitySplitParameters(parameters)) {
         return false;
     }
-    return checkGradient(makeInput(features), toValues(parameters),
-                         parameters.size(), nullptr);
+    return checkGradient(makeInput(features), toValues(parameters), parameters.size(),
+                         nullptr);
 }
 
 NonLinearPrefillModelR::OptimizerState NonLinearPrefillModelR::getOptimizerState() const
@@ -898,18 +1171,25 @@ NonLinearPrefillModelR::getOptimizerStepDiagnostics() const
     return _optimizerStepDiagnostics;
 }
 
-bool NonLinearPrefillModelR::validateOptimizerState(
-    const OptimizerState &state, size_t parameterCount)
+bool NonLinearPrefillModelR::validateOptimizerState(const OptimizerState &state,
+                                                    size_t parameterCount)
 {
     if ((parameterCount != PARAMETER_COUNT &&
-         parameterCount != CAPACITY_SPLIT_PARAMETER_COUNT) ||
+         parameterCount != CAPACITY_SPLIT_PARAMETER_COUNT &&
+         parameterCount != CACHE_SOURCE_PARAMETER_COUNT) ||
         state.step <= 0) {
         return false;
     }
+    for (size_t index = PARAMETER_COUNT; parameterCount == CACHE_SOURCE_PARAMETER_COUNT &&
+                                         index < CAPACITY_SPLIT_PARAMETER_COUNT;
+         ++index) {
+        if (state.adamMoment1[index] != 0.0 || state.adamMoment2[index] != 0.0) {
+            return false;
+        }
+    }
     for (size_t index = 0; index < parameterCount; ++index) {
         if (!std::isfinite(state.adamMoment1[index]) ||
-            !std::isfinite(state.adamMoment2[index]) ||
-            state.adamMoment2[index] < 0.0) {
+            !std::isfinite(state.adamMoment2[index]) || state.adamMoment2[index] < 0.0) {
             return false;
         }
     }
@@ -936,22 +1216,27 @@ bool NonLinearPrefillModelR::makeOptimizerState(
 {
     if (!data.valid(data.adamMoment1.size()) ||
         (data.adamMoment1.size() != PARAMETER_COUNT &&
-         data.adamMoment1.size() != CAPACITY_SPLIT_PARAMETER_COUNT)) {
+         data.adamMoment1.size() != CAPACITY_SPLIT_PARAMETER_COUNT &&
+         data.adamMoment1.size() != CACHE_SOURCE_PARAMETER_COUNT)) {
         return false;
     }
-    state = OptimizerState();
+    OptimizerState decoded;
     std::copy(data.adamMoment1.begin(), data.adamMoment1.end(),
-              state.adamMoment1.begin());
+              decoded.adamMoment1.begin());
     std::copy(data.adamMoment2.begin(), data.adamMoment2.end(),
-              state.adamMoment2.begin());
-    state.step = data.step;
+              decoded.adamMoment2.begin());
+    decoded.step = data.step;
+    if (!validateOptimizerState(decoded, data.adamMoment1.size())) {
+        return false;
+    }
+    state = decoded;
     return true;
 }
 
-bool NonLinearPrefillModelR::sanitizeInactiveParameters(
-    std::vector<double> &parameters, OptimizerState &state) const
+bool NonLinearPrefillModelR::sanitizeInactiveParameters(std::vector<double> &parameters,
+                                                        OptimizerState &state) const
 {
-    if (!validateParameters(parameters) ||
+    if (!validateConfiguredParameters(parameters) ||
         !validateOptimizerState(state, parameters.size())) {
         return false;
     }
@@ -970,10 +1255,9 @@ bool NonLinearPrefillModelR::sanitizeInactiveParameters(
     return true;
 }
 
-bool NonLinearPrefillModelR::restoreOptimizerState(
-    const OptimizerState &state)
+bool NonLinearPrefillModelR::restoreOptimizerState(const OptimizerState &state)
 {
-    const auto parameterCount = getInitialParameters().size();
+    const auto parameterCount = getParameterCount();
     if (!validateOptimizerState(state, parameterCount)) {
         return false;
     }
@@ -999,33 +1283,67 @@ bool NonLinearPrefillModelR::usesBatchCountFeature() const
     return _useBatchCountFeature;
 }
 
-bool NonLinearPrefillModelR::checkGradient(const Input &input,
-                                           const Values &weights,
-                                           size_t parameterCount,
-                                           size_t *failedIndex,
-                                           double nonlinearScale)
+bool NonLinearPrefillModelR::checkGradient(const Input &input, const Values &weights,
+                                           size_t parameterCount, size_t *failedIndex,
+                                           double nonlinearScale,
+                                           const ParameterScales &scales)
 {
     Values gradient{};
     auto prediction =
-        predict(input, weights, parameterCount, &gradient, nonlinearScale);
+        predict(input, weights, parameterCount, &gradient, nonlinearScale, scales);
     for (size_t index = 0; index < parameterCount; ++index) {
         auto testWeights = weights;
-        const auto parameterScale = PARAMETER_SCALES[index];
+        const auto parameterScale = scales[index];
         const auto formulaCoefficient = testWeights[index] * parameterScale;
         const auto formulaDelta =
             0.0 == formulaCoefficient
                 ? 1e-6
-                : std::max(-10.0,
-                           std::min(10.0, formulaCoefficient * 0.0001));
+                : std::max(-10.0, std::min(10.0, formulaCoefficient * 0.0001));
         const auto delta = formulaDelta / parameterScale;
         testWeights[index] += delta;
-        auto difference = predict(input, testWeights, parameterCount, nullptr,
-                                  nonlinearScale) -
-                          prediction;
+        auto difference =
+            predict(input, testWeights, parameterCount, nullptr, nonlinearScale, scales) -
+            prediction;
         const auto expectedDifference = delta * gradient[index];
         const auto error = std::abs(expectedDifference - difference);
-        const auto scale = std::max(
-            {std::abs(expectedDifference), std::abs(difference), 1e-9});
+        const auto scale =
+            std::max({std::abs(expectedDifference), std::abs(difference), 1e-9});
+        if (error > std::max(1e-8, scale * 0.01)) {
+            if (failedIndex) {
+                *failedIndex = index;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+bool NonLinearPrefillModelR::checkStepCompositionGradient(
+    const Input &input, const std::vector<Input> &steps, const Values &weights,
+    size_t parameterCount, size_t *failedIndex, double nonlinearScale,
+    const ParameterScales &scales)
+{
+    Values gradient{};
+    auto prediction = predictStepComposition(input, steps, weights, parameterCount,
+                                             &gradient, nonlinearScale, scales);
+    for (size_t index = 0; index < parameterCount; ++index) {
+        auto testWeights = weights;
+        const auto parameterScale = scales[index];
+        const auto formulaCoefficient = testWeights[index] * parameterScale;
+        const auto formulaDelta =
+            0.0 == formulaCoefficient
+                ? 1e-6
+                : std::max(-10.0, std::min(10.0, formulaCoefficient * 0.0001));
+        const auto delta = formulaDelta / parameterScale;
+        testWeights[index] += delta;
+        auto difference =
+            predictStepComposition(input, steps, testWeights, parameterCount, nullptr,
+                                   nonlinearScale, scales) -
+            prediction;
+        const auto expectedDifference = delta * gradient[index];
+        const auto error = std::abs(expectedDifference - difference);
+        const auto scale =
+            std::max({std::abs(expectedDifference), std::abs(difference), 1e-9});
         if (error > std::max(1e-8, scale * 0.01)) {
             if (failedIndex) {
                 *failedIndex = index;
@@ -1055,27 +1373,25 @@ navi::SummaryErrorCode NonLinearPrefillModelR::getSummary(
     TABLE_ADD_COLUMN_VALUE(overview, "formula_name",
                            getNaviSchedLatencyFormulaName(getFormula()));
     TABLE_ADD_COLUMN_VALUE(overview, "binary_version", getBinaryVersion());
-    const auto parameterCount = getInitialParameters().size();
+    const auto parameterCount = getParameterCount();
     TABLE_ADD_COLUMN_VALUE(overview, "parameter_count", parameterCount);
-    TABLE_ADD_COLUMN_VALUE(overview, "use_batch_count_feature",
-                           _useBatchCountFeature);
+    TABLE_ADD_COLUMN_VALUE(overview, "use_batch_count_feature", _useBatchCountFeature);
     TABLE_ADD_COLUMN_VALUE(overview, "use_capacity_split_feature",
                            _useCapacitySplitFeature);
     TABLE_ADD_COLUMN_VALUE(overview, "fit_step", step - 1);
     TABLE_ADD_COLUMN_VALUE(overview, "nonlinear_scale", getNonlinearScale());
     TABLE_ADD_COLUMN_VALUE(overview, "zero_anchor_max_ms", zeroAnchorMaxMs);
-    TABLE_ADD_COLUMN_VALUE(overview, "output_parameter_projection_recovery_count",
-                           _outputParameterProjectionRecoveryCount.load(
-                               std::memory_order_relaxed));
-    TABLE_ADD_COLUMN_VALUE(overview, "invalid_candidate_recovery_count",
-                           _invalidCandidateRecoveryCount.load(
-                               std::memory_order_relaxed));
-    TABLE_ADD_COLUMN_VALUE(overview, "unsafe_waiting_candidate_recovery_count",
-                           _unsafeWaitingCandidateRecoveryCount.load(
-                               std::memory_order_relaxed));
+    TABLE_ADD_COLUMN_VALUE(
+        overview, "output_parameter_projection_recovery_count",
+        _outputParameterProjectionRecoveryCount.load(std::memory_order_relaxed));
+    TABLE_ADD_COLUMN_VALUE(
+        overview, "invalid_candidate_recovery_count",
+        _invalidCandidateRecoveryCount.load(std::memory_order_relaxed));
+    TABLE_ADD_COLUMN_VALUE(
+        overview, "unsafe_waiting_candidate_recovery_count",
+        _unsafeWaitingCandidateRecoveryCount.load(std::memory_order_relaxed));
     TABLE_ADD_COLUMN_VALUE(overview, "unsafe_waiting_state_reset_count",
-                           _unsafeWaitingStateResetCount.load(
-                               std::memory_order_relaxed));
+                           _unsafeWaitingStateResetCount.load(std::memory_order_relaxed));
     if (SummaryUtil::getSummaryLevel(query) < 2) {
         return navi::SEC_OK;
     }
@@ -1089,35 +1405,30 @@ navi::SummaryErrorCode NonLinearPrefillModelR::getSummary(
 }
 
 NonLinearPrefillModelR::Input NonLinearPrefillModelR::makeInput(
-    const NaviSchedLatencyFeatures &features)
+    const NaviSchedLatencyFeatures &features, bool geometry, bool cacheSource)
 {
     auto batchSize = features.getRunningBatchSize();
     auto reuse = features.getRunningCacheHitTokenCount() / TOKEN_SCALE;
     auto compute = features.getRunningCacheMissTokenCount() / TOKEN_SCALE;
     auto computeSquare =
-        features.getRunningCacheMissTokenSquareSum() /
-        (TOKEN_SCALE * TOKEN_SCALE);
+        features.getRunningCacheMissTokenSquareSum() / (TOKEN_SCALE * TOKEN_SCALE);
     auto reuseCompute =
-        features.getRunningCacheHitMissTokenProductSum() /
-        (TOKEN_SCALE * TOKEN_SCALE);
+        features.getRunningCacheHitMissTokenProductSum() / (TOKEN_SCALE * TOKEN_SCALE);
     auto waitingBatchSize = features.getWaitingBatchSize();
-    auto waitingReuse =
-        features.getWaitingCacheHitTokenCount() / TOKEN_SCALE;
-    auto waitingCompute =
-        features.getWaitingCacheMissTokenCount() / TOKEN_SCALE;
+    auto waitingReuse = features.getWaitingCacheHitTokenCount() / TOKEN_SCALE;
+    auto waitingCompute = features.getWaitingCacheMissTokenCount() / TOKEN_SCALE;
     auto waitingComputeSquare =
-        features.getWaitingCacheMissTokenSquareSum() /
-        (TOKEN_SCALE * TOKEN_SCALE);
+        features.getWaitingCacheMissTokenSquareSum() / (TOKEN_SCALE * TOKEN_SCALE);
     auto waitingReuseCompute =
-        features.getWaitingCacheHitMissTokenProductSum() /
-        (TOKEN_SCALE * TOKEN_SCALE);
+        features.getWaitingCacheHitMissTokenProductSum() / (TOKEN_SCALE * TOKEN_SCALE);
     return {1.0,
             static_cast<double>(batchSize),
             reuse,
-            compute,
+            geometry ? features.getGlobalPaddedTokens() / TOKEN_SCALE : compute,
             computeSquare,
             reuseCompute,
-            static_cast<double>(features._batchCount),
+            static_cast<double>(geometry ? features.getExecutionStepCount()
+                                         : features._batchCount),
             static_cast<double>(waitingBatchSize),
             waitingReuse,
             waitingCompute,
@@ -1126,14 +1437,15 @@ NonLinearPrefillModelR::Input NonLinearPrefillModelR::makeInput(
             static_cast<double>(features._precedingRequestCount),
             features._runningElapsedTimeMs / RUNNING_ELAPSED_TIME_SCALE_MS,
             static_cast<double>(features._runningDecodeRequestCount),
-            features._runningDecodeGeneratedTokenCount / TOKEN_SCALE};
+            features._runningDecodeGeneratedTokenCount / TOKEN_SCALE,
+            reuse + compute + waitingReuse + waitingCompute,
+            cacheSource && features.getExternalReadRequestCount() > 0 ? 1.0 : 0.0,
+            cacheSource ? features.getMaxExternalReadTokens() / TOKEN_SCALE : 0.0};
 }
 
-bool NonLinearPrefillModelR::isZeroWorkload(
-    const NaviSchedLatencyFeatures &features)
+bool NonLinearPrefillModelR::isZeroWorkload(const NaviSchedLatencyFeatures &features)
 {
-    if (features.getBatchCount() != 0 ||
-        features.getPrecedingRequestCount() != 0 ||
+    if (features.getBatchCount() != 0 || features.getPrecedingRequestCount() != 0 ||
         features.getRunningElapsedTimeMs() != 0.0 ||
         features.getRunningDecodeRequestCount() != 0 ||
         features.getRunningDecodeGeneratedTokenCount() != 0 ||
@@ -1141,8 +1453,7 @@ bool NonLinearPrefillModelR::isZeroWorkload(
         return false;
     }
     if (!features.usesCapacitySplit()) {
-        return features.getBatchSize() == 0 &&
-               features.getCacheHitTokenCount() == 0 &&
+        return features.getBatchSize() == 0 && features.getCacheHitTokenCount() == 0 &&
                features.getCacheMissTokenCount() == 0 &&
                features.getCacheMissTokenSquareSum() == 0.0 &&
                features.getCacheHitMissTokenProductSum() == 0.0;
@@ -1159,97 +1470,136 @@ bool NonLinearPrefillModelR::isZeroWorkload(
            features.getWaitingCacheHitMissTokenProductSum() == 0.0;
 }
 
-double NonLinearPrefillModelR::predict(const Input &input,
-                                       const Values &weights,
-                                       size_t parameterCount,
-                                       Values *gradient,
-                                       double nonlinearScale)
+double NonLinearPrefillModelR::predict(const Input &input, const Values &weights,
+                                       size_t parameterCount, Values *gradient,
+                                       double nonlinearScale,
+                                       const ParameterScales &scales)
 {
     if (!gradient) {
-        return evaluate(input, weights, nonlinearScale);
+        return evaluate(input, weights, nonlinearScale, scales);
     }
-    std::array<AutoGrad<MAX_PARAMETER_COUNT>, MAX_PARAMETER_COUNT>
-        autoGradWeights;
+    std::array<AutoGrad<MAX_PARAMETER_COUNT>, MAX_PARAMETER_COUNT> autoGradWeights;
     for (size_t index = 0; index < weights.size(); ++index) {
-        autoGradWeights[index] = AutoGrad<MAX_PARAMETER_COUNT>::parameter(
-            weights[index], index);
+        autoGradWeights[index] =
+            AutoGrad<MAX_PARAMETER_COUNT>::parameter(weights[index], index);
     }
-    auto prediction = evaluate(input, autoGradWeights, nonlinearScale);
+    auto prediction = evaluate(input, autoGradWeights, nonlinearScale, scales);
     for (size_t index = 0; index < parameterCount; ++index) {
         (*gradient)[index] = prediction.gradient(index);
     }
-    return evaluate(input, weights, nonlinearScale);
+    // Keep the training residual on the exact same forward path as inference.
+    return evaluate(input, weights, nonlinearScale, scales);
+}
+
+template <typename Value>
+Value NonLinearPrefillModelR::evaluateStepComposition(
+    const Input &global, const std::vector<Input> &steps,
+    const std::array<Value, MAX_PARAMETER_COUNT> &weights, double nonlinearScale,
+    const ParameterScales &scales)
+{
+    Value latency =
+        weights[BASE_LATENCY_PARAMETER_INDEX] * scales[BASE_LATENCY_PARAMETER_INDEX];
+    for (const auto &step : steps) {
+        latency =
+            latency +
+            evaluateNonLinear(evaluateLinear(step, weights, scales), weights,
+                              nonlinearScale, scales) -
+            weights[BASE_LATENCY_PARAMETER_INDEX] * scales[BASE_LATENCY_PARAMETER_INDEX];
+    }
+    latency = latency +
+              weights[TOTAL_PROMPT_PARAMETER_INDEX] *
+                  scales[TOTAL_PROMPT_PARAMETER_INDEX] * global[16] +
+              weights[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
+                  scales[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] * global[12] +
+              weights[EXTERNAL_READ_ACTIVATION_PARAMETER_INDEX] *
+                  scales[EXTERNAL_READ_ACTIVATION_PARAMETER_INDEX] * global[17] +
+              weights[EXTERNAL_READ_VOLUME_PARAMETER_INDEX] *
+                  scales[EXTERNAL_READ_VOLUME_PARAMETER_INDEX] * global[18];
+    return valueOf(latency) < 0.0 ? Value(0.0) : latency;
+}
+
+double NonLinearPrefillModelR::predictStepComposition(
+    const Input &global, const std::vector<Input> &steps, const Values &weights,
+    size_t parameterCount, Values *gradient, double nonlinearScale,
+    const ParameterScales &scales)
+{
+    // The one-step identity retains the original numerical forward path.
+    if (steps.size() == 1) {
+        return predict(global, weights, parameterCount, gradient, nonlinearScale, scales);
+    }
+    if (gradient) {
+        std::array<AutoGrad<MAX_PARAMETER_COUNT>, MAX_PARAMETER_COUNT> variables;
+        for (size_t index = 0; index < weights.size(); ++index) {
+            variables[index] =
+                AutoGrad<MAX_PARAMETER_COUNT>::parameter(weights[index], index);
+        }
+        const auto result =
+            evaluateStepComposition(global, steps, variables, nonlinearScale, scales);
+        for (size_t index = 0; index < parameterCount; ++index) {
+            (*gradient)[index] = result.gradient(index);
+        }
+    }
+    return evaluateStepComposition(global, steps, weights, nonlinearScale, scales);
 }
 
 template <typename Value>
 Value NonLinearPrefillModelR::evaluateLinear(
-    const Input &input,
-    const std::array<Value, MAX_PARAMETER_COUNT> &weights)
+    const Input &input, const std::array<Value, MAX_PARAMETER_COUNT> &weights,
+    const ParameterScales &scales)
 {
     Value linear = 0.0;
     for (size_t index = 0; index < LINEAR_PARAMETER_COUNT; ++index) {
-        linear = linear + input[index] * weights[index] *
-                              PARAMETER_SCALES[index];
+        linear = linear + input[index] * weights[index] * scales[index];
     }
     for (size_t index = 0; index < WAITING_PARAMETER_COUNT; ++index) {
         const auto parameterIndex = WAITING_PARAMETER_OFFSET + index;
         linear = linear + input[LINEAR_PARAMETER_COUNT + index] *
-                              weights[parameterIndex] *
-                              PARAMETER_SCALES[parameterIndex];
+                              weights[parameterIndex] * scales[parameterIndex];
     }
-    linear = linear +
-             input[13] * weights[RUNNING_ELAPSED_TIME_PARAMETER_INDEX] *
-                 PARAMETER_SCALES
-                     [RUNNING_ELAPSED_TIME_PARAMETER_INDEX];
-    linear = linear +
-             input[14] *
-                 weights[RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX] *
-                 PARAMETER_SCALES
-                     [RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX];
-    linear = linear +
-             input[15] *
-                 weights[RUNNING_DECODE_GENERATED_TOKEN_COUNT_PARAMETER_INDEX] *
-                 PARAMETER_SCALES
-                     [RUNNING_DECODE_GENERATED_TOKEN_COUNT_PARAMETER_INDEX];
+    linear = linear + input[13] * weights[RUNNING_ELAPSED_TIME_PARAMETER_INDEX] *
+                          scales[RUNNING_ELAPSED_TIME_PARAMETER_INDEX];
+    linear = linear + input[14] * weights[RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX] *
+                          scales[RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX];
+    linear = linear + input[15] *
+                          weights[RUNNING_DECODE_GENERATED_TOKEN_COUNT_PARAMETER_INDEX] *
+                          scales[RUNNING_DECODE_GENERATED_TOKEN_COUNT_PARAMETER_INDEX];
     return linear / COEFFICIENT_3;
 }
 
 template <typename Value>
 Value NonLinearPrefillModelR::evaluate(
-    const Input &input,
-    const std::array<Value, MAX_PARAMETER_COUNT> &weights,
-    double nonlinearScale)
+    const Input &input, const std::array<Value, MAX_PARAMETER_COUNT> &weights,
+    double nonlinearScale, const ParameterScales &scales)
 {
-    const auto linear = evaluateLinear(input, weights);
-    auto latency = evaluateNonLinear(linear, weights, nonlinearScale) +
+    const auto linear = evaluateLinear(input, weights, scales);
+    auto latency = evaluateNonLinear(linear, weights, nonlinearScale, scales) +
                    weights[TOTAL_PROMPT_PARAMETER_INDEX] *
-                       PARAMETER_SCALES
-                           [TOTAL_PROMPT_PARAMETER_INDEX] *
-                       (input[2] + input[3] + input[8] + input[9]) +
+                       scales[TOTAL_PROMPT_PARAMETER_INDEX] * input[16] +
                    weights[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
-                       PARAMETER_SCALES
-                           [PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] *
-                       input[12];
+                       scales[PRECEDING_REQUEST_COUNT_PARAMETER_INDEX] * input[12] +
+                   weights[EXTERNAL_READ_ACTIVATION_PARAMETER_INDEX] *
+                       scales[EXTERNAL_READ_ACTIVATION_PARAMETER_INDEX] * input[17] +
+                   weights[EXTERNAL_READ_VOLUME_PARAMETER_INDEX] *
+                       scales[EXTERNAL_READ_VOLUME_PARAMETER_INDEX] * input[18];
     return valueOf(latency) < 0.0 ? Value(0.0) : latency;
 }
 
 template <typename Value, typename Weights>
-Value NonLinearPrefillModelR::evaluateNonLinear(
-    const Value &linear, const Weights &weights, double nonlinearScale)
+Value NonLinearPrefillModelR::evaluateNonLinear(const Value &linear,
+                                                const Weights &weights,
+                                                double nonlinearScale,
+                                                const ParameterScales &scales)
 {
     using std::sqrt;
-    const auto curvature =
-        weights[NONLINEAR_CURVATURE_PARAMETER_INDEX] *
-        PARAMETER_SCALES[NONLINEAR_CURVATURE_PARAMETER_INDEX];
+    const auto curvature = weights[NONLINEAR_CURVATURE_PARAMETER_INDEX] *
+                           scales[NONLINEAR_CURVATURE_PARAMETER_INDEX];
     const auto shape = [&](const auto &value) {
         auto squareRoot = sqrt(value * value + curvature);
         return valueOf(value) >= 0.0 ? value + squareRoot
                                      : curvature / (squareRoot - value);
     };
-    const auto zeroLinear =
-        weights[0] * PARAMETER_SCALES[0] / COEFFICIENT_3;
-    return weights[ZERO_POINT_PARAMETER_INDEX] *
-               PARAMETER_SCALES[ZERO_POINT_PARAMETER_INDEX] +
+    const auto zeroLinear = weights[0] * scales[0] / COEFFICIENT_3;
+    return weights[ZERO_POINT_PARAMETER_INDEX] * scales[ZERO_POINT_PARAMETER_INDEX] +
            nonlinearScale * (shape(linear) - shape(zeroLinear));
 }
 
@@ -1261,15 +1611,11 @@ NonLinearPrefillModelR::Values NonLinearPrefillModelR::toValues(
     return values;
 }
 
-double NonLinearPrefillModelR::positiveParameterFloor(
-    size_t, double)
-{
-    return 0.0;
-}
+double NonLinearPrefillModelR::positiveParameterFloor(size_t, double) { return 0.0; }
 
-void NonLinearPrefillModelR::reparameterize(
-    Values &parameters, Values &adamMoment1, Values &adamMoment2,
-    size_t parameterCount, double fromScale, double toScale)
+void NonLinearPrefillModelR::reparameterize(Values &parameters, Values &adamMoment1,
+                                            Values &adamMoment2, size_t parameterCount,
+                                            double fromScale, double toScale)
 {
     const auto ratio = fromScale / toScale;
     const auto ratioSquared = ratio * ratio;
@@ -1296,9 +1642,11 @@ void NonLinearPrefillModelR::reparameterize(
     adamMoment2[curvatureIndex] /= ratioSquared * ratioSquared;
 }
 
-void NonLinearPrefillModelR::projectOutputParameters(
-    Values &parameters, Values &adamMoment1, Values &adamMoment2,
-    double minimumCurvature, double linearScaleRatio) const
+void NonLinearPrefillModelR::projectOutputParameters(Values &parameters,
+                                                     Values &adamMoment1,
+                                                     Values &adamMoment2,
+                                                     double minimumCurvature,
+                                                     double linearScaleRatio) const
 {
     if (!_useBatchCountFeature) {
         parameters[BATCH_COUNT_PARAMETER_INDEX] = 0.0;
@@ -1314,8 +1662,7 @@ void NonLinearPrefillModelR::projectOutputParameters(
         if ((index == BATCH_COUNT_PARAMETER_INDEX && !_useBatchCountFeature) ||
             (index == RUNNING_DECODE_REQUEST_COUNT_PARAMETER_INDEX &&
              !_useRunningDecodeRequestCountFeature) ||
-            index >= (_useCapacitySplitFeature ? CAPACITY_SPLIT_PARAMETER_COUNT
-                                               : PARAMETER_COUNT)) {
+            index >= getParameterCount()) {
             continue;
         }
         const auto minimumValue = positiveParameterFloor(index, linearScaleRatio);
@@ -1336,9 +1683,8 @@ void NonLinearPrefillModelR::projectOutputParameters(
     }
     if (_useCapacitySplitFeature) {
         constexpr auto index = PRECEDING_REQUEST_COUNT_PARAMETER_INDEX;
-        const auto minimumValue =
-            MIN_PRECEDING_REQUEST_COEFFICIENT_MS * linearScaleRatio /
-            PARAMETER_SCALES[index];
+        const auto minimumValue = MIN_PRECEDING_REQUEST_COEFFICIENT_MS *
+                                  linearScaleRatio / PARAMETER_SCALES[index];
         if (parameters[index] < minimumValue) {
             parameters[index] = minimumValue;
             if (adamMoment1[index] > 0.0) {
@@ -1346,6 +1692,60 @@ void NonLinearPrefillModelR::projectOutputParameters(
             }
         }
     }
+}
+
+bool NonLinearPrefillModelR::usesExecutionGeometry() const
+{
+    return _executionGeometryEnabled && usesPdCoordinates();
+}
+
+bool NonLinearPrefillModelR::usesProjectedExecutionGeometry() const
+{
+    return _projectedExecutionGeometryEnabled && usesExecutionGeometry();
+}
+
+bool NonLinearPrefillModelR::usesExecutionCacheSource() const
+{
+    return _executionCacheSourceEnabled && usesExecutionGeometry();
+}
+
+void NonLinearPrefillModelR::setExecutionCacheSourceEnabled(bool enabled)
+{
+    autil::ScopedLock lock(_lock);
+    if (_executionCacheSourceEnabled == enabled) {
+        return;
+    }
+    _executionCacheSourceEnabled = enabled;
+    _adamMoment1.fill(0.0);
+    _adamMoment2.fill(0.0);
+    _step = 1;
+    _optimizerStepDiagnostics = {};
+}
+
+void NonLinearPrefillModelR::setProjectedExecutionGeometryEnabled(bool enabled)
+{
+    autil::ScopedLock lock(_lock);
+    if (_projectedExecutionGeometryEnabled == enabled) {
+        return;
+    }
+    _projectedExecutionGeometryEnabled = enabled;
+    _adamMoment1.fill(0.0);
+    _adamMoment2.fill(0.0);
+    _step = 1;
+    _optimizerStepDiagnostics = {};
+}
+
+void NonLinearPrefillModelR::setExecutionGeometryEnabled(bool enabled)
+{
+    autil::ScopedLock lock(_lock);
+    if (_executionGeometryEnabled == enabled) {
+        return;
+    }
+    _executionGeometryEnabled = enabled;
+    _adamMoment1.fill(0.0);
+    _adamMoment2.fill(0.0);
+    _step = 1;
+    _optimizerStepDiagnostics = {};
 }
 
 REGISTER_RESOURCE(NonLinearPrefillModelR);

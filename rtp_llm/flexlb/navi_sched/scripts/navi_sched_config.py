@@ -16,8 +16,12 @@ from typing import Any, Dict, Iterable, Mapping, MutableMapping, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-
 MASTER_FIELDS = {
+    'overload_control_strategy': str,
+    'execution_utilization_global_scaling': bool,
+    'execution_utilization_target': float,
+    'execution_utilization_kp': float,
+    'execution_utilization_ki_per_second': float,
     "lambda": float,
     "alpha": float,
     "alpha_decay": float,
@@ -25,6 +29,8 @@ MASTER_FIELDS = {
     "max_loop_count": int,
     "min_loop_count": int,
     "optimization_time_budget_us": int,
+    "peer_cache_enabled": bool,
+    "peer_cache_ready_agents": list,
     "parallelism": int,
     "latency_weight_concavity": float,
     "latency_token_normalization_power": float,
@@ -44,6 +50,7 @@ MASTER_FIELDS = {
     "latency_learning_rate": float,
     "latency_online_learning_rate_scale": float,
     "latency_current_sample_weight": float,
+    "latency_error_clip_ms": float,
     "latency_parameter_learning_rate_scales": list,
     "latency_nonlinear_scale": float,
     "queue_learning_rate": float,
@@ -69,7 +76,13 @@ MASTER_FIELDS = {
 AGENT_FIELDS = {
     name: value_type
     for name, value_type in MASTER_FIELDS.items()
-    if name not in {
+    if name
+    not in {
+        'overload_control_strategy',
+        'execution_utilization_global_scaling',
+        'execution_utilization_target',
+        'execution_utilization_kp',
+        'execution_utilization_ki_per_second',
         "lambda",
         "alpha",
         "alpha_decay",
@@ -77,6 +90,8 @@ AGENT_FIELDS = {
         "max_loop_count",
         "min_loop_count",
         "optimization_time_budget_us",
+        "peer_cache_enabled",
+        "peer_cache_ready_agents",
         "parallelism",
         "latency_weight_concavity",
         "latency_token_normalization_power",
@@ -193,9 +208,7 @@ def _merge_patch_inputs(
                 raise ValueError(f"unsupported scheduler config field: {name}")
         patch.update(value)
     if namespace.patch_file is not None:
-        value = json.loads(
-            Path(namespace.patch_file).read_text(encoding="utf-8")
-        )
+        value = json.loads(Path(namespace.patch_file).read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             raise ValueError("--patch-file must contain a JSON object")
         for name in value:
@@ -238,7 +251,9 @@ def _post(url: str, payload: Mapping[str, Any], timeout: float) -> Dict[str, Any
     return value
 
 
-def _apply_rfc6902(document: MutableMapping[str, Any], operations: Sequence[Any]) -> None:
+def _apply_rfc6902(
+    document: MutableMapping[str, Any], operations: Sequence[Any]
+) -> None:
     """Apply root-level RFC 6902 add/replace operations to the flat config."""
     for operation in operations:
         if not isinstance(operation, dict):
@@ -246,7 +261,9 @@ def _apply_rfc6902(document: MutableMapping[str, Any], operations: Sequence[Any]
         action = operation.get("op")
         path = operation.get("path")
         if action not in {"add", "replace"} or not isinstance(path, str):
-            raise ValueError("only root-level add/replace JSON Patch operations are supported")
+            raise ValueError(
+                "only root-level add/replace JSON Patch operations are supported"
+            )
         if not path.startswith("/") or "/" in path[1:]:
             raise ValueError("JSON Patch paths must be root-level scheduler fields")
         name = path[1:].replace("~1", "/").replace("~0", "~")
@@ -264,7 +281,9 @@ def _update(args: argparse.Namespace) -> int:
             document = json.loads(current["configJson"])
             operations = _read_json_arg(args.rfc6902)
         except (KeyError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"invalid get response for --rfc6902: {error}") from error
+            raise RuntimeError(
+                f"invalid get response for --rfc6902: {error}"
+            ) from error
         if not isinstance(document, dict) or not isinstance(operations, list):
             raise ValueError("--rfc6902 must contain a JSON Patch array")
         _apply_rfc6902(document, operations)
@@ -381,7 +400,9 @@ def main(argv: Sequence[str] = None) -> int:
         if args.rfc6902 is not None and any(
             (args.patch, args.patch_file, args.set_values)
         ):
-            parser.error("--rfc6902 cannot be combined with --patch, --patch-file or --set")
+            parser.error(
+                "--rfc6902 cannot be combined with --patch, --patch-file or --set"
+            )
         return _update(args)
     if args.command == "agent-render":
         return _agent_render(args)

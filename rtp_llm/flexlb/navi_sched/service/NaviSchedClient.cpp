@@ -214,8 +214,8 @@ void NaviSchedClient::scheduleReplayRequest(
     }
     _scheduleCount.fetch_add(1, std::memory_order_relaxed);
     const auto beginTimeUs = autil::TimeUtility::monotonicTimeUs();
-    auto complete = [this, request, masterBizName, beginTimeUs](
-                        ClientGraphRunResult result) mutable {
+    auto complete = [this, request, masterBizName,
+                     beginTimeUs](ClientGraphRunResult result) mutable {
         {
             std::lock_guard<std::mutex> lock(_replayRequestsMutex);
             _activeReplayRequestIds.erase(request->requestId);
@@ -223,13 +223,12 @@ void NaviSchedClient::scheduleReplayRequest(
         const auto latencyUs = result.masterRequestLatencyUs > 0
                                    ? result.masterRequestLatencyUs
                                    : autil::TimeUtility::monotonicTimeUs() - beginTimeUs;
-        recordScheduleResult(request, masterBizName, result,
-                             latencyUs);
+        recordScheduleResult(request, masterBizName, result, latencyUs);
     };
     ClientGraphRunResult launchResult;
     if (_runner) {
-        launchResult = _runner->scheduleDetached(
-            request, masterBizName, timeoutMs, complete, false);
+        launchResult =
+            _runner->scheduleDetached(request, masterBizName, timeoutMs, complete, false);
     } else {
         launchResult.errorCode = navi::EC_ABORT;
         launchResult.errorMessage = "navi sched client is stopped";
@@ -247,8 +246,8 @@ bool NaviSchedClient::replayAbortOccurredSince(uint64_t generation) const
     return _replayAbortGeneration != generation;
 }
 
-void NaviSchedClient::abortReplayRequestLaunchedAcrossStop(
-    uint64_t requestId, uint64_t generation)
+void NaviSchedClient::abortReplayRequestLaunchedAcrossStop(uint64_t requestId,
+                                                           uint64_t generation)
 {
     if (!replayAbortOccurredSince(generation) || !_responseR) {
         return;
@@ -272,8 +271,8 @@ void NaviSchedClient::abortReplayRequests()
     for (auto requestId : requestIds) {
         const bool didAbort = _responseR && _responseR->abort(requestId);
         aborted += didAbort ? 1 : 0;
-        AUTIL_LOG(INFO, "abort replay graph, request_id [%lu], aborted [%d]",
-                  requestId, didAbort);
+        AUTIL_LOG(INFO, "abort replay graph, request_id [%lu], aborted [%d]", requestId,
+                  didAbort);
     }
     if (!requestIds.empty()) {
         AUTIL_LOG(INFO, "abort replay requests, active [%lu], aborted [%lu]",
@@ -329,18 +328,17 @@ bool NaviSchedClient::init()
         replayClientId += ":" + std::to_string(getGrpcPort());
     }
     _replayClientR->setClientId(replayClientId);
-    const auto historyHash = autil::HashAlgorithm::hashString64(
-        replayClientId.data(), replayClientId.size());
+    const auto historyHash =
+        autil::HashAlgorithm::hashString64(replayClientId.data(), replayClientId.size());
     std::ostringstream historyKey;
     historyKey << std::hex << std::setfill('0') << std::setw(16) << historyHash;
-    const auto snapshotRoot = getConfig().snapshotDir.empty()
-                                  ? std::string("navi_sched")
-                                  : getConfig().snapshotDir;
-    const auto historyDirectory = std::filesystem::path(snapshotRoot) /
-                                  getConfig().name / "replay_history";
+    const auto snapshotRoot = getConfig().snapshotDir.empty() ? std::string("navi_sched")
+                                                              : getConfig().snapshotDir;
+    const auto historyDirectory =
+        std::filesystem::path(snapshotRoot) / getConfig().name / "replay_history";
     const auto legacyHistoryDirectory = historyDirectory / historyKey.str();
     if (!_replayClientR->configureHistory(historyDirectory.string(), 20000,
-                                           legacyHistoryDirectory.string())) {
+                                          legacyHistoryDirectory.string())) {
         AUTIL_LOG(ERROR, "configure persistent replay history failed, path [%s]",
                   historyDirectory.c_str());
         stop();
@@ -353,9 +351,11 @@ bool NaviSchedClient::init()
         replay->bizName = request.bizName;
         replay->timeoutMs = request.timeoutMs;
         replay->promptTokenCount = request.promptTokenCount;
+        replay->explicitCacheCheckpointPosition = request.explicitCacheCheckpointPosition;
         replay->blockSize = request.blockSize;
         replay->blockHashes = request.blockHashes;
         replay->forwardPayload = request.forwardPayload;
+        replay->routeOnly = request.routeOnly;
         _requestReceivedCount.fetch_add(1, std::memory_order_relaxed);
         scheduleReplayRequest(replay, _defaultMasterBizName, request.timeoutMs);
     });
@@ -372,21 +372,22 @@ bool NaviSchedClient::init()
     auto configStr = NaviSchedConfigBuilder::build(config, kernels, true, kernelConfigs);
     auto resourceMap = std::make_shared<navi::ResourceMap>();
     if ((_enableAgentForward && !resourceMap->addResource(_responseR)) ||
-        !resourceMap->addResource(_replayClientR) ||
-        configStr.empty() || !update(configStr, resourceMap)) {
+        !resourceMap->addResource(_replayClientR) || configStr.empty() ||
+        !update(configStr, resourceMap)) {
         stop();
         return false;
     }
     navi::ResourceMap gigResources;
-    if (!getNavi()->createResource(config.bizName, 1, 0,
-                                   {navi::GigClientR::RESOURCE_ID}, gigResources)) {
+    if (!getNavi()->createResource(config.bizName, 1, 0, {navi::GigClientR::RESOURCE_ID},
+                                   gigResources)) {
         stop();
         return false;
     }
     const auto gigIt = gigResources.getMap().find(navi::GigClientR::RESOURCE_ID);
-    const auto gigClientR = gigIt == gigResources.getMap().end()
-                                ? nullptr
-                                : std::dynamic_pointer_cast<navi::GigClientR>(gigIt->second);
+    const auto gigClientR =
+        gigIt == gigResources.getMap().end()
+            ? nullptr
+            : std::dynamic_pointer_cast<navi::GigClientR>(gigIt->second);
     auto searchService = gigClientR ? gigClientR->getSearchService() : nullptr;
     if (!searchService) {
         stop();
@@ -412,12 +413,11 @@ bool NaviSchedClient::init()
     return true;
 }
 
-std::shared_ptr<AgentResponseToClientData>
-NaviSchedClient::takeNextForwardResponse(int64_t timeoutMs)
+std::shared_ptr<AgentResponseToClientData> NaviSchedClient::takeNextForwardResponse(
+    int64_t timeoutMs)
 {
-    return _enableAgentForward && _responseR
-               ? _responseR->takeNextResponse(timeoutMs)
-               : nullptr;
+    return _enableAgentForward && _responseR ? _responseR->takeNextResponse(timeoutMs)
+                                             : nullptr;
 }
 
 bool NaviSchedClient::abortForwardRequest(uint64_t requestId)
@@ -512,11 +512,13 @@ NaviSchedScheduleResult NaviSchedClient::schedule(const NaviSchedScheduleRequest
     request->requestId = input.requestId;
     request->bizName = input.bizName;
     request->promptTokenCount = input.promptTokenCount;
+    request->explicitCacheCheckpointPosition = input.explicitCacheCheckpointPosition;
     request->blockSize = input.blockSize;
     request->blockHashes = input.blockHashes;
     request->timeoutMs = input.timeoutMs;
     request->collectReplay = collectReplay;
     request->forwardPayload = input.forwardPayload;
+    request->routeOnly = input.routeOnly;
     if (_enableSampleCollection && _replayClientR) {
         _replayClientR->enqueueNormalQuery(
             request, autil::TimeUtility::currentTimeInMicroSeconds());
@@ -570,7 +572,8 @@ std::string NaviSchedClient::makeSnapshot() const
     summary.scheduleCount = _scheduleCount.load(std::memory_order_relaxed);
     summary.scheduleSuccessCount = _scheduleSuccessCount.load(std::memory_order_relaxed);
     summary.scheduleErrorCount = _scheduleErrorCount.load(std::memory_order_relaxed);
-    summary.masterRateLimitedCount = _masterRateLimitedCount.load(std::memory_order_relaxed);
+    summary.masterRateLimitedCount =
+        _masterRateLimitedCount.load(std::memory_order_relaxed);
     summary.masterTimeoutCount = _masterTimeoutCount.load(std::memory_order_relaxed);
     summary.masterTransportErrorCount =
         _masterTransportErrorCount.load(std::memory_order_relaxed);
@@ -601,8 +604,7 @@ void NaviSchedClient::reportMetrics() const
         _masterRoutingErrorCount.load(std::memory_order_relaxed);
     const auto noDecisionCount = _masterNoDecisionCount.load(std::memory_order_relaxed);
     const auto otherErrorCount = _masterOtherErrorCount.load(std::memory_order_relaxed);
-    const auto localFallbackCount =
-        _localFallbackCount.load(std::memory_order_relaxed);
+    const auto localFallbackCount = _localFallbackCount.load(std::memory_order_relaxed);
     reportMetric("client.schedule_total", scheduleCount);
     reportMetric("client.schedule_success_total", successCount);
     reportMetric("client.schedule_error_total", errorCount);

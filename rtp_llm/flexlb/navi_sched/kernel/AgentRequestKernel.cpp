@@ -62,10 +62,13 @@ NaviSchedForwardRequest AgentRequestKernel::makeForwardRequest(
     scheduleRequest.requestId = decision.requestId;
     scheduleRequest.bizName = request.bizName;
     scheduleRequest.promptTokenCount = request.promptTokenCount;
+    scheduleRequest.explicitCacheCheckpointPosition =
+        request.explicitCacheCheckpointPosition;
     scheduleRequest.blockSize = request.blockSize;
     scheduleRequest.blockHashes = request.blockHashes;
     scheduleRequest.timeoutMs = request.timeoutMs;
     scheduleRequest.forwardPayload = request.forwardPayload;
+    scheduleRequest.routeOnly = request.routeOnly;
     forwardRequest.decision.version = decision.version;
     forwardRequest.decision.requestId = decision.requestId;
     forwardRequest.decision.scheduleId = decision.scheduleId;
@@ -75,15 +78,13 @@ NaviSchedForwardRequest AgentRequestKernel::makeForwardRequest(
     forwardRequest.decision.reason = decision.reason;
     forwardRequest.decision.batchId = decision.batchId;
     forwardRequest.decision.expectedBatchSize = decision.expectedBatchSize;
-    forwardRequest.decision.predictedQueueLatencyMs =
-        decision.predictedQueueLatencyMs;
+    forwardRequest.decision.predictedQueueLatencyMs = decision.predictedQueueLatencyMs;
     forwardRequest.decision.predictedCacheHitTokenCount =
         decision.predictedCacheHitTokenCount;
     forwardRequest.decision.predictedExecutionLatencyMs =
         decision.predictedExecutionLatencyMs;
     forwardRequest.decision.latencyPrediction = decision.latencyPrediction;
-    forwardRequest.decision.latencyTrainingPhase =
-        decision.latencyTrainingPhase;
+    forwardRequest.decision.latencyTrainingPhase = decision.latencyTrainingPhase;
     forwardRequest.decision.target = decision.target;
     return forwardRequest;
 }
@@ -101,20 +102,20 @@ navi::ErrorCode AgentRequestKernel::init(navi::KernelInitContext &ctx)
     const auto initBeginTimeUs = tracing ? autil::TimeUtility::currentTime() : 0;
     _completionPipe = ctx.createAsyncPipe(navi::AS_INDEPENDENT);
     if (!_completionPipe || !_decision || !_request) {
-        NAVI_KERNEL_LOG(ERROR,
-                        "invalid agent request input, pipe [%p], decision [%p], request [%p]",
-                        _completionPipe.get(), _decision, _request);
+        NAVI_KERNEL_LOG(
+            ERROR, "invalid agent request input, pipe [%p], decision [%p], request [%p]",
+            _completionPipe.get(), _decision, _request);
         return navi::EC_INIT_SUB_GRAPH;
     }
     if (tracing) {
-        NAVI_KERNEL_LOG(INFO,
-                        "[navi-request-stage] stage=agent_init_begin request_id=%lu "
-                        "schedule_batch_id=%ld expected_batch_size=%ld event_time_us=%ld "
-                        "deserialize_begin_us=%ld deserialize_end_us=%ld payload_bytes=%zu",
-                        _decision->requestId, _decision->batchId,
-                        _decision->expectedBatchSize, initBeginTimeUs,
-                        _request->deserializeBeginTimeUs, _request->deserializeEndTimeUs,
-                        _request->forwardPayload.size());
+        NAVI_KERNEL_LOG(
+            INFO,
+            "[navi-request-stage] stage=agent_init_begin request_id=%lu "
+            "schedule_batch_id=%ld expected_batch_size=%ld event_time_us=%ld "
+            "deserialize_begin_us=%ld deserialize_end_us=%ld payload_bytes=%zu",
+            _decision->requestId, _decision->batchId, _decision->expectedBatchSize,
+            initBeginTimeUs, _request->deserializeBeginTimeUs,
+            _request->deserializeEndTimeUs, _request->forwardPayload.size());
     }
     auto forwardRequest = makeForwardRequest(*_request, *_decision);
     const auto copyDoneTimeUs = tracing ? autil::TimeUtility::currentTime() : 0;
@@ -141,8 +142,7 @@ navi::ErrorCode AgentRequestKernel::init(navi::KernelInitContext &ctx)
     forwardRequest.request.timeoutMs = remainingMs;
     _requestId = forwardRequest.request.requestId;
     const auto submitBeginTimeUs = tracing ? autil::TimeUtility::currentTime() : 0;
-    auto submitResult =
-        _agentRequestR->submitWithResult(forwardRequest, _completionPipe);
+    auto submitResult = _agentRequestR->submitWithResult(forwardRequest, _completionPipe);
     if (tracing) {
         const auto endTimeUs = autil::TimeUtility::currentTime();
         NAVI_KERNEL_LOG(INFO,
@@ -150,8 +150,9 @@ navi::ErrorCode AgentRequestKernel::init(navi::KernelInitContext &ctx)
                         "schedule_batch_id=%ld event_time_us=%ld request_copy_us=%ld "
                         "apply_model_us=%ld submit_us=%ld submit_result=%d",
                         _requestId, _decision->batchId, endTimeUs,
-                        copyDoneTimeUs - initBeginTimeUs, submitBeginTimeUs - copyDoneTimeUs,
-                        endTimeUs - submitBeginTimeUs, static_cast<int>(submitResult));
+                        copyDoneTimeUs - initBeginTimeUs,
+                        submitBeginTimeUs - copyDoneTimeUs, endTimeUs - submitBeginTimeUs,
+                        static_cast<int>(submitResult));
     }
     if (AgentRequestR::SubmitResult::ACCEPTED != submitResult) {
         const char *reason =
@@ -162,9 +163,9 @@ navi::ErrorCode AgentRequestKernel::init(navi::KernelInitContext &ctx)
             ERROR,
             "agent request submission failed, requestId [%lu], payloadSize [%zu], "
             "batchId [%ld], expectedBatchSize [%ld], reason [%s]",
-            forwardRequest.request.requestId, forwardRequest.request.forwardPayload.size(),
-            forwardRequest.decision.batchId, forwardRequest.decision.expectedBatchSize,
-            reason);
+            forwardRequest.request.requestId,
+            forwardRequest.request.forwardPayload.size(), forwardRequest.decision.batchId,
+            forwardRequest.decision.expectedBatchSize, reason);
         return navi::EC_INIT_SUB_GRAPH;
     }
     return navi::EC_NONE;

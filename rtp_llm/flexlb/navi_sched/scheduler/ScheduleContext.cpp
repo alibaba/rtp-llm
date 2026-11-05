@@ -20,6 +20,13 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
                                              int64_t scheduleTimeUs,
                                              double timeCompression)
     : _node(std::move(node))
+    , _prefillExecutionPolicy(std::move(snapshot.prefillExecutionPolicy))
+    , _queueLookupPromptBoundary(
+          _prefillExecutionPolicy ? TPUPrefillExecutionPolicy::asyncLookupPromptBoundary(
+                                        *_prefillExecutionPolicy)
+                                  : std::numeric_limits<int64_t>::max())
+    , _peerCacheReadAvailable(snapshot.peerCacheReadAvailable)
+    , _peerCacheReadRevision(snapshot.peerCacheReadRevision)
     , _info(std::move(snapshot.info))
     , _latencyModel(std::move(snapshot.latencyModel))
     , _residualRuntimeConfig(snapshot.residualRuntimeConfig)
@@ -33,6 +40,7 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
     , _abnormalBatchFinishCount(snapshot.load.abnormalBatchFinishCount)
     , _queueTotalPredictedLatencyMs(snapshot.load.queueTotalPredictedLatencyMs)
     , _queueDecayHeadRemainingMs(snapshot.load.queueDecayHeadRemainingMs)
+    , _queueModel(snapshot.load.queueModel)
     , _queueReportReceiveTimeUs(snapshot.load.queueReportReceiveTimeUs)
     , _scheduleTimeUs(scheduleTimeUs)
     , _timeCompression(timeCompression)
@@ -47,6 +55,14 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
     , _workloadReportReceiveTimeUs(snapshot.workloadReportReceiveTimeUs)
     , _agentStartTimeUs(snapshot.agentStartTimeUs)
 {
+    if (_latencyModel &&
+        (_latencyModel->binaryVersion == NonLinearPrefillModelR::PD_BINARY_VERSION ||
+         NonLinearPrefillModelR::usesGeometryForVersion(_latencyModel->binaryVersion))) {
+        // Smooth proposal coordinates only. Binary26 exact predictions below
+        // always use versioned parameters and complete-batch geometry.
+        _legacyLatencyParameters = NonLinearPrefillModelR::parametersForLegacyPrediction(
+            _latencyModel->parameters, _latencyModel->binaryVersion);
+    }
     if (_unifiedLatencyPrediction && _workloadReportReceiveTimeUs > 0) {
         const auto workloadReportAgeMs = getWorkloadReportAgeMs();
         const bool supportsRunningElapsed =
@@ -113,12 +129,31 @@ uint64_t NaviSchedScheduleNode::getAbnormalBatchFinishCount() const
     return _abnormalBatchFinishCount;
 }
 
-double NaviSchedScheduleNode::getEstimatedQueueWaitMs() const
+double NaviSchedScheduleNode::getEstimatedQueueWaitMs(
+    double hitMemberWeight, double batchWeight, double lookupMemberWeight,
+    double *hitDerivative, double *batchDerivative, double *lookupDerivative) const
 {
-    return getEstimatedQueueWaitMsAt(_scheduleTimeUs);
+    return NaviSchedQueueModel::predictMs(
+        getEstimatedQueueBaseMsAt(_scheduleTimeUs),
+        usesUnifiedLatencyPrediction() ? 0.0 : _queueModel.cacheMemberWeightMs,
+        usesUnifiedLatencyPrediction() ? 0.0 : _queueModel.lookupMemberWeightMs,
+        hitMemberWeight, lookupMemberWeight, batchWeight, hitDerivative, lookupDerivative,
+        batchDerivative);
 }
 
-double NaviSchedScheduleNode::getEstimatedQueueWaitMsAt(int64_t predictionTimeUs) const
+double NaviSchedScheduleNode::getEstimatedQueueWaitMsAt(int64_t predictionTimeUs,
+                                                        double hitMemberWeight,
+                                                        double batchWeight,
+                                                        double lookupMemberWeight) const
+{
+    return NaviSchedQueueModel::predictMs(
+        getEstimatedQueueBaseMsAt(predictionTimeUs),
+        usesUnifiedLatencyPrediction() ? 0.0 : _queueModel.cacheMemberWeightMs,
+        usesUnifiedLatencyPrediction() ? 0.0 : _queueModel.lookupMemberWeightMs,
+        hitMemberWeight, lookupMemberWeight, batchWeight);
+}
+
+double NaviSchedScheduleNode::getEstimatedQueueBaseMsAt(int64_t predictionTimeUs) const
 {
     if (usesUnifiedLatencyPrediction()) {
         return 0.0;
@@ -129,7 +164,7 @@ double NaviSchedScheduleNode::getEstimatedQueueWaitMsAt(int64_t predictionTimeUs
             : 0.0;
     const auto decayMs =
         std::min(_queueDecayHeadRemainingMs, elapsedMs * _timeCompression);
-    return std::max(0.0, _queueTotalPredictedLatencyMs - decayMs);
+    return _queueModel.decayedBaseMs(_queueTotalPredictedLatencyMs, decayMs);
 }
 
 double NaviSchedScheduleNode::getEstimatedBacklogLatencyMs() const
@@ -137,6 +172,7 @@ double NaviSchedScheduleNode::getEstimatedBacklogLatencyMs() const
     if (!usesUnifiedLatencyPrediction()) {
         return getEstimatedQueueWaitMs();
     }
+    // Accepted requests own workload before their first batch becomes ready.
     if (!hasLatencyModel() || (_workloadFeatures.getBatchCount() == 0 &&
                                _workloadFeatures.getBatchSize() == 0 &&
                                _workloadFeatures.getPrecedingRequestCount() == 0)) {
@@ -171,12 +207,20 @@ bool NaviSchedScheduleNode::hasLatencyModel() const { return bool(_latencyModel)
 bool NaviSchedScheduleNode::hasValidLatencyModel() const
 {
     return _latencyModel &&
+           (!NonLinearPrefillModelR::usesGeometryForVersion(
+                _latencyModel->binaryVersion) ||
+            (_info && _info->pdSeparated && !usesUnifiedLatencyPrediction() &&
+             _prefillExecutionPolicy &&
+             TPUPrefillExecutionPolicy::validate(*_prefillExecutionPolicy))) &&
            NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL == _latencyModel->formula &&
-           NonLinearPrefillModelR::BINARY_VERSION == _latencyModel->binaryVersion &&
-           NonLinearPrefillModelR::validateParameters(_latencyModel->parameters) &&
-           LatencyResidualModel::VERSION == _latencyModel->residualVersion &&
-           LatencyResidualModel::validateParameters(_latencyModel->residualParameters) &&
-           _latencyModel->residualLastUpdateTimeUs >= 0;
+           NonLinearPrefillModelR::supportsBinaryVersion(_latencyModel->binaryVersion) &&
+           NonLinearPrefillModelR::validateParametersForVersion(
+               _latencyModel->parameters, _latencyModel->binaryVersion) &&
+           (_residualRuntimeConfig.learningRate == 0.0 ||
+            (LatencyResidualModel::VERSION == _latencyModel->residualVersion &&
+             LatencyResidualModel::validateParameters(
+                 _latencyModel->residualParameters) &&
+             _latencyModel->residualLastUpdateTimeUs >= 0));
 }
 
 int32_t NaviSchedScheduleNode::getLatencyFormula() const
@@ -235,7 +279,9 @@ bool NaviSchedScheduleNode::isBacklogPredictionTrusted() const
 const std::vector<double> &NaviSchedScheduleNode::getLatencyParameters() const
 {
     static const std::vector<double> EMPTY_PARAMETERS;
-    return _latencyModel ? _latencyModel->parameters : EMPTY_PARAMETERS;
+    return !_legacyLatencyParameters.empty()
+               ? _legacyLatencyParameters
+               : (_latencyModel ? _latencyModel->parameters : EMPTY_PARAMETERS);
 }
 
 double NaviSchedScheduleNode::applyLatencyResidual(double basePredictionMs,
@@ -256,11 +302,33 @@ double NaviSchedScheduleNode::applyLatencyResidual(double basePredictionMs,
     return result.predictionMs;
 }
 
+double NaviSchedScheduleNode::predictBaseLatency(
+    const NaviSchedLatencyFeatures &features) const
+{
+    if (!_latencyModel) {
+        return 0.0;
+    }
+    if (NonLinearPrefillModelR::usesGeometryForVersion(_latencyModel->binaryVersion)) {
+        return NonLinearPrefillModelR::predictForVersion(
+            features, _latencyModel->parameters, _latencyModel->binaryVersion);
+    }
+    // Preserve the legacy prediction path and its numerical coordinates.
+    return NonLinearPrefillModelR::predict(features, getLatencyParameters());
+}
+
 double NaviSchedScheduleNode::predictLatency(
     const NaviSchedLatencyFeatures &features) const
 {
-    return applyLatencyResidual(
-        NonLinearPrefillModelR::predict(features, getLatencyParameters()));
+    if (!_latencyModel) {
+        return 0.0;
+    }
+    return applyLatencyResidual(predictBaseLatency(features));
+}
+
+const std::optional<TPUPrefillExecutionPolicyConfig> &
+NaviSchedScheduleNode::getPrefillExecutionPolicy() const
+{
+    return _prefillExecutionPolicy;
 }
 
 bool NaviSchedScheduleNode::usesUnifiedLatencyPrediction() const
@@ -371,6 +439,8 @@ double NaviSchedScheduleNode::decayUnifiedLatency(double latencyWithReportedWork
         _reportedWorkloadFeatures.getBatchCount() == 0) {
         return latencyWithReportedWorkloadMs;
     }
+    // An elapsed-aware model has already advanced running prefill progress.
+    // Applying wall-clock decay as well would count the same progress twice.
     const auto decayedLatencyMs =
         _runningElapsedProgressApplied
             ? latencyWithReportedWorkloadMs
@@ -401,10 +471,169 @@ bool NaviSchedScheduleContext::prepare()
         }
         node.refreshExistingUnifiedLatency();
     }
+    preparePeerCacheCounts();
     _decisions.assign(requestCount(), NaviSchedDecision());
     _selectedNodeIndexes.assign(requestCount(), INVALID_NODE_INDEX);
     _prepared = true;
     return true;
+}
+
+int64_t NaviSchedPeerCacheSuffixLookup::extend(size_t requestIndex,
+                                               int64_t localBlocks) const
+{
+    if (localBlocks < 0 || alignmentBlocks <= 0 || localBlocks % alignmentBlocks != 0 ||
+        requestIndex >= endBlocks.size()) {
+        return localBlocks;
+    }
+    const auto &row = endBlocks[requestIndex];
+    return static_cast<uint64_t>(localBlocks) < row.size()
+               ? std::max(localBlocks, row[localBlocks])
+               : localBlocks;
+}
+
+std::shared_ptr<const NaviSchedPeerCacheSuffixLookup>
+NaviSchedPeerCacheSuffixLookup::build(const std::vector<NaviSchedScheduleItem> &requests,
+                                      const std::vector<std::vector<size_t>> &keyIndexes,
+                                      const std::vector<uint8_t> &readyStates,
+                                      const NaviSchedCachePolicy &policy)
+{
+    if (policy.blockSize <= 0 || policy.linearStep <= 0 ||
+        policy.fullAttentionQueryDropTokens < 0 || requests.size() != keyIndexes.size()) {
+        return nullptr;
+    }
+    auto result = std::make_shared<NaviSchedPeerCacheSuffixLookup>();
+    result->alignmentBlocks = policy.linearStep;
+    result->endBlocks.resize(requests.size());
+    for (size_t r = 0; r < requests.size(); ++r) {
+        const auto &request = requests[r].request;
+        if (request.blockSize != policy.blockSize) {
+            return nullptr;
+        }
+        const auto &indexes = keyIndexes[r];
+        const auto matchable =
+            request.promptTokenCount > policy.fullAttentionQueryDropTokens
+                ? (request.promptTokenCount - policy.fullAttentionQueryDropTokens) /
+                      policy.blockSize
+                : 0;
+        const auto limit = std::min<size_t>(indexes.size(), matchable);
+        std::vector<int64_t> tailEnd(limit + 1, 0);
+        for (size_t i = 0; i < limit; ++i) {
+            if (indexes[i] >= readyStates.size()) {
+                return nullptr;
+            }
+            tailEnd[i + 1] =
+                ((i + 1) % policy.linearStep == 0 && (readyStates[indexes[i]] & 2))
+                    ? i + 1
+                    : tailEnd[i];
+        }
+        auto &row = result->endBlocks[r];
+        row.resize(limit + 1);
+        row[limit] = limit;
+        int64_t nextGap = limit;
+        for (size_t i = limit; i-- > 0;) {
+            if (!(readyStates[indexes[i]] & 1)) {
+                nextGap = i;
+            }
+            auto end = nextGap - nextGap % policy.linearStep;
+            if (policy.hybridTailRequired) {
+                end = tailEnd[end];
+            }
+            row[i] = std::max<int64_t>(i, end);
+        }
+    }
+    return result;
+}
+
+void NaviSchedScheduleContext::preparePeerCacheCounts()
+{
+    if (!_peerCacheEnabled || _requests.empty()) {
+        return;
+    }
+    NaviSchedBlockHashes queryKeys;
+    std::unordered_map<uint64_t, size_t> keyIndex;
+    std::vector<std::vector<size_t>> requestKeyIndexes(_requests.size());
+    for (size_t i = 0; i < _requests.size(); ++i) {
+        if (!_requests[i].request.blockHashes) {
+            continue;
+        }
+        auto &indexes = requestKeyIndexes[i];
+        const auto &request = _requests[i].request;
+        const auto limit =
+            request.blockSize > 0
+                ? std::min<size_t>(
+                      request.blockHashes->size(),
+                      std::max<int64_t>(0, request.promptTokenCount) / request.blockSize)
+                : 0;
+        indexes.reserve(limit);
+        for (size_t h = 0; h < limit; ++h) {
+            const auto hash = (*request.blockHashes)[h];
+            const auto entry = keyIndex.emplace(hash, queryKeys.size());
+            if (entry.second) {
+                queryKeys.push_back(hash);
+            }
+            indexes.push_back(entry.first->second);
+        }
+    }
+    struct ReadyGroup {
+        NaviSchedCachePolicy policy;
+        std::vector<uint8_t> states;
+        std::shared_ptr<const NaviSchedPeerCacheSuffixLookup> lookup;
+    };
+    std::unordered_map<std::string, ReadyGroup> groups;
+    std::vector<std::string> keys(_scheduleNodes.size());
+    std::vector<uint8_t> states;
+    for (size_t n = 0; n < _scheduleNodes.size(); ++n) {
+        auto &node = _scheduleNodes[n];
+        NaviSchedCachePolicy p;
+        if (!node._info->online || !node._info->peerCacheEnabled ||
+            (_peerCacheReadyAgents && !_peerCacheReadyAgents->empty() &&
+             !_peerCacheReadyAgents->count(node.getAgentId())) ||
+            node.getLatencyModelFingerprint().empty() ||
+            !node._node->getReadyExternalCacheKeyStates(queryKeys, states, p) ||
+            states.size() != queryKeys.size() || p.blockSize <= 0 || p.linearStep <= 0 ||
+            std::any_of(_requests.begin(), _requests.end(), [&](const auto &item) {
+                return item.request.blockSize != p.blockSize;
+            })) {
+            continue;
+        }
+        // Compare fingerprints as opaque identities, with identical cache policies.
+        auto key = node.getLatencyModelFingerprint() + ":" + std::to_string(p.blockSize) +
+                   ":" + std::to_string(p.linearStep) + ":" +
+                   std::to_string(p.hybridTailRequired) + ":" +
+                   std::to_string(p.mambaReplayStopShift) + ":" +
+                   std::to_string(p.mambaRetentionInterval) + ":" +
+                   std::to_string(p.mambaAlign) + ":" +
+                   std::to_string(p.fullAttentionQueryDropTokens);
+        keys[n] = key;
+        auto it = groups.find(key);
+        if (it == groups.end()) {
+            groups.emplace(key, ReadyGroup{p, states, nullptr});
+        } else {
+            // The SDK may fetch different READY keys/groups from different peers.
+            // Union only published physical observations, never pending estimates.
+            for (size_t i = 0; i < states.size(); ++i) {
+                it->second.states[i] |= states[i];
+            }
+        }
+    }
+    for (auto &entry : groups) {
+        auto &group = entry.second;
+        group.lookup = NaviSchedPeerCacheSuffixLookup::build(_requests, requestKeyIndexes,
+                                                             group.states, group.policy);
+    }
+    for (size_t n = 0; n < _scheduleNodes.size(); ++n) {
+        // A receiver's read failure does not remove its healthy resident objects
+        // from the supplier pool. Gate only cross-node consumption.
+        if (!keys[n].empty() && _scheduleNodes[n]._peerCacheReadAvailable) {
+            _scheduleNodes[n]._peerCacheSuffixLookup = groups.at(keys[n]).lookup;
+        }
+    }
+    // Freeze the single local observation plus READY suffix before optimization.
+    for (size_t n = 0; n < _scheduleNodes.size(); ++n) {
+        if (_scheduleNodes[n]._peerCacheSuffixLookup) {
+            getCacheHitBlockCountsSnapshot(n);
+        }
+    }
 }
 
 size_t NaviSchedScheduleContext::requestCount() const
@@ -428,6 +657,64 @@ const NaviSchedScheduleNode &NaviSchedScheduleContext::getNode(size_t nodeIndex)
     return _scheduleNodes[resolveNodeIndex(nodeIndex)];
 }
 
+std::shared_ptr<const std::vector<int64_t>>
+NaviSchedScheduleContext::getCacheHitBlockCountsSnapshot(size_t nodeIndex) const
+{
+    if (nodeIndex >= nodeCount()) {
+        return nullptr;
+    }
+    const auto storageNode = resolveNodeIndex(nodeIndex);
+    const auto &node = _scheduleNodes[storageNode];
+    auto published = std::atomic_load(&node._matchedBlockCounts);
+    if (published) {
+        return published;
+    }
+    auto counts = std::make_shared<std::vector<int64_t>>(_requests.size());
+    bool recordedBatch = !_requests.empty() && !_replayMatchRequestIndexes.empty();
+    for (size_t index = 0; recordedBatch && index < _requests.size(); ++index) {
+        recordedBatch = getReplayMatch(index, storageNode, (*counts)[index]);
+    }
+    if (recordedBatch) {
+        std::shared_ptr<const std::vector<int64_t>> immutable = counts;
+        std::atomic_compare_exchange_strong(&node._matchedBlockCounts, &published, immutable);
+        return published ? published : immutable;
+    }
+    if (NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion())) {
+        const auto inputs = getExecutionCacheInputs(storageNode);
+        if (!inputs) {
+            return nullptr;
+        }
+        for (size_t i = 0; i < _requests.size(); ++i) {
+            const auto block = _requests[i].request.blockSize;
+            if (block <= 0) {
+                return nullptr;
+            }
+            (*counts)[i] = (*inputs)[i].computedTokens / block;
+        }
+    } else if (!_requests.empty()) {
+        // Ordinary and geometry paths publish one immutable batch observation.
+        // Keep ordinary Full-prefix semantics in the existing batch matcher.
+        if ((!_scheduleViewActive || _scheduleViewUsesAllRequests) &&
+            _cacheMatchCommonPrefixes.size() == _requests.size()) {
+            node._node->getMatchedBlockCounts(_requests, counts->data(), _cacheMatchCommonPrefixes);
+        } else {
+            node._node->getMatchedBlockCounts(_requests, counts->data());
+        }
+    }
+    if (node._peerCacheSuffixLookup &&
+        !NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion())) {
+        std::shared_ptr<const std::vector<int64_t>> local =
+            std::make_shared<const std::vector<int64_t>>(*counts);
+        std::atomic_store(&node._localCacheBlockCounts, local);
+        for (size_t i = 0; i < counts->size(); ++i) {
+            (*counts)[i] = node._peerCacheSuffixLookup->extend(i, (*counts)[i]);
+        }
+    }
+    std::shared_ptr<const std::vector<int64_t>> immutable = counts;
+    std::atomic_compare_exchange_strong(&node._matchedBlockCounts, &published, immutable);
+    return published ? published : immutable;
+}
+
 int64_t NaviSchedScheduleContext::getCacheHitBlockCount(size_t requestIndex,
                                                         size_t nodeIndex) const
 {
@@ -440,8 +727,8 @@ int64_t NaviSchedScheduleContext::getCacheHitBlockCount(size_t requestIndex,
     if (getReplayMatch(storageRequestIndex, storageNodeIndex, matchedBlockCount)) {
         return matchedBlockCount;
     }
-    return _scheduleNodes[storageNodeIndex]._node->getMatchedBlockCountForRequest(
-        _requests[storageRequestIndex].request);
+    const auto counts = getCacheHitBlockCountsSnapshot(nodeIndex);
+    return counts ? getCacheHitBlockCount(*counts, requestIndex) : 0;
 }
 
 void NaviSchedScheduleContext::prepareCacheMatchPrefixes()
@@ -486,6 +773,17 @@ bool NaviSchedScheduleContext::getCacheHitBlockCounts(
             return true;
         }
     }
+    const auto &node = _scheduleNodes[storageNodeIndex];
+    if (std::atomic_load(&node._matchedBlockCounts) ||
+        NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion()) ||
+        node._peerCacheSuffixLookup) {
+        const auto counts = getCacheHitBlockCountsSnapshot(nodeIndex);
+        if (!counts) return false;
+        for (size_t index = 0; index < requestCount(); ++index) {
+            matchedBlockCounts[index] = getCacheHitBlockCount(*counts, index);
+        }
+        return true;
+    }
     if (!_scheduleViewActive || _scheduleViewUsesAllRequests) {
         _scheduleNodes[storageNodeIndex]._node->getMatchedBlockCounts(
             _requests, matchedBlockCounts.data(), _cacheMatchCommonPrefixes);
@@ -528,6 +826,8 @@ std::optional<double> NaviSchedScheduleContext::discreteSearchImprovementPct() c
     if (initialLoss == 0.0) {
         return finalLoss == 0.0 ? std::optional<double>(0.0) : std::nullopt;
     }
+    // Normalize by |initial| so lower losses always mean positive improvement.
+    // Widen before subtraction to keep finite large losses from overflowing.
     const auto initial = static_cast<long double>(initialLoss);
     const auto improvement = static_cast<double>(
         (initial - static_cast<long double>(finalLoss)) / std::abs(initial) * 100.0L);
@@ -540,6 +840,276 @@ bool NaviSchedScheduleContext::setScheduleLoss(double loss)
         return false;
     }
     _scheduleLoss = loss;
+    return true;
+}
+
+
+
+std::shared_ptr<const std::vector<TPUPrefillRequestInput>>
+NaviSchedScheduleContext::getExecutionCacheInputs(size_t storageNodeIndex) const
+{
+    const auto &node = _scheduleNodes[storageNodeIndex];
+    auto published = std::atomic_load(&node._executionCacheInputs);
+    if (published) {
+        return {published, &published->inputs};
+    }
+    auto capture = std::make_shared<NaviSchedExecutionCacheInputCapture>();
+    auto inputs =
+        std::shared_ptr<std::vector<TPUPrefillRequestInput>>(capture, &capture->inputs);
+    if (!_requests.empty() && !node._node->getExecutionCacheInputs(
+                                  _requests, *inputs, nullptr, &capture->observation)) {
+        return nullptr;
+    }
+    if (inputs->size() != _requests.size()) {
+        return nullptr;
+    }
+    if (node._peerCacheSuffixLookup) {
+        auto local = std::make_shared<std::vector<int64_t>>(_requests.size());
+        for (size_t i = 0; i < inputs->size(); ++i) {
+            const auto block = _requests[i].request.blockSize;
+            if (block <= 0 || (*inputs)[i].computedTokens < 0 ||
+                (*inputs)[i].computedTokens >= (*inputs)[i].promptTokens ||
+                (*inputs)[i].computedTokens % block != 0) {
+                return nullptr;
+            }
+            const auto resident =
+                (*inputs)[i].externalReadTokens >= 0
+                    ? (*inputs)[i].computedTokens - (*inputs)[i].externalReadTokens
+                    : -1;
+            (*local)[i] = (*inputs)[i].computedTokens / block;
+            (*inputs)[i].computedTokens =
+                node._peerCacheSuffixLookup->extend(i, (*local)[i]) * block;
+            if (resident >= 0) {
+                (*inputs)[i].externalReadTokens = (*inputs)[i].computedTokens - resident;
+            }
+        }
+        std::shared_ptr<const std::vector<int64_t>> immutableLocal = local;
+        std::atomic_store(&node._localCacheBlockCounts, immutableLocal);
+    }
+    for (size_t i = 0; i < _requests.size(); ++i) {
+        const auto &request = _requests[i].request;
+        const auto &input = (*inputs)[i];
+        if (request.blockSize <= 0 || input.promptTokens <= 0 ||
+            input.promptTokens != request.promptTokenCount || input.computedTokens < 0 ||
+            input.computedTokens >= input.promptTokens ||
+            input.computedTokens % request.blockSize != 0 ||
+            (NonLinearPrefillModelR::usesCacheSourceForVersion(
+                 node.getLatencyBinaryVersion()) &&
+             (input.externalReadTokens < 0 ||
+              input.externalReadTokens > input.computedTokens)) ||
+            input.sharedPrefixBoundary < 0 ||
+            input.sharedPrefixBoundary > input.promptTokens) {
+            return nullptr;
+        }
+    }
+    std::shared_ptr<const NaviSchedExecutionCacheInputCapture> immutable = capture;
+    // Publish the observation and inputs as one immutable object.
+    std::atomic_compare_exchange_strong(&node._executionCacheInputs, &published,
+                                        immutable);
+    const auto winner = published ? published : immutable;
+    return {winner, &winner->inputs};
+}
+
+const NaviSchedGeometryOptimizationInput *
+NaviSchedScheduleContext::getGeometryOptimizationInput(size_t nodeIndex,
+                                                       size_t requestIndex) const
+{
+    if (nodeIndex >= nodeCount() || requestIndex >= requestCount()) {
+        return nullptr;
+    }
+    const auto inputs = getGeometryOptimizationInputs(nodeIndex);
+    return inputs ? getGeometryOptimizationInput(*inputs, requestIndex) : nullptr;
+}
+
+const NaviSchedGeometryOptimizationInput *
+NaviSchedScheduleContext::getGeometryOptimizationInput(
+    const std::vector<NaviSchedGeometryOptimizationInput> &inputs,
+    size_t requestIndex) const
+{
+    if (requestIndex >= requestCount()) {
+        return nullptr;
+    }
+    const auto storageRequest = resolveRequestIndex(requestIndex);
+    return storageRequest < inputs.size() ? &inputs[storageRequest] : nullptr;
+}
+
+std::shared_ptr<const std::vector<NaviSchedGeometryOptimizationInput>>
+NaviSchedScheduleContext::getGeometryOptimizationInputs(size_t nodeIndex) const
+{
+    if (nodeIndex >= nodeCount()) {
+        return nullptr;
+    }
+    const auto storageNode = resolveNodeIndex(nodeIndex);
+    const auto &node = _scheduleNodes[storageNode];
+    auto published = std::atomic_load(&node._geometryOptimizationInputs);
+    if (!published) {
+        const auto &policy = node.getPrefillExecutionPolicy();
+        if (!policy || !node.hasValidLatencyModel() ||
+            !NonLinearPrefillModelR::usesGeometryForVersion(
+                node.getLatencyBinaryVersion())) {
+            return nullptr;
+        }
+        const auto inputs = getExecutionCacheInputs(storageNode);
+        if (!inputs) {
+            return nullptr;
+        }
+        auto coordinates =
+            std::make_shared<std::vector<NaviSchedGeometryOptimizationInput>>();
+        coordinates->reserve(inputs->size());
+        const auto &parameters = node.getLatencyParameters();
+        const auto paddingCoefficient =
+            parameters[3] * NonLinearPrefillModelR::getParameterScale(3) / 1024.0;
+        const auto stepCoefficient =
+            parameters[6] * NonLinearPrefillModelR::getParameterScale(6);
+        for (const auto &input : *inputs) {
+            NaviSchedLatencyFeatures features;
+            if (!features.appendBatchCount(1)) {
+                return nullptr;
+            }
+            const auto remaining = input.promptTokens - input.computedTokens;
+            features.appendRequest(input.computedTokens, remaining);
+            NaviSchedGeometryOptimizationInput value;
+            value.cacheHit = input.computedTokens > 0;
+            value.externalReadTokens = std::max(int64_t{0}, input.externalReadTokens);
+            // Remove the old raw-compute and constant-batch coordinates; the
+            // continuous group projection below supplies padding and steps.
+            value.linearCost =
+                NonLinearPrefillModelR::calculateLinearCost(parameters, features) -
+                paddingCoefficient * remaining - stepCoefficient;
+            const auto independent =
+                NonLinearPrefillModelR::usesProjectedGeometryForVersion(
+                    node.getLatencyBinaryVersion()) &&
+                policy->asyncKVLookupEnabled &&
+                (input.promptTokens - (policy->asyncKVLookupUsesEagle ? 1 : 0)) /
+                        policy->asyncKVLookupHashBlockSize >
+                    0;
+            value.shared = !independent;
+            if (independent) {
+                TPUPrefillExecutionProjection projection;
+                if (!TPUPrefillExecutionPolicy::projectLatencyFeaturesSummary(
+                        {input}, *policy, static_cast<size_t>(remaining), projection,
+                        nullptr)) {
+                    return nullptr;
+                }
+                value.linearCost += paddingCoefficient * projection.globalPaddedTokenSum +
+                                    stepCoefficient * projection.stepCount;
+            } else {
+                value.sharedTokens = remaining;
+                if (policy->fixedPrefillChunkPlan) {
+                    TPUPrefillExecutionProjection projection;
+                    if (!TPUPrefillExecutionPolicy::projectCacheResolvedBatchSummary(
+                            {input}, *policy, static_cast<size_t>(remaining), projection,
+                            nullptr)) {
+                        return nullptr;
+                    }
+                    value.fixedChunkCount = projection.stepCount;
+                    value.fixedAttentionPairs = projection.attentionPairSum;
+                }
+            }
+            coordinates->emplace_back(value);
+        }
+        std::shared_ptr<const std::vector<NaviSchedGeometryOptimizationInput>> immutable =
+            coordinates;
+        std::atomic_compare_exchange_strong(&node._geometryOptimizationInputs, &published,
+                                            immutable);
+        if (!published) {
+            published = std::move(immutable);
+        }
+    }
+    return published;
+}
+
+bool NaviSchedScheduleContext::buildExecutionGeometryFeatures(
+    size_t nodeIndex, const std::vector<size_t> &requestIndexes,
+    NaviSchedLatencyFeatures &features) const
+{
+    features = NaviSchedLatencyFeatures();
+    if (nodeIndex >= nodeCount() || requestIndexes.empty()) {
+        return false;
+    }
+    const auto storageNode = resolveNodeIndex(nodeIndex);
+    const auto &node = _scheduleNodes[storageNode];
+    const auto &policy = node.getPrefillExecutionPolicy();
+    if (!node.hasValidLatencyModel() || !policy ||
+        !NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion()) ||
+        node.usesUnifiedLatencyPrediction()) {
+        return false;
+    }
+    const auto inputs = getExecutionCacheInputs(storageNode);
+    if (!inputs) {
+        return false;
+    }
+    NaviSchedLatencyFeatures logical;
+    if (!logical.appendBatchCount(1)) {
+        return false;
+    }
+    std::vector<TPUPrefillRequestInput> ordered;
+    ordered.reserve(requestIndexes.size());
+    if (std::is_sorted(requestIndexes.begin(), requestIndexes.end())) {
+        if (std::adjacent_find(requestIndexes.begin(), requestIndexes.end()) !=
+            requestIndexes.end()) {
+            return false;
+        }
+    } else {
+        auto sorted = requestIndexes;
+        std::sort(sorted.begin(), sorted.end());
+        if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end()) {
+            return false;
+        }
+    }
+    // Whole-chunk deferral makes geometry order-sensitive. Use the same
+    // canonical batch order as native forwarding and queued reservations,
+    // independent of context views, search iteration and RPC arrival order.
+    auto canonicalIndexes = requestIndexes;
+    for (const auto index : canonicalIndexes) {
+        if (index >= requestCount()) {
+            return false;
+        }
+    }
+    std::stable_sort(canonicalIndexes.begin(), canonicalIndexes.end(),
+                     [this](size_t left, size_t right) {
+                         return getRequest(left).request.requestId <
+                                getRequest(right).request.requestId;
+                     });
+    size_t maxSteps = 0;
+    int64_t totalPrompt = 0;
+    for (const auto index : canonicalIndexes) {
+        const auto storageIndex = resolveRequestIndex(index);
+        const auto &input = (*inputs)[storageIndex];
+        const auto remaining = input.promptTokens - input.computedTokens;
+        if (input.promptTokens > std::numeric_limits<int64_t>::max() - totalPrompt ||
+            static_cast<uint64_t>(remaining) >
+                std::numeric_limits<size_t>::max() - maxSteps) {
+            return false;
+        }
+        totalPrompt += input.promptTokens;
+        maxSteps += static_cast<size_t>(remaining);
+        logical.appendRequest(input.computedTokens, remaining);
+        ordered.emplace_back(input);
+    }
+    TPUPrefillExecutionProjection projection;
+    const auto projector =
+        NonLinearPrefillModelR::usesProjectedGeometryForVersion(
+            node.getLatencyBinaryVersion())
+            ? TPUPrefillExecutionPolicy::projectLatencyFeaturesSummary
+            : TPUPrefillExecutionPolicy::projectCacheResolvedBatchSummary;
+    if (!projector(ordered, *policy, maxSteps, projection, nullptr) ||
+        !logical.setExecutionGeometry(projection.stepCount,
+                                      projection.globalPaddedTokenSum)) {
+        return false;
+    }
+    if (NonLinearPrefillModelR::usesCacheSourceForVersion(
+            node.getLatencyBinaryVersion())) {
+        int64_t reads = 0, maximum = 0;
+        for (const auto &input : ordered) {
+            reads += input.externalReadTokens > 0;
+            maximum = std::max(maximum, input.externalReadTokens);
+        }
+        if (!logical.setExecutionCacheSource(reads, maximum)) {
+            return false;
+        }
+    }
+    features = std::move(logical);
     return true;
 }
 
@@ -564,6 +1134,19 @@ double NaviSchedScheduleContext::estimateBatchExecutionLatencyMs(
     }
     const auto storageNodeIndex = resolveNodeIndex(nodeIndex);
     const auto &node = _scheduleNodes[storageNodeIndex];
+    if (NonLinearPrefillModelR::usesGeometryForVersion(node.getLatencyBinaryVersion())) {
+        NaviSchedLatencyFeatures geometryFeatures;
+        if (!buildExecutionGeometryFeatures(nodeIndex, requestIndexes,
+                                            geometryFeatures)) {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        const auto prediction = node.predictLatency(geometryFeatures);
+        if (latencyPrediction && std::isfinite(prediction)) {
+            latencyPrediction->features = geometryFeatures;
+            latencyPrediction->recomputable = true;
+        }
+        return prediction;
+    }
     if (!node.hasValidLatencyModel()) {
         return 0.0;
     }
@@ -794,6 +1377,8 @@ bool NaviSchedScheduleContext::getReplayMatch(size_t storageRequestIndex,
     if (it == _replayMatchRequestIndexes.end()) {
         return false;
     }
+    // Queue-overload filtering compacts _requests after replay capture.
+    // Retain the original row by request ID so costs use the recorded snapshot.
     matchedBlockCount =
         _replay->nodeMatches[it->second][storageNodeIndex].matchedBlockCount;
     return true;
@@ -801,6 +1386,8 @@ bool NaviSchedScheduleContext::getReplayMatch(size_t storageRequestIndex,
 
 bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
 {
+    // The Master reserves this round after the first result preparation.  Reusing
+    // that result prevents the response from matching its own reservation.
     if (_resultPrepared) {
         return true;
     }
@@ -861,16 +1448,31 @@ bool NaviSchedScheduleContext::prepareResult(int64_t queuePredictionTimeUs)
         if (batchState.requestIndexes.empty()) {
             continue;
         }
-        for (auto requestIndex : batchState.requestIndexes) {
-            matchedBlockCounts[requestIndex] =
-                getCacheHitBlockCount(requestIndex, nodeIndex);
+        const auto cacheCounts = getCacheHitBlockCountsSnapshot(nodeIndex);
+        if (!cacheCounts) {
+            return false;
+        }
+        for (const auto requestIndex : batchState.requestIndexes) {
+            matchedBlockCounts[requestIndex] = getCacheHitBlockCount(*cacheCounts, requestIndex);
+        }
+        size_t hitMembers = 0, lookupMembers = 0;
+        for (const auto requestIndex : batchState.requestIndexes) {
+            hitMembers += getCacheHitBlockCount(*cacheCounts, requestIndex) > 0;
+            lookupMembers += _scheduleNodes[nodeIndex].hasQueueLookupOpportunity(
+                _requests[requestIndex].request.promptTokenCount);
         }
         batchState.predictedQueueLatencyMs =
-            _scheduleNodes[nodeIndex].getEstimatedQueueWaitMsAt(_queuePredictionTimeUs);
+            _scheduleNodes[nodeIndex].getEstimatedQueueWaitMsAt(
+                _queuePredictionTimeUs, hitMembers, batchState.requestIndexes.size(),
+                lookupMembers);
         auto latencyPrediction = std::make_shared<NaviSchedLatencyPrediction>();
-        batchState.predictedExecutionLatencyMs =
-            estimateBatchExecutionLatencyMs(nodeIndex, batchState.requestIndexes,
-                                            latencyPrediction.get(), &matchedBlockCounts);
+        batchState.predictedExecutionLatencyMs = estimateBatchExecutionLatencyMs(
+            nodeIndex, batchState.requestIndexes, latencyPrediction.get(), &matchedBlockCounts);
+        if (NonLinearPrefillModelR::usesGeometryForVersion(
+                _scheduleNodes[nodeIndex].getLatencyBinaryVersion()) &&
+            !std::isfinite(batchState.predictedExecutionLatencyMs)) {
+            return false;
+        }
         latencyPrediction->fixedLatencyMs += batchState.predictedQueueLatencyMs;
         if (latencyPrediction->valid()) {
             batchState.latencyPrediction = std::move(latencyPrediction);
@@ -966,6 +1568,7 @@ bool NaviSchedScheduleContext::finish()
         }
         return success;
     }
+    // Finish non-debug requests before returning the larger replay value.
     for (size_t index = 0; index < requestCount(); ++index) {
         const auto &responseRequest = _responseRequests[index];
         if (!responseRequest || !responseRequest->valid()) {
@@ -1067,4 +1670,4 @@ MasterResponseToClientDataPtr NaviSchedScheduleContext::makeResponse(
     return response;
 }
 
-}
+} // namespace navi_sched

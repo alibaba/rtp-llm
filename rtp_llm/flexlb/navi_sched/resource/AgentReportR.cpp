@@ -34,13 +34,13 @@ AgentLatencyToMasterDataPtr makeLatencyModelData(
     latency->residualVersion = snapshot->residualVersion;
     latency->residualParameters = snapshot->residualParameters;
     latency->residualLastUpdateTimeUs = snapshot->residualLastUpdateTimeUs;
-    latency->zeroPoint =
-        NonLinearPrefillModelR::calculateZeroPoint(snapshot->parameters);
+    latency->zeroPoint = NonLinearPrefillModelR::calculateZeroPoint(
+        snapshot->parameters, nullptr, snapshot->binaryVersion);
     latency->sessionSampleCount = snapshot->sessionSampleCount;
     return latency;
 }
 
-}
+} // namespace
 
 const std::string AgentReportBridgeR::RESOURCE_ID = "navi_sched.agent_report_bridge_r";
 
@@ -62,6 +62,18 @@ std::shared_ptr<AgentReportR> AgentReportBridgeR::getAgentReportR() const
     return _agentReportR.lock();
 }
 
+void AgentReportBridgeR::setControlConfig(const AgentControlToMasterData &config)
+{
+    autil::ScopedLock lock(_lock);
+    _controlConfig = config;
+}
+
+AgentControlToMasterData AgentReportBridgeR::getControlConfig() const
+{
+    autil::ScopedLock lock(_lock);
+    return _controlConfig;
+}
+
 const std::string AgentReportR::RESOURCE_ID = "navi_sched.agent_report_r";
 
 void AgentReportR::def(navi::ResourceDefBuilder &builder) const
@@ -77,22 +89,29 @@ bool AgentReportR::config(navi::ResourceConfigContext &ctx)
         _latencyValidationEnabled.load(std::memory_order_relaxed);
     NAVI_JSONIZE(ctx, "latency_validation_enabled", latencyValidationEnabled,
                  latencyValidationEnabled);
-    _latencyValidationEnabled.store(latencyValidationEnabled,
-                                    std::memory_order_relaxed);
+    _latencyValidationEnabled.store(latencyValidationEnabled, std::memory_order_relaxed);
     NAVI_JSONIZE(ctx, "pd_separated", _pdSeparated, _pdSeparated);
     NAVI_JSONIZE(ctx, "unified_latency_prediction", _unifiedLatencyPrediction,
                  _unifiedLatencyPrediction);
-    NAVI_JSONIZE(ctx, "workload_publish_timing_enabled",
-                 _workloadPublishTimingEnabled,
+    NAVI_JSONIZE(ctx, "full_attention_query_drop_tokens", _fullAttentionQueryDropTokens,
+                 _fullAttentionQueryDropTokens);
+    NAVI_JSONIZE(ctx, "mamba_replay_stop_shift", _mambaReplayStopShift,
+                 _mambaReplayStopShift);
+    NAVI_JSONIZE(ctx, "mamba_retention_interval", _mambaRetentionInterval,
+                 _mambaRetentionInterval);
+    NAVI_JSONIZE(ctx, "mamba_align", _mambaAlign, _mambaAlign);
+    NAVI_JSONIZE(ctx, "workload_publish_timing_enabled", _workloadPublishTimingEnabled,
                  _workloadPublishTimingEnabled);
     NAVI_JSONIZE(ctx, "latency_model_fingerprint", _latencyModelFingerprint,
                  _latencyModelFingerprint);
-    return _serverInfo.port >= 0 && _latencyModelFingerprint.size() <= 4096;
+    return _serverInfo.port >= 0 && _latencyModelFingerprint.size() <= 4096 &&
+           _fullAttentionQueryDropTokens >= 0;
 }
 
 navi::ErrorCode AgentReportR::init(navi::ResourceInitContext &)
 {
     initLogger(_logger, "AgentReportR");
+    _controlConfig = _agentReportBridgeR->getControlConfig();
     _agentStartTimeUs = autil::TimeUtility::currentTime();
     if (_unifiedLatencyPrediction) {
         NaviSchedWorkloadSnapshot workload;
@@ -147,32 +166,29 @@ bool AgentReportR::setInflightTracker(
     if (!tracker) {
         return false;
     }
-    std::atomic_store_explicit(&_inflightTracker, tracker,
-                               std::memory_order_release);
+    std::atomic_store_explicit(&_inflightTracker, tracker, std::memory_order_release);
     return setInflightStats(tracker->snapshot());
 }
 
-bool AgentReportR::setInflightStats(
-    const RequestLatencyTracker::Snapshot &snapshot)
+bool AgentReportR::setInflightStats(const RequestLatencyTracker::Snapshot &snapshot)
 {
     if (!snapshot.valid()) {
         return false;
     }
     auto next = std::make_shared<const RequestLatencyTracker::Snapshot>(snapshot);
     while (true) {
-        auto current = std::atomic_load_explicit(
-            &_inflightStats, std::memory_order_acquire);
+        auto current =
+            std::atomic_load_explicit(&_inflightStats, std::memory_order_acquire);
         if (current && current->revision > snapshot.revision) {
             return true;
         }
         if (current && current->revision == snapshot.revision) {
             return current->requestCount == snapshot.requestCount &&
-                   current->totalPredictedLatencyMs ==
-                       snapshot.totalPredictedLatencyMs;
+                   current->totalPredictedLatencyMs == snapshot.totalPredictedLatencyMs;
         }
-        if (std::atomic_compare_exchange_weak_explicit(
-                &_inflightStats, &current, next, std::memory_order_release,
-                std::memory_order_acquire)) {
+        if (std::atomic_compare_exchange_weak_explicit(&_inflightStats, &current, next,
+                                                       std::memory_order_release,
+                                                       std::memory_order_acquire)) {
             return true;
         }
     }
@@ -180,16 +196,14 @@ bool AgentReportR::setInflightStats(
 
 RequestLatencyTracker::Snapshot AgentReportR::getInflightStats() const
 {
-    auto snapshot = std::atomic_load_explicit(
-        &_inflightStats, std::memory_order_acquire);
+    auto snapshot = std::atomic_load_explicit(&_inflightStats, std::memory_order_acquire);
     return snapshot ? *snapshot : RequestLatencyTracker::Snapshot();
 }
 
-bool AgentReportR::getLiveInflightStats(
-    RequestLatencyTracker::Snapshot &snapshot) const
+bool AgentReportR::getLiveInflightStats(RequestLatencyTracker::Snapshot &snapshot) const
 {
-    auto tracker = std::atomic_load_explicit(
-        &_inflightTracker, std::memory_order_acquire);
+    auto tracker =
+        std::atomic_load_explicit(&_inflightTracker, std::memory_order_acquire);
     if (!tracker) {
         return false;
     }
@@ -205,11 +219,10 @@ size_t AgentReportR::reportLatencyModelUpdated(
         return 0;
     }
     if (snapshot->onlineFitUpdate || recomputeWaitingInflight) {
-        auto tracker = std::atomic_load_explicit(
-            &_inflightTracker, std::memory_order_acquire);
+        auto tracker =
+            std::atomic_load_explicit(&_inflightTracker, std::memory_order_acquire);
         if (!tracker) {
-            _inflightRecomputeFailureCount.fetch_add(1,
-                                                     std::memory_order_relaxed);
+            _inflightRecomputeFailureCount.fetch_add(1, std::memory_order_relaxed);
             NAVI_KERNEL_LOG(ERROR,
                             "recompute inflight latency without tracker, "
                             "modelRevision [%ld]",
@@ -219,34 +232,35 @@ size_t AgentReportR::reportLatencyModelUpdated(
         RequestLatencyTracker::Snapshot inflight;
         size_t recomputedRequestCount = 0;
         const auto predictionTimeUs = autil::TimeUtility::currentTime();
-        const auto residualConfig = getSchedulerConfigSnapshot()
-                                        .config.residualRuntimeConfig();
+        const auto residualConfig =
+            getSchedulerConfigSnapshot().config.residualRuntimeConfig();
         const auto predictor = [&snapshot, predictionTimeUs, residualConfig](
                                    const NaviSchedLatencyFeatures &features) {
-            const auto base = NonLinearPrefillModelR::predict(
-                features, snapshot->parameters);
-            return LatencyResidualModel::evaluate(
-                       base, snapshot->residualParameters,
-                       snapshot->residualLastUpdateTimeUs,
-                       predictionTimeUs, residualConfig)
+            const auto base =
+                NonLinearPrefillModelR::usesGeometryForVersion(snapshot->binaryVersion)
+                    ? NonLinearPrefillModelR::predictForVersion(
+                          features, snapshot->parameters, snapshot->binaryVersion)
+                    : NonLinearPrefillModelR::predict(
+                          features, NonLinearPrefillModelR::parametersForLegacyPrediction(
+                                        snapshot->parameters, snapshot->binaryVersion));
+            return LatencyResidualModel::evaluate(base, snapshot->residualParameters,
+                                                  snapshot->residualLastUpdateTimeUs,
+                                                  predictionTimeUs, residualConfig)
                 .predictionMs;
         };
-        if (!tracker->recomputeWaiting(
-                predictor, inflight, recomputedRequestCount) ||
+        if (!tracker->recomputeWaiting(predictor, inflight, recomputedRequestCount) ||
             !setInflightStats(inflight)) {
-            _inflightRecomputeFailureCount.fetch_add(1,
-                                                     std::memory_order_relaxed);
+            _inflightRecomputeFailureCount.fetch_add(1, std::memory_order_relaxed);
             NAVI_KERNEL_LOG(ERROR,
                             "recompute inflight latency after model change failed, "
                             "modelRevision [%ld], inflightRevision [%lu], "
                             "inflightRequests [%d]",
-                            snapshot->revision, inflight.revision,
-                            inflight.requestCount);
+                            snapshot->revision, inflight.revision, inflight.requestCount);
             return 0;
         }
         _inflightRecomputeCount.fetch_add(1, std::memory_order_relaxed);
-        _inflightRecomputedRequestCount.fetch_add(
-            recomputedRequestCount, std::memory_order_relaxed);
+        _inflightRecomputedRequestCount.fetch_add(recomputedRequestCount,
+                                                  std::memory_order_relaxed);
     }
     setLatencyModelSnapshot(snapshot);
     auto update = makeUpdate(NaviSchedAgentEvent::LATENCY_MODEL_UPDATED, 0);
@@ -266,30 +280,37 @@ AgentReportR::QueuedPublishPtr AgentReportR::enqueueWorkloadLocked(
         std::vector<SubscriberPtr> subscribers;
         subscribers.reserve(_subscribers.size());
         for (const auto &pair : _subscribers) subscribers.emplace_back(pair.second);
-        return enqueuePublishLocked(std::move(trailingUpdates), std::move(subscribers), true);
+        return enqueuePublishLocked(std::move(trailingUpdates), std::move(subscribers),
+                                    true);
     };
-    const auto current = std::atomic_load_explicit(&_workloadSnapshot, std::memory_order_acquire);
-    if (!update && current && snapshot.admittedBatch.empty() && current->sameWorkload(snapshot)) {
+    const auto current =
+        std::atomic_load_explicit(&_workloadSnapshot, std::memory_order_acquire);
+    if (!update && current && snapshot.admittedBatch.empty() &&
+        current->sameWorkload(snapshot)) {
         snapshot.revision = current->revision;
         return publishTrailing();
     }
-    if (_stopping || (current && current->revision == std::numeric_limits<uint64_t>::max())) {
+    if (_stopping ||
+        (current && current->revision == std::numeric_limits<uint64_t>::max())) {
         snapshot.revision = 0;
         return publishTrailing();
     }
     snapshot.revision = current ? current->revision + 1 : 1;
-    if (!update) update = makeUpdate(NaviSchedAgentEvent::WORKLOAD_UPDATED, snapshot.eventTimeUs);
+    if (!update)
+        update = makeUpdate(NaviSchedAgentEvent::WORKLOAD_UPDATED, snapshot.eventTimeUs);
     update->workload = std::make_shared<NaviSchedWorkloadSnapshot>(snapshot);
     auto storedSnapshot = snapshot;
     storedSnapshot.admittedBatch = NaviSchedLocalBatchInfo();
     std::vector<SubscriberPtr> subscribers;
     subscribers.reserve(_subscribers.size());
     for (const auto &pair : _subscribers) subscribers.emplace_back(pair.second);
-    std::atomic_store_explicit(&_workloadSnapshot,
+    std::atomic_store_explicit(
+        &_workloadSnapshot,
         std::make_shared<const NaviSchedWorkloadSnapshot>(std::move(storedSnapshot)),
         std::memory_order_release);
     trailingUpdates.insert(trailingUpdates.begin(), std::move(update));
-    auto task = enqueuePublishLocked(std::move(trailingUpdates), std::move(subscribers), true);
+    auto task =
+        enqueuePublishLocked(std::move(trailingUpdates), std::move(subscribers), true);
     if (!task) {
         snapshot.revision = 0;
         return nullptr;
@@ -300,7 +321,8 @@ AgentReportR::QueuedPublishPtr AgentReportR::enqueueWorkloadLocked(
 void AgentReportR::finishWorkloadPublish(const QueuedPublishPtr &task) const
 {
     if (!task) return;
-    const auto beginUs = _workloadPublishTimingEnabled ? autil::TimeUtility::currentTime() : 0;
+    const auto beginUs =
+        _workloadPublishTimingEnabled ? autil::TimeUtility::currentTime() : 0;
     drainPublishQueue();
     waitPublish(task);
     if (_workloadPublishTimingEnabled) {
@@ -313,8 +335,9 @@ NaviSchedWorkloadSnapshot AgentReportR::observedWorkloadLocked() const
     auto snapshot = _observedWorkload;
     const auto nowUs = autil::TimeUtility::currentTime();
     if (snapshot.eventTimeUs > 0 && snapshot.runningRequestCount > 0) {
-        snapshot.runningElapsedTimeMs += std::max<int64_t>(0, nowUs - snapshot.eventTimeUs) /
-                                        1000.0 * snapshot.runningCapacityPrefillRequestCount;
+        snapshot.runningElapsedTimeMs +=
+            std::max<int64_t>(0, nowUs - snapshot.eventTimeUs) / 1000.0 *
+            snapshot.runningCapacityPrefillRequestCount;
     }
     snapshot.revision = 1;
     snapshot.eventTimeUs = nowUs;
@@ -324,23 +347,28 @@ NaviSchedWorkloadSnapshot AgentReportR::observedWorkloadLocked() const
 }
 
 uint64_t AgentReportR::reportWorkloadUpdated(
-    const NaviSchedWorkloadSnapshot &snapshot, const std::vector<int64_t> &coveredNativeBatchIds)
+    const NaviSchedWorkloadSnapshot &snapshot,
+    const std::vector<int64_t> &coveredNativeBatchIds)
 {
     auto observed = snapshot;
     observed.revision = 1;
-    if (observed.eventTimeUs <= 0) observed.eventTimeUs = autil::TimeUtility::currentTime();
+    if (observed.eventTimeUs <= 0)
+        observed.eventTimeUs = autil::TimeUtility::currentTime();
     if (!observed.valid()) return 0;
     NaviSchedWorkloadSnapshot published = observed;
     QueuedPublishPtr task;
     AgentWorkloadOwnership::RetiredBatches retired;
     auto covered = coveredNativeBatchIds;
-    if (observed.admittedBatch.valid()) covered.emplace_back(observed.admittedBatch.localBatchId);
+    if (observed.admittedBatch.valid())
+        covered.emplace_back(observed.admittedBatch.localBatchId);
     {
         autil::ScopedLock lock(_mutex);
         if (_stopping) return 0;
         if (!_pdSeparated && _unifiedLatencyPrediction) {
+            // Preview the complete replacement before changing either owner's state.
             if (!_nativeWorkload.combine(observed, published, covered) ||
-                !_nativeWorkload.handoff(covered, retired)) return 0;
+                !_nativeWorkload.handoff(covered, retired))
+                return 0;
             _observedWorkload = observed;
             _observedWorkload.admittedBatch = {};
         }
@@ -355,14 +383,16 @@ bool AgentReportR::reportNativeBatchReady(const NaviSchedBatchPtr &batch)
 {
     if (_pdSeparated || !_unifiedLatencyPrediction) return true;
     if (!batch) return false;
-    const auto prepared = AgentWorkloadOwnership::prepareBatch(AgentBatchR::getRequestStats(*batch));
+    const auto prepared =
+        AgentWorkloadOwnership::prepareBatch(AgentBatchR::getRequestStats(*batch));
     if (!prepared) return false;
     NaviSchedWorkloadSnapshot combined;
     QueuedPublishPtr task;
     AgentWorkloadOwnership::RetiredBatches retired;
     {
         autil::ScopedLock lock(_mutex);
-        if (_stopping || !_nativeWorkload.addBatch(batch->batchId, prepared)) return false;
+        if (_stopping || !_nativeWorkload.addBatch(batch->batchId, prepared))
+            return false;
         if (!_nativeWorkload.combine(observedWorkloadLocked(), combined)) {
             _nativeWorkload.handoff({batch->batchId}, retired);
             return false;
@@ -374,9 +404,11 @@ bool AgentReportR::reportNativeBatchReady(const NaviSchedBatchPtr &batch)
     return combined.revision > 0;
 }
 
-bool AgentReportR::reportNativeRequestReceived(
-    const NaviSchedRequestStats &request, int32_t batchWaitingRequests,
-    int32_t queuedBatchRequests, int32_t runningRequests, int64_t eventTimeUs)
+bool AgentReportR::reportNativeRequestReceived(const NaviSchedRequestStats &request,
+                                               int32_t batchWaitingRequests,
+                                               int32_t queuedBatchRequests,
+                                               int32_t runningRequests,
+                                               int64_t eventTimeUs)
 {
     const auto prepared = AgentWorkloadOwnership::prepareRequest(request);
     if (!prepared) return false;
@@ -390,20 +422,25 @@ bool AgentReportR::reportNativeRequestReceived(
     QueuedPublishPtr task;
     {
         autil::ScopedLock lock(_mutex);
-        if (_stopping || !_nativeWorkload.addUnbatchedRequest(request.requestId, prepared)) return false;
+        if (_stopping ||
+            !_nativeWorkload.addUnbatchedRequest(request.requestId, prepared))
+            return false;
         if (!_nativeWorkload.combine(observedWorkloadLocked(), combined)) {
             _nativeWorkload.removeUnbatchedRequests({request.requestId});
             return false;
         }
+        // One receive report commits inflight and workload together on Master.
         task = enqueueWorkloadLocked(combined, std::move(update));
     }
     finishWorkloadPublish(task);
     if (combined.revision == 0) return false;
-    _publishedPromptTokenCount.fetch_add(request.totalTokenCount, std::memory_order_relaxed);
+    _publishedPromptTokenCount.fetch_add(request.totalTokenCount,
+                                         std::memory_order_relaxed);
     return true;
 }
 
-bool AgentReportR::reportNativeUnbatchedRequestsRemoved(const std::vector<uint64_t> &requestIds)
+bool AgentReportR::reportNativeUnbatchedRequestsRemoved(
+    const std::vector<uint64_t> &requestIds)
 {
     if (_pdSeparated || !_unifiedLatencyPrediction) return true;
     NaviSchedWorkloadSnapshot combined;
@@ -420,8 +457,8 @@ bool AgentReportR::reportNativeUnbatchedRequestsRemoved(const std::vector<uint64
     return combined.revision > 0;
 }
 
-bool AgentReportR::reportNativeRequestsRemoved(
-    int64_t localBatchId, const std::vector<uint64_t> &requestIds)
+bool AgentReportR::reportNativeRequestsRemoved(int64_t localBatchId,
+                                               const std::vector<uint64_t> &requestIds)
 {
     if (_pdSeparated || !_unifiedLatencyPrediction) return true;
     NaviSchedWorkloadSnapshot combined;
@@ -430,7 +467,8 @@ bool AgentReportR::reportNativeRequestsRemoved(
         autil::ScopedLock lock(_mutex);
         if (!_nativeWorkload.hasBatch(localBatchId)) return true;
         if (!_nativeWorkload.removeRequests(localBatchId, requestIds) ||
-            !_nativeWorkload.combine(observedWorkloadLocked(), combined)) return false;
+            !_nativeWorkload.combine(observedWorkloadLocked(), combined))
+            return false;
         task = enqueueWorkloadLocked(combined);
     }
     finishWorkloadPublish(task);
@@ -447,7 +485,8 @@ bool AgentReportR::reportNativeBatchRemoved(int64_t localBatchId)
         autil::ScopedLock lock(_mutex);
         if (!_nativeWorkload.hasBatch(localBatchId)) return true;
         if (!_nativeWorkload.handoff({localBatchId}, retired) ||
-            !_nativeWorkload.combine(observedWorkloadLocked(), combined)) return false;
+            !_nativeWorkload.combine(observedWorkloadLocked(), combined))
+            return false;
         task = enqueueWorkloadLocked(combined);
     }
     retired.clear();
@@ -455,8 +494,16 @@ bool AgentReportR::reportNativeBatchRemoved(int64_t localBatchId)
     return combined.revision > 0;
 }
 
-bool AgentReportR::reportNativeBatchCompleted(int64_t localBatchId, int64_t pendingBatchId)
+bool AgentReportR::reportNativeBatchCompleted(int64_t localBatchId,
+                                              int64_t pendingBatchId,
+                                              const std::vector<NaviSchedCacheKeyType> &pendingTypes)
 {
+    for (size_t index = 0; index < pendingTypes.size(); ++index) {
+        if (!validCacheKeyType(pendingTypes[index]) ||
+            std::find(pendingTypes.begin(), pendingTypes.begin() + index,
+                      pendingTypes[index]) != pendingTypes.begin() + index)
+            return false;
+    }
     if (pendingBatchId <= 0) {
         reportNativeBatchRemoved(localBatchId);
         return true;
@@ -466,23 +513,29 @@ bool AgentReportR::reportNativeBatchCompleted(int64_t localBatchId, int64_t pend
     bool pendingCompleted = true;
     bool workloadCompleted = true;
     {
+        // Same lock order as cache updates and subscription. Never deliver under locks.
         autil::ScopedLock cacheLock(_cacheReportLock);
         std::vector<AgentUpdateToMasterDataPtr> updates;
-        if (pendingBatchId > 0) {
+        for (const auto type : pendingTypes) {
             AgentPendingCacheToMasterData pending;
             bool changed = false;
-            pendingCompleted = _agentPendingCacheR->retire(pendingBatchId, pending, changed) && changed;
-            if (pendingCompleted && changed) {
+            const bool retired = _agentPendingCacheR->forKeyType(type)
+                                     .retire(pendingBatchId, pending, changed);
+            pendingCompleted = retired && changed && pendingCompleted;
+            if (retired && changed) {
                 auto update = makeUpdate(NaviSchedAgentEvent::PENDING_CACHE_UPDATED, 0);
-                update->pendingCache = std::make_shared<AgentPendingCacheToMasterData>(std::move(pending));
+                update->pendingCache =
+                    std::make_shared<AgentPendingCacheToMasterData>(std::move(pending));
                 updates.emplace_back(std::move(update));
             }
         }
         autil::ScopedLock lock(_mutex);
-        if (!_pdSeparated && _unifiedLatencyPrediction && _nativeWorkload.hasBatch(localBatchId)) {
+        if (!_pdSeparated && _unifiedLatencyPrediction &&
+            _nativeWorkload.hasBatch(localBatchId)) {
             NaviSchedWorkloadSnapshot combined;
-            workloadCompleted = _nativeWorkload.handoff({localBatchId}, retired) &&
-                                _nativeWorkload.combine(observedWorkloadLocked(), combined);
+            workloadCompleted =
+                _nativeWorkload.handoff({localBatchId}, retired) &&
+                _nativeWorkload.combine(observedWorkloadLocked(), combined);
             if (workloadCompleted) {
                 task = enqueueWorkloadLocked(combined, {}, std::move(updates));
                 workloadCompleted = combined.revision > 0;
@@ -497,15 +550,17 @@ bool AgentReportR::reportNativeBatchCompleted(int64_t localBatchId, int64_t pend
     retired.clear();
     finishWorkloadPublish(task);
     if (!workloadCompleted) {
-        NAVI_KERNEL_LOG(WARN, "complete native workload report failed, batchId [%ld]", localBatchId);
+        NAVI_KERNEL_LOG(WARN, "complete native workload report failed, batchId [%ld]",
+                        localBatchId);
     }
     return pendingCompleted;
 }
 
-size_t AgentReportR::reportSchedulerConfigUpdated(
-    uint64_t requestGeneration, uint64_t appliedGeneration,
-    const std::string &configHash, const std::string &configJson,
-    const std::string &error) const
+size_t AgentReportR::reportSchedulerConfigUpdated(uint64_t requestGeneration,
+                                                  uint64_t appliedGeneration,
+                                                  const std::string &configHash,
+                                                  const std::string &configJson,
+                                                  const std::string &error) const
 {
     auto update = makeUpdate(NaviSchedAgentEvent::SCHEDULER_CONFIG_UPDATED, 0);
     update->schedulerConfigRequestGeneration = requestGeneration;
@@ -516,8 +571,7 @@ size_t AgentReportR::reportSchedulerConfigUpdated(
     return publish(update);
 }
 
-size_t AgentReportR::reportRequestReceived(uint64_t requestId,
-                                           int64_t promptTokenCount,
+size_t AgentReportR::reportRequestReceived(uint64_t requestId, int64_t promptTokenCount,
                                            int32_t inflightRequests,
                                            int32_t batchWaitingRequests,
                                            int32_t queuedBatchRequests,
@@ -535,23 +589,23 @@ size_t AgentReportR::reportRequestReceived(uint64_t requestId,
     update->requestEvent->queuedBatchRequests = queuedBatchRequests;
     update->requestEvent->runningRequests = runningRequests;
     const auto publishCount = publish(update);
-    _publishedPromptTokenCount.fetch_add(
-        static_cast<uint64_t>(promptTokenCount), std::memory_order_relaxed);
+    _publishedPromptTokenCount.fetch_add(static_cast<uint64_t>(promptTokenCount),
+                                         std::memory_order_relaxed);
     return publishCount;
 }
 
 size_t AgentReportR::reportExecutionLoad(
     int32_t batchWaitingRequests, int32_t queuedBatchRequests, int32_t runningRequests,
     double queueTotalPredictedLatencyMs, double queueDecayHeadRemainingMs,
-    uint64_t batchTimeoutCount, uint64_t abnormalBatchFinishCount,
-    int64_t eventTimeUs, const NaviSchedLocalBatchInfo &localBatch) const
+    uint64_t batchTimeoutCount, uint64_t abnormalBatchFinishCount, int64_t eventTimeUs,
+    const NaviSchedLocalBatchInfo &localBatch,
+    const NaviSchedQueueModelState &queueModel) const
 {
     if (batchWaitingRequests < 0 || queuedBatchRequests < 0 || runningRequests < 0 ||
         !std::isfinite(queueTotalPredictedLatencyMs) ||
-        queueTotalPredictedLatencyMs < 0.0 ||
-        !std::isfinite(queueDecayHeadRemainingMs) ||
+        queueTotalPredictedLatencyMs < 0.0 || !std::isfinite(queueDecayHeadRemainingMs) ||
         queueDecayHeadRemainingMs < 0.0 ||
-        queueDecayHeadRemainingMs > queueTotalPredictedLatencyMs) {
+        !queueModel.valid(queueTotalPredictedLatencyMs)) {
         return 0;
     }
     auto update = makeUpdate(NaviSchedAgentEvent::EXECUTION_LOAD_UPDATED, eventTimeUs);
@@ -562,8 +616,8 @@ size_t AgentReportR::reportExecutionLoad(
     update->requestEvent->batchTimeoutCount = batchTimeoutCount;
     update->requestEvent->abnormalBatchFinishCount = abnormalBatchFinishCount;
     update->requestEvent->queueTotalPredictedLatencyMs = queueTotalPredictedLatencyMs;
-    update->requestEvent->queueDecayHeadRemainingMs =
-        queueDecayHeadRemainingMs;
+    update->requestEvent->queueDecayHeadRemainingMs = queueDecayHeadRemainingMs;
+    update->requestEvent->queueModel = queueModel;
     update->requestEvent->localBatch = localBatch;
     return publish(update);
 }
@@ -571,35 +625,32 @@ size_t AgentReportR::reportExecutionLoad(
 size_t AgentReportR::reportBatchFinished(
     int32_t inflightRequests, int32_t batchWaitingRequests, int32_t queuedBatchRequests,
     int32_t runningRequests, double latencyMs, double queueTotalPredictedLatencyMs,
-    double queueDecayHeadRemainingMs,
-    const NaviSchedCacheUpdate &cacheUpdate,
-    int32_t completedRequestCount,
-    int64_t cacheHitTokens, int64_t cacheMissTokens, uint64_t batchTimeoutCount,
-    uint64_t abnormalBatchFinishCount, bool abnormalBatchFinished,
-    int64_t eventTimeUs, const NaviSchedLocalBatchInfo &localBatch,
-    double agentPredictedExecutionLatencyMs, double backendQueueLatencyMs,
-    const NaviSchedLatencyValidationStats &validationStats) const
+    double queueDecayHeadRemainingMs, const NaviSchedCacheUpdate &cacheUpdate,
+    int32_t completedRequestCount, int64_t cacheHitTokens, int64_t cacheMissTokens,
+    uint64_t batchTimeoutCount, uint64_t abnormalBatchFinishCount,
+    bool abnormalBatchFinished, int64_t eventTimeUs,
+    const NaviSchedLocalBatchInfo &localBatch, double agentPredictedExecutionLatencyMs,
+    double backendQueueLatencyMs, const NaviSchedLatencyValidationStats &validationStats,
+    const NaviSchedQueueModelState &queueModel) const
 {
     if (inflightRequests < 0 || batchWaitingRequests < 0 || queuedBatchRequests < 0 ||
         runningRequests < 0 || latencyMs < 0.0 ||
         !std::isfinite(queueTotalPredictedLatencyMs) ||
-        queueTotalPredictedLatencyMs < 0.0 ||
-        !std::isfinite(queueDecayHeadRemainingMs) ||
+        queueTotalPredictedLatencyMs < 0.0 || !std::isfinite(queueDecayHeadRemainingMs) ||
         queueDecayHeadRemainingMs < 0.0 ||
-        queueDecayHeadRemainingMs > queueTotalPredictedLatencyMs ||
-        completedRequestCount <= 0 || cacheHitTokens < 0 || cacheMissTokens < 0) {
+        !queueModel.valid(queueTotalPredictedLatencyMs) || completedRequestCount <= 0 ||
+        cacheHitTokens < 0 || cacheMissTokens < 0) {
         return 0;
     }
     const auto latencyValidationEnabled =
         _latencyValidationEnabled.load(std::memory_order_relaxed);
-    const bool latencyValidationValid =
-        latencyValidationEnabled && localBatch.valid() &&
-        std::isfinite(agentPredictedExecutionLatencyMs) &&
-        agentPredictedExecutionLatencyMs >= 0.0 &&
-        std::isfinite(backendQueueLatencyMs) && backendQueueLatencyMs >= 0.0;
+    const bool latencyValidationValid = latencyValidationEnabled && localBatch.valid() &&
+                                        std::isfinite(agentPredictedExecutionLatencyMs) &&
+                                        agentPredictedExecutionLatencyMs >= 0.0 &&
+                                        std::isfinite(backendQueueLatencyMs) &&
+                                        backendQueueLatencyMs >= 0.0;
     if (latencyValidationEnabled && !latencyValidationValid) {
-        _suppressedLatencyValidationBatchCount.fetch_add(
-            1, std::memory_order_relaxed);
+        _suppressedLatencyValidationBatchCount.fetch_add(1, std::memory_order_relaxed);
     }
     auto update = makeUpdate(NaviSchedAgentEvent::BATCH_FINISHED, eventTimeUs);
     attachInflightStats(update);
@@ -616,11 +667,11 @@ size_t AgentReportR::reportBatchFinished(
     requestEvent.latencyMs = latencyMs;
     requestEvent.queueTotalPredictedLatencyMs = queueTotalPredictedLatencyMs;
     requestEvent.queueDecayHeadRemainingMs = queueDecayHeadRemainingMs;
+    requestEvent.queueModel = queueModel;
     requestEvent.localBatch = localBatch;
     if (latencyValidationValid) {
         requestEvent.latencyValidation = true;
-        requestEvent.agentPredictedExecutionLatencyMs =
-            agentPredictedExecutionLatencyMs;
+        requestEvent.agentPredictedExecutionLatencyMs = agentPredictedExecutionLatencyMs;
         requestEvent.backendQueueLatencyMs = backendQueueLatencyMs;
         requestEvent.latencyValidationStats = validationStats;
         autil::ScopedWriteLock lock(_latencyValidationStatsLock);
@@ -635,7 +686,8 @@ size_t AgentReportR::reportBatchFinished(
              bucketId < validationStats.executionLatencyBuckets.size(); ++bucketId) {
             const auto previousCount =
                 bucketId < _latencyValidationStats.executionLatencyBuckets.size()
-                    ? _latencyValidationStats.executionLatencyBuckets[bucketId].sampleCount
+                    ? _latencyValidationStats.executionLatencyBuckets[bucketId]
+                          .sampleCount
                     : 0;
             const auto currentCount =
                 validationStats.executionLatencyBuckets[bucketId].sampleCount;
@@ -645,8 +697,8 @@ size_t AgentReportR::reportBatchFinished(
         }
         _latencyValidationStats = validationStats;
     }
-    if (cacheUpdate.totalBlocks >= 0 ||
-        cacheUpdate.blockSize >= 0 || cacheUpdate.linearStep >= 0 ||
+    if (cacheUpdate.totalBlocks >= 0 || cacheUpdate.blockSize >= 0 ||
+        cacheUpdate.linearStep >= 0 ||
         BlockHashUtil::size(cacheUpdate.addedBlockHashes) > 0 ||
         BlockHashUtil::size(cacheUpdate.removedBlockHashes) > 0 ||
         BlockHashUtil::size(cacheUpdate.addedFullReadyBlockHashes) > 0 ||
@@ -654,14 +706,17 @@ size_t AgentReportR::reportBatchFinished(
         BlockHashUtil::size(cacheUpdate.addedTailReadyBlockHashes) > 0 ||
         BlockHashUtil::size(cacheUpdate.removedTailReadyBlockHashes) > 0) {
         update->cache = std::make_shared<AgentCacheToMasterData>();
+        update->cache->cacheKeyType = cacheUpdate.cacheKeyType;
         update->cache->totalBlocks = cacheUpdate.totalBlocks;
         update->cache->fullSnapshot = cacheUpdate.fullSnapshot;
         update->cache->addedBlockHashes = cacheUpdate.addedBlockHashes;
         update->cache->removedBlockHashes = cacheUpdate.removedBlockHashes;
         update->cache->addedFullReadyBlockHashes = cacheUpdate.addedFullReadyBlockHashes;
-        update->cache->removedFullReadyBlockHashes = cacheUpdate.removedFullReadyBlockHashes;
+        update->cache->removedFullReadyBlockHashes =
+            cacheUpdate.removedFullReadyBlockHashes;
         update->cache->addedTailReadyBlockHashes = cacheUpdate.addedTailReadyBlockHashes;
-        update->cache->removedTailReadyBlockHashes = cacheUpdate.removedTailReadyBlockHashes;
+        update->cache->removedTailReadyBlockHashes =
+            cacheUpdate.removedTailReadyBlockHashes;
         update->cache->blockSize = cacheUpdate.blockSize;
         update->cache->linearStep = cacheUpdate.linearStep;
         update->cache->hybridTailRequired = cacheUpdate.hybridTailRequired;
@@ -685,26 +740,24 @@ NaviSchedLatencyValidationStats AgentReportR::getLatencyValidationStats() const
     return _latencyValidationStats;
 }
 
-AgentReportR::LatencyValidationDiagnostics
-AgentReportR::getLatencyValidationDiagnostics() const
+AgentReportR::LatencyValidationDiagnostics AgentReportR::getLatencyValidationDiagnostics()
+    const
 {
     autil::ScopedReadLock lock(_latencyValidationStatsLock);
     LatencyValidationDiagnostics diagnostics;
     diagnostics.stats = _latencyValidationStats;
     diagnostics.lastUpdateTimeUs = _latencyValidationLastUpdateTimeUs;
-    diagnostics.bucketLastUpdateTimeUs =
-        _latencyValidationBucketLastUpdateTimeUs;
+    diagnostics.bucketLastUpdateTimeUs = _latencyValidationBucketLastUpdateTimeUs;
     return diagnostics;
 }
 
 NaviSchedWorkloadSnapshotConstPtr AgentReportR::getWorkloadSnapshot() const
 {
-    return std::atomic_load_explicit(&_workloadSnapshot,
-                                     std::memory_order_acquire);
+    return std::atomic_load_explicit(&_workloadSnapshot, std::memory_order_acquire);
 }
 
-AgentReportR::WorkloadPublishWindowStats
-AgentReportR::takeWorkloadPublishWindowStats() const
+AgentReportR::WorkloadPublishWindowStats AgentReportR::takeWorkloadPublishWindowStats()
+    const
 {
     WorkloadPublishWindowStats stats;
     int64_t publishTimeUs = 0;
@@ -718,16 +771,22 @@ AgentReportR::takeWorkloadPublishWindowStats() const
 
 size_t AgentReportR::reportCacheUpdated(const NaviSchedCacheUpdate &update) const
 {
+    if (!validCacheKeyType(update.cacheKeyType)) {
+        return 0;
+    }
+    const auto cacheKeyType = update.cacheKeyType;
     QueuedPublishPtr cachePublish;
+    QueuedPublishPtr lastPublish;
     {
+        // Cache mutation and queue insertion share one order; delivery happens below.
         autil::ScopedLock cacheReportLock(_cacheReportLock);
         AgentCacheR::State state;
         if (!_agentCacheR->apply(update, state)) {
             return 0;
         }
-        auto report = makeUpdate(NaviSchedAgentEvent::CACHE_UPDATED,
-                                 update.eventTimeUs);
+        auto report = makeUpdate(NaviSchedAgentEvent::CACHE_UPDATED, update.eventTimeUs);
         report->cache = std::make_shared<AgentCacheToMasterData>();
+        report->cache->cacheKeyType = cacheKeyType;
         report->cache->totalBlocks = update.totalBlocks;
         report->cache->fullSnapshot = update.fullSnapshot;
         report->cache->addedBlockHashes = update.addedBlockHashes;
@@ -747,21 +806,43 @@ size_t AgentReportR::reportCacheUpdated(const NaviSchedCacheUpdate &update) cons
         report->cache->tailReadyBlockCount = state.tailReadyBlockCount;
         report->cache->tailReadyHashChecksum = state.tailReadyHashChecksum;
         report->cache->rtpCachedBlockCount = state.rtpCachedBlockCount;
+        if (cacheKeyType == NaviSchedCacheKeyType::V6D) {
+            report->fullAttentionQueryDropTokens =
+                state.policy.fullAttentionQueryDropTokens;
+            report->mambaReplayStopShift = state.policy.mambaReplayStopShift;
+            report->mambaRetentionInterval = state.policy.mambaRetentionInterval;
+            report->mambaAlign = state.policy.mambaAlign;
+        }
         cachePublish = enqueuePublish(report);
+        lastPublish = cachePublish;
+        for (auto batchId : _agentPendingCacheR->forKeyType(cacheKeyType).resolveCompleted(update)) {
+            QueuedPublishPtr pendingPublish;
+            if (retirePendingCacheLocked(batchId, &pendingPublish, cacheKeyType) &&
+                pendingPublish) {
+                lastPublish = pendingPublish;
+            }
+        }
     }
     drainPublishQueue();
-    return waitPublish(cachePublish);
+    const auto cachePublishCount = waitPublish(cachePublish);
+    if (lastPublish != cachePublish) waitPublish(lastPublish);
+    return cachePublishCount;
 }
 
 bool AgentReportR::reportPendingCacheReady(
-    const NaviSchedPendingCacheReservation &reservation) const
+    const NaviSchedPendingCacheReservation &reservation,
+    NaviSchedCacheKeyType cacheKeyType) const
 {
+    if (!validCacheKeyType(cacheKeyType)) {
+        return false;
+    }
     QueuedPublishPtr publishTask;
     {
         autil::ScopedLock cacheReportLock(_cacheReportLock);
         AgentPendingCacheToMasterData pendingUpdate;
         bool changed = false;
-        if (!_agentPendingCacheR->reserve(reservation, pendingUpdate, changed)) {
+        if (!_agentPendingCacheR->forKeyType(cacheKeyType)
+                 .reserve(reservation, pendingUpdate, changed)) {
             return false;
         }
         if (!changed) {
@@ -777,16 +858,36 @@ bool AgentReportR::reportPendingCacheReady(
     return true;
 }
 
-bool AgentReportR::reportPendingCacheCompleted(int64_t localBatchId) const
+bool AgentReportR::reportPendingCacheCompleted(int64_t localBatchId,
+                                               NaviSchedCacheKeyType cacheKeyType) const
 {
+    if (!validCacheKeyType(cacheKeyType)) return false;
     QueuedPublishPtr publishTask;
     {
         autil::ScopedLock cacheReportLock(_cacheReportLock);
         NaviSchedPendingCacheReservation reservation;
-        if (!_agentPendingCacheR->getReservation(localBatchId, reservation)) {
+        if (!_agentPendingCacheR->forKeyType(cacheKeyType)
+                 .getReservation(localBatchId, reservation)) return false;
+        // Terminal batches cannot promise future publication. Physical cache
+        // updates remain independent, including events delivered after completion.
+        if (!retirePendingCacheLocked(localBatchId, &publishTask, cacheKeyType))
             return false;
-        }
-        if (!retirePendingCacheLocked(localBatchId, &publishTask)) {
+    }
+    drainPublishQueue();
+    waitPublish(publishTask);
+    return true;
+}
+
+bool AgentReportR::reportPendingCacheAborted(int64_t localBatchId,
+                                             NaviSchedCacheKeyType cacheKeyType) const
+{
+    if (!validCacheKeyType(cacheKeyType)) {
+        return false;
+    }
+    QueuedPublishPtr publishTask;
+    {
+        autil::ScopedLock cacheReportLock(_cacheReportLock);
+        if (!retirePendingCacheLocked(localBatchId, &publishTask, cacheKeyType)) {
             return false;
         }
     }
@@ -795,27 +896,47 @@ bool AgentReportR::reportPendingCacheCompleted(int64_t localBatchId) const
     return true;
 }
 
-bool AgentReportR::reportPendingCacheAborted(int64_t localBatchId) const
+bool AgentReportR::removePendingCachePublications(int64_t batchId,
+                                                  const NaviSchedBlockHashes &failedFull,
+                                                  const NaviSchedBlockHashes &failedTail,
+                                                  NaviSchedCacheKeyType type,
+                                                  bool &retired) const
 {
-    QueuedPublishPtr publishTask;
+    retired = false;
+    if (!validCacheKeyType(type)) {
+        return false;
+    }
+    QueuedPublishPtr task;
     {
-        autil::ScopedLock cacheReportLock(_cacheReportLock);
-        if (!retirePendingCacheLocked(localBatchId, &publishTask)) {
+        autil::ScopedLock lock(_cacheReportLock);
+        AgentPendingCacheToMasterData update;
+        bool changed = false;
+        if (!_agentPendingCacheR->forKeyType(type).removePublications(
+                batchId, failedFull, failedTail, update, changed, retired)) {
             return false;
         }
+        if (!changed) {
+            return true;
+        }
+        auto report = makeUpdate(NaviSchedAgentEvent::PENDING_CACHE_UPDATED, 0);
+        report->pendingCache =
+            std::make_shared<AgentPendingCacheToMasterData>(std::move(update));
+        task = enqueuePublish(report);
     }
     drainPublishQueue();
-    waitPublish(publishTask);
+    waitPublish(task);
     return true;
 }
 
 bool AgentReportR::replacePendingCache(
-    int64_t localBatchId,
-    const NaviSchedPendingCacheReservation *remainingReservation) const
+    int64_t localBatchId, const NaviSchedPendingCacheReservation *remainingReservation,
+    NaviSchedCacheKeyType cacheKeyType) const
 {
+    if (!validCacheKeyType(cacheKeyType)) {
+        return false;
+    }
     if (localBatchId <= 0 ||
-        (remainingReservation &&
-         remainingReservation->batchId != localBatchId)) {
+        (remainingReservation && remainingReservation->batchId != localBatchId)) {
         return false;
     }
     QueuedPublishPtr publishTask;
@@ -823,11 +944,12 @@ bool AgentReportR::replacePendingCache(
         autil::ScopedLock cacheReportLock(_cacheReportLock);
         AgentPendingCacheToMasterData pendingUpdate;
         bool changed = false;
-        const auto updated = remainingReservation
-                                 ? _agentPendingCacheR->retain(
-                                       *remainingReservation, pendingUpdate, changed)
-                                 : _agentPendingCacheR->retire(
-                                       localBatchId, pendingUpdate, changed);
+        const auto updated =
+            remainingReservation
+                ? _agentPendingCacheR->forKeyType(cacheKeyType)
+                      .retain(*remainingReservation, pendingUpdate, changed)
+                : _agentPendingCacheR->forKeyType(cacheKeyType)
+                      .retire(localBatchId, pendingUpdate, changed);
         if (!updated) {
             return false;
         }
@@ -845,27 +967,23 @@ bool AgentReportR::replacePendingCache(
 }
 
 size_t AgentReportR::reportBatchRequestsAborted(
-    int32_t inflightRequests, int32_t batchWaitingRequests,
-    int32_t queuedBatchRequests, int32_t runningRequests,
-    double queueTotalPredictedLatencyMs, double queueDecayHeadRemainingMs,
-    uint64_t batchTimeoutCount, uint64_t abnormalBatchFinishCount,
-    int32_t abortedRequestCount, int64_t eventTimeUs,
-    const NaviSchedLocalBatchInfo &localBatch) const
+    int32_t inflightRequests, int32_t batchWaitingRequests, int32_t queuedBatchRequests,
+    int32_t runningRequests, double queueTotalPredictedLatencyMs,
+    double queueDecayHeadRemainingMs, uint64_t batchTimeoutCount,
+    uint64_t abnormalBatchFinishCount, int32_t abortedRequestCount, int64_t eventTimeUs,
+    const NaviSchedLocalBatchInfo &localBatch,
+    const NaviSchedQueueModelState &queueModel) const
 {
-    if (inflightRequests < 0 || batchWaitingRequests < 0 ||
-        queuedBatchRequests < 0 || runningRequests < 0 ||
-        !std::isfinite(queueTotalPredictedLatencyMs) ||
-        queueTotalPredictedLatencyMs < 0.0 ||
-        !std::isfinite(queueDecayHeadRemainingMs) ||
+    if (inflightRequests < 0 || batchWaitingRequests < 0 || queuedBatchRequests < 0 ||
+        runningRequests < 0 || !std::isfinite(queueTotalPredictedLatencyMs) ||
+        queueTotalPredictedLatencyMs < 0.0 || !std::isfinite(queueDecayHeadRemainingMs) ||
         queueDecayHeadRemainingMs < 0.0 ||
-        queueDecayHeadRemainingMs > queueTotalPredictedLatencyMs ||
-        abortedRequestCount <= 0 || !localBatch.valid() ||
-        localBatch.requestIds.empty() ||
+        !queueModel.valid(queueTotalPredictedLatencyMs) || abortedRequestCount <= 0 ||
+        !localBatch.valid() || localBatch.requestIds.empty() ||
         localBatch.requestCount != abortedRequestCount) {
         return 0;
     }
-    auto update =
-        makeUpdate(NaviSchedAgentEvent::BATCH_REQUESTS_ABORTED, eventTimeUs);
+    auto update = makeUpdate(NaviSchedAgentEvent::BATCH_REQUESTS_ABORTED, eventTimeUs);
     attachInflightStats(update);
     auto &requestEvent = *update->requestEvent;
     requestEvent.batchWaitingRequests = batchWaitingRequests;
@@ -877,13 +995,31 @@ size_t AgentReportR::reportBatchRequestsAborted(
     requestEvent.abnormalBatchFinished = true;
     requestEvent.queueTotalPredictedLatencyMs = queueTotalPredictedLatencyMs;
     requestEvent.queueDecayHeadRemainingMs = queueDecayHeadRemainingMs;
+    requestEvent.queueModel = queueModel;
     requestEvent.localBatch = localBatch;
     return publish(update);
 }
 
-bool AgentReportR::reportPendingCacheSnapshot(
-    const std::string &collectorId) const
+bool AgentReportR::reportPendingCacheSnapshot(const std::string &collectorId) const
 {
+    bool success = true;
+    for (const auto cacheKeyType :
+         {NaviSchedCacheKeyType::BLOCK_POOL, NaviSchedCacheKeyType::V6D}) {
+        if (_agentCacheR->hasKeyType(cacheKeyType) ||
+            _agentPendingCacheR->hasKeyType(cacheKeyType)) {
+            const bool sent = reportPendingCacheSnapshot(collectorId, cacheKeyType);
+            success = success && sent;
+        }
+    }
+    return success;
+}
+
+bool AgentReportR::reportPendingCacheSnapshot(const std::string &collectorId,
+                                              NaviSchedCacheKeyType cacheKeyType) const
+{
+    if (!validCacheKeyType(cacheKeyType)) {
+        return false;
+    }
     if (collectorId.empty()) {
         return false;
     }
@@ -896,21 +1032,25 @@ bool AgentReportR::reportPendingCacheSnapshot(
             return false;
         }
         auto report = makeUpdate(NaviSchedAgentEvent::PENDING_CACHE_UPDATED, 0);
-        report->pendingCache =
-            std::make_shared<AgentPendingCacheToMasterData>(
-                _agentPendingCacheR->makeSnapshot());
+        report->pendingCache = std::make_shared<AgentPendingCacheToMasterData>(
+            _agentPendingCacheR->forKeyType(cacheKeyType).makeSnapshot());
         publishTask = enqueuePublishLocked({std::move(report)}, {it->second}, true);
     }
     drainPublishQueue();
     return 1 == waitPublish(publishTask);
 }
 
-bool AgentReportR::retirePendingCacheLocked(
-    int64_t localBatchId, QueuedPublishPtr *publishTask) const
+bool AgentReportR::retirePendingCacheLocked(int64_t localBatchId,
+                                            QueuedPublishPtr *publishTask,
+                                            NaviSchedCacheKeyType cacheKeyType) const
 {
+    if (!validCacheKeyType(cacheKeyType)) {
+        return false;
+    }
     AgentPendingCacheToMasterData pendingUpdate;
     bool changed = false;
-    if (!_agentPendingCacheR->retire(localBatchId, pendingUpdate, changed)) {
+    if (!_agentPendingCacheR->forKeyType(cacheKeyType)
+             .retire(localBatchId, pendingUpdate, changed)) {
         return false;
     }
     if (!changed) {
@@ -927,15 +1067,16 @@ bool AgentReportR::retirePendingCacheLocked(
 }
 
 NaviSchedRequestStats AgentReportR::makeRequestStats(
-    const NaviSchedBatchRequest &request) const
+    const NaviSchedBatchRequest &request, NaviSchedCacheKeyType cacheKeyType) const
 {
-    return makeRequestAudit(request).stats;
+    return makeRequestAudit(request, cacheKeyType).stats;
 }
 
 AgentCacheR::RequestAudit AgentReportR::makeRequestAudit(
-    const NaviSchedBatchRequest &request) const
+    const NaviSchedBatchRequest &request, NaviSchedCacheKeyType cacheKeyType) const
 {
-    return _agentCacheR->makeRequestAudit(request, _agentPendingCacheR);
+    return _agentCacheR->forKeyType(cacheKeyType)
+        .makeRequestAudit(request, &_agentPendingCacheR->forKeyType(cacheKeyType));
 }
 
 size_t AgentReportR::beginStop(int64_t eventTimeUs)
@@ -960,8 +1101,8 @@ size_t AgentReportR::beginStop(int64_t eventTimeUs)
                 ++it;
             }
         }
-        publishTask = enqueuePublishLocked(
-            {std::move(update)}, std::move(subscribers), true, true);
+        publishTask =
+            enqueuePublishLocked({std::move(update)}, std::move(subscribers), true, true);
     }
     drainPublishQueue();
     auto count = waitPublish(publishTask);
@@ -1024,6 +1165,7 @@ bool AgentReportR::subscribe(const std::string &collectorId,
     SubscriberPtr subscriber;
     QueuedPublishPtr publishTask;
     {
+        // Queue the complete initial state before exposing the subscriber to deltas.
         autil::ScopedLock cacheReportLock(_cacheReportLock);
         autil::ScopedLock lock(_mutex);
         if (_stopping || !_handshake) {
@@ -1037,56 +1179,70 @@ bool AgentReportR::subscribe(const std::string &collectorId,
         handshake->control = _handshake->control;
         attachInflightStats(handshake);
         handshake->latency = _handshake->latency;
-        handshake->latencyModelFingerprint =
-            _handshake->latencyModelFingerprint;
+        handshake->latencyModelFingerprint = _handshake->latencyModelFingerprint;
         handshake->latencyModelTrusted = _handshake->latencyModelTrusted;
-        handshake->latencyModelWarmStarted =
-            _handshake->latencyModelWarmStarted;
-        handshake->schedulerConfigGeneration =
-            _handshake->schedulerConfigGeneration;
+        handshake->latencyModelWarmStarted = _handshake->latencyModelWarmStarted;
+        handshake->schedulerConfigGeneration = _handshake->schedulerConfigGeneration;
         handshake->schedulerConfigHash = _handshake->schedulerConfigHash;
         handshake->schedulerConfigJson = _handshake->schedulerConfigJson;
         auto workload = getWorkloadSnapshot();
         if (workload) {
-            handshake->workload =
-                std::make_shared<NaviSchedWorkloadSnapshot>(*workload);
+            handshake->workload = std::make_shared<NaviSchedWorkloadSnapshot>(*workload);
         }
-        auto cacheSnapshot = _agentCacheR->makeSnapshot();
-        auto cacheUpdate =
-            makeUpdate(NaviSchedAgentEvent::CACHE_UPDATED, cacheSnapshot.eventTimeUs);
-        cacheUpdate->cache = std::make_shared<AgentCacheToMasterData>();
-        cacheUpdate->cache->totalBlocks = cacheSnapshot.totalBlocks;
-        cacheUpdate->cache->fullSnapshot = true;
-        cacheUpdate->cache->addedBlockHashes = cacheSnapshot.addedBlockHashes;
-        cacheUpdate->cache->addedFullReadyBlockHashes =
-            cacheSnapshot.addedFullReadyBlockHashes;
-        cacheUpdate->cache->addedTailReadyBlockHashes =
-            cacheSnapshot.addedTailReadyBlockHashes;
-        cacheUpdate->cache->blockSize = cacheSnapshot.blockSize;
-        cacheUpdate->cache->linearStep = cacheSnapshot.linearStep;
-        cacheUpdate->cache->hybridTailRequired = cacheSnapshot.hybridTailRequired;
-        cacheUpdate->cache->revision = cacheSnapshot.revision;
-        cacheUpdate->cache->cachedBlockCount = cacheSnapshot.cachedBlockCount;
-        cacheUpdate->cache->hashChecksum = cacheSnapshot.hashChecksum;
-        cacheUpdate->cache->fullReadyBlockCount = cacheSnapshot.fullReadyBlockCount;
-        cacheUpdate->cache->fullReadyHashChecksum =
-            cacheSnapshot.fullReadyHashChecksum;
-        cacheUpdate->cache->tailReadyBlockCount = cacheSnapshot.tailReadyBlockCount;
-        cacheUpdate->cache->tailReadyHashChecksum =
-            cacheSnapshot.tailReadyHashChecksum;
-        cacheUpdate->cache->rtpCachedBlockCount = cacheSnapshot.rtpCachedBlockCount;
-        auto pendingUpdate =
-            makeUpdate(NaviSchedAgentEvent::PENDING_CACHE_UPDATED, 0);
-        pendingUpdate->pendingCache =
-            std::make_shared<AgentPendingCacheToMasterData>(
-                _agentPendingCacheR->makeSnapshot());
+        std::vector<AgentUpdateToMasterDataPtr> initialUpdates{std::move(handshake)};
+        for (const auto cacheKeyType :
+             {NaviSchedCacheKeyType::BLOCK_POOL, NaviSchedCacheKeyType::V6D}) {
+            if (!_agentCacheR->hasKeyType(cacheKeyType) &&
+                !_agentPendingCacheR->hasKeyType(cacheKeyType)) {
+                continue;
+            }
+            auto cacheSnapshot = _agentCacheR->forKeyType(cacheKeyType).makeSnapshot();
+            auto cacheUpdate =
+                makeUpdate(NaviSchedAgentEvent::CACHE_UPDATED, cacheSnapshot.eventTimeUs);
+            cacheUpdate->cache = std::make_shared<AgentCacheToMasterData>();
+            cacheUpdate->cache->cacheKeyType = cacheKeyType;
+            cacheUpdate->cache->totalBlocks = cacheSnapshot.totalBlocks;
+            cacheUpdate->cache->fullSnapshot = true;
+            cacheUpdate->cache->addedBlockHashes = cacheSnapshot.addedBlockHashes;
+            cacheUpdate->cache->addedFullReadyBlockHashes =
+                cacheSnapshot.addedFullReadyBlockHashes;
+            cacheUpdate->cache->addedTailReadyBlockHashes =
+                cacheSnapshot.addedTailReadyBlockHashes;
+            cacheUpdate->cache->blockSize = cacheSnapshot.blockSize;
+            cacheUpdate->cache->linearStep = cacheSnapshot.linearStep;
+            cacheUpdate->cache->hybridTailRequired = cacheSnapshot.hybridTailRequired;
+            cacheUpdate->cache->revision = cacheSnapshot.revision;
+            cacheUpdate->cache->cachedBlockCount = cacheSnapshot.cachedBlockCount;
+            cacheUpdate->cache->hashChecksum = cacheSnapshot.hashChecksum;
+            cacheUpdate->cache->fullReadyBlockCount = cacheSnapshot.fullReadyBlockCount;
+            cacheUpdate->cache->fullReadyHashChecksum =
+                cacheSnapshot.fullReadyHashChecksum;
+            cacheUpdate->cache->tailReadyBlockCount = cacheSnapshot.tailReadyBlockCount;
+            cacheUpdate->cache->tailReadyHashChecksum =
+                cacheSnapshot.tailReadyHashChecksum;
+            cacheUpdate->cache->rtpCachedBlockCount = cacheSnapshot.rtpCachedBlockCount;
+            if (cacheKeyType == NaviSchedCacheKeyType::V6D) {
+                cacheUpdate->fullAttentionQueryDropTokens =
+                    cacheSnapshot.fullAttentionQueryDropTokens;
+                cacheUpdate->mambaReplayStopShift =
+                    cacheSnapshot.mambaReplayStopShift > 0;
+                cacheUpdate->mambaRetentionInterval =
+                    cacheSnapshot.mambaRetentionInterval;
+                cacheUpdate->mambaAlign = cacheSnapshot.mambaAlign;
+            }
+            auto pendingUpdate =
+                makeUpdate(NaviSchedAgentEvent::PENDING_CACHE_UPDATED, 0);
+            pendingUpdate->pendingCache = std::make_shared<AgentPendingCacheToMasterData>(
+                _agentPendingCacheR->forKeyType(cacheKeyType).makeSnapshot());
+            initialUpdates.push_back(std::move(cacheUpdate));
+            initialUpdates.push_back(std::move(pendingUpdate));
+        }
         subscriber = std::make_shared<Subscriber>();
         subscriber->collectorId = collectorId;
         subscriber->asyncPipe = asyncPipe;
         subscriber->orderedReports = orderedReports;
-        publishTask = enqueuePublishLocked(
-            {std::move(handshake), std::move(cacheUpdate), std::move(pendingUpdate)},
-            {subscriber}, false);
+        publishTask =
+            enqueuePublishLocked(std::move(initialUpdates), {subscriber}, false);
         _subscribers[collectorId] = subscriber;
     }
     drainPublishQueue();
@@ -1123,16 +1279,14 @@ size_t AgentReportR::publish(const AgentUpdateToMasterDataPtr &update) const
         _workloadPublishTimingEnabled &&
         NaviSchedAgentEvent::WORKLOAD_UPDATED == update->event;
     const bool trackPublishTiming = trackRequestTiming || trackWorkloadTiming;
-    const auto publishBeginTimeUs = trackPublishTiming
-                                        ? autil::TimeUtility::currentTime()
-                                        : 0;
+    const auto publishBeginTimeUs =
+        trackPublishTiming ? autil::TimeUtility::currentTime() : 0;
     auto publishTask = enqueuePublish(update);
     if (!publishTask) {
         return 0;
     }
-    const auto subscribersReadyTimeUs = trackRequestTiming
-                                            ? autil::TimeUtility::currentTime()
-                                            : 0;
+    const auto subscribersReadyTimeUs =
+        trackRequestTiming ? autil::TimeUtility::currentTime() : 0;
     drainPublishQueue();
     const auto publishCount = waitPublish(publishTask);
     const auto &subscribers = publishTask->subscribers;
@@ -1151,16 +1305,15 @@ size_t AgentReportR::publish(const AgentUpdateToMasterDataPtr &update) const
                      "[navi-request-report-slow] request_id=%lu subscribers=%zu "
                      "subscriber_snapshot_us=%ld max_set_data_us=%ld total_us=%ld",
                      update->requestEvent ? update->requestEvent->requestId : 0,
-                     subscribers.size(),
-                     subscribersReadyTimeUs - publishBeginTimeUs,
+                     subscribers.size(), subscribersReadyTimeUs - publishBeginTimeUs,
                      publishTask->maxSetDataTimeUs, publishTimeUs);
         }
     }
     return publishCount;
 }
 
-void AgentReportR::recordPublishedEvent(
-    const AgentUpdateToMasterDataPtr &update, bool noSubscribers) const
+void AgentReportR::recordPublishedEvent(const AgentUpdateToMasterDataPtr &update,
+                                        bool noSubscribers) const
 {
     _publishedEventCount.fetch_add(1, std::memory_order_relaxed);
     if (NaviSchedAgentEvent::REQUEST_RECEIVED == update->event) {
@@ -1173,8 +1326,7 @@ void AgentReportR::recordPublishedEvent(
         }
         if (NaviSchedAgentEvent::BATCH_FINISHED == update->event &&
             update->requestEvent->abnormalBatchFinished) {
-            _publishedAbnormalFinishedBatchCount.fetch_add(
-                1, std::memory_order_relaxed);
+            _publishedAbnormalFinishedBatchCount.fetch_add(1, std::memory_order_relaxed);
         }
         auto &counter = update->requestEvent->abnormalBatchFinished
                             ? _publishedAbnormalFinishedRequestCount
@@ -1207,7 +1359,8 @@ AgentReportR::Stats AgentReportR::getStats() const
     stats.publishedAbnormalFinishedRequestCount =
         _publishedAbnormalFinishedRequestCount.load(std::memory_order_relaxed);
     stats.deliveredMessageCount = _deliveredMessageCount.load(std::memory_order_relaxed);
-    stats.combinedMessageSavings = _combinedMessageSavings.load(std::memory_order_relaxed);
+    stats.combinedMessageSavings =
+        _combinedMessageSavings.load(std::memory_order_relaxed);
     stats.deliverySuccessCount = _deliverySuccessCount.load(std::memory_order_relaxed);
     stats.deliveryFailureCount = _deliveryFailureCount.load(std::memory_order_relaxed);
     stats.noSubscriberEventCount =
@@ -1273,32 +1426,64 @@ size_t AgentReportR::getSubscriberCount() const
     return count;
 }
 
-size_t AgentReportR::getCachedBlockCount() const
+bool AgentReportR::hasCacheKeyType(NaviSchedCacheKeyType cacheKeyType) const
 {
-    return _agentCacheR->getCachedBlockCount();
+    return _agentCacheR->hasKeyType(cacheKeyType);
 }
 
-AgentCacheR::State AgentReportR::getCacheState() const
+size_t AgentReportR::getCachedBlockCount(NaviSchedCacheKeyType cacheKeyType) const
 {
-    return _agentCacheR->getState();
+    return _agentCacheR->forKeyType(cacheKeyType).getCachedBlockCount();
 }
 
-AgentPendingCacheR::State AgentReportR::getPendingCacheState() const
+AgentCacheR::State AgentReportR::getCacheState(NaviSchedCacheKeyType cacheKeyType) const
 {
-    return _agentPendingCacheR->getState();
+    return _agentCacheR->forKeyType(cacheKeyType).getState();
+}
+
+AgentPendingCacheR::State AgentReportR::getPendingCacheState(
+    NaviSchedCacheKeyType cacheKeyType) const
+{
+    return _agentPendingCacheR->forKeyType(cacheKeyType).getState();
+}
+
+bool AgentReportR::reportPeerCacheReadAvailable(bool available)
+{
+    {
+        autil::ScopedLock lock(_peerCacheReadLock);
+        if (_peerCacheReadAvailable == available) {
+            return true;
+        }
+        _peerCacheReadAvailable = available;
+        ++_peerCacheReadRevision;
+    }
+    auto update = makeUpdate(NaviSchedAgentEvent::PEER_CACHE_READ_UPDATED, 0);
+    enqueuePublish(update);
+    return true;
 }
 
 AgentUpdateToMasterDataPtr AgentReportR::makeUpdate(NaviSchedAgentEvent::Type event,
                                                     int64_t eventTimeUs) const
 {
     auto update = std::make_shared<AgentUpdateToMasterData>();
+    update->fullAttentionQueryDropTokens = _fullAttentionQueryDropTokens;
+    update->mambaReplayStopShift = _mambaReplayStopShift;
+    update->mambaRetentionInterval = _mambaRetentionInterval;
+    update->mambaAlign = _mambaAlign;
+    {
+        autil::ScopedLock lock(_peerCacheReadLock);
+        update->peerCacheReadAvailable = _peerCacheReadAvailable;
+        update->peerCacheReadRevision = _peerCacheReadRevision;
+        update->peerCacheReadAgentStartTimeUs = _agentStartTimeUs;
+    }
     update->event = event;
     update->eventTimeUs =
         eventTimeUs > 0 ? eventTimeUs : autil::TimeUtility::currentTime();
     if (const auto source = _executionUtilizationSource.load(std::memory_order_acquire)) {
         update->executionUtilization = source->load(std::memory_order_relaxed);
     }
-    if (const auto source = _executionBusyUtilizationSource.load(std::memory_order_acquire)) {
+    if (const auto source =
+            _executionBusyUtilizationSource.load(std::memory_order_acquire)) {
         update->executionBusyUtilization = source->load(std::memory_order_relaxed);
     }
     return update;
@@ -1311,7 +1496,8 @@ bool AgentReportR::setExecutionUtilizationSource(
     if (!source) return false;
     autil::ScopedLock lock(_mutex);
     if (_executionUtilizationOwner && _executionUtilizationOwner != source) return false;
-    if (_executionBusyUtilizationOwner && _executionBusyUtilizationOwner != busySource) return false;
+    if (_executionBusyUtilizationOwner && _executionBusyUtilizationOwner != busySource)
+        return false;
     _executionBusyUtilizationOwner = busySource;
     _executionBusyUtilizationSource.store(busySource.get(), std::memory_order_release);
     _executionUtilizationOwner = source;
@@ -1319,8 +1505,7 @@ bool AgentReportR::setExecutionUtilizationSource(
     return true;
 }
 
-void AgentReportR::attachInflightStats(
-    const AgentUpdateToMasterDataPtr &update) const
+void AgentReportR::attachInflightStats(const AgentUpdateToMasterDataPtr &update) const
 {
     if (!update) {
         return;
@@ -1337,7 +1522,7 @@ AgentUpdateToMasterDataPtr AgentReportR::makeHandshakeUpdate() const
 {
     auto update = makeUpdate(NaviSchedAgentEvent::AGENT_HANDSHAKE, 0);
     attachInflightStats(update);
-    update->control = std::make_shared<AgentControlToMasterData>();
+    update->control = std::make_shared<AgentControlToMasterData>(_controlConfig);
     update->control->serverInfo = getServerInfo();
     update->control->agentStartTimeUs = _agentStartTimeUs;
     update->control->pdSeparated = _pdSeparated;
@@ -1355,14 +1540,12 @@ AgentUpdateToMasterDataPtr AgentReportR::makeHandshakeUpdate() const
     }
     auto workload = getWorkloadSnapshot();
     if (workload) {
-        update->workload =
-            std::make_shared<NaviSchedWorkloadSnapshot>(*workload);
+        update->workload = std::make_shared<NaviSchedWorkloadSnapshot>(*workload);
     }
     if (_agentSchedulerConfigR) {
         const auto config = _agentSchedulerConfigR->get();
         update->schedulerConfigGeneration = config.generation;
-        update->schedulerConfigHash =
-            config.generation > 0 ? config.configHash : "";
+        update->schedulerConfigHash = config.generation > 0 ? config.configHash : "";
         update->schedulerConfigJson = config.generation > 0 ? config.configJson : "";
     }
     return update;
@@ -1437,8 +1620,7 @@ AgentReportR::QueuedPublishPtr AgentReportR::enqueuePublish(
 
 AgentReportR::QueuedPublishPtr AgentReportR::enqueuePublishLocked(
     std::vector<AgentUpdateToMasterDataPtr> updates,
-    std::vector<SubscriberPtr> subscribers, bool trackStats,
-    bool allowStopping) const
+    std::vector<SubscriberPtr> subscribers, bool trackStats, bool allowStopping) const
 {
     if (updates.empty() || (_stopping && !allowStopping)) {
         return nullptr;
@@ -1455,8 +1637,7 @@ void AgentReportR::drainPublishQueue() const
 {
     bool expected = false;
     if (!_publishDraining.compare_exchange_strong(
-            expected, true, std::memory_order_acq_rel,
-            std::memory_order_acquire)) {
+            expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
         return;
     }
     while (true) {
@@ -1470,8 +1651,7 @@ void AgentReportR::drainPublishQueue() const
         }
         expected = false;
         if (!_publishDraining.compare_exchange_strong(
-                expected, true, std::memory_order_acq_rel,
-                std::memory_order_acquire)) {
+                expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
             return;
         }
     }
@@ -1511,32 +1691,43 @@ void AgentReportR::deliverPublish(const QueuedPublishPtr &publishTask) const
                 _deliveryFailureCount.fetch_add(1, std::memory_order_relaxed);
             }
         } else {
-            const auto send = [&](const AgentUpdateToMasterDataPtr &value, size_t eventCount) {
-                const bool trackRequestTiming = publishTask->trackStats &&
+            const auto send = [&](const AgentUpdateToMasterDataPtr &value,
+                                  size_t eventCount) {
+                const bool trackRequestTiming =
+                    publishTask->trackStats &&
                     (value->event == NaviSchedAgentEvent::REQUEST_RECEIVED ||
-                     std::any_of(value->updates.begin(), value->updates.end(), [](const auto &event) {
-                         return event->event == NaviSchedAgentEvent::REQUEST_RECEIVED;
-                     }));
-                const auto beginUs = trackRequestTiming ? autil::TimeUtility::currentTime() : 0;
+                     std::any_of(value->updates.begin(), value->updates.end(),
+                                 [](const auto &event) {
+                                     return event->event ==
+                                            NaviSchedAgentEvent::REQUEST_RECEIVED;
+                                 }));
+                const auto beginUs =
+                    trackRequestTiming ? autil::TimeUtility::currentTime() : 0;
                 const auto result = asyncPipe->setData(value);
                 if (trackRequestTiming) {
-                    maxSetDataTimeUs = std::max(maxSetDataTimeUs, autil::TimeUtility::currentTime() - beginUs);
+                    maxSetDataTimeUs = std::max(
+                        maxSetDataTimeUs, autil::TimeUtility::currentTime() - beginUs);
                 }
                 if (result != navi::EC_NONE) {
-                    if (publishTask->trackStats) _deliveryFailureCount.fetch_add(1, std::memory_order_relaxed);
+                    if (publishTask->trackStats)
+                        _deliveryFailureCount.fetch_add(1, std::memory_order_relaxed);
                     return false;
                 }
                 _deliveredMessageCount.fetch_add(1, std::memory_order_relaxed);
-                _combinedMessageSavings.fetch_add(eventCount - 1, std::memory_order_relaxed);
+                _combinedMessageSavings.fetch_add(eventCount - 1,
+                                                  std::memory_order_relaxed);
                 if (publishTask->trackStats) {
-                    _deliverySuccessCount.fetch_add(eventCount, std::memory_order_relaxed);
+                    _deliverySuccessCount.fetch_add(eventCount,
+                                                    std::memory_order_relaxed);
                 }
                 return true;
             };
             if (subscriber->orderedReports) {
-                if (!message) message = AgentUpdateToMasterData::makeBatch(publishTask->updates);
+                if (!message)
+                    message = AgentUpdateToMasterData::makeBatch(publishTask->updates);
                 delivered = message && send(message, publishTask->updates.size());
             } else {
+                // Older Masters did not request the ordered envelope protocol.
                 for (const auto &update : publishTask->updates) {
                     if (!send(update, 1)) {
                         delivered = false;
@@ -1560,8 +1751,8 @@ void AgentReportR::deliverPublish(const QueuedPublishPtr &publishTask) const
     }
 }
 
-bool AgentReportR::removeSubscriberLocked(
-    const std::string &collectorId, const SubscriberPtr *expected) const
+bool AgentReportR::removeSubscriberLocked(const std::string &collectorId,
+                                          const SubscriberPtr *expected) const
 {
     auto it = _subscribers.find(collectorId);
     if (_subscribers.end() == it || (expected && it->second != *expected)) {
@@ -1586,4 +1777,4 @@ bool AgentReportR::removeSubscriber(const SubscriberPtr &subscriber) const
 REGISTER_RESOURCE(AgentReportR);
 REGISTER_RESOURCE(AgentReportBridgeR);
 
-}
+} // namespace navi_sched

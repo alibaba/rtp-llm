@@ -1,5 +1,6 @@
-from navi_sched import NaviSchedClient as CoreNaviSchedClient
 from navi_sched.util import DEFAULT_CLIENT_RUNTIME_NAME
+
+from navi_sched import NaviSchedClient as CoreNaviSchedClient
 
 from .NaviSchedAdapterConfig import NaviSchedAdapterConfig
 from .NaviSchedEndpointRouter import NaviSchedEndpointRouter
@@ -18,9 +19,7 @@ class NaviSchedClient:
         self._config = config
         self._client = native_client
         if self._client is None:
-            enable_agent_forward = bool(
-                role_options.pop("enable_agent_forward", False)
-            )
+            enable_agent_forward = bool(role_options.pop("enable_agent_forward", False))
             name = role_options.pop("name", DEFAULT_CLIENT_RUNTIME_NAME)
             local_nodes = []
             for address in config.master_addresses:
@@ -39,6 +38,11 @@ class NaviSchedClient:
                     "services": [config.master_vip_domain],
                     "grpc_port_diff": config.master_vip_grpc_port_diff,
                 }
+            if config.master_spectrum_service_id:
+                runtime_config["spectrum_subscription"] = {
+                    "service_id": config.master_spectrum_service_id,
+                    "grpc_port_diff": 1,
+                }
             self._client = CoreNaviSchedClient(
                 config.client_biz_name,
                 config.master_biz_name,
@@ -48,9 +52,7 @@ class NaviSchedClient:
                 name=name,
                 enable_kmon=True,
                 kmon_tags=(
-                    make_kmon_tags("client")
-                    if kmon_tags is None
-                    else kmon_tags
+                    make_kmon_tags("client") if kmon_tags is None else kmon_tags
                 ),
                 wait_no_query=False,
                 **role_options,

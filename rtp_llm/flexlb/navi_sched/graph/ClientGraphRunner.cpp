@@ -11,8 +11,7 @@ namespace {
 
 const std::string SCHEDULE_NODE = "navi_sched_schedule";
 const std::string CLIENT_GRAPH_VIS_FILE = "./client_graph.vis";
-const std::string ADMISSION_TIMEOUT_ERROR =
-    "NaviSched request admission timed out";
+const std::string ADMISSION_TIMEOUT_ERROR = "NaviSched request admission timed out";
 const std::string DECISION_WAIT_TIMEOUT_ERROR =
     "timed out waiting for NaviSched decision";
 
@@ -42,14 +41,12 @@ public:
         if (_enableVis) {
             GraphVisRecorder::save(result, CLIENT_GRAPH_VIS_FILE);
         }
-        const auto errorCode = result && result->hasError()
-                                   ? result->getErrorCode()
-                                   : navi::EC_NONE;
-        const auto errorMessage = result && result->hasError()
-                                      ? result->getErrorMessage()
-                                      : std::string();
-        auto response = _responseR->finishGraph(
-            _requestId, errorCode, errorMessage, static_cast<bool>(_completion));
+        const auto errorCode =
+            result && result->hasError() ? result->getErrorCode() : navi::EC_NONE;
+        const auto errorMessage =
+            result && result->hasError() ? result->getErrorMessage() : std::string();
+        auto response = _responseR->finishGraph(_requestId, errorCode, errorMessage,
+                                                static_cast<bool>(_completion));
         if (_completion) {
             ClientGraphRunResult result;
             result.errorCode = response.errorCode;
@@ -57,9 +54,8 @@ public:
             result.decision = std::move(response.decision);
             result.replay = std::move(response.replay);
             const auto completedTimeUs = autil::TimeUtility::currentTime();
-            const auto decisionTimeUs = response.decisionTimeUs > 0
-                                            ? response.decisionTimeUs
-                                            : completedTimeUs;
+            const auto decisionTimeUs =
+                response.decisionTimeUs > 0 ? response.decisionTimeUs : completedTimeUs;
             result.masterRequestLatencyUs =
                 std::max(int64_t(0), decisionTimeUs - _beginTimeUs);
             if (result.decision) {
@@ -112,10 +108,10 @@ std::unique_ptr<navi::GraphDef> ClientGraphRunner::buildScheduleGraph(
             masterBizName, masterAddress.substr(0, separator), port);
     }
     builder.subGraph(masterGraphId).gigProbe(false);
-    auto scheduleNode = builder.node(SCHEDULE_NODE)
-                            .kernel("navi_sched.schedule_k")
-                            .integerAttr("dispatch_guard_enabled",
-                                         clientBizName.empty() ? 0 : 1);
+    auto scheduleNode =
+        builder.node(SCHEDULE_NODE)
+            .kernel("navi_sched.schedule_k")
+            .integerAttr("dispatch_guard_enabled", clientBizName.empty() ? 0 : 1);
     if (clientBizName.empty()) {
         scheduleNode.out("decision").asGraphOutput("decision");
         if (collectReplay) {
@@ -128,9 +124,7 @@ std::unique_ptr<navi::GraphDef> ClientGraphRunner::buildScheduleGraph(
         return graphDef;
     }
     clientGraphId = builder.newSubGraph(clientBizName);
-    builder.subGraph(clientGraphId)
-        .location(clientBizName, 1, 0)
-        .inlineMode(true);
+    builder.subGraph(clientGraphId).location(clientBizName, 1, 0).inlineMode(true);
     auto forwardNode = builder.node(clientGraphId, "navi_sched_forward")
                            .kernel("navi_sched.client_forward_k");
     auto responseNode = builder.node(clientGraphId, "navi_sched_response")
@@ -139,8 +133,7 @@ std::unique_ptr<navi::GraphDef> ClientGraphRunner::buildScheduleGraph(
         .integerAttr("admission_timeout_ms", rpcTimeoutMs);
     scheduleNode.out("decision").to(forwardNode.in("decision"));
     forwardNode.out("decision").to(responseNode.in("decision"));
-    forwardNode.out("decision")
-        .to(scheduleNode.in("forward_decision")).require(false);
+    forwardNode.out("decision").to(scheduleNode.in("forward_decision")).require(false);
     forwardNode.out("response").to(responseNode.in("response"));
     if (collectReplay) {
         scheduleNode.out("replay").to(responseNode.in("replay"));
@@ -181,9 +174,11 @@ ClientRequestToMasterDataConstPtr withoutForwardPayload(
     copy->bizName = request->bizName;
     copy->timeoutMs = request->timeoutMs;
     copy->promptTokenCount = request->promptTokenCount;
+    copy->explicitCacheCheckpointPosition = request->explicitCacheCheckpointPosition;
     copy->blockSize = request->blockSize;
     copy->requestId = request->requestId;
     copy->collectReplay = request->collectReplay;
+    copy->routeOnly = request->routeOnly;
     copy->blockHashes = request->blockHashes;
     return copy;
 }
@@ -221,9 +216,8 @@ ClientGraphRunResult ClientGraphRunner::schedule(
 }
 
 ClientGraphRunResult ClientGraphRunner::scheduleDetached(
-    const ClientRequestToMasterDataConstPtr &request,
-    const std::string &masterBizName, int64_t timeoutMs,
-    DecisionCallback decisionCallback, bool expectResponseStream)
+    const ClientRequestToMasterDataConstPtr &request, const std::string &masterBizName,
+    int64_t timeoutMs, DecisionCallback decisionCallback, bool expectResponseStream)
 {
     ClientGraphRunResult result;
     if (!_navi || !request || 0 == request->requestId || request->bizName.empty() ||
@@ -270,8 +264,8 @@ ClientGraphRunResult ClientGraphRunner::runRequest(
         return result;
     }
     if (_clientBizName.empty()) {
-        result =
-            collectResult(_navi->runGraph(graphDef.release(), params), request->requestId);
+        result = collectResult(_navi->runGraph(graphDef.release(), params),
+                               request->requestId);
     } else {
         if (!_responseR->begin(request->requestId, request->collectReplay,
                                _expectAgentResponseStream && expectResponseStream,
@@ -282,22 +276,21 @@ ClientGraphRunResult ClientGraphRunner::runRequest(
         }
         navi::ResourceMap resources;
         if (!resources.addResource(_responseR)) {
-            _responseR->finishGraph(
-                request->requestId, navi::EC_ABORT,
-                "failed to attach NaviSched client response resource", detached);
+            _responseR->finishGraph(request->requestId, navi::EC_ABORT,
+                                    "failed to attach NaviSched client response resource",
+                                    detached);
             if (detached) {
                 _responseR->finishClosureCompletion(request->requestId);
             }
             result.errorCode = navi::EC_ABORT;
-            result.errorMessage =
-                "failed to attach NaviSched client response resource";
+            result.errorMessage = "failed to attach NaviSched client response resource";
             return result;
         } else {
             auto userResult = _navi->runLocalGraphAsync(
                 graphDef.release(), params, resources,
                 new ClientGraphClosure(_responseR, request->requestId,
-                                       _enableVis && !detached,
-                                       beginTimeUs, std::move(decisionCallback)));
+                                       _enableVis && !detached, beginTimeUs,
+                                       std::move(decisionCallback)));
             if (userResult) {
                 _responseR->attach(request->requestId, userResult);
             } else {
@@ -315,8 +308,8 @@ ClientGraphRunResult ClientGraphRunner::runRequest(
         if (detached) {
             result.errorCode = navi::EC_NONE;
         } else {
-            auto decision = _responseR->waitDecision(
-                request->requestId, getNaviSchedRpcTimeoutMs(timeoutMs));
+            auto decision = _responseR->waitDecision(request->requestId,
+                                                     getNaviSchedRpcTimeoutMs(timeoutMs));
             if (navi::EC_TIMEOUT == decision.errorCode &&
                 DECISION_WAIT_TIMEOUT_ERROR == decision.errorMessage) {
                 decision.errorMessage = ADMISSION_TIMEOUT_ERROR;
@@ -332,8 +325,7 @@ ClientGraphRunResult ClientGraphRunner::runRequest(
     }
     if (result.decision) {
         if (!result.decision->requestTiming) {
-            result.decision->requestTiming =
-                std::make_shared<NaviSchedRequestTiming>();
+            result.decision->requestTiming = std::make_shared<NaviSchedRequestTiming>();
         }
         result.decision->requestTiming->clientTotalLatencyMs =
             std::max(int64_t(0), autil::TimeUtility::currentTime() - beginTimeUs) /

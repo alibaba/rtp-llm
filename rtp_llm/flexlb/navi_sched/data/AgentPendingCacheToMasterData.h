@@ -1,5 +1,6 @@
 #pragma once
 
+#include "aios/navi_sched/common/NaviSchedCommon.h"
 #include "autil/DataBuffer.h"
 
 #include <cstdint>
@@ -19,6 +20,7 @@ struct NaviSchedPendingCacheReservation {
 };
 
 struct AgentPendingCacheToMasterData {
+    NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL;
     void serialize(autil::DataBuffer &dataBuffer) const;
     void deserialize(autil::DataBuffer &dataBuffer);
 
@@ -32,7 +34,6 @@ struct AgentPendingCacheToMasterData {
     uint64_t checksum = 0;
 };
 
-using AgentPendingCacheToMasterDataPtr =
-    std::shared_ptr<AgentPendingCacheToMasterData>;
+using AgentPendingCacheToMasterDataPtr = std::shared_ptr<AgentPendingCacheToMasterData>;
 
 }

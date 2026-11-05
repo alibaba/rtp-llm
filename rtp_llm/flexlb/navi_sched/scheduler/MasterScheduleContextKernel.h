@@ -10,6 +10,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <vector>
 
 class NaviSchedResourceTest;
 
@@ -33,6 +34,9 @@ public:
 
 private:
     bool drainRequests();
+    void retireCancelledRequests();
+    bool retireRequest(const MasterScheduleRequestDataPtr &request,
+                       int64_t currentTimeUs);
     bool shouldBuildContext(int64_t currentTimeUs) const;
     int64_t getNextScheduleDelayMs(int64_t currentTimeUs) const;
     bool stopScheduleTimer(navi::KernelComputeContext &ctx);
@@ -79,6 +83,9 @@ private:
     int64_t _queueOverloadStartCycleMultiplier = 10;
     int64_t _queueOverloadFullCycleMultiplier = 30;
     double _timeCompression = 1.0;
+    bool _peerCacheEnabled = false;
+    uint64_t _peerCacheReadyConfigGeneration = 0;
+    std::shared_ptr<const std::unordered_set<std::string>> _peerCacheReadyAgents;
     int64_t _requestPipeGeneration = 0;
     multi_call::RandomGenerator _randomGenerator;
     uint64_t _nextScheduleId = 1;
@@ -98,7 +105,15 @@ public:
     static void recordReplayAdmission(NaviSchedScheduleContext &context);
 
 protected:
+    struct FrozenExecutionInputAudit {
+        uint64_t requestId = 0;
+        TPUPrefillRequestInput input;
+        int64_t fullPrefixBlocksBeforeQueryDrop = -1;
+    };
+
     struct AdmissionPredictionAudit {
+        std::vector<FrozenExecutionInputAudit> frozenExecutionInputs;
+        std::optional<TPUPrefillCacheObservation> cacheObservation = std::nullopt;
         double withWorkloadBaseMs = 0.0;
         double withWorkloadFinalMs = 0.0;
         double floorBaseMs = 0.0;
@@ -110,7 +125,8 @@ protected:
     };
 
     static AdmissionPredictionAudit getAdmissionPredictionAudit(
-        const NaviSchedScheduleContext &context, size_t requestIndex);
+        const NaviSchedScheduleContext &context, size_t requestIndex,
+        bool includeFrozenExecutionInputs = false);
     void logAdmissionPredictions(const NaviSchedScheduleContext &context) const;
     bool finishContext(NaviSchedScheduleContext &context);
     bool prepareContext(NaviSchedScheduleContext &context, int64_t resultBeginUs);

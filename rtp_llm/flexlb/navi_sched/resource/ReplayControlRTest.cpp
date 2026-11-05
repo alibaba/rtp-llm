@@ -1,3 +1,4 @@
+#include "aios/navi_sched/data/BlockHashUtil.h"
 #include "aios/navi_sched/resource/ReplayClientR.h"
 #include "aios/navi_sched/resource/ReplayControlR.h"
 #include "autil/CRC32C.h"
@@ -50,26 +51,30 @@ std::string historyKey(uint64_t value)
 
 void appendPersistentHistoryRecord(const std::filesystem::path &path,
                                    const NaviSchedScheduleRequest &request,
-                                   int64_t eventTimeUs,
-                                   uint32_t recordVersion = 1)
+                                   int64_t eventTimeUs, uint32_t recordVersion = 1)
 {
     constexpr uint32_t RECORD_MAGIC = 0x4E535248;
     autil::DataBuffer buffer;
-    request.serialize(buffer);
+    // This helper creates the archived v1 history envelope. Its payload
+    // uses the frozen v9/v10 request layout, not the current wire protocol.
+    const int32_t legacyVersion =
+        request.version == NAVI_SCHED_DATA_VERSION ? 10 : request.version;
+    buffer.write(legacyVersion);
+    buffer.write(request.requestId);
+    buffer.write(request.bizName);
+    buffer.write(request.promptTokenCount);
+    buffer.write(request.blockSize);
+    BlockHashUtil::write(buffer, request.blockHashes);
+    buffer.write(request.timeoutMs);
     buffer.write(request.forwardPayload);
     const auto payloadSize = static_cast<uint64_t>(buffer.getDataLen());
-    const auto checksum =
-        autil::CRC32C::Value(buffer.getData(), buffer.getDataLen());
+    const auto checksum = autil::CRC32C::Value(buffer.getData(), buffer.getDataLen());
     std::ofstream output(path, std::ios::binary | std::ios::app);
     ASSERT_TRUE(output);
-    output.write(reinterpret_cast<const char *>(&RECORD_MAGIC),
-                 sizeof(RECORD_MAGIC));
-    output.write(reinterpret_cast<const char *>(&recordVersion),
-                 sizeof(recordVersion));
-    output.write(reinterpret_cast<const char *>(&eventTimeUs),
-                 sizeof(eventTimeUs));
-    output.write(reinterpret_cast<const char *>(&payloadSize),
-                 sizeof(payloadSize));
+    output.write(reinterpret_cast<const char *>(&RECORD_MAGIC), sizeof(RECORD_MAGIC));
+    output.write(reinterpret_cast<const char *>(&recordVersion), sizeof(recordVersion));
+    output.write(reinterpret_cast<const char *>(&eventTimeUs), sizeof(eventTimeUs));
+    output.write(reinterpret_cast<const char *>(&payloadSize), sizeof(payloadSize));
     output.write(reinterpret_cast<const char *>(&checksum), sizeof(checksum));
     output.write(buffer.getData(), buffer.getDataLen());
     output.flush();
@@ -83,8 +88,8 @@ public:
         const auto *testTmpDir = std::getenv("TEST_TMPDIR");
         const auto base = testTmpDir ? std::filesystem::path(testTmpDir)
                                      : std::filesystem::temp_directory_path();
-        path = base / ("replay_history_" + std::to_string(
-                           autil::TimeUtility::currentTimeInMicroSeconds()));
+        path = base / ("replay_history_" +
+                       std::to_string(autil::TimeUtility::currentTimeInMicroSeconds()));
         std::filesystem::create_directories(path);
     }
 
@@ -112,7 +117,8 @@ int waitForHistoryChild(pid_t child)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     ::kill(child, SIGKILL);
-    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+    while (::waitpid(child, &status, 0) < 0 && errno == EINTR) {
+    }
     return -1;
 }
 
@@ -376,13 +382,11 @@ TEST_F(ReplayControlRTest, testReplayDataRoundTrip)
     EXPECT_EQ(command.loopCount, commandOutput.loopCount);
     EXPECT_EQ(command.historyMode, commandOutput.historyMode);
     EXPECT_EQ(command.recentQueryCount, commandOutput.recentQueryCount);
-    EXPECT_EQ(command.selectionGeneration,
-              commandOutput.selectionGeneration);
+    EXPECT_EQ(command.selectionGeneration, commandOutput.selectionGeneration);
     EXPECT_EQ(command.pacingIndex, commandOutput.pacingIndex);
     EXPECT_EQ(command.pacingClientCount, commandOutput.pacingClientCount);
     EXPECT_EQ(command.pacingEpochUs, commandOutput.pacingEpochUs);
-    EXPECT_EQ(command.pacingClockOffsetUs,
-              commandOutput.pacingClockOffsetUs);
+    EXPECT_EQ(command.pacingClockOffsetUs, commandOutput.pacingClockOffsetUs);
 
     autil::DataBuffer legacyCommandBuffer;
     legacyCommandBuffer.write(command.action);
@@ -455,8 +459,7 @@ TEST_F(ReplayControlRTest, testReplayDataRoundTrip)
               capabilityOutput.summary.selectedSampleCount);
     EXPECT_EQ(capability.summary.completedSelectionGeneration,
               capabilityOutput.summary.completedSelectionGeneration);
-    EXPECT_EQ(capability.summary.reportTimeUs,
-              capabilityOutput.summary.reportTimeUs);
+    EXPECT_EQ(capability.summary.reportTimeUs, capabilityOutput.summary.reportTimeUs);
 
     autil::DataBuffer legacyCapabilityBuffer;
     legacyCapabilityBuffer.write(capability.clientId);
@@ -469,8 +472,7 @@ TEST_F(ReplayControlRTest, testReplayDataRoundTrip)
     legacyCapabilityBuffer.write(capability.summary.error);
     legacyCapabilityBuffer.write(capability.summary.selectionGeneration);
     legacyCapabilityBuffer.write(capability.summary.selectedSampleCount);
-    legacyCapabilityBuffer.write(
-        capability.summary.completedSelectionGeneration);
+    legacyCapabilityBuffer.write(capability.summary.completedSelectionGeneration);
     ReplayClientCapabilityData legacyCapabilityOutput;
     legacyCapabilityOutput.deserialize(legacyCapabilityBuffer);
     EXPECT_EQ(capability.summary.completedSelectionGeneration,
@@ -569,8 +571,8 @@ TEST_F(ReplayControlRTest, testFixedQpsReallocationOnlyOnEligibilityChange)
 
     resource.unsubscribe("client-b", clientB);
     ASSERT_GT(clientA->dataItems.size(), beforeStableUpdate);
-    auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
+    auto command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::START, command->action);
     EXPECT_DOUBLE_EQ(100.0, command->perClientQps);
@@ -579,8 +581,8 @@ TEST_F(ReplayControlRTest, testFixedQpsReallocationOnlyOnEligibilityChange)
     ASSERT_TRUE(resource.processRequest(request, response));
     EXPECT_TRUE(response->accepted);
     EXPECT_EQ(ReplayAction::STOP, response->action);
-    command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
+    command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::STOP, command->action);
 }
@@ -617,8 +619,8 @@ TEST_F(ReplayControlRTest, testFixedQpsDropsConfirmedEmptySelection)
     EXPECT_EQ(2u, response->eligibleClientCount);
     EXPECT_DOUBLE_EQ(50.0, response->perClientQps);
 
-    auto commandA = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
+    auto commandA =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
     ASSERT_TRUE(commandA);
     ASSERT_GT(commandA->selectionGeneration, 0u);
     summaryA.selectionGeneration = commandA->selectionGeneration;
@@ -631,13 +633,13 @@ TEST_F(ReplayControlRTest, testFixedQpsDropsConfirmedEmptySelection)
     summaryB.selectedSampleCount = 0;
     resource.updateHistory(summaryB);
     ASSERT_GT(clientA->dataItems.size(), commandCount);
-    commandA = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
+    commandA =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
     ASSERT_TRUE(commandA);
     EXPECT_EQ(ReplayAction::START, commandA->action);
     EXPECT_DOUBLE_EQ(100.0, commandA->perClientQps);
-    auto commandB = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientB->dataItems.back());
+    auto commandB =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientB->dataItems.back());
     ASSERT_TRUE(commandB);
     EXPECT_EQ(ReplayAction::STOP, commandB->action);
     EXPECT_EQ(commandA->selectionGeneration, commandB->selectionGeneration);
@@ -677,8 +679,8 @@ TEST_F(ReplayControlRTest, testMasterStopsAfterAllClientsCompleteSelection)
     ReplayControlResponseDataPtr response;
     ASSERT_TRUE(resource.processRequest(request, response));
     ASSERT_TRUE(response->accepted);
-    auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
+    auto command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
     ASSERT_TRUE(command);
     const auto selectionGeneration = command->selectionGeneration;
     ASSERT_NE(0u, selectionGeneration);
@@ -700,8 +702,8 @@ TEST_F(ReplayControlRTest, testMasterStopsAfterAllClientsCompleteSelection)
     ASSERT_TRUE(resource.processRequest({"query"}, response));
     EXPECT_EQ(ReplayAction::STOP, response->action);
     EXPECT_EQ(0u, response->eligibleClientCount);
-    command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
+    command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::STOP, command->action);
     EXPECT_EQ(0u, command->selectionGeneration);
@@ -730,8 +732,8 @@ TEST_F(ReplayControlRTest, testMasterStopsAfterAllSelectionsAreEmpty)
     request.totalQps = 100.0;
     ReplayControlResponseDataPtr response;
     ASSERT_TRUE(resource.processRequest(request, response));
-    auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        client->dataItems.back());
+    auto command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(client->dataItems.back());
     ASSERT_TRUE(command);
 
     summary.selectionGeneration = command->selectionGeneration;
@@ -845,10 +847,10 @@ TEST_F(ReplayControlRTest, testMasterSharesRealtimeEpochAcrossClients)
     ASSERT_TRUE(resource.processRequest(request, response));
     ASSERT_TRUE(response->accepted);
 
-    const auto commandA = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
-    const auto commandB = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientB->dataItems.back());
+    const auto commandA =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
+    const auto commandB =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientB->dataItems.back());
     ASSERT_TRUE(commandA);
     ASSERT_TRUE(commandB);
     EXPECT_EQ(ReplayAction::START, commandA->action);
@@ -871,14 +873,12 @@ TEST_F(ReplayControlRTest, testMasterSendsPerClientClockOffsetWithSharedEpoch)
     summaryA.latestEventTimeUs = 200;
     summaryA.sampleCount = 2;
     summaryA.replayable = true;
-    summaryA.reportTimeUs =
-        autil::TimeUtility::currentTimeInMicroSeconds() + 2'000'000;
+    summaryA.reportTimeUs = autil::TimeUtility::currentTimeInMicroSeconds() + 2'000'000;
     resource.updateHistory(summaryA);
 
     auto summaryB = summaryA;
     summaryB.clientId = "client-b";
-    summaryB.reportTimeUs =
-        autil::TimeUtility::currentTimeInMicroSeconds() - 3'000'000;
+    summaryB.reportTimeUs = autil::TimeUtility::currentTimeInMicroSeconds() - 3'000'000;
     resource.updateHistory(summaryB);
 
     ReplayControlR::Request request;
@@ -892,10 +892,10 @@ TEST_F(ReplayControlRTest, testMasterSendsPerClientClockOffsetWithSharedEpoch)
     ASSERT_TRUE(resource.processRequest(request, response));
     ASSERT_TRUE(response->accepted);
 
-    auto commandA = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
-    auto commandB = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientB->dataItems.back());
+    auto commandA =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
+    auto commandB =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientB->dataItems.back());
     ASSERT_TRUE(commandA);
     ASSERT_TRUE(commandB);
     EXPECT_EQ(commandA->pacingEpochUs, commandB->pacingEpochUs);
@@ -906,17 +906,15 @@ TEST_F(ReplayControlRTest, testMasterSendsPerClientClockOffsetWithSharedEpoch)
 
     const auto commandCount = clientA->dataItems.size();
     const auto otherCommandCount = clientB->dataItems.size();
-    summaryA.reportTimeUs =
-        autil::TimeUtility::currentTimeInMicroSeconds() + 1'000'000;
+    summaryA.reportTimeUs = autil::TimeUtility::currentTimeInMicroSeconds() + 1'000'000;
     resource.updateHistory(summaryA);
     EXPECT_EQ(commandCount, clientA->dataItems.size());
 
-    summaryA.reportTimeUs =
-        autil::TimeUtility::currentTimeInMicroSeconds() + 2'500'000;
+    summaryA.reportTimeUs = autil::TimeUtility::currentTimeInMicroSeconds() + 2'500'000;
     resource.updateHistory(summaryA);
     ASSERT_GT(clientA->dataItems.size(), commandCount);
-    commandA = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
+    commandA =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
     ASSERT_TRUE(commandA);
     EXPECT_GT(commandA->pacingClockOffsetUs, 2'000'000);
     EXPECT_LE(commandA->pacingClockOffsetUs, 2'500'000);
@@ -924,15 +922,14 @@ TEST_F(ReplayControlRTest, testMasterSendsPerClientClockOffsetWithSharedEpoch)
 
     ReplayHistoryQueryResponseData queryResponse;
     queryResponse.queryId = 1;
-    summaryA.reportTimeUs =
-        autil::TimeUtility::currentTimeInMicroSeconds() + 3'000'000;
+    summaryA.reportTimeUs = autil::TimeUtility::currentTimeInMicroSeconds() + 3'000'000;
     queryResponse.summary = summaryA;
     const auto updatedCommandCount = clientA->dataItems.size();
     resource.completeHistoryQuery(queryResponse);
     ASSERT_EQ(updatedCommandCount + 1, clientA->dataItems.size());
     EXPECT_EQ(otherCommandCount, clientB->dataItems.size());
-    commandA = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
+    commandA =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
     ASSERT_TRUE(commandA);
     EXPECT_EQ(commandB->pacingEpochUs, commandA->pacingEpochUs);
     EXPECT_EQ(0u, commandA->pacingIndex);
@@ -981,20 +978,18 @@ TEST_F(ReplayControlRTest, testFleetBroadcastAndSingleClientClockUpdate)
         ASSERT_DOUBLE_EQ(10'000.0 / CLIENT_COUNT, command->perClientQps);
     }
     summary.clientId = historyKey(CLIENT_COUNT / 2);
-    summary.reportTimeUs =
-        autil::TimeUtility::currentTimeInMicroSeconds() + 1'000'000;
+    summary.reportTimeUs = autil::TimeUtility::currentTimeInMicroSeconds() + 1'000'000;
     const auto updateBegin = std::chrono::steady_clock::now();
     resource.updateHistory(summary);
     const auto updateDone = std::chrono::steady_clock::now();
-    std::fprintf(stderr, "fleet_clients=%zu broadcast_us=%ld clock_update_us=%ld\n",
-                 CLIENT_COUNT,
-                 std::chrono::duration_cast<std::chrono::microseconds>(
-                     startDone - begin).count(),
-                 std::chrono::duration_cast<std::chrono::microseconds>(
-                     updateDone - updateBegin).count());
+    std::fprintf(
+        stderr, "fleet_clients=%zu broadcast_us=%ld clock_update_us=%ld\n", CLIENT_COUNT,
+        std::chrono::duration_cast<std::chrono::microseconds>(startDone - begin).count(),
+        std::chrono::duration_cast<std::chrono::microseconds>(updateDone - updateBegin)
+            .count());
     for (size_t index = 0; index < CLIENT_COUNT; ++index) {
-        ASSERT_EQ(index == CLIENT_COUNT / 2 ? 3u : 2u,
-                  clients[index]->dataItems.size()) << index;
+        ASSERT_EQ(index == CLIENT_COUNT / 2 ? 3u : 2u, clients[index]->dataItems.size())
+            << index;
     }
 }
 
@@ -1137,7 +1132,8 @@ TEST_F(ReplayControlRTest, testPersistentHistoryCoordinatesConcurrentProcesses)
     auto largestRequest = makeRequest(80);
     largestRequest.forwardPayload = "payload-80";
     ASSERT_TRUE(reference.append(largestRequest, 80000));
-    const auto recordSize = std::filesystem::file_size(referenceDirectory.path / "queries.bin");
+    const auto recordSize =
+        std::filesystem::file_size(referenceDirectory.path / "queries.bin");
     for (size_t limit : {8u, 128u}) {
         SCOPED_TRACE(limit);
         TempDirectory directory;
@@ -1196,7 +1192,8 @@ TEST_F(ReplayControlRTest, testPersistentHistoryCoordinatesConcurrentProcesses)
         for (size_t index = 0; index < count; ++index) {
             const uint64_t id = 81 - count + index;
             EXPECT_EQ(id, samples[index].request.requestId);
-            EXPECT_EQ("payload-" + std::to_string(id), samples[index].request.forwardPayload);
+            EXPECT_EQ("payload-" + std::to_string(id),
+                      samples[index].request.forwardPayload);
         }
         ReplayHistoryStore restored;
         ASSERT_TRUE(restored.configure(directory.path.string(), limit));
@@ -1287,7 +1284,7 @@ TEST_F(ReplayControlRTest, testPersistentHistoryRestoresCompatibleLegacyVersions
     TempDirectory directory;
     const auto dataFile = directory.path / "queries.bin";
     auto oldRequest = makeRequest(1);
-    oldRequest.version = NAVI_SCHED_DATA_VERSION - 1;
+    oldRequest.version = 9;
     appendPersistentHistoryRecord(dataFile, oldRequest, 1000);
     appendPersistentHistoryRecord(dataFile, makeRequest(2), 2000);
     oldRequest.requestId = 3;
@@ -1370,9 +1367,8 @@ TEST_F(ReplayControlRTest, testHistoryLoadFailureDoesNotAbortControlStream)
     EXPECT_FALSE(client.replaying());
 
     ASSERT_GE(capabilityPipe->dataItems.size(), 2u);
-    const auto capability =
-        std::dynamic_pointer_cast<ReplayClientCapabilityData>(
-            capabilityPipe->dataItems.back());
+    const auto capability = std::dynamic_pointer_cast<ReplayClientCapabilityData>(
+        capabilityPipe->dataItems.back());
     ASSERT_TRUE(capability);
     EXPECT_EQ(7u, capability->summary.selectionGeneration);
     EXPECT_EQ(0u, capability->summary.selectedSampleCount);
@@ -1423,8 +1419,7 @@ TEST_F(ReplayControlRTest, testPersistentHistoryDropsChecksumCorruptTail)
         ASSERT_TRUE(store.configure(directory.path.string(), 10));
         ASSERT_TRUE(store.append(makeRequest(1), 1000));
         ASSERT_TRUE(store.append(makeRequest(2), 2000));
-        sizeAfterTwoRecords =
-            std::filesystem::file_size(directory.path / "queries.bin");
+        sizeAfterTwoRecords = std::filesystem::file_size(directory.path / "queries.bin");
         ASSERT_TRUE(store.append(makeRequest(3), 3000));
     }
     {
@@ -1497,8 +1492,7 @@ TEST_F(ReplayControlRTest, testPersistentHistoryMigratesToSingleDirectory)
     }
 
     ReplayHistoryStore migrated;
-    ASSERT_TRUE(migrated.configure(root.string(), 10,
-                                   (root / historyKey(2)).string()));
+    ASSERT_TRUE(migrated.configure(root.string(), 10, (root / historyKey(2)).string()));
     EXPECT_FALSE(std::filesystem::exists(root / historyKey(1)));
     EXPECT_FALSE(std::filesystem::exists(root / historyKey(2)));
     EXPECT_TRUE(std::filesystem::exists(root / "queries.bin"));
@@ -1565,8 +1559,8 @@ TEST_F(ReplayControlRTest, testAsyncHistoryQueryAggregatesAllClients)
     auto responsePipe = std::make_shared<CaptureAsyncPipe>();
     uint64_t queryId = 0;
     ReplayControlResponseDataPtr immediate;
-    ASSERT_TRUE(resource.processRequestAsync({"query"}, responsePipe, queryId,
-                                             immediate));
+    ASSERT_TRUE(
+        resource.processRequestAsync({"query"}, responsePipe, queryId, immediate));
     EXPECT_FALSE(immediate);
     ASSERT_NE(0u, queryId);
     ASSERT_EQ(1u, queryA->dataItems.size());
@@ -1614,8 +1608,8 @@ TEST_F(ReplayControlRTest, testAsyncHistoryQueryReportsOfflineAndTimeout)
     auto responsePipe = std::make_shared<CaptureAsyncPipe>();
     uint64_t queryId = 0;
     ReplayControlResponseDataPtr immediate;
-    ASSERT_TRUE(resource.processRequestAsync({"query"}, responsePipe, queryId,
-                                             immediate));
+    ASSERT_TRUE(
+        resource.processRequestAsync({"query"}, responsePipe, queryId, immediate));
     ReplayHistoryQueryResponseData responseA;
     responseA.queryId = queryId;
     responseA.summary.clientId = "client-a";
@@ -1667,14 +1661,14 @@ TEST_F(ReplayControlRTest, testRecentCountSelectsOnlyCapableClients)
     ASSERT_TRUE(response->accepted);
     EXPECT_EQ(1u, response->eligibleClientCount);
     EXPECT_DOUBLE_EQ(40.0, response->perClientQps);
-    auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientA->dataItems.back());
+    auto command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientA->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::START, command->action);
     EXPECT_EQ(ReplayHistoryMode::RECENT_COUNT, command->historyMode);
     EXPECT_EQ(3u, command->recentQueryCount);
-    command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        clientB->dataItems.back());
+    command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientB->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::STOP, command->action);
 }
@@ -1704,8 +1698,8 @@ TEST_F(ReplayControlRTest, testClientJoinAndLeaveReallocateFixedQps)
     ASSERT_TRUE(resource.processRequest(request, response));
     ASSERT_TRUE(response->accepted);
     EXPECT_DOUBLE_EQ(100.0, response->perClientQps);
-    auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandA->dataItems.back());
+    auto command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandA->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(0u, command->pacingIndex);
     EXPECT_EQ(1u, command->pacingClientCount);
@@ -1716,8 +1710,8 @@ TEST_F(ReplayControlRTest, testClientJoinAndLeaveReallocateFixedQps)
     auto queryB = std::make_shared<CaptureAsyncPipe>();
     ASSERT_TRUE(resource.subscribe("client-b", commandB, queryB));
     ASSERT_EQ(1u, queryB->dataItems.size());
-    auto joinQuery = std::dynamic_pointer_cast<ReplayHistoryQueryData>(
-        queryB->dataItems.front());
+    auto joinQuery =
+        std::dynamic_pointer_cast<ReplayHistoryQueryData>(queryB->dataItems.front());
     ASSERT_TRUE(joinQuery);
 
     ReplayHistoryQueryResponseData responseB;
@@ -1727,16 +1721,16 @@ TEST_F(ReplayControlRTest, testClientJoinAndLeaveReallocateFixedQps)
     responseB.summary.reportTimeUs =
         autil::TimeUtility::currentTimeInMicroSeconds() + 4'000'000;
     resource.completeHistoryQuery(responseB);
-    command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandA->dataItems.back());
+    command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandA->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_DOUBLE_EQ(50.0, command->perClientQps);
     EXPECT_EQ(0u, command->pacingIndex);
     EXPECT_EQ(2u, command->pacingClientCount);
     EXPECT_GE(command->pacingEpochUs, initialPacingEpochUs);
     const auto joinedPacingEpochUs = command->pacingEpochUs;
-    command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandB->dataItems.back());
+    command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandB->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::START, command->action);
     EXPECT_DOUBLE_EQ(50.0, command->perClientQps);
@@ -1747,8 +1741,8 @@ TEST_F(ReplayControlRTest, testClientJoinAndLeaveReallocateFixedQps)
     EXPECT_LE(command->pacingClockOffsetUs, 4'000'000);
 
     resource.unsubscribe("client-b", commandB, queryB);
-    command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandA->dataItems.back());
+    command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandA->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_DOUBLE_EQ(100.0, command->perClientQps);
     EXPECT_EQ(0u, command->pacingIndex);
@@ -1790,8 +1784,8 @@ TEST_F(ReplayControlRTest, testRestartedClientJoinsActiveReplayAfterRestoringHis
         previousClient.setClientId("client-b");
         ASSERT_TRUE(previousClient.configureHistory(directory.path.string(), 10));
         for (uint64_t requestId = 1; requestId <= 5; ++requestId) {
-            ASSERT_TRUE(previousClient.recordNormalQuery(
-                makeRequest(requestId), 100 * requestId));
+            ASSERT_TRUE(previousClient.recordNormalQuery(makeRequest(requestId),
+                                                         100 * requestId));
         }
     }
 
@@ -1805,8 +1799,8 @@ TEST_F(ReplayControlRTest, testRestartedClientJoinsActiveReplayAfterRestoringHis
     auto queryB = std::make_shared<CaptureAsyncPipe>();
     ASSERT_TRUE(master.subscribe("client-b", commandB, queryB));
     ASSERT_EQ(1u, commandB->dataItems.size());
-    auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandB->dataItems.back());
+    auto command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandB->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::STOP, command->action);
     EXPECT_EQ(0u, command->selectionGeneration);
@@ -1814,8 +1808,8 @@ TEST_F(ReplayControlRTest, testRestartedClientJoinsActiveReplayAfterRestoringHis
     EXPECT_EQ(0u, restartedClient.getSummary().selectionGeneration);
 
     ASSERT_EQ(1u, queryB->dataItems.size());
-    const auto historyQuery = std::dynamic_pointer_cast<ReplayHistoryQueryData>(
-        queryB->dataItems.back());
+    const auto historyQuery =
+        std::dynamic_pointer_cast<ReplayHistoryQueryData>(queryB->dataItems.back());
     ASSERT_TRUE(historyQuery);
     ReplayHistoryQueryResponseData historyResponse;
     historyResponse.queryId = historyQuery->queryId;
@@ -1823,8 +1817,8 @@ TEST_F(ReplayControlRTest, testRestartedClientJoinsActiveReplayAfterRestoringHis
     master.completeHistoryQuery(historyResponse);
 
     ASSERT_GE(commandB->dataItems.size(), 2u);
-    command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandB->dataItems.back());
+    command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandB->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::START, command->action);
     EXPECT_GT(command->selectionGeneration, 0u);
@@ -1834,8 +1828,7 @@ TEST_F(ReplayControlRTest, testRestartedClientJoinsActiveReplayAfterRestoringHis
     ASSERT_TRUE(restartedClient.applyCommand(*command));
 
     const auto restartedSummary = restartedClient.getSummary();
-    EXPECT_EQ(command->selectionGeneration,
-              restartedSummary.selectionGeneration);
+    EXPECT_EQ(command->selectionGeneration, restartedSummary.selectionGeneration);
     EXPECT_EQ(5u, restartedSummary.selectedSampleCount);
     master.updateHistory(restartedSummary);
     ReplayControlR::Request query;
@@ -1879,8 +1872,8 @@ TEST_F(ReplayControlRTest, testQpsOnlyUpdatesPreserveReplayDefinition)
     ASSERT_TRUE(resource.processRequest(start, response));
     ASSERT_TRUE(response->accepted);
     const auto initialGeneration = response->generation;
-    auto initialCommand = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandA->dataItems.back());
+    auto initialCommand =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandA->dataItems.back());
     ASSERT_TRUE(initialCommand);
     auto previousPacingEpochUs = initialCommand->pacingEpochUs;
     auto previousTotalQps = start.totalQps;
@@ -1890,11 +1883,9 @@ TEST_F(ReplayControlRTest, testQpsOnlyUpdatesPreserveReplayDefinition)
     for (const auto totalQps : {20.0, 200.0, 5.0, 80.0}) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
         update.totalQps = totalQps;
-        const auto beforeUpdateUs =
-            autil::TimeUtility::currentTimeInMicroSeconds();
+        const auto beforeUpdateUs = autil::TimeUtility::currentTimeInMicroSeconds();
         ASSERT_TRUE(resource.processRequest(update, response));
-        const auto afterUpdateUs =
-            autil::TimeUtility::currentTimeInMicroSeconds();
+        const auto afterUpdateUs = autil::TimeUtility::currentTimeInMicroSeconds();
         ASSERT_TRUE(response->accepted) << response->error;
         EXPECT_DOUBLE_EQ(totalQps / 2.0, response->perClientQps);
 
@@ -1919,10 +1910,8 @@ TEST_F(ReplayControlRTest, testQpsOnlyUpdatesPreserveReplayDefinition)
             (static_cast<long double>(command->pacingEpochUs) -
              qpsRatio * static_cast<long double>(previousPacingEpochUs)) /
             (1.0L - qpsRatio);
-        EXPECT_GE(inferredUpdateUs,
-                  static_cast<long double>(beforeUpdateUs - 2));
-        EXPECT_LE(inferredUpdateUs,
-                  static_cast<long double>(afterUpdateUs + 2));
+        EXPECT_GE(inferredUpdateUs, static_cast<long double>(beforeUpdateUs - 2));
+        EXPECT_LE(inferredUpdateUs, static_cast<long double>(afterUpdateUs + 2));
         previousPacingEpochUs = command->pacingEpochUs;
         previousTotalQps = totalQps;
     }
@@ -1964,11 +1953,9 @@ TEST_F(ReplayControlRTest, testExtremeQpsUpdateKeepsRepresentableEpoch)
     request = {};
     request.action = "update";
     request.totalQps = std::numeric_limits<double>::min();
-    const auto beforeUpdateUs =
-        autil::TimeUtility::currentTimeInMicroSeconds();
+    const auto beforeUpdateUs = autil::TimeUtility::currentTimeInMicroSeconds();
     ASSERT_TRUE(resource.processRequest(request, response));
-    const auto afterUpdateUs =
-        autil::TimeUtility::currentTimeInMicroSeconds();
+    const auto afterUpdateUs = autil::TimeUtility::currentTimeInMicroSeconds();
     ASSERT_TRUE(response->accepted) << response->error;
 
     auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(
@@ -2017,8 +2004,8 @@ TEST_F(ReplayControlRTest, testDurationExpiryStopsMasterAndLateClient)
     EXPECT_EQ(0u, response->eligibleClientCount);
     EXPECT_DOUBLE_EQ(0.0, response->perClientQps);
     ASSERT_FALSE(commandA->dataItems.empty());
-    auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandA->dataItems.back());
+    auto command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandA->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::STOP, command->action);
     EXPECT_EQ(0u, command->selectionGeneration);
@@ -2027,8 +2014,8 @@ TEST_F(ReplayControlRTest, testDurationExpiryStopsMasterAndLateClient)
     auto queryB = std::make_shared<CaptureAsyncPipe>();
     ASSERT_TRUE(resource.subscribe("client-b", commandB, queryB));
     ASSERT_EQ(1u, commandB->dataItems.size());
-    command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandB->dataItems.back());
+    command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandB->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::STOP, command->action);
     EXPECT_TRUE(queryB->dataItems.empty());
@@ -2073,8 +2060,8 @@ TEST_F(ReplayControlRTest, testLateClientReceivesOnlyRemainingDuration)
     auto queryB = std::make_shared<CaptureAsyncPipe>();
     ASSERT_TRUE(resource.subscribe("client-b", commandB, queryB));
     ASSERT_EQ(1u, queryB->dataItems.size());
-    auto historyQuery = std::dynamic_pointer_cast<ReplayHistoryQueryData>(
-        queryB->dataItems.back());
+    auto historyQuery =
+        std::dynamic_pointer_cast<ReplayHistoryQueryData>(queryB->dataItems.back());
     ASSERT_TRUE(historyQuery);
 
     ReplayHistoryQueryResponseData historyResponse;
@@ -2084,8 +2071,8 @@ TEST_F(ReplayControlRTest, testLateClientReceivesOnlyRemainingDuration)
     resource.completeHistoryQuery(historyResponse);
 
     ASSERT_GE(commandB->dataItems.size(), 2u);
-    auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandB->dataItems.back());
+    auto command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandB->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::START, command->action);
     EXPECT_GT(command->durationMs, 0);
@@ -2132,8 +2119,8 @@ TEST_F(ReplayControlRTest, testQpsUpdateReallocatesAfterDeliveryFailure)
     EXPECT_EQ(1u, response->eligibleClientCount);
     EXPECT_DOUBLE_EQ(80.0, response->perClientQps);
 
-    auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(
-        commandA->dataItems.back());
+    auto command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(commandA->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::START, command->action);
     EXPECT_DOUBLE_EQ(80.0, command->perClientQps);
@@ -2184,8 +2171,7 @@ TEST_F(ReplayControlRTest, testFixedQpsUpdateKeepsReplayCursor)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
-    auto updatedAgain =
-        makeStart(ReplayMode::FIXED_QPS, now, now + 2, 10, 0, 40.0);
+    auto updatedAgain = makeStart(ReplayMode::FIXED_QPS, now, now + 2, 10, 0, 40.0);
     updatedAgain->generation = 3;
     ASSERT_TRUE(resource.applyCommand(*updatedAgain));
     for (int i = 0; i < 200; ++i) {
@@ -2233,8 +2219,7 @@ TEST_F(ReplayControlRTest, testCompletedSelectionIsNotRestartedByReallocation)
         ASSERT_EQ(1, callbackCount.load(std::memory_order_relaxed));
 
         command->generation = 2;
-        command->perClientQps =
-            mode == ReplayMode::FIXED_QPS ? 2000.0 : 0.0;
+        command->perClientQps = mode == ReplayMode::FIXED_QPS ? 2000.0 : 0.0;
         ASSERT_TRUE(resource.applyCommand(*command));
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         EXPECT_FALSE(resource.replaying());
@@ -2276,8 +2261,7 @@ TEST_F(ReplayControlRTest, testClientPublishesNaturalCompletion)
     ASSERT_TRUE(resource.recordNormalQuery(makeRequest(1), now));
     resource.setScheduleCallback([](const auto &) {});
 
-    auto command =
-        makeStart(ReplayMode::FIXED_QPS, now, now + 1, 1, 0, 1000.0);
+    auto command = makeStart(ReplayMode::FIXED_QPS, now, now + 1, 1, 0, 1000.0);
     command->generation = 1;
     command->selectionGeneration = 17;
     ASSERT_TRUE(resource.applyCommand(*command));
@@ -2287,9 +2271,8 @@ TEST_F(ReplayControlRTest, testClientPublishesNaturalCompletion)
     resource.stopReplay();
 
     ASSERT_GE(capabilityPipe->dataItems.size(), 3u);
-    const auto capability =
-        std::dynamic_pointer_cast<ReplayClientCapabilityData>(
-            capabilityPipe->dataItems.back());
+    const auto capability = std::dynamic_pointer_cast<ReplayClientCapabilityData>(
+        capabilityPipe->dataItems.back());
     ASSERT_TRUE(capability);
     EXPECT_EQ(17u, capability->summary.selectionGeneration);
     EXPECT_EQ(1u, capability->summary.selectedSampleCount);
@@ -2338,18 +2321,16 @@ TEST_F(ReplayControlRTest, testQpsOnlyUpdateDoesNotSendOldDeadline)
     ASSERT_TRUE(resource.recordNormalQuery(makeRequest(1), historyTimeUs));
 
     std::chrono::steady_clock::time_point callbackTime;
-    resource.setScheduleCallback([&](const auto &) {
-        callbackTime = std::chrono::steady_clock::now();
-    });
-    auto command = makeStart(ReplayMode::FIXED_QPS, historyTimeUs,
-                             historyTimeUs + 1, 1, 0, 10.0);
+    resource.setScheduleCallback(
+        [&](const auto &) { callbackTime = std::chrono::steady_clock::now(); });
+    auto command =
+        makeStart(ReplayMode::FIXED_QPS, historyTimeUs, historyTimeUs + 1, 1, 0, 10.0);
     command->generation = 1;
     command->totalQps = 10.0;
     command->perClientQps = 10.0;
     command->pacingIndex = 0;
     command->pacingClientCount = 1;
-    command->pacingEpochUs =
-        autil::TimeUtility::currentTimeInMicroSeconds() + 50'000;
+    command->pacingEpochUs = autil::TimeUtility::currentTimeInMicroSeconds() + 50'000;
     const auto started = std::chrono::steady_clock::now();
     ASSERT_TRUE(resource.applyCommand(*command));
 
@@ -2365,9 +2346,9 @@ TEST_F(ReplayControlRTest, testQpsOnlyUpdateDoesNotSendOldDeadline)
     resource.stopReplay();
 
     ASSERT_NE(std::chrono::steady_clock::time_point(), callbackTime);
-    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               callbackTime - started)
-                               .count();
+    const auto elapsedMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(callbackTime - started)
+            .count();
     EXPECT_GE(elapsedMs, 450)
         << "QPS update emitted the deadline calculated with the old rate";
     EXPECT_LT(elapsedMs, 800);
@@ -2430,10 +2411,9 @@ TEST_F(ReplayControlRTest, testContinuousQpsProfilesTrackTargetIntegral)
         for (size_t index = 1; index < qpsValues.size(); ++index) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             const auto segmentEnd = std::chrono::steady_clock::now();
-            expectedCount += activeQps *
-                             std::chrono::duration<double>(segmentEnd -
-                                                           segmentStart)
-                                 .count();
+            expectedCount +=
+                activeQps *
+                std::chrono::duration<double>(segmentEnd - segmentStart).count();
             request.totalQps = qpsValues[index];
             ASSERT_TRUE(master.processRequest(request, response));
             ASSERT_TRUE(response->accepted) << response->error;
@@ -2443,9 +2423,8 @@ TEST_F(ReplayControlRTest, testContinuousQpsProfilesTrackTargetIntegral)
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         const auto stoppedAt = std::chrono::steady_clock::now();
-        expectedCount += activeQps *
-                         std::chrono::duration<double>(stoppedAt - segmentStart)
-                             .count();
+        expectedCount +=
+            activeQps * std::chrono::duration<double>(stoppedAt - segmentStart).count();
         client.stopReplay();
 
         request = {};
@@ -2476,16 +2455,15 @@ TEST_F(ReplayControlRTest, testContinuousQpsProfilesTrackTargetIntegral)
         const auto fraction = static_cast<double>(index) / (STEP_COUNT - 1);
         rising.emplace_back(10.0 + 90.0 * fraction);
         falling.emplace_back(100.0 - 90.0 * fraction);
-        sine.emplace_back(55.0 + 45.0 * std::sin(
-                                           2.0L * PI * index / STEP_COUNT));
+        sine.emplace_back(55.0 + 45.0 * std::sin(2.0L * PI * index / STEP_COUNT));
     }
 
     for (const auto &profile : {rising, falling, sine}) {
         ProfileResult result;
         runProfile(profile, result);
         const auto tolerance = std::max(4.0, result.expectedCount * 0.08);
-        EXPECT_NEAR(result.expectedCount,
-                    static_cast<double>(result.actualCount), tolerance);
+        EXPECT_NEAR(result.expectedCount, static_cast<double>(result.actualCount),
+                    tolerance);
         EXPECT_LT(result.maxGapMs, 250)
             << "continuous QPS updates paused fixed-QPS replay";
     }
@@ -2512,10 +2490,9 @@ TEST_F(ReplayControlRTest, testTinyFixedQpsCanBeStoppedWithoutOverflow)
 
     const auto stopStarted = std::chrono::steady_clock::now();
     resource.stopReplay();
-    const auto stopElapsedMs =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - stopStarted)
-            .count();
+    const auto stopElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - stopStarted)
+                                   .count();
     EXPECT_LT(stopElapsedMs, 100);
     EXPECT_EQ(0u, sentCount.load(std::memory_order_relaxed));
 }
@@ -2537,8 +2514,8 @@ TEST_F(ReplayControlRTest, testQpsOnlyUpdateRephasesFollowingSendsAcrossClients)
     first.setScheduleCallback(callback);
     second.setScheduleCallback(callback);
 
-    auto firstCommand = makeStart(ReplayMode::FIXED_QPS, historyTimeUs,
-                                  historyTimeUs + 1, 0, 2000, 50.0);
+    auto firstCommand =
+        makeStart(ReplayMode::FIXED_QPS, historyTimeUs, historyTimeUs + 1, 0, 2000, 50.0);
     firstCommand->generation = 1;
     firstCommand->selectionGeneration = 29;
     firstCommand->totalQps = 100.0;
@@ -2546,8 +2523,8 @@ TEST_F(ReplayControlRTest, testQpsOnlyUpdateRephasesFollowingSendsAcrossClients)
     firstCommand->pacingClientCount = 2;
     firstCommand->pacingEpochUs =
         autil::TimeUtility::currentTimeInMicroSeconds() + 100'000;
-    auto secondCommand = makeStart(ReplayMode::FIXED_QPS, historyTimeUs,
-                                   historyTimeUs + 1, 0, 2000, 50.0);
+    auto secondCommand =
+        makeStart(ReplayMode::FIXED_QPS, historyTimeUs, historyTimeUs + 1, 0, 2000, 50.0);
     secondCommand->generation = firstCommand->generation;
     secondCommand->selectionGeneration = firstCommand->selectionGeneration;
     secondCommand->totalQps = firstCommand->totalQps;
@@ -2604,8 +2581,7 @@ TEST_F(ReplayControlRTest, testFixedQpsDoesNotAddScheduleCallbackLatency)
         callbackTimes.emplace_back(std::chrono::steady_clock::now());
         std::this_thread::sleep_for(std::chrono::milliseconds(60));
     });
-    auto command =
-        makeStart(ReplayMode::FIXED_QPS, now, now + 1, 6, 0, 10.0);
+    auto command = makeStart(ReplayMode::FIXED_QPS, now, now + 1, 6, 0, 10.0);
     command->generation = 1;
     ASSERT_TRUE(resource.applyCommand(*command));
     for (int i = 0; i < 400 && resource.replaying(); ++i) {
@@ -2620,11 +2596,9 @@ TEST_F(ReplayControlRTest, testFixedQpsDoesNotAddScheduleCallbackLatency)
                           callbackTimes[index] - callbackTimes[index - 1])
                           .count();
     }
-    const auto averageGapMs =
-        totalGapMs / static_cast<int64_t>(callbackTimes.size() - 1);
+    const auto averageGapMs = totalGapMs / static_cast<int64_t>(callbackTimes.size() - 1);
     EXPECT_GE(averageGapMs, 80);
-    EXPECT_LT(averageGapMs, 135)
-        << "fixed-QPS pacing included schedule callback latency";
+    EXPECT_LT(averageGapMs, 135) << "fixed-QPS pacing included schedule callback latency";
 }
 
 TEST_F(ReplayControlRTest, testFixedQpsPacingIndexDelaysFirstSend)
@@ -2637,8 +2611,7 @@ TEST_F(ReplayControlRTest, testFixedQpsPacingIndexDelaysFirstSend)
         resource.setScheduleCallback([&callbackTime](const auto &) {
             callbackTime = std::chrono::steady_clock::now();
         });
-        auto command =
-            makeStart(ReplayMode::FIXED_QPS, now, now + 1, 1, 0, 5.0);
+        auto command = makeStart(ReplayMode::FIXED_QPS, now, now + 1, 1, 0, 5.0);
         command->generation = 1;
         command->totalQps = 10.0;
         command->pacingIndex = pacingIndex;
@@ -2650,8 +2623,8 @@ TEST_F(ReplayControlRTest, testFixedQpsPacingIndexDelaysFirstSend)
         }
         resource.stopReplay();
         EXPECT_NE(std::chrono::steady_clock::time_point(), callbackTime);
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   callbackTime - started)
+        return std::chrono::duration_cast<std::chrono::milliseconds>(callbackTime -
+                                                                     started)
             .count();
     };
 
@@ -2674,23 +2647,21 @@ TEST_F(ReplayControlRTest, testFixedQpsClientsUseSharedPacingEpoch)
 
     std::chrono::steady_clock::time_point firstCallbackTime;
     std::chrono::steady_clock::time_point secondCallbackTime;
-    first.setScheduleCallback([&](const auto &) {
-        firstCallbackTime = std::chrono::steady_clock::now();
-    });
-    second.setScheduleCallback([&](const auto &) {
-        secondCallbackTime = std::chrono::steady_clock::now();
-    });
+    first.setScheduleCallback(
+        [&](const auto &) { firstCallbackTime = std::chrono::steady_clock::now(); });
+    second.setScheduleCallback(
+        [&](const auto &) { secondCallbackTime = std::chrono::steady_clock::now(); });
 
-    auto firstCommand = makeStart(ReplayMode::FIXED_QPS, historyTimeUs,
-                                  historyTimeUs + 1, 1, 0, 5.0);
+    auto firstCommand =
+        makeStart(ReplayMode::FIXED_QPS, historyTimeUs, historyTimeUs + 1, 1, 0, 5.0);
     firstCommand->generation = 1;
     firstCommand->totalQps = 10.0;
     firstCommand->pacingIndex = 0;
     firstCommand->pacingClientCount = 2;
     firstCommand->pacingEpochUs =
         autil::TimeUtility::currentTimeInMicroSeconds() + 250000;
-    auto secondCommand = makeStart(ReplayMode::FIXED_QPS, historyTimeUs,
-                                   historyTimeUs + 1, 1, 0, 5.0);
+    auto secondCommand =
+        makeStart(ReplayMode::FIXED_QPS, historyTimeUs, historyTimeUs + 1, 1, 0, 5.0);
     secondCommand->generation = 1;
     secondCommand->totalQps = 10.0;
     secondCommand->pacingIndex = 1;
@@ -2708,10 +2679,9 @@ TEST_F(ReplayControlRTest, testFixedQpsClientsUseSharedPacingEpoch)
 
     ASSERT_NE(std::chrono::steady_clock::time_point(), firstCallbackTime);
     ASSERT_NE(std::chrono::steady_clock::time_point(), secondCallbackTime);
-    const auto callbackGapMs =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            secondCallbackTime - firstCallbackTime)
-            .count();
+    const auto callbackGapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   secondCallbackTime - firstCallbackTime)
+                                   .count();
     EXPECT_GE(callbackGapMs, 60);
     EXPECT_LT(callbackGapMs, 140);
 }
@@ -2723,16 +2693,14 @@ TEST_F(ReplayControlRTest, testFixedQpsAppliesClientClockOffset)
     ASSERT_TRUE(resource.recordNormalQuery(makeRequest(1), historyTimeUs));
 
     std::chrono::steady_clock::time_point callbackTime;
-    resource.setScheduleCallback([&](const auto &) {
-        callbackTime = std::chrono::steady_clock::now();
-    });
-    auto command = makeStart(ReplayMode::FIXED_QPS, historyTimeUs,
-                             historyTimeUs + 1, 1, 0, 10.0);
+    resource.setScheduleCallback(
+        [&](const auto &) { callbackTime = std::chrono::steady_clock::now(); });
+    auto command =
+        makeStart(ReplayMode::FIXED_QPS, historyTimeUs, historyTimeUs + 1, 1, 0, 10.0);
     command->generation = 1;
     command->totalQps = 10.0;
     command->pacingClientCount = 1;
-    command->pacingEpochUs =
-        autil::TimeUtility::currentTimeInMicroSeconds() + 200'000;
+    command->pacingEpochUs = autil::TimeUtility::currentTimeInMicroSeconds() + 200'000;
     command->pacingClockOffsetUs = 200'000;
     const auto appliedAt = std::chrono::steady_clock::now();
     ASSERT_TRUE(resource.applyCommand(*command));
@@ -2742,9 +2710,9 @@ TEST_F(ReplayControlRTest, testFixedQpsAppliesClientClockOffset)
     resource.stopReplay();
 
     ASSERT_NE(std::chrono::steady_clock::time_point(), callbackTime);
-    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                               callbackTime - appliedAt)
-                               .count();
+    const auto elapsedMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(callbackTime - appliedAt)
+            .count();
     EXPECT_GE(elapsedMs, 350);
     EXPECT_LT(elapsedMs, 800);
 }
@@ -2759,12 +2727,10 @@ TEST_F(ReplayControlRTest, testRealtimeClientsUseSharedPacingEpoch)
 
     std::chrono::steady_clock::time_point firstCallbackTime;
     std::chrono::steady_clock::time_point secondCallbackTime;
-    first.setScheduleCallback([&](const auto &) {
-        firstCallbackTime = std::chrono::steady_clock::now();
-    });
-    second.setScheduleCallback([&](const auto &) {
-        secondCallbackTime = std::chrono::steady_clock::now();
-    });
+    first.setScheduleCallback(
+        [&](const auto &) { firstCallbackTime = std::chrono::steady_clock::now(); });
+    second.setScheduleCallback(
+        [&](const auto &) { secondCallbackTime = std::chrono::steady_clock::now(); });
 
     auto firstCommand = makeStart(ReplayMode::REALTIME, historyTimeUs,
                                   historyTimeUs + 200'000, 1, 0, 0.0);
@@ -2802,14 +2768,12 @@ TEST_F(ReplayControlRTest, testRealtimeLateClientSkipsExpiredEvents)
     ASSERT_TRUE(resource.recordNormalQuery(makeRequest(2), historyTimeUs + 300'000));
 
     std::vector<uint64_t> requestIds;
-    resource.setScheduleCallback([&](const auto &request) {
-        requestIds.push_back(request.requestId);
-    });
-    auto command = makeStart(ReplayMode::REALTIME, historyTimeUs,
-                             historyTimeUs + 400'000, 1, 0, 0.0);
+    resource.setScheduleCallback(
+        [&](const auto &request) { requestIds.push_back(request.requestId); });
+    auto command = makeStart(ReplayMode::REALTIME, historyTimeUs, historyTimeUs + 400'000,
+                             1, 0, 0.0);
     command->generation = 1;
-    command->pacingEpochUs =
-        autil::TimeUtility::currentTimeInMicroSeconds() - 200'000;
+    command->pacingEpochUs = autil::TimeUtility::currentTimeInMicroSeconds() - 200'000;
     ASSERT_TRUE(resource.applyCommand(*command));
     for (int i = 0; i < 100 && resource.replaying(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -2833,11 +2797,10 @@ TEST_F(ReplayControlRTest, testRealtimeDoesNotDropEventsDelayedByCallback)
         requestIds.push_back(request.requestId);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     });
-    auto command = makeStart(ReplayMode::REALTIME, historyTimeUs,
-                             historyTimeUs + 3'000, 1, 0, 0.0);
+    auto command =
+        makeStart(ReplayMode::REALTIME, historyTimeUs, historyTimeUs + 3'000, 1, 0, 0.0);
     command->generation = 1;
-    command->pacingEpochUs =
-        autil::TimeUtility::currentTimeInMicroSeconds() + 300'000;
+    command->pacingEpochUs = autil::TimeUtility::currentTimeInMicroSeconds() + 300'000;
     ASSERT_TRUE(resource.applyCommand(*command));
     for (int i = 0; i < 200 && resource.replaying(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -2859,8 +2822,7 @@ TEST_F(ReplayControlRTest, testFixedQpsUpdateAppliesNewPacingPhase)
         callbackTimes.emplace_back(std::chrono::steady_clock::now());
     });
 
-    auto command =
-        makeStart(ReplayMode::FIXED_QPS, now, now + 1, 0, 2000, 50.0);
+    auto command = makeStart(ReplayMode::FIXED_QPS, now, now + 1, 0, 2000, 50.0);
     command->generation = 1;
     command->selectionGeneration = 7;
     command->totalQps = 100.0;
@@ -2907,10 +2869,9 @@ TEST_F(ReplayControlRTest, testFixedQpsUpdateAppliesNewPacingPhase)
 
     std::lock_guard<std::mutex> lock(callbackMutex);
     ASSERT_GT(callbackTimes.size(), countAtUpdate);
-    const auto delayMs =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            callbackTimes[countAtUpdate] - updatedAt)
-            .count();
+    const auto delayMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             callbackTimes[countAtUpdate] - updatedAt)
+                             .count();
     EXPECT_GE(delayMs, 120);
     EXPECT_LT(delayMs, 260);
 }
@@ -2972,7 +2933,8 @@ TEST_F(ReplayControlRTest, testNoHistoryClientIsReportedButNotScheduled)
     EXPECT_EQ(1u, response->eligibleClientCount);
     EXPECT_EQ(2u, response->clients.size());
 
-    auto command = std::dynamic_pointer_cast<ReplayControlCommandData>(clientB->dataItems.back());
+    auto command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientB->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::STOP, command->action);
 
@@ -2984,7 +2946,8 @@ TEST_F(ReplayControlRTest, testNoHistoryClientIsReportedButNotScheduled)
     ReplayHistorySummary summaryB = summaryA;
     summaryB.clientId = "client-b";
     resource.updateHistory(summaryB);
-    command = std::dynamic_pointer_cast<ReplayControlCommandData>(clientB->dataItems.back());
+    command =
+        std::dynamic_pointer_cast<ReplayControlCommandData>(clientB->dataItems.back());
     ASSERT_TRUE(command);
     EXPECT_EQ(ReplayAction::START, command->action);
     EXPECT_DOUBLE_EQ(50.0, command->perClientQps);
@@ -3024,8 +2987,8 @@ TEST_F(ReplayControlRTest, testValidEmptyRangeDoesNotStartReplay)
     resource.setScheduleCallback([&callbackCount](const auto &) {
         callbackCount.fetch_add(1, std::memory_order_relaxed);
     });
-    auto command = makeStart(ReplayMode::FIXED_QPS, now + 100'000,
-                             now + 200'000, 1, 0, 100.0);
+    auto command =
+        makeStart(ReplayMode::FIXED_QPS, now + 100'000, now + 200'000, 1, 0, 100.0);
     command->generation = 1;
     command->selectionGeneration = 9;
     ASSERT_TRUE(resource.applyCommand(*command));
@@ -3041,9 +3004,8 @@ TEST_F(ReplayControlRTest, testValidEmptyRangeDoesNotStartReplay)
 
     ASSERT_TRUE(resource.answerHistoryQuery(17));
     ASSERT_EQ(1u, queryResponsePipe->dataItems.size());
-    const auto queryResponse =
-        std::dynamic_pointer_cast<ReplayHistoryQueryResponseData>(
-            queryResponsePipe->dataItems.back());
+    const auto queryResponse = std::dynamic_pointer_cast<ReplayHistoryQueryResponseData>(
+        queryResponsePipe->dataItems.back());
     ASSERT_TRUE(queryResponse);
     EXPECT_EQ(17u, queryResponse->queryId);
     EXPECT_EQ(9u, queryResponse->summary.selectionGeneration);
@@ -3067,12 +3029,10 @@ TEST_F(ReplayControlRTest, testRealtimeUsesAbsoluteOffsetsWithoutCallbackDrift)
         callbackCount.fetch_add(1, std::memory_order_release);
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
     });
-    auto command = makeStart(ReplayMode::REALTIME, now, now + 3 * OFFSET_US,
-                             2, 0, 0.0);
+    auto command = makeStart(ReplayMode::REALTIME, now, now + 3 * OFFSET_US, 2, 0, 0.0);
     command->generation = 1;
     ASSERT_TRUE(resource.applyCommand(*command));
-    for (int i = 0; i < 400 && callbackCount.load(std::memory_order_acquire) < 6;
-         ++i) {
+    for (int i = 0; i < 400 && callbackCount.load(std::memory_order_acquire) < 6; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     resource.stopReplay();
@@ -3082,10 +3042,10 @@ TEST_F(ReplayControlRTest, testRealtimeUsesAbsoluteOffsetsWithoutCallbackDrift)
     for (size_t loop = 0; loop < 2; ++loop) {
         const auto begin = loop * 3;
         for (size_t index = 1; index < 3; ++index) {
-            const auto gapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                   callbackTimes[begin + index] -
-                                   callbackTimes[begin + index - 1])
-                                   .count();
+            const auto gapMs =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    callbackTimes[begin + index] - callbackTimes[begin + index - 1])
+                    .count();
             EXPECT_GE(gapMs, 250);
             EXPECT_LT(gapMs, 430);
         }
@@ -3100,18 +3060,15 @@ TEST_F(ReplayControlRTest, testRealtimePreservesGapFromRequestedRangeStart)
     ASSERT_TRUE(resource.recordNormalQuery(makeRequest(1), now + 150'000));
 
     std::atomic<uint64_t> callbackCount{0};
-    resource.setScheduleCallback([&](const auto &) {
-        callbackCount.fetch_add(1, std::memory_order_relaxed);
-    });
-    auto command = makeStart(ReplayMode::REALTIME, now, now + 200'000,
-                             1, 0, 0.0);
+    resource.setScheduleCallback(
+        [&](const auto &) { callbackCount.fetch_add(1, std::memory_order_relaxed); });
+    auto command = makeStart(ReplayMode::REALTIME, now, now + 200'000, 1, 0, 0.0);
     command->generation = 1;
     ASSERT_TRUE(resource.applyCommand(*command));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(60));
     EXPECT_EQ(0u, callbackCount.load(std::memory_order_relaxed));
-    for (int i = 0; i < 100 && callbackCount.load(std::memory_order_relaxed) < 1;
-         ++i) {
+    for (int i = 0; i < 100 && callbackCount.load(std::memory_order_relaxed) < 1; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     resource.stopReplay();
@@ -3132,8 +3089,7 @@ TEST_F(ReplayControlRTest, testRealtimeLoopsUseRequestedRangeBoundary)
         std::lock_guard<std::mutex> lock(callbackMutex);
         callbackTimes.emplace_back(std::chrono::steady_clock::now());
     });
-    auto command = makeStart(ReplayMode::REALTIME, now, now + 120'000,
-                             2, 0, 0.0);
+    auto command = makeStart(ReplayMode::REALTIME, now, now + 120'000, 2, 0, 0.0);
     command->generation = 1;
     ASSERT_TRUE(resource.applyCommand(*command));
     for (int i = 0; i < 100; ++i) {
@@ -3149,10 +3105,9 @@ TEST_F(ReplayControlRTest, testRealtimeLoopsUseRequestedRangeBoundary)
 
     std::lock_guard<std::mutex> lock(callbackMutex);
     ASSERT_EQ(4u, callbackTimes.size());
-    const auto loopBoundaryGapMs =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            callbackTimes[2] - callbackTimes[1])
-            .count();
+    const auto loopBoundaryGapMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       callbackTimes[2] - callbackTimes[1])
+                                       .count();
     EXPECT_GE(loopBoundaryGapMs, 70);
     EXPECT_LT(loopBoundaryGapMs, 170);
 }

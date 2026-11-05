@@ -3,6 +3,7 @@
 #include "aios/navi_sched/common/NaviSchedCommon.h"
 #include "aios/navi_sched/data/NaviSchedLatencyPrediction.h"
 #include "aios/navi_sched/data/NaviSchedLatencySample.h"
+#include "aios/navi_sched/data/NaviSchedQueueModel.h"
 #include <autil/legacy/json.h>
 
 namespace navi_sched {
@@ -163,6 +164,7 @@ struct NaviSchedNodeInfo {
     double lastRequestLatencyMs = 0.0;
     double queueTotalPredictedLatencyMs = 0.0;
     double queueDecayHeadRemainingMs = 0.0;
+    NaviSchedQueueModelState queueModel;
     int64_t queueReportReceiveTimeUs = 0;
     bool online = false;
     std::string lastEventType;
@@ -179,6 +181,15 @@ struct NaviSchedNodeInfo {
         std::vector<double>(NAVI_SCHED_LATENCY_RESIDUAL_PARAMETER_COUNT, 0.0);
     int64_t latencyResidualLastUpdateTimeUs = 0;
     std::string latencyModelFingerprint;
+    bool executionGeometryEnabled = false;
+    bool projectedExecutionGeometryEnabled = false;
+    bool peerCacheEnabled = false;
+    // Live Master diagnostics; intentionally excluded from persisted model/replay wire
+    // data.
+    bool peerCacheReadAvailable = false;
+    uint64_t peerCacheReadRevision = 0;
+    int64_t peerCacheReadAgentStartTimeUs = 0;
+    TPUPrefillExecutionPolicyConfig prefillExecutionPolicy;
     bool latencyModelTrusted = false;
     bool latencyModelWarmStarted = false;
     uint32_t latencyModelConsecutiveRejectedCount = 0;
@@ -199,10 +210,13 @@ struct NaviSchedScheduleRequest {
     uint64_t requestId = 0;
     std::string bizName;
     int64_t promptTokenCount = 0;
+    // Explicit runtime checkpoint, before node-specific block alignment.
+    int64_t explicitCacheCheckpointPosition = 0;
     int64_t blockSize = 256;
     NaviSchedBlockHashesConstPtr blockHashes;
     int64_t timeoutMs = 0;
     std::string forwardPayload;
+    bool routeOnly = false;
 
     void serialize(autil::DataBuffer &dataBuffer) const;
     void deserialize(autil::DataBuffer &dataBuffer);

@@ -1,3 +1,4 @@
+#include <optional>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "aios/navi_sched/bindings/NaviSchedBindings.h"
@@ -9,6 +10,9 @@
 #include "aios/navi_sched/service/NaviSchedAgent.h"
 #include "aios/navi_sched/service/NaviSchedClient.h"
 #include "aios/navi_sched/service/NaviSchedMaster.h"
+#include "aios/navi_sched/resource/MasterStateR.h"
+#include "aios/navi_sched/common/TPUPrefillExecutionPolicy.h"
+#include <limits>
 #include "aios/network/gig/multi_call/subscribe/VIPSubscribeService.h"
 #include "autil/Log.h"
 #include "alog/Configurator.h"
@@ -21,6 +25,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <tuple>
@@ -55,28 +60,32 @@ public:
     using BatchRequest = std::tuple<uint64_t, int64_t, int64_t, std::vector<uint64_t>>;
     using RequestStats = std::tuple<uint64_t, int64_t, int64_t>;
 
-    struct ForwardBatch {
-        int64_t scheduleBatchId = 0;
-        int64_t localBatchId = 0;
-        int64_t scheduleBatchSize = 0;
-        bool pendingCacheTracked = false;
-        int64_t readyTimeNs = 0;
-        std::vector<uint64_t> requestIds;
-        std::vector<std::string> payloads;
-        std::vector<int64_t> predictedCacheHitTokenCounts;
-        std::unordered_map<uint64_t, NaviSchedBlockHashesConstPtr> requestBlockHashes;
-        std::mutex reporterMutex;
-        NaviSchedBatchFinishReporterPtr reporter;
-    };
-
     struct ForwardRequestTouch {
         uint64_t requestId = 0;
         int64_t acceptedTimeNs = 0;
         std::string payload;
     };
 
-    explicit VLLMAgentBridge(const std::shared_ptr<NaviSchedAgent> &agent)
+    struct ForwardBatch {
+        int64_t scheduleBatchId = 0;
+        int64_t localBatchId = 0;
+        int64_t scheduleBatchSize = 0;
+        bool pendingCacheTracked = false;
+        int64_t readyTimeNs = 0;
+        int64_t readyTimeUs = 0;
+        std::vector<uint64_t> requestIds;
+        std::vector<std::string> payloads;
+        std::vector<int64_t> predictedCacheHitTokenCounts;
+        std::unordered_map<uint64_t, NaviSchedBlockHashesConstPtr> requestBlockHashes;
+        std::vector<std::shared_ptr<ForwardRequestTouch>> touches;
+        std::mutex reporterMutex;
+        NaviSchedBatchFinishReporterPtr reporter;
+    };
+
+    explicit VLLMAgentBridge(const std::shared_ptr<NaviSchedAgent> &agent,
+                             bool pdSeparated = false)
         : _agent(agent)
+        , _pdSeparated(pdSeparated)
         , _forwardState(std::make_shared<ForwardState>())
     {
     }
@@ -113,7 +122,7 @@ public:
         });
         const auto enabled = _agent->setForwardBatchHandler(
             [state](const std::vector<NaviSchedForwardedRequest> &requests,
-                   int64_t batchId, const NaviSchedBatchFinishReporterPtr &reporter) {
+                    int64_t batchId, const NaviSchedBatchFinishReporterPtr &reporter) {
                 if (batchId <= 0 || requests.empty() || !reporter) {
                     return false;
                 }
@@ -122,8 +131,11 @@ public:
                 batch->localBatchId = requests.front().localBatchId;
                 batch->scheduleBatchSize = requests.front().scheduleBatchSize;
                 batch->pendingCacheTracked = requests.front().pendingCacheTracked;
-                batch->readyTimeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                batch->readyTimeUs = requests.front().batchReadyTimeUs;
+                batch->readyTimeNs =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
                 batch->reporter = reporter;
                 batch->requestIds.reserve(requests.size());
                 batch->payloads.reserve(requests.size());
@@ -136,15 +148,14 @@ public:
                             static_cast<int64_t>(requests.size()) ||
                         request.localBatchId != batch->localBatchId ||
                         request.scheduleBatchSize != batch->scheduleBatchSize ||
-                        request.localBatchSize !=
-                            static_cast<int64_t>(requests.size()) ||
-                        request.pendingCacheTracked !=
-                            batch->pendingCacheTracked ||
+                        request.localBatchSize != static_cast<int64_t>(requests.size()) ||
+                        request.pendingCacheTracked != batch->pendingCacheTracked ||
                         !uniqueRequestIds.emplace(request.requestId).second) {
                         return false;
                     }
                     batch->requestIds.emplace_back(request.requestId);
-                    batch->requestBlockHashes.emplace(request.requestId, request.blockHashes);
+                    batch->requestBlockHashes.emplace(request.requestId,
+                                                      request.blockHashes);
                     batch->payloads.emplace_back(request.payload);
                     batch->predictedCacheHitTokenCounts.emplace_back(
                         request.predictedCacheHitTokenCount);
@@ -174,7 +185,8 @@ public:
                 touch->requestId = requestId;
                 touch->acceptedTimeNs =
                     std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
                 touch->payload = payload;
                 std::lock_guard<std::mutex> lock(state->mutex);
                 if (!state->enabled ||
@@ -231,8 +243,7 @@ public:
         std::unique_lock<std::mutex> lock(state->mutex);
         if (state->forwardQueue.empty() && state->enabled && timeoutMs > 0) {
             state->condition.wait_for(
-                lock, std::chrono::milliseconds(timeoutMs),
-                [state] {
+                lock, std::chrono::milliseconds(timeoutMs), [state] {
                     return !state->enabled || !state->forwardQueue.empty() ||
                            !state->cancelledRequests.empty();
                 });
@@ -246,19 +257,21 @@ public:
         for (auto requestId : batch->requestIds) {
             state->queuedForwardRequestIds.erase(requestId);
             removeQueuedTouches =
-                state->queuedTouchRequestIds.erase(requestId) > 0 ||
-                removeQueuedTouches;
+                state->queuedTouchRequestIds.erase(requestId) > 0 || removeQueuedTouches;
         }
         if (removeQueuedTouches) {
-            const std::unordered_set<uint64_t> requestIds(
-                batch->requestIds.begin(), batch->requestIds.end());
-            state->touchQueue.erase(
-                std::remove_if(
-                    state->touchQueue.begin(), state->touchQueue.end(),
-                    [&requestIds](const std::shared_ptr<ForwardRequestTouch> &touch) {
-                        return touch && requestIds.count(touch->requestId) != 0;
-                    }),
-                state->touchQueue.end());
+            const std::unordered_set<uint64_t> requestIds(batch->requestIds.begin(),
+                                                          batch->requestIds.end());
+            for (auto it = state->touchQueue.begin(); it != state->touchQueue.end();) {
+                if (*it && requestIds.count((*it)->requestId) != 0) {
+                    if (_pdSeparated) {
+                        batch->touches.emplace_back(std::move(*it));
+                    }
+                    it = state->touchQueue.erase(it);
+                } else {
+                    ++it;
+                }
+            }
         }
         lock.unlock();
         if (!batch->reporter || !batch->reporter->beginExecution()) {
@@ -268,21 +281,19 @@ public:
         return batch;
     }
 
-    std::vector<std::shared_ptr<ForwardRequestTouch>>
-    takeForwardRequestTouches(size_t maxCount)
+    std::vector<std::shared_ptr<ForwardRequestTouch>> takeForwardRequestTouches(
+        size_t maxCount)
     {
         const auto state = _forwardState;
         std::lock_guard<std::mutex> lock(state->mutex);
         std::vector<std::shared_ptr<ForwardRequestTouch>> touches;
-        const auto count = maxCount == 0
-                               ? state->touchQueue.size()
-                               : std::min(maxCount, state->touchQueue.size());
+        const auto count = maxCount == 0 ? state->touchQueue.size()
+                                         : std::min(maxCount, state->touchQueue.size());
         touches.reserve(count);
         while (!state->touchQueue.empty() && touches.size() < count) {
             auto touch = std::move(state->touchQueue.front());
             state->touchQueue.pop_front();
-            if (!touch ||
-                state->queuedTouchRequestIds.erase(touch->requestId) == 0) {
+            if (!touch || state->queuedTouchRequestIds.erase(touch->requestId) == 0) {
                 continue;
             }
             touches.emplace_back(std::move(touch));
@@ -303,23 +314,21 @@ public:
         return requests;
     }
 
-    bool publishForwardResponse(uint64_t requestId,
-                                std::vector<std::string> frames,
+    bool publishForwardResponse(uint64_t requestId, std::vector<std::string> frames,
                                 bool terminal) const
     {
         return _agent &&
                _agent->publishForwardResponse(requestId, std::move(frames), terminal);
     }
 
-    bool failForwardResponse(uint64_t requestId,
-                             const std::string &errorMessage) const
+    bool failForwardResponse(uint64_t requestId, const std::string &errorMessage) const
     {
         return _agent && _agent->failForwardResponse(requestId, errorMessage);
     }
 
     static NaviSchedBatchFinishReporterPtr startForwardBatch(
         const std::shared_ptr<ForwardBatch> &batch,
-        const std::vector<uint64_t> &requestIds)
+        const std::vector<uint64_t> &requestIds, int64_t executionStartTimeUs)
     {
         if (!batch || requestIds.size() != batch->requestIds.size() ||
             std::unordered_set<uint64_t>(requestIds.begin(), requestIds.end()) !=
@@ -331,12 +340,34 @@ public:
         if (!batch->reporter) {
             return nullptr;
         }
-        return batch->reporter->startBatch(requestIds) ? batch->reporter : nullptr;
+        return batch->reporter->startBatch(requestIds, executionStartTimeUs)
+                   ? batch->reporter
+                   : nullptr;
     }
 
-    static bool abortForwardBatchRequests(
-        const std::shared_ptr<ForwardBatch> &batch,
-        const std::vector<uint64_t> &requestIds)
+    static bool resolveForwardExecutionCache(
+        const NaviSchedBatchFinishReporterPtr &reporter,
+        const std::vector<std::tuple<uint64_t, int64_t, int64_t, int64_t, int64_t>>
+            &values)
+    {
+        if (!reporter || values.empty()) {
+            return false;
+        }
+        std::vector<NaviSchedRequestStats> requests;
+        for (const auto &value : values) {
+            NaviSchedRequestStats request;
+            request.requestId = std::get<0>(value);
+            request.totalTokenCount = std::get<1>(value);
+            request.cacheHitTokenCount = std::get<2>(value);
+            request.executionSharedPrefixBoundary = std::get<3>(value);
+            request.executionExternalReadTokens = std::get<4>(value);
+            requests.emplace_back(std::move(request));
+        }
+        return reporter->resolveExecutionCache(requests);
+    }
+
+    static bool abortForwardBatchRequests(const std::shared_ptr<ForwardBatch> &batch,
+                                          const std::vector<uint64_t> &requestIds)
     {
         if (!batch || requestIds.empty()) {
             return false;
@@ -344,8 +375,7 @@ public:
         std::lock_guard<std::mutex> lock(batch->reporterMutex);
         if (!batch->reporter || requestIds.size() >= batch->requestIds.size() ||
             batch->requestIds.size() != batch->payloads.size() ||
-            batch->requestIds.size() !=
-                batch->predictedCacheHitTokenCounts.size()) {
+            batch->requestIds.size() != batch->predictedCacheHitTokenCounts.size()) {
             return false;
         }
         std::unordered_set<uint64_t> abortedIds;
@@ -378,8 +408,7 @@ public:
         }
         batch->requestIds.swap(remainingRequestIds);
         batch->payloads.swap(remainingPayloads);
-        batch->predictedCacheHitTokenCounts.swap(
-            remainingPredictedCacheHits);
+        batch->predictedCacheHitTokenCounts.swap(remainingPredictedCacheHits);
         return true;
     }
 
@@ -392,7 +421,8 @@ public:
     }
 
     NaviSchedBatchFinishReporterPtr startBatch(
-        int64_t batchId, const std::vector<BatchRequest> &requests) const
+        int64_t batchId, const std::vector<BatchRequest> &requests,
+        const std::map<uint64_t, int64_t> &prefixCachePromptTokens) const
     {
         if (!_agent || batchId <= 0 || requests.empty()) {
             return nullptr;
@@ -418,6 +448,10 @@ public:
             request.blockSize = std::get<2>(value);
             request.blockHashes =
                 std::make_shared<const NaviSchedBlockHashes>(std::get<3>(value));
+            const auto publication = prefixCachePromptTokens.find(request.requestId);
+            if (publication != prefixCachePromptTokens.end()) {
+                request.cachePublicationTokenCount = publication->second;
+            }
             if (!request.valid()) {
                 return nullptr;
             }
@@ -464,32 +498,21 @@ public:
         return reporter->finishBatch(requests);
     }
 
-    static bool finishBatchWithExecution(const NaviSchedBatchFinishReporterPtr &reporter,
-                                         const std::vector<RequestStats> &values,
-                                         double wallTimeMs, double executeModelTimeMs,
-                                         int64_t executionStepCount,
-                                         int64_t prefillTokenCount,
-                                         int64_t decodeRequestStepCount,
-                                         int64_t decodeTokenCount,
-                                         double unifiedLatencyMs,
-                                         int64_t precedingRequestCount,
-                                         int64_t sampleBatchCount,
-                                         int64_t runningRequestCount,
-                                         int64_t runningCacheHitTokenCount,
-                                         int64_t runningCacheMissTokenCount,
-                                         double runningCacheMissTokenSquareSum,
-                                         double runningCacheHitMissTokenProductSum,
-                                         int64_t waitingRequestCount,
-                                         int64_t waitingCacheHitTokenCount,
-                                         int64_t waitingCacheMissTokenCount,
-                                         double waitingCacheMissTokenSquareSum,
-                                         double waitingCacheHitMissTokenProductSum,
-                                         double runningElapsedTimeMs,
-                                         int64_t runningDecodeRequestCount,
-                                         int64_t runningDecodeGeneratedTokenCount,
-                                         int64_t runningDecodeRemainingTokenBudget,
-                                         double admissionToFirstExecutionMs,
-                                         double nativePreparationMs)
+    static bool finishBatchWithExecution(
+        const NaviSchedBatchFinishReporterPtr &reporter,
+        const std::vector<RequestStats> &values, double wallTimeMs,
+        double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+        int64_t decodeRequestStepCount, int64_t decodeTokenCount, double unifiedLatencyMs,
+        int64_t precedingRequestCount, int64_t sampleBatchCount,
+        int64_t runningRequestCount, int64_t runningCacheHitTokenCount,
+        int64_t runningCacheMissTokenCount, double runningCacheMissTokenSquareSum,
+        double runningCacheHitMissTokenProductSum, int64_t waitingRequestCount,
+        int64_t waitingCacheHitTokenCount, int64_t waitingCacheMissTokenCount,
+        double waitingCacheMissTokenSquareSum, double waitingCacheHitMissTokenProductSum,
+        double runningElapsedTimeMs, int64_t runningDecodeRequestCount,
+        int64_t runningDecodeGeneratedTokenCount,
+        int64_t runningDecodeRemainingTokenBudget, double admissionToFirstExecutionMs,
+        double nativePreparationMs, int64_t executionFinishTimeUs)
     {
         if (!reporter || values.empty()) {
             return false;
@@ -507,49 +530,246 @@ public:
             return reporter->finishBatch(
                 requests, wallTimeMs, executeModelTimeMs, executionStepCount,
                 prefillTokenCount, decodeRequestStepCount, decodeTokenCount,
-                admissionToFirstExecutionMs, nativePreparationMs);
+                admissionToFirstExecutionMs, nativePreparationMs, executionFinishTimeUs);
         }
         NaviSchedLatencyFeatures sampleFeatures;
         if (!sampleFeatures.appendCapacitySplitAggregate(
-                sampleBatchCount, runningRequestCount,
-                runningCacheHitTokenCount, runningCacheMissTokenCount,
-                runningCacheMissTokenSquareSum,
+                sampleBatchCount, runningRequestCount, runningCacheHitTokenCount,
+                runningCacheMissTokenCount, runningCacheMissTokenSquareSum,
                 runningCacheHitMissTokenProductSum, waitingRequestCount,
                 waitingCacheHitTokenCount, waitingCacheMissTokenCount,
-                waitingCacheMissTokenSquareSum,
-                waitingCacheHitMissTokenProductSum) ||
-            !sampleFeatures.appendPrecedingRequestCount(
-                precedingRequestCount) ||
-            !sampleFeatures.appendRunningElapsedTimeMs(
-                runningElapsedTimeMs) ||
+                waitingCacheMissTokenSquareSum, waitingCacheHitMissTokenProductSum) ||
+            !sampleFeatures.appendPrecedingRequestCount(precedingRequestCount) ||
+            !sampleFeatures.appendRunningElapsedTimeMs(runningElapsedTimeMs) ||
             !sampleFeatures.appendRunningDecodeProgress(
-                runningDecodeRequestCount,
-                runningDecodeGeneratedTokenCount,
+                runningDecodeRequestCount, runningDecodeGeneratedTokenCount,
                 runningDecodeRemainingTokenBudget)) {
             return false;
         }
         return reporter->finishBatchWithUnifiedLatency(
             requests, wallTimeMs, executeModelTimeMs, executionStepCount,
+            prefillTokenCount, decodeRequestStepCount, decodeTokenCount, sampleFeatures,
+            unifiedLatencyMs, admissionToFirstExecutionMs, nativePreparationMs);
+    }
+
+    static bool finishBatchWithExecutionGeometry(
+        const NaviSchedBatchFinishReporterPtr &reporter,
+        const std::vector<RequestStats> &values, double wallTimeMs,
+        double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+        int64_t decodeRequestStepCount, int64_t decodeTokenCount, double unifiedLatencyMs,
+        int64_t precedingRequestCount, int64_t sampleBatchCount,
+        int64_t runningRequestCount, int64_t runningCacheHitTokenCount,
+        int64_t runningCacheMissTokenCount, double runningCacheMissTokenSquareSum,
+        double runningCacheHitMissTokenProductSum, int64_t waitingRequestCount,
+        int64_t waitingCacheHitTokenCount, int64_t waitingCacheMissTokenCount,
+        double waitingCacheMissTokenSquareSum, double waitingCacheHitMissTokenProductSum,
+        double runningElapsedTimeMs, int64_t runningDecodeRequestCount,
+        int64_t runningDecodeGeneratedTokenCount,
+        int64_t runningDecodeRemainingTokenBudget, double admissionToFirstExecutionMs,
+        double nativePreparationMs, int64_t geometryExecutionStepCount, int64_t globalPaddedTokens,
+        int64_t executionFinishTimeUs)
+    {
+        if (!reporter || values.empty() || unifiedLatencyMs != -1.0 ||
+            geometryExecutionStepCount <= 0 ||
+            executionStepCount != geometryExecutionStepCount || globalPaddedTokens <= 0) {
+            return false;
+        }
+        std::vector<NaviSchedRequestStats> requests;
+        requests.reserve(values.size());
+        for (const auto &value : values) {
+            NaviSchedRequestStats request;
+            request.requestId = std::get<0>(value);
+            request.totalTokenCount = std::get<1>(value);
+            request.cacheHitTokenCount = std::get<2>(value);
+            requests.emplace_back(request);
+        }
+        return reporter->finishBatchWithExecutionGeometry(
+            requests, wallTimeMs, executeModelTimeMs, executionStepCount,
             prefillTokenCount, decodeRequestStepCount, decodeTokenCount,
-            sampleFeatures, unifiedLatencyMs, admissionToFirstExecutionMs,
-            nativePreparationMs);
+            admissionToFirstExecutionMs, globalPaddedTokens, executionFinishTimeUs, nativePreparationMs);
+    }
+    static bool finishBatchWithProjectedExecutionGeometry(
+        const NaviSchedBatchFinishReporterPtr &reporter,
+        const std::vector<RequestStats> &values, double wallTimeMs,
+        double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+        int64_t decodeRequestStepCount, int64_t decodeTokenCount, double unifiedLatencyMs,
+        int64_t precedingRequestCount, int64_t sampleBatchCount,
+        int64_t runningRequestCount, int64_t runningCacheHitTokenCount,
+        int64_t runningCacheMissTokenCount, double runningCacheMissTokenSquareSum,
+        double runningCacheHitMissTokenProductSum, int64_t waitingRequestCount,
+        int64_t waitingCacheHitTokenCount, int64_t waitingCacheMissTokenCount,
+        double waitingCacheMissTokenSquareSum, double waitingCacheHitMissTokenProductSum,
+        double runningElapsedTimeMs, int64_t runningDecodeRequestCount,
+        int64_t runningDecodeGeneratedTokenCount,
+        int64_t runningDecodeRemainingTokenBudget, double admissionToFirstExecutionMs,
+        double nativePreparationMs, int64_t geometryExecutionStepCount, int64_t globalPaddedTokens,
+        int64_t projectedExecutionStepCount, int64_t projectedGlobalPaddedTokens,
+        int64_t executionFinishTimeUs)
+    {
+        if (!reporter || values.empty() || unifiedLatencyMs != -1.0 ||
+            executionStepCount <= 0 ||
+            !((geometryExecutionStepCount == 0 && globalPaddedTokens == 0) ||
+              (geometryExecutionStepCount == executionStepCount &&
+               globalPaddedTokens > 0)) ||
+            projectedExecutionStepCount <= 0 ||
+            projectedGlobalPaddedTokens < projectedExecutionStepCount) {
+            return false;
+        }
+        std::vector<NaviSchedRequestStats> requests;
+        requests.reserve(values.size());
+        for (const auto &value : values) {
+            NaviSchedRequestStats request;
+            request.requestId = std::get<0>(value);
+            request.totalTokenCount = std::get<1>(value);
+            request.cacheHitTokenCount = std::get<2>(value);
+            requests.emplace_back(request);
+        }
+        return reporter->finishBatchWithProjectedExecutionGeometry(
+            requests, wallTimeMs, executeModelTimeMs, executionStepCount,
+            prefillTokenCount, decodeRequestStepCount, decodeTokenCount,
+            admissionToFirstExecutionMs, globalPaddedTokens, projectedExecutionStepCount,
+            projectedGlobalPaddedTokens, executionFinishTimeUs, nativePreparationMs);
     }
 
-    bool beginBackendExecution(int32_t requestCount) const
+    static std::pair<int64_t, int64_t> fixedPrefillChunk(
+        const TPUPrefillExecutionPolicyConfig &policy, int64_t prompt, int64_t prefillEnd,
+        int64_t numTokens, int64_t computed, int64_t sharedBoundary)
     {
-        return _agent && _agent->beginObservedBackendExecution(requestCount);
+        int64_t tokens = 0, pairs = 0;
+        std::string error;
+        TPUPrefillRequestInput input{prompt, computed, sharedBoundary};
+        input.prefillEndTokens = prefillEnd;
+        input.numTokens = numTokens;
+        if (!TPUPrefillExecutionPolicy::planNextPrefillChunk(input, policy, tokens, pairs,
+                                                             &error)) {
+            throw std::invalid_argument(error);
+        }
+        return {tokens, pairs};
     }
 
-    bool endBackendExecution() const
+    static int64_t prefillAttentionPairs(const TPUPrefillExecutionPolicyConfig &policy,
+                                         int64_t tokens, int64_t prefix)
     {
-        return _agent && _agent->endObservedBackendExecution();
+        int64_t pairs = 0;
+        std::string error;
+        if (!TPUPrefillExecutionPolicy::validate(policy, &error) ||
+            !TPUPrefillExecutionPolicy::countAttentionPairs(tokens, prefix, policy, pairs,
+                                                            &error)) {
+            throw std::invalid_argument(error);
+        }
+        return pairs;
+    }
+
+    static std::pair<int64_t, int64_t> projectPrefillExecutionGeometry(
+        const TPUPrefillExecutionPolicyConfig &policy,
+        const std::vector<std::tuple<int64_t, int64_t, int64_t>> &requests)
+    {
+        if (!TPUPrefillExecutionPolicy::validate(policy) || requests.empty()) {
+            throw std::invalid_argument(
+                "invalid typed prefill projection policy or empty batch");
+        }
+        std::vector<TPUPrefillRequestInput> ordered;
+        ordered.reserve(requests.size());
+        size_t maxSteps = 0;
+        int64_t totalPrompt = 0;
+        for (const auto &request : requests) {
+            const auto prompt = std::get<0>(request);
+            const auto hit = std::get<1>(request);
+            const auto boundary = std::get<2>(request);
+            if (prompt <= 0 || hit < 0 || hit >= prompt || boundary < 0 ||
+                boundary > prompt ||
+                prompt > std::numeric_limits<int64_t>::max() - totalPrompt ||
+                static_cast<uint64_t>(prompt - hit) >
+                    std::numeric_limits<size_t>::max() - maxSteps) {
+                throw std::invalid_argument(
+                    "invalid prefill projection request coordinates");
+            }
+            totalPrompt += prompt;
+            maxSteps += static_cast<size_t>(prompt - hit);
+            ordered.push_back({prompt, hit, boundary});
+        }
+        TPUPrefillExecutionProjection projection;
+        if (!TPUPrefillExecutionPolicy::projectLatencyFeatures(ordered, policy, maxSteps,
+                                                               projection)) {
+            throw std::invalid_argument("prefill policy projection failed");
+        }
+        return {projection.stepCount, projection.globalPaddedTokenSum};
+    }
+
+    // Offline diagnostics of the SAME native policy used by Master geometry.
+    // The explicit resource bound is not a runtime execution instruction.
+    using PrefillProjectionStepForReplay =
+        std::tuple<int64_t, int64_t, int64_t, int64_t,
+                   std::vector<std::tuple<size_t, int64_t, int64_t>>>;
+    static std::vector<PrefillProjectionStepForReplay>
+    projectPrefillExecutionStepsForReplay(
+        const TPUPrefillExecutionPolicyConfig &policy,
+        const std::vector<std::tuple<int64_t, int64_t, int64_t>> &requests,
+        size_t maxProjectionSteps, bool allCacheResolved)
+    {
+        if (!TPUPrefillExecutionPolicy::validate(policy) || requests.empty() ||
+            maxProjectionSteps == 0) {
+            throw std::invalid_argument(
+                "invalid replay prefill projection policy, batch or bound");
+        }
+        std::vector<TPUPrefillRequestInput> ordered;
+        ordered.reserve(requests.size());
+        int64_t totalPrompt = 0;
+        for (const auto &request : requests) {
+            const auto prompt = std::get<0>(request);
+            const auto hit = std::get<1>(request);
+            const auto boundary = std::get<2>(request);
+            if (prompt <= 0 || hit < 0 || hit >= prompt || boundary < 0 ||
+                boundary > prompt ||
+                prompt > std::numeric_limits<int64_t>::max() - totalPrompt) {
+                throw std::invalid_argument("invalid replay prefill request coordinates");
+            }
+            totalPrompt += prompt;
+            ordered.push_back({prompt, hit, boundary});
+        }
+        TPUPrefillExecutionProjection projection;
+        const bool ok = allCacheResolved
+                            ? TPUPrefillExecutionPolicy::projectCacheResolvedBatch(
+                                  ordered, policy, maxProjectionSteps, projection)
+                            : TPUPrefillExecutionPolicy::projectLatencyFeatures(
+                                  ordered, policy, maxProjectionSteps, projection);
+        if (!ok || projection.stepCount < 0 ||
+            static_cast<uint64_t>(projection.stepCount) != projection.steps.size()) {
+            throw std::invalid_argument(
+                "replay prefill projection failed without a complete plan");
+        }
+        std::vector<PrefillProjectionStepForReplay> result;
+        result.reserve(projection.steps.size());
+        for (const auto &step : projection.steps) {
+            std::vector<std::tuple<size_t, int64_t, int64_t>> members;
+            members.reserve(step.requests.size());
+            for (const auto &request : step.requests) {
+                members.emplace_back(request.requestIndex, request.computedStart,
+                                     request.scheduledTokens);
+            }
+            result.emplace_back(step.geometry.scheduledTokens,
+                                step.geometry.maxLocalTokens,
+                                step.geometry.localPaddedTokens,
+                                step.geometry.globalPaddedTokens, std::move(members));
+        }
+        return result;
+    }
+
+    bool beginBackendExecution(int64_t eventTimeUs, int32_t requestCount) const
+    {
+        return _agent && _agent->beginObservedBackendExecution(eventTimeUs, requestCount);
+    }
+
+    bool endBackendExecution(int64_t eventTimeUs) const
+    {
+        return _agent && _agent->endObservedBackendExecution(eventTimeUs);
     }
 
     bool reportExecutionStep(double elapsedMs, int64_t prefillTokens,
                              int64_t decodeTokens) const
     {
-        return _agent && _agent->reportObservedExecutionStep(
-                             elapsedMs, prefillTokens, decodeTokens);
+        return _agent && _agent->reportObservedExecutionStep(elapsedMs, prefillTokens,
+                                                             decodeTokens);
     }
 
     bool reportCoreStep(double elapsedMs, bool futureWait) const
@@ -557,43 +777,36 @@ public:
         return _agent && _agent->reportObservedCoreStep(elapsedMs, futureWait);
     }
 
-    bool reportWorkload(int64_t eventTimeUs, int32_t batchCount,
-                        int32_t requestCount,
-                        int32_t remainingPrefillRequestCount,
-                        int32_t runningRequestCount,
-                        int32_t waitingRequestCount,
-                        int64_t remainingPrefillContextTokenCount,
-                        int64_t remainingPrefillTokenCount,
-                        double remainingPrefillTokenSquareSum,
-                        double contextRemainingPrefillTokenProductSum,
-                        int32_t maxRunningRequestCount,
-                        int32_t runningCapacitySlotCount,
-                        int32_t runningCapacityPrefillRequestCount,
-                        int64_t runningCapacityPrefillContextTokenCount,
-                        int64_t runningCapacityPrefillTokenCount,
-                        double runningCapacityPrefillTokenSquareSum,
-                        double runningCapacityContextRemainingPrefillTokenProductSum,
-                        int32_t waitingCapacityPrefillRequestCount,
-                        int64_t waitingCapacityPrefillContextTokenCount,
-                        int64_t waitingCapacityPrefillTokenCount,
-                        double waitingCapacityPrefillTokenSquareSum,
-                        double waitingCapacityContextRemainingPrefillTokenProductSum,
-                        int64_t remainingTotalContextTokenCount,
-                        int64_t remainingTotalTokenCount,
-                        double remainingTotalTokenSquareSum,
-                        double contextRemainingTotalTokenProductSum,
-                        int64_t totalPromptTokenCount,
-                        int64_t inFlightScheduledTokenCount,
-                        int64_t admittedScheduleBatchId,
-                        int64_t admittedLocalBatchId,
-                        int32_t admittedRequestCount,
-                        bool admittedPendingCacheTracked,
-                        const std::vector<uint64_t> &admittedRequestIds,
-                        double runningElapsedTimeMs,
-                        int32_t runningDecodeRequestCount,
-                        int64_t runningDecodeGeneratedTokenCount,
-                        int64_t runningDecodeRemainingTokenBudget,
-                        const std::vector<int64_t> &coveredNativeBatchIds) const
+    bool reportPeerCacheReadAvailable(bool available) const
+    {
+        return _agent && _agent->reportPeerCacheReadAvailable(available);
+    }
+
+    bool reportWorkload(
+        int64_t eventTimeUs, int32_t batchCount, int32_t requestCount,
+        int32_t remainingPrefillRequestCount, int32_t runningRequestCount,
+        int32_t waitingRequestCount, int64_t remainingPrefillContextTokenCount,
+        int64_t remainingPrefillTokenCount, double remainingPrefillTokenSquareSum,
+        double contextRemainingPrefillTokenProductSum, int32_t maxRunningRequestCount,
+        int32_t runningCapacitySlotCount, int32_t runningCapacityPrefillRequestCount,
+        int64_t runningCapacityPrefillContextTokenCount,
+        int64_t runningCapacityPrefillTokenCount,
+        double runningCapacityPrefillTokenSquareSum,
+        double runningCapacityContextRemainingPrefillTokenProductSum,
+        int32_t waitingCapacityPrefillRequestCount,
+        int64_t waitingCapacityPrefillContextTokenCount,
+        int64_t waitingCapacityPrefillTokenCount,
+        double waitingCapacityPrefillTokenSquareSum,
+        double waitingCapacityContextRemainingPrefillTokenProductSum,
+        int64_t remainingTotalContextTokenCount, int64_t remainingTotalTokenCount,
+        double remainingTotalTokenSquareSum, double contextRemainingTotalTokenProductSum,
+        int64_t totalPromptTokenCount, int64_t inFlightScheduledTokenCount,
+        int64_t admittedScheduleBatchId, int64_t admittedLocalBatchId,
+        int32_t admittedRequestCount, bool admittedPendingCacheTracked,
+        const std::vector<uint64_t> &admittedRequestIds, double runningElapsedTimeMs,
+        int32_t runningDecodeRequestCount, int64_t runningDecodeGeneratedTokenCount,
+        int64_t runningDecodeRemainingTokenBudget,
+        const std::vector<int64_t> &coveredNativeBatchIds) const
     {
         if (!_agent) {
             return false;
@@ -606,43 +819,38 @@ public:
         snapshot.runningRequestCount = runningRequestCount;
         snapshot.runningElapsedTimeMs = runningElapsedTimeMs;
         snapshot.runningDecodeRequestCount = runningDecodeRequestCount;
-        snapshot.runningDecodeGeneratedTokenCount =
-            runningDecodeGeneratedTokenCount;
-        snapshot.runningDecodeRemainingTokenBudget =
-            runningDecodeRemainingTokenBudget;
+        snapshot.runningDecodeGeneratedTokenCount = runningDecodeGeneratedTokenCount;
+        snapshot.runningDecodeRemainingTokenBudget = runningDecodeRemainingTokenBudget;
         snapshot.waitingRequestCount = waitingRequestCount;
-        snapshot.remainingPrefillContextTokenCount =
-            remainingPrefillContextTokenCount;
+        snapshot.remainingPrefillContextTokenCount = remainingPrefillContextTokenCount;
         snapshot.remainingPrefillTokenCount = remainingPrefillTokenCount;
-        snapshot.remainingPrefillTokenSquareSum =
-            remainingPrefillTokenSquareSum;
+        snapshot.remainingPrefillTokenSquareSum = remainingPrefillTokenSquareSum;
         snapshot.contextRemainingPrefillTokenProductSum =
             contextRemainingPrefillTokenProductSum;
-        snapshot.prefillCapacitySplit = true;
-        snapshot.maxRunningRequestCount = maxRunningRequestCount;
-        snapshot.runningCapacitySlotCount = runningCapacitySlotCount;
-        snapshot.runningCapacityPrefillRequestCount =
-            runningCapacityPrefillRequestCount;
-        snapshot.runningCapacityPrefillContextTokenCount =
-            runningCapacityPrefillContextTokenCount;
-        snapshot.runningCapacityPrefillTokenCount =
-            runningCapacityPrefillTokenCount;
-        snapshot.runningCapacityPrefillTokenSquareSum =
-            runningCapacityPrefillTokenSquareSum;
-        snapshot.runningCapacityContextRemainingPrefillTokenProductSum =
-            runningCapacityContextRemainingPrefillTokenProductSum;
-        snapshot.waitingCapacityPrefillRequestCount =
-            waitingCapacityPrefillRequestCount;
-        snapshot.waitingCapacityPrefillContextTokenCount =
-            waitingCapacityPrefillContextTokenCount;
-        snapshot.waitingCapacityPrefillTokenCount =
-            waitingCapacityPrefillTokenCount;
-        snapshot.waitingCapacityPrefillTokenSquareSum =
-            waitingCapacityPrefillTokenSquareSum;
-        snapshot.waitingCapacityContextRemainingPrefillTokenProductSum =
-            waitingCapacityContextRemainingPrefillTokenProductSum;
-        snapshot.remainingTotalContextTokenCount =
-            remainingTotalContextTokenCount;
+        snapshot.prefillCapacitySplit = !_pdSeparated;
+        if (!_pdSeparated) {
+            snapshot.maxRunningRequestCount = maxRunningRequestCount;
+            snapshot.runningCapacitySlotCount = runningCapacitySlotCount;
+            snapshot.runningCapacityPrefillRequestCount =
+                runningCapacityPrefillRequestCount;
+            snapshot.runningCapacityPrefillContextTokenCount =
+                runningCapacityPrefillContextTokenCount;
+            snapshot.runningCapacityPrefillTokenCount = runningCapacityPrefillTokenCount;
+            snapshot.runningCapacityPrefillTokenSquareSum =
+                runningCapacityPrefillTokenSquareSum;
+            snapshot.runningCapacityContextRemainingPrefillTokenProductSum =
+                runningCapacityContextRemainingPrefillTokenProductSum;
+            snapshot.waitingCapacityPrefillRequestCount =
+                waitingCapacityPrefillRequestCount;
+            snapshot.waitingCapacityPrefillContextTokenCount =
+                waitingCapacityPrefillContextTokenCount;
+            snapshot.waitingCapacityPrefillTokenCount = waitingCapacityPrefillTokenCount;
+            snapshot.waitingCapacityPrefillTokenSquareSum =
+                waitingCapacityPrefillTokenSquareSum;
+            snapshot.waitingCapacityContextRemainingPrefillTokenProductSum =
+                waitingCapacityContextRemainingPrefillTokenProductSum;
+        }
+        snapshot.remainingTotalContextTokenCount = remainingTotalContextTokenCount;
         snapshot.remainingTotalTokenCount = remainingTotalTokenCount;
         snapshot.remainingTotalTokenSquareSum = remainingTotalTokenSquareSum;
         snapshot.contextRemainingTotalTokenProductSum =
@@ -652,48 +860,61 @@ public:
         snapshot.admittedBatch.scheduleBatchId = admittedScheduleBatchId;
         snapshot.admittedBatch.localBatchId = admittedLocalBatchId;
         snapshot.admittedBatch.requestCount = admittedRequestCount;
-        snapshot.admittedBatch.pendingCacheTracked =
-            admittedPendingCacheTracked;
+        snapshot.admittedBatch.pendingCacheTracked = admittedPendingCacheTracked;
         snapshot.admittedBatch.requestIds = admittedRequestIds;
-        return _agent->reportObservedWorkload(snapshot, coveredNativeBatchIds);
+        return (!_pdSeparated || (runningDecodeRequestCount == 0 &&
+                                  runningDecodeGeneratedTokenCount == 0 &&
+                                  runningDecodeRemainingTokenBudget == 0)) &&
+               _agent->reportObservedWorkload(snapshot, coveredNativeBatchIds);
     }
 
-    void reportCacheInserted(const std::vector<uint64_t> &hashes) const
+    static NaviSchedCacheKeyType checkedCacheKeyType(int value)
     {
+        if (value != static_cast<int>(NaviSchedCacheKeyType::BLOCK_POOL) &&
+            value != static_cast<int>(NaviSchedCacheKeyType::V6D)) {
+            throw std::invalid_argument("invalid cache key type");
+        }
+        return static_cast<NaviSchedCacheKeyType>(value);
+    }
+
+    void reportCacheInserted(const std::vector<uint64_t> &hashes, int cacheKeyType) const
+    {
+        const auto type = checkedCacheKeyType(cacheKeyType);
         if (_agent && !hashes.empty()) {
             _agent->reportCacheInserted(
-                std::make_shared<const NaviSchedBlockHashes>(hashes));
+                std::make_shared<const NaviSchedBlockHashes>(hashes), type);
         }
     }
 
-    void reportCacheRemoved(const std::vector<uint64_t> &hashes) const
+    void reportCacheRemoved(const std::vector<uint64_t> &hashes, int cacheKeyType) const
     {
+        const auto type = checkedCacheKeyType(cacheKeyType);
         if (_agent && !hashes.empty()) {
             _agent->reportCacheRemoved(
-                std::make_shared<const NaviSchedBlockHashes>(hashes));
+                std::make_shared<const NaviSchedBlockHashes>(hashes), type);
         }
     }
 
-    void reportCacheUpdated(
-        const std::vector<uint64_t> &added,
-        const std::vector<uint64_t> &removed,
-        const std::vector<uint64_t> &addedFullReady,
-        const std::vector<uint64_t> &removedFullReady,
-        const std::vector<uint64_t> &addedTailReady,
-        const std::vector<uint64_t> &removedTailReady) const
+    void reportCacheUpdated(const std::vector<uint64_t> &added,
+                            const std::vector<uint64_t> &removed,
+                            const std::vector<uint64_t> &addedFullReady,
+                            const std::vector<uint64_t> &removedFullReady,
+                            const std::vector<uint64_t> &addedTailReady,
+                            const std::vector<uint64_t> &removedTailReady,
+                            int cacheKeyType) const
     {
+        const auto type = checkedCacheKeyType(cacheKeyType);
         if (!_agent) {
             return;
         }
         const auto makeHashes = [](const std::vector<uint64_t> &values) {
-            return values.empty()
-                       ? NaviSchedBlockHashesConstPtr()
-                       : std::make_shared<const NaviSchedBlockHashes>(values);
+            return values.empty() ? NaviSchedBlockHashesConstPtr()
+                                  : std::make_shared<const NaviSchedBlockHashes>(values);
         };
         _agent->reportCacheUpdated(
             -1, -1, -1, makeHashes(added), makeHashes(removed),
             makeHashes(addedFullReady), makeHashes(removedFullReady),
-            makeHashes(addedTailReady), makeHashes(removedTailReady), -1, 0);
+            makeHashes(addedTailReady), makeHashes(removedTailReady), -1, 0, -1, type);
     }
 
     void logCacheLifecycleAudit(const std::string &audit) const
@@ -707,8 +928,7 @@ public:
     }
 
     void logCacheTouchAudit(uint64_t requestCount, uint64_t promotedBlockCount,
-                            uint64_t lastDrainRequestCount,
-                            double lastDrainMaxLagMs,
+                            uint64_t lastDrainRequestCount, double lastDrainMaxLagMs,
                             double lastDrainProcessingMs) const
     {
         AUTIL_LOG(INFO,
@@ -738,6 +958,7 @@ private:
 
 private:
     std::shared_ptr<NaviSchedAgent> _agent;
+    bool _pdSeparated = false;
     std::shared_ptr<ForwardState> _forwardState;
 };
 
@@ -762,17 +983,20 @@ void bindNaviSchedData(py::module_ &m)
         .def_readonly("pending_cache_tracked",
                       &VLLMAgentBridge::ForwardBatch::pendingCacheTracked)
         .def_readonly("ready_time_ns", &VLLMAgentBridge::ForwardBatch::readyTimeNs)
+        .def_readonly("ready_time_us", &VLLMAgentBridge::ForwardBatch::readyTimeUs)
         .def_readonly("request_ids", &VLLMAgentBridge::ForwardBatch::requestIds)
+        .def_readonly("touches", &VLLMAgentBridge::ForwardBatch::touches)
         .def_readonly("predicted_cache_hit_token_counts",
                       &VLLMAgentBridge::ForwardBatch::predictedCacheHitTokenCounts)
-        .def("get_request_block_hashes", [](const VLLMAgentBridge::ForwardBatch &self,
-                                            uint64_t requestId) -> const NaviSchedBlockHashes & {
-            const auto it = self.requestBlockHashes.find(requestId);
-            if (it == self.requestBlockHashes.end()) {
-                throw py::key_error("unknown forwarded request id");
-            }
-            return BlockHashUtil::get(it->second);
-        })
+        .def("get_request_block_hashes",
+             [](const VLLMAgentBridge::ForwardBatch &self,
+                uint64_t requestId) -> const NaviSchedBlockHashes & {
+                 const auto it = self.requestBlockHashes.find(requestId);
+                 if (it == self.requestBlockHashes.end()) {
+                     throw py::key_error("unknown forwarded request id");
+                 }
+                 return BlockHashUtil::get(it->second);
+             })
         .def_property_readonly("payloads", [](const VLLMAgentBridge::ForwardBatch &self) {
             py::list result;
             for (const auto &payload : self.payloads) {
@@ -783,19 +1007,41 @@ void bindNaviSchedData(py::module_ &m)
     py::class_<VLLMAgentBridge::ForwardRequestTouch,
                std::shared_ptr<VLLMAgentBridge::ForwardRequestTouch>>(
         m, "_VLLMForwardRequestTouch")
-        .def_readonly("request_id",
-                      &VLLMAgentBridge::ForwardRequestTouch::requestId)
+        .def_readonly("request_id", &VLLMAgentBridge::ForwardRequestTouch::requestId)
         .def_readonly("accepted_time_ns",
                       &VLLMAgentBridge::ForwardRequestTouch::acceptedTimeNs)
-        .def_property_readonly(
-            "payload", [](const VLLMAgentBridge::ForwardRequestTouch &self) {
-                return py::bytes(self.payload);
-            });
+        .def_property_readonly("payload",
+                               [](const VLLMAgentBridge::ForwardRequestTouch &self) {
+                                   return py::bytes(self.payload);
+                               });
     py::class_<NaviSchedBatchFinishReporter, NaviSchedBatchFinishReporterPtr>(
-        m, "_VLLMBatchHandle");
+        m, "_VLLMBatchHandle")
+        .def(
+            "report_cache_publication_failed",
+            [](NaviSchedBatchFinishReporter &self, const std::vector<uint64_t> &full,
+               const std::vector<uint64_t> &tail, int cacheKeyType) {
+                return self.reportCachePublicationFailed(
+                    VLLMAgentBridge::checkedCacheKeyType(cacheKeyType), full, tail);
+            },
+            py::arg("full_hashes"), py::arg("tail_hashes"), py::arg("cache_key_type"),
+            py::call_guard<py::gil_scoped_release>())
+        .def("make_cache_publication_reporter",
+             [](const NaviSchedBatchFinishReporter &self) {
+                 auto callback = self.makeCachePublicationFailureCallback();
+                 return py::cpp_function([callback](const std::vector<uint64_t> &full,
+                                                    const std::vector<uint64_t> &tail,
+                                                    int type) {
+                     const auto checked = VLLMAgentBridge::checkedCacheKeyType(type);
+                     py::gil_scoped_release release;
+                     return callback(checked, full, tail);
+                 });
+             });
     py::class_<VLLMAgentBridge>(m, "_VLLMAgentBridge")
-        .def(py::init<const std::shared_ptr<NaviSchedAgent> &>())
-        .def("start_batch", &VLLMAgentBridge::startBatch,
+        .def(py::init<const std::shared_ptr<NaviSchedAgent> &, bool>(), py::arg("agent"),
+             py::arg("pd_separated") = false)
+        .def("start_batch", &VLLMAgentBridge::startBatch, py::arg("batch_id"),
+             py::arg("requests"),
+             py::arg("prefix_cache_prompt_tokens") = std::map<uint64_t, int64_t>(),
              py::call_guard<py::gil_scoped_release>())
         .def("enable_forwarding", &VLLMAgentBridge::enableForwarding,
              py::call_guard<py::gil_scoped_release>())
@@ -803,10 +1049,8 @@ void bindNaviSchedData(py::module_ &m)
              py::call_guard<py::gil_scoped_release>())
         .def("take_next_forward_batch", &VLLMAgentBridge::takeNextForwardBatch,
              py::arg("timeout_ms") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("take_forward_request_touches",
-             &VLLMAgentBridge::takeForwardRequestTouches,
-             py::arg("max_count") = 0,
-             py::call_guard<py::gil_scoped_release>())
+        .def("take_forward_request_touches", &VLLMAgentBridge::takeForwardRequestTouches,
+             py::arg("max_count") = 0, py::call_guard<py::gil_scoped_release>())
         .def("take_cancelled_requests", &VLLMAgentBridge::takeCancelledRequests,
              py::call_guard<py::gil_scoped_release>())
         .def("publish_forward_response", &VLLMAgentBridge::publishForwardResponse,
@@ -816,6 +1060,11 @@ void bindNaviSchedData(py::module_ &m)
              py::arg("request_id"), py::arg("error_message"),
              py::call_guard<py::gil_scoped_release>())
         .def_static("start_forward_batch", &VLLMAgentBridge::startForwardBatch,
+                    py::arg("batch"), py::arg("request_ids"),
+                    py::arg("execution_start_time_us") = 0,
+                    py::call_guard<py::gil_scoped_release>())
+        .def_static("resolve_forward_execution_cache",
+                    &VLLMAgentBridge::resolveForwardExecutionCache,
                     py::call_guard<py::gil_scoped_release>())
         .def_static("abort_forward_batch_requests",
                     &VLLMAgentBridge::abortForwardBatchRequests,
@@ -824,99 +1073,146 @@ void bindNaviSchedData(py::module_ &m)
                     py::call_guard<py::gil_scoped_release>())
         .def_static("finish_batch", &VLLMAgentBridge::finishBatch,
                     py::call_guard<py::gil_scoped_release>())
-        .def_static("finish_batch_with_execution",
-                    &VLLMAgentBridge::finishBatchWithExecution,
-                    py::arg("reporter"), py::arg("values"),
-                    py::arg("wall_time_ms"),
-                    py::arg("execute_model_time_ms"),
-                    py::arg("execution_step_count"),
-                    py::arg("prefill_token_count"),
-                    py::arg("decode_request_step_count"),
-                    py::arg("decode_token_count"),
-                    py::arg("unified_latency_ms"),
-                    py::arg("preceding_request_count"),
-                    py::arg("sample_batch_count"),
-                    py::arg("running_request_count"),
-                    py::arg("running_cache_hit_token_count"),
-                    py::arg("running_cache_miss_token_count"),
-                    py::arg("running_cache_miss_token_square_sum"),
-                    py::arg("running_cache_hit_miss_token_product_sum"),
-                    py::arg("waiting_request_count"),
-                    py::arg("waiting_cache_hit_token_count"),
-                    py::arg("waiting_cache_miss_token_count"),
-                    py::arg("waiting_cache_miss_token_square_sum"),
-                    py::arg("waiting_cache_hit_miss_token_product_sum"),
-                    py::arg("running_elapsed_time_ms"),
-                    py::arg("running_decode_request_count"),
-                    py::arg("running_decode_generated_token_count"),
-                    py::arg("running_decode_remaining_token_budget"),
-                    py::arg("admission_to_first_execution_ms") = -1.0,
-                    py::arg("native_preparation_ms") = 0.0,
+        .def_static(
+            "finish_batch_with_execution", &VLLMAgentBridge::finishBatchWithExecution,
+            py::arg("reporter"), py::arg("values"), py::arg("wall_time_ms"),
+            py::arg("execute_model_time_ms"), py::arg("execution_step_count"),
+            py::arg("prefill_token_count"), py::arg("decode_request_step_count"),
+            py::arg("decode_token_count"), py::arg("unified_latency_ms"),
+            py::arg("preceding_request_count"), py::arg("sample_batch_count"),
+            py::arg("running_request_count"), py::arg("running_cache_hit_token_count"),
+            py::arg("running_cache_miss_token_count"),
+            py::arg("running_cache_miss_token_square_sum"),
+            py::arg("running_cache_hit_miss_token_product_sum"),
+            py::arg("waiting_request_count"), py::arg("waiting_cache_hit_token_count"),
+            py::arg("waiting_cache_miss_token_count"),
+            py::arg("waiting_cache_miss_token_square_sum"),
+            py::arg("waiting_cache_hit_miss_token_product_sum"),
+            py::arg("running_elapsed_time_ms"), py::arg("running_decode_request_count"),
+            py::arg("running_decode_generated_token_count"),
+            py::arg("running_decode_remaining_token_budget"),
+            py::arg("admission_to_first_execution_ms") = -1.0,
+            py::arg("native_preparation_ms") = 0.0,
+            py::arg("execution_finish_time_us") = 0,
+            py::call_guard<py::gil_scoped_release>())
+        .def_static(
+            "finish_batch_with_execution_geometry",
+            &VLLMAgentBridge::finishBatchWithExecutionGeometry, py::arg("reporter"),
+            py::arg("values"), py::arg("wall_time_ms"), py::arg("execute_model_time_ms"),
+            py::arg("execution_step_count"), py::arg("prefill_token_count"),
+            py::arg("decode_request_step_count"), py::arg("decode_token_count"),
+            py::arg("unified_latency_ms"), py::arg("preceding_request_count"),
+            py::arg("sample_batch_count"), py::arg("running_request_count"),
+            py::arg("running_cache_hit_token_count"),
+            py::arg("running_cache_miss_token_count"),
+            py::arg("running_cache_miss_token_square_sum"),
+            py::arg("running_cache_hit_miss_token_product_sum"),
+            py::arg("waiting_request_count"), py::arg("waiting_cache_hit_token_count"),
+            py::arg("waiting_cache_miss_token_count"),
+            py::arg("waiting_cache_miss_token_square_sum"),
+            py::arg("waiting_cache_hit_miss_token_product_sum"),
+            py::arg("running_elapsed_time_ms"), py::arg("running_decode_request_count"),
+            py::arg("running_decode_generated_token_count"),
+            py::arg("running_decode_remaining_token_budget"),
+            py::arg("admission_to_first_execution_ms"), py::arg("native_preparation_ms"),
+            py::arg("geometry_execution_step_count"), py::arg("global_padded_tokens"),
+            py::arg("execution_finish_time_us") = 0,
+            py::call_guard<py::gil_scoped_release>())
+        .def_static(
+            "finish_batch_with_projected_execution_geometry",
+            &VLLMAgentBridge::finishBatchWithProjectedExecutionGeometry,
+            py::arg("reporter"), py::arg("values"), py::arg("wall_time_ms"),
+            py::arg("execute_model_time_ms"), py::arg("execution_step_count"),
+            py::arg("prefill_token_count"), py::arg("decode_request_step_count"),
+            py::arg("decode_token_count"), py::arg("unified_latency_ms"),
+            py::arg("preceding_request_count"), py::arg("sample_batch_count"),
+            py::arg("running_request_count"), py::arg("running_cache_hit_token_count"),
+            py::arg("running_cache_miss_token_count"),
+            py::arg("running_cache_miss_token_square_sum"),
+            py::arg("running_cache_hit_miss_token_product_sum"),
+            py::arg("waiting_request_count"), py::arg("waiting_cache_hit_token_count"),
+            py::arg("waiting_cache_miss_token_count"),
+            py::arg("waiting_cache_miss_token_square_sum"),
+            py::arg("waiting_cache_hit_miss_token_product_sum"),
+            py::arg("running_elapsed_time_ms"), py::arg("running_decode_request_count"),
+            py::arg("running_decode_generated_token_count"),
+            py::arg("running_decode_remaining_token_budget"),
+            py::arg("admission_to_first_execution_ms"), py::arg("native_preparation_ms"),
+            py::arg("geometry_execution_step_count"), py::arg("global_padded_tokens"),
+            py::arg("projected_execution_step_count"),
+            py::arg("projected_global_padded_tokens"),
+            py::arg("execution_finish_time_us") = 0,
+            py::call_guard<py::gil_scoped_release>())
+        .def_static("fixed_prefill_chunk", &VLLMAgentBridge::fixedPrefillChunk)
+        .def_static("prefill_attention_pairs", &VLLMAgentBridge::prefillAttentionPairs)
+        .def_static("project_prefill_execution_geometry",
+                    &VLLMAgentBridge::projectPrefillExecutionGeometry, py::arg("policy"),
+                    py::arg("ordered_requests"), py::call_guard<py::gil_scoped_release>())
+        .def_static("project_prefill_execution_steps_for_replay",
+                    &VLLMAgentBridge::projectPrefillExecutionStepsForReplay,
+                    py::arg("policy"), py::arg("ordered_requests"),
+                    py::arg("max_projection_steps"), py::arg("all_cache_resolved"),
                     py::call_guard<py::gil_scoped_release>())
         .def("begin_backend_execution", &VLLMAgentBridge::beginBackendExecution,
-             py::arg("request_count") = 0,
+             py::arg("event_time_us") = 0, py::arg("request_count") = 0,
              py::call_guard<py::gil_scoped_release>())
         .def("end_backend_execution", &VLLMAgentBridge::endBackendExecution,
-             py::call_guard<py::gil_scoped_release>())
+             py::arg("event_time_us") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("report_peer_cache_read_available",
+             &VLLMAgentBridge::reportPeerCacheReadAvailable, py::arg("available"))
         .def("report_workload", &VLLMAgentBridge::reportWorkload,
-             py::arg("event_time_us"), py::arg("batch_count"),
-             py::arg("request_count"),
-             py::arg("remaining_prefill_request_count"),
-             py::arg("running_request_count"),
+             py::arg("event_time_us"), py::arg("batch_count"), py::arg("request_count"),
+             py::arg("remaining_prefill_request_count"), py::arg("running_request_count"),
              py::arg("waiting_request_count"),
              py::arg("remaining_prefill_context_token_count"),
              py::arg("remaining_prefill_token_count"),
              py::arg("remaining_prefill_token_square_sum"),
              py::arg("context_remaining_prefill_token_product_sum"),
-             py::arg("max_running_request_count"),
-             py::arg("running_capacity_slot_count"),
+             py::arg("max_running_request_count"), py::arg("running_capacity_slot_count"),
              py::arg("running_capacity_prefill_request_count"),
              py::arg("running_capacity_prefill_context_token_count"),
              py::arg("running_capacity_prefill_token_count"),
              py::arg("running_capacity_prefill_token_square_sum"),
-             py::arg(
-                 "running_capacity_context_remaining_prefill_token_product_sum"),
+             py::arg("running_capacity_context_remaining_prefill_token_product_sum"),
              py::arg("waiting_capacity_prefill_request_count"),
              py::arg("waiting_capacity_prefill_context_token_count"),
              py::arg("waiting_capacity_prefill_token_count"),
              py::arg("waiting_capacity_prefill_token_square_sum"),
-             py::arg(
-                 "waiting_capacity_context_remaining_prefill_token_product_sum"),
+             py::arg("waiting_capacity_context_remaining_prefill_token_product_sum"),
              py::arg("remaining_total_context_token_count"),
              py::arg("remaining_total_token_count"),
              py::arg("remaining_total_token_square_sum"),
              py::arg("context_remaining_total_token_product_sum"),
              py::arg("total_prompt_token_count"),
              py::arg("in_flight_scheduled_token_count"),
-             py::arg("admitted_schedule_batch_id"),
-             py::arg("admitted_local_batch_id"),
-             py::arg("admitted_request_count"),
-             py::arg("admitted_pending_cache_tracked"),
-             py::arg("admitted_request_ids"),
-             py::arg("running_elapsed_time_ms"),
+             py::arg("admitted_schedule_batch_id"), py::arg("admitted_local_batch_id"),
+             py::arg("admitted_request_count"), py::arg("admitted_pending_cache_tracked"),
+             py::arg("admitted_request_ids"), py::arg("running_elapsed_time_ms"),
              py::arg("running_decode_request_count"),
              py::arg("running_decode_generated_token_count"),
              py::arg("running_decode_remaining_token_budget"),
              py::arg("covered_native_batch_ids") = std::vector<int64_t>(),
              py::call_guard<py::gil_scoped_release>())
         .def("report_cache_inserted", &VLLMAgentBridge::reportCacheInserted,
+             py::arg("hashes"), py::arg("cache_key_type") = 0,
              py::call_guard<py::gil_scoped_release>())
         .def("report_cache_removed", &VLLMAgentBridge::reportCacheRemoved,
+             py::arg("hashes"), py::arg("cache_key_type") = 0,
              py::call_guard<py::gil_scoped_release>())
         .def("report_cache_updated", &VLLMAgentBridge::reportCacheUpdated,
+             py::arg("added"), py::arg("removed"), py::arg("added_full_ready"),
+             py::arg("removed_full_ready"), py::arg("added_tail_ready"),
+             py::arg("removed_tail_ready"), py::arg("cache_key_type") = 0,
              py::call_guard<py::gil_scoped_release>())
-        .def("log_cache_lifecycle_audit",
-             &VLLMAgentBridge::logCacheLifecycleAudit,
+        .def("log_cache_lifecycle_audit", &VLLMAgentBridge::logCacheLifecycleAudit,
              py::call_guard<py::gil_scoped_release>())
-        .def("log_request_lifecycle_audit",
-             &VLLMAgentBridge::logRequestLifecycleAudit,
+        .def("log_request_lifecycle_audit", &VLLMAgentBridge::logRequestLifecycleAudit,
              py::call_guard<py::gil_scoped_release>())
         .def("report_execution_step", &VLLMAgentBridge::reportExecutionStep,
-             py::arg("elapsed_ms"), py::arg("prefill_tokens"),
-             py::arg("decode_tokens"), py::call_guard<py::gil_scoped_release>())
-        .def("report_core_step", &VLLMAgentBridge::reportCoreStep,
-             py::arg("elapsed_ms"), py::arg("future_wait"),
+             py::arg("elapsed_ms"), py::arg("prefill_tokens"), py::arg("decode_tokens"),
              py::call_guard<py::gil_scoped_release>())
+        .def("report_core_step", &VLLMAgentBridge::reportCoreStep, py::arg("elapsed_ms"),
+             py::arg("future_wait"), py::call_guard<py::gil_scoped_release>())
         .def("log_cache_touch_audit", &VLLMAgentBridge::logCacheTouchAudit,
              py::call_guard<py::gil_scoped_release>());
     py::class_<NaviSchedTarget>(m, "NaviSchedTarget")
@@ -939,8 +1235,11 @@ void bindNaviSchedData(py::module_ &m)
                 self.blockHashes = blockHashesFromPython(values);
             })
         .def_readwrite("prompt_token_count", &NaviSchedScheduleRequest::promptTokenCount)
+        .def_readwrite("explicit_cache_checkpoint_position",
+                       &NaviSchedScheduleRequest::explicitCacheCheckpointPosition)
         .def_readwrite("block_size", &NaviSchedScheduleRequest::blockSize)
         .def_readwrite("timeout_ms", &NaviSchedScheduleRequest::timeoutMs)
+        .def_readwrite("route_only", &NaviSchedScheduleRequest::routeOnly)
         .def_property(
             "forward_payload",
             [](const NaviSchedScheduleRequest &self) {
@@ -964,6 +1263,8 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("total_token_count", &NaviSchedRequestStats::totalTokenCount)
         .def_readwrite("cache_hit_token_count",
                        &NaviSchedRequestStats::cacheHitTokenCount)
+        .def_readwrite("execution_external_read_tokens",
+                       &NaviSchedRequestStats::executionExternalReadTokens)
         .def_readwrite("predicted_cache_hit_token_count",
                        &NaviSchedRequestStats::predictedCacheHitTokenCount)
         .def_readwrite("request_id", &NaviSchedRequestStats::requestId);
@@ -1006,13 +1307,14 @@ void bindNaviSchedData(py::module_ &m)
         m, "AgentResponseToClientData")
         .def_readonly("request_id", &AgentResponseToClientData::requestId)
         .def_readonly("kind", &AgentResponseToClientData::kind)
-        .def_property_readonly("frames", [](const AgentResponseToClientData &self) {
-            py::list result;
-            for (const auto &frame : self.frames) {
-                result.append(py::bytes(frame));
-            }
-            return result;
-        })
+        .def_property_readonly("frames",
+                               [](const AgentResponseToClientData &self) {
+                                   py::list result;
+                                   for (const auto &frame : self.frames) {
+                                       result.append(py::bytes(frame));
+                                   }
+                                   return result;
+                               })
         .def_readonly("terminal", &AgentResponseToClientData::terminal)
         .def_readonly("error_message", &AgentResponseToClientData::errorMessage);
 
@@ -1066,13 +1368,13 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("log_file_name", &NaviSchedConfig::logFileName)
         .def_readwrite("log_level", &NaviSchedConfig::logLevel)
         .def_readwrite("enable_kmon", &NaviSchedConfig::enableKmon)
+        .def_readwrite("kmon_platform_discovery", &NaviSchedConfig::kmonPlatformDiscovery)
         .def_readwrite("kmon_service_name", &NaviSchedConfig::kmonServiceName)
         .def_readwrite("kmon_metrics_path", &NaviSchedConfig::kmonMetricsPath)
         .def_readwrite("kmon_tags", &NaviSchedConfig::kmonTags)
         .def_readwrite("kmon_monitor_name_prefix",
                        &NaviSchedConfig::kmonMonitorNamePrefix)
-        .def_readwrite("kmon_report_interval_ms",
-                       &NaviSchedConfig::kmonReportIntervalMs)
+        .def_readwrite("kmon_report_interval_ms", &NaviSchedConfig::kmonReportIntervalMs)
         .def_readwrite("gig", &NaviSchedConfig::gig)
         .def_readwrite("wait_no_query", &NaviSchedConfig::waitNoQuery)
         .def_readwrite("batch_timeout_ms", &NaviSchedConfig::batchTimeoutMs)
@@ -1082,12 +1384,12 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("latency_learning_rate", &NaviSchedConfig::latencyLearningRate)
         .def_readwrite("latency_online_learning_rate_scale",
                        &NaviSchedConfig::latencyOnlineLearningRateScale)
+        .def_readwrite("latency_error_clip_ms", &NaviSchedConfig::latencyErrorClipMs)
         .def_readwrite("latency_current_sample_weight",
                        &NaviSchedConfig::latencyCurrentSampleWeight)
         .def_readwrite("latency_parameter_learning_rate_scales",
                        &NaviSchedConfig::latencyParameterLearningRateScales)
-        .def_readwrite("latency_nonlinear_scale",
-                       &NaviSchedConfig::latencyNonlinearScale)
+        .def_readwrite("latency_nonlinear_scale", &NaviSchedConfig::latencyNonlinearScale)
         .def_readwrite("queue_learning_rate", &NaviSchedConfig::queueLearningRate)
         .def_readwrite("latency_check_gradient", &NaviSchedConfig::latencyCheckGradient)
         .def_readwrite("latency_cold_start_fit_epochs",
@@ -1109,8 +1411,7 @@ void bindNaviSchedData(py::module_ &m)
                        &NaviSchedConfig::latencyZeroAnchorMinSamples)
         .def_readwrite("latency_validation_enabled",
                        &NaviSchedConfig::latencyValidationEnabled)
-        .def_readwrite("residual_learning_rate",
-                       &NaviSchedConfig::residualLearningRate)
+        .def_readwrite("residual_learning_rate", &NaviSchedConfig::residualLearningRate)
         .def_readwrite("residual_update_error_floor_ms",
                        &NaviSchedConfig::residualUpdateErrorFloorMs)
         .def_readwrite("residual_update_error_ratio",
@@ -1138,13 +1439,70 @@ void bindNaviSchedData(py::module_ &m)
              py::arg("runtime_config"))
         .def_readwrite("biz_name", &NaviSchedRuntimeConfig::bizName);
 
+    py::class_<TPUPrefillExecutionPolicyConfig>(m, "TPUPrefillExecutionPolicyConfig")
+        .def(py::init<>())
+        .def_readwrite("pcp_size", &TPUPrefillExecutionPolicyConfig::pcpSize)
+        .def_readwrite("interleave_size",
+                       &TPUPrefillExecutionPolicyConfig::interleaveSize)
+        .def_readwrite("compile_sizes", &TPUPrefillExecutionPolicyConfig::compileSizes)
+        .def_readwrite("max_scheduled_tokens",
+                       &TPUPrefillExecutionPolicyConfig::maxScheduledTokens)
+        .def_readwrite("long_prefill_token_threshold",
+                       &TPUPrefillExecutionPolicyConfig::longPrefillTokenThreshold)
+        .def_readwrite("hash_block_size", &TPUPrefillExecutionPolicyConfig::hashBlockSize)
+        .def_readwrite("scheduler_block_size",
+                       &TPUPrefillExecutionPolicyConfig::schedulerBlockSize)
+        .def_readwrite("use_eagle", &TPUPrefillExecutionPolicyConfig::useEagle)
+        .def_readwrite("mamba_has_prefill_checkpoint_blocks",
+                       &TPUPrefillExecutionPolicyConfig::mambaHasPrefillCheckpointBlocks)
+        .def_readwrite("mamba_partial_cache_hit",
+                       &TPUPrefillExecutionPolicyConfig::mambaPartialCacheHit)
+        .def_readwrite("async_kv_lookup_enabled",
+                       &TPUPrefillExecutionPolicyConfig::asyncKVLookupEnabled)
+        .def_readwrite("async_kv_lookup_hash_block_size",
+                       &TPUPrefillExecutionPolicyConfig::asyncKVLookupHashBlockSize)
+        .def_readwrite("async_kv_lookup_uses_eagle",
+                       &TPUPrefillExecutionPolicyConfig::asyncKVLookupUsesEagle)
+        .def_readwrite("fixed_prefill_chunk_plan",
+                       &TPUPrefillExecutionPolicyConfig::fixedPrefillChunkPlan)
+        .def_readwrite("mamba_block_aligned_split",
+                       &TPUPrefillExecutionPolicyConfig::mambaBlockAlignedSplit)
+        .def_readwrite("attention_schedule_capacity",
+                       &TPUPrefillExecutionPolicyConfig::attentionScheduleCapacity)
+        .def_readwrite("attention_query_tile",
+                       &TPUPrefillExecutionPolicyConfig::attentionQueryTile)
+        .def_readwrite("attention_kv_tile",
+                       &TPUPrefillExecutionPolicyConfig::attentionKvTile)
+        .def_readwrite("prefill_lookahead",
+                       &TPUPrefillExecutionPolicyConfig::prefillLookahead)
+        .def_readwrite("max_input_tokens",
+                       &TPUPrefillExecutionPolicyConfig::maxInputTokens)
+        .def_readwrite("draft_slots_per_request",
+                       &TPUPrefillExecutionPolicyConfig::draftSlotsPerRequest);
+
     py::class_<NaviSchedAgentConfig>(m, "NaviSchedAgentConfig")
         .def(py::init<>())
         .def_readwrite("service", &NaviSchedAgentConfig::service)
         .def_readwrite("runtime", &NaviSchedAgentConfig::runtime)
         .def_readwrite("pd_separated", &NaviSchedAgentConfig::pdSeparated)
+        .def_readwrite("execution_geometry_enabled",
+                       &NaviSchedAgentConfig::executionGeometryEnabled)
+        .def_readwrite("projected_execution_geometry_enabled",
+                       &NaviSchedAgentConfig::projectedExecutionGeometryEnabled)
+        .def_readwrite("execution_cache_source_enabled",
+                       &NaviSchedAgentConfig::executionCacheSourceEnabled)
+        .def_readwrite("peer_cache_enabled", &NaviSchedAgentConfig::peerCacheEnabled)
+        .def_readwrite("prefill_execution_policy",
+                       &NaviSchedAgentConfig::prefillExecutionPolicy)
         .def_readwrite("unified_latency_prediction",
                        &NaviSchedAgentConfig::unifiedLatencyPrediction)
+        .def_readwrite("full_attention_query_drop_tokens",
+                       &NaviSchedAgentConfig::fullAttentionQueryDropTokens)
+        .def_readwrite("mamba_replay_stop_shift",
+                       &NaviSchedAgentConfig::mambaReplayStopShift)
+        .def_readwrite("mamba_retention_interval",
+                       &NaviSchedAgentConfig::mambaRetentionInterval)
+        .def_readwrite("mamba_align", &NaviSchedAgentConfig::mambaAlign)
         .def_readwrite("time_compression", &NaviSchedAgentConfig::timeCompression)
         .def_readwrite("latency_model_fingerprint",
                        &NaviSchedAgentConfig::latencyModelFingerprint)
@@ -1159,8 +1517,7 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("master_biz_name", &NaviSchedClientConfig::masterBizName)
         .def_readwrite("enable_sample_collection",
                        &NaviSchedClientConfig::enableSampleCollection)
-        .def_readwrite("enable_agent_forward",
-                       &NaviSchedClientConfig::enableAgentForward)
+        .def_readwrite("enable_agent_forward", &NaviSchedClientConfig::enableAgentForward)
         .def_readwrite("expect_agent_response_stream",
                        &NaviSchedClientConfig::expectAgentResponseStream);
     py::class_<NaviSchedMasterConfig>(m, "NaviSchedMasterConfig")
@@ -1168,7 +1525,8 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("service", &NaviSchedMasterConfig::service)
         .def_readwrite("runtime", &NaviSchedMasterConfig::runtime)
         .def_readwrite("collector_thread_num", &NaviSchedMasterConfig::collectorThreadNum)
-        .def_readwrite("collector_queue_count", &NaviSchedMasterConfig::collectorQueueCount)
+        .def_readwrite("collector_queue_count",
+                       &NaviSchedMasterConfig::collectorQueueCount)
         .def_readwrite("max_wait_schedule_count",
                        &NaviSchedMasterConfig::maxWaitScheduleCount)
         .def_readwrite("max_wait_schedule_time_ms",
@@ -1229,12 +1587,10 @@ void bindNaviSchedData(py::module_ &m)
              py::arg("request_id"), py::call_guard<py::gil_scoped_release>())
         .def("allocate_request_id", &NaviSchedClient::allocateRequestId)
         .def("has_master_biz", &NaviSchedClient::hasMasterBiz,
-             py::arg("master_biz_name") = "",
-             py::call_guard<py::gil_scoped_release>())
+             py::arg("master_biz_name") = "", py::call_guard<py::gil_scoped_release>())
         .def("report_local_fallback", &NaviSchedClient::reportLocalFallback,
              py::call_guard<py::gil_scoped_release>())
-        .def("get_request_received_count",
-             &NaviSchedClient::getRequestReceivedCount);
+        .def("get_request_received_count", &NaviSchedClient::getRequestReceivedCount);
 
     py::class_<NaviSchedMaster, std::shared_ptr<NaviSchedMaster>>(m, "NaviSchedMaster")
         .def(py::init<const NaviSchedMasterConfig &>(), py::arg("config"))
@@ -1250,18 +1606,44 @@ void bindNaviSchedData(py::module_ &m)
              py::arg("server_ip") = "", py::arg("total_blocks") = 0)
         .def("init", &NaviSchedAgent::init, py::call_guard<py::gil_scoped_release>())
         .def("stop", &NaviSchedAgent::stop, py::call_guard<py::gil_scoped_release>())
-        .def("report_cache_status",
-             [](const NaviSchedAgent &self, int64_t totalBlocks,
-                int64_t blockSize, int64_t linearStep,
-                bool hybridTailRequired) {
-                 self.reportCacheUpdated(totalBlocks, blockSize, linearStep,
-                                         nullptr, nullptr, nullptr, nullptr,
-                                         nullptr, nullptr,
-                                         hybridTailRequired ? 1 : 0, 0);
-             },
-             py::arg("total_blocks"), py::arg("block_size"),
-             py::arg("linear_step"), py::arg("hybrid_tail_required"),
-             py::call_guard<py::gil_scoped_release>())
+        .def(
+            "report_cache_status",
+            [](const NaviSchedAgent &self, int64_t totalBlocks, int64_t blockSize,
+               int64_t linearStep, bool hybridTailRequired, int cacheKeyType,
+               const std::optional<int64_t> &fullQueryDrop,
+               const std::optional<bool> &replayStopShift,
+               const std::optional<int64_t> &retentionInterval,
+               const std::optional<bool> &mambaAlign) {
+                const auto type = VLLMAgentBridge::checkedCacheKeyType(cacheKeyType);
+                const bool anyPolicy =
+                    fullQueryDrop || replayStopShift || retentionInterval || mambaAlign;
+                const bool allPolicy =
+                    fullQueryDrop && replayStopShift && retentionInterval && mambaAlign;
+                if (anyPolicy && !allPolicy) {
+                    throw std::invalid_argument(
+                        "cache status requires all policy fields");
+                }
+                NaviSchedCachePolicy policy;
+                if (allPolicy) {
+                    policy.blockSize = blockSize;
+                    policy.linearStep = linearStep;
+                    policy.hybridTailRequired = hybridTailRequired;
+                    policy.fullAttentionQueryDropTokens = *fullQueryDrop;
+                    policy.mambaReplayStopShift = *replayStopShift;
+                    policy.mambaRetentionInterval = *retentionInterval;
+                    policy.mambaAlign = *mambaAlign;
+                }
+                self.reportCacheUpdated(totalBlocks, blockSize, linearStep, nullptr,
+                                        nullptr, nullptr, nullptr, nullptr, nullptr,
+                                        hybridTailRequired ? 1 : 0, 0, -1, type,
+                                        allPolicy ? &policy : nullptr);
+            },
+            py::arg("total_blocks"), py::arg("block_size"), py::arg("linear_step"),
+            py::arg("hybrid_tail_required"), py::arg("cache_key_type") = 0,
+            py::arg("full_attention_query_drop_tokens") = py::none(),
+            py::arg("mamba_replay_stop_shift") = py::none(),
+            py::arg("mamba_retention_interval") = py::none(),
+            py::arg("mamba_align") = py::none(), py::call_guard<py::gil_scoped_release>())
         .def("get_grpc_port", &NaviSchedAgent::getGrpcPort);
 }
 

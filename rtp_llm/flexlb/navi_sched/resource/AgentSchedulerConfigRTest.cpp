@@ -4,6 +4,7 @@
 #include "unittest/unittest.h"
 
 #include <limits>
+#include <algorithm>
 
 namespace navi_sched {
 
@@ -45,8 +46,7 @@ TEST(AgentSchedulerConfigRTest, testServiceConfigCarriesRuntimeParameters)
     serviceConfig.residualIdleDecayStartMs = 4000;
     serviceConfig.residualIdleDecayEndMs = 9000;
 
-    const auto config =
-        AgentSchedulerConfig::fromServiceConfig(serviceConfig, 1.25);
+    const auto config = AgentSchedulerConfig::fromServiceConfig(serviceConfig, 1.25);
     EXPECT_DOUBLE_EQ(2.5, config.latencyOnlineLearningRateScale);
     EXPECT_DOUBLE_EQ(3.0, config.latencyCurrentSampleWeight);
     EXPECT_EQ(serviceConfig.latencyParameterLearningRateScales,
@@ -69,8 +69,8 @@ TEST(AgentSchedulerConfigRTest, testServiceConfigCarriesRuntimeParameters)
 
     AgentSchedulerConfig parsed;
     std::string errorMessage;
-    ASSERT_TRUE(AgentSchedulerConfigR::parse(
-        AgentSchedulerConfigR::toJson(config), parsed, errorMessage))
+    ASSERT_TRUE(AgentSchedulerConfigR::parse(AgentSchedulerConfigR::toJson(config),
+                                             parsed, errorMessage))
         << errorMessage;
     EXPECT_DOUBLE_EQ(config.latencyOnlineLearningRateScale,
                      parsed.latencyOnlineLearningRateScale);
@@ -78,25 +78,21 @@ TEST(AgentSchedulerConfigRTest, testServiceConfigCarriesRuntimeParameters)
                      parsed.latencyCurrentSampleWeight);
     EXPECT_EQ(config.latencyParameterLearningRateScales,
               parsed.latencyParameterLearningRateScales);
-    EXPECT_DOUBLE_EQ(config.latencyNonlinearScale,
-                     parsed.latencyNonlinearScale);
-    EXPECT_EQ(config.latencyHistoryBucketCapacity,
-              parsed.latencyHistoryBucketCapacity);
-    EXPECT_DOUBLE_EQ(config.residualLearningRate,
-                     parsed.residualLearningRate);
+    EXPECT_DOUBLE_EQ(config.latencyNonlinearScale, parsed.latencyNonlinearScale);
+    EXPECT_EQ(config.latencyHistoryBucketCapacity, parsed.latencyHistoryBucketCapacity);
+    EXPECT_DOUBLE_EQ(config.residualLearningRate, parsed.residualLearningRate);
     EXPECT_DOUBLE_EQ(config.residualUpdateErrorFloorMs,
                      parsed.residualUpdateErrorFloorMs);
-    EXPECT_DOUBLE_EQ(config.residualUpdateErrorRatio,
-                     parsed.residualUpdateErrorRatio);
-    EXPECT_EQ(config.residualIdleDecayStartMs,
-              parsed.residualIdleDecayStartMs);
+    EXPECT_DOUBLE_EQ(config.residualUpdateErrorRatio, parsed.residualUpdateErrorRatio);
+    EXPECT_EQ(config.residualIdleDecayStartMs, parsed.residualIdleDecayStartMs);
     EXPECT_EQ(config.residualIdleDecayEndMs, parsed.residualIdleDecayEndMs);
 }
 
 TEST(AgentSchedulerConfigRTest, testFixedLearningRateDefaults)
 {
     NaviSchedConfig serviceConfig;
-    AgentSchedulerConfig agentConfig = AgentSchedulerConfig::fromServiceConfig(serviceConfig);
+    AgentSchedulerConfig agentConfig =
+        AgentSchedulerConfig::fromServiceConfig(serviceConfig);
     EXPECT_DOUBLE_EQ(0.05, serviceConfig.latencyLearningRate);
     EXPECT_DOUBLE_EQ(1.0, serviceConfig.latencyOnlineLearningRateScale);
     EXPECT_DOUBLE_EQ(0.0, serviceConfig.residualLearningRate);
@@ -117,8 +113,9 @@ TEST(AgentSchedulerConfigRTest, testZeroResidualLearningRateIsValid)
 {
     AgentSchedulerConfig config;
     std::string errorMessage;
-    ASSERT_TRUE(AgentSchedulerConfigR::parse(
-        R"({"residual_learning_rate":0})", config, errorMessage)) << errorMessage;
+    ASSERT_TRUE(AgentSchedulerConfigR::parse(R"({"residual_learning_rate":0})", config,
+                                             errorMessage))
+        << errorMessage;
     EXPECT_DOUBLE_EQ(0.0, config.residualLearningRate);
     EXPECT_TRUE(config.residualRuntimeConfig().valid());
 
@@ -130,18 +127,18 @@ TEST(AgentSchedulerConfigRTest, testInvalidConfigNamesRejectedField)
 {
     AgentSchedulerConfig config;
     std::string errorMessage;
-    EXPECT_FALSE(AgentSchedulerConfigR::parse(
-        R"({"residual_learning_rate":-0.01})", config, errorMessage));
+    EXPECT_FALSE(AgentSchedulerConfigR::parse(R"({"residual_learning_rate":-0.01})",
+                                              config, errorMessage));
     EXPECT_NE(std::string::npos, errorMessage.find("residual_learning_rate"));
 
     errorMessage.clear();
-    EXPECT_FALSE(AgentSchedulerConfigR::parse(
-        R"({"latency_learning_rate":0})", config, errorMessage));
+    EXPECT_FALSE(AgentSchedulerConfigR::parse(R"({"latency_learning_rate":0})", config,
+                                              errorMessage));
     EXPECT_NE(std::string::npos, errorMessage.find("latency_learning_rate"));
 
     errorMessage.clear();
-    EXPECT_FALSE(AgentSchedulerConfigR::parse(
-        R"({"closed_batch_keep_ms":1})", config, errorMessage));
+    EXPECT_FALSE(AgentSchedulerConfigR::parse(R"({"closed_batch_keep_ms":1})", config,
+                                              errorMessage));
     EXPECT_NE(std::string::npos, errorMessage.find("closed_batch_keep_ms"));
 
     AgentSchedulerConfigR resource;
@@ -165,11 +162,9 @@ TEST(AgentSchedulerConfigRTest, testLatencyNonlinearScaleValidationAndHash)
     EXPECT_FALSE(invalid.valid());
     invalid.latencyNonlinearScale = -1.0;
     EXPECT_FALSE(invalid.valid());
-    invalid.latencyNonlinearScale =
-        std::numeric_limits<double>::infinity();
+    invalid.latencyNonlinearScale = std::numeric_limits<double>::infinity();
     EXPECT_FALSE(invalid.valid());
-    invalid.latencyNonlinearScale =
-        std::numeric_limits<double>::quiet_NaN();
+    invalid.latencyNonlinearScale = std::numeric_limits<double>::quiet_NaN();
     EXPECT_FALSE(invalid.valid());
 
     auto changed = config;
@@ -179,12 +174,10 @@ TEST(AgentSchedulerConfigRTest, testLatencyNonlinearScaleValidationAndHash)
     EXPECT_NE(configJson, changedJson);
     EXPECT_NE(AgentSchedulerConfigR::hashConfig(config),
               AgentSchedulerConfigR::hashConfig(changed));
-    EXPECT_NE(std::string::npos,
-              changedJson.find("\"latency_nonlinear_scale\""));
+    EXPECT_NE(std::string::npos, changedJson.find("\"latency_nonlinear_scale\""));
 }
 
-TEST(AgentSchedulerConfigRTest,
-     testLatencyNonlinearScaleCurlPatchAndNewAgentInheritance)
+TEST(AgentSchedulerConfigRTest, testLatencyNonlinearScaleCurlPatchAndNewAgentInheritance)
 {
     SchedulerConfigR masterConfig;
     SchedulerConfigR::Request request;
@@ -192,35 +185,29 @@ TEST(AgentSchedulerConfigRTest,
     request.configJson = R"({"latency_nonlinear_scale":2048.0})";
     SchedulerConfigResponseDataPtr response;
     bool waitingForAgents = false;
-    ASSERT_TRUE(
-        masterConfig.processRequest(request, response, waitingForAgents));
+    ASSERT_TRUE(masterConfig.processRequest(request, response, waitingForAgents));
     ASSERT_TRUE(response);
     EXPECT_TRUE(response->accepted) << response->error;
     EXPECT_FALSE(waitingForAgents);
-    EXPECT_DOUBLE_EQ(2048.0,
-                     masterConfig.get().config.agent.latencyNonlinearScale);
+    EXPECT_DOUBLE_EQ(2048.0, masterConfig.get().config.agent.latencyNonlinearScale);
     EXPECT_NE(std::string::npos,
-              masterConfig._agentConfigPatchJson.find(
-                  "\"latency_nonlinear_scale\""));
+              masterConfig._agentConfigPatchJson.find("\"latency_nonlinear_scale\""));
 
-    masterConfig._subscribers.emplace("collector",
-                                      SchedulerConfigR::Subscriber());
+    masterConfig._subscribers.emplace("collector", SchedulerConfigR::Subscriber());
     AgentSchedulerConfig localConfig;
     const auto localJson = AgentSchedulerConfigR::toJson(localConfig);
     const auto localHash = AgentSchedulerConfigR::hashJson(localJson);
-    ASSERT_TRUE(masterConfig.activateSubscriber(
-        "collector", "agent", "10.0.0.1", 1, localHash, localJson));
+    ASSERT_TRUE(masterConfig.activateSubscriber("collector", "agent", "10.0.0.1", 1,
+                                                localHash, localJson));
 
     SchedulerConfigR::PendingAgentUpdate pending;
     ASSERT_TRUE(masterConfig.getPendingAgentUpdate("collector", pending));
     AgentSchedulerConfig inherited;
     std::string errorMessage;
-    ASSERT_TRUE(AgentSchedulerConfigR::parse(
-        pending.configJson, inherited, errorMessage))
+    ASSERT_TRUE(AgentSchedulerConfigR::parse(pending.configJson, inherited, errorMessage))
         << errorMessage;
     EXPECT_DOUBLE_EQ(2048.0, inherited.latencyNonlinearScale);
-    EXPECT_EQ(AgentSchedulerConfigR::hashJson(pending.configJson),
-              pending.configHash);
+    EXPECT_EQ(AgentSchedulerConfigR::hashJson(pending.configJson), pending.configHash);
 }
 
 TEST(AgentSchedulerConfigRTest,
@@ -255,8 +242,7 @@ TEST(AgentSchedulerConfigRTest,
     ASSERT_TRUE(response);
     EXPECT_TRUE(response->accepted) << response->error;
     EXPECT_FALSE(waitingForAgents);
-    EXPECT_EQ(scales,
-              masterConfig.get().config.agent.latencyParameterLearningRateScales);
+    EXPECT_EQ(scales, masterConfig.get().config.agent.latencyParameterLearningRateScales);
     EXPECT_NE(AgentSchedulerConfigR::hashConfig(AgentSchedulerConfig()),
               AgentSchedulerConfigR::hashConfig(config));
 
@@ -264,14 +250,14 @@ TEST(AgentSchedulerConfigRTest,
     AgentSchedulerConfig localConfig;
     const auto localJson = AgentSchedulerConfigR::toJson(localConfig);
     ASSERT_TRUE(masterConfig.activateSubscriber(
-        "collector", "agent", "10.0.0.1", 1,
-        AgentSchedulerConfigR::hashJson(localJson), localJson));
+        "collector", "agent", "10.0.0.1", 1, AgentSchedulerConfigR::hashJson(localJson),
+        localJson));
     SchedulerConfigR::PendingAgentUpdate pending;
     ASSERT_TRUE(masterConfig.getPendingAgentUpdate("collector", pending));
     AgentSchedulerConfig inherited;
     std::string errorMessage;
-    ASSERT_TRUE(AgentSchedulerConfigR::parse(
-        pending.configJson, inherited, errorMessage)) << errorMessage;
+    ASSERT_TRUE(AgentSchedulerConfigR::parse(pending.configJson, inherited, errorMessage))
+        << errorMessage;
     EXPECT_EQ(scales, inherited.latencyParameterLearningRateScales);
 }
 
@@ -279,10 +265,8 @@ TEST(AgentSchedulerConfigRTest,
      testMasterDoesNotOverrideIndependentStartupConfigsWithoutPatch)
 {
     SchedulerConfigR masterConfig;
-    masterConfig._subscribers.emplace("collector_a",
-                                      SchedulerConfigR::Subscriber());
-    masterConfig._subscribers.emplace("collector_b",
-                                      SchedulerConfigR::Subscriber());
+    masterConfig._subscribers.emplace("collector_a", SchedulerConfigR::Subscriber());
+    masterConfig._subscribers.emplace("collector_b", SchedulerConfigR::Subscriber());
 
     AgentSchedulerConfig first;
     first.latencyOnlineLearningRateScale = 2.0;
@@ -337,4 +321,22 @@ TEST(AgentSchedulerConfigRTest,
               masterConfig._subscribers.at("collector_b").configHash);
 }
 
+} // namespace navi_sched
+
+namespace navi_sched {
+TEST(AgentSchedulerConfigRTest, testCacheSourceLearningRateCoordinateIdentity)
+{
+    AgentSchedulerConfig config;
+    config.latencyParameterLearningRateScales.assign(21, 1.0);
+    EXPECT_FALSE(config.valid());
+    std::fill(config.latencyParameterLearningRateScales.begin() + 10,
+              config.latencyParameterLearningRateScales.begin() + 19, 0.0);
+    EXPECT_TRUE(config.valid());
+    config.latencyParameterLearningRateScales[19] = 0.0;
+    EXPECT_FALSE(config.valid());
+    config.latencyParameterLearningRateScales[19] = 1.0;
+    config.latencyParameterLearningRateScales[20] = -1.0;
+    EXPECT_FALSE(config.valid());
 }
+
+} // namespace navi_sched

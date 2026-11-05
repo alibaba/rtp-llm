@@ -31,10 +31,10 @@ ClientRequestToMasterData::ClientRequestToMasterData()
 
 bool ClientRequestToMasterData::valid() const
 {
-    return version == NAVI_SCHED_DATA_VERSION && requestId != 0 &&
-           !bizName.empty() && timeoutMs > 0 &&
-           BlockHashUtil::validTokenBlocks(
-               promptTokenCount, blockSize, blockHashes);
+    return version == NAVI_SCHED_DATA_VERSION && requestId != 0 && !bizName.empty() &&
+           timeoutMs > 0 && explicitCacheCheckpointPosition >= 0 &&
+           explicitCacheCheckpointPosition <= promptTokenCount &&
+           BlockHashUtil::validTokenBlocks(promptTokenCount, blockSize, blockHashes);
 }
 
 navi::SummaryErrorCode ClientRequestToMasterData::getSummary(
@@ -46,9 +46,12 @@ navi::SummaryErrorCode ClientRequestToMasterData::getSummary(
     TABLE_ADD_COLUMN_VALUE(table, "timeout_ms", timeoutMs);
     TABLE_ADD_COLUMN_VALUE(table, "request_id", requestId);
     TABLE_ADD_COLUMN_VALUE(table, "prompt_token_count", promptTokenCount);
+    TABLE_ADD_COLUMN_VALUE(table, "explicit_cache_checkpoint_position",
+                           explicitCacheCheckpointPosition);
     TABLE_ADD_COLUMN_VALUE(table, "block_size", blockSize);
     TABLE_ADD_COLUMN_VALUE(table, "block_hash_count", BlockHashUtil::size(blockHashes));
     TABLE_ADD_COLUMN_VALUE(table, "forward_payload_size", forwardPayload.size());
+    TABLE_ADD_COLUMN_VALUE(table, "route_only", routeOnly);
     auto level = SummaryUtil::getSummaryLevel(query);
     if (level >= 1) {
         TABLE_ADD_COLUMN_VALUE(table, "collect_replay", collectReplay);
@@ -68,11 +71,13 @@ void ClientRequestToMasterData::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(bizName);
     dataBuffer.write(timeoutMs);
     dataBuffer.write(promptTokenCount);
+    dataBuffer.write(explicitCacheCheckpointPosition);
     dataBuffer.write(blockSize);
     dataBuffer.write(requestId);
     dataBuffer.write(collectReplay);
     BlockHashUtil::write(dataBuffer, blockHashes);
     dataBuffer.write(forwardPayload);
+    dataBuffer.write(routeOnly);
 }
 
 void ClientRequestToMasterData::deserialize(autil::DataBuffer &dataBuffer)
@@ -84,11 +89,13 @@ void ClientRequestToMasterData::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(bizName);
     dataBuffer.read(timeoutMs);
     dataBuffer.read(promptTokenCount);
+    dataBuffer.read(explicitCacheCheckpointPosition);
     dataBuffer.read(blockSize);
     dataBuffer.read(requestId);
     dataBuffer.read(collectReplay);
     BlockHashUtil::read(dataBuffer, blockHashes);
     dataBuffer.read(forwardPayload);
+    dataBuffer.read(routeOnly);
 }
 
 class ClientRequestToMasterType : public navi::Type {
@@ -113,9 +120,8 @@ public:
     navi::TypeErrorCode deserialize(navi::TypeContext &ctx,
                                     navi::DataPtr &data) const override
     {
-        const auto beginTimeUs = requestTraceBatchModulus() > 0
-                                     ? autil::TimeUtility::currentTime()
-                                     : 0;
+        const auto beginTimeUs =
+            requestTraceBatchModulus() > 0 ? autil::TimeUtility::currentTime() : 0;
         ClientRequestToMasterData *request = nullptr;
         ctx.getDataBuffer().read(request);
         if (!request) {

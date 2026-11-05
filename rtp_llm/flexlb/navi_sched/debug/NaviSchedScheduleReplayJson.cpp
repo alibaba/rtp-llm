@@ -34,10 +34,7 @@ struct ReplayTargetJson : public autil::legacy::Jsonizable {
 struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
     NaviSchedWorkloadSnapshot value;
     ReplayWorkloadJson() = default;
-    explicit ReplayWorkloadJson(const NaviSchedWorkloadSnapshot &input)
-        : value(input)
-    {
-    }
+    explicit ReplayWorkloadJson(const NaviSchedWorkloadSnapshot &input) : value(input) {}
     void Jsonize(JsonWrapper &json) override
     {
         json.Jsonize("revision", value.revision);
@@ -48,8 +45,7 @@ struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
                      value.remainingPrefillRequestCount);
         json.Jsonize("running_request_count", value.runningRequestCount);
         json.Jsonize("running_elapsed_time_ms", value.runningElapsedTimeMs);
-        json.Jsonize("running_decode_request_count",
-                     value.runningDecodeRequestCount,
+        json.Jsonize("running_decode_request_count", value.runningDecodeRequestCount,
                      value.runningDecodeRequestCount);
         json.Jsonize("running_decode_generated_token_count",
                      value.runningDecodeGeneratedTokenCount,
@@ -60,19 +56,16 @@ struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
         json.Jsonize("waiting_request_count", value.waitingRequestCount);
         json.Jsonize("remaining_prefill_context_token_count",
                      value.remainingPrefillContextTokenCount);
-        json.Jsonize("remaining_prefill_token_count",
-                     value.remainingPrefillTokenCount);
+        json.Jsonize("remaining_prefill_token_count", value.remainingPrefillTokenCount);
         json.Jsonize("remaining_prefill_token_square_sum",
                      value.remainingPrefillTokenSquareSum);
         json.Jsonize("context_remaining_prefill_token_product_sum",
                      value.contextRemainingPrefillTokenProductSum);
         json.Jsonize("prefill_capacity_split", value.prefillCapacitySplit,
                      value.prefillCapacitySplit);
-        json.Jsonize("max_running_request_count",
-                     value.maxRunningRequestCount,
+        json.Jsonize("max_running_request_count", value.maxRunningRequestCount,
                      value.maxRunningRequestCount);
-        json.Jsonize("running_capacity_slot_count",
-                     value.runningCapacitySlotCount,
+        json.Jsonize("running_capacity_slot_count", value.runningCapacitySlotCount,
                      value.runningCapacitySlotCount);
         json.Jsonize("running_capacity_prefill_request_count",
                      value.runningCapacityPrefillRequestCount,
@@ -86,10 +79,9 @@ struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
         json.Jsonize("running_capacity_prefill_token_square_sum",
                      value.runningCapacityPrefillTokenSquareSum,
                      value.runningCapacityPrefillTokenSquareSum);
-        json.Jsonize(
-            "running_capacity_context_remaining_prefill_token_product_sum",
-            value.runningCapacityContextRemainingPrefillTokenProductSum,
-            value.runningCapacityContextRemainingPrefillTokenProductSum);
+        json.Jsonize("running_capacity_context_remaining_prefill_token_product_sum",
+                     value.runningCapacityContextRemainingPrefillTokenProductSum,
+                     value.runningCapacityContextRemainingPrefillTokenProductSum);
         json.Jsonize("waiting_capacity_prefill_request_count",
                      value.waitingCapacityPrefillRequestCount,
                      value.waitingCapacityPrefillRequestCount);
@@ -102,14 +94,12 @@ struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
         json.Jsonize("waiting_capacity_prefill_token_square_sum",
                      value.waitingCapacityPrefillTokenSquareSum,
                      value.waitingCapacityPrefillTokenSquareSum);
-        json.Jsonize(
-            "waiting_capacity_context_remaining_prefill_token_product_sum",
-            value.waitingCapacityContextRemainingPrefillTokenProductSum,
-            value.waitingCapacityContextRemainingPrefillTokenProductSum);
+        json.Jsonize("waiting_capacity_context_remaining_prefill_token_product_sum",
+                     value.waitingCapacityContextRemainingPrefillTokenProductSum,
+                     value.waitingCapacityContextRemainingPrefillTokenProductSum);
         json.Jsonize("remaining_total_context_token_count",
                      value.remainingTotalContextTokenCount);
-        json.Jsonize("remaining_total_token_count",
-                     value.remainingTotalTokenCount);
+        json.Jsonize("remaining_total_token_count", value.remainingTotalTokenCount);
         json.Jsonize("remaining_total_token_square_sum",
                      value.remainingTotalTokenSquareSum);
         json.Jsonize("context_remaining_total_token_product_sum",
@@ -140,8 +130,7 @@ struct ReplayLatencyFeaturesJson : public autil::legacy::Jsonizable {
         auto batchCount = value.getBatchCount();
         auto precedingRequestCount = value.getPrecedingRequestCount();
         auto runningElapsedTimeMs = value.getRunningElapsedTimeMs();
-        auto runningDecodeRequestCount =
-            value.getRunningDecodeRequestCount();
+        auto runningDecodeRequestCount = value.getRunningDecodeRequestCount();
         auto runningDecodeGeneratedTokenCount =
             value.getRunningDecodeGeneratedTokenCount();
         auto runningDecodeRemainingTokenBudget =
@@ -155,28 +144,22 @@ struct ReplayLatencyFeaturesJson : public autil::legacy::Jsonizable {
         auto runningBatchSize = value.getRunningBatchSize();
         auto runningHitTokens = value.getRunningCacheHitTokenCount();
         auto runningComputeTokens = value.getRunningCacheMissTokenCount();
-        auto runningComputeTokensSquared =
-            value.getRunningCacheMissTokenSquareSum();
-        auto runningHitComputeProduct =
-            value.getRunningCacheHitMissTokenProductSum();
+        auto runningComputeTokensSquared = value.getRunningCacheMissTokenSquareSum();
+        auto runningHitComputeProduct = value.getRunningCacheHitMissTokenProductSum();
         auto waitingBatchSize = value.getWaitingBatchSize();
         auto waitingHitTokens = value.getWaitingCacheHitTokenCount();
         auto waitingComputeTokens = value.getWaitingCacheMissTokenCount();
-        auto waitingComputeTokensSquared =
-            value.getWaitingCacheMissTokenSquareSum();
-        auto waitingHitComputeProduct =
-            value.getWaitingCacheHitMissTokenProductSum();
+        auto waitingComputeTokensSquared = value.getWaitingCacheMissTokenSquareSum();
+        auto waitingHitComputeProduct = value.getWaitingCacheHitMissTokenProductSum();
         json.Jsonize("batch_count", batchCount);
         json.Jsonize("preceding_request_count", precedingRequestCount,
                      precedingRequestCount);
         json.Jsonize("running_elapsed_time_ms", runningElapsedTimeMs,
                      runningElapsedTimeMs);
-        json.Jsonize("running_decode_request_count",
-                     runningDecodeRequestCount,
+        json.Jsonize("running_decode_request_count", runningDecodeRequestCount,
                      runningDecodeRequestCount);
         json.Jsonize("running_decode_generated_token_count",
-                     runningDecodeGeneratedTokenCount,
-                     runningDecodeGeneratedTokenCount);
+                     runningDecodeGeneratedTokenCount, runningDecodeGeneratedTokenCount);
         json.Jsonize("running_decode_remaining_token_budget",
                      runningDecodeRemainingTokenBudget,
                      runningDecodeRemainingTokenBudget);
@@ -186,51 +169,78 @@ struct ReplayLatencyFeaturesJson : public autil::legacy::Jsonizable {
         json.Jsonize("compute_tokens_squared", computeTokensSquared);
         json.Jsonize("hit_compute_product", hitComputeProduct);
         json.Jsonize("capacity_split", capacitySplit, capacitySplit);
-        json.Jsonize("running_batch_size", runningBatchSize,
-                     runningBatchSize);
-        json.Jsonize("running_hit_tokens", runningHitTokens,
-                     runningHitTokens);
+        json.Jsonize("running_batch_size", runningBatchSize, runningBatchSize);
+        json.Jsonize("running_hit_tokens", runningHitTokens, runningHitTokens);
         json.Jsonize("running_compute_tokens", runningComputeTokens,
                      runningComputeTokens);
-        json.Jsonize("running_compute_tokens_squared",
-                     runningComputeTokensSquared,
+        json.Jsonize("running_compute_tokens_squared", runningComputeTokensSquared,
                      runningComputeTokensSquared);
-        json.Jsonize("running_hit_compute_product",
-                     runningHitComputeProduct,
+        json.Jsonize("running_hit_compute_product", runningHitComputeProduct,
                      runningHitComputeProduct);
-        json.Jsonize("waiting_batch_size", waitingBatchSize,
-                     waitingBatchSize);
-        json.Jsonize("waiting_hit_tokens", waitingHitTokens,
-                     waitingHitTokens);
+        json.Jsonize("waiting_batch_size", waitingBatchSize, waitingBatchSize);
+        json.Jsonize("waiting_hit_tokens", waitingHitTokens, waitingHitTokens);
         json.Jsonize("waiting_compute_tokens", waitingComputeTokens,
                      waitingComputeTokens);
-        json.Jsonize("waiting_compute_tokens_squared",
-                     waitingComputeTokensSquared,
+        json.Jsonize("waiting_compute_tokens_squared", waitingComputeTokensSquared,
                      waitingComputeTokensSquared);
-        json.Jsonize("waiting_hit_compute_product",
-                     waitingHitComputeProduct,
+        json.Jsonize("waiting_hit_compute_product", waitingHitComputeProduct,
                      waitingHitComputeProduct);
+        int64_t executionSteps = 0;
+        int64_t paddedTokens = 0;
+        bool geometryPresent = false;
+        bool sourcePresent = false;
+        int64_t sourceRequests = -1, sourceMaximum = -1;
+        if (json.GetMode() == JsonMode::TO_JSON) {
+            if (value.hasExecutionGeometry()) {
+                executionSteps = value.getExecutionStepCount();
+                paddedTokens = value.getGlobalPaddedTokens();
+                json.Jsonize("execution_step_count", executionSteps);
+                json.Jsonize("global_padded_tokens", paddedTokens);
+            }
+            if (value.hasExecutionCacheSource()) {
+                sourceRequests = value.getExternalReadRequestCount();
+                sourceMaximum = value.getMaxExternalReadTokens();
+                json.Jsonize("external_read_request_count", sourceRequests);
+                json.Jsonize("max_external_read_tokens", sourceMaximum);
+            }
+        } else {
+            const auto fields = json.GetMap();
+            geometryPresent = fields.count("execution_step_count") ||
+                              fields.count("global_padded_tokens");
+            json.Jsonize("execution_step_count", executionSteps, int64_t(0));
+            json.Jsonize("global_padded_tokens", paddedTokens, int64_t(0));
+            sourcePresent = fields.count("external_read_request_count") ||
+                            fields.count("max_external_read_tokens");
+            json.Jsonize("external_read_request_count", sourceRequests, int64_t(-1));
+            json.Jsonize("max_external_read_tokens", sourceMaximum, int64_t(-1));
+        }
         if (json.GetMode() != JsonMode::TO_JSON) {
             value = NaviSchedLatencyFeatures();
             if (capacitySplit) {
                 value.appendCapacitySplitAggregate(
-                    batchCount, runningBatchSize, runningHitTokens,
-                    runningComputeTokens, runningComputeTokensSquared,
-                    runningHitComputeProduct, waitingBatchSize,
-                    waitingHitTokens, waitingComputeTokens,
-                    waitingComputeTokensSquared,
-                    waitingHitComputeProduct);
+                    batchCount, runningBatchSize, runningHitTokens, runningComputeTokens,
+                    runningComputeTokensSquared, runningHitComputeProduct,
+                    waitingBatchSize, waitingHitTokens, waitingComputeTokens,
+                    waitingComputeTokensSquared, waitingHitComputeProduct);
                 value.appendPrecedingRequestCount(precedingRequestCount);
             } else {
-                value.appendAggregate(batchCount, batchSize, hitTokens,
-                                      computeTokens, computeTokensSquared,
-                                      hitComputeProduct);
+                value.appendAggregate(batchCount, batchSize, hitTokens, computeTokens,
+                                      computeTokensSquared, hitComputeProduct);
             }
             value.appendRunningElapsedTimeMs(runningElapsedTimeMs);
-            value.appendRunningDecodeProgress(
-                runningDecodeRequestCount,
-                runningDecodeGeneratedTokenCount,
-                runningDecodeRemainingTokenBudget);
+            value.appendRunningDecodeProgress(runningDecodeRequestCount,
+                                              runningDecodeGeneratedTokenCount,
+                                              runningDecodeRemainingTokenBudget);
+            if (geometryPresent &&
+                !value.setExecutionGeometry(executionSteps, paddedTokens)) {
+                AUTIL_LEGACY_THROW(autil::legacy::NotJsonizableException,
+                                   "invalid or incomplete execution geometry");
+            }
+            if (sourcePresent &&
+                !value.setExecutionCacheSource(sourceRequests, sourceMaximum)) {
+                AUTIL_LEGACY_THROW(autil::legacy::NotJsonizableException,
+                                   "invalid execution cache source");
+            }
         }
     }
 };
@@ -240,8 +250,7 @@ struct ReplayLatencyPredictionJson : public autil::legacy::Jsonizable {
     bool present = false;
 
     ReplayLatencyPredictionJson() = default;
-    explicit ReplayLatencyPredictionJson(
-        const NaviSchedLatencyPrediction &input)
+    explicit ReplayLatencyPredictionJson(const NaviSchedLatencyPrediction &input)
         : value(input), present(true)
     {
     }
@@ -275,22 +284,17 @@ struct ReplayDecisionJson : public autil::legacy::Jsonizable {
         json.Jsonize("schedule_loss", value.scheduleLoss);
         json.Jsonize("schedule_latency_us", value.scheduleLatencyUs,
                      value.scheduleLatencyUs);
-        json.Jsonize("schedule_time_us", value.scheduleTimeUs,
-                     value.scheduleTimeUs);
+        json.Jsonize("schedule_time_us", value.scheduleTimeUs, value.scheduleTimeUs);
         json.Jsonize("reason", value.reason);
         json.Jsonize("batch_id", value.batchId);
         json.Jsonize("expected_batch_size", value.expectedBatchSize);
-        json.Jsonize("predicted_cache_hit_token_count",
-                     value.predictedCacheHitTokenCount,
+        json.Jsonize("predicted_cache_hit_token_count", value.predictedCacheHitTokenCount,
                      value.predictedCacheHitTokenCount);
-        json.Jsonize("predicted_queue_latency_ms",
-                     value.predictedQueueLatencyMs,
+        json.Jsonize("predicted_queue_latency_ms", value.predictedQueueLatencyMs,
                      value.predictedQueueLatencyMs);
-        json.Jsonize("predicted_execution_latency_ms",
-                     value.predictedExecutionLatencyMs,
+        json.Jsonize("predicted_execution_latency_ms", value.predictedExecutionLatencyMs,
                      value.predictedExecutionLatencyMs);
-        int32_t trainingPhase =
-            static_cast<int32_t>(value.latencyTrainingPhase);
+        int32_t trainingPhase = static_cast<int32_t>(value.latencyTrainingPhase);
         json.Jsonize("latency_training_phase", trainingPhase, trainingPhase);
         if (json.GetMode() != JsonMode::TO_JSON) {
             value.latencyTrainingPhase =
@@ -339,8 +343,7 @@ struct ReplayNodeInfoJson : public autil::legacy::Jsonizable {
         json.Jsonize("queued_batch_requests", value.queuedBatchRequests);
         json.Jsonize("running_requests", value.runningRequests);
         json.Jsonize("pd_separated", value.pdSeparated);
-        json.Jsonize("unified_latency_prediction",
-                     value.unifiedLatencyPrediction);
+        json.Jsonize("unified_latency_prediction", value.unifiedLatencyPrediction);
         ReplayWorkloadJson workload(value.workload);
         json.Jsonize("workload", workload);
         if (json.GetMode() != JsonMode::TO_JSON) value.workload = workload.value;
@@ -354,13 +357,11 @@ struct ReplayNodeInfoJson : public autil::legacy::Jsonizable {
                      value.workloadFeatureSnapshotValid,
                      value.workloadFeatureSnapshotValid);
         ReplayLatencyFeaturesJson workloadFeatures(value.workloadFeatures);
-        json.Jsonize("workload_features", workloadFeatures,
-                     workloadFeatures);
+        json.Jsonize("workload_features", workloadFeatures, workloadFeatures);
         if (json.GetMode() != JsonMode::TO_JSON) {
             value.workloadFeatures = workloadFeatures.value;
         }
-        json.Jsonize("max_running_request_count",
-                     value.maxRunningRequestCount,
+        json.Jsonize("max_running_request_count", value.maxRunningRequestCount,
                      value.maxRunningRequestCount);
         json.Jsonize("workload_running_capacity_slot_count",
                      value.workloadRunningCapacitySlotCount,
@@ -370,15 +371,20 @@ struct ReplayNodeInfoJson : public autil::legacy::Jsonizable {
                      value.reservedRunningCapacitySlotCount);
         json.Jsonize("workload_report_receive_time_us",
                      value.workloadReportReceiveTimeUs);
-        json.Jsonize("workload_stale_update_count",
-                     value.workloadStaleUpdateCount);
+        json.Jsonize("workload_stale_update_count", value.workloadStaleUpdateCount);
         json.Jsonize("batch_timeout_count", value.batchTimeoutCount);
         json.Jsonize("abnormal_batch_finish_count", value.abnormalBatchFinishCount);
         json.Jsonize("last_request_latency_ms", value.lastRequestLatencyMs);
         json.Jsonize("queue_total_predicted_latency_ms",
                      value.queueTotalPredictedLatencyMs);
-        json.Jsonize("queue_decay_head_remaining_ms",
-                     value.queueDecayHeadRemainingMs);
+        json.Jsonize("queue_decay_head_remaining_ms", value.queueDecayHeadRemainingMs);
+        json.Jsonize("queue_base_clip_adjustment_ms",
+                     value.queueModel.baseClipAdjustmentMs);
+        json.Jsonize("queue_cache_member_weight_ms",
+                     value.queueModel.cacheMemberWeightMs);
+        json.Jsonize("queue_lookup_member_weight_ms",
+                     value.queueModel.lookupMemberWeightMs);
+        json.Jsonize("queue_raw_decay_factor", value.queueModel.rawDecayFactor);
         json.Jsonize("queue_report_receive_time_us", value.queueReportReceiveTimeUs);
         json.Jsonize("online", value.online);
         json.Jsonize("last_event_type", value.lastEventType);
@@ -392,19 +398,16 @@ struct ReplayNodeInfoJson : public autil::legacy::Jsonizable {
         json.Jsonize("latency_parameters", value.latencyParameters);
         json.Jsonize("latency_residual_version", value.latencyResidualVersion,
                      value.latencyResidualVersion);
-        json.Jsonize("latency_residual_parameters",
-                     value.latencyResidualParameters,
+        json.Jsonize("latency_residual_parameters", value.latencyResidualParameters,
                      value.latencyResidualParameters);
         json.Jsonize("latency_residual_last_update_time_us",
                      value.latencyResidualLastUpdateTimeUs,
                      value.latencyResidualLastUpdateTimeUs);
-        json.Jsonize("latency_model_fingerprint",
-                     value.latencyModelFingerprint,
+        json.Jsonize("latency_model_fingerprint", value.latencyModelFingerprint,
                      value.latencyModelFingerprint);
         json.Jsonize("latency_model_trusted", value.latencyModelTrusted,
                      value.latencyModelTrusted);
-        json.Jsonize("latency_model_warm_started",
-                     value.latencyModelWarmStarted,
+        json.Jsonize("latency_model_warm_started", value.latencyModelWarmStarted,
                      value.latencyModelWarmStarted);
         json.Jsonize("latency_model_consecutive_rejected_count",
                      value.latencyModelConsecutiveRejectedCount,
@@ -412,8 +415,7 @@ struct ReplayNodeInfoJson : public autil::legacy::Jsonizable {
         json.Jsonize("latency_model_last_reject_reason",
                      value.latencyModelLastRejectReason,
                      value.latencyModelLastRejectReason);
-        json.Jsonize("scheduler_config_generation",
-                     value.schedulerConfigGeneration,
+        json.Jsonize("scheduler_config_generation", value.schedulerConfigGeneration,
                      value.schedulerConfigGeneration);
         json.Jsonize("scheduler_config_hash", value.schedulerConfigHash,
                      value.schedulerConfigHash);
@@ -434,6 +436,8 @@ struct ReplayScheduleRequestJson : public autil::legacy::Jsonizable {
         json.Jsonize("version", value.version);
         json.Jsonize("request_id", value.requestId);
         json.Jsonize("prompt_token_count", value.promptTokenCount);
+        json.Jsonize("explicit_cache_checkpoint_position",
+                     value.explicitCacheCheckpointPosition);
         json.Jsonize("block_size", value.blockSize);
         auto blockHashes = BlockHashUtil::get(value.blockHashes);
         json.Jsonize("block_hashes", blockHashes);
@@ -507,8 +511,7 @@ struct ReplayJson : public autil::legacy::Jsonizable {
             json.Jsonize("nodes", nodes);
             json.Jsonize("node_matches", nodeMatches);
             json.Jsonize("decisions", decisions);
-            json.Jsonize("scheduler_info", value.schedulerInfo,
-                         value.schedulerInfo);
+            json.Jsonize("scheduler_info", value.schedulerInfo, value.schedulerInfo);
             value.requests.clear();
             value.nodes.clear();
             value.nodeMatches.clear();

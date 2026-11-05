@@ -59,7 +59,7 @@ class BoundedReader:
 
 def classify(stream, payload_size, record_version=LEGACY_RECORD_VERSION):
     reader = BoundedReader(stream, payload_size)
-    version, = struct.unpack("<i", exact(reader, 4))
+    (version,) = struct.unpack("<i", exact(reader, 4))
     if record_version == LEGACY_RECORD_VERSION:
         if version not in COMPATIBLE_LEGACY_DATA_VERSIONS:
             raise ValueError("unsupported legacy request version: %d" % version)
@@ -83,8 +83,9 @@ def classify(stream, payload_size, record_version=LEGACY_RECORD_VERSION):
     forward_size = varint(reader, 32)
     if forward_size != reader.remaining:
         raise ValueError("forward payload length mismatch")
-    unpacker = msgpack.Unpacker(reader, raw=False, read_size=4096,
-                               max_buffer_size=MAX_METADATA_BYTES)
+    unpacker = msgpack.Unpacker(
+        reader, raw=False, read_size=4096, max_buffer_size=MAX_METADATA_BYTES
+    )
     frame_count = unpacker.read_array_header()
     if frame_count < 1:
         raise ValueError("empty forward frames")
@@ -110,9 +111,14 @@ def classify(stream, payload_size, record_version=LEGACY_RECORD_VERSION):
 
 def audit(stream, start_time_us=0, end_time_us=2**63 - 1):
     size = os.fstat(stream.fileno()).st_size
-    result = {"counts": {"text": 0, "vl": 0, "unknown": 0},
-              "ranges": {}, "errors": [], "truncated_tail": False,
-              "checksum_verified": False, "file_bytes": size}
+    result = {
+        "counts": {"text": 0, "vl": 0, "unknown": 0},
+        "ranges": {},
+        "errors": [],
+        "truncated_tail": False,
+        "checksum_verified": False,
+        "file_bytes": size,
+    }
     offset = 0
     while offset < size:
         stream.seek(offset)
@@ -121,9 +127,15 @@ def audit(stream, start_time_us=0, end_time_us=2**63 - 1):
             result["truncated_tail"] = True
             break
         magic, version, event, length, _ = HEADER.unpack(header)
-        if (magic != MAGIC or version not in (LEGACY_RECORD_VERSION, RECORD_VERSION)
-                or event <= 0 or length > 256 * 1024 * 1024):
-            result["errors"].append({"offset": offset, "error": "invalid record header"})
+        if (
+            magic != MAGIC
+            or version not in (LEGACY_RECORD_VERSION, RECORD_VERSION)
+            or event <= 0
+            or length > 256 * 1024 * 1024
+        ):
+            result["errors"].append(
+                {"offset": offset, "error": "invalid record header"}
+            )
             break
         end = offset + HEADER.size + length
         if end > size:
@@ -137,16 +149,20 @@ def audit(stream, start_time_us=0, end_time_us=2**63 - 1):
                 if len(result["errors"]) < 10:
                     result["errors"].append({"offset": offset, "error": str(error)})
             result["counts"][kind] += 1
-            span = result["ranges"].setdefault(kind, {"earliest_us": event, "latest_us": event})
+            span = result["ranges"].setdefault(
+                kind, {"earliest_us": event, "latest_us": event}
+            )
             span["earliest_us"] = min(span["earliest_us"], event)
             span["latest_us"] = max(span["latest_us"], event)
         offset = end
     result["scanned_bytes"] = offset
-    result["all_selected_text"] = (result["counts"]["text"] > 0
-                                   and result["counts"]["vl"] == 0
-                                   and result["counts"]["unknown"] == 0
-                                   and not result["errors"]
-                                   and not result["truncated_tail"])
+    result["all_selected_text"] = (
+        result["counts"]["text"] > 0
+        and result["counts"]["vl"] == 0
+        and result["counts"]["unknown"] == 0
+        and not result["errors"]
+        and not result["truncated_tail"]
+    )
     return result
 
 

@@ -30,10 +30,9 @@ public:
                          const NaviSchedReadyBatchCallback &callback,
                          const std::function<void()> &acceptedCallback = {});
     bool abortPendingBatch(int64_t scheduleBatchId);
-    bool setForwardBatchHandler(const NaviSchedForwardBatchHandler &handler,
-                                bool streamResponse = true,
-                                const NaviSchedForwardRequestAcceptedHandler
-                                    &requestAcceptedHandler = {});
+    bool setForwardBatchHandler(
+        const NaviSchedForwardBatchHandler &handler, bool streamResponse = true,
+        const NaviSchedForwardRequestAcceptedHandler &requestAcceptedHandler = {});
     bool publishForwardResponse(uint64_t requestId, std::vector<std::string> frames,
                                 bool terminal) const;
     bool failForwardResponse(uint64_t requestId, const std::string &errorMessage) const;
@@ -44,15 +43,21 @@ public:
         const std::vector<NaviSchedBatchFinishReporterPtr> &finishReporters) const;
     bool reportObservedExecutionLoad(int32_t queuedBatchRequests, int32_t runningRequests,
                                      int64_t eventTimeUs) const;
-    bool reportObservedWorkload(const NaviSchedWorkloadSnapshot &snapshot,
-                               const std::vector<int64_t> &coveredNativeBatchIds = {}) const;
-    bool beginObservedBackendExecution(int32_t requestCount = 0) const;
-    bool endObservedBackendExecution() const;
+    bool reportPeerCacheReadAvailable(bool available) const;
+    bool reportObservedWorkload(
+        const NaviSchedWorkloadSnapshot &snapshot,
+        const std::vector<int64_t> &coveredNativeBatchIds = {}) const;
+    bool beginObservedBackendExecution(int64_t eventTimeUs = 0, int32_t requestCount = 0) const;
+    bool endObservedBackendExecution(int64_t eventTimeUs = 0) const;
     bool reportObservedExecutionStep(double elapsedMs, int64_t prefillTokens,
                                      int64_t decodeTokens) const;
     bool reportObservedCoreStep(double elapsedMs, bool futureWait) const;
-    void reportCacheInserted(const NaviSchedBlockHashesConstPtr &blockHashes) const;
-    void reportCacheRemoved(const NaviSchedBlockHashesConstPtr &blockHashes) const;
+    void reportCacheInserted(
+        const NaviSchedBlockHashesConstPtr &blockHashes,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+    void reportCacheRemoved(
+        const NaviSchedBlockHashesConstPtr &blockHashes,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
     void reportCacheUpdated(
         int64_t totalBlocks, int64_t blockSize, int64_t linearStep,
         const NaviSchedBlockHashesConstPtr &addedBlockHashes,
@@ -61,8 +66,9 @@ public:
         const NaviSchedBlockHashesConstPtr &removedFullReadyBlockHashes,
         const NaviSchedBlockHashesConstPtr &addedTailReadyBlockHashes,
         const NaviSchedBlockHashesConstPtr &removedTailReadyBlockHashes,
-        int8_t hybridTailRequired, int64_t eventTimeUs,
-        int64_t rtpCachedBlockCount = -1) const;
+        int8_t hybridTailRequired, int64_t eventTimeUs, int64_t rtpCachedBlockCount = -1,
+        NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL,
+        const NaviSchedCachePolicy *typedPolicy = nullptr) const;
     int32_t getGrpcPort() const;
     const std::shared_ptr<navi::Navi> &getRuntimeNavi() const;
     const std::string &getRuntimeBizName() const;
@@ -115,6 +121,13 @@ private:
     int64_t _cacheTotalBlocks = 0;
     bool _pdSeparated = true;
     bool _unifiedLatencyPrediction = false;
+    bool _executionGeometryEnabled = false;
+    bool _executionCacheSourceEnabled = false;
+    bool _projectedExecutionGeometryEnabled = false;
+    int64_t _fullAttentionQueryDropTokens = 0;
+    bool _mambaReplayStopShift = false;
+    int64_t _mambaRetentionInterval = -1;
+    bool _mambaAlign = false;
     double _timeCompression = 1.0;
     std::shared_ptr<ConcurrentRequestLatencyTracker> _inflightState;
     std::shared_ptr<AgentForwardState> _forwardState;

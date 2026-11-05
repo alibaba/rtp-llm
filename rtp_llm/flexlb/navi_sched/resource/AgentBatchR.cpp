@@ -465,6 +465,9 @@ std::vector<AgentBatchR::ExecutionState> AgentBatchR::stop()
                         batch->batchId = state.batchId;
                     }
                     state.localBatch = makeLocalBatchInfo(*batch);
+                    state.pendingCacheTypes.assign(
+                        batch->trackedPendingCacheTypes.begin(),
+                        batch->trackedPendingCacheTypes.end());
                 }
                 state.eventTimeUs = nowTimeUs;
                 abortedStates.emplace_back(state);
@@ -524,13 +527,16 @@ bool AgentBatchR::startBatch(int64_t batchId, const std::vector<uint64_t> &reque
     state.scheduleBatchId = batch->scheduleBatchId;
     state.requestIds = requestIds;
     state.localBatch = makeLocalBatchInfo(*batch);
+    state.pendingCacheTypes.assign(batch->trackedPendingCacheTypes.begin(),
+                                   batch->trackedPendingCacheTypes.end());
     state.eventTimeUs = batch->startTimeUs;
     return true;
 }
 
 bool AgentBatchR::makePendingCacheReservation(
     int64_t batchId, const NaviSchedCachePolicy &policy,
-    NaviSchedPendingCacheReservation &reservation) const
+    NaviSchedPendingCacheReservation &reservation, NaviSchedCacheKeyType type,
+    const std::map<uint64_t, int64_t> &publicationStarts) const
 {
     autil::ScopedLock lock(_lock);
     const auto readyIt = _readyBatches.find(batchId);
@@ -545,20 +551,25 @@ bool AgentBatchR::makePendingCacheReservation(
     std::vector<PendingCacheReferencedRequest> requests;
     requests.reserve(batch->cacheHitPathTokens.size());
     for (const auto &entry : batch->cacheHitPathTokens) {
+        const auto start = publicationStarts.find(entry.first);
         requests.emplace_back(PendingCacheReferencedRequest{
             entry.second.audit.blockHashes.get(), entry.second.totalTokens,
-            entry.second.blockSize});
+            entry.second.blockSize, entry.second.audit.cachePublicationTokenCount,
+            start == publicationStarts.end() ? 0 : start->second});
     }
-    if (!PendingCacheUtil::makeReservation(batch->batchId, requests, policy,
-                                           reservation)) {
+    if (!PendingCacheUtil::makeReservation(batch->batchId, requests, policy, reservation,
+                                           type)) {
         return false;
     }
-    batch->pendingCachePolicy = policy;
+    if (type == NaviSchedCacheKeyType::BLOCK_POOL) {
+        batch->pendingCachePolicy = policy;
+    }
+    batch->pendingCachePolicies[type] = policy;
     reservation.scheduleBatchId = batch->scheduleBatchId;
     return true;
 }
 
-bool AgentBatchR::markPendingCacheTracked(int64_t batchId)
+bool AgentBatchR::markPendingCacheTracked(int64_t batchId, NaviSchedCacheKeyType type)
 {
     autil::ScopedLock lock(_lock);
     const auto readyIt = _readyBatches.find(batchId);
@@ -570,10 +581,84 @@ bool AgentBatchR::markPendingCacheTracked(int64_t batchId)
     if (!batch) {
         return false;
     }
+    batch->trackedPendingCacheTypes.insert(type);
     batch->pendingCacheTracked = true;
     if (batch->batch) {
         batch->batch->pendingCacheTracked = true;
     }
+    return true;
+}
+
+bool AgentBatchR::unmarkPendingCacheTracked(int64_t batchId, NaviSchedCacheKeyType type)
+{
+    autil::ScopedLock lock(_lock);
+    const auto ready = _readyBatches.find(batchId);
+    const auto running = _runningBatches.find(batchId);
+    const auto batch = ready != _readyBatches.end()       ? ready->second
+                       : running != _runningBatches.end() ? running->second
+                                                          : CallbackBatchPtr();
+    if (!batch) {
+        return false;
+    }
+    batch->trackedPendingCacheTypes.erase(type);
+    batch->pendingCacheTracked = !batch->trackedPendingCacheTypes.empty();
+    if (batch->batch) {
+        batch->batch->pendingCacheTracked = batch->pendingCacheTracked;
+    }
+    return true;
+}
+
+bool AgentBatchR::resolveExecutionCache(
+    int64_t batchId, const std::vector<NaviSchedRequestStats> &requests,
+    ExecutionState &state, NaviSchedBatchPtr &resolved)
+{
+    resolved.reset();
+    autil::ScopedLock lock(_lock);
+    const auto it = _runningBatches.find(batchId);
+    if (it == _runningBatches.end() || requests.empty() ||
+        requests.size() != it->second->requestStats.size()) {
+        return false;
+    }
+    const auto &source = it->second;
+    auto corrected = source->requestStats;
+    std::unordered_set<uint64_t> seen;
+    for (const auto &request : requests) {
+        const auto original = std::find_if(
+            corrected.begin(), corrected.end(),
+            [&](const auto &value) { return value.requestId == request.requestId; });
+        if (!request.valid() || !seen.insert(request.requestId).second ||
+            original == corrected.end() ||
+            request.totalTokenCount != original->totalTokenCount ||
+            request.cacheHitTokenCount >= request.totalTokenCount ||
+            request.executionSharedPrefixBoundary < 0 ||
+            request.executionSharedPrefixBoundary > request.totalTokenCount) {
+            return false;
+        }
+        // Preserve the admission prediction and audit baseline; only the
+        // execution features change after the backend resolves its cache.
+        original->cacheHitTokenCount = request.cacheHitTokenCount;
+        original->executionSharedPrefixBoundary = request.executionSharedPrefixBoundary;
+        original->executionExternalReadTokens = request.executionExternalReadTokens;
+    }
+    // The callback releases source->batch after publication. Reconstruct from
+    // owned lifecycle metadata rather than dereferencing that released pointer.
+    resolved = std::make_shared<NaviSchedBatch>();
+    resolved->batchId = source->batchId;
+    resolved->scheduleBatchId = source->scheduleBatchId;
+    resolved->expectedBatchSize = source->expectedBatchSize;
+    resolved->timedOut = source->timeoutDetectedTimeUs > 0;
+    resolved->readyTimeUs = source->readyTimeUs;
+    resolved->readyAcceptedCallbackTimeUs = source->readyAcceptedCallbackTimeUs;
+    resolved->pendingCacheTracked = source->pendingCacheTracked;
+    for (const auto &request : corrected) {
+        resolved->requestIds.emplace_back(request.requestId);
+    }
+    resolved->_requestStats = corrected;
+    source->requestStats = std::move(corrected);
+    makeExecutionState(state);
+    state.batchId = batchId;
+    state.eventTimeUs = autil::TimeUtility::currentTime();
+    state.localBatch = makeLocalBatchInfo(*source);
     return true;
 }
 
@@ -606,7 +691,8 @@ bool AgentBatchR::finishBatch(int64_t batchId,
                               const std::vector<NaviSchedRequestStats> &requests,
                               ExecutionState &state,
                               std::vector<NaviSchedRequestStats> *completedRequests,
-                              double nativePreparationMs)
+                              double nativePreparationMs,
+                              int64_t executionFinishTimeUs)
 {
     if (!std::isfinite(nativePreparationMs) || nativePreparationMs < 0.0) {
         return false;
@@ -653,9 +739,21 @@ bool AgentBatchR::finishBatch(int64_t batchId,
             const auto requestIndex = completedIt->second - requests.data();
             (*completedRequests)[requestIndex].latencyTrainingPhase =
                 scheduledRequest.latencyTrainingPhase;
+            // This fact was resolved at the first forwarded prefill step. The
+            // completion tuple must not replace it with later cache contents.
+            if (scheduledRequest.executionExternalReadTokens >= 0) {
+                (*completedRequests)[requestIndex].executionExternalReadTokens =
+                    scheduledRequest.executionExternalReadTokens;
+            }
         }
     }
-    const auto nowTimeUs = autil::TimeUtility::currentTime();
+    const auto currentTimeUs = autil::TimeUtility::currentTime();
+    const auto nowTimeUs =
+        executionFinishTimeUs > 0 ? executionFinishTimeUs : currentTimeUs;
+    if (executionFinishTimeUs < 0 || nowTimeUs < batch->startTimeUs ||
+        nowTimeUs > currentTimeUs) {
+        return false;
+    }
     auditRecords.reserve(batch->cacheHitPathTokens.size());
     ++_cacheHitPathStats.batchCount;
     for (const auto &entry : batch->cacheHitPathTokens) {
@@ -680,7 +778,7 @@ bool AgentBatchR::finishBatch(int64_t batchId,
             rtpTokens - agentPhysicalTokens,
             agentPendingAwareTokens - masterTokens,
             rtpTokens - agentPendingAwareTokens,
-            rtpTokens - masterTokens,
+            masterTokens - rtpTokens, // Final Bias: positive overprediction.
             blockAligned,
         });
         if (entry.second.audit.arrivalTimeUs > 0) {
@@ -715,6 +813,7 @@ bool AgentBatchR::finishBatch(int64_t batchId,
         _cacheHitPathStats.agentArrivalTokens += agentPhysicalTokens;
         _cacheHitPathStats.agentPendingAwareTokens += agentPendingAwareTokens;
         _cacheHitPathStats.rtpActualTokens += rtpTokens;
+        _cacheHitPathStats.promptTokens += request.totalTokenCount;
         _cacheHitPathStats.masterToAgentAbsoluteErrorTokens +=
             static_cast<uint64_t>(std::abs(agentPhysicalTokens - masterTokens));
         _cacheHitPathStats.agentToRtpAbsoluteErrorTokens +=
@@ -783,6 +882,11 @@ bool AgentBatchR::finishBatch(int64_t batchId,
         state.requestIds.emplace_back(request.requestId);
     }
     state.localBatch = makeLocalBatchInfo(*batch);
+    state.pendingCacheTypes.assign(batch->trackedPendingCacheTypes.begin(),
+                                   batch->trackedPendingCacheTypes.end());
+    state.eventTimeUs = nowTimeUs;
+    // Preparation runs before startBatch. Reclassify that interval without
+    // counting it twice or making queue time negative after a clock adjustment.
     const auto preparationMs =
         std::min(nativePreparationMs, batch->backendQueueLatencyMs);
     state.batchLatencyMs = batchLatencyMs + preparationMs;
@@ -805,12 +909,16 @@ bool AgentBatchR::abortBatchRequests(
     int64_t batchId, const std::vector<uint64_t> &requestIds, ExecutionState &state,
     std::vector<NaviSchedRequestStats> &abortedRequests,
     NaviSchedBatchPtr &remainingBatch,
-    NaviSchedPendingCacheReservation &remainingPendingCache)
+    NaviSchedPendingCacheReservation &remainingPendingCache,
+    std::map<NaviSchedCacheKeyType, NaviSchedPendingCacheReservation> *typedRemaining)
 {
     state = ExecutionState();
     abortedRequests.clear();
     remainingBatch.reset();
     remainingPendingCache = NaviSchedPendingCacheReservation();
+    if (typedRemaining) {
+        typedRemaining->clear();
+    }
     if (batchId <= 0 || requestIds.empty()) {
         return false;
     }
@@ -890,15 +998,27 @@ bool AgentBatchR::abortBatchRequests(
                 entry.second.audit.blockHashes.get(), entry.second.totalTokens,
                 entry.second.blockSize});
         }
-        if (referencedBlockCount > 0) {
-            if (!PendingCacheUtil::makeReservation(batchId, referencedRequests,
-                                                   batch->pendingCachePolicy,
-                                                   remainingPendingCache)) {
-                abortedRequests.clear();
-                remainingBatch.reset();
-                return false;
+        for (const auto type : batch->trackedPendingCacheTypes) {
+            NaviSchedPendingCacheReservation remaining;
+            if (referencedBlockCount > 0) {
+                const auto policyIt = batch->pendingCachePolicies.find(type);
+                const auto &policy = policyIt == batch->pendingCachePolicies.end()
+                                         ? batch->pendingCachePolicy
+                                         : policyIt->second;
+                if (!PendingCacheUtil::makeReservation(batchId, referencedRequests,
+                                                       policy, remaining, type)) {
+                    abortedRequests.clear();
+                    remainingBatch.reset();
+                    return false;
+                }
+                remaining.scheduleBatchId = batch->scheduleBatchId;
             }
-            remainingPendingCache.scheduleBatchId = batch->scheduleBatchId;
+            if (type == NaviSchedCacheKeyType::BLOCK_POOL) {
+                remainingPendingCache = remaining;
+            }
+            if (typedRemaining) {
+                (*typedRemaining)[type] = std::move(remaining);
+            }
         }
     }
 
@@ -961,6 +1081,8 @@ bool AgentBatchR::abortBatchRequests(
     state.localBatch.localBatchId = batchId;
     state.localBatch.requestCount = state.batchRequestCount;
     state.localBatch.pendingCacheTracked = batch->pendingCacheTracked;
+    state.pendingCacheTypes.assign(batch->trackedPendingCacheTypes.begin(),
+                                   batch->trackedPendingCacheTypes.end());
     state.localBatch.requestIds.assign(abortedIds.begin(), abortedIds.end());
     std::sort(state.localBatch.requestIds.begin(), state.localBatch.requestIds.end());
     state.latencySampleValid = batch->latencySampleValid;
@@ -1002,6 +1124,8 @@ bool AgentBatchR::abortBatch(int64_t batchId, ExecutionState &state)
     state.scheduleBatchId = batch ? batch->scheduleBatchId : 0;
     if (batch) {
         state.localBatch = makeLocalBatchInfo(*batch);
+        state.pendingCacheTypes.assign(batch->trackedPendingCacheTypes.begin(),
+                                       batch->trackedPendingCacheTypes.end());
         state.requestIds.assign(batch->requestIdSet.begin(), batch->requestIdSet.end());
         std::sort(state.requestIds.begin(), state.requestIds.end());
     }
@@ -1085,6 +1209,8 @@ bool AgentBatchR::abortPendingBatch(int64_t scheduleBatchId, ExecutionState &sta
     state.requestIds.assign(batch->requestIdSet.begin(), batch->requestIdSet.end());
     std::sort(state.requestIds.begin(), state.requestIds.end());
     state.localBatch = makeLocalBatchInfo(*batch);
+    state.pendingCacheTypes.assign(batch->trackedPendingCacheTypes.begin(),
+                                   batch->trackedPendingCacheTypes.end());
     auditRecords.reserve(batch->cacheHitPathTokens.size());
     for (const auto &entry : batch->cacheHitPathTokens) {
         if (entry.second.audit.arrivalTimeUs <= 0) {

@@ -152,6 +152,37 @@ ColdStartRoutingPlan buildRoutingPlan(
             plan.trustedNodes.emplace_back(nodeIndex);
             plan.analysis.trustedInflight += inflight;
             if (!unknownBusyBacklog) {
+                const auto occupied = std::max(
+                    {inflight,
+                     static_cast<int64_t>(node.getRunningRequests()) +
+                         node.getBatchWaitingRequests() + node.getQueuedBatchRequests(),
+                     node.getWorkloadFeatures().getPrecedingRequestCount(),
+                     static_cast<int64_t>(node.getWorkloadRunningCapacitySlotCount()) +
+                         node.getReservedRunningCapacitySlotCount()});
+                const auto capacity = node.getMaxRunningRequestCount();
+                const auto available =
+                    capacity > 0
+                        ? static_cast<size_t>(std::max<int64_t>(1, capacity - occupied))
+                        : size_t(1);
+                if (capacity > occupied &&
+                    backlogLatencyMs <= healthyBacklogLatencyLimitMs) {
+                    auto &recovery = plan.analysis.healthyBacklogRecoveryRequestCount;
+                    recovery += std::min(context.requestCount() - recovery, available);
+                }
+                if (backlogLatencyMs < plan.analysis.minimumTrustedBacklogLatencyMs) {
+                    plan.analysis.minimumTrustedBacklogLatencyMs = backlogLatencyMs;
+                    plan.analysis.minimumTrustedBacklogNodeIndex = nodeIndex;
+                    plan.analysis.minimumTrustedBacklogNodeCount = 1;
+                    plan.analysis.minimumTrustedBacklogRecoveryRequestCount =
+                        std::min(context.requestCount(), available);
+                } else if (backlogLatencyMs ==
+                           plan.analysis.minimumTrustedBacklogLatencyMs) {
+                    ++plan.analysis.minimumTrustedBacklogNodeCount;
+                    auto &availableCount =
+                        plan.analysis.minimumTrustedBacklogRecoveryRequestCount;
+                    availableCount +=
+                        std::min(context.requestCount() - availableCount, available);
+                }
                 const auto backlogRequestCount =
                     node.usesUnifiedLatencyPrediction()
                         ? std::max(inflight,
@@ -274,7 +305,10 @@ bool CostSchedulerColdStartStrategy::apply(NaviSchedScheduleContext &context,
     std::vector<size_t> trustedRequests;
     trustedRequests.reserve(context.requestCount());
     size_t remainingUntrustedCapacity = result.untrustedCapacity;
+    const auto bootstrapRequestCount = context._coldStartBootstrapRequestCount;
+    context._coldStartBootstrapRequestCount = 0;
     for (size_t requestIndex = 0; requestIndex < context.requestCount(); ++requestIndex) {
+        const auto forceUntrusted = requestIndex < bootstrapRequestCount;
         bool routeToUntrusted = false;
         if (remainingUntrustedCapacity > 0 && !untrustedQueue.empty()) {
             if (context.isCollectingReplay()) {

@@ -104,7 +104,24 @@ double validationWindowMean(double currentMean, uint64_t currentCount,
                : 0.0;
 }
 
+bool reportPendingTerminal(const std::shared_ptr<AgentReportR> &report,
+                           const AgentBatchR::ExecutionState &state, bool completed)
+{
+    if (!report) {
+        return !state.localBatch.pendingCacheTracked;
+    }
+    bool success = true;
+    for (const auto type : state.pendingCacheTypes) {
+        const bool reported =
+            completed
+                ? report->reportPendingCacheCompleted(state.localBatch.localBatchId, type)
+                : report->reportPendingCacheAborted(state.localBatch.localBatchId, type);
+        success = reported && success;
+    }
+    return success;
 }
+
+} // namespace
 
 void NaviSchedAgentImpl::reportCacheHitPathSamples(
     const std::shared_ptr<kmonitor::MetricsReporter> &reporter,
@@ -263,7 +280,7 @@ struct NaviSchedBatchFinishReporter::State {
         AgentBatchR::ExecutionState abortedState;
         if (batchR->abortBatch(batchId, abortedState)) {
             if (abortedState.localBatch.pendingCacheTracked) {
-                reportR->reportPendingCacheAborted(abortedState.localBatch.localBatchId);
+                reportPendingTerminal(reportR, abortedState, false);
             }
             const auto inflight =
                 removeTrackedRequests(inflightState, abortedState.requestIds, reportR,
@@ -285,11 +302,76 @@ struct NaviSchedBatchFinishReporter::State {
         return false;
     }
 
+    void filterFailedPublications(NaviSchedPendingCacheReservation &reservation,
+                                  NaviSchedCacheKeyType type) const
+    {
+        const auto it = failedPublications.find(type);
+        if (it == failedPublications.end()) {
+            return;
+        }
+        const auto &full = it->second.first;
+        const auto &tail = it->second.second;
+        auto &requiredFull = reservation.fullReadyBlockHashes;
+        auto &requiredTail = reservation.tailReadyBlockHashes;
+        requiredFull.erase(std::remove_if(requiredFull.begin(), requiredFull.end(),
+                                          [&](uint64_t h) { return full.count(h); }),
+                           requiredFull.end());
+        requiredTail.erase(
+            std::remove_if(requiredTail.begin(), requiredTail.end(),
+                           [&](uint64_t h) { return full.count(h) || tail.count(h); }),
+            requiredTail.end());
+    }
+
+    bool resolveExecutionCache(const std::vector<NaviSchedRequestStats> &requests)
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto batchR = agentBatchR.lock();
+        auto inputR = agentLatencyInputR.lock();
+        if (!started || finished || !batchR || !inputR) {
+            return false;
+        }
+        AgentBatchR::ExecutionState state;
+        NaviSchedBatchPtr resolved;
+        if (!batchR->resolveExecutionCache(batchId, requests, state, resolved)) {
+            return false;
+        }
+        AgentLatencyInput input;
+        input.batchWaitingRequests = state.batchWaitingRequests;
+        input.queuedBatchRequests = state.queuedBatchRequests;
+        input.runningRequests = state.runningRequests;
+        input.eventTimeUs = state.eventTimeUs;
+        return inputR->submitBatchCacheResolved(resolved, input);
+    }
+
+    bool publicationFailed(NaviSchedCacheKeyType type, const NaviSchedBlockHashes &full,
+                           const NaviSchedBlockHashes &tail)
+    {
+        if (!validCacheKeyType(type)) {
+            return false;
+        }
+        std::lock_guard<std::mutex> publicationLock(publicationMutex);
+        auto report = agentReportR.lock();
+        auto batch = agentBatchR.lock();
+        if (!report || !batch) {
+            return false;
+        }
+        auto &failed = failedPublications[type];
+        failed.first.insert(full.begin(), full.end());
+        failed.second.insert(tail.begin(), tail.end());
+        bool retired = false;
+        if (!report->removePendingCachePublications(batchId, full, tail, type, retired)) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mutex);
+        return !retired || finished || batch->unmarkPendingCacheTracked(batchId, type);
+    }
+
     bool finish(const std::vector<NaviSchedRequestStats> &requests,
                 const AgentBatchR::BackendBatchExecutionSample *backendExecutionSample,
                 const NaviSchedLatencyFeatures *precedingFeatures = nullptr,
                 double unifiedLatencyMs = -1.0, double nativePreparationMs = 0.0)
     {
+        std::lock_guard<std::mutex> publicationLock(publicationMutex);
         auto batchR = agentBatchR.lock();
         BatchLifecycleGuard lifecycle(batchR);
         if (!lifecycle) return false;
@@ -297,12 +379,18 @@ struct NaviSchedBatchFinishReporter::State {
         auto reportR = agentReportR.lock();
         AgentBatchR::ExecutionState executionState;
         std::vector<NaviSchedRequestStats> completedRequests;
+        NaviSchedPendingCacheReservation publicationReservation;
+        bool publicationRangeKnown = false;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!batchR || !latencyInputR || !reportR || !inflightState) {
                 return false;
             }
-            if (finished || !started || requests.empty()) {
+            if (finished || !started || requests.empty() ||
+                (backendExecutionSample &&
+                 (backendExecutionSample->globalPaddedTokens > 0 ||
+                  backendExecutionSample->projectedExecutionStepCount > 0) &&
+                 !executionGeometryEligible)) {
                 return false;
             }
             for (const auto &request : requests) {
@@ -310,8 +398,29 @@ struct NaviSchedBatchFinishReporter::State {
                     return false;
                 }
             }
-            if (!batchR->finishBatch(batchId, requests, executionState,
-                                     &completedRequests, nativePreparationMs)) {
+            if (reportR->hasCacheKeyType(NaviSchedCacheKeyType::V6D)) {
+                const auto cache = reportR->getCacheState(NaviSchedCacheKeyType::V6D);
+                if (cache.policy.valid(NaviSchedCacheKeyType::V6D)) {
+                    std::map<uint64_t, int64_t> publicationStarts;
+                    for (const auto &request : requests) {
+                        publicationStarts.emplace(request.requestId,
+                                                  request.cacheHitTokenCount);
+                    }
+                    if (!batchR->makePendingCacheReservation(
+                            batchId, cache.policy, publicationReservation,
+                            NaviSchedCacheKeyType::V6D, publicationStarts)) {
+                        return false;
+                    }
+                    publicationRangeKnown = true;
+                    filterFailedPublications(publicationReservation,
+                                             NaviSchedCacheKeyType::V6D);
+                }
+            }
+            if (!batchR->finishBatch(
+                    batchId, requests, executionState, &completedRequests,
+                    nativePreparationMs,
+                    backendExecutionSample ? backendExecutionSample->executionFinishTimeUs
+                                           : 0)) {
                 return false;
             }
             finished = true;
@@ -319,33 +428,105 @@ struct NaviSchedBatchFinishReporter::State {
         if (backendExecutionSample) {
             batchR->recordBackendBatchExecution(*backendExecutionSample);
         }
-        const bool pendingCompleted = reportR->reportNativeBatchCompleted(
-            batchId, executionState.localBatch.pendingCacheTracked
-                         ? executionState.localBatch.localBatchId
-                         : 0);
         NaviSchedAgentImpl::reportCacheHitPathSamples(metricsReporter,
                                                       executionState.cacheHitPathSamples);
+        bool pendingRefined = true;
+        const auto externalPending =
+            std::find(executionState.pendingCacheTypes.begin(),
+                      executionState.pendingCacheTypes.end(), NaviSchedCacheKeyType::V6D);
+        if (publicationRangeKnown &&
+            externalPending != executionState.pendingCacheTypes.end()) {
+            // V6D advances its store cursor past reused/loaded tokens. Those
+            // tokens may remain in HBM after their V6D objects were evicted,
+            // and this execution will never publish them again.
+            const bool empty = publicationReservation.fullReadyBlockHashes.empty();
+            pendingRefined = reportR->replacePendingCache(
+                executionState.localBatch.localBatchId,
+                empty ? nullptr : &publicationReservation, NaviSchedCacheKeyType::V6D);
+            if (pendingRefined && empty) {
+                executionState.pendingCacheTypes.erase(externalPending);
+            }
+        }
+        const bool pendingCompleted = reportR->reportNativeBatchCompleted(
+            batchId,
+            executionState.localBatch.pendingCacheTracked
+                ? executionState.localBatch.localBatchId : 0,
+            executionState.pendingCacheTypes);
         const auto inflight = removeTrackedRequests(
             inflightState, executionState.requestIds, reportR, "batch_finished");
-        const bool latencySubmitted = latencyInputR->submitBatchFinished(
-            completedRequests, executionState.batchLatencyMs,
-            executionState.backendQueueLatencyMs, executionState.predictedQueueLatencyMs,
-            executionState.predictedExecutionLatencyMs,
-            executionState.predictedCacheHitTokenCount,
-            executionState.actualCacheHitTokenCount,
-            executionState.cacheHitMismatchRequestCount,
-            executionState.cacheHitAbsoluteErrorTokenCount,
-            executionState.cacheHitMaxAbsoluteErrorTokenCount, executionState.batchId,
-            inflight.requestCount, executionState.batchWaitingRequests,
-            executionState.queuedBatchRequests, executionState.runningRequests, 0,
-            precedingFeatures ? *precedingFeatures : NaviSchedLatencyFeatures(),
-            unifiedLatencyMs, executionState.latencySampleValid,
-            executionState.latencyValidationValid, executionState.localBatch);
-        return pendingCompleted && latencySubmitted;
+        const bool hasGeometry =
+            backendExecutionSample && backendExecutionSample->globalPaddedTokens > 0;
+        const bool hasProjectedGeometry =
+            backendExecutionSample &&
+            backendExecutionSample->projectedExecutionStepCount > 0;
+        const bool latencySubmitted =
+            hasProjectedGeometry
+                ? latencyInputR->submitBatchFinishedWithProjectedExecutionGeometry(
+                      completedRequests, executionState.batchLatencyMs,
+                      executionState.backendQueueLatencyMs,
+                      executionState.predictedQueueLatencyMs,
+                      executionState.predictedExecutionLatencyMs,
+                      executionState.predictedCacheHitTokenCount,
+                      executionState.actualCacheHitTokenCount,
+                      executionState.cacheHitMismatchRequestCount,
+                      executionState.cacheHitAbsoluteErrorTokenCount,
+                      executionState.cacheHitMaxAbsoluteErrorTokenCount,
+                      executionState.batchId, inflight.requestCount,
+                      executionState.batchWaitingRequests,
+                      executionState.queuedBatchRequests, executionState.runningRequests,
+                      0,
+                      precedingFeatures ? *precedingFeatures : NaviSchedLatencyFeatures(),
+                      unifiedLatencyMs, executionState.latencySampleValid,
+                      executionState.latencyValidationValid, executionState.localBatch,
+                      backendExecutionSample->executionStepCount,
+                      backendExecutionSample->globalPaddedTokens,
+                      backendExecutionSample->projectedExecutionStepCount,
+                      backendExecutionSample->projectedGlobalPaddedTokens)
+
+            : hasGeometry
+                ? latencyInputR->submitBatchFinishedWithExecutionGeometry(
+                      completedRequests, executionState.batchLatencyMs,
+                      executionState.backendQueueLatencyMs,
+                      executionState.predictedQueueLatencyMs,
+                      executionState.predictedExecutionLatencyMs,
+                      executionState.predictedCacheHitTokenCount,
+                      executionState.actualCacheHitTokenCount,
+                      executionState.cacheHitMismatchRequestCount,
+                      executionState.cacheHitAbsoluteErrorTokenCount,
+                      executionState.cacheHitMaxAbsoluteErrorTokenCount,
+                      executionState.batchId, inflight.requestCount,
+                      executionState.batchWaitingRequests,
+                      executionState.queuedBatchRequests, executionState.runningRequests,
+                      0,
+                      precedingFeatures ? *precedingFeatures : NaviSchedLatencyFeatures(),
+                      unifiedLatencyMs, executionState.latencySampleValid,
+                      executionState.latencyValidationValid, executionState.localBatch,
+                      backendExecutionSample->executionStepCount,
+                      backendExecutionSample->globalPaddedTokens)
+                : latencyInputR->submitBatchFinished(
+                      completedRequests, executionState.batchLatencyMs,
+                      executionState.backendQueueLatencyMs,
+                      executionState.predictedQueueLatencyMs,
+                      executionState.predictedExecutionLatencyMs,
+                      executionState.predictedCacheHitTokenCount,
+                      executionState.actualCacheHitTokenCount,
+                      executionState.cacheHitMismatchRequestCount,
+                      executionState.cacheHitAbsoluteErrorTokenCount,
+                      executionState.cacheHitMaxAbsoluteErrorTokenCount,
+                      executionState.batchId, inflight.requestCount,
+                      executionState.batchWaitingRequests,
+                      executionState.queuedBatchRequests, executionState.runningRequests,
+                      0,
+                      precedingFeatures ? *precedingFeatures : NaviSchedLatencyFeatures(),
+                      unifiedLatencyMs, executionState.latencySampleValid,
+                      executionState.latencyValidationValid, executionState.localBatch);
+
+        return pendingRefined && pendingCompleted && latencySubmitted;
     }
 
     bool abortRequests(const std::vector<uint64_t> &requestIds)
     {
+        std::lock_guard<std::mutex> publicationLock(publicationMutex);
         auto batchR = agentBatchR.lock();
         BatchLifecycleGuard lifecycle(batchR);
         if (!lifecycle) return false;
@@ -355,15 +536,17 @@ struct NaviSchedBatchFinishReporter::State {
         std::vector<NaviSchedRequestStats> abortedRequests;
         NaviSchedBatchPtr remainingBatch;
         NaviSchedPendingCacheReservation remainingPendingCache;
+        std::map<NaviSchedCacheKeyType, NaviSchedPendingCacheReservation> typedRemaining;
         {
             std::lock_guard<std::mutex> lock(mutex);
             if (!batchR || !latencyInputR || !reportR || !inflightState || finished ||
                 requestIds.empty() ||
                 !batchR->abortBatchRequests(batchId, requestIds, executionState,
                                             abortedRequests, remainingBatch,
-                                            remainingPendingCache)) {
+                                            remainingPendingCache, &typedRemaining)) {
                 return false;
             }
+            executionGeometryEligible = false;
             for (auto requestId : executionState.requestIds) {
                 ownedRequestIds.erase(std::remove(ownedRequestIds.begin(),
                                                   ownedRequestIds.end(), requestId),
@@ -373,11 +556,24 @@ struct NaviSchedBatchFinishReporter::State {
         bool pendingUpdated = true;
         reportR->reportNativeRequestsRemoved(batchId, executionState.requestIds);
         if (executionState.localBatch.pendingCacheTracked) {
-            pendingUpdated = reportR->replacePendingCache(
-                executionState.localBatch.localBatchId,
-                PendingCacheUtil::validReservation(remainingPendingCache)
-                    ? &remainingPendingCache
-                    : nullptr);
+            for (const auto type : executionState.pendingCacheTypes) {
+                const auto it = typedRemaining.find(type);
+                if (it != typedRemaining.end()) {
+                    filterFailedPublications(it->second, type);
+                }
+                const auto *remaining =
+                    it != typedRemaining.end() &&
+                            PendingCacheUtil::validReservation(it->second)
+                        ? &it->second
+                        : nullptr;
+                if (!remaining && remainingBatch && failedPublications.count(type)) {
+                    pendingUpdated = batchR->unmarkPendingCacheTracked(batchId, type) &&
+                                     pendingUpdated;
+                }
+                const bool updated = reportR->replacePendingCache(
+                    executionState.localBatch.localBatchId, remaining, type);
+                pendingUpdated = updated && pendingUpdated;
+            }
         }
         const auto inflight = removeTrackedRequests(
             inflightState, executionState.requestIds, reportR, "batch_requests_aborted");
@@ -391,6 +587,7 @@ struct NaviSchedBatchFinishReporter::State {
 
     bool finishObserved()
     {
+        std::lock_guard<std::mutex> publicationLock(publicationMutex);
         auto batchR = agentBatchR.lock();
         BatchLifecycleGuard lifecycle(batchR);
         if (!lifecycle) return false;
@@ -406,7 +603,7 @@ struct NaviSchedBatchFinishReporter::State {
         }
         reportR->reportNativeBatchRemoved(batchId);
         if (executionState.localBatch.pendingCacheTracked) {
-            reportR->reportPendingCacheAborted(executionState.localBatch.localBatchId);
+            reportPendingTerminal(reportR, executionState, false);
         }
         removeTrackedRequests(inflightState, executionState.requestIds, reportR,
                               "observed_batch_finished");
@@ -415,6 +612,7 @@ struct NaviSchedBatchFinishReporter::State {
 
     void finishAbnormally()
     {
+        std::lock_guard<std::mutex> publicationLock(publicationMutex);
         auto batchR = agentBatchR.lock();
         BatchLifecycleGuard lifecycle(batchR);
         if (batchR && !lifecycle) return;
@@ -460,8 +658,7 @@ struct NaviSchedBatchFinishReporter::State {
                       batchId, static_cast<bool>(batchR), cleanupRequestIds.size());
         }
         if (batchAborted && executionState.localBatch.pendingCacheTracked &&
-            (!reportR || !reportR->reportPendingCacheAborted(
-                             executionState.localBatch.localBatchId))) {
+            (!reportR || !reportPendingTerminal(reportR, executionState, false))) {
             AUTIL_LOG(ERROR,
                       "report abnormal pending cache abort failed, batchId [%ld], "
                       "localBatchId [%ld], hasReportResource [%d]",
@@ -497,8 +694,13 @@ struct NaviSchedBatchFinishReporter::State {
     std::shared_ptr<ConcurrentRequestLatencyTracker> inflightState;
     std::shared_ptr<kmonitor::MetricsReporter> metricsReporter;
     std::mutex mutex;
+    std::mutex publicationMutex;
+    std::map<NaviSchedCacheKeyType,
+             std::pair<std::unordered_set<uint64_t>, std::unordered_set<uint64_t>>>
+        failedPublications;
     bool started = false;
     bool finished = false;
+    bool executionGeometryEligible = true;
 };
 
 NaviSchedBatchFinishReporter::NaviSchedBatchFinishReporter(
@@ -530,34 +732,59 @@ bool NaviSchedBatchFinishReporter::startBatch(const std::vector<uint64_t> &reque
     return _state && _state->start(requestIds, executionStartTimeUs);
 }
 
+bool NaviSchedBatchFinishReporter::resolveExecutionCache(
+    const std::vector<NaviSchedRequestStats> &requests)
+{
+    return _state && _state->resolveExecutionCache(requests);
+}
+
 bool NaviSchedBatchFinishReporter::finishBatch(
     const std::vector<NaviSchedRequestStats> &requests)
 {
     return _state && _state->finish(requests, nullptr);
 }
 
-bool NaviSchedBatchFinishReporter::finishBatch(
-    const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
-    double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
-    int64_t decodeRequestStepCount, int64_t decodeTokenCount,
-    double admissionToFirstExecutionMs)
+bool NaviSchedBatchFinishReporter::reportCachePublicationFailed(
+    NaviSchedCacheKeyType type, const std::vector<uint64_t> &full,
+    const std::vector<uint64_t> &tail)
 {
-    return finishBatch(requests, wallTimeMs, executeModelTimeMs, executionStepCount,
-                       prefillTokenCount, decodeRequestStepCount, decodeTokenCount,
-                       admissionToFirstExecutionMs, 0.0);
+    return _state && _state->publicationFailed(type, full, tail);
+}
+
+std::function<bool(NaviSchedCacheKeyType, const std::vector<uint64_t> &,
+                   const std::vector<uint64_t> &)>
+NaviSchedBatchFinishReporter::makeCachePublicationFailureCallback() const
+{
+    return [state = _state](NaviSchedCacheKeyType type, const std::vector<uint64_t> &full,
+                            const std::vector<uint64_t> &tail) {
+        return state && state->publicationFailed(type, full, tail);
+    };
 }
 
 bool NaviSchedBatchFinishReporter::finishBatch(
     const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
     double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
     int64_t decodeRequestStepCount, int64_t decodeTokenCount,
-    double admissionToFirstExecutionMs, double nativePreparationMs)
+    double admissionToFirstExecutionMs, int64_t executionFinishTimeUs)
+{
+    return finishBatch(requests, wallTimeMs, executeModelTimeMs, executionStepCount,
+                       prefillTokenCount, decodeRequestStepCount, decodeTokenCount,
+                       admissionToFirstExecutionMs, 0.0, executionFinishTimeUs);
+}
+
+bool NaviSchedBatchFinishReporter::finishBatch(
+    const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
+    double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+    int64_t decodeRequestStepCount, int64_t decodeTokenCount,
+    double admissionToFirstExecutionMs, double nativePreparationMs,
+    int64_t executionFinishTimeUs)
 {
     if (!std::isfinite(admissionToFirstExecutionMs) ||
         admissionToFirstExecutionMs < -1.0) {
         return false;
     }
     AgentBatchR::BackendBatchExecutionSample sample;
+    sample.executionFinishTimeUs = executionFinishTimeUs;
     sample.wallTimeUs = static_cast<int64_t>(std::max(0.0, wallTimeMs) * 1000.0);
     sample.executeModelTimeUs =
         static_cast<int64_t>(std::max(0.0, executeModelTimeMs) * 1000.0);
@@ -572,6 +799,86 @@ bool NaviSchedBatchFinishReporter::finishBatch(
     }
     return _state &&
            _state->finish(requests, &sample, nullptr, -1.0, nativePreparationMs);
+}
+
+bool NaviSchedBatchFinishReporter::finishBatch(
+    const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
+    double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+    int64_t decodeRequestStepCount, int64_t decodeTokenCount)
+{
+    return finishBatch(requests, wallTimeMs, executeModelTimeMs, executionStepCount,
+                       prefillTokenCount, decodeRequestStepCount, decodeTokenCount, -1.0);
+}
+
+bool NaviSchedBatchFinishReporter::finishBatchWithExecutionGeometry(
+    const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
+    double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+    int64_t decodeRequestStepCount, int64_t decodeTokenCount,
+    double admissionToFirstExecutionMs, int64_t globalPaddedTokens,
+    int64_t executionFinishTimeUs, double nativePreparationMs)
+{
+    const double maxTimeMs =
+        static_cast<double>(std::numeric_limits<int64_t>::max()) / 1000.0;
+    if (!std::isfinite(wallTimeMs) || wallTimeMs < 0.0 || wallTimeMs >= maxTimeMs ||
+        !std::isfinite(executeModelTimeMs) || executeModelTimeMs < 0.0 ||
+        executeModelTimeMs >= maxTimeMs || !std::isfinite(admissionToFirstExecutionMs) ||
+        admissionToFirstExecutionMs < -1.0 || admissionToFirstExecutionMs >= maxTimeMs ||
+        executionStepCount <= 0 || globalPaddedTokens <= 0 ||
+        globalPaddedTokens < executionStepCount || prefillTokenCount < 0 ||
+        globalPaddedTokens < prefillTokenCount || decodeRequestStepCount != 0 ||
+        decodeTokenCount != 0) {
+        return false;
+    }
+    AgentBatchR::BackendBatchExecutionSample sample;
+    sample.executionFinishTimeUs = executionFinishTimeUs;
+    sample.wallTimeUs = static_cast<int64_t>(wallTimeMs * 1000.0);
+    sample.executeModelTimeUs = static_cast<int64_t>(executeModelTimeMs * 1000.0);
+    sample.executionStepCount = executionStepCount;
+    sample.prefillTokenCount = prefillTokenCount;
+    sample.globalPaddedTokens = globalPaddedTokens;
+    if (admissionToFirstExecutionMs >= 0.0) {
+        sample.admissionToFirstExecutionTimeUs =
+            static_cast<int64_t>(admissionToFirstExecutionMs * 1000.0);
+    }
+    return _state && _state->finish(requests, &sample, nullptr, -1.0, nativePreparationMs);
+}
+
+bool NaviSchedBatchFinishReporter::finishBatchWithProjectedExecutionGeometry(
+    const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
+    double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+    int64_t decodeRequestStepCount, int64_t decodeTokenCount,
+    double admissionToFirstExecutionMs, int64_t globalPaddedTokens,
+    int64_t projectedExecutionStepCount, int64_t projectedGlobalPaddedTokens,
+    int64_t executionFinishTimeUs, double nativePreparationMs)
+{
+    const double maxTimeMs =
+        static_cast<double>(std::numeric_limits<int64_t>::max()) / 1000.0;
+    if (!std::isfinite(wallTimeMs) || wallTimeMs < 0.0 || wallTimeMs >= maxTimeMs ||
+        !std::isfinite(executeModelTimeMs) || executeModelTimeMs < 0.0 ||
+        executeModelTimeMs >= maxTimeMs || !std::isfinite(admissionToFirstExecutionMs) ||
+        admissionToFirstExecutionMs < -1.0 || admissionToFirstExecutionMs >= maxTimeMs ||
+        executionStepCount <= 0 || globalPaddedTokens < 0 ||
+        projectedExecutionStepCount <= 0 ||
+        projectedGlobalPaddedTokens < projectedExecutionStepCount ||
+        (globalPaddedTokens > 0 && (globalPaddedTokens < executionStepCount ||
+                                    globalPaddedTokens < prefillTokenCount)) ||
+        prefillTokenCount < 0 || decodeRequestStepCount != 0 || decodeTokenCount != 0) {
+        return false;
+    }
+    AgentBatchR::BackendBatchExecutionSample sample;
+    sample.executionFinishTimeUs = executionFinishTimeUs;
+    sample.wallTimeUs = static_cast<int64_t>(wallTimeMs * 1000.0);
+    sample.executeModelTimeUs = static_cast<int64_t>(executeModelTimeMs * 1000.0);
+    sample.executionStepCount = executionStepCount;
+    sample.prefillTokenCount = prefillTokenCount;
+    sample.globalPaddedTokens = globalPaddedTokens;
+    sample.projectedExecutionStepCount = projectedExecutionStepCount;
+    sample.projectedGlobalPaddedTokens = projectedGlobalPaddedTokens;
+    if (admissionToFirstExecutionMs >= 0.0) {
+        sample.admissionToFirstExecutionTimeUs =
+            static_cast<int64_t>(admissionToFirstExecutionMs * 1000.0);
+    }
+    return _state && _state->finish(requests, &sample, nullptr, -1.0, nativePreparationMs);
 }
 
 bool NaviSchedBatchFinishReporter::finishBatchWithUnifiedLatency(
@@ -658,10 +965,24 @@ NaviSchedAgentImpl::NaviSchedAgentImpl(const NaviSchedAgentConfig &agentConfig,
     , _cacheTotalBlocks(totalBlocks)
     , _pdSeparated(agentConfig.pdSeparated)
     , _unifiedLatencyPrediction(agentConfig.unifiedLatencyPrediction)
+    , _executionGeometryEnabled(agentConfig.executionGeometryEnabled)
+    , _executionCacheSourceEnabled(agentConfig.executionCacheSourceEnabled)
+    , _projectedExecutionGeometryEnabled(agentConfig.projectedExecutionGeometryEnabled)
+    , _fullAttentionQueryDropTokens(agentConfig.fullAttentionQueryDropTokens)
+    , _mambaReplayStopShift(agentConfig.mambaReplayStopShift)
+    , _mambaRetentionInterval(agentConfig.mambaRetentionInterval)
+    , _mambaAlign(agentConfig.mambaAlign)
     , _timeCompression(agentConfig.timeCompression)
     , _inflightState(std::make_shared<ConcurrentRequestLatencyTracker>())
     , _forwardState(std::make_shared<AgentForwardState>())
 {
+    AgentControlToMasterData control;
+    control.executionGeometryEnabled = agentConfig.executionGeometryEnabled;
+    control.projectedExecutionGeometryEnabled =
+        agentConfig.projectedExecutionGeometryEnabled;
+    control.prefillExecutionPolicy = agentConfig.prefillExecutionPolicy;
+    control.peerCacheEnabled = agentConfig.peerCacheEnabled;
+    _agentReportBridgeR->setControlConfig(control);
 }
 
 NaviSchedAgentImpl::~NaviSchedAgentImpl() { stop(); }
@@ -681,7 +1002,13 @@ bool NaviSchedAgentImpl::applyConfig(const std::string &configStr)
 
 bool NaviSchedAgentImpl::init()
 {
-    if (_cacheTotalBlocks < 0 || (!_pdSeparated && !_unifiedLatencyPrediction) ||
+    if ((_executionGeometryEnabled &&
+         (!_pdSeparated || _unifiedLatencyPrediction ||
+          !TPUPrefillExecutionPolicy::validate(
+              _agentReportBridgeR->getControlConfig().prefillExecutionPolicy))) ||
+        (_projectedExecutionGeometryEnabled && !_executionGeometryEnabled) ||
+        (_executionCacheSourceEnabled && !_executionGeometryEnabled) ||
+        _cacheTotalBlocks < 0 || (!_pdSeparated && !_unifiedLatencyPrediction) ||
         !std::isfinite(_timeCompression) || _timeCompression <= 0.0 ||
         getConfig().latencyPersistIntervalMs <= 0) {
         return false;
@@ -736,6 +1063,10 @@ bool NaviSchedAgentImpl::init()
     reportConfig["latency_validation_enabled"] = getConfig().latencyValidationEnabled;
     reportConfig["pd_separated"] = _pdSeparated;
     reportConfig["unified_latency_prediction"] = _unifiedLatencyPrediction;
+    reportConfig["full_attention_query_drop_tokens"] = _fullAttentionQueryDropTokens;
+    reportConfig["mamba_replay_stop_shift"] = _mambaReplayStopShift;
+    reportConfig["mamba_retention_interval"] = _mambaRetentionInterval;
+    reportConfig["mamba_align"] = _mambaAlign;
     reportConfig["workload_publish_timing_enabled"] = getConfig().enableKmon;
     reportConfig["latency_model_fingerprint"] = _latencyModelFingerprint;
     resourceConfigs[AgentReportR::RESOURCE_ID] =
@@ -745,6 +1076,12 @@ bool NaviSchedAgentImpl::init()
     nonLinearPrefillModelConfig["check_gradient"] = getConfig().latencyCheckGradient;
     nonLinearPrefillModelConfig["zero_anchor_max_ms"] =
         getConfig().latencyZeroAnchorMaxMs;
+    nonLinearPrefillModelConfig["pd_separated"] = _pdSeparated;
+    nonLinearPrefillModelConfig["execution_geometry_enabled"] = _executionGeometryEnabled;
+    nonLinearPrefillModelConfig["projected_execution_geometry_enabled"] =
+        _projectedExecutionGeometryEnabled;
+    nonLinearPrefillModelConfig["execution_cache_source_enabled"] =
+        _executionCacheSourceEnabled;
     nonLinearPrefillModelConfig["use_batch_count_feature"] = _pdSeparated;
     nonLinearPrefillModelConfig["use_capacity_split_feature"] = !_pdSeparated;
     resourceConfigs[NonLinearPrefillModelR::RESOURCE_ID] =
@@ -792,6 +1129,7 @@ bool NaviSchedAgentImpl::addBatchRequest(const NaviSchedBatchRequest &request,
     const auto &requestStats = requestAudit.stats;
     AgentBatchR::CacheKeyAudit cacheKeyAudit;
     cacheKeyAudit.blockHashes = request.blockHashes;
+    cacheKeyAudit.cachePublicationTokenCount = request.cachePublicationTokenCount;
     cacheKeyAudit.physicalCacheHitTokenCount = requestAudit.physicalCacheHitTokenCount;
     cacheKeyAudit.arrivalTimeUs = requestAudit.eventTimeUs;
     cacheKeyAudit.cacheRevision = requestAudit.cacheState.revision;
@@ -828,17 +1166,22 @@ bool NaviSchedAgentImpl::addBatchRequest(const NaviSchedBatchRequest &request,
         accepted = _agentBatchR->addRequest(
             requestStats, batchId, expectedBatchSize,
             [this, callback](const NaviSchedBatchPtr &batch) {
-                const auto cacheState = _agentReportR->getCacheState();
-                NaviSchedPendingCacheReservation pendingReservation;
-                if (_agentBatchR->makePendingCacheReservation(
-                        batch->batchId, cacheState.policy, pendingReservation)) {
-                    if (_agentReportR->reportPendingCacheReady(pendingReservation)) {
-                        if (!_agentBatchR->markPendingCacheTracked(batch->batchId)) {
-                            _agentReportR->reportPendingCacheAborted(batch->batchId);
-                            AUTIL_LOG(ERROR,
-                                      "mark ready batch pending cache tracked failed, "
-                                      "scheduleBatchId [%ld], localBatchId [%ld]",
-                                      batch->scheduleBatchId, batch->batchId);
+                for (const auto type :
+                     {NaviSchedCacheKeyType::BLOCK_POOL, NaviSchedCacheKeyType::V6D}) {
+                    const auto cacheState = _agentReportR->getCacheState(type);
+                    if (!cacheState.policy.valid(type)) {
+                        continue;
+                    }
+                    NaviSchedPendingCacheReservation pendingReservation;
+                    if (_agentBatchR->makePendingCacheReservation(
+                            batch->batchId, cacheState.policy, pendingReservation,
+                            type) &&
+                        _agentReportR->reportPendingCacheReady(pendingReservation,
+                                                               type)) {
+                        if (!_agentBatchR->markPendingCacheTracked(batch->batchId,
+                                                                   type)) {
+                            _agentReportR->reportPendingCacheAborted(batch->batchId,
+                                                                     type);
                             throw std::runtime_error(
                                 "mark ready batch pending cache tracked failed");
                         }
@@ -1187,6 +1530,14 @@ void NaviSchedAgentImpl::handleForwardBatch(const NaviSchedBatchPtr &batch)
             forwarded.emplace_back(std::move(value));
         }
     }
+    // RPC arrivals do not preserve the Master batch's iteration order.
+    // Match the canonical order used by exact cost geometry and reservations;
+    // accepted callbacks and their arrival timestamps remain untouched.
+    std::sort(forwarded.begin(), forwarded.end(),
+              [](const NaviSchedForwardedRequest &left,
+                 const NaviSchedForwardedRequest &right) {
+                  return left.requestId < right.requestId;
+              });
     const auto forwardBatchBuildDoneTimeUs =
         autil::TimeUtility::currentTimeInMicroSeconds();
     if (tracing) {
@@ -1307,6 +1658,11 @@ bool NaviSchedAgentImpl::reportObservedExecutionLoad(int32_t queuedBatchRequests
                                                     runningRequests, eventTimeUs);
 }
 
+bool NaviSchedAgentImpl::reportPeerCacheReadAvailable(bool available) const
+{
+    return _agentReportR && _agentReportR->reportPeerCacheReadAvailable(available);
+}
+
 bool NaviSchedAgentImpl::reportObservedWorkload(
     const NaviSchedWorkloadSnapshot &snapshot,
     const std::vector<int64_t> &coveredNativeBatchIds) const
@@ -1321,14 +1677,14 @@ bool NaviSchedAgentImpl::reportObservedWorkload(
     return revision > 0;
 }
 
-bool NaviSchedAgentImpl::beginObservedBackendExecution(int32_t requestCount) const
+bool NaviSchedAgentImpl::beginObservedBackendExecution(int64_t eventTimeUs, int32_t requestCount) const
 {
-    return _agentBatchR && _agentBatchR->beginBackendExecution(0, requestCount);
+    return _agentBatchR && _agentBatchR->beginBackendExecution(eventTimeUs, requestCount);
 }
 
-bool NaviSchedAgentImpl::endObservedBackendExecution() const
+bool NaviSchedAgentImpl::endObservedBackendExecution(int64_t eventTimeUs) const
 {
-    return _agentBatchR && _agentBatchR->endBackendExecution();
+    return _agentBatchR && _agentBatchR->endBackendExecution(eventTimeUs);
 }
 
 bool NaviSchedAgentImpl::reportObservedExecutionStep(double elapsedMs,
@@ -1358,23 +1714,27 @@ bool NaviSchedAgentImpl::reportObservedCoreStep(double elapsedMs, bool futureWai
 }
 
 void NaviSchedAgentImpl::reportCacheInserted(
-    const NaviSchedBlockHashesConstPtr &blockHashes) const
+    const NaviSchedBlockHashesConstPtr &blockHashes,
+    NaviSchedCacheKeyType cacheKeyType) const
 {
     if (!_agentReportR) {
         return;
     }
     NaviSchedCacheUpdate update;
+    update.cacheKeyType = cacheKeyType;
     update.addedBlockHashes = blockHashes;
     _agentReportR->reportCacheUpdated(update);
 }
 
 void NaviSchedAgentImpl::reportCacheRemoved(
-    const NaviSchedBlockHashesConstPtr &blockHashes) const
+    const NaviSchedBlockHashesConstPtr &blockHashes,
+    NaviSchedCacheKeyType cacheKeyType) const
 {
     if (!_agentReportR) {
         return;
     }
     NaviSchedCacheUpdate update;
+    update.cacheKeyType = cacheKeyType;
     update.removedBlockHashes = blockHashes;
     _agentReportR->reportCacheUpdated(update);
 }
@@ -1387,12 +1747,24 @@ void NaviSchedAgentImpl::reportCacheUpdated(
     const NaviSchedBlockHashesConstPtr &removedFullReadyBlockHashes,
     const NaviSchedBlockHashesConstPtr &addedTailReadyBlockHashes,
     const NaviSchedBlockHashesConstPtr &removedTailReadyBlockHashes,
-    int8_t hybridTailRequired, int64_t eventTimeUs, int64_t rtpCachedBlockCount) const
+    int8_t hybridTailRequired, int64_t eventTimeUs, int64_t rtpCachedBlockCount,
+    NaviSchedCacheKeyType cacheKeyType, const NaviSchedCachePolicy *typedPolicy) const
 {
+    const bool hasStatus = blockSize > 0 && linearStep > 0 && hybridTailRequired >= 0;
+    if (typedPolicy &&
+        (!typedPolicy->valid(cacheKeyType) || typedPolicy->blockSize != blockSize ||
+         typedPolicy->linearStep != linearStep ||
+         typedPolicy->hybridTailRequired != (hybridTailRequired != 0))) {
+        throw std::invalid_argument("invalid cache policy");
+    }
+    if (hasStatus && cacheKeyType == NaviSchedCacheKeyType::V6D && !typedPolicy) {
+        throw std::invalid_argument("V6D cache status requires an independent policy");
+    }
     if (!_agentReportR) {
         return;
     }
     NaviSchedCacheUpdate update;
+    update.cacheKeyType = cacheKeyType;
     update.totalBlocks = totalBlocks;
     update.blockSize = blockSize;
     update.linearStep = linearStep;
@@ -1403,6 +1775,17 @@ void NaviSchedAgentImpl::reportCacheUpdated(
     update.addedTailReadyBlockHashes = addedTailReadyBlockHashes;
     update.removedTailReadyBlockHashes = removedTailReadyBlockHashes;
     update.hybridTailRequired = hybridTailRequired;
+    if (typedPolicy) {
+        update.fullAttentionQueryDropTokens = typedPolicy->fullAttentionQueryDropTokens;
+        update.mambaReplayStopShift = typedPolicy->mambaReplayStopShift ? 1 : 0;
+        update.mambaRetentionInterval = typedPolicy->mambaRetentionInterval;
+        update.mambaAlign = typedPolicy->mambaAlign;
+    } else if (hasStatus && cacheKeyType == NaviSchedCacheKeyType::BLOCK_POOL) {
+        update.fullAttentionQueryDropTokens = _fullAttentionQueryDropTokens;
+        update.mambaReplayStopShift = _mambaReplayStopShift ? 1 : 0;
+        update.mambaRetentionInterval = _mambaRetentionInterval;
+        update.mambaAlign = _mambaAlign;
+    }
     update.eventTimeUs = eventTimeUs;
     update.rtpCachedBlockCount = rtpCachedBlockCount;
     _agentReportR->reportCacheUpdated(update);
@@ -1487,8 +1870,7 @@ void NaviSchedAgentImpl::handleAcceptedBatchFailure(
                   state.requestIds.size());
     }
     if (state.localBatch.pendingCacheTracked &&
-        (!_agentReportR ||
-         !_agentReportR->reportPendingCacheAborted(state.localBatch.localBatchId))) {
+        (!_agentReportR || !reportPendingTerminal(_agentReportR, state, false))) {
         AUTIL_LOG(ERROR,
                   "retire accepted batch pending cache after failure failed, "
                   "scheduleBatchId [%ld], localBatchId [%ld], hasReportResource [%d]",
@@ -1676,8 +2058,8 @@ std::string NaviSchedAgentImpl::makeSnapshot() const
             (cacheHitPathStats.rtpActualTokens -
              cacheHitPathStats.agentPendingAwareTokens) /
             divisor;
-        summary.cacheHitMasterToRtpBiasMean = (cacheHitPathStats.rtpActualTokens -
-                                               cacheHitPathStats.masterPredictedTokens) /
+        summary.cacheHitMasterToRtpBiasMean = (cacheHitPathStats.masterPredictedTokens -
+                                               cacheHitPathStats.rtpActualTokens) /
                                               divisor;
     }
     summary.cacheHitAlignedRequestCount = cacheHitPathStats.alignedRequestCount;
@@ -1789,6 +2171,10 @@ void NaviSchedAgentImpl::reportMetrics() const
                      ? 100.0 * cacheState.cachedBlockCount / _cacheTotalBlocks
                      : 0.0);
     reportMetric("agent.pending_cache_batch_count", pendingCacheState.batchCount);
+    reportMetric("agent.pending_cache_completed_batch_count",
+                 pendingCacheState.completedBatchCount);
+    reportMetric("agent.pending_cache_oldest_completed_age_ms",
+                 pendingCacheState.oldestCompletedAgeMs);
     reportMetric("agent.pending_cache_unique_block_count",
                  pendingCacheState.uniqueBlockCount);
     reportMetric("agent.pending_cache_unique_block_pct",
@@ -1798,6 +2184,24 @@ void NaviSchedAgentImpl::reportMetrics() const
     reportMetric("agent.full_ready_block_count", cacheState.fullReadyBlockCount);
     reportMetric("agent.tail_ready_block_count", cacheState.tailReadyBlockCount);
     reportMetric("agent.cache_revision", cacheState.revision);
+    if (_agentReportR->hasCacheKeyType(NaviSchedCacheKeyType::V6D)) {
+        const auto external = _agentReportR->getCacheState(NaviSchedCacheKeyType::V6D);
+        const auto pending =
+            _agentReportR->getPendingCacheState(NaviSchedCacheKeyType::V6D);
+        reportMetric("agent.v6d_cached_block_count", external.cachedBlockCount);
+        reportMetric("agent.v6d_full_ready_block_count", external.fullReadyBlockCount);
+        reportMetric("agent.v6d_tail_ready_block_count", external.tailReadyBlockCount);
+        reportMetric("agent.v6d_cache_revision", external.revision);
+        reportMetric("agent.v6d_pending_cache_batch_count", pending.batchCount);
+        reportMetric("agent.v6d_pending_cache_completed_batch_count",
+                     pending.completedBatchCount);
+        reportMetric("agent.v6d_pending_cache_oldest_completed_age_ms",
+                     pending.oldestCompletedAgeMs);
+        reportMetric("agent.v6d_pending_cache_unique_block_count",
+                     pending.uniqueBlockCount);
+        reportMetric("agent.v6d_pending_cache_unique_tail_ready_block_count",
+                     pending.uniqueTailReadyBlockCount);
+    }
     const bool rtpCacheMirrorAvailable = cacheState.rtpCachedBlockCount >= 0;
     reportMetric("agent.rtp_cache_mirror_available", rtpCacheMirrorAvailable);
     if (rtpCacheMirrorAvailable) {
@@ -1835,7 +2239,8 @@ void NaviSchedAgentImpl::reportMetrics() const
         reportMetric("agent.latency_residual_decay_factor", residualDecay);
         reportMetric(
             "agent.latency_model_zero_point",
-            NonLinearPrefillModelR::calculateZeroPoint(latencySnapshot->parameters));
+            NonLinearPrefillModelR::calculateZeroPoint(
+                latencySnapshot->parameters, nullptr, latencySnapshot->binaryVersion));
         for (size_t index = 0; index < latencySnapshot->parameters.size(); ++index) {
             reportMetric("agent.latency_model_parameter_" + std::to_string(index),
                          latencySnapshot->parameters[index]);
@@ -1850,12 +2255,27 @@ void NaviSchedAgentImpl::reportMetrics() const
         }
     }
     const auto cacheHitPathStats = _agentBatchR->getCacheHitPathStats();
+    reportMetric("agent.kv_cache_hit_tokens_total", cacheHitPathStats.rtpActualTokens);
+    reportMetric("agent.kv_cache_prompt_tokens_total", cacheHitPathStats.promptTokens);
+    const auto cacheTokenReportTimeUs = autil::TimeUtility::monotonicTimeUs();
+    reportCounterQpsMetricAt("agent.kv_cache_hit_tokens_qps",
+                             cacheHitPathStats.rtpActualTokens, cacheTokenReportTimeUs);
+    reportCounterQpsMetricAt("agent.kv_cache_prompt_tokens_qps",
+                             cacheHitPathStats.promptTokens, cacheTokenReportTimeUs);
     if (cacheHitPathStats.requestCount < _lastCacheHitPathStats.requestCount) {
         _lastCacheHitPathStats = AgentBatchR::CacheHitPathStats();
     }
     const auto cacheHitRequestDelta =
         cacheHitPathStats.requestCount - _lastCacheHitPathStats.requestCount;
     if (cacheHitRequestDelta > 0) {
+        const auto promptTokens =
+            cacheHitPathStats.promptTokens - _lastCacheHitPathStats.promptTokens;
+        const auto hitTokens =
+            cacheHitPathStats.rtpActualTokens - _lastCacheHitPathStats.rtpActualTokens;
+        if (promptTokens > 0 && hitTokens >= 0 && hitTokens <= promptTokens) {
+            reportSampleMetric("agent.kv_cache_hit_rate_pct",
+                               100.0 * hitTokens / promptTokens);
+        }
         const auto delta = [](auto current, auto previous) { return current - previous; };
         const auto hybridDebugCount =
             delta(cacheHitPathStats.hybridDebugRequestCount,
@@ -2391,6 +2811,11 @@ bool NaviSchedAgent::reportObservedExecutionLoad(int32_t queuedBatchRequests,
                                                        runningRequests, eventTimeUs);
 }
 
+bool NaviSchedAgent::reportPeerCacheReadAvailable(bool available) const
+{
+    return _impl && _impl->reportPeerCacheReadAvailable(available);
+}
+
 bool NaviSchedAgent::reportObservedWorkload(
     const NaviSchedWorkloadSnapshot &snapshot) const
 {
@@ -2404,14 +2829,14 @@ bool NaviSchedAgent::reportObservedWorkload(
     return _impl && _impl->reportObservedWorkload(snapshot, coveredNativeBatchIds);
 }
 
-bool NaviSchedAgent::beginObservedBackendExecution(int32_t requestCount) const
+bool NaviSchedAgent::beginObservedBackendExecution(int64_t eventTimeUs, int32_t requestCount) const
 {
-    return _impl && _impl->beginObservedBackendExecution(requestCount);
+    return _impl && _impl->beginObservedBackendExecution(eventTimeUs, requestCount);
 }
 
-bool NaviSchedAgent::endObservedBackendExecution() const
+bool NaviSchedAgent::endObservedBackendExecution(int64_t eventTimeUs) const
 {
-    return _impl && _impl->endObservedBackendExecution();
+    return _impl && _impl->endObservedBackendExecution(eventTimeUs);
 }
 
 bool NaviSchedAgent::reportObservedExecutionStep(double elapsedMs, int64_t prefillTokens,
@@ -2426,19 +2851,19 @@ bool NaviSchedAgent::reportObservedCoreStep(double elapsedMs, bool futureWait) c
     return _impl && _impl->reportObservedCoreStep(elapsedMs, futureWait);
 }
 
-void NaviSchedAgent::reportCacheInserted(
-    const NaviSchedBlockHashesConstPtr &blockHashes) const
+void NaviSchedAgent::reportCacheInserted(const NaviSchedBlockHashesConstPtr &blockHashes,
+                                         NaviSchedCacheKeyType cacheKeyType) const
 {
     if (_impl) {
-        _impl->reportCacheInserted(blockHashes);
+        _impl->reportCacheInserted(blockHashes, cacheKeyType);
     }
 }
 
-void NaviSchedAgent::reportCacheRemoved(
-    const NaviSchedBlockHashesConstPtr &blockHashes) const
+void NaviSchedAgent::reportCacheRemoved(const NaviSchedBlockHashesConstPtr &blockHashes,
+                                        NaviSchedCacheKeyType cacheKeyType) const
 {
     if (_impl) {
-        _impl->reportCacheRemoved(blockHashes);
+        _impl->reportCacheRemoved(blockHashes, cacheKeyType);
     }
 }
 
@@ -2450,14 +2875,15 @@ void NaviSchedAgent::reportCacheUpdated(
     const NaviSchedBlockHashesConstPtr &removedFullReadyBlockHashes,
     const NaviSchedBlockHashesConstPtr &addedTailReadyBlockHashes,
     const NaviSchedBlockHashesConstPtr &removedTailReadyBlockHashes,
-    int8_t hybridTailRequired, int64_t eventTimeUs, int64_t rtpCachedBlockCount) const
+    int8_t hybridTailRequired, int64_t eventTimeUs, int64_t rtpCachedBlockCount,
+    NaviSchedCacheKeyType cacheKeyType, const NaviSchedCachePolicy *typedPolicy) const
 {
     if (_impl) {
-        _impl->reportCacheUpdated(totalBlocks, blockSize, linearStep, addedBlockHashes,
-                                  removedBlockHashes, addedFullReadyBlockHashes,
-                                  removedFullReadyBlockHashes, addedTailReadyBlockHashes,
-                                  removedTailReadyBlockHashes, hybridTailRequired,
-                                  eventTimeUs, rtpCachedBlockCount);
+        _impl->reportCacheUpdated(
+            totalBlocks, blockSize, linearStep, addedBlockHashes, removedBlockHashes,
+            addedFullReadyBlockHashes, removedFullReadyBlockHashes,
+            addedTailReadyBlockHashes, removedTailReadyBlockHashes, hybridTailRequired,
+            eventTimeUs, rtpCachedBlockCount, cacheKeyType, typedPolicy);
     }
 }
 

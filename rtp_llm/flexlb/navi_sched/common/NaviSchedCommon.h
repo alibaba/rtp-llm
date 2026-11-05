@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aios/navi_sched/common/NaviSchedConstants.h"
+#include "aios/navi_sched/common/TPUPrefillExecutionPolicy.h"
 
 #if defined(__GNUC__)
 #define NAVI_SCHED_API __attribute__((visibility("default")))
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -23,10 +25,21 @@ class DataBuffer;
 
 namespace navi_sched {
 
-static const int32_t NAVI_SCHED_DATA_VERSION = 10;
+static const int32_t NAVI_SCHED_DATA_VERSION = 17;
 static const int32_t NAVI_SCHED_LATENCY_RESIDUAL_VERSION = 2;
 static const size_t NAVI_SCHED_LATENCY_RESIDUAL_PARAMETER_COUNT = 19;
 NAVI_SCHED_API int64_t getNaviSchedRpcTimeoutMs(int64_t entryTimeoutMs);
+
+enum class NaviSchedCacheKeyType : int8_t {
+    BLOCK_POOL = 0,
+    V6D = 1,
+};
+
+inline bool validCacheKeyType(NaviSchedCacheKeyType type)
+{
+    return type == NaviSchedCacheKeyType::BLOCK_POOL ||
+           type == NaviSchedCacheKeyType::V6D;
+}
 
 enum class NaviSchedLatencyTrainingPhase : int8_t {
     NORMAL = 0,
@@ -43,11 +56,29 @@ using NaviSchedBlockHashes = std::vector<uint64_t>;
 using NaviSchedBlockHashesConstPtr = std::shared_ptr<const NaviSchedBlockHashes>;
 
 struct NaviSchedCachePolicy {
-    bool valid() const { return blockSize > 0 && linearStep > 0; }
+    bool valid(NaviSchedCacheKeyType type = NaviSchedCacheKeyType::BLOCK_POOL) const
+    {
+        return validCacheKeyType(type) && blockSize > 0 && linearStep > 0 &&
+               linearStep <= std::numeric_limits<int64_t>::max() / blockSize &&
+               mambaRetentionInterval >= -1 && fullAttentionQueryDropTokens >= 0 &&
+               (type == NaviSchedCacheKeyType::V6D
+                    ? fullAttentionQueryDropTokens <= 1
+                    : fullAttentionQueryDropTokens % blockSize == 0) &&
+               (!mambaAlign || mambaRetentionInterval <= 0 ||
+                mambaRetentionInterval % (blockSize * linearStep) == 0);
+    }
 
     int64_t blockSize = 0;
     int64_t linearStep = 0;
     bool hybridTailRequired = false;
+    // vLLM sparse Mamba retention with a one-block replay-stop shift.
+    // This is a cache/scheduler policy, independent of the draft model.
+    bool mambaReplayStopShift = false;
+    int64_t mambaRetentionInterval = -1;
+    bool mambaAlign = false;
+    // Query-only margin: BlockPool subtracts whole blocks from its Full hit;
+    // V6D clips the request token upper bound before matching the external suffix.
+    int64_t fullAttentionQueryDropTokens = 0;
 };
 
 class NaviSchedBatchFinishReporter;
@@ -69,11 +100,16 @@ struct NaviSchedBatchRequest {
     std::shared_ptr<const NaviSchedLatencyPrediction> latencyPrediction;
     NaviSchedLatencyTrainingPhase latencyTrainingPhase =
         NaviSchedLatencyTrainingPhase::NORMAL;
+    // Local chunk observation only; execution features still use totalTokenCount.
+    int64_t cachePublicationTokenCount = -1;
 };
 
 struct NaviSchedRequestStats {
     bool valid() const;
 
+    // Local admission geometry; never serialized on the request wire.
+    int64_t executionSharedPrefixBoundary = -1;
+    int64_t executionExternalReadTokens = -1;
     int64_t totalTokenCount = 0;
     int64_t blockSize = 256;
     int64_t cacheHitTokenCount = 0;
@@ -230,6 +266,7 @@ struct NaviSchedConfig {
     std::string logFileName = "./logs/navi_sched.log";
     std::string logLevel = "INFO";
     bool enableKmon = true;
+    bool kmonPlatformDiscovery = false;
     std::string kmonServiceName = "navi_sched";
     std::string kmonMetricsPath;
     std::map<std::string, std::string> kmonTags;
@@ -244,9 +281,10 @@ struct NaviSchedConfig {
     double latencyLearningRate = 0.05;
     double latencyOnlineLearningRateScale = 1.0;
     double latencyCurrentSampleWeight = 4.0;
+    double latencyErrorClipMs = 5000.0;
     std::vector<double> latencyParameterLearningRateScales;
     double latencyNonlinearScale = 1500.0;
-    double queueLearningRate = 0.02;
+    double queueLearningRate = 0.002;
     bool latencyCheckGradient = false;
     size_t latencyColdStartFitEpochs = 100;
     size_t latencyHistoryLimit = 2000;
@@ -296,7 +334,7 @@ struct NaviSchedMasterConfig {
     int64_t maxWaitScheduleTimeMs = 10;
     int64_t queueOverloadStartCycleMultiplier = 0;
     int64_t queueOverloadFullCycleMultiplier = 0;
-    std::string schedulerName = "random";
+    std::string schedulerName = "cost";
     std::string schedulerConfig;
     double timeCompression = 1.0;
     std::string latencyModelPoolStateFile;
@@ -310,10 +348,19 @@ struct NaviSchedAgentConfig {
     NaviSchedRuntimeConfig runtime;
     bool pdSeparated = true;
     bool unifiedLatencyPrediction = false;
+    bool mambaReplayStopShift = false;
+    int64_t mambaRetentionInterval = -1;
+    bool mambaAlign = false;
+    int64_t fullAttentionQueryDropTokens = 0;
     double timeCompression = 1.0;
     std::string latencyModelFingerprint;
     std::string latencyHistoryFingerprint;
     std::string latencyHistoryBinaryFingerprint;
+    bool executionGeometryEnabled = false;
+    bool projectedExecutionGeometryEnabled = false;
+    bool executionCacheSourceEnabled = false;
+    bool peerCacheEnabled = false;
+    TPUPrefillExecutionPolicyConfig prefillExecutionPolicy;
 };
 
 }

@@ -48,8 +48,7 @@ private:
 };
 
 MasterScheduleRequestData::MasterScheduleRequestData(
-    const ClientRequestToMasterDataConstPtr &requestData,
-    const navi::AsyncPipePtr &pipe)
+    const ClientRequestToMasterDataConstPtr &requestData, const navi::AsyncPipePtr &pipe)
     : navi::Data(MASTER_SCHEDULE_REQUEST_TYPE_ID)
     , request(requestData)
     , enqueueTimeUs(autil::TimeUtility::monotonicTimeUs())

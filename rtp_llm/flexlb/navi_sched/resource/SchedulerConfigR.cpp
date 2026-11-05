@@ -55,6 +55,7 @@ const std::set<std::string> &agentConfigFields()
         "latency_learning_rate",
         "latency_online_learning_rate_scale",
         "latency_current_sample_weight",
+        "latency_error_clip_ms",
         "latency_parameter_learning_rate_scales",
         "latency_nonlinear_scale",
         "queue_learning_rate",
@@ -79,18 +80,14 @@ const std::set<std::string> &agentConfigFields()
     return fields;
 }
 
-bool hasNonAgentConfigFields(const std::string &configJson,
-                             std::string &errorMessage)
+bool hasNonAgentConfigFields(const std::string &configJson, std::string &errorMessage)
 {
     try {
-        const auto patch =
-            autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
-                autil::legacy::json::ParseJson(configJson));
-        return std::any_of(
-            patch.begin(), patch.end(), [](const auto &entry) {
-                return agentConfigFields().find(entry.first) ==
-                       agentConfigFields().end();
-            });
+        const auto patch = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+            autil::legacy::json::ParseJson(configJson));
+        return std::any_of(patch.begin(), patch.end(), [](const auto &entry) {
+            return agentConfigFields().find(entry.first) == agentConfigFields().end();
+        });
     } catch (const std::exception &error) {
         errorMessage = error.what();
     } catch (...) {
@@ -120,43 +117,45 @@ void SchedulerConfigR::Config::Jsonize(JsonWrapper &json)
         }
     }
     cost.Jsonize(json);
-    json.Jsonize("max_wait_schedule_count", maxWaitScheduleCount,
-                 maxWaitScheduleCount);
+    json.Jsonize("peer_cache_enabled", peerCacheEnabled, peerCacheEnabled);
+    json.Jsonize("peer_cache_ready_agents", peerCacheReadyAgents, peerCacheReadyAgents);
+    json.Jsonize("max_wait_schedule_count", maxWaitScheduleCount, maxWaitScheduleCount);
     json.Jsonize("max_wait_schedule_time_ms", maxWaitScheduleTimeMs,
                  maxWaitScheduleTimeMs);
     json.Jsonize("queue_overload_start_cycle_multiplier",
-                 queueOverloadStartCycleMultiplier,
-                 queueOverloadStartCycleMultiplier);
-    json.Jsonize("queue_overload_full_cycle_multiplier",
-                 queueOverloadFullCycleMultiplier,
+                 queueOverloadStartCycleMultiplier, queueOverloadStartCycleMultiplier);
+    json.Jsonize("queue_overload_full_cycle_multiplier", queueOverloadFullCycleMultiplier,
                  queueOverloadFullCycleMultiplier);
-    json.Jsonize("admission_timeout_ms", admissionTimeoutMs,
-                 admissionTimeoutMs);
-    json.Jsonize("overload_control_strategy", overloadControlStrategy, overloadControlStrategy);
-    json.Jsonize("execution_utilization_global_scaling", executionUtilization.globalScaling, executionUtilization.globalScaling);
-    json.Jsonize("execution_utilization_target", executionUtilization.target, executionUtilization.target);
-    json.Jsonize("execution_utilization_kp", executionUtilization.proportionalGain, executionUtilization.proportionalGain);
-    json.Jsonize("execution_utilization_ki_per_second", executionUtilization.integralGainPerSecond, executionUtilization.integralGainPerSecond);
+    json.Jsonize("admission_timeout_ms", admissionTimeoutMs, admissionTimeoutMs);
+    json.Jsonize("overload_control_strategy", overloadControlStrategy,
+                 overloadControlStrategy);
+    json.Jsonize("execution_utilization_global_scaling",
+                 executionUtilization.globalScaling, executionUtilization.globalScaling);
+    json.Jsonize("execution_utilization_target", executionUtilization.target,
+                 executionUtilization.target);
+    json.Jsonize("execution_utilization_kp", executionUtilization.proportionalGain,
+                 executionUtilization.proportionalGain);
+    json.Jsonize("execution_utilization_ki_per_second",
+                 executionUtilization.integralGainPerSecond,
+                 executionUtilization.integralGainPerSecond);
     agent.Jsonize(json);
 }
 
 bool SchedulerConfigR::Config::valid() const
 {
-    if ((overloadControlStrategy != "latency" && overloadControlStrategy != "execution_utilization") ||
-        !executionUtilization.valid() ||
-        !cost.valid() || maxWaitScheduleCount == 0 || maxWaitScheduleTimeMs < 10 ||
+    if ((overloadControlStrategy != "latency" &&
+         overloadControlStrategy != "execution_utilization") ||
+        !executionUtilization.valid() || !cost.valid() || maxWaitScheduleCount == 0 ||
+        maxWaitScheduleTimeMs < 10 ||
         maxWaitScheduleTimeMs > std::numeric_limits<int64_t>::max() / 1000 ||
-        queueOverloadStartCycleMultiplier < 0 ||
-        queueOverloadFullCycleMultiplier < 0 || admissionTimeoutMs <= 0 ||
-        !agent.valid()) {
+        queueOverloadStartCycleMultiplier < 0 || queueOverloadFullCycleMultiplier < 0 ||
+        admissionTimeoutMs <= 0 || !agent.valid()) {
         return false;
     }
-    if (queueOverloadStartCycleMultiplier == 0 ||
-        queueOverloadFullCycleMultiplier == 0) {
+    if (queueOverloadStartCycleMultiplier == 0 || queueOverloadFullCycleMultiplier == 0) {
         return true;
     }
-    return queueOverloadFullCycleMultiplier >
-               queueOverloadStartCycleMultiplier &&
+    return queueOverloadFullCycleMultiplier > queueOverloadStartCycleMultiplier &&
            queueOverloadFullCycleMultiplier <=
                std::numeric_limits<int64_t>::max() / maxWaitScheduleTimeMs;
 }
@@ -179,11 +178,9 @@ navi::ErrorCode SchedulerConfigR::init(navi::ResourceInitContext &ctx)
     _bizName = ctx.getBizName();
     if (!_initialConfigJson.empty()) {
         try {
-            autil::legacy::FromJsonString(_snapshot.config,
-                                          _initialConfigJson);
+            autil::legacy::FromJsonString(_snapshot.config, _initialConfigJson);
         } catch (const std::exception &error) {
-            NAVI_KERNEL_LOG(ERROR, "invalid initial scheduler config: %s",
-                            error.what());
+            NAVI_KERNEL_LOG(ERROR, "invalid initial scheduler config: %s", error.what());
             return navi::EC_ABORT;
         }
         if (!_snapshot.config.valid()) {
@@ -194,10 +191,8 @@ navi::ErrorCode SchedulerConfigR::init(navi::ResourceInitContext &ctx)
             _snapshot.config.maxWaitScheduleTimeMs * 800;
     }
     _snapshot.generation = std::max<uint64_t>(
-        _snapshot.generation,
-        static_cast<uint64_t>(autil::TimeUtility::currentTime()));
-    _snapshot.agentConfigHash =
-        AgentSchedulerConfigR::hashConfig(_snapshot.config.agent);
+        _snapshot.generation, static_cast<uint64_t>(autil::TimeUtility::currentTime()));
+    _snapshot.agentConfigHash = AgentSchedulerConfigR::hashConfig(_snapshot.config.agent);
     navi::ArpcRegistryParam param;
     param.arpcParam.method = "scheduler_config";
     param.arpcParam.httpAliasVec.emplace_back("/scheduler-config");
@@ -208,14 +203,13 @@ navi::ErrorCode SchedulerConfigR::init(navi::ResourceInitContext &ctx)
         NAVI_KERNEL_LOG(ERROR, "build scheduler config rpc graph failed");
         return navi::EC_ABORT;
     }
-    auto service = _naviRpcServerR->registerArpcService<SchedulerConfigService>(
-        param, this);
+    auto service =
+        _naviRpcServerR->registerArpcService<SchedulerConfigService>(param, this);
     if (!service) {
         NAVI_KERNEL_LOG(ERROR, "register scheduler config rpc service failed");
         return navi::EC_ABORT;
     }
-    NAVI_KERNEL_LOG(INFO,
-                    "scheduler_config_effective generation [%lu] config [%s]",
+    NAVI_KERNEL_LOG(INFO, "scheduler_config_effective generation [%lu] config [%s]",
                     _snapshot.generation, toJson(_snapshot.config).c_str());
     return navi::EC_NONE;
 }
@@ -308,11 +302,10 @@ bool SchedulerConfigR::submit(Request request)
         return true;
     }
     autil::ScopedLock lock(_mutex);
-    auto it = std::find_if(
-        _requests.begin(), _requests.end(),
-        [&responsePipe](const auto &queued) {
-            return queued.responsePipe == responsePipe;
-        });
+    auto it = std::find_if(_requests.begin(), _requests.end(),
+                           [&responsePipe](const auto &queued) {
+                               return queued.responsePipe == responsePipe;
+                           });
     if (it == _requests.end()) {
         return true;
     }
@@ -332,9 +325,9 @@ bool SchedulerConfigR::takeRequest(Request &request)
     return true;
 }
 
-bool SchedulerConfigR::processRequest(
-    const Request &request, SchedulerConfigResponseDataPtr &response,
-    bool &waitingForAgents)
+bool SchedulerConfigR::processRequest(const Request &request,
+                                      SchedulerConfigResponseDataPtr &response,
+                                      bool &waitingForAgents)
 {
     response.reset();
     waitingForAgents = false;
@@ -368,8 +361,7 @@ bool SchedulerConfigR::processRequest(
         }
         Config updated;
         std::string errorMessage;
-        if (!applyPatch(_snapshot.config, request.configJson, updated,
-                        errorMessage)) {
+        if (!applyPatch(_snapshot.config, request.configJson, updated, errorMessage)) {
             response = makeResponseLocked(false, errorMessage);
             response->hardware = request.hardware;
             logRejectedUpdateLocked(request.configJson, errorMessage);
@@ -385,10 +377,8 @@ bool SchedulerConfigR::processRequest(
             releaseUpdateTokenLocked(updateToken);
             return true;
         }
-        if (hardwareScoped &&
-            hasNonAgentConfigFields(request.configJson, errorMessage)) {
-            errorMessage =
-                "hardware-scoped updates may only contain Agent config fields";
+        if (hardwareScoped && hasNonAgentConfigFields(request.configJson, errorMessage)) {
+            errorMessage = "hardware-scoped updates may only contain Agent config fields";
             response = makeResponseLocked(false, errorMessage);
             response->hardware = request.hardware;
             logRejectedUpdateLocked(request.configJson, errorMessage);
@@ -398,8 +388,7 @@ bool SchedulerConfigR::processRequest(
         AgentSchedulerConfig ignoredAgentConfig;
         bool hasAgentFields = false;
         if (!applyAgentPatch(_snapshot.config.agent, request.configJson,
-                             ignoredAgentConfig, hasAgentFields,
-                             errorMessage)) {
+                             ignoredAgentConfig, hasAgentFields, errorMessage)) {
             response = makeResponseLocked(false, errorMessage);
             response->hardware = request.hardware;
             logRejectedUpdateLocked(request.configJson, errorMessage);
@@ -407,8 +396,7 @@ bool SchedulerConfigR::processRequest(
             return true;
         }
         if (hardwareScoped && !hasAgentFields) {
-            errorMessage =
-                "hardware-scoped update contains no Agent config fields";
+            errorMessage = "hardware-scoped update contains no Agent config fields";
             response = makeResponseLocked(false, errorMessage);
             response->hardware = request.hardware;
             logRejectedUpdateLocked(request.configJson, errorMessage);
@@ -417,8 +405,7 @@ bool SchedulerConfigR::processRequest(
         }
         std::string currentAgentPatchJson;
         if (hardwareScoped) {
-            const auto it =
-                _hardwareAgentConfigPatchJson.find(request.hardware);
+            const auto it = _hardwareAgentConfigPatchJson.find(request.hardware);
             if (it != _hardwareAgentConfigPatchJson.end()) {
                 currentAgentPatchJson = it->second;
             }
@@ -427,8 +414,7 @@ bool SchedulerConfigR::processRequest(
         }
         std::string updatedAgentPatchJson;
         if (!mergeAgentPatch(currentAgentPatchJson, request.configJson,
-                             updatedAgentPatchJson, hasAgentFields,
-                             errorMessage)) {
+                             updatedAgentPatchJson, hasAgentFields, errorMessage)) {
             response = makeResponseLocked(false, errorMessage);
             response->hardware = request.hardware;
             logRejectedUpdateLocked(request.configJson, errorMessage);
@@ -438,9 +424,9 @@ bool SchedulerConfigR::processRequest(
 
         if (hardwareScoped) {
             AgentSchedulerConfig validated;
-            if (!applyStoredAgentPatchesLocked(
-                    _snapshot.config.agent, request.hardware, nullptr,
-                    &updatedAgentPatchJson, validated, errorMessage)) {
+            if (!applyStoredAgentPatchesLocked(_snapshot.config.agent, request.hardware,
+                                               nullptr, &updatedAgentPatchJson, validated,
+                                               errorMessage)) {
                 response = makeResponseLocked(false, errorMessage);
                 response->hardware = request.hardware;
                 logRejectedUpdateLocked(request.configJson, errorMessage);
@@ -464,17 +450,15 @@ bool SchedulerConfigR::processRequest(
             "previousAgentHash [%s], agentHash [%s], hasAgentFields [%d], "
             "hardware [%s], patch [%s], previousConfig [%s], "
             "effectiveConfig [%s]",
-            previousGeneration, _snapshot.generation,
-            previousAgentConfigHash.c_str(), _snapshot.agentConfigHash.c_str(),
-            static_cast<int>(hasAgentFields), request.hardware.c_str(),
-            request.configJson.c_str(),
+            previousGeneration, _snapshot.generation, previousAgentConfigHash.c_str(),
+            _snapshot.agentConfigHash.c_str(), static_cast<int>(hasAgentFields),
+            request.hardware.c_str(), request.configJson.c_str(),
             previousConfigJson.c_str(), toJson(_snapshot.config).c_str());
 
         if (!hasAgentFields) {
             response = makeResponseLocked(true, "");
             response->hardware = request.hardware;
-            logCompletedUpdateLocked(_snapshot.generation, true, false, 0, 0,
-                                     0, "");
+            logCompletedUpdateLocked(_snapshot.generation, true, false, 0, 0, 0, "");
             releaseUpdateTokenLocked(updateToken);
             return true;
         }
@@ -490,8 +474,8 @@ bool SchedulerConfigR::processRequest(
         sync->updateToken = updateToken;
         sync->requestGeneration = _snapshot.generation;
         sync->hardware = request.hardware;
-        sync->deadlineTimeUs = autil::TimeUtility::monotonicTimeUs() +
-                               AGENT_CONFIG_SYNC_TIMEOUT_US;
+        sync->deadlineTimeUs =
+            autil::TimeUtility::monotonicTimeUs() + AGENT_CONFIG_SYNC_TIMEOUT_US;
         sync->responsePipe = request.responsePipe;
         for (auto it = _subscribers.begin(); it != _subscribers.end();) {
             auto notificationPipe = it->second.notificationPipe.lock();
@@ -510,9 +494,8 @@ bool SchedulerConfigR::processRequest(
                 continue;
             }
             AgentSyncTarget target;
-            target.agentIp = subscriber.agentIp.empty()
-                                 ? subscriber.agentId
-                                 : subscriber.agentIp;
+            target.agentIp =
+                subscriber.agentIp.empty() ? subscriber.agentId : subscriber.agentIp;
             target.hardware = subscriber.hardware;
             target.effectiveHash = subscriber.configHash;
             target.effectiveJson = subscriber.configJson;
@@ -520,9 +503,8 @@ bool SchedulerConfigR::processRequest(
             AgentSchedulerConfig expected;
             if (!AgentSchedulerConfigR::parse(subscriber.configJson, current,
                                               errorMessage) ||
-                !applyStoredAgentPatchesLocked(current, subscriber.hardware,
-                                               nullptr, nullptr, expected,
-                                               errorMessage)) {
+                !applyStoredAgentPatchesLocked(current, subscriber.hardware, nullptr,
+                                               nullptr, expected, errorMessage)) {
                 target.errorMessage = errorMessage;
                 target.completed = true;
                 sync->targets.emplace(subscriberId, std::move(target));
@@ -534,8 +516,7 @@ bool SchedulerConfigR::processRequest(
             subscriber.pendingConfigJson.clear();
             subscriber.pendingConfigSent = false;
             target.expectedJson = AgentSchedulerConfigR::toJson(expected);
-            target.expectedHash =
-                AgentSchedulerConfigR::hashJson(target.expectedJson);
+            target.expectedHash = AgentSchedulerConfigR::hashJson(target.expectedJson);
             if (!hasPendingCatchup && target.expectedHash == subscriber.configHash) {
                 target.completed = true;
             } else {
@@ -547,8 +528,7 @@ bool SchedulerConfigR::processRequest(
         if (sync->targets.empty()) {
             response = makeResponseLocked(true, "");
             response->hardware = request.hardware;
-            logCompletedUpdateLocked(_snapshot.generation, true, false, 0, 0,
-                                     0, "");
+            logCompletedUpdateLocked(_snapshot.generation, true, false, 0, 0, 0, "");
             releaseUpdateTokenLocked(updateToken);
             return true;
         }
@@ -558,8 +538,7 @@ bool SchedulerConfigR::processRequest(
 
     for (const auto &pipe : notificationPipes) {
         if (navi::EC_NONE != pipe->setDataOverride(nullptr, true)) {
-            NAVI_KERNEL_LOG(WARN,
-                            "notify Agent scheduler config subscriber failed");
+            NAVI_KERNEL_LOG(WARN, "notify Agent scheduler config subscriber failed");
         }
     }
     if (allTargetsCompleted) {
@@ -570,17 +549,17 @@ bool SchedulerConfigR::processRequest(
     return true;
 }
 
-bool SchedulerConfigR::finishAgentSync(
-    bool timedOut, SchedulerConfigResponseDataPtr &response,
-    navi::AsyncPipePtr &responsePipe)
+bool SchedulerConfigR::finishAgentSync(bool timedOut,
+                                       SchedulerConfigResponseDataPtr &response,
+                                       navi::AsyncPipePtr &responsePipe)
 {
     autil::ScopedLock lock(_mutex);
     if (!_agentSync) {
         return false;
     }
-    const auto allCompleted = std::all_of(
-        _agentSync->targets.begin(), _agentSync->targets.end(),
-        [](const auto &entry) { return entry.second.completed; });
+    const auto allCompleted =
+        std::all_of(_agentSync->targets.begin(), _agentSync->targets.end(),
+                    [](const auto &entry) { return entry.second.completed; });
     if (!allCompleted && !timedOut) {
         return false;
     }
@@ -600,15 +579,13 @@ bool SchedulerConfigR::finishAgentSync(
         }
     }
     const auto accepted = failures.empty();
-    const auto errorMessage = accepted
-                                  ? std::string()
-                                  : autil::legacy::ToJsonString(failures, true);
+    const auto errorMessage =
+        accepted ? std::string() : autil::legacy::ToJsonString(failures, true);
     response = makeResponseLocked(accepted, errorMessage);
     response->hardware = _agentSync->hardware;
     response->targetAgentCount = _agentSync->targets.size();
     response->failedAgentCount = failures.size();
-    response->updatedAgentCount =
-        response->targetAgentCount - response->failedAgentCount;
+    response->updatedAgentCount = response->targetAgentCount - response->failedAgentCount;
     response->agentResults.reserve(_agentSync->targets.size());
     for (const auto &[subscriberId, target] : _agentSync->targets) {
         SchedulerConfigResponseData::AgentResult result;
@@ -620,10 +597,9 @@ bool SchedulerConfigR::finishAgentSync(
         result.effectiveConfigJson = target.effectiveJson;
         response->agentResults.emplace_back(std::move(result));
     }
-    logCompletedUpdateLocked(
-        _agentSync->requestGeneration, accepted, timedOut,
-        response->targetAgentCount, response->updatedAgentCount,
-        response->failedAgentCount, response->error);
+    logCompletedUpdateLocked(_agentSync->requestGeneration, accepted, timedOut,
+                             response->targetAgentCount, response->updatedAgentCount,
+                             response->failedAgentCount, response->error);
     responsePipe = _agentSync->responsePipe;
     releaseUpdateTokenLocked(_agentSync->updateToken);
     _agentSync.reset();
@@ -636,15 +612,14 @@ bool SchedulerConfigR::hasActiveAgentSync() const
     return static_cast<bool>(_agentSync);
 }
 
-int64_t SchedulerConfigR::getAgentSyncRemainingTimeoutMs(
-    int64_t currentTimeUs) const
+int64_t SchedulerConfigR::getAgentSyncRemainingTimeoutMs(int64_t currentTimeUs) const
 {
     autil::ScopedLock lock(_mutex);
     if (!_agentSync) {
         return 0;
     }
-    return std::max<int64_t>(
-        1, (_agentSync->deadlineTimeUs - currentTimeUs + 999) / 1000);
+    return std::max<int64_t>(1,
+                             (_agentSync->deadlineTimeUs - currentTimeUs + 999) / 1000);
 }
 
 bool SchedulerConfigR::subscribe(const std::string &subscriberId,
@@ -659,8 +634,7 @@ bool SchedulerConfigR::subscribe(const std::string &subscriberId,
         auto &subscriber = _subscribers[subscriberId];
         if (_agentSync) {
             auto targetIt = _agentSync->targets.find(subscriberId);
-            if (targetIt != _agentSync->targets.end() &&
-                !targetIt->second.completed) {
+            if (targetIt != _agentSync->targets.end() && !targetIt->second.completed) {
                 targetIt->second.completed = true;
                 targetIt->second.errorMessage =
                     "Agent collector replaced during scheduler config sync";
@@ -680,9 +654,8 @@ bool SchedulerConfigR::subscribe(const std::string &subscriberId,
 
 bool SchedulerConfigR::activateSubscriber(
     const std::string &subscriberId, const std::string &agentId,
-    const std::string &agentIp, uint64_t configGeneration,
-    const std::string &configHash, const std::string &configJson,
-    const std::string &latencyModelFingerprint)
+    const std::string &agentIp, uint64_t configGeneration, const std::string &configHash,
+    const std::string &configJson, const std::string &latencyModelFingerprint)
 {
     if (subscriberId.empty() || agentId.empty() || configGeneration == 0 ||
         configHash.empty() || configJson.empty()) {
@@ -701,8 +674,7 @@ bool SchedulerConfigR::activateSubscriber(
     subscriber.configGeneration = configGeneration;
     subscriber.configHash = configHash;
     subscriber.configJson = configJson;
-    const auto hardwarePatchIt =
-        _hardwareAgentConfigPatchJson.find(subscriber.hardware);
+    const auto hardwarePatchIt = _hardwareAgentConfigPatchJson.find(subscriber.hardware);
     if (_agentConfigPatchJson.empty() &&
         hardwarePatchIt == _hardwareAgentConfigPatchJson.end()) {
         return true;
@@ -711,13 +683,12 @@ bool SchedulerConfigR::activateSubscriber(
     AgentSchedulerConfig expected;
     std::string errorMessage;
     if (!AgentSchedulerConfigR::parse(configJson, current, errorMessage) ||
-        !applyStoredAgentPatchesLocked(current, subscriber.hardware, nullptr,
-                                       nullptr, expected, errorMessage)) {
+        !applyStoredAgentPatchesLocked(current, subscriber.hardware, nullptr, nullptr,
+                                       expected, errorMessage)) {
         NAVI_KERNEL_LOG(ERROR,
                         "prepare scheduler config for new Agent failed, "
                         "agentId [%s], collectorId [%s], error [%s]",
-                        agentId.c_str(), subscriberId.c_str(),
-                        errorMessage.c_str());
+                        agentId.c_str(), subscriberId.c_str(), errorMessage.c_str());
         return false;
     }
     const auto expectedJson = AgentSchedulerConfigR::toJson(expected);
@@ -732,10 +703,12 @@ bool SchedulerConfigR::activateSubscriber(
     return true;
 }
 
-void SchedulerConfigR::reportAgentConfig(
-    const std::string &subscriberId, uint64_t requestGeneration,
-    uint64_t configGeneration, const std::string &configHash,
-    const std::string &configJson, const std::string &errorMessage)
+void SchedulerConfigR::reportAgentConfig(const std::string &subscriberId,
+                                         uint64_t requestGeneration,
+                                         uint64_t configGeneration,
+                                         const std::string &configHash,
+                                         const std::string &configJson,
+                                         const std::string &errorMessage)
 {
     navi::AsyncPipePtr syncPipe;
     {
@@ -756,34 +729,30 @@ void SchedulerConfigR::reportAgentConfig(
             subscriber.pendingConfigJson.clear();
             subscriber.pendingConfigSent = false;
         }
-        if (!_agentSync ||
-            requestGeneration != _agentSync->requestGeneration) {
+        if (!_agentSync || requestGeneration != _agentSync->requestGeneration) {
             if (errorMessage.empty()) {
-                NAVI_KERNEL_LOG(
-                    INFO,
-                    "[navi-scheduler-config-update] role [master], "
-                    "status [agent_ack], agentId [%s], agentIp [%s], "
-                    "requestGeneration [%lu], effectiveGeneration [%lu], "
-                    "effectiveHash [%s], effectiveConfig [%s], error [%s]",
-                    subscriber.agentId.c_str(), subscriber.agentIp.c_str(),
-                    requestGeneration, configGeneration, configHash.c_str(),
-                    configJson.c_str(), errorMessage.c_str());
+                NAVI_KERNEL_LOG(INFO,
+                                "[navi-scheduler-config-update] role [master], "
+                                "status [agent_ack], agentId [%s], agentIp [%s], "
+                                "requestGeneration [%lu], effectiveGeneration [%lu], "
+                                "effectiveHash [%s], effectiveConfig [%s], error [%s]",
+                                subscriber.agentId.c_str(), subscriber.agentIp.c_str(),
+                                requestGeneration, configGeneration, configHash.c_str(),
+                                configJson.c_str(), errorMessage.c_str());
             } else {
-                NAVI_KERNEL_LOG(
-                    WARN,
-                    "[navi-scheduler-config-update] role [master], "
-                    "status [agent_ack], agentId [%s], agentIp [%s], "
-                    "requestGeneration [%lu], effectiveGeneration [%lu], "
-                    "effectiveHash [%s], effectiveConfig [%s], error [%s]",
-                    subscriber.agentId.c_str(), subscriber.agentIp.c_str(),
-                    requestGeneration, configGeneration, configHash.c_str(),
-                    configJson.c_str(), errorMessage.c_str());
+                NAVI_KERNEL_LOG(WARN,
+                                "[navi-scheduler-config-update] role [master], "
+                                "status [agent_ack], agentId [%s], agentIp [%s], "
+                                "requestGeneration [%lu], effectiveGeneration [%lu], "
+                                "effectiveHash [%s], effectiveConfig [%s], error [%s]",
+                                subscriber.agentId.c_str(), subscriber.agentIp.c_str(),
+                                requestGeneration, configGeneration, configHash.c_str(),
+                                configJson.c_str(), errorMessage.c_str());
             }
             return;
         }
         auto targetIt = _agentSync->targets.find(subscriberId);
-        if (targetIt == _agentSync->targets.end() ||
-            targetIt->second.completed) {
+        if (targetIt == _agentSync->targets.end() || targetIt->second.completed) {
             return;
         }
         auto &target = targetIt->second;
@@ -791,34 +760,32 @@ void SchedulerConfigR::reportAgentConfig(
         target.effectiveJson = configJson;
         target.errorMessage = errorMessage;
         if (target.errorMessage.empty() && configHash != target.expectedHash) {
-            target.errorMessage = "expected hash " + target.expectedHash +
-                                  ", got " + configHash;
+            target.errorMessage =
+                "expected hash " + target.expectedHash + ", got " + configHash;
         }
         target.completed = true;
         if (target.errorMessage.empty()) {
-            NAVI_KERNEL_LOG(
-                INFO,
-                "[navi-scheduler-config-update] role [master], "
-                "status [agent_ack], agentId [%s], agentIp [%s], "
-                "requestGeneration [%lu], effectiveGeneration [%lu], "
-                "expectedHash [%s], effectiveHash [%s], "
-                "effectiveConfig [%s], error [%s]",
-                subscriber.agentId.c_str(), subscriber.agentIp.c_str(),
-                requestGeneration, configGeneration,
-                target.expectedHash.c_str(), configHash.c_str(),
-                configJson.c_str(), target.errorMessage.c_str());
+            NAVI_KERNEL_LOG(INFO,
+                            "[navi-scheduler-config-update] role [master], "
+                            "status [agent_ack], agentId [%s], agentIp [%s], "
+                            "requestGeneration [%lu], effectiveGeneration [%lu], "
+                            "expectedHash [%s], effectiveHash [%s], "
+                            "effectiveConfig [%s], error [%s]",
+                            subscriber.agentId.c_str(), subscriber.agentIp.c_str(),
+                            requestGeneration, configGeneration,
+                            target.expectedHash.c_str(), configHash.c_str(),
+                            configJson.c_str(), target.errorMessage.c_str());
         } else {
-            NAVI_KERNEL_LOG(
-                WARN,
-                "[navi-scheduler-config-update] role [master], "
-                "status [agent_ack], agentId [%s], agentIp [%s], "
-                "requestGeneration [%lu], effectiveGeneration [%lu], "
-                "expectedHash [%s], effectiveHash [%s], "
-                "effectiveConfig [%s], error [%s]",
-                subscriber.agentId.c_str(), subscriber.agentIp.c_str(),
-                requestGeneration, configGeneration,
-                target.expectedHash.c_str(), configHash.c_str(),
-                configJson.c_str(), target.errorMessage.c_str());
+            NAVI_KERNEL_LOG(WARN,
+                            "[navi-scheduler-config-update] role [master], "
+                            "status [agent_ack], agentId [%s], agentIp [%s], "
+                            "requestGeneration [%lu], effectiveGeneration [%lu], "
+                            "expectedHash [%s], effectiveHash [%s], "
+                            "effectiveConfig [%s], error [%s]",
+                            subscriber.agentId.c_str(), subscriber.agentIp.c_str(),
+                            requestGeneration, configGeneration,
+                            target.expectedHash.c_str(), configHash.c_str(),
+                            configJson.c_str(), target.errorMessage.c_str());
         }
         syncPipe = _syncPipe;
     }
@@ -827,8 +794,8 @@ void SchedulerConfigR::reportAgentConfig(
     }
 }
 
-bool SchedulerConfigR::getPendingAgentUpdate(
-    const std::string &subscriberId, PendingAgentUpdate &update)
+bool SchedulerConfigR::getPendingAgentUpdate(const std::string &subscriberId,
+                                             PendingAgentUpdate &update)
 {
     autil::ScopedLock lock(_mutex);
     if (_agentSync) {
@@ -849,8 +816,7 @@ bool SchedulerConfigR::getPendingAgentUpdate(
         return false;
     }
     auto &subscriber = subscriberIt->second;
-    if (subscriber.pendingConfigGeneration == 0 ||
-        subscriber.pendingConfigSent) {
+    if (subscriber.pendingConfigGeneration == 0 || subscriber.pendingConfigSent) {
         return false;
     }
     subscriber.pendingConfigSent = true;
@@ -876,8 +842,7 @@ void SchedulerConfigR::unsubscribe(const std::string &subscriberId,
         }
         if (_agentSync) {
             auto targetIt = _agentSync->targets.find(subscriberId);
-            if (targetIt != _agentSync->targets.end() &&
-                !targetIt->second.completed) {
+            if (targetIt != _agentSync->targets.end() && !targetIt->second.completed) {
                 targetIt->second.completed = true;
                 targetIt->second.errorMessage =
                     "Agent disconnected during scheduler config sync";
@@ -910,21 +875,21 @@ void SchedulerConfigR::releaseUpdateTokenLocked(uint64_t updateToken)
     }
 }
 
-void SchedulerConfigR::logRejectedUpdateLocked(
-    const std::string &configJson, const std::string &errorMessage) const
+void SchedulerConfigR::logRejectedUpdateLocked(const std::string &configJson,
+                                               const std::string &errorMessage) const
 {
-    NAVI_KERNEL_LOG(
-        WARN,
-        "[navi-scheduler-config-update] role [master], status [rejected], "
-        "generation [%lu], activeUpdateToken [%lu], patch [%s], error [%s]",
-        _snapshot.generation, _activeUpdateToken, configJson.c_str(),
-        errorMessage.c_str());
+    NAVI_KERNEL_LOG(WARN,
+                    "[navi-scheduler-config-update] role [master], status [rejected], "
+                    "generation [%lu], activeUpdateToken [%lu], patch [%s], error [%s]",
+                    _snapshot.generation, _activeUpdateToken, configJson.c_str(),
+                    errorMessage.c_str());
 }
 
-void SchedulerConfigR::logCompletedUpdateLocked(
-    uint64_t generation, bool accepted, bool timedOut, size_t targetAgentCount,
-    size_t updatedAgentCount, size_t failedAgentCount,
-    const std::string &errorMessage) const
+void SchedulerConfigR::logCompletedUpdateLocked(uint64_t generation, bool accepted,
+                                                bool timedOut, size_t targetAgentCount,
+                                                size_t updatedAgentCount,
+                                                size_t failedAgentCount,
+                                                const std::string &errorMessage) const
 {
     if (accepted) {
         NAVI_KERNEL_LOG(
@@ -933,8 +898,8 @@ void SchedulerConfigR::logCompletedUpdateLocked(
             "generation [%lu], accepted [1], timedOut [%d], "
             "targetAgentCount [%lu], updatedAgentCount [%lu], "
             "failedAgentCount [%lu], error [%s]",
-            generation, static_cast<int>(timedOut), targetAgentCount,
-            updatedAgentCount, failedAgentCount, errorMessage.c_str());
+            generation, static_cast<int>(timedOut), targetAgentCount, updatedAgentCount,
+            failedAgentCount, errorMessage.c_str());
     } else {
         NAVI_KERNEL_LOG(
             WARN,
@@ -942,8 +907,8 @@ void SchedulerConfigR::logCompletedUpdateLocked(
             "generation [%lu], accepted [0], timedOut [%d], "
             "targetAgentCount [%lu], updatedAgentCount [%lu], "
             "failedAgentCount [%lu], error [%s]",
-            generation, static_cast<int>(timedOut), targetAgentCount,
-            updatedAgentCount, failedAgentCount, errorMessage.c_str());
+            generation, static_cast<int>(timedOut), targetAgentCount, updatedAgentCount,
+            failedAgentCount, errorMessage.c_str());
     }
 }
 
@@ -958,17 +923,13 @@ SchedulerConfigResponseDataPtr SchedulerConfigR::makeResponseLocked(
     return response;
 }
 
-bool SchedulerConfigR::notifySyncPipe(
-    const navi::AsyncPipePtr &syncPipe) const
+bool SchedulerConfigR::notifySyncPipe(const navi::AsyncPipePtr &syncPipe) const
 {
-    return syncPipe &&
-           navi::EC_NONE == syncPipe->setDataOverride(nullptr, true, true);
+    return syncPipe && navi::EC_NONE == syncPipe->setDataOverride(nullptr, true, true);
 }
 
-bool SchedulerConfigR::applyPatch(const Config &current,
-                                  const std::string &configJson,
-                                  Config &updated,
-                                  std::string &errorMessage)
+bool SchedulerConfigR::applyPatch(const Config &current, const std::string &configJson,
+                                  Config &updated, std::string &errorMessage)
 {
     static const std::set<std::string> supportedFields = {
         "lambda",
@@ -978,6 +939,8 @@ bool SchedulerConfigR::applyPatch(const Config &current,
         "max_loop_count",
         "min_loop_count",
         "optimization_time_budget_us",
+        "peer_cache_enabled",
+        "peer_cache_ready_agents",
         "parallelism",
         "latency_weight_concavity",
         "latency_token_normalization_power",
@@ -1002,6 +965,7 @@ bool SchedulerConfigR::applyPatch(const Config &current,
         "latency_learning_rate",
         "latency_online_learning_rate_scale",
         "latency_current_sample_weight",
+        "latency_error_clip_ms",
         "latency_parameter_learning_rate_scales",
         "latency_nonlinear_scale",
         "queue_learning_rate",
@@ -1043,12 +1007,10 @@ bool SchedulerConfigR::applyPatch(const Config &current,
             merged["overload_control_strategy"] = std::string("latency");
         }
         updated = current;
-        autil::legacy::FromJsonString(
-            updated, autil::legacy::ToJsonString(merged, true));
+        autil::legacy::FromJsonString(updated, autil::legacy::ToJsonString(merged, true));
         if (patch.find("max_wait_schedule_time_ms") != patch.end() &&
             patch.find("optimization_time_budget_us") == patch.end()) {
-            updated.cost.optimizationTimeBudgetUs =
-                updated.maxWaitScheduleTimeMs * 800;
+            updated.cost.optimizationTimeBudgetUs = updated.maxWaitScheduleTimeMs * 800;
         }
     } catch (const std::exception &error) {
         errorMessage = error.what();
@@ -1064,20 +1026,17 @@ bool SchedulerConfigR::applyPatch(const Config &current,
     return true;
 }
 
-bool SchedulerConfigR::applyAgentPatch(
-    const AgentSchedulerConfig &current, const std::string &configJson,
-    AgentSchedulerConfig &updated, bool &hasAgentFields,
-    std::string &errorMessage)
+bool SchedulerConfigR::applyAgentPatch(const AgentSchedulerConfig &current,
+                                       const std::string &configJson,
+                                       AgentSchedulerConfig &updated,
+                                       bool &hasAgentFields, std::string &errorMessage)
 {
     hasAgentFields = false;
     try {
-        const auto patch =
-            autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
-                autil::legacy::json::ParseJson(configJson));
-        auto merged =
-            autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
-                autil::legacy::json::ParseJson(
-                    AgentSchedulerConfigR::toJson(current)));
+        const auto patch = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+            autil::legacy::json::ParseJson(configJson));
+        auto merged = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+            autil::legacy::json::ParseJson(AgentSchedulerConfigR::toJson(current)));
         for (const auto &[name, value] : patch) {
             if (agentConfigFields().find(name) == agentConfigFields().end()) {
                 continue;
@@ -1086,8 +1045,7 @@ bool SchedulerConfigR::applyAgentPatch(
             hasAgentFields = true;
         }
         updated = current;
-        autil::legacy::FromJsonString(
-            updated, autil::legacy::ToJsonString(merged, true));
+        autil::legacy::FromJsonString(updated, autil::legacy::ToJsonString(merged, true));
     } catch (const std::exception &error) {
         errorMessage = error.what();
         return false;
@@ -1102,10 +1060,10 @@ bool SchedulerConfigR::applyAgentPatch(
     return true;
 }
 
-bool SchedulerConfigR::mergeAgentPatch(
-    const std::string &currentPatchJson, const std::string &configJson,
-    std::string &updatedPatchJson, bool &hasAgentFields,
-    std::string &errorMessage)
+bool SchedulerConfigR::mergeAgentPatch(const std::string &currentPatchJson,
+                                       const std::string &configJson,
+                                       std::string &updatedPatchJson,
+                                       bool &hasAgentFields, std::string &errorMessage)
 {
     hasAgentFields = false;
     try {
@@ -1114,9 +1072,8 @@ bool SchedulerConfigR::mergeAgentPatch(
             merged = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
                 autil::legacy::json::ParseJson(currentPatchJson));
         }
-        const auto patch =
-            autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
-                autil::legacy::json::ParseJson(configJson));
+        const auto patch = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+            autil::legacy::json::ParseJson(configJson));
         for (const auto &[name, value] : patch) {
             if (agentConfigFields().find(name) == agentConfigFields().end()) {
                 continue;
@@ -1135,8 +1092,7 @@ bool SchedulerConfigR::mergeAgentPatch(
     return true;
 }
 
-std::string SchedulerConfigR::extractHardware(
-    const std::string &latencyModelFingerprint)
+std::string SchedulerConfigR::extractHardware(const std::string &latencyModelFingerprint)
 {
     if (latencyModelFingerprint.empty()) {
         return {};
@@ -1154,17 +1110,15 @@ std::string SchedulerConfigR::extractHardware(
 
 bool SchedulerConfigR::applyStoredAgentPatchesLocked(
     const AgentSchedulerConfig &current, const std::string &hardware,
-    const std::string *globalPatchOverride,
-    const std::string *hardwarePatchOverride, AgentSchedulerConfig &updated,
-    std::string &errorMessage) const
+    const std::string *globalPatchOverride, const std::string *hardwarePatchOverride,
+    AgentSchedulerConfig &updated, std::string &errorMessage) const
 {
     updated = current;
     const auto &globalPatch =
         globalPatchOverride ? *globalPatchOverride : _agentConfigPatchJson;
     bool hasAgentFields = false;
     if (!globalPatch.empty() &&
-        !applyAgentPatch(updated, globalPatch, updated, hasAgentFields,
-                         errorMessage)) {
+        !applyAgentPatch(updated, globalPatch, updated, hasAgentFields, errorMessage)) {
         return false;
     }
 

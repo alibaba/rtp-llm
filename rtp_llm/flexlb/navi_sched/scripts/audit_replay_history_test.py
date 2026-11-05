@@ -9,8 +9,14 @@ try:
 except ModuleNotFoundError:
     from pip._vendor import msgpack
 
-from audit_replay_history import (HEADER, LEGACY_RECORD_VERSION, MAGIC,
-                                  RECORD_VERSION, audit, classify)
+from audit_replay_history import (
+    HEADER,
+    LEGACY_RECORD_VERSION,
+    MAGIC,
+    RECORD_VERSION,
+    audit,
+    classify,
+)
 
 
 def vint(value):
@@ -28,9 +34,18 @@ def payload(features=None, version=9, extra_frame=False):
     if extra_frame:
         frames.append(b"tensor")
     forward = msgpack.packb(frames, use_bin_type=True)
-    return (struct.pack("<iQ", version, 42) + vint(3) + b"biz"
-            + vint(6) + vint(32) + vint(1) + struct.pack("<Q", 17)
-            + vint(120000) + vint(len(forward)) + forward)
+    return (
+        struct.pack("<iQ", version, 42)
+        + vint(3)
+        + b"biz"
+        + vint(6)
+        + vint(32)
+        + vint(1)
+        + struct.pack("<Q", 17)
+        + vint(120000)
+        + vint(len(forward))
+        + forward
+    )
 
 
 def record(event, data, version=LEGACY_RECORD_VERSION):
@@ -61,7 +76,9 @@ class AuditTest(unittest.TestCase):
         self.assertTrue(result["all_selected_text"])
 
     def test_multimodal(self):
-        data = payload([{"modality": "image", "data": {"pixel_values": 0}}], extra_frame=True)
+        data = payload(
+            [{"modality": "image", "data": {"pixel_values": 0}}], extra_frame=True
+        )
         self.assertEqual(classify(io.BytesIO(data), len(data)), "vl")
 
     def test_mixed_and_time_selection(self):
@@ -71,13 +88,20 @@ class AuditTest(unittest.TestCase):
         self.assertFalse(result["all_selected_text"])
         result = self.audit_bytes(data, start_time_us=100, end_time_us=199)
         self.assertTrue(result["all_selected_text"])
-        self.assertEqual(result["ranges"], {"text": {"earliest_us": 100, "latest_us": 100}})
+        self.assertEqual(
+            result["ranges"], {"text": {"earliest_us": 100, "latest_us": 100}}
+        )
         result = self.audit_bytes(data, start_time_us=100, end_time_us=200)
         self.assertFalse(result["all_selected_text"])
         self.assertEqual(result["counts"], {"text": 1, "vl": 1, "unknown": 0})
 
     def test_unknown_fails_closed(self):
-        for data in (payload(version=8), payload(features={}), payload(extra_frame=True), b"broken"):
+        for data in (
+            payload(version=8),
+            payload(features={}),
+            payload(extra_frame=True),
+            b"broken",
+        ):
             result = self.audit_bytes(record(100, data))
             self.assertFalse(result["all_selected_text"])
             self.assertEqual(result["counts"]["unknown"], 1)

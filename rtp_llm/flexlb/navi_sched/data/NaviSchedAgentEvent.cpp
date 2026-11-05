@@ -37,6 +37,9 @@ NaviSchedAgentEvent::Type NaviSchedAgentEvent::fromName(const std::string &name)
     if ("scheduler_config_updated" == name) {
         return SCHEDULER_CONFIG_UPDATED;
     }
+    if ("peer_cache_read_updated" == name) {
+        return PEER_CACHE_READ_UPDATED;
+    }
     return UNKNOWN;
 }
 
@@ -65,6 +68,8 @@ std::string NaviSchedAgentEvent::getName(Type event)
             return "batch_requests_aborted";
         case SCHEDULER_CONFIG_UPDATED:
             return "scheduler_config_updated";
+        case PEER_CACHE_READ_UPDATED:
+            return "peer_cache_read_updated";
         default:
             return "unknown";
     }

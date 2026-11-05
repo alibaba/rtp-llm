@@ -28,6 +28,7 @@ public:
     double latencyMs = 0.0;
     double queueTotalPredictedLatencyMs = 0.0;
     double queueDecayHeadRemainingMs = 0.0;
+    NaviSchedQueueModelState queueModel;
     uint64_t requestId = 0;
     bool latencyValidation = false;
     NaviSchedLocalBatchInfo localBatch;

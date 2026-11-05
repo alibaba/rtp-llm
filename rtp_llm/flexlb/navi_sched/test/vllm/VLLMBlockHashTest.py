@@ -71,14 +71,44 @@ class VLLMBlockHashTest(unittest.TestCase):
         )
         expected = [
             12687895063098490012, 1814341696565857452, 2713165534665270607,
-            11063484669882182000, 16968407209067685648, 11953250879845326278,
-            9449750925622734140, 423325345915297856, 7257199288814033199,
-            15200343972170926530,
+            18404408909527126274, 7865465297107673843, 10698632190875616625,
+            13012976205636083705, 9965430180500714476, 7245807258087879451,
+            12708805266631538567,
         ]
         self.assertEqual(
             expected,
             calculate_vllm_block_hashes(list(range(160)), 16, request=request),
         )
+
+    def test_multimodal_hash_distinguishes_relative_image_offsets(self):
+        from vllm.v1.core import kv_cache_utils
+
+        def request(offset):
+            return SimpleNamespace(
+                mm_features=[SimpleNamespace(
+                    identifier="same-image",
+                    mm_position=SimpleNamespace(offset=offset, length=31),
+                )],
+                lora_request=None, cache_salt=None, prompt_embeds=None,
+            )
+
+        tokens = [1] * 160
+        left = calculate_vllm_block_hashes(tokens, 16, request=request(48))
+        right = calculate_vllm_block_hashes(tokens, 16, request=request(49))
+        self.assertEqual(left[:3], right[:3])
+        self.assertNotEqual(left[3:], right[3:])
+
+        original = kv_cache_utils._gen_mm_extra_hash_keys
+
+        def omit_relative_offset(*args):
+            keys, index = original(*args)
+            return [key[0] for key in keys], index
+
+        # Dropping the offset recreates the old collision with identical tokens.
+        with mock.patch.object(kv_cache_utils, "_gen_mm_extra_hash_keys", omit_relative_offset):
+            left = calculate_vllm_block_hashes(tokens, 16, request=request(48))
+            right = calculate_vllm_block_hashes(tokens, 16, request=request(49))
+        self.assertEqual(left, right)
 
     def test_matches_vllm_fixed_vectors(self):
         self.assertEqual(

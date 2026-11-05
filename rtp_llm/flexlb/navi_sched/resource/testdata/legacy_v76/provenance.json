@@ -1,0 +1,19 @@
+{
+  "archive": "navi-v76-unified-r43-manual.tar.gz",
+  "source_member": "source/source.tar.gz!resource/",
+  "transformations": [
+    "Rename class only to coexist with production model",
+    "Rewrite include path",
+    "Remove resource registration; fixture never serving"
+  ],
+  "files": {
+    "NonLinearPrefillModelR.h": {
+      "archive_sha256": "3ab9e0a6e218775c9f81c453f55962be4fb60556fa078533191378de34593d02",
+      "fixture_sha256": "9edd11b19fad570b9e7991bfc40bebf22b6329fd72e9b308f91755a96f1752b3"
+    },
+    "NonLinearPrefillModelR.cpp": {
+      "archive_sha256": "207be7cf4f7dce9d538cee3914e613d3f658732f37850f3318399de50a8a3277",
+      "fixture_sha256": "bc6aa3aeb5b44bb555fcddf62952d6af2a4767736f8188194ba3148bdc755449"
+    }
+  }
+}

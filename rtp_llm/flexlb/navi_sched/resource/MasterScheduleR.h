@@ -63,12 +63,11 @@ public:
     void def(navi::ResourceDefBuilder &builder) const override;
     navi::ErrorCode init(navi::ResourceInitContext &ctx) override;
     uint64_t beginRequestPipeGeneration();
-    bool setRequestPipe(uint64_t generation,
-                        const navi::AsyncPipePtr &requestPipe);
+    bool setRequestPipe(uint64_t generation, const navi::AsyncPipePtr &requestPipe);
     bool waitRequestPipe(uint64_t generation, int64_t timeoutMs) const;
     void clearRequestPipe(uint64_t generation);
     MasterScheduleRequestDataPtr submit(const ClientRequestToMasterDataConstPtr &request,
-                const navi::AsyncPipePtr &responsePipe);
+                                        const navi::AsyncPipePtr &responsePipe);
     bool stopped() const;
     void stop();
     uint64_t getSubmitCount() const;
@@ -81,10 +80,10 @@ public:
     void recordDequeueWait(int64_t totalUs, int64_t maxUs, size_t count);
     void recordKernelPendingRequests(uint64_t generation, size_t count);
     void recordQueueOverload(size_t requestCount, size_t rejectedRequestCount,
-                             double averagePredictedLatencyMs,
-                             double dropProbability);
+                             double averagePredictedLatencyMs, double dropProbability);
     QueueOverloadStats getQueueOverloadStats() const;
-    void recordExecutionUtilization(double average, double integral, size_t reportingNodes, bool enabled,
+    void recordExecutionUtilization(double average, double integral,
+                                    size_t reportingNodes, bool enabled,
                                     double rawAverage = 0.0, uint64_t running = 0,
                                     uint64_t waiting = 0, bool globalScaling = false);
     ExecutionUtilizationStats getExecutionUtilizationStats() const;
@@ -97,8 +96,7 @@ public:
     static const std::string RESOURCE_ID;
 
 private:
-    static uint64_t makeRequestIdSeed(const std::string &bindIp,
-                                      int64_t startupTimeUs);
+    static uint64_t makeRequestIdSeed(const std::string &bindIp, int64_t startupTimeUs);
     uint64_t nextRequestId();
     static void rejectUnavailable(
         const ClientRequestToMasterDataConstPtr &request,

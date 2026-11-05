@@ -16,6 +16,10 @@ public:
     int64_t agentStartTimeUs = 0;
     bool pdSeparated = true;
     bool unifiedLatencyPrediction = false;
+    bool executionGeometryEnabled = false;
+    bool projectedExecutionGeometryEnabled = false;
+    bool peerCacheEnabled = false;
+    TPUPrefillExecutionPolicyConfig prefillExecutionPolicy;
 };
 
 NAVI_TYPEDEF_PTR(AgentControlToMasterData);

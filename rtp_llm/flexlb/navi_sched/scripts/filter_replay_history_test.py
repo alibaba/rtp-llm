@@ -2,9 +2,14 @@ import os
 import tempfile
 import unittest
 
+from audit_replay_history import (
+    HEADER,
+    LEGACY_RECORD_VERSION,
+    MAGIC,
+    RECORD_VERSION,
+    audit,
+)
 from audit_replay_history_test import payload
-from audit_replay_history import (HEADER, LEGACY_RECORD_VERSION, MAGIC,
-                                  RECORD_VERSION, audit)
 from filter_replay_history import crc32c, filter_history
 
 

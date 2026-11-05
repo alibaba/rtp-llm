@@ -62,10 +62,10 @@ class NaviSchedClient(RoleFacade):
         collect_replay: bool = False,
         forward_payload: bytes = b"",
         master_address: str = "",
+        route_only: bool = False,
+        explicit_cache_checkpoint_position: int = 0,
     ) -> NaviSchedDecision:
-        effective_master_biz_name = (
-            str(master_biz_name) or self._master_biz_name
-        )
+        effective_master_biz_name = str(master_biz_name) or self._master_biz_name
         if not target_biz_name:
             raise ValueError("target_biz_name is required")
         if not effective_master_biz_name:
@@ -77,6 +77,7 @@ class NaviSchedClient(RoleFacade):
                 request_id=request_id,
                 block_size=block_size,
                 forward_payload=forward_payload,
+                explicit_cache_checkpoint_position=explicit_cache_checkpoint_position,
             )
         elif not 0 < int(request.request_id) < (1 << 64):
             raise ValueError("request.request_id must be a nonzero uint64")
@@ -88,14 +89,26 @@ class NaviSchedClient(RoleFacade):
             int(request.prompt_token_count) // int(request.block_size)
         ):
             raise ValueError("request.block_hashes exceed complete prompt blocks")
+        if type(
+            request.explicit_cache_checkpoint_position
+        ) is not int or not 0 <= request.explicit_cache_checkpoint_position <= int(
+            request.prompt_token_count
+        ):
+            raise ValueError(
+                "explicit cache checkpoint position must be within the prompt"
+            )
         native_request = _navi_sched.NaviSchedScheduleRequest()
         native_request.request_id = int(request.request_id)
         native_request.biz_name = str(target_biz_name)
         native_request.prompt_token_count = int(request.prompt_token_count)
+        native_request.explicit_cache_checkpoint_position = (
+            request.explicit_cache_checkpoint_position
+        )
         native_request.block_size = int(request.block_size)
         native_request.block_hashes = request.block_hashes
         native_request.timeout_ms = int(timeout_ms)
         native_request.forward_payload = request.forward_payload
+        native_request.route_only = bool(route_only)
         arguments = (native_request, effective_master_biz_name, bool(collect_replay))
         if master_address:
             arguments += (str(master_address),)
@@ -121,9 +134,7 @@ class NaviSchedClient(RoleFacade):
         return int(self._service.allocate_request_id())
 
     def has_master_biz(self, master_biz_name: str = "") -> bool:
-        effective_master_biz_name = (
-            str(master_biz_name) or self._master_biz_name
-        )
+        effective_master_biz_name = str(master_biz_name) or self._master_biz_name
         return bool(self._service.has_master_biz(effective_master_biz_name))
 
     def report_local_fallback(self) -> None:
@@ -132,6 +143,7 @@ class NaviSchedClient(RoleFacade):
     @property
     def request_received_count(self) -> int:
         return int(self._service.get_request_received_count())
+
 
 __all__ = [
     "NaviSchedClient",

@@ -24,8 +24,8 @@ public:
                 if (_decision->dispatchHandle.valid()) {
                     _decision->dispatchHandle.abandon();
                 } else {
-                    state->reportDispatchAbandoned(
-                        _decision->target, _decision->batchId, _decision->requestId);
+                    state->reportDispatchAbandoned(_decision->target, _decision->batchId,
+                                                   _decision->requestId);
                 }
             }
         }
@@ -79,8 +79,8 @@ ScheduleKernel::~ScheduleKernel()
         if (_decision->dispatchHandle.valid()) {
             _decision->dispatchHandle.abandon();
         } else {
-            _masterStateR->reportDispatchAbandoned(
-                _decision->target, _decision->batchId, _decision->requestId);
+            _masterStateR->reportDispatchAbandoned(_decision->target, _decision->batchId,
+                                                   _decision->requestId);
         }
     }
 }
@@ -88,8 +88,8 @@ ScheduleKernel::~ScheduleKernel()
 void ScheduleKernel::def(navi::KernelDefBuilder &builder) const
 {
     builder.name("navi_sched.schedule_k")
-        .input("forward_decision", MASTER_RESPONSE_TO_CLIENT_TYPE_ID,
-               navi::IT_OPTIONAL, true)
+        .input("forward_decision", MASTER_RESPONSE_TO_CLIENT_TYPE_ID, navi::IT_OPTIONAL,
+               true)
         .output("decision", MASTER_RESPONSE_TO_CLIENT_TYPE_ID)
         .output("replay", MASTER_RESPONSE_TO_CLIENT_TYPE_ID)
         .output("dispatch_finished", "");
@@ -99,10 +99,10 @@ bool ScheduleKernel::config(navi::KernelConfigContext &ctx)
 {
     NAVI_JSONIZE(ctx, "dispatch_guard_enabled", _dispatchGuardEnabled,
                  _dispatchGuardEnabled);
-    NAVI_JSONIZE(ctx, "fused_dispatch_guard", _fusedDispatchGuard,
-                 _fusedDispatchGuard);
+    NAVI_JSONIZE(ctx, "fused_dispatch_guard", _fusedDispatchGuard, _fusedDispatchGuard);
     return (_dispatchGuardEnabled == 0 || _dispatchGuardEnabled == 1) &&
-        (!_fusedDispatchGuard || (_dispatchGuardEnabled && MasterDispatchGuardKernel::config(ctx)));
+           (!_fusedDispatchGuard ||
+            (_dispatchGuardEnabled && MasterDispatchGuardKernel::config(ctx)));
 }
 
 navi::ErrorCode ScheduleKernel::init(navi::KernelInitContext &ctx)
@@ -132,8 +132,7 @@ navi::ErrorCode ScheduleKernel::init(navi::KernelInitContext &ctx)
         NAVI_KERNEL_LOG(ERROR,
                         "receive invalid Client request on Master, requestId [%lu], "
                         "bizName [%s], timeoutMs [%ld]",
-                        request->requestId, request->bizName.c_str(),
-                        request->timeoutMs);
+                        request->requestId, request->bizName.c_str(), request->timeoutMs);
         return navi::EC_ABORT;
     }
     auto responsePipe = _responsePipe;
@@ -155,8 +154,7 @@ navi::ErrorCode ScheduleKernel::init(navi::KernelInitContext &ctx)
         NAVI_KERNEL_LOG(WARN,
                         "Master schedule graph unavailable, return retryable decision, "
                         "requestId [%lu], generation [%lu]",
-                        request->requestId,
-                        _masterScheduleR->getRequestPipeGeneration());
+                        request->requestId, _masterScheduleR->getRequestPipeGeneration());
     }
     return navi::EC_NONE;
 }
@@ -179,8 +177,7 @@ navi::ErrorCode ScheduleKernel::compute(navi::KernelComputeContext &ctx)
     }
     auto decision = std::dynamic_pointer_cast<MasterResponseToClientData>(data);
     if (!decision) {
-        NAVI_KERNEL_LOG(ERROR,
-                        "invalid Master schedule response type [%s]",
+        NAVI_KERNEL_LOG(ERROR, "invalid Master schedule response type [%s]",
                         data->getTypeId().c_str());
         return navi::EC_ABORT;
     }

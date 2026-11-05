@@ -47,11 +47,11 @@ protected:
 
 private:
     AUTIL_LOG_DECLARE();
-    static NaviSchedMasterNodeSummary makeNodeSummary(const NaviSchedNodeInfo &node,
-                                                       const MasterStateR::CacheSyncStats &cacheStats,
-                                                       uint64_t sentRequestCount,
-                                                       uint64_t sentBatchCount,
-                                                       double timeCompression);
+    static std::map<std::string, uint64_t> makeCacheStateSummary(
+        const MasterStateR::CacheSyncStats &stats);
+    static NaviSchedMasterNodeSummary makeNodeSummary(
+        const NaviSchedNodeInfo &node, const MasterStateR::CacheSyncStats &cacheStats,
+        uint64_t sentRequestCount, uint64_t sentBatchCount, double timeCompression);
     std::string _masterBizName;
     NaviSchedRuntimeConfig _masterConfig;
     size_t _collectorThreadNum = 0;

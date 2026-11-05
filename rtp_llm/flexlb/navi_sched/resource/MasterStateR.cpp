@@ -32,7 +32,9 @@ struct MasterDispatchHandle::State {
 
     struct FailureTrace {
         FailureTrace(const MasterStateR::NodeState &node, const char *source)
-            : node(node), source(source) {}
+            : node(node), source(source)
+        {
+        }
         void recordBefore(const MasterBatchReservation &batch, size_t requestIndex)
         {
             sampled = traceRequestBatch(batchId);
@@ -61,36 +63,38 @@ struct MasterDispatchHandle::State {
             const auto unlockedUs = autil::TimeUtility::monotonicTimeUs();
             if (attempted && sampled) {
                 const auto info = std::atomic_load_explicit(&node._infoSnapshot,
-                                                           std::memory_order_acquire);
-                NAVI_KERNEL_LOG(INFO,
+                                                            std::memory_order_acquire);
+                NAVI_KERNEL_LOG(
+                    INFO,
                     "[navi-request-stage] stage=master_dispatch_release source=%s "
                     "agent=%s request_id=%lu schedule_batch_id=%ld event_time_us=%ld "
                     "changed=%d batch_released=%d request_state_before=%d "
-                    "dispatch_acknowledged_before=%d waiting_before=%ld waiting_after=%ld "
+                    "dispatch_acknowledged_before=%d waiting_before=%ld "
+                    "waiting_after=%ld "
                     "prediction_before_ms=%.9f prediction_after_ms=%.9f "
                     "runtime_wait_us=%ld runtime_hold_us=%ld",
                     source, info->agentId.c_str(), requestId, batchId, completedTimeUs,
                     int(changed), int(batchReleased), requestStateBefore,
                     int(dispatchAcknowledgedBefore), waitingBefore, waitingAfter,
-                    predictionBeforeMs, predictionAfterMs,
-                    lockAcquiredUs - lockBeginUs, unlockedUs - lockAcquiredUs);
+                    predictionBeforeMs, predictionAfterMs, lockAcquiredUs - lockBeginUs,
+                    unlockedUs - lockAcquiredUs);
             }
             if (unlockedUs - lockBeginUs < 50'000) {
                 return;
             }
-            const auto info = std::atomic_load_explicit(&node._infoSnapshot,
-                                                       std::memory_order_acquire);
-            NAVI_KERNEL_LOG(INFO,
+            const auto info =
+                std::atomic_load_explicit(&node._infoSnapshot, std::memory_order_acquire);
+            NAVI_KERNEL_LOG(
+                INFO,
                 "[navi-master-failure-function-timing] function=failRequestIndexesLocked "
                 "source=%s agent=%s batch_id=%ld requests=1 attempted=%d changed=%d "
                 "runtime_wait_us=%ld runtime_hold_us=%ld copy_us=%ld mark_failed_us=%ld "
                 "prediction_us=%ld pending_update_us=%ld commit_us=%ld "
                 "reference_index_built=%d reference_hashes=%lu reference_slots=%lu",
                 source, info->agentId.c_str(), batchId, int(attempted), int(changed),
-                lockAcquiredUs - lockBeginUs, unlockedUs - lockAcquiredUs,
-                timing.copyUs, timing.markFailedUs, timing.predictionUs,
-                timing.pendingUpdateUs, timing.commitUs, int(indexBuilt),
-                referenceHashes, referenceSlots);
+                lockAcquiredUs - lockBeginUs, unlockedUs - lockAcquiredUs, timing.copyUs,
+                timing.markFailedUs, timing.predictionUs, timing.pendingUpdateUs,
+                timing.commitUs, int(indexBuilt), referenceHashes, referenceSlots);
         }
 
         const MasterStateR::NodeState &node;
@@ -117,8 +121,8 @@ struct MasterDispatchHandle::State {
     };
 };
 
-bool MasterDispatchHandle::registerWaiter(
-    const std::shared_ptr<navi::AsyncPipe> &pipe, bool &acknowledged) const
+bool MasterDispatchHandle::registerWaiter(const std::shared_ptr<navi::AsyncPipe> &pipe,
+                                          bool &acknowledged) const
 {
     acknowledged = false;
     if (!_state || !pipe) {
@@ -141,7 +145,8 @@ bool MasterDispatchHandle::registerWaiter(
         acknowledged = true;
         return true;
     }
-    auto [it, inserted] = reservation->dispatchWaiters.emplace(entry.request.requestId, pipe);
+    auto [it, inserted] =
+        reservation->dispatchWaiters.emplace(entry.request.requestId, pipe);
     if (!inserted) {
         auto current = it->second.lock();
         if (current && current != pipe) {
@@ -183,13 +188,14 @@ bool MasterDispatchHandle::cancel(const std::shared_ptr<navi::AsyncPipe> &pipe) 
     const bool hadReferences = reservation->batch.hasPendingCacheReferences();
     trace.attempted = true;
     trace.recordBefore(reservation->batch, _requestIndex);
-    trace.changed = node->failRequestIndexesLocked(*reservation, {_requestIndex}, released,
-                                                  &trace.timing);
+    trace.changed = node->failRequestIndexesLocked(*reservation, {_requestIndex},
+                                                   released, &trace.timing);
     trace.recordAfter(reservation->batch, released);
     trace.indexBuilt = !hadReferences && reservation->batch.hasPendingCacheReferences();
     trace.referenceHashes = reservation->batch._pendingReferences.size();
     trace.referenceSlots = reservation->batch._requestBlockIndexes
-                               ? reservation->batch._requestBlockIndexes->size() : 0;
+                               ? reservation->batch._requestBlockIndexes->size()
+                               : 0;
     return trace.changed;
 }
 
@@ -224,13 +230,14 @@ bool MasterDispatchHandle::abandon() const
     const bool hadReferences = reservation->batch.hasPendingCacheReferences();
     trace.attempted = true;
     trace.recordBefore(reservation->batch, _requestIndex);
-    trace.changed = node->failRequestIndexesLocked(*reservation, {_requestIndex}, released,
-                                                  &trace.timing);
+    trace.changed = node->failRequestIndexesLocked(*reservation, {_requestIndex},
+                                                   released, &trace.timing);
     trace.recordAfter(reservation->batch, released);
     trace.indexBuilt = !hadReferences && reservation->batch.hasPendingCacheReferences();
     trace.referenceHashes = reservation->batch._pendingReferences.size();
     trace.referenceSlots = reservation->batch._requestBlockIndexes
-                               ? reservation->batch._requestBlockIndexes->size() : 0;
+                               ? reservation->batch._requestBlockIndexes->size()
+                               : 0;
     return trace.changed;
 }
 
@@ -268,34 +275,40 @@ void MasterDispatchHandle::fail(const std::vector<MasterDispatchHandle> &handles
             lockAcquiredUs = autil::TimeUtility::monotonicTimeUs();
             if (node->_acceptReservations && reservation->attached) {
                 batchId = reservation->batch.getBatchId();
-                changed = node->failRequestIndexesLocked(*reservation, batch.indexes, released,
-                                                        &timing);
+                changed = node->failRequestIndexesLocked(*reservation, batch.indexes,
+                                                         released, &timing);
             }
         }
         const auto unlockedUs = autil::TimeUtility::monotonicTimeUs();
         if (unlockedUs - lockBeginUs >= 50'000) {
             const auto info = std::atomic_load_explicit(&node->_infoSnapshot,
                                                         std::memory_order_acquire);
-            NAVI_KERNEL_LOG(INFO,
+            NAVI_KERNEL_LOG(
+                INFO,
                 "[navi-master-failure-function-timing] function=failRequestIndexesLocked "
-                "agent=%s batch_id=%ld requests=%lu runtime_wait_us=%ld runtime_hold_us=%ld "
-                "copy_us=%ld mark_failed_us=%ld prediction_us=%ld pending_update_us=%ld commit_us=%ld",
+                "agent=%s batch_id=%ld requests=%lu runtime_wait_us=%ld "
+                "runtime_hold_us=%ld "
+                "copy_us=%ld mark_failed_us=%ld prediction_us=%ld pending_update_us=%ld "
+                "commit_us=%ld",
                 info->agentId.c_str(), batchId, batch.indexes.size(),
-                lockAcquiredUs - lockBeginUs, unlockedUs - lockAcquiredUs,
-                timing.copyUs, timing.markFailedUs, timing.predictionUs,
-                timing.pendingUpdateUs, timing.commitUs);
+                lockAcquiredUs - lockBeginUs, unlockedUs - lockAcquiredUs, timing.copyUs,
+                timing.markFailedUs, timing.predictionUs, timing.pendingUpdateUs,
+                timing.commitUs);
         }
         if (changed) {
-            auto info = std::atomic_load_explicit(&node->_infoSnapshot, std::memory_order_acquire);
+            auto info = std::atomic_load_explicit(&node->_infoSnapshot,
+                                                  std::memory_order_acquire);
             NAVI_KERNEL_LOG(WARN,
                             "[navi-master-dispatch-lifecycle] phase=bulk_failed agent=%s "
                             "batch_id=%ld request_count=%lu batch_released=%d",
-                            info->agentId.c_str(), batchId, batch.indexes.size(), int(released));
+                            info->agentId.c_str(), batchId, batch.indexes.size(),
+                            int(released));
         }
     }
     const auto endUs = autil::TimeUtility::monotonicTimeUs();
     if (endUs - beginUs >= 50'000) {
-        NAVI_KERNEL_LOG(INFO,
+        NAVI_KERNEL_LOG(
+            INFO,
             "[navi-master-failure-function-timing] function=MasterDispatchHandle::fail "
             "handles=%lu batches=%lu group_us=%ld total_us=%ld",
             handles.size(), batches.size(), groupedUs - beginUs, endUs - beginUs);
@@ -319,9 +332,11 @@ NaviSchedScheduleRequest MasterStateR::makeScheduleRequest(
     output.requestId = request.requestId;
     output.bizName = request.bizName;
     output.promptTokenCount = request.promptTokenCount;
+    output.explicitCacheCheckpointPosition = request.explicitCacheCheckpointPosition;
     output.blockSize = request.blockSize;
     output.blockHashes = request.blockHashes;
     output.timeoutMs = request.timeoutMs;
+    output.routeOnly = request.routeOnly;
     return output;
 }
 
@@ -347,8 +362,8 @@ bool MasterStateR::validLatencyModel(const AgentLatencyToMasterDataPtr &latency)
     snapshot.binaryVersion = latency->binaryVersion;
     snapshot.revision = latency->modelRevision;
     snapshot.parameters = latency->parameters;
-    if (!NonLinearPrefillModelR::makeOptimizerState(
-            latency->optimizerState, snapshot.optimizerState)) {
+    if (!NonLinearPrefillModelR::makeOptimizerState(latency->optimizerState,
+                                                    snapshot.optimizerState)) {
         return false;
     }
     snapshot.residualVersion = latency->residualVersion;
@@ -375,8 +390,7 @@ void applyLatencyModelInfo(
     info.latencyResidualLastUpdateTimeUs = latencyInfo->residualLastUpdateTimeUs;
     info.latencyModelTrusted = latencyInfo->overloadPredictionTrusted;
     info.latencyModelWarmStarted = latencyInfo->warmStarted;
-    info.latencyModelConsecutiveRejectedCount =
-        latencyInfo->consecutiveRejectedCount;
+    info.latencyModelConsecutiveRejectedCount = latencyInfo->consecutiveRejectedCount;
     info.latencyModelLastRejectReason = latencyInfo->lastRejectReason;
 }
 
@@ -403,10 +417,9 @@ MasterStateR::MasterStateR() {}
 
 NaviSchedNodeInfo MasterStateR::NodeState::getInfo() const
 {
-    auto published = std::atomic_load_explicit(&_publishedSnapshot,
-                                               std::memory_order_acquire);
-    auto info = published && published->info ? *published->info
-                                              : NaviSchedNodeInfo();
+    auto published =
+        std::atomic_load_explicit(&_publishedSnapshot, std::memory_order_acquire);
+    auto info = published && published->info ? *published->info : NaviSchedNodeInfo();
     fillDynamicInfo(info);
     if (published) {
         applyLatencyModelInfo(info, published->latencyModel);
@@ -419,15 +432,18 @@ bool MasterStateR::NodeState::getScheduleSnapshot(const std::string &bizName,
 {
     snapshot.runtimeLockWaitUs = 0;
     snapshot.runtimeLockHoldUs = 0;
-    auto published = std::atomic_load_explicit(&_publishedSnapshot,
-                                               std::memory_order_acquire);
+    auto published =
+        std::atomic_load_explicit(&_publishedSnapshot, std::memory_order_acquire);
     if (!published || !published->info || !published->info->online ||
-        published->info->bizName != bizName ||
-        published->info->serverAddress.empty()) {
+        published->info->bizName != bizName || published->info->serverAddress.empty()) {
         return false;
     }
     snapshot.info = published->info;
     snapshot.latencyModel = published->latencyModel;
+    if (!published->executionGeometryValid) {
+        return false;
+    }
+    snapshot.prefillExecutionPolicy = published->prefillExecutionPolicy;
     snapshot.residualRuntimeConfig = getResidualRuntimeConfig();
     {
         const auto lockBeginUs = autil::TimeUtility::monotonicTimeUs();
@@ -445,6 +461,8 @@ bool MasterStateR::NodeState::getScheduleSnapshot(const std::string &bizName,
         }
         snapshot.load = _runtimeState.load;
         snapshot.agentStartTimeUs = _runtimeState.agentStartTimeUs;
+        snapshot.peerCacheReadAvailable = _runtimeState.peerCacheReadAvailable;
+        snapshot.peerCacheReadRevision = _runtimeState.peerCacheReadRevision;
         int64_t effectiveInflightRequests = snapshot.load.inflightRequests;
         long double effectivePredictedLatencySumMs =
             snapshot.load.inflightPredictedLatencySumMs;
@@ -455,8 +473,10 @@ bool MasterStateR::NodeState::getScheduleSnapshot(const std::string &bizName,
         }
         for (const auto &reservationPtr : _pendingBatchReservations) {
             const auto &reservation = *reservationPtr;
-            snapshot.load.queueTotalPredictedLatencyMs +=
-                reservation.batch.getPredictedLatencyMs();
+            snapshot.load.queueModel.setBaseMs(
+                snapshot.load.queueModel.baseMs(snapshot.load.queueTotalPredictedLatencyMs) +
+                    reservation.batch.getPredictedLatencyMs(),
+                snapshot.load.queueTotalPredictedLatencyMs);
             const auto unreported = reservation.batch.getUnreportedInflightStats();
             if (!unreported.valid()) {
                 return false;
@@ -535,12 +555,28 @@ void MasterStateR::NodeState::rebuildInfoSnapshot()
     auto published = std::make_shared<PublishedSnapshot>();
     published->info = info;
     published->latencyModel = std::move(latencyModel);
+    if (published->latencyModel) {
+        const auto version = published->latencyModel->binaryVersion;
+        const auto geometry = NonLinearPrefillModelR::usesGeometryForVersion(version);
+        const auto projected =
+            NonLinearPrefillModelR::usesProjectedGeometryForVersion(version);
+        published->executionGeometryValid =
+            geometry == info->executionGeometryEnabled &&
+            projected == info->projectedExecutionGeometryEnabled;
+        if (geometry && published->executionGeometryValid) {
+            published->executionGeometryValid =
+                info->pdSeparated && !info->unifiedLatencyPrediction &&
+                TPUPrefillExecutionPolicy::validate(info->prefillExecutionPolicy);
+            if (published->executionGeometryValid) {
+                published->prefillExecutionPolicy = info->prefillExecutionPolicy;
+            }
+        }
+    }
     std::shared_ptr<const PublishedSnapshot> immutablePublished = published;
     std::atomic_store_explicit(&_publishedSnapshot, immutablePublished,
                                std::memory_order_release);
     std::shared_ptr<const NaviSchedNodeInfo> immutableInfo = info;
-    std::atomic_store_explicit(&_infoSnapshot,
-                               std::move(immutableInfo),
+    std::atomic_store_explicit(&_infoSnapshot, std::move(immutableInfo),
                                std::memory_order_release);
 }
 
@@ -557,6 +593,9 @@ double MasterStateR::NodeState::getExecutionBusyUtilization() const
 void MasterStateR::NodeState::fillDynamicInfo(NaviSchedNodeInfo &info) const
 {
     auto runtime = getRuntimeState();
+    info.peerCacheReadAvailable = runtime.peerCacheReadAvailable;
+    info.peerCacheReadRevision = runtime.peerCacheReadRevision;
+    info.peerCacheReadAgentStartTimeUs = runtime.agentStartTimeUs;
     info.totalBlocks = runtime.load.totalBlocks;
     info.inflightStatsRevision = runtime.load.inflightStatsRevision;
     info.inflightRequests = runtime.load.inflightRequests;
@@ -570,6 +609,7 @@ void MasterStateR::NodeState::fillDynamicInfo(NaviSchedNodeInfo &info) const
     info.lastRequestLatencyMs = runtime.lastRequestLatencyMs;
     info.queueTotalPredictedLatencyMs = runtime.load.queueTotalPredictedLatencyMs;
     info.queueDecayHeadRemainingMs = runtime.load.queueDecayHeadRemainingMs;
+    info.queueModel = runtime.load.queueModel;
     info.queueReportReceiveTimeUs = runtime.load.queueReportReceiveTimeUs;
     info.workload = runtime.workload;
     info.workloadReportReceiveTimeUs = runtime.workloadReportReceiveTimeUs;
@@ -608,14 +648,18 @@ NaviSchedNodeLoad MasterStateR::NodeState::getScheduleLoadLocked(
             ? std::max<int64_t>(0, currentTimeUs - load.queueReportReceiveTimeUs) / 1000.0
             : 0.0;
     const auto decayMs = std::min(load.queueDecayHeadRemainingMs, elapsedMs);
-    load.queueTotalPredictedLatencyMs =
-        std::max(0.0, load.queueTotalPredictedLatencyMs - decayMs);
+    load.queueModel.setBaseMs(
+        load.queueModel.decayedBaseMs(load.queueTotalPredictedLatencyMs, decayMs),
+        load.queueTotalPredictedLatencyMs);
     load.queueDecayHeadRemainingMs =
         std::max(0.0, load.queueDecayHeadRemainingMs - decayMs);
     load.queueReportReceiveTimeUs = currentTimeUs;
     for (const auto &reservationPtr : _pendingBatchReservations) {
         const auto &reservation = *reservationPtr;
-        load.queueTotalPredictedLatencyMs += reservation.batch.getPredictedLatencyMs();
+        load.queueModel.setBaseMs(
+            load.queueModel.baseMs(load.queueTotalPredictedLatencyMs) +
+                reservation.batch.getPredictedLatencyMs(),
+            load.queueTotalPredictedLatencyMs);
     }
     return load;
 }
@@ -624,6 +668,7 @@ bool MasterStateR::NodeState::reserveBatch(
     int64_t batchId, int64_t scheduleTimeUs, double predictedLatencyMs,
     std::vector<MasterBatchReservation::Request> requests,
     const NaviSchedCachePolicy *cachePolicy, bool *pendingCacheTracked,
+    double *queueLatencyMs, int64_t predictionTimeUs, double timeCompression,
     ReservationPtr *reserved, ReservationTiming *timing)
 {
     ReservationTiming localTiming;
@@ -636,8 +681,10 @@ bool MasterStateR::NodeState::reserveBatch(
         timing->totalUs = autil::TimeUtility::monotonicTimeUs() - beginUs;
         timing->totalCpuUs = autil::TimeUtility::cpuThreadTimeUs() - beginCpuUs;
         if (timing->totalUs >= 50'000) {
-            NAVI_KERNEL_LOG(INFO,
-                "[navi-master-reservation-function-timing] function=NodeState::reserveBatch "
+            NAVI_KERNEL_LOG(
+                INFO,
+                "[navi-master-reservation-function-timing] "
+                "function=NodeState::reserveBatch "
                 "agent=%s batch_id=%ld requests=%lu total_us=%ld init_us=%ld "
                 "runtime_wait_us=%ld runtime_hold_us=%ld pending_publish_us=%ld "
                 "total_cpu_us=%ld init_cpu_us=%ld runtime_hold_cpu_us=%ld "
@@ -654,10 +701,28 @@ bool MasterStateR::NodeState::reserveBatch(
     if (pendingCacheTracked) {
         *pendingCacheTracked = false;
     }
+    NaviSchedCachePolicy externalPolicy;
+    const bool hasExternalPolicy =
+        getCachePolicy(externalPolicy, NaviSchedCacheKeyType::V6D);
+    size_t hitMembers = 0;
+    std::vector<int64_t> requestTokenCounts;
+    if (queueLatencyMs) {
+        requestTokenCounts.reserve(requests.size());
+        for (const auto &request : requests) {
+            hitMembers += request.predictedCacheHitTokenCount > 0;
+            requestTokenCounts.push_back(request.totalTokenCount);
+        }
+    }
     auto reservation = std::make_shared<PendingBatchReservation>();
     if (!reservation->batch.init(batchId, scheduleTimeUs, predictedLatencyMs,
-                                std::move(requests), cachePolicy)) {
+                                 std::move(requests), cachePolicy)) {
         timing->failureReason = "invalid_batch_definition";
+        return false;
+    }
+    if (hasExternalPolicy &&
+        !reservation->batch.setPendingCachePolicy(NaviSchedCacheKeyType::V6D,
+                                                   externalPolicy)) {
+        timing->failureReason = "invalid_external_cache_policy";
         return false;
     }
     const auto initEndUs = autil::TimeUtility::monotonicTimeUs();
@@ -675,6 +740,44 @@ bool MasterStateR::NodeState::reserveBatch(
     if (!_acceptReservations) {
         timing->failureReason = "reservations_disabled";
         return false;
+    }
+    if (queueLatencyMs && !findReservationLocked(batchId)) {
+        // Reports retire admitted reservation work under this same lock. Read
+        // their combined queue before inserting this batch, excluding retries.
+        auto load = _runtimeState.load;
+        const auto elapsedMs =
+            load.queueReportReceiveTimeUs > 0
+                ? std::max<int64_t>(0, predictionTimeUs - load.queueReportReceiveTimeUs) /
+                      1000.0 * timeCompression
+                : 0.0;
+        double baseQueue = load.queueModel.decayedBaseMs(
+            load.queueTotalPredictedLatencyMs,
+            std::min(load.queueDecayHeadRemainingMs, elapsedMs));
+        for (const auto &existing : _pendingBatchReservations) {
+            if (existing->batch.getBatchId() != batchId) {
+                baseQueue += existing->batch.getPredictedLatencyMs();
+            }
+        }
+        const auto published =
+            std::atomic_load_explicit(&_publishedSnapshot, std::memory_order_acquire);
+        size_t lookupMembers = 0;
+        if (published && published->prefillExecutionPolicy) {
+            for (const auto tokenCount : requestTokenCounts) {
+                lookupMembers += TPUPrefillExecutionPolicy::hasAsyncLookupOpportunity(
+                    tokenCount, *published->prefillExecutionPolicy);
+            }
+        }
+        double queue = _runtimeState.unifiedLatencyPrediction
+                           ? 0.0
+                           : NaviSchedQueueModel::predictMs(
+                                 baseQueue, load.queueModel.cacheMemberWeightMs,
+                                 load.queueModel.lookupMemberWeightMs, hitMembers,
+                                 lookupMembers, requestCountBeforeMove);
+        if (!reservation->batch.adjustInitialRequestLatencyMs(queue - *queueLatencyMs)) {
+            timing->failureReason = "invalid_refreshed_queue_prediction";
+            return false;
+        }
+        *queueLatencyMs = queue;
     }
     if (_runtimeState.unifiedLatencyPrediction &&
         !reservation->batch.setPredictedLatencyMs(0.0)) {
@@ -699,7 +802,8 @@ bool MasterStateR::NodeState::reserveBatch(
     const auto pendingBeginCpuUs = autil::TimeUtility::cpuThreadTimeUs();
     const auto pendingUpdated = updateReservationPendingCacheLocked(reservation->batch);
     timing->pendingPublishUs = autil::TimeUtility::monotonicTimeUs() - pendingBeginUs;
-    timing->pendingPublishCpuUs = autil::TimeUtility::cpuThreadTimeUs() - pendingBeginCpuUs;
+    timing->pendingPublishCpuUs =
+        autil::TimeUtility::cpuThreadTimeUs() - pendingBeginCpuUs;
     if (!pendingUpdated) {
         timing->failureReason = "pending_cache_update_failed";
         return false;
@@ -708,8 +812,8 @@ bool MasterStateR::NodeState::reserveBatch(
     if (pendingCacheTracked) {
         *pendingCacheTracked = reservation->batch.tracksPendingCache();
     }
-    reservation->position = _pendingBatchReservations.insert(
-        _pendingBatchReservations.end(), reservation);
+    reservation->position =
+        _pendingBatchReservations.insert(_pendingBatchReservations.end(), reservation);
     reservation->attached = true;
     _reservationsById.emplace(batchId, reservation);
     if (reserved) {
@@ -748,28 +852,39 @@ bool MasterStateR::NodeState::updateReservationPendingCacheLocked(
     const MasterBatchReservation &reservation,
     const MasterBatchReservation::Transition *transition)
 {
-    if (!reservation.tracksPendingCache()) {
-        return true;
-    }
-    if (transition) {
-        if (!transition->cacheChanged) {
-            return true;
+    if (reservation.tracksPendingCache()) {
+        if (transition) {
+            if (transition->cacheChanged) {
+                if (transition->retireCache) {
+                    _pendingCacheR->retire(_info.agentIdHash, reservation.getBatchId());
+                } else if (!_pendingCacheR->removeScheduledBlocks(
+                               _info.agentIdHash, reservation.getBatchId(),
+                               transition->removedFullReadyBlockHashes,
+                               transition->removedTailReadyBlockHashes)) {
+                    return false;
+                }
+            }
+        } else {
+            const auto &pending = reservation.getPendingCacheReservation();
+            if (pending.fullReadyBlockHashes.empty()) {
+                _pendingCacheR->retire(_info.agentIdHash, reservation.getBatchId());
+            } else if (!_pendingCacheR->updateScheduled(_info.agentIdHash, pending)) {
+                return false;
+            }
         }
-        if (transition->retireCache) {
-            _pendingCacheR->retire(_info.agentIdHash, reservation.getBatchId());
-            return true;
+    }
+    // V6D has different publication boundaries: never reuse BLOCK_POOL deltas.
+    for (const auto &entry : reservation.getPendingCachePolicies()) {
+        if (entry.first == NaviSchedCacheKeyType::BLOCK_POOL) continue;
+        NaviSchedPendingCacheReservation pending;
+        if (!reservation.makePendingCacheReservation(entry.first, pending)) return false;
+        if (pending.fullReadyBlockHashes.empty()) {
+            _pendingCacheR->retire(_info.agentIdHash, reservation.getBatchId(), entry.first);
+        } else if (!_pendingCacheR->updateScheduled(_info.agentIdHash, pending, entry.first)) {
+            return false;
         }
-        return _pendingCacheR->removeScheduledBlocks(
-            _info.agentIdHash, reservation.getBatchId(),
-            transition->removedFullReadyBlockHashes,
-            transition->removedTailReadyBlockHashes);
     }
-    const auto &pending = reservation.getPendingCacheReservation();
-    if (pending.fullReadyBlockHashes.empty()) {
-        _pendingCacheR->retire(_info.agentIdHash, reservation.getBatchId());
-        return true;
-    }
-    return _pendingCacheR->updateScheduled(_info.agentIdHash, pending);
+    return true;
 }
 
 bool MasterStateR::NodeState::refreshReservationPredictionLocked(
@@ -781,10 +896,19 @@ bool MasterStateR::NodeState::refreshReservationPredictionLocked(
         const auto batchId = batch.getBatchId();
         if (!batch.recomputeWaitingFeatures(
                 [this, batchId](const MasterBatchReservation::Request &request) {
-                    return _pendingCacheR->getMatchedBlockCountExcludingSchedule(
-                        _info.agentIdHash, batchId, *request.blockHashes,
-                        _cachedBlockHashes, _fullReadyBlockHashes, _tailReadyBlockHashes,
-                        _hybridTailRequired, request.blockHashes->size());
+                    const auto local =
+                        _pendingCacheR->getMatchedBlockCountExcludingSchedule(
+                            _info.agentIdHash, batchId, *request.blockHashes,
+                            _cachedBlockHashes, _fullReadyBlockHashes,
+                            _tailReadyBlockHashes, _hybridTailRequired,
+                            request.blockHashes->size(),
+                            _cachePolicyReady.load(std::memory_order_relaxed)
+                                ? _cachePolicy.fullAttentionQueryDropTokens /
+                                      _cachePolicy.blockSize
+                                : 0);
+                    return local + matchExternalSuffix(*request.blockHashes,
+                                                       request.totalTokenCount,
+                                                       request.blockSize, local, batchId);
                 })) {
             return false;
         }
@@ -797,23 +921,123 @@ bool MasterStateR::NodeState::refreshReservationPredictionLocked(
     }
     const auto latency = getLatencyInfo();
     if (!latency || latency->formula != NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL ||
-        latency->binaryVersion != NonLinearPrefillModelR::BINARY_VERSION ||
-        !NonLinearPrefillModelR::validateParameters(latency->parameters) ||
+        !NonLinearPrefillModelR::supportsBinaryVersion(latency->binaryVersion) ||
+        !NonLinearPrefillModelR::validateParametersForVersion(latency->parameters,
+                                                              latency->binaryVersion) ||
         latency->residualVersion != LatencyResidualModel::VERSION ||
         !LatencyResidualModel::validateParameters(latency->residualParameters)) {
         return batch.setPredictedLatencyMs(0.0);
     }
-    const auto basePrediction = NonLinearPrefillModelR::predict(
-        batch.getWaitingFeatures(), latency->parameters);
+    auto features = batch.getWaitingFeatures();
+    double basePrediction;
+    if (NonLinearPrefillModelR::usesGeometryForVersion(latency->binaryVersion)) {
+        const auto published =
+            std::atomic_load_explicit(&_publishedSnapshot, std::memory_order_acquire);
+        if (!published || !published->executionGeometryValid ||
+            !published->prefillExecutionPolicy || !published->info->pdSeparated ||
+            !published->info->executionGeometryEnabled ||
+            ((NonLinearPrefillModelR::usesProjectedGeometryForVersion(
+                 latency->binaryVersion)) !=
+             published->info->projectedExecutionGeometryEnabled)) {
+            return false;
+        }
+        const auto &policy = *published->prefillExecutionPolicy;
+        std::vector<TPUPrefillRequestInput> inputs;
+        NaviSchedLatencyFeatures logical;
+        if (!logical.appendBatchCount(1)) {
+            return false;
+        }
+        size_t maxSteps = 0;
+        autil::ScopedReadLock cacheLock(_cacheLock);
+        if (!_cachePolicyReady.load(std::memory_order_relaxed)) {
+            return false;
+        }
+        for (const auto &request : batch.getWaitingRequests()) {
+            if (request.blockSize <= 0 || request.blockSize != _cachePolicy.blockSize ||
+                request.totalTokenCount <= 0) {
+                return false;
+            }
+            const auto &hashes = BlockHashUtil::get(request.blockHashes);
+            const auto local = _pendingCacheR->getMatchBreakdown(
+                _info.agentIdHash, hashes, _cachedBlockHashes, _fullReadyBlockHashes,
+                _tailReadyBlockHashes, _hybridTailRequired,
+                BlockHashUtil::getMatchableBlockCount(
+                    request.totalTokenCount, request.blockSize, request.blockHashes),
+                _cachePolicy.fullAttentionQueryDropTokens / _cachePolicy.blockSize,
+                NaviSchedCacheKeyType::BLOCK_POOL, 0, 1, batch.getBatchId());
+            const auto suffix =
+                matchExternalSuffix(hashes, request.totalTokenCount, request.blockSize,
+                                    local.matchedBlockCount, batch.getBatchId());
+            const auto maximumBlocks = request.totalTokenCount / request.blockSize;
+            if (local.matchedBlockCount < 0 || suffix < 0 ||
+                local.matchedBlockCount > maximumBlocks - suffix ||
+                local.effectiveFullMatchedBlockCount < 0 ||
+                local.effectiveFullMatchedBlockCount > maximumBlocks) {
+                return false;
+            }
+            TPUPrefillRequestInput input;
+            input.promptTokens = request.totalTokenCount;
+            input.computedTokens = (local.matchedBlockCount + suffix) * request.blockSize;
+            input.externalReadTokens = suffix * request.blockSize;
+            // Only the effective local Full boundary can create a shared junction.
+            if (local.effectiveFullMatchedBlockCount > local.matchedBlockCount) {
+                input.sharedPrefixBoundary =
+                    local.effectiveFullMatchedBlockCount * request.blockSize;
+            }
+            if (request.explicitCacheCheckpointPosition > 0) {
+                const auto boundary = request.explicitCacheCheckpointPosition /
+                                      policy.schedulerBlockSize *
+                                      policy.schedulerBlockSize;
+                if (boundary > 0) {
+                    input.sharedPrefixBoundary = boundary;
+                }
+            }
+            const auto remaining = input.promptTokens - input.computedTokens;
+            if (remaining <= 0 || static_cast<uint64_t>(remaining) >
+                                      std::numeric_limits<size_t>::max() - maxSteps) {
+                return false;
+            }
+            maxSteps += static_cast<size_t>(remaining);
+            logical.appendRequest(input.computedTokens, remaining);
+            inputs.push_back(input);
+        }
+        TPUPrefillExecutionProjection projection;
+        const auto projector = NonLinearPrefillModelR::usesProjectedGeometryForVersion(
+                                   latency->binaryVersion)
+                                   ? TPUPrefillExecutionPolicy::projectLatencyFeatures
+                                   : TPUPrefillExecutionPolicy::projectCacheResolvedBatch;
+        if (!projector(inputs, policy, maxSteps, projection, nullptr) ||
+            !logical.setExecutionGeometry(projection.stepCount,
+                                          projection.globalPaddedTokenSum)) {
+            return false;
+        }
+        if (NonLinearPrefillModelR::usesCacheSourceForVersion(latency->binaryVersion)) {
+            int64_t reads = 0, maximum = 0;
+            for (const auto &input : inputs) {
+                reads += input.externalReadTokens > 0;
+                maximum = std::max(maximum, input.externalReadTokens);
+            }
+            if (!logical.setExecutionCacheSource(reads, maximum)) {
+                return false;
+            }
+        }
+        features = std::move(logical);
+        basePrediction = NonLinearPrefillModelR::predictForVersion(
+            features, latency->parameters, latency->binaryVersion);
+    } else {
+        basePrediction = NonLinearPrefillModelR::predict(
+            features, NonLinearPrefillModelR::parametersForLegacyPrediction(
+                          latency->parameters, latency->binaryVersion));
+    }
     return batch.setPredictedLatencyMs(
-        LatencyResidualModel::evaluate(
-            basePrediction, latency->residualParameters,
-            latency->residualLastUpdateTimeUs,
-            autil::TimeUtility::currentTime(), getResidualRuntimeConfig())
+        LatencyResidualModel::evaluate(basePrediction, latency->residualParameters,
+                                       latency->residualLastUpdateTimeUs,
+                                       autil::TimeUtility::currentTime(),
+                                       getResidualRuntimeConfig())
             .predictionMs);
 }
 
-void MasterStateR::NodeState::clearCacheStateLocked()
+void MasterStateR::NodeCacheState::clear()
 {
     _cachedBlockHashes.clear();
     _fullReadyBlockHashes.clear();
@@ -839,6 +1063,31 @@ void MasterStateR::NodeState::clearCacheStateLocked()
     _rtpCacheMirrorSampleCount = 0;
     _rtpCacheMirrorMismatchCount = 0;
     _pendingCacheResyncTriggerCount.store(0, std::memory_order_relaxed);
+}
+
+MasterStateR::NodeCacheState &MasterStateR::NodeState::cacheForType(
+    NaviSchedCacheKeyType type)
+{
+    if (!validCacheKeyType(type)) {
+        throw std::invalid_argument("invalid cache key type");
+    }
+    return type == NaviSchedCacheKeyType::V6D ? _v6dCacheState : *this;
+}
+
+const MasterStateR::NodeCacheState &MasterStateR::NodeState::cacheForType(
+    NaviSchedCacheKeyType type) const
+{
+    if (!validCacheKeyType(type)) {
+        throw std::invalid_argument("invalid cache key type");
+    }
+    return type == NaviSchedCacheKeyType::V6D ? _v6dCacheState : *this;
+}
+
+void MasterStateR::NodeState::clearCacheStateLocked()
+{
+    NodeCacheState::clear();
+    autil::ScopedWriteLock lock(_v6dCacheState._cacheLock);
+    _v6dCacheState.clear();
 }
 
 void MasterStateR::NodeState::collectDispatchWaitersLocked(
@@ -923,9 +1172,9 @@ bool MasterStateR::NodeState::failRequestLocked(PendingBatchReservation &reserva
     return failRequestsLocked(reservation, {requestId}, batchReleased);
 }
 
-bool MasterStateR::NodeState::failRequestsLocked(
-    PendingBatchReservation &reservation, const std::vector<uint64_t> &requestIds,
-    bool &batchReleased)
+bool MasterStateR::NodeState::failRequestsLocked(PendingBatchReservation &reservation,
+                                                 const std::vector<uint64_t> &requestIds,
+                                                 bool &batchReleased)
 {
     std::vector<size_t> indexes;
     indexes.reserve(requestIds.size());
@@ -978,7 +1227,8 @@ bool MasterStateR::NodeState::failRequestIndexesLocked(
     });
     reservation.batch = std::move(candidate);
     for (auto index : requestIndexes) {
-        reservation.dispatchWaiters.erase(reservation.batch._requests[index].request.requestId);
+        reservation.dispatchWaiters.erase(
+            reservation.batch._requests[index].request.requestId);
     }
     if (!transition.resolved) {
         return true;
@@ -1093,51 +1343,63 @@ MasterStateR::ReservationStats MasterStateR::NodeState::getReservationStats() co
     return stats;
 }
 
-size_t MasterStateR::NodeState::getCachedBlockCount() const
+size_t MasterStateR::NodeState::getCachedBlockCount(
+    NaviSchedCacheKeyType cacheKeyType) const
 {
-    autil::ScopedReadLock lock(_cacheLock);
-    return _cachedBlockHashes.size();
+    if (!validCacheKeyType(cacheKeyType)) {
+        return 0;
+    }
+    const auto &mirror = cacheForType(cacheKeyType);
+    autil::ScopedReadLock lock(mirror._cacheLock);
+    return mirror._cachedBlockHashes.size();
 }
 
-MasterStateR::CacheSyncStats MasterStateR::NodeState::getCacheSyncStats() const
+MasterStateR::CacheSyncStats MasterStateR::NodeState::getCacheSyncStats(
+    NaviSchedCacheKeyType cacheKeyType) const
 {
-    const auto pendingCacheStats = _pendingCacheR->getStats(_info.agentIdHash);
-    autil::ScopedReadLock lock(_cacheLock);
-    return {_cacheRevision,
-            _agentCachedBlockCount,
-            _agentCacheHashChecksum,
-            _agentFullReadyBlockCount,
-            _agentFullReadyHashChecksum,
-            _agentTailReadyBlockCount,
-            _agentTailReadyHashChecksum,
-            _cachedBlockHashes.size(),
-            _masterCacheHashChecksum,
-            _fullReadyBlockHashes.size(),
-            _masterFullReadyHashChecksum,
-            _tailReadyBlockHashes.size(),
-            _masterTailReadyHashChecksum,
-            _rtpCachedBlockCount,
-            _cacheRevisionGapCount,
-            _cacheStateMismatchCount,
-            _rtpCacheMirrorSampleCount,
-            _rtpCacheMirrorMismatchCount,
-            _cacheStateReady.load(std::memory_order_relaxed),
+    if (!validCacheKeyType(cacheKeyType)) {
+        return {};
+    }
+    const auto &mirror = cacheForType(cacheKeyType);
+    const auto pendingCacheStats =
+        _pendingCacheR->getStats(_info.agentIdHash, cacheKeyType);
+    autil::ScopedReadLock lock(mirror._cacheLock);
+    return {mirror._cacheRevision,
+            mirror._agentCachedBlockCount,
+            mirror._agentCacheHashChecksum,
+            mirror._agentFullReadyBlockCount,
+            mirror._agentFullReadyHashChecksum,
+            mirror._agentTailReadyBlockCount,
+            mirror._agentTailReadyHashChecksum,
+            mirror._cachedBlockHashes.size(),
+            mirror._masterCacheHashChecksum,
+            mirror._fullReadyBlockHashes.size(),
+            mirror._masterFullReadyHashChecksum,
+            mirror._tailReadyBlockHashes.size(),
+            mirror._masterTailReadyHashChecksum,
+            mirror._rtpCachedBlockCount,
+            mirror._cacheRevisionGapCount,
+            mirror._cacheStateMismatchCount,
+            mirror._rtpCacheMirrorSampleCount,
+            mirror._rtpCacheMirrorMismatchCount,
+            mirror._cacheStateReady.load(std::memory_order_relaxed),
             pendingCacheStats.batchCount,
             pendingCacheStats.uniqueBlockCount,
             pendingCacheStats.uniqueTailReadyBlockCount,
-            _cachePolicy.blockSize,
-            _cachePolicy.linearStep,
-            _cachePolicyReady.load(std::memory_order_relaxed),
-            _hybridTailRequired,
-            _cachePolicyMismatchCount.load(std::memory_order_relaxed),
+            mirror._cachePolicy.blockSize,
+            mirror._cachePolicy.linearStep,
+            mirror._cachePolicyReady.load(std::memory_order_relaxed),
+            mirror._hybridTailRequired,
+            mirror._cachePolicyMismatchCount.load(std::memory_order_relaxed),
             pendingCacheStats.scheduledBatchCount,
             pendingCacheStats.agentBatchCount,
             pendingCacheStats.agentRevision,
             pendingCacheStats.agentChecksum,
             pendingCacheStats.agentRevisionGapCount,
             pendingCacheStats.agentStateMismatchCount,
-            _pendingCacheResyncTriggerCount.load(std::memory_order_relaxed),
-            pendingCacheStats.agentSnapshotReady};
+            mirror._pendingCacheResyncTriggerCount.load(std::memory_order_relaxed),
+            pendingCacheStats.agentSnapshotReady,
+            mirror._cachePolicy.fullAttentionQueryDropTokens};
 }
 
 int64_t MasterStateR::NodeState::getMatchedBlockCount(
@@ -1156,11 +1418,142 @@ int64_t MasterStateR::NodeState::getMatchedBlockCountForRequest(
         _cachePolicyMismatchCount.fetch_add(1, std::memory_order_relaxed);
         return 0;
     }
-    return _pendingCacheR->getMatchedBlockCount(
+    const auto local = _pendingCacheR->getMatchedBlockCount(
         _info.agentIdHash, BlockHashUtil::get(request.blockHashes), _cachedBlockHashes,
         _fullReadyBlockHashes, _tailReadyBlockHashes, _hybridTailRequired,
         BlockHashUtil::getMatchableBlockCount(request.promptTokenCount, request.blockSize,
-                                              request.blockHashes));
+                                              request.blockHashes),
+        _cachePolicy.fullAttentionQueryDropTokens / _cachePolicy.blockSize);
+    return local + matchExternalSuffix(BlockHashUtil::get(request.blockHashes),
+                                       request.promptTokenCount, request.blockSize,
+                                       local);
+}
+
+bool MasterStateR::NodeState::getExecutionCacheInputs(
+    const NaviSchedScheduleRequest &request, int64_t &computedTokens,
+    int64_t &sharedPrefixBoundary) const
+{
+    computedTokens = 0;
+    sharedPrefixBoundary = 0;
+    std::vector<NaviSchedScheduleItem> requests(1);
+    requests.front().request = request;
+    std::vector<TPUPrefillRequestInput> inputs;
+    if (!getExecutionCacheInputs(requests, inputs)) {
+        return false;
+    }
+    computedTokens = inputs.front().computedTokens;
+    sharedPrefixBoundary = inputs.front().sharedPrefixBoundary;
+    return true;
+}
+
+bool MasterStateR::NodeState::getExecutionCacheInputs(
+    const std::vector<NaviSchedScheduleItem> &requests,
+    std::vector<TPUPrefillRequestInput> &inputs, int64_t *externalSuffixBlockCounts,
+    TPUPrefillCacheObservationBatch *observation) const
+{
+    if (observation) {
+        observation->pool.reset();
+        observation->fullPrefixBlocksBeforeQueryDrop.clear();
+    }
+    if (requests.empty()) {
+        inputs.clear();
+        return true;
+    }
+    if (requests.size() > std::numeric_limits<size_t>::max() / 2) {
+        inputs.clear();
+        return false;
+    }
+    const auto publishedPolicy =
+        std::atomic_load_explicit(&_publishedSnapshot, std::memory_order_acquire);
+    const auto count = requests.size();
+    std::unique_ptr<int64_t[]> counts(new int64_t[count * 2]);
+    auto *boundaries = counts.get() + count;
+    TPUPrefillCacheObservation poolObservation;
+    if (observation) {
+        observation->fullPrefixBlocksBeforeQueryDrop.resize(count);
+    }
+    std::vector<int64_t> ownedExternal(count, 0);
+    auto *external =
+        externalSuffixBlockCounts ? externalSuffixBlockCounts : ownedExternal.data();
+    if (!matchCacheBatch(requests, counts.get(), boundaries, external,
+                         observation ? &poolObservation : nullptr,
+                         observation ? observation->fullPrefixBlocksBeforeQueryDrop.data()
+                                     : nullptr)) {
+        if (observation) {
+            observation->fullPrefixBlocksBeforeQueryDrop.clear();
+        }
+        inputs.clear();
+        return false;
+    }
+    inputs.resize(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (requests[i].request.promptTokenCount <= 0) {
+            if (observation) {
+                observation->fullPrefixBlocksBeforeQueryDrop.clear();
+            }
+            inputs.clear();
+            return false;
+        }
+        inputs[i] = {requests[i].request.promptTokenCount,
+                     counts[i] * requests[i].request.blockSize, boundaries[i],
+                     external[i] * requests[i].request.blockSize};
+        const auto position = requests[i].request.explicitCacheCheckpointPosition;
+        if (position < 0 || position > inputs[i].promptTokens) {
+            inputs.clear();
+            return false;
+        }
+        if (position > 0) {
+            if (!publishedPolicy || !publishedPolicy->prefillExecutionPolicy ||
+                publishedPolicy->prefillExecutionPolicy->schedulerBlockSize <= 0) {
+                inputs.clear();
+                return false;
+            }
+            const auto blockSize =
+                publishedPolicy->prefillExecutionPolicy->schedulerBlockSize;
+            const auto boundary = position / blockSize * blockSize;
+            // The runtime ignores sub-block directives; they do not erase a cache
+            // junction.
+            if (boundary > 0) {
+                inputs[i].sharedPrefixBoundary = boundary;
+            }
+        }
+    }
+    if (observation) {
+        observation->pool = poolObservation;
+    }
+    return true;
+}
+
+int64_t MasterStateR::NodeState::matchExternalSuffix(
+    const NaviSchedBlockHashes &blockHashes, int64_t promptTokens, int64_t blockSize,
+    int64_t localBlocks, int64_t excludedScheduleBatchId,
+    MasterPendingCacheR::MatchBreakdown *details) const
+{
+    const auto &external = _v6dCacheState;
+    autil::ScopedReadLock lock(external._cacheLock);
+    const auto &policy = external._cachePolicy;
+    if (!external._cachePolicyReady.load(std::memory_order_relaxed) ||
+        !policy.valid(NaviSchedCacheKeyType::V6D) || blockSize != policy.blockSize ||
+        localBlocks < 0 || localBlocks % policy.linearStep != 0) {
+        return 0;
+    }
+    const auto limit = static_cast<size_t>(
+        std::max<int64_t>(0, promptTokens - policy.fullAttentionQueryDropTokens) /
+        blockSize);
+    if (details) {
+        *details = _pendingCacheR->getMatchBreakdown(
+            _info.agentIdHash, blockHashes, external._cachedBlockHashes,
+            external._fullReadyBlockHashes, external._tailReadyBlockHashes,
+            external._hybridTailRequired, limit, 0, NaviSchedCacheKeyType::V6D,
+            static_cast<size_t>(localBlocks), static_cast<size_t>(policy.linearStep));
+        return details->matchedBlockCount;
+    }
+    return _pendingCacheR->getMatchedBlockCountExcludingSchedule(
+        _info.agentIdHash, excludedScheduleBatchId, blockHashes,
+        external._cachedBlockHashes, external._fullReadyBlockHashes,
+        external._tailReadyBlockHashes, external._hybridTailRequired, limit, 0,
+        NaviSchedCacheKeyType::V6D, static_cast<size_t>(localBlocks),
+        static_cast<size_t>(policy.linearStep));
 }
 
 int64_t MasterStateR::NodeState::matchBlockCount(
@@ -1168,36 +1561,87 @@ int64_t MasterStateR::NodeState::matchBlockCount(
 {
     return _pendingCacheR->getMatchedBlockCount(
         _info.agentIdHash, blockHashes, _cachedBlockHashes, _fullReadyBlockHashes,
-        _tailReadyBlockHashes, _hybridTailRequired);
+        _tailReadyBlockHashes, _hybridTailRequired, std::numeric_limits<size_t>::max(),
+        _cachePolicyReady.load(std::memory_order_relaxed)
+            ? _cachePolicy.fullAttentionQueryDropTokens / _cachePolicy.blockSize
+            : 0);
 }
 
 void MasterStateR::NodeState::getMatchedBlockCounts(
-    const std::vector<NaviSchedScheduleItem> &requests, int64_t *matchedBlockCounts) const
+    const std::vector<NaviSchedScheduleItem> &requests, int64_t *matchedBlockCounts,
+    int64_t *externalSuffixBlockCounts) const
 {
-    getMatchedBlockCounts(requests, matchedBlockCounts, {});
+    matchCacheBatch(requests, matchedBlockCounts, nullptr, externalSuffixBlockCounts);
 }
 
 void MasterStateR::NodeState::getMatchedBlockCounts(
     const std::vector<NaviSchedScheduleItem> &requests, int64_t *matchedBlockCounts,
     const std::vector<size_t> &commonPrefixes) const
 {
+    matchCacheBatch(requests, matchedBlockCounts, nullptr, nullptr, nullptr, nullptr,
+                    &commonPrefixes);
+}
+
+bool MasterStateR::NodeState::getReadyExternalCacheKeyStates(
+    const NaviSchedBlockHashes &keys, std::vector<uint8_t> &states,
+    NaviSchedCachePolicy &policy) const
+{
+    const auto &external = _v6dCacheState;
+    autil::ScopedReadLock lock(external._cacheLock);
+    if (!external._cachePolicyReady.load(std::memory_order_relaxed) ||
+        !external._cacheStateReady.load(std::memory_order_relaxed) ||
+        !external._cachePolicy.valid(NaviSchedCacheKeyType::V6D)) {
+        return false;
+    }
+    policy = external._cachePolicy;
+    const auto &full = external._hybridTailRequired ? external._fullReadyBlockHashes
+                                                    : external._cachedBlockHashes;
+    states.resize(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) {
+        states[i] = (full.count(keys[i]) ? 1 : 0) |
+                    (external._tailReadyBlockHashes.count(keys[i]) ? 2 : 0);
+    }
+    return true;
+}
+
+bool MasterStateR::NodeState::getReadyExternalCacheCounts(
+    const std::vector<NaviSchedScheduleItem> &requests, std::vector<int64_t> &counts,
+    NaviSchedCachePolicy &policy) const
+{
+    const auto &external = _v6dCacheState;
+    autil::ScopedReadLock lock(external._cacheLock);
+    if (!external._cachePolicyReady.load(std::memory_order_relaxed) ||
+        !external._cacheStateReady.load(std::memory_order_relaxed) ||
+        !external._cachePolicy.valid(NaviSchedCacheKeyType::V6D)) {
+        return false;
+    }
+    policy = external._cachePolicy;
+    counts.resize(requests.size());
+    std::vector<size_t> limits(requests.size());
+    for (size_t i = 0; i < requests.size(); ++i) {
+        limits[i] = std::max<int64_t>(0, requests[i].request.promptTokenCount -
+                                             policy.fullAttentionQueryDropTokens) /
+                    policy.blockSize;
+    }
+    // Peer reads may use published READY objects only, never planned publications.
+    return _pendingCacheR->getMatchedBlockCounts(
+               _info.agentIdHash, requests, policy.blockSize, external._cachedBlockHashes,
+               external._fullReadyBlockHashes, external._tailReadyBlockHashes,
+               external._hybridTailRequired, counts.data(), 0, NaviSchedCacheKeyType::V6D,
+               nullptr, nullptr, nullptr, limits.data(), policy.linearStep, false) == 0;
+}
+
+bool MasterStateR::NodeState::matchCacheBatch(
+    const std::vector<NaviSchedScheduleItem> &requests, int64_t *matchedBlockCounts,
+    int64_t *sharedPrefixBoundaries, int64_t *externalSuffixBlockCounts,
+    TPUPrefillCacheObservation *observation, int64_t *fullPrefixBlockCounts,
+    const std::vector<size_t> *commonPrefixes) const
+{
     const auto beginUs = autil::TimeUtility::monotonicTimeUs();
-    int64_t cacheAcquiredUs = 0;
+    int64_t cacheAcquiredUs = beginUs;
     size_t physicalBlocks = 0;
     MasterPendingCacheR::BatchMatchTiming timing;
-    {
-        autil::ScopedReadLock lock(_cacheLock);
-        cacheAcquiredUs = autil::TimeUtility::monotonicTimeUs();
-        physicalBlocks = _cachedBlockHashes.size();
-        const auto mismatchCount = _pendingCacheR->getMatchedBlockCounts(
-            _info.agentIdHash, requests,
-            _cachePolicyReady.load(std::memory_order_relaxed) ? _cachePolicy.blockSize : -1,
-            _cachedBlockHashes, _fullReadyBlockHashes, _tailReadyBlockHashes,
-            _hybridTailRequired, matchedBlockCounts, &timing, &commonPrefixes);
-        if (mismatchCount > 0) {
-            _cachePolicyMismatchCount.fetch_add(mismatchCount, std::memory_order_relaxed);
-        }
-    }
+    autil::ScopeGuard recordMatchTiming([&]() {
     const auto endUs = autil::TimeUtility::monotonicTimeUs();
     if (endUs - beginUs >= 10'000) {
         // Emit after releasing both cache locks, at most once per second process-wide.
@@ -1205,98 +1649,222 @@ void MasterStateR::NodeState::getMatchedBlockCounts(
         auto previousLogUs = lastLogUs.load(std::memory_order_relaxed);
         if (endUs - previousLogUs >= 1'000'000 &&
             lastLogUs.compare_exchange_strong(previousLogUs, endUs,
-                                             std::memory_order_relaxed)) {
-            const auto info = std::atomic_load_explicit(&_infoSnapshot,
-                                                        std::memory_order_acquire);
+                                              std::memory_order_relaxed)) {
+            const auto info =
+                std::atomic_load_explicit(&_infoSnapshot, std::memory_order_acquire);
             NAVI_KERNEL_LOG(
                 INFO,
                 "[navi-master-kv-match-timing] agent=%s requests=%lu "
                 "first_request_id=%lu total_us=%ld physical_lock_wait_us=%ld "
                 "physical_lock_hold_us=%ld pending_node_lookup_us=%ld "
                 "pending_lock_wait_us=%ld match_us=%ld physical_blocks=%lu "
-                "scheduled_batches=%lu agent_batches=%lu scheduled_blocks=%lu agent_blocks=%lu "
-                "prefix_comparisons=%lu reused_full_prefix_blocks=%lu full_prefix_probes=%lu tail_probes=%lu",
+                "scheduled_batches=%lu agent_batches=%lu scheduled_blocks=%lu "
+                "agent_blocks=%lu "
+                "prefix_comparisons=%lu reused_full_prefix_blocks=%lu "
+                "full_prefix_probes=%lu tail_probes=%lu",
                 info ? info->agentId.c_str() : "unknown", requests.size(),
                 requests.empty() ? uint64_t(0) : requests.front().request.requestId,
                 endUs - beginUs, cacheAcquiredUs - beginUs, endUs - cacheAcquiredUs,
                 timing.nodeLookupUs, timing.lockWaitUs, timing.matchUs, physicalBlocks,
-                timing.scheduledBatches, timing.agentBatches,
-                timing.scheduledBlocks, timing.agentBlocks,
-                timing.prefixComparisonCount, timing.reusedFullPrefixBlockCount,
-                timing.fullPrefixProbeCount, timing.tailProbeCount);
+                timing.scheduledBatches, timing.agentBatches, timing.scheduledBlocks,
+                timing.agentBlocks, timing.prefixComparisonCount,
+                timing.reusedFullPrefixBlockCount, timing.fullPrefixProbeCount,
+                timing.tailProbeCount);
         }
     }
+    });
+    if (externalSuffixBlockCounts) {
+        std::fill(externalSuffixBlockCounts, externalSuffixBlockCounts + requests.size(),
+                  0);
+    }
+    autil::ScopedReadLock lock(_cacheLock);
+    cacheAcquiredUs = autil::TimeUtility::monotonicTimeUs();
+    physicalBlocks = _cachedBlockHashes.size();
+    const bool ready = _cachePolicyReady.load(std::memory_order_relaxed);
+    if (observation) {
+        *observation = {_cacheRevision,
+                        _cacheStateReady.load(std::memory_order_relaxed),
+                        static_cast<uint64_t>(_cachedBlockHashes.size()),
+                        static_cast<uint64_t>(_fullReadyBlockHashes.size()),
+                        static_cast<uint64_t>(_tailReadyBlockHashes.size()),
+                        _masterCacheHashChecksum,
+                        _masterFullReadyHashChecksum,
+                        _masterTailReadyHashChecksum};
+    }
+    // Geometry adds an output to the existing batch observation, not another read.
+    if (sharedPrefixBoundaries) {
+        if (!ready) {
+            return false;
+        }
+    }
+    const auto count = requests.size();
+    const auto mismatchCount = _pendingCacheR->getMatchedBlockCounts(
+        _info.agentIdHash, requests, ready ? _cachePolicy.blockSize : -1,
+        _cachedBlockHashes, _fullReadyBlockHashes, _tailReadyBlockHashes,
+        _hybridTailRequired, matchedBlockCounts,
+        ready ? _cachePolicy.fullAttentionQueryDropTokens / _cachePolicy.blockSize : 0,
+        NaviSchedCacheKeyType::BLOCK_POOL, fullPrefixBlockCounts,
+        _hybridTailRequired ? sharedPrefixBoundaries : nullptr,
+        nullptr, nullptr, 1, true, &timing, commonPrefixes);
+    if (mismatchCount > 0) {
+        if (sharedPrefixBoundaries) {
+            return false;
+        }
+        _cachePolicyMismatchCount.fetch_add(mismatchCount, std::memory_order_relaxed);
+    }
+    if (!matchedBlockCounts || requests.empty()) {
+        return ready && mismatchCount == 0;
+    }
+    if (sharedPrefixBoundaries && !_hybridTailRequired) {
+        std::fill(sharedPrefixBoundaries, sharedPrefixBoundaries + count, 0);
+    } else if (sharedPrefixBoundaries) {
+        for (size_t i = 0; i < count; ++i) {
+            const auto &request = requests[i].request;
+            const auto full = sharedPrefixBoundaries[i];
+            // Marconi's boundary is local; external hits do not change it.
+            sharedPrefixBoundaries[i] =
+                full > matchedBlockCounts[i] ? full * request.blockSize : 0;
+        }
+    }
+    const auto &external = _v6dCacheState;
+    {
+        autil::ScopedReadLock externalLock(external._cacheLock);
+        const auto &policy = external._cachePolicy;
+        if (external._cachePolicyReady.load(std::memory_order_relaxed) &&
+            policy.valid(NaviSchedCacheKeyType::V6D) &&
+            policy.blockSize == _cachePolicy.blockSize) {
+            std::vector<size_t> limits(count);
+            std::vector<int64_t> suffixStorage;
+            if (!externalSuffixBlockCounts) {
+                suffixStorage.resize(count, 0);
+            }
+            auto *suffix = externalSuffixBlockCounts ? externalSuffixBlockCounts
+                                                     : suffixStorage.data();
+            for (size_t i = 0; i < count; ++i) {
+                limits[i] = static_cast<size_t>(
+                    std::max<int64_t>(0, requests[i].request.promptTokenCount -
+                                             policy.fullAttentionQueryDropTokens) /
+                    policy.blockSize);
+            }
+            _pendingCacheR->getMatchedBlockCounts(
+                _info.agentIdHash, requests, policy.blockSize,
+                external._cachedBlockHashes, external._fullReadyBlockHashes,
+                external._tailReadyBlockHashes, external._hybridTailRequired, suffix, 0,
+                NaviSchedCacheKeyType::V6D, nullptr, nullptr, matchedBlockCounts,
+                limits.data(), static_cast<size_t>(policy.linearStep));
+            for (size_t i = 0; i < count; ++i) {
+                matchedBlockCounts[i] += suffix[i];
+            }
+        }
+    }
+    // Both matchers clip to the prompt, and the external suffix starts at the
+    // local hit. Their sum is already bounded without another request scan.
+    return ready && mismatchCount == 0;
 }
 
-bool MasterStateR::NodeState::getCachePolicy(NaviSchedCachePolicy &policy) const
+bool MasterStateR::NodeState::getCachePolicy(NaviSchedCachePolicy &policy,
+                                             NaviSchedCacheKeyType cacheKeyType) const
 {
-    autil::ScopedReadLock lock(_cacheLock);
-    if (!_cachePolicyReady.load(std::memory_order_relaxed)) {
+    if (!validCacheKeyType(cacheKeyType)) {
         return false;
     }
-    policy = _cachePolicy;
+    const auto &mirror = cacheForType(cacheKeyType);
+    autil::ScopedReadLock lock(mirror._cacheLock);
+    if (!mirror._cachePolicyReady.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    policy = mirror._cachePolicy;
     return true;
 }
 
 MasterStateR::CacheMatchBreakdown MasterStateR::NodeState::getCacheMatchBreakdown(
-    const NaviSchedScheduleRequest &request) const
+    const NaviSchedScheduleRequest &request, NaviSchedCacheKeyType cacheKeyType) const
 {
+    if (!validCacheKeyType(cacheKeyType)) {
+        return {};
+    }
+    const auto &mirror = cacheForType(cacheKeyType);
     CacheMatchBreakdown breakdown;
-    autil::ScopedReadLock lock(_cacheLock);
-    if (!_cachePolicyReady.load(std::memory_order_relaxed) ||
-        request.blockSize != _cachePolicy.blockSize) {
+    autil::ScopedReadLock lock(mirror._cacheLock);
+    if (!mirror._cachePolicyReady.load(std::memory_order_relaxed) ||
+        request.blockSize != mirror._cachePolicy.blockSize) {
         return breakdown;
     }
+    const bool externalType = cacheKeyType == NaviSchedCacheKeyType::V6D;
+    const auto queryLimit =
+        externalType
+            ? static_cast<size_t>(
+                  std::max<int64_t>(
+                      0, request.promptTokenCount -
+                             mirror._cachePolicy.fullAttentionQueryDropTokens) /
+                  request.blockSize)
+            : BlockHashUtil::getMatchableBlockCount(
+                  request.promptTokenCount, request.blockSize, request.blockHashes);
     const auto matchBreakdown = _pendingCacheR->getMatchBreakdown(
-        _info.agentIdHash, BlockHashUtil::get(request.blockHashes), _cachedBlockHashes,
-        _fullReadyBlockHashes, _tailReadyBlockHashes, _hybridTailRequired,
-        BlockHashUtil::getMatchableBlockCount(request.promptTokenCount, request.blockSize,
-                                              request.blockHashes));
-    const auto pendingStats = _pendingCacheR->getStats(_info.agentIdHash);
+        _info.agentIdHash, BlockHashUtil::get(request.blockHashes),
+        mirror._cachedBlockHashes, mirror._fullReadyBlockHashes,
+        mirror._tailReadyBlockHashes, mirror._hybridTailRequired, queryLimit,
+        externalType ? 0
+                     : mirror._cachePolicy.fullAttentionQueryDropTokens /
+                           mirror._cachePolicy.blockSize,
+        cacheKeyType, 0, externalType ? mirror._cachePolicy.linearStep : 1);
+    const auto pendingStats = _pendingCacheR->getStats(_info.agentIdHash, cacheKeyType);
     breakdown.staticMatchedBlockCount = matchBreakdown.staticMatchedBlockCount;
     breakdown.matchedBlockCount = matchBreakdown.matchedBlockCount;
     breakdown.firstPendingBlockSourceBatchId =
         matchBreakdown.firstPendingBlockSourceBatchId;
     breakdown.pendingTailSourceBatchId = matchBreakdown.pendingTailSourceBatchId;
-    breakdown.cacheRevision = _cacheRevision;
+    breakdown.cacheRevision = mirror._cacheRevision;
     breakdown.pendingBatchCount = pendingStats.batchCount;
     breakdown.pendingBlockCount = pendingStats.uniqueBlockCount;
     breakdown.valid = true;
+    if (!externalType) {
+        const auto local = breakdown.matchedBlockCount;
+        MasterPendingCacheR::MatchBreakdown external;
+        breakdown.matchedBlockCount += matchExternalSuffix(
+            BlockHashUtil::get(request.blockHashes), request.promptTokenCount,
+            request.blockSize, local, 0, &external);
+        breakdown.staticMatchedBlockCount += external.staticMatchedBlockCount;
+        if (breakdown.firstPendingBlockSourceBatchId == 0) {
+            breakdown.firstPendingBlockSourceBatchId =
+                external.firstPendingBlockSourceBatchId;
+        }
+        if (breakdown.pendingTailSourceBatchId == 0) {
+            breakdown.pendingTailSourceBatchId = external.pendingTailSourceBatchId;
+        }
+    }
     return breakdown;
 }
 
 std::shared_ptr<const MasterStateR::LatencyInfo> MasterStateR::NodeState::getLatencyInfo()
     const
 {
-    auto slot = std::atomic_load_explicit(&_latencyModelSlot,
-                                          std::memory_order_acquire);
+    auto slot = std::atomic_load_explicit(&_latencyModelSlot, std::memory_order_acquire);
     return slot ? slot->getModel() : nullptr;
 }
 
 void MasterStateR::NodeState::setLatencyModelSlot(
     const MasterLatencyModelR::LiveModelSlotPtr &slot)
 {
-    std::atomic_store_explicit(&_latencyModelSlot, slot,
-                               std::memory_order_release);
+    std::atomic_store_explicit(&_latencyModelSlot, slot, std::memory_order_release);
     autil::ScopedWriteLock lock(_infoLock);
     rebuildInfoSnapshot();
 }
 
 void MasterStateR::NodeState::clearLatencyModelSlot()
 {
-    std::atomic_store_explicit(
-        &_latencyModelSlot,
-        MasterLatencyModelR::LiveModelSlotPtr(),
-        std::memory_order_release);
+    std::atomic_store_explicit(&_latencyModelSlot,
+                               MasterLatencyModelR::LiveModelSlotPtr(),
+                               std::memory_order_release);
     autil::ScopedWriteLock lock(_infoLock);
     rebuildInfoSnapshot();
 }
 
-LatencyResidualModel::RuntimeConfig
-MasterStateR::NodeState::getResidualRuntimeConfig() const
+LatencyResidualModel::RuntimeConfig MasterStateR::NodeState::getResidualRuntimeConfig()
+    const
 {
-    const auto config = std::atomic_load_explicit(
-        &_residualRuntimeConfig, std::memory_order_acquire);
+    const auto config =
+        std::atomic_load_explicit(&_residualRuntimeConfig, std::memory_order_acquire);
     return config ? *config : LatencyResidualModel::RuntimeConfig();
 }
 
@@ -1676,10 +2244,9 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
     std::string acknowledgedSchedulerConfigJson;
     std::string schedulerConfigError;
     const auto hasSchedulerConfig = update->schedulerConfigGeneration > 0;
-    if (hasSchedulerConfig &&
-        !AgentSchedulerConfigR::parse(update->schedulerConfigJson,
-                                      acknowledgedSchedulerConfig,
-                                      schedulerConfigError)) {
+    if (hasSchedulerConfig && !AgentSchedulerConfigR::parse(update->schedulerConfigJson,
+                                                            acknowledgedSchedulerConfig,
+                                                            schedulerConfigError)) {
         NAVI_KERNEL_LOG(ERROR,
                         "reject invalid Agent scheduler config ACK, agentId [%s], "
                         "generation [%lu], error [%s]",
@@ -1690,8 +2257,7 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
     if (hasSchedulerConfig) {
         acknowledgedSchedulerConfigJson =
             AgentSchedulerConfigR::toJson(acknowledgedSchedulerConfig);
-        if (AgentSchedulerConfigR::hashJson(
-                acknowledgedSchedulerConfigJson) !=
+        if (AgentSchedulerConfigR::hashJson(acknowledgedSchedulerConfigJson) !=
             update->schedulerConfigHash) {
             NAVI_KERNEL_LOG(ERROR,
                             "reject Agent scheduler config ACK hash mismatch, "
@@ -1701,11 +2267,9 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
             return false;
         }
     }
-    const auto latencyEvent =
-        NaviSchedAgentEvent::AGENT_HANDSHAKE == event ||
-        NaviSchedAgentEvent::LATENCY_MODEL_UPDATED == event;
-    const auto invalidLatencyModel =
-        latencyEvent && !validLatencyModel(update->latency);
+    const auto latencyEvent = NaviSchedAgentEvent::AGENT_HANDSHAKE == event ||
+                              NaviSchedAgentEvent::LATENCY_MODEL_UPDATED == event;
+    const auto invalidLatencyModel = latencyEvent && !validLatencyModel(update->latency);
     const auto pdSeparated = NaviSchedAgentEvent::AGENT_HANDSHAKE == event
                                  ? update->control->pdSeparated
                                  : infoSnapshot->pdSeparated;
@@ -1725,20 +2289,45 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
         return false;
     }
     MasterLatencyModelR::RecordResult localLatencyRecordResult;
-    auto &modelResult = latencyRecordResult ? *latencyRecordResult
-                                            : localLatencyRecordResult;
+    auto &modelResult =
+        latencyRecordResult ? *latencyRecordResult : localLatencyRecordResult;
     const auto sourceId = latencySourceId.empty() ? agentId : latencySourceId;
     const auto fingerprint = !update->latencyModelFingerprint.empty()
                                  ? update->latencyModelFingerprint
                                  : infoSnapshot->latencyModelFingerprint;
+    const auto geometryEnabled = update->control
+                                     ? update->control->executionGeometryEnabled
+                                     : infoSnapshot->executionGeometryEnabled;
+    const auto projectedGeometryEnabled =
+        update->control ? update->control->projectedExecutionGeometryEnabled
+                        : infoSnapshot->projectedExecutionGeometryEnabled;
+    const auto &prefillPolicy = update->control ? update->control->prefillExecutionPolicy
+                                                : infoSnapshot->prefillExecutionPolicy;
+    if (latencyEvent && update->latency &&
+        (NonLinearPrefillModelR::usesGeometryForVersion(update->latency->binaryVersion) !=
+             geometryEnabled ||
+         (NonLinearPrefillModelR::usesProjectedGeometryForVersion(
+             update->latency->binaryVersion)) != projectedGeometryEnabled)) {
+        NAVI_KERNEL_LOG(
+            ERROR, "reject Agent/Master execution geometry mode mismatch, agentId [%s]",
+            agentId.c_str());
+        return false;
+    }
+    if (latencyEvent && update->latency && geometryEnabled &&
+        (!pdSeparated || !TPUPrefillExecutionPolicy::validate(prefillPolicy))) {
+        NAVI_KERNEL_LOG(ERROR,
+                        "reject geometry latency model without valid typed runtime "
+                        "policy, agentId [%s]",
+                        agentId.c_str());
+        return false;
+    }
     const auto recordLatencyModel = [&]() {
         if (invalidLatencyModel) {
             if (update->latency) {
                 bool ignored = false;
-                _masterLatencyModelR->record(
-                    agentId, fingerprint, *update->latency, false,
-                    update->eventTimeUs, sourceId, &ignored, false, &modelResult,
-                    false);
+                _masterLatencyModelR->record(agentId, fingerprint, *update->latency,
+                                             false, update->eventTimeUs, sourceId,
+                                             &ignored, false, &modelResult, false);
                 if (auto slot =
                         _masterLatencyModelR->getLiveModelSlot(agentId, sourceId)) {
                     state->setLatencyModelSlot(slot);
@@ -1764,22 +2353,18 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
             return true;
         }
         const auto runtime = state->getRuntimeState();
-        const auto agentStartTimeUs =
-            NaviSchedAgentEvent::AGENT_HANDSHAKE == event
-                ? update->control->agentStartTimeUs
-                : runtime.agentStartTimeUs;
+        const auto agentStartTimeUs = NaviSchedAgentEvent::AGENT_HANDSHAKE == event
+                                          ? update->control->agentStartTimeUs
+                                          : runtime.agentStartTimeUs;
         const auto rampFinished = CostSchedulerColdStartStrategy::isRampFinished(
-            update->eventTimeUs, agentStartTimeUs,
-            update->latency->sessionSampleCount);
+            update->eventTimeUs, agentStartTimeUs, update->latency->sessionSampleCount);
         const auto agentTrusted = update->latencyModelTrusted;
         bool liveUpdateAccepted = false;
         _masterLatencyModelR->record(
-            agentId, fingerprint, *update->latency,
-            agentTrusted && rampFinished, update->eventTimeUs,
-            sourceId,
-            &liveUpdateAccepted,
-            update->version >= 2 && update->latencyModelWarmStarted,
-            &modelResult, rampFinished);
+            agentId, fingerprint, *update->latency, agentTrusted && rampFinished,
+            update->eventTimeUs, sourceId, &liveUpdateAccepted,
+            update->version >= 2 && update->latencyModelWarmStarted, &modelResult,
+            rampFinished);
         if (auto slot = _masterLatencyModelR->getLiveModelSlot(agentId, sourceId)) {
             state->setLatencyModelSlot(slot);
         }
@@ -1802,8 +2387,8 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                     : 0,
                 modelResult.model ? modelResult.model->binaryVersion : 0,
                 modelResult.model ? modelResult.model->parameters.size() : 0,
-                modelResult.consecutiveRejectedCount,
-                update->latency->modelRevision, static_cast<int>(agentTrusted));
+                modelResult.consecutiveRejectedCount, update->latency->modelRevision,
+                static_cast<int>(agentTrusted));
             return false;
         }
         if (!liveUpdateAccepted) {
@@ -1817,8 +2402,7 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                 MasterLatencyModelR::getRejectReasonName(modelResult.rejectReason),
                 modelResult.model ? modelResult.model->revision : 0,
                 modelResult.model
-                    ? static_cast<int>(
-                          modelResult.model->overloadPredictionTrusted)
+                    ? static_cast<int>(modelResult.model->overloadPredictionTrusted)
                     : 0,
                 update->latency->modelRevision,
                 static_cast<int>(agentTrusted && rampFinished),
@@ -1828,17 +2412,14 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
         return true;
     };
     const auto rejectInvalidLatencyModel =
-        NaviSchedAgentEvent::LATENCY_MODEL_UPDATED == event &&
-        invalidLatencyModel;
-    if ((NaviSchedAgentEvent::AGENT_HANDSHAKE == event ||
-         rejectInvalidLatencyModel) &&
+        NaviSchedAgentEvent::LATENCY_MODEL_UPDATED == event && invalidLatencyModel;
+    if ((NaviSchedAgentEvent::AGENT_HANDSHAKE == event || rejectInvalidLatencyModel) &&
         !recordLatencyModel()) {
         return false;
     }
     if (NaviSchedAgentEvent::LATENCY_MODEL_UPDATED == event && update->latency) {
         const auto activeSlot = _masterLatencyModelR->getLiveModelSlot(agentId);
-        const auto sourceSlot =
-            _masterLatencyModelR->getLiveModelSlot(agentId, sourceId);
+        const auto sourceSlot = _masterLatencyModelR->getLiveModelSlot(agentId, sourceId);
         if (activeSlot && !sourceSlot) {
             NAVI_KERNEL_LOG(
                 ERROR,
@@ -1851,6 +2432,10 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
     const auto &request = update->requestEvent;
     const auto &cache = update->cache;
     const auto &pendingCache = update->pendingCache;
+    auto &cacheState = state->cacheForType(cache ? cache->cacheKeyType
+                                                 : NaviSchedCacheKeyType::BLOCK_POOL);
+    auto &pendingCacheState = state->cacheForType(
+        pendingCache ? pendingCache->cacheKeyType : NaviSchedCacheKeyType::BLOCK_POOL);
     const auto &workload = update->workload;
     bool stateDiverged = false;
     bool cachePolicyInitialized = false;
@@ -1861,7 +2446,11 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                                      cache->hybridTailRequired >= 0;
         if (hasPolicyFields) {
             if (cache->blockSize <= 0 || cache->linearStep <= 0 ||
-                cache->hybridTailRequired < 0) {
+                cache->hybridTailRequired < 0 ||
+                update->fullAttentionQueryDropTokens < 0 ||
+                (cache->cacheKeyType == NaviSchedCacheKeyType::V6D
+                     ? update->fullAttentionQueryDropTokens > 1
+                     : update->fullAttentionQueryDropTokens % cache->blockSize != 0)) {
                 NAVI_KERNEL_LOG(ERROR,
                                 "reject incomplete agent cache policy, agentId [%s], "
                                 "blockSize [%ld], linearStep [%ld], "
@@ -1871,15 +2460,27 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                 return false;
             }
             incomingCachePolicy.emplace(NaviSchedCachePolicy{
-                cache->blockSize, cache->linearStep, cache->hybridTailRequired != 0});
+                cache->blockSize, cache->linearStep, cache->hybridTailRequired != 0,
+                update->mambaReplayStopShift, update->mambaRetentionInterval,
+                update->mambaAlign, update->fullAttentionQueryDropTokens});
             {
-                autil::ScopedReadLock cacheLock(state->_cacheLock);
-                if (state->_cachePolicyReady.load(std::memory_order_relaxed) &&
-                    (state->_cachePolicy.blockSize != incomingCachePolicy->blockSize ||
-                     state->_cachePolicy.linearStep != incomingCachePolicy->linearStep ||
-                     state->_cachePolicy.hybridTailRequired !=
-                         incomingCachePolicy->hybridTailRequired)) {
-                    conflictingCachePolicy = state->_cachePolicy;
+                autil::ScopedReadLock cacheLock(cacheState._cacheLock);
+                if (cacheState._cachePolicyReady.load(std::memory_order_relaxed) &&
+                    (cacheState._cachePolicy.blockSize !=
+                         incomingCachePolicy->blockSize ||
+                     cacheState._cachePolicy.linearStep !=
+                         incomingCachePolicy->linearStep ||
+                     cacheState._cachePolicy.hybridTailRequired !=
+                         incomingCachePolicy->hybridTailRequired ||
+                     cacheState._cachePolicy.mambaReplayStopShift !=
+                         incomingCachePolicy->mambaReplayStopShift ||
+                     cacheState._cachePolicy.mambaRetentionInterval !=
+                         incomingCachePolicy->mambaRetentionInterval ||
+                     cacheState._cachePolicy.mambaAlign !=
+                         incomingCachePolicy->mambaAlign ||
+                     cacheState._cachePolicy.fullAttentionQueryDropTokens !=
+                         incomingCachePolicy->fullAttentionQueryDropTokens)) {
+                    conflictingCachePolicy = cacheState._cachePolicy;
                 }
             }
             if (conflictingCachePolicy) {
@@ -1917,8 +2518,8 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                             agentId.c_str(), pendingCache->revision,
                             static_cast<int>(pendingCache->fullSnapshot));
         } else if (!pendingResult.applied) {
-            state->_pendingCacheResyncTriggerCount.fetch_add(1,
-                                                             std::memory_order_relaxed);
+            pendingCacheState._pendingCacheResyncTriggerCount.fetch_add(
+                1, std::memory_order_relaxed);
             if (pendingCacheResyncRequired) {
                 *pendingCacheResyncRequired = true;
             }
@@ -1958,7 +2559,8 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                 static_cast<int>(pendingResult.stats.agentSnapshotReady),
                 pendingResult.stats.agentRevisionGapCount,
                 pendingResult.stats.agentStateMismatchCount,
-                state->_pendingCacheResyncTriggerCount.load(std::memory_order_relaxed));
+                pendingCacheState._pendingCacheResyncTriggerCount.load(
+                    std::memory_order_relaxed));
         }
     }
     auto requestEvent = NaviSchedAgentEvent::REQUEST_RECEIVED == event ||
@@ -2062,7 +2664,8 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
             if (transition.changed) {
                 if (!state->refreshReservationPredictionLocked(candidate, false) ||
                     (transition.cacheChanged &&
-                     !state->updateReservationPendingCacheLocked(candidate, &transition))) {
+                     !state->updateReservationPendingCacheLocked(candidate,
+                                                                 &transition))) {
                     return false;
                 }
                 reservation->batch = std::move(candidate);
@@ -2178,7 +2781,8 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                 bool changed = false;
                 if (workload && workload->revision > runtime.workload.revision &&
                     runtime.unifiedLatencyPrediction) {
-                    if (!reservation.batch.markAcceptedWorkloadReported(requestId)) return false;
+                    if (!reservation.batch.markAcceptedWorkloadReported(requestId))
+                        return false;
                 }
                 return reservation.batch.markInflightReported(requestId, changed);
             }
@@ -2205,7 +2809,8 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
         NodeState::ReservationPtr previousReservationOwner;
         auto previousNextReservation = state->_pendingBatchReservations.end();
         if (reservationLocalBatch) {
-            auto existing = state->_reservationsById.find(reservationLocalBatch->scheduleBatchId);
+            auto existing =
+                state->_reservationsById.find(reservationLocalBatch->scheduleBatchId);
             if (existing != state->_reservationsById.end()) {
                 previousReservationOwner = existing->second;
                 previousReservation = *previousReservationOwner;
@@ -2260,6 +2865,7 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
             runtime.load.queueTotalPredictedLatencyMs =
                 request->queueTotalPredictedLatencyMs;
             runtime.load.queueDecayHeadRemainingMs = request->queueDecayHeadRemainingMs;
+            runtime.load.queueModel = request->queueModel;
             runtime.load.queueReportReceiveTimeUs = receiveTimeUs;
         }
         if (reservationStateValid && requestLocalBatch &&
@@ -2288,6 +2894,10 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
             runtime.workload.admittedBatch = NaviSchedLocalBatchInfo();
             runtime.workloadReportReceiveTimeUs = workload ? receiveTimeUs : 0;
             runtime.workloadStaleUpdateCount = 0;
+            if (runtime.agentStartTimeUs != update->control->agentStartTimeUs) {
+                runtime.peerCacheReadAvailable = false;
+                runtime.peerCacheReadRevision = 0;
+            }
             runtime.agentStartTimeUs = update->control->agentStartTimeUs;
         } else if (workload) {
             if (workload->admittedBatch.valid()) {
@@ -2315,10 +2925,26 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
         }
         if (reservationStateValid) {
             if (update->executionUtilization >= 0.0) {
-                state->_executionUtilization.store(update->executionUtilization, std::memory_order_relaxed);
+                state->_executionUtilization.store(update->executionUtilization,
+                                                   std::memory_order_relaxed);
             }
             if (update->executionBusyUtilization >= 0.0) {
-                state->_executionBusyUtilization.store(update->executionBusyUtilization, std::memory_order_relaxed);
+                state->_executionBusyUtilization.store(update->executionBusyUtilization,
+                                                       std::memory_order_relaxed);
+            }
+            if (update->peerCacheReadAgentStartTimeUs == runtime.agentStartTimeUs &&
+                runtime.agentStartTimeUs > 0 &&
+                update->peerCacheReadRevision > runtime.peerCacheReadRevision) {
+                const auto changed =
+                    runtime.peerCacheReadAvailable != update->peerCacheReadAvailable;
+                runtime.peerCacheReadAvailable = update->peerCacheReadAvailable;
+                runtime.peerCacheReadRevision = update->peerCacheReadRevision;
+                if (changed) {
+                    NAVI_KERNEL_LOG(
+                        INFO, "[navi-peer-cache-read] agent=%s available=%d revision=%lu",
+                        agentId.c_str(), int(runtime.peerCacheReadAvailable),
+                        runtime.peerCacheReadRevision);
+                }
             }
             runtime.lastEvent = event;
             runtime.lastEventTimeUs = update->eventTimeUs;
@@ -2334,11 +2960,13 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                     *current = *previousReservation;
                 } else {
                     *previousReservationOwner = *previousReservation;
-                    previousReservationOwner->position = state->_pendingBatchReservations.insert(
-                        previousNextReservation, previousReservationOwner);
+                    previousReservationOwner->position =
+                        state->_pendingBatchReservations.insert(previousNextReservation,
+                                                                previousReservationOwner);
                     previousReservationOwner->attached = true;
                     state->_reservationsById.emplace(
-                        previousReservationOwner->batch.getBatchId(), previousReservationOwner);
+                        previousReservationOwner->batch.getBatchId(),
+                        previousReservationOwner);
                 }
                 if (!state->updateReservationPendingCacheLocked(
                         previousReservation->batch)) {
@@ -2363,16 +2991,16 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
             staleInflightIncomingRevision, staleInflightCurrentRevision);
     }
     if (inflightSnapshotConflict) {
-        NAVI_KERNEL_LOG(
-            ERROR,
-            "reject inconsistent Agent inflight snapshot at same revision, "
-            "agentId [%s], eventType [%s], revision [%lu], "
-            "currentCount [%d], incomingCount [%d], "
-            "currentLatencySumMs [%.6f], incomingLatencySumMs [%.6f]",
-            agentId.c_str(), NaviSchedAgentEvent::getName(event).c_str(),
-            conflictingInflightRevision, conflictingInflightCurrentCount,
-            conflictingInflightIncomingCount, conflictingInflightCurrentLatencySumMs,
-            conflictingInflightIncomingLatencySumMs);
+        NAVI_KERNEL_LOG(ERROR,
+                        "reject inconsistent Agent inflight snapshot at same revision, "
+                        "agentId [%s], eventType [%s], revision [%lu], "
+                        "currentCount [%d], incomingCount [%d], "
+                        "currentLatencySumMs [%.6f], incomingLatencySumMs [%.6f]",
+                        agentId.c_str(), NaviSchedAgentEvent::getName(event).c_str(),
+                        conflictingInflightRevision, conflictingInflightCurrentCount,
+                        conflictingInflightIncomingCount,
+                        conflictingInflightCurrentLatencySumMs,
+                        conflictingInflightIncomingLatencySumMs);
     }
     if (reservationPendingCacheRestoreFailed) {
         NAVI_KERNEL_LOG(ERROR,
@@ -2429,12 +3057,10 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
             "latency_validation=%d agent_prediction_ms=%.9f "
             "backend_queue_ms=%.9f reservation_transition_valid=%d",
             update->eventTimeUs, receiveTimeUs, agentId.c_str(),
-            request->localBatch.scheduleBatchId,
-            request->localBatch.localBatchId, request->completedRequestCount,
-            request->abnormalBatchFinished ? 1 : 0, request->latencyMs,
-            request->latencyValidation ? 1 : 0,
-            request->agentPredictedExecutionLatencyMs,
-            request->backendQueueLatencyMs,
+            request->localBatch.scheduleBatchId, request->localBatch.localBatchId,
+            request->completedRequestCount, request->abnormalBatchFinished ? 1 : 0,
+            request->latencyMs, request->latencyValidation ? 1 : 0,
+            request->agentPredictedExecutionLatencyMs, request->backendQueueLatencyMs,
             reservationStateValid ? 1 : 0);
     }
     if (handshakePendingCleared) {
@@ -2466,18 +3092,20 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
             node.pdSeparated = update->control->pdSeparated;
             node.unifiedLatencyPrediction = update->control->unifiedLatencyPrediction;
             node.latencyModelFingerprint = update->latencyModelFingerprint;
+            node.executionGeometryEnabled = update->control->executionGeometryEnabled;
+            node.projectedExecutionGeometryEnabled =
+                update->control->projectedExecutionGeometryEnabled;
+            node.prefillExecutionPolicy = update->control->prefillExecutionPolicy;
+            node.peerCacheEnabled = update->control->peerCacheEnabled;
             rebuildInfo = true;
         } else if (NaviSchedAgentEvent::SCHEDULER_CONFIG_UPDATED == event) {
-            node.schedulerConfigGeneration =
-                update->schedulerConfigGeneration;
+            node.schedulerConfigGeneration = update->schedulerConfigGeneration;
             node.schedulerConfigHash = update->schedulerConfigHash;
             node.schedulerConfigJson = acknowledgedSchedulerConfigJson;
             rebuildInfo = true;
         }
-        if (NaviSchedAgentEvent::AGENT_HANDSHAKE == event &&
-            hasSchedulerConfig) {
-            node.schedulerConfigGeneration =
-                update->schedulerConfigGeneration;
+        if (NaviSchedAgentEvent::AGENT_HANDSHAKE == event && hasSchedulerConfig) {
+            node.schedulerConfigGeneration = update->schedulerConfigGeneration;
             node.schedulerConfigHash = update->schedulerConfigHash;
             node.schedulerConfigJson = acknowledgedSchedulerConfigJson;
             rebuildInfo = true;
@@ -2500,18 +3128,25 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
     if (incomingCachePolicy) {
         bool cachePolicyChangedConcurrently = false;
         {
-            autil::ScopedWriteLock cacheLock(state->_cacheLock);
+            autil::ScopedWriteLock cacheLock(cacheState._cacheLock);
             cachePolicyChangedConcurrently =
-                state->_cachePolicyReady.load(std::memory_order_relaxed) &&
-                (state->_cachePolicy.blockSize != incomingCachePolicy->blockSize ||
-                 state->_cachePolicy.linearStep != incomingCachePolicy->linearStep ||
-                 state->_cachePolicy.hybridTailRequired !=
-                     incomingCachePolicy->hybridTailRequired);
+                cacheState._cachePolicyReady.load(std::memory_order_relaxed) &&
+                (cacheState._cachePolicy.blockSize != incomingCachePolicy->blockSize ||
+                 cacheState._cachePolicy.linearStep != incomingCachePolicy->linearStep ||
+                 cacheState._cachePolicy.hybridTailRequired !=
+                     incomingCachePolicy->hybridTailRequired ||
+                 cacheState._cachePolicy.mambaReplayStopShift !=
+                     incomingCachePolicy->mambaReplayStopShift ||
+                 cacheState._cachePolicy.mambaRetentionInterval !=
+                     incomingCachePolicy->mambaRetentionInterval ||
+                 cacheState._cachePolicy.mambaAlign != incomingCachePolicy->mambaAlign ||
+                 cacheState._cachePolicy.fullAttentionQueryDropTokens !=
+                     incomingCachePolicy->fullAttentionQueryDropTokens);
             if (!cachePolicyChangedConcurrently &&
-                !state->_cachePolicyReady.load(std::memory_order_relaxed)) {
-                state->_cachePolicy = *incomingCachePolicy;
-                state->_cachePolicyReady.store(true, std::memory_order_release);
-                state->_hybridTailRequired = incomingCachePolicy->hybridTailRequired;
+                !cacheState._cachePolicyReady.load(std::memory_order_relaxed)) {
+                cacheState._cachePolicy = *incomingCachePolicy;
+                cacheState._cachePolicyReady.store(true, std::memory_order_release);
+                cacheState._hybridTailRequired = incomingCachePolicy->hybridTailRequired;
                 cachePolicyInitialized = true;
             }
         }
@@ -2526,9 +3161,14 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
     if (cachePolicyInitialized) {
         NAVI_KERNEL_LOG(INFO,
                         "effective agent cache policy, agentId [%s], blockSize [%ld], "
-                        "linearStep [%ld], hybridTailRequired [%d]",
+                        "linearStep [%ld], hybridTailRequired [%d], "
+                        "mambaAlign [%d], mambaRetentionInterval [%ld], "
+                        "mambaReplayStopShift [%d]",
                         agentId.c_str(), cache->blockSize, cache->linearStep,
-                        static_cast<int>(cache->hybridTailRequired));
+                        static_cast<int>(cache->hybridTailRequired),
+                        static_cast<int>(incomingCachePolicy->mambaAlign),
+                        incomingCachePolicy->mambaRetentionInterval,
+                        static_cast<int>(incomingCachePolicy->mambaReplayStopShift));
     }
     if (cache) {
         bool cacheStateMismatch = false;
@@ -2537,14 +3177,14 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
         bool rtpCacheMirrorMismatch = false;
         CacheSyncStats cacheSyncStats;
         {
-            autil::ScopedWriteLock cacheLock(state->_cacheLock);
+            autil::ScopedWriteLock cacheLock(cacheState._cacheLock);
             auto clearMirroredCache = [&]() {
-                state->_cachedBlockHashes.clear();
-                state->_fullReadyBlockHashes.clear();
-                state->_tailReadyBlockHashes.clear();
-                state->_masterCacheHashChecksum = 0;
-                state->_masterFullReadyHashChecksum = 0;
-                state->_masterTailReadyHashChecksum = 0;
+                cacheState._cachedBlockHashes.clear();
+                cacheState._fullReadyBlockHashes.clear();
+                cacheState._tailReadyBlockHashes.clear();
+                cacheState._masterCacheHashChecksum = 0;
+                cacheState._masterFullReadyHashChecksum = 0;
+                cacheState._masterTailReadyHashChecksum = 0;
             };
             auto hashesMatch = [](const NaviSchedBlockHashesConstPtr &hashes,
                                   const MasterPendingCacheR::PhysicalBlockSet &expected) {
@@ -2556,55 +3196,57 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                                    });
             };
             const bool cacheStateReady =
-                state->_cacheStateReady.load(std::memory_order_relaxed);
+                cacheState._cacheStateReady.load(std::memory_order_relaxed);
             staleCacheSnapshotIgnored = cache->fullSnapshot && cacheStateReady &&
-                                        cache->revision < state->_cacheRevision;
+                                        cache->revision < cacheState._cacheRevision;
             const bool sameRevisionStateMismatch =
                 cache->fullSnapshot && cacheStateReady &&
-                cache->revision == state->_cacheRevision &&
+                cache->revision == cacheState._cacheRevision &&
                 (!BlockHashUtil::get(cache->removedBlockHashes).empty() ||
                  !BlockHashUtil::get(cache->removedFullReadyBlockHashes).empty() ||
                  !BlockHashUtil::get(cache->removedTailReadyBlockHashes).empty() ||
                  cache->cachedBlockCount !=
-                     static_cast<int64_t>(state->_cachedBlockHashes.size()) ||
-                 cache->hashChecksum != state->_masterCacheHashChecksum ||
+                     static_cast<int64_t>(cacheState._cachedBlockHashes.size()) ||
+                 cache->hashChecksum != cacheState._masterCacheHashChecksum ||
                  cache->fullReadyBlockCount !=
-                     static_cast<int64_t>(state->_fullReadyBlockHashes.size()) ||
-                 cache->fullReadyHashChecksum != state->_masterFullReadyHashChecksum ||
+                     static_cast<int64_t>(cacheState._fullReadyBlockHashes.size()) ||
+                 cache->fullReadyHashChecksum !=
+                     cacheState._masterFullReadyHashChecksum ||
                  cache->tailReadyBlockCount !=
-                     static_cast<int64_t>(state->_tailReadyBlockHashes.size()) ||
-                 cache->tailReadyHashChecksum != state->_masterTailReadyHashChecksum ||
-                 !hashesMatch(cache->addedBlockHashes, state->_cachedBlockHashes) ||
+                     static_cast<int64_t>(cacheState._tailReadyBlockHashes.size()) ||
+                 cache->tailReadyHashChecksum !=
+                     cacheState._masterTailReadyHashChecksum ||
+                 !hashesMatch(cache->addedBlockHashes, cacheState._cachedBlockHashes) ||
                  !hashesMatch(cache->addedFullReadyBlockHashes,
-                              state->_fullReadyBlockHashes) ||
+                              cacheState._fullReadyBlockHashes) ||
                  !hashesMatch(cache->addedTailReadyBlockHashes,
-                              state->_tailReadyBlockHashes));
+                              cacheState._tailReadyBlockHashes));
             if (staleCacheSnapshotIgnored) {
             } else if (sameRevisionStateMismatch) {
                 cacheStateMismatch = true;
-                ++state->_cacheStateMismatchCount;
+                ++cacheState._cacheStateMismatchCount;
                 clearMirroredCache();
-                state->_cacheStateReady.store(false, std::memory_order_release);
+                cacheState._cacheStateReady.store(false, std::memory_order_release);
             } else if (cache->cachedBlockCount >= 0) {
                 if (cache->hybridTailRequired >= 0) {
-                    state->_hybridTailRequired = cache->hybridTailRequired != 0;
+                    cacheState._hybridTailRequired = cache->hybridTailRequired != 0;
                 }
-                state->_agentCachedBlockCount = cache->cachedBlockCount;
-                state->_agentCacheHashChecksum = cache->hashChecksum;
-                state->_agentFullReadyBlockCount = cache->fullReadyBlockCount;
-                state->_agentFullReadyHashChecksum = cache->fullReadyHashChecksum;
-                state->_agentTailReadyBlockCount = cache->tailReadyBlockCount;
-                state->_agentTailReadyHashChecksum = cache->tailReadyHashChecksum;
+                cacheState._agentCachedBlockCount = cache->cachedBlockCount;
+                cacheState._agentCacheHashChecksum = cache->hashChecksum;
+                cacheState._agentFullReadyBlockCount = cache->fullReadyBlockCount;
+                cacheState._agentFullReadyHashChecksum = cache->fullReadyHashChecksum;
+                cacheState._agentTailReadyBlockCount = cache->tailReadyBlockCount;
+                cacheState._agentTailReadyHashChecksum = cache->tailReadyHashChecksum;
                 const bool completeState =
                     cache->fullReadyBlockCount >= 0 && cache->tailReadyBlockCount >= 0;
                 cacheRevisionGap =
                     !cache->fullSnapshot &&
-                    (!state->_cacheStateReady.load(std::memory_order_relaxed) ||
-                     cache->revision != state->_cacheRevision + 1);
+                    (!cacheState._cacheStateReady.load(std::memory_order_relaxed) ||
+                     cache->revision != cacheState._cacheRevision + 1);
                 if (cacheRevisionGap) {
-                    ++state->_cacheRevisionGapCount;
+                    ++cacheState._cacheRevisionGapCount;
                     clearMirroredCache();
-                    state->_cacheStateReady.store(false, std::memory_order_release);
+                    cacheState._cacheStateReady.store(false, std::memory_order_release);
                 } else if (!completeState) {
                     cacheStateMismatch = true;
                 } else {
@@ -2612,89 +3254,93 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                         clearMirroredCache();
                     }
                     for (auto hash : BlockHashUtil::get(cache->removedBlockHashes)) {
-                        if (state->_cachedBlockHashes.erase(hash) > 0) {
-                            state->_masterCacheHashChecksum ^= hash;
+                        if (cacheState._cachedBlockHashes.erase(hash) > 0) {
+                            cacheState._masterCacheHashChecksum ^= hash;
                         }
                     }
                     for (auto hash : BlockHashUtil::get(cache->addedBlockHashes)) {
-                        if (state->_cachedBlockHashes.emplace(hash).second) {
-                            state->_masterCacheHashChecksum ^= hash;
+                        if (cacheState._cachedBlockHashes.emplace(hash).second) {
+                            cacheState._masterCacheHashChecksum ^= hash;
                         }
                     }
                     for (auto hash :
                          BlockHashUtil::get(cache->removedFullReadyBlockHashes)) {
-                        if (state->_fullReadyBlockHashes.erase(hash) > 0) {
-                            state->_masterFullReadyHashChecksum ^= hash;
+                        if (cacheState._fullReadyBlockHashes.erase(hash) > 0) {
+                            cacheState._masterFullReadyHashChecksum ^= hash;
                         }
                     }
                     for (auto hash :
                          BlockHashUtil::get(cache->addedFullReadyBlockHashes)) {
-                        if (state->_fullReadyBlockHashes.emplace(hash).second) {
-                            state->_masterFullReadyHashChecksum ^= hash;
+                        if (cacheState._fullReadyBlockHashes.emplace(hash).second) {
+                            cacheState._masterFullReadyHashChecksum ^= hash;
                         }
                     }
                     for (auto hash :
                          BlockHashUtil::get(cache->removedTailReadyBlockHashes)) {
-                        if (state->_tailReadyBlockHashes.erase(hash) > 0) {
-                            state->_masterTailReadyHashChecksum ^= hash;
+                        if (cacheState._tailReadyBlockHashes.erase(hash) > 0) {
+                            cacheState._masterTailReadyHashChecksum ^= hash;
                         }
                     }
                     for (auto hash :
                          BlockHashUtil::get(cache->addedTailReadyBlockHashes)) {
-                        if (state->_tailReadyBlockHashes.emplace(hash).second) {
-                            state->_masterTailReadyHashChecksum ^= hash;
+                        if (cacheState._tailReadyBlockHashes.emplace(hash).second) {
+                            cacheState._masterTailReadyHashChecksum ^= hash;
                         }
                     }
                     cacheStateMismatch =
                         cache->cachedBlockCount !=
-                            static_cast<int64_t>(state->_cachedBlockHashes.size()) ||
-                        cache->hashChecksum != state->_masterCacheHashChecksum ||
+                            static_cast<int64_t>(cacheState._cachedBlockHashes.size()) ||
+                        cache->hashChecksum != cacheState._masterCacheHashChecksum ||
                         cache->fullReadyBlockCount !=
-                            static_cast<int64_t>(state->_fullReadyBlockHashes.size()) ||
+                            static_cast<int64_t>(
+                                cacheState._fullReadyBlockHashes.size()) ||
                         cache->fullReadyHashChecksum !=
-                            state->_masterFullReadyHashChecksum ||
+                            cacheState._masterFullReadyHashChecksum ||
                         cache->tailReadyBlockCount !=
-                            static_cast<int64_t>(state->_tailReadyBlockHashes.size()) ||
+                            static_cast<int64_t>(
+                                cacheState._tailReadyBlockHashes.size()) ||
                         cache->tailReadyHashChecksum !=
-                            state->_masterTailReadyHashChecksum;
+                            cacheState._masterTailReadyHashChecksum;
                     if (!cacheStateMismatch) {
-                        state->_cacheRevision = cache->revision;
-                        state->_cacheStateReady.store(true, std::memory_order_release);
+                        cacheState._cacheRevision = cache->revision;
+                        cacheState._cacheStateReady.store(true,
+                                                          std::memory_order_release);
                     }
                 }
                 if (cacheStateMismatch) {
-                    ++state->_cacheStateMismatchCount;
+                    ++cacheState._cacheStateMismatchCount;
                     clearMirroredCache();
-                    state->_cacheStateReady.store(false, std::memory_order_release);
+                    cacheState._cacheStateReady.store(false, std::memory_order_release);
                 }
                 if (cache->rtpCachedBlockCount >= 0) {
-                    ++state->_rtpCacheMirrorSampleCount;
-                    state->_rtpCachedBlockCount = cache->rtpCachedBlockCount;
-                    if (cache->rtpCachedBlockCount != state->_agentCachedBlockCount) {
+                    ++cacheState._rtpCacheMirrorSampleCount;
+                    cacheState._rtpCachedBlockCount = cache->rtpCachedBlockCount;
+                    if (cache->rtpCachedBlockCount != cacheState._agentCachedBlockCount) {
                         rtpCacheMirrorMismatch = true;
-                        ++state->_rtpCacheMirrorMismatchCount;
+                        ++cacheState._rtpCacheMirrorMismatchCount;
                     }
                 }
             }
-            cacheSyncStats = {state->_cacheRevision,
-                              state->_agentCachedBlockCount,
-                              state->_agentCacheHashChecksum,
-                              state->_agentFullReadyBlockCount,
-                              state->_agentFullReadyHashChecksum,
-                              state->_agentTailReadyBlockCount,
-                              state->_agentTailReadyHashChecksum,
-                              state->_cachedBlockHashes.size(),
-                              state->_masterCacheHashChecksum,
-                              state->_fullReadyBlockHashes.size(),
-                              state->_masterFullReadyHashChecksum,
-                              state->_tailReadyBlockHashes.size(),
-                              state->_masterTailReadyHashChecksum,
-                              state->_rtpCachedBlockCount,
-                              state->_cacheRevisionGapCount,
-                              state->_cacheStateMismatchCount,
-                              state->_rtpCacheMirrorSampleCount,
-                              state->_rtpCacheMirrorMismatchCount,
-                              state->_cacheStateReady.load(std::memory_order_relaxed)};
+            cacheSyncStats = {
+                cacheState._cacheRevision,
+                cacheState._agentCachedBlockCount,
+                cacheState._agentCacheHashChecksum,
+                cacheState._agentFullReadyBlockCount,
+                cacheState._agentFullReadyHashChecksum,
+                cacheState._agentTailReadyBlockCount,
+                cacheState._agentTailReadyHashChecksum,
+                cacheState._cachedBlockHashes.size(),
+                cacheState._masterCacheHashChecksum,
+                cacheState._fullReadyBlockHashes.size(),
+                cacheState._masterFullReadyHashChecksum,
+                cacheState._tailReadyBlockHashes.size(),
+                cacheState._masterTailReadyHashChecksum,
+                cacheState._rtpCachedBlockCount,
+                cacheState._cacheRevisionGapCount,
+                cacheState._cacheStateMismatchCount,
+                cacheState._rtpCacheMirrorSampleCount,
+                cacheState._rtpCacheMirrorMismatchCount,
+                cacheState._cacheStateReady.load(std::memory_order_relaxed)};
         }
         if (staleCacheSnapshotIgnored) {
             NAVI_KERNEL_LOG(INFO,
@@ -2726,7 +3372,8 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                 cacheSyncStats.rtpMirrorMismatchCount);
         }
         stateDiverged = stateDiverged || cacheRevisionGap || cacheStateMismatch;
-        if (!staleCacheSnapshotIgnored && cache->totalBlocks >= 0) {
+        if (!staleCacheSnapshotIgnored && cache->totalBlocks >= 0 &&
+            cache->cacheKeyType == NaviSchedCacheKeyType::BLOCK_POOL) {
             autil::ScopedLock runtimeLock(state->_runtimeLock);
             state->_runtimeState.load.totalBlocks = cache->totalBlocks;
         }
@@ -2734,8 +3381,7 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
     if (reservationTransitionFailed) {
         return false;
     }
-    if (NaviSchedAgentEvent::LATENCY_MODEL_UPDATED == event &&
-        !recordLatencyModel()) {
+    if (NaviSchedAgentEvent::LATENCY_MODEL_UPDATED == event && !recordLatencyModel()) {
         return false;
     }
     if (becameOnline) {
@@ -2860,7 +3506,8 @@ MasterStateR::NodeState::capturePendingReplaySnapshot() const
     copyHashes(_tailReadyBlockHashes, snapshot.tailReadyBlockHashes);
     snapshot.hybridTailRequired = _hybridTailRequired;
     snapshot.blockSize = _cachePolicyReady.load(std::memory_order_relaxed)
-                             ? _cachePolicy.blockSize : int64_t(-1);
+                             ? _cachePolicy.blockSize
+                             : int64_t(-1);
     snapshot.reservations.reserve(_pendingBatchReservations.size());
     for (const auto &reservationPtr : _pendingBatchReservations) {
         const auto &reservation = *reservationPtr;
@@ -2873,8 +3520,8 @@ MasterStateR::NodeState::capturePendingReplaySnapshot() const
     return snapshot;
 }
 
-autil::legacy::json::JsonMap
-MasterStateR::NodeState::PendingReplaySnapshot::toJson() const
+autil::legacy::json::JsonMap MasterStateR::NodeState::PendingReplaySnapshot::toJson()
+    const
 {
     using autil::legacy::ToJson;
     autil::legacy::json::JsonMap result;
@@ -2924,21 +3571,24 @@ std::shared_ptr<NaviSchedScheduleReplay> MasterStateR::makeScheduleReplay(
             MasterPendingCacheR frozenPending;
             if (snapshot.pendingCache.present &&
                 !frozenPending.restoreReplayState(snapshot.agentIdHash,
-                                                 snapshot.pendingCache.toJson())) {
-                NAVI_KERNEL_LOG(ERROR, "restore captured replay pending state failed, agent [%s]",
-                          snapshot.agentId.c_str());
+                                                  snapshot.pendingCache.toJson())) {
+                NAVI_KERNEL_LOG(
+                    ERROR, "restore captured replay pending state failed, agent [%s]",
+                    snapshot.agentId.c_str());
                 return nullptr;
             }
             const MasterPendingCacheR::PhysicalBlockSet cached(
                 snapshot.cachedBlockHashes.begin(), snapshot.cachedBlockHashes.end());
             const MasterPendingCacheR::PhysicalBlockSet fullReady(
-                snapshot.fullReadyBlockHashes.begin(), snapshot.fullReadyBlockHashes.end());
+                snapshot.fullReadyBlockHashes.begin(),
+                snapshot.fullReadyBlockHashes.end());
             const MasterPendingCacheR::PhysicalBlockSet tailReady(
-                snapshot.tailReadyBlockHashes.begin(), snapshot.tailReadyBlockHashes.end());
-            frozenPending.getMatchedBlockCounts(
-                snapshot.agentIdHash, context._requests, snapshot.blockSize,
-                cached, fullReady, tailReady, snapshot.hybridTailRequired,
-                matchedBlockCounts.data());
+                snapshot.tailReadyBlockHashes.begin(),
+                snapshot.tailReadyBlockHashes.end());
+            frozenPending.getMatchedBlockCounts(snapshot.agentIdHash, context._requests,
+                                                snapshot.blockSize, cached, fullReady,
+                                                tailReady, snapshot.hybridTailRequired,
+                                                matchedBlockCounts.data());
             capturedMatches = true;
         } else {
             pendingStates.emplace_back();
@@ -2954,7 +3604,10 @@ std::shared_ptr<NaviSchedScheduleReplay> MasterStateR::makeScheduleReplay(
         nodeInfo.runningRequests = scheduleNode._runningRequests;
         nodeInfo.batchTimeoutCount = scheduleNode._batchTimeoutCount;
         nodeInfo.abnormalBatchFinishCount = scheduleNode._abnormalBatchFinishCount;
-        nodeInfo.queueTotalPredictedLatencyMs = scheduleNode.getEstimatedQueueWaitMs();
+        nodeInfo.queueModel = scheduleNode._queueModel;
+        nodeInfo.queueModel.setBaseMs(
+            scheduleNode.getEstimatedQueueBaseMsAt(context._scheduleTimeUs),
+            nodeInfo.queueTotalPredictedLatencyMs);
         const auto elapsedMs =
             scheduleNode._queueReportReceiveTimeUs > 0
                 ? std::max<int64_t>(0, context._scheduleTimeUs -
@@ -2981,8 +3634,7 @@ std::shared_ptr<NaviSchedScheduleReplay> MasterStateR::makeScheduleReplay(
             nodeInfo.latencyBinaryVersion = scheduleNode._latencyModel->binaryVersion;
             nodeInfo.latencyModelRevision = scheduleNode._latencyModel->revision;
             nodeInfo.latencyParameters = scheduleNode._latencyModel->parameters;
-            nodeInfo.latencyResidualVersion =
-                scheduleNode._latencyModel->residualVersion;
+            nodeInfo.latencyResidualVersion = scheduleNode._latencyModel->residualVersion;
             nodeInfo.latencyResidualParameters =
                 scheduleNode._latencyModel->residualParameters;
             nodeInfo.latencyResidualLastUpdateTimeUs =
@@ -2994,7 +3646,9 @@ std::shared_ptr<NaviSchedScheduleReplay> MasterStateR::makeScheduleReplay(
         nodeInfo.bizName.clear();
         replay->nodes.emplace_back(std::move(nodeInfo));
         if (node && !capturedMatches) {
-            node->getMatchedBlockCounts(context._requests, matchedBlockCounts.data());
+            if (!context.getCacheHitBlockCounts(nodeIndex, matchedBlockCounts)) {
+                return nullptr;
+            }
         }
         for (size_t requestIndex = 0; requestIndex < context._requests.size();
              ++requestIndex) {
@@ -3056,9 +3710,9 @@ void MasterStateR::reserveScheduleBatches(NaviSchedScheduleContext &context)
     }
 }
 
-void MasterStateR::reserveScheduleNodeBatch(
-    NaviSchedScheduleContext &context, size_t nodeIndex,
-    const std::vector<size_t> &requestIndexes)
+void MasterStateR::reserveScheduleNodeBatch(NaviSchedScheduleContext &context,
+                                            size_t nodeIndex,
+                                            const std::vector<size_t> &requestIndexes)
 {
     const auto beginUs = autil::TimeUtility::monotonicTimeUs();
     const auto beginCpuUs = autil::TimeUtility::cpuThreadTimeUs();
@@ -3070,7 +3724,8 @@ void MasterStateR::reserveScheduleNodeBatch(
         const auto totalUs = autil::TimeUtility::monotonicTimeUs() - beginUs;
         if (totalUs >= 50'000 || context._scheduleId % 100 == 0) {
             const auto totalCpuUs = autil::TimeUtility::cpuThreadTimeUs() - beginCpuUs;
-            NAVI_KERNEL_LOG(INFO,
+            NAVI_KERNEL_LOG(
+                INFO,
                 "[navi-master-reserve-node-timing] function=reserveScheduleNodeBatch "
                 "schedule_id=%lu agent=%s requests=%lu total_us=%ld "
                 "request_build_us=%ld registry_wait_us=%ld audit_us=%ld policy_us=%ld "
@@ -3078,11 +3733,11 @@ void MasterStateR::reserveScheduleNodeBatch(
                 "total_cpu_us=%ld estimate_cpu_us=%ld reserve_cpu_us=%ld "
                 "init_us=%ld init_cpu_us=%ld pending_publish_us=%ld "
                 "pending_publish_cpu_us=%ld runtime_wait_us=%ld runtime_hold_cpu_us=%ld",
-                context._scheduleId, context._scheduleNodes[nodeIndex].getAgentId().c_str(),
-                requestIndexes.size(), totalUs, requestBuildUs, registryWaitUs,
-                auditUs, policyUs, estimateUs, reserveUs, handlesUs,
-                totalCpuUs, estimateCpuUs, reserveCpuUs,
-                reservationTiming.initUs, reservationTiming.initCpuUs,
+                context._scheduleId,
+                context._scheduleNodes[nodeIndex].getAgentId().c_str(),
+                requestIndexes.size(), totalUs, requestBuildUs, registryWaitUs, auditUs,
+                policyUs, estimateUs, reserveUs, handlesUs, totalCpuUs, estimateCpuUs,
+                reserveCpuUs, reservationTiming.initUs, reservationTiming.initCpuUs,
                 reservationTiming.pendingPublishUs, reservationTiming.pendingPublishCpuUs,
                 reservationTiming.runtimeWaitUs, reservationTiming.runtimeHoldCpuUs);
         }
@@ -3092,7 +3747,8 @@ void MasterStateR::reserveScheduleNodeBatch(
                                  const char *reason) {
         const auto batchId = context._decisions[requestIndexes.front()].batchId;
         if (context.isCollectingReplay()) {
-            context._replay->schedulerInfo["reservation_failure_" + std::to_string(batchId)] =
+            context._replay
+                ->schedulerInfo["reservation_failure_" + std::to_string(batchId)] =
                 autil::legacy::json::JsonMap{
                     {"reason", std::string(reason)},
                     {"agent", context._scheduleNodes[nodeIndex].getAgentId()},
@@ -3104,8 +3760,7 @@ void MasterStateR::reserveScheduleNodeBatch(
                         "[navi-master-reservation-failed] schedule_id=%lu agent=%s "
                         "batch_id=%ld requests=%lu reason=%s",
                         context._scheduleId,
-                        context._scheduleNodes[nodeIndex].getAgentId().c_str(),
-                        batchId,
+                        context._scheduleNodes[nodeIndex].getAgentId().c_str(), batchId,
                         requestIndexes.size(), reason);
         for (auto requestIndex : requestIndexes) {
             auto &decision = context._decisions[requestIndex];
@@ -3120,6 +3775,17 @@ void MasterStateR::reserveScheduleNodeBatch(
                 NaviSchedScheduleContext::INVALID_NODE_INDEX;
         }
     };
+    const auto routeOnly = context._requests[requestIndexes.front()].request.routeOnly;
+    const auto mixedIngress = std::any_of(
+        requestIndexes.begin(), requestIndexes.end(), [&](size_t requestIndex) {
+            return context._requests[requestIndex].request.routeOnly != routeOnly;
+        });
+    if (mixedIngress) {
+        NAVI_KERNEL_LOG(ERROR, "mixed route-only and forwarded requests in one batch");
+        rejectReservation(requestIndexes, "mixed_ingress_batch");
+        return;
+    }
+    if (routeOnly) return;
     std::vector<MasterBatchReservation::Request> reservationRequests;
     reservationRequests.reserve(requestIndexes.size());
     for (auto requestIndex : requestIndexes) {
@@ -3129,7 +3795,8 @@ void MasterStateR::reserveScheduleNodeBatch(
              context._decisions[requestIndex].predictedCacheHitTokenCount,
              request.blockHashes,
              context._decisions[requestIndex].predictedQueueLatencyMs +
-                 context._decisions[requestIndex].predictedExecutionLatencyMs});
+                 context._decisions[requestIndex].predictedExecutionLatencyMs,
+             request.explicitCacheCheckpointPosition});
     }
     const auto &decision = context._decisions[requestIndexes.front()];
     auto state =
@@ -3196,6 +3863,7 @@ void MasterStateR::reserveScheduleNodeBatch(
         return;
     }
     bool pendingCacheTracked = false;
+    double queueLatencyMs = decision.predictedQueueLatencyMs;
     NodeState::ReservationPtr reserved;
     stageEndUs = autil::TimeUtility::monotonicTimeUs();
     policyUs = stageEndUs - stageBeginUs;
@@ -3208,11 +3876,11 @@ void MasterStateR::reserveScheduleNodeBatch(
     estimateUs = stageEndUs - stageBeginUs;
     estimateCpuUs = estimateEndCpuUs - estimateBeginCpuUs;
     stageBeginUs = stageEndUs;
-    if (!state->reserveBatch(
-            decision.batchId, context._scheduleTimeUs,
-            predictedLatencyMs,
-            std::move(reservationRequests), &cachePolicy, &pendingCacheTracked, &reserved,
-            &reservationTiming)) {
+    if (!state->reserveBatch(decision.batchId, context._scheduleTimeUs,
+                             predictedLatencyMs, std::move(reservationRequests),
+                             &cachePolicy, &pendingCacheTracked, &queueLatencyMs,
+                             context._queuePredictionTimeUs, context._timeCompression,
+                             &reserved, &reservationTiming)) {
         NAVI_KERNEL_LOG(ERROR,
                         "failed to reserve scheduled batch, agentId [%s], "
                         "batchId [%ld], requestCount [%lu]",
@@ -3227,6 +3895,16 @@ void MasterStateR::reserveScheduleNodeBatch(
     reserveCpuUs = autil::TimeUtility::cpuThreadTimeUs() - estimateEndCpuUs;
     reserveUs = stageEndUs - stageBeginUs;
     stageBeginUs = stageEndUs;
+    for (auto requestIndex : requestIndexes) {
+        auto &requestDecision = context._decisions[requestIndex];
+        if (requestDecision.latencyPrediction) {
+            auto prediction = std::make_shared<NaviSchedLatencyPrediction>(
+                *requestDecision.latencyPrediction);
+            prediction->fixedLatencyMs += queueLatencyMs - requestDecision.predictedQueueLatencyMs;
+            requestDecision.latencyPrediction = std::move(prediction);
+        }
+        requestDecision.predictedQueueLatencyMs = queueLatencyMs;
+    }
     auto handleState = std::make_shared<MasterDispatchHandle::State>();
     handleState->node = state;
     handleState->reservation = reserved;
@@ -3335,9 +4013,8 @@ bool MasterStateR::reportDispatchFailed(const NaviSchedTarget &target, int64_t b
     return true;
 }
 
-bool MasterStateR::reportDispatchFailures(
-    const NaviSchedTarget &target, int64_t batchId,
-    const std::vector<uint64_t> &requestIds)
+bool MasterStateR::reportDispatchFailures(const NaviSchedTarget &target, int64_t batchId,
+                                          const std::vector<uint64_t> &requestIds)
 {
     if (requestIds.empty() || batchId <= 0 || target.bizName.empty() ||
         target.agentAddress.empty()) {
@@ -3347,8 +4024,8 @@ bool MasterStateR::reportDispatchFailures(
     if (!state) {
         return false;
     }
-    const auto info = std::atomic_load_explicit(&state->_infoSnapshot,
-                                               std::memory_order_acquire);
+    const auto info =
+        std::atomic_load_explicit(&state->_infoSnapshot, std::memory_order_acquire);
     bool batchReleased = false;
     if (!info || !state->reportDispatchFailures(batchId, requestIds, batchReleased)) {
         return false;
@@ -3732,6 +4409,13 @@ navi::SummaryErrorCode MasterStateR::getSummary(const std::string &query,
         TABLE_ADD_COLUMN_VALUE(nodeTable, "scheduling_state",
                                nodeReady.at(pair.first) ? "ready" : "pending");
         TABLE_ADD_COLUMN_VALUE(nodeTable, "online", node.online);
+        TABLE_ADD_COLUMN_VALUE(nodeTable, "peer_cache_enabled", node.peerCacheEnabled);
+        TABLE_ADD_COLUMN_VALUE(nodeTable, "peer_cache_read_available",
+                               node.peerCacheReadAvailable);
+        TABLE_ADD_COLUMN_VALUE(nodeTable, "peer_cache_read_revision",
+                               node.peerCacheReadRevision);
+        TABLE_ADD_COLUMN_VALUE(nodeTable, "peer_cache_read_agent_start_time_us",
+                               node.peerCacheReadAgentStartTimeUs);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "total_blocks", node.totalBlocks);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "inflight_requests", node.inflightRequests);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "batch_waiting_requests",
@@ -3739,7 +4423,8 @@ navi::SummaryErrorCode MasterStateR::getSummary(const std::string &query,
         TABLE_ADD_COLUMN_VALUE(nodeTable, "queued_batch_requests",
                                node.queuedBatchRequests);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "running_requests", node.runningRequests);
-        TABLE_ADD_COLUMN_VALUE(nodeTable, "execution_busy_utilization", executionBusyUtilizations.at(node.agentId));
+        TABLE_ADD_COLUMN_VALUE(nodeTable, "execution_busy_utilization",
+                               executionBusyUtilizations.at(node.agentId));
         TABLE_ADD_COLUMN_VALUE(nodeTable, "execution_utilization",
                                executionUtilizations.at(node.agentId));
         TABLE_ADD_COLUMN_VALUE(nodeTable, "batch_timeout_count", node.batchTimeoutCount);
@@ -3825,6 +4510,8 @@ navi::SummaryErrorCode MasterStateR::getSummary(const std::string &query,
         TABLE_ADD_COLUMN_VALUE(nodeTable, "cache_block_size", cacheStats.cacheBlockSize);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "cache_linear_step",
                                cacheStats.cacheLinearStep);
+        TABLE_ADD_COLUMN_VALUE(nodeTable, "full_attention_query_drop_tokens",
+                               cacheStats.fullAttentionQueryDropTokens);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "hybrid_tail_required",
                                cacheStats.hybridTailRequired);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "cache_policy_mismatch_count",
@@ -3834,6 +4521,10 @@ navi::SummaryErrorCode MasterStateR::getSummary(const std::string &query,
                                getNaviSchedLatencyFormulaName(node.latencyFormula));
         TABLE_ADD_COLUMN_VALUE(nodeTable, "latency_binary_version",
                                node.latencyBinaryVersion);
+        TABLE_ADD_COLUMN_VALUE(
+            nodeTable, "execution_geometry_enabled",
+            NonLinearPrefillModelR::usesGeometryForVersion(node.latencyBinaryVersion) &&
+                node.executionGeometryEnabled);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "latency_model_revision",
                                node.latencyModelRevision);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "latency_parameter_count",
@@ -3844,8 +4535,7 @@ navi::SummaryErrorCode MasterStateR::getSummary(const std::string &query,
                                node.latencyModelTrusted);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "latency_model_warm_started",
                                node.latencyModelWarmStarted);
-        TABLE_ADD_COLUMN_VALUE(nodeTable,
-                               "latency_model_consecutive_rejected_count",
+        TABLE_ADD_COLUMN_VALUE(nodeTable, "latency_model_consecutive_rejected_count",
                                node.latencyModelConsecutiveRejectedCount);
         TABLE_ADD_COLUMN_VALUE(nodeTable, "latency_model_last_reject_reason",
                                node.latencyModelLastRejectReason);

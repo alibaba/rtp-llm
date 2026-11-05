@@ -1,6 +1,7 @@
 #include "aios/navi_sched/scheduler/CostSchedulerGraph.h"
 
 #include "aios/navi_sched/scheduler/CostSchedulerColdStartStrategy.h"
+#include "aios/navi_sched/resource/NonLinearPrefillModelR.h"
 #include "aios/navi_sched/scheduler/MasterScheduleContextData.h"
 #include "aios/navi_sched/scheduler/SchedulerBaseKernel.h"
 #include "autil/TimeUtility.h"
@@ -293,11 +294,11 @@ public:
 
 std::shared_ptr<CostSchedulerGraphState> CostSchedulerGraphState::create(
     const NaviSchedScheduleContextPtr &context, const CostSchedulerConfig &config,
-    size_t workerCount, const double *randomWeights, size_t randomWeightCount)
+    size_t workerCount, std::shared_ptr<const std::vector<double>> randomWeights)
 {
     auto state = std::shared_ptr<CostSchedulerGraphState>(
         new CostSchedulerGraphState(context, config, workerCount));
-    return state->init(randomWeights, randomWeightCount) ? state : nullptr;
+    return state->init(std::move(randomWeights)) ? state : nullptr;
 }
 
 CostSchedulerGraphState::CostSchedulerGraphState(NaviSchedScheduleContextPtr context,
@@ -314,11 +315,13 @@ CostSchedulerGraphState::~CostSchedulerGraphState()
     }
 }
 
-bool CostSchedulerGraphState::init(const double *randomWeights, size_t randomWeightCount)
+bool CostSchedulerGraphState::init(
+    std::shared_ptr<const std::vector<double>> randomWeights)
 {
     _preparationBeginUs = autil::TimeUtility::monotonicTimeUs();
     const auto initCpuBeginUs = autil::TimeUtility::cpuThreadTimeUs();
     _optimizationBeginUs = _preparationBeginUs;
+    const auto initBeginUs = _preparationBeginUs;
     if (!_context || !_config.valid() || 0 == _workerCount) {
         return false;
     }
@@ -377,10 +380,12 @@ bool CostSchedulerGraphState::init(const double *randomWeights, size_t randomWei
     _weights.reset(new double[_weightCount]);
     _bestNodeIndexes.reset(new uint32_t[_requestCount]);
     _candidateNodeIndexes.reset(new uint32_t[_requestCount]);
-    _parallelPreparation = randomWeights && randomWeightCount > 0 &&
-                           0 == (randomWeightCount & (randomWeightCount - 1));
+    const auto randomWeightCount = randomWeights ? randomWeights->size() : 0;
+    _parallelPreparation =
+        randomWeightCount > 0 && 0 == (randomWeightCount & (randomWeightCount - 1));
     if (_parallelPreparation) {
-        _randomWeights = randomWeights;
+        // Preparation workers can outlive the kernel that publishes the table.
+        _randomWeights = std::move(randomWeights);
         _randomWeightCount = randomWeightCount;
     } else {
         CostSchedulerKernelInternal::initializeWeights(
@@ -421,6 +426,14 @@ bool CostSchedulerGraphState::init(const double *randomWeights, size_t randomWei
     }
     _preparationInitCpuUs = autil::TimeUtility::cpuThreadTimeUs() - initCpuBeginUs;
     _preparationReadyUs = autil::TimeUtility::monotonicTimeUs();
+    if (_context->_scheduleId < 10 || _context->_scheduleId % 100 == 0) {
+        NAVI_KERNEL_LOG(INFO,
+                        "[navi-cost-boundary-timing] schedule_id=%lu phase=init "
+                        "activation_to_init_us=%ld init_us=%ld workers=%lu",
+                        _context->_scheduleId, initBeginUs - _optimizationBeginUs,
+                        autil::TimeUtility::monotonicTimeUs() - initBeginUs,
+                        _workerCount);
+    }
     return true;
 }
 
@@ -462,7 +475,7 @@ bool CostSchedulerGraphState::prepareWorker(size_t workerIndex)
     const auto weightsBeginUs = autil::TimeUtility::monotonicTimeUs();
     if (_parallelPreparation &&
         !CostSchedulerKernelInternal::initializeWeightRequestRange(
-            _weights.get(), *_context, _randomWeights, _randomWeightCount, requests.first,
+            _weights.get(), *_context, _randomWeights ? _randomWeights->data() : nullptr, _randomWeightCount, requests.first,
             requests.second)) {
         fail();
         return false;
@@ -538,6 +551,13 @@ bool CostSchedulerGraphState::finishPreparation()
     }
     if (_parallelPreparation) {
         beginOptimization();
+    }
+    if (_context->_scheduleId < 10 || _context->_scheduleId % 100 == 0) {
+        NAVI_KERNEL_LOG(INFO,
+                        "[navi-cost-boundary-timing] schedule_id=%lu phase=prepared "
+                        "activation_elapsed_us=%ld",
+                        _context->_scheduleId,
+                        autil::TimeUtility::monotonicTimeUs() - _optimizationBeginUs);
     }
     return true;
 }
@@ -781,11 +801,26 @@ bool CostSchedulerGraphState::finishProjection(size_t iteration)
     const auto replayCollectionUs =
         _context->getReplayCollectionTimeUs() - _replayCollectionBaselineUs;
     auto elapsedUs =
-        std::max<int64_t>(0, nowUs - _optimizationBeginUs - replayCollectionUs);
+        std::max<int64_t>(0, nowUs - _optimizationBeginUs);
     auto lastLoopUs = std::max<int64_t>(
-        0, nowUs - _lastLoopEndUs - (replayCollectionUs - _lastLoopReplayCollectionUs));
+        0, nowUs - _lastLoopEndUs);
     _lastLoopEndUs = nowUs;
     _lastLoopReplayCollectionUs = replayCollectionUs;
+    if (iteration == 0 &&
+        (_context->_scheduleId < 10 || _context->_scheduleId % 100 == 0)) {
+        NAVI_KERNEL_LOG(
+            INFO,
+            "[navi-cost-boundary-timing] schedule_id=%lu phase=first_projection "
+            "activation_elapsed_us=%ld forward_worker_max_us=%ld "
+            "backward_worker_max_us=%ld projection_worker_max_us=%ld",
+            _context->_scheduleId, elapsedUs,
+            CostSchedulerGraphKernelUtil::maxWorkerTime(_workers,
+                                                        &WorkerState::forwardUs),
+            CostSchedulerGraphKernelUtil::maxWorkerTime(_workers,
+                                                        &WorkerState::backwardUs),
+            CostSchedulerGraphKernelUtil::maxWorkerTime(_workers,
+                                                        &WorkerState::projectionUs));
+    }
     if (!CostSchedulerKernelInternal::shouldRunNextLoop(
             _actualLoopCount, static_cast<size_t>(_config.maxLoopCount),
             _config.optimizationTimeBudgetUs, elapsedUs, lastLoopUs,
@@ -831,6 +866,8 @@ bool CostSchedulerGraphState::runFinalRow(size_t workerIndex)
 
 bool CostSchedulerGraphState::finalize(int64_t replayRefinementEvaluations)
 {
+    const auto finalizeBeginUs = autil::TimeUtility::monotonicTimeUs();
+    const auto optimizationEndUs = autil::TimeUtility::monotonicTimeUs();
     if (failed()) {
         _context->fail("scheduler_error");
         return false;
@@ -847,27 +884,38 @@ bool CostSchedulerGraphState::finalize(int64_t replayRefinementEvaluations)
         _context->fail("scheduler_error");
         return false;
     }
+    const auto scoringEndUs = autil::TimeUtility::monotonicTimeUs();
     const auto refinementBudget =
         replayRefinementEvaluations >= 0
             ? -1
             : CostSchedulerKernelInternal::discreteRefinementBudgetUs(
                   _config.optimizationTimeBudgetUs,
-                  std::max<int64_t>(0, autil::TimeUtility::monotonicTimeUs() -
-                                           _optimizationBeginUs -
-                                           _context->getReplayCollectionTimeUs() +
-                                           _replayCollectionBaselineUs));
+                  autil::TimeUtility::monotonicTimeUs() - _optimizationBeginUs);
     const auto maxEvaluations = replayRefinementEvaluations >= 0
                                     ? static_cast<size_t>(replayRefinementEvaluations)
                                     : std::numeric_limits<size_t>::max();
-    const auto initialLoss = _bestLoss;
     CostSchedulerKernelInternal::DiscreteRefinementStats refinementStats;
-    if ((refinementBudget != 0 &&
-         !CostSchedulerKernelInternal::refineDiscreteAssignment(
-             *_context, _costs.get(), _bestNodeIndexes.get(), _requestTokenCounts.get(),
-             _inverseRequestTokenCounts.get(), _tokenNormalizationDenominator,
-             _config.lambda, _config.latencyWeightConcavity, _bestLoss, refinementBudget,
-             maxEvaluations, refinementStats)) ||
-        !CostSchedulerKernelInternal::selectNodes(*_context, _bestNodeIndexes.get()) ||
+    const auto auditAssignment = _context->_scheduleId % 100 == 0;
+    std::vector<size_t> initialNodeRequests;
+    const auto initialLoss = _bestLoss;
+    if (auditAssignment) {
+        initialNodeRequests.assign(_nodeCount, 0);
+        for (size_t i = 0; i < _requestCount; ++i) {
+            ++initialNodeRequests[_bestNodeIndexes[i]];
+        }
+    }
+    if (refinementBudget != 0 &&
+        !CostSchedulerKernelInternal::refineDiscreteAssignment(
+            *_context, _costs.get(), _bestNodeIndexes.get(), _requestTokenCounts.get(),
+            _inverseRequestTokenCounts.get(), _tokenNormalizationDenominator,
+            _config.lambda, _config.latencyWeightConcavity, _bestLoss, refinementBudget,
+            maxEvaluations, refinementStats)) {
+        fail();
+        _context->fail("scheduler_error");
+        return false;
+    }
+    const auto refinementEndUs = autil::TimeUtility::monotonicTimeUs();
+    if (!CostSchedulerKernelInternal::selectNodes(*_context, _bestNodeIndexes.get()) ||
         !_context->setScheduleLoss(_bestLoss)) {
         fail();
         _context->fail("scheduler_error");
@@ -875,6 +923,36 @@ bool CostSchedulerGraphState::finalize(int64_t replayRefinementEvaluations)
     }
     _context->recordDiscreteSearchLosses(initialLoss, _bestLoss);
     _forwardValue = _bestLoss;
+    if (auditAssignment) {
+        std::vector<size_t> finalNodeRequests(_nodeCount, 0);
+        for (size_t i = 0; i < _requestCount; ++i) {
+            ++finalNodeRequests[_bestNodeIndexes[i]];
+        }
+        NAVI_KERNEL_LOG(
+            INFO,
+            "[navi-geometry-search-audit] path=parallel_graph schedule_id=%lu "
+            "schedule_time_us=%ld requests=%lu candidates=%lu budget_us=%ld "
+            "evaluations=%lu moves=%lu budget_exhausted=%d "
+            "initial_loss=%.9f final_loss=%.9f gradient_loops=%lu stop_reason=%s",
+            _context->_scheduleId, _context->getScheduleTimeUs(), _requestCount,
+            _nodeCount, refinementBudget, refinementStats.evaluations,
+            refinementStats.moves, refinementStats.budgetExhausted, initialLoss,
+            _bestLoss, _actualLoopCount, _stopReason.c_str());
+        for (size_t i = 0; i < _nodeCount; ++i) {
+            const auto &node = _context->getNode(i);
+            NAVI_KERNEL_LOG(
+                INFO,
+                "[navi-geometry-candidate-audit] path=parallel_graph schedule_id=%lu "
+                "schedule_time_us=%ld node_index=%lu agent=%s inflight=%d "
+                "queue_ms=%.9f model_revision=%ld initial_requests=%lu "
+                "final_requests=%lu",
+                _context->_scheduleId, _context->getScheduleTimeUs(), i,
+                node.getAgentId().c_str(), node.getInflightRequests(),
+                node.getEstimatedQueueWaitMs(), node.getLatencyModelRevision(),
+                initialNodeRequests[i], finalNodeRequests[i]);
+        }
+    }
+    const auto replayBeginUs = autil::TimeUtility::monotonicTimeUs();
     if (_replayInfo) {
         _replayInfo->finishRun(_weights.get(), _weightCount, finalForwardValue, _bestLoss,
                                _bestNodeIndexes.get(), _requestCount,
@@ -883,6 +961,20 @@ bool CostSchedulerGraphState::finalize(int64_t replayRefinementEvaluations)
                                refinementStats.moves);
         _replayInfo->finish(*_context, _costs.get(), _weights.get(), _requestCount,
                             _nodeCount);
+    }
+    const auto replayEndUs = autil::TimeUtility::monotonicTimeUs();
+    if (_context->_scheduleId < 10 || _context->_scheduleId % 100 == 0) {
+        NAVI_KERNEL_LOG(
+            INFO,
+            "[navi-cost-phase-timing] schedule_id=%lu requests=%lu candidates=%lu "
+            "prepare_gradient_graph_us=%ld exact_score_us=%ld refinement_us=%ld "
+            "select_audit_us=%ld replay_json_us=%ld finalize_total_us=%ld "
+            "gradient_loops=%lu replay=%d",
+            _context->_scheduleId, _requestCount, _nodeCount,
+            optimizationEndUs - _optimizationBeginUs, scoringEndUs - finalizeBeginUs,
+            refinementEndUs - scoringEndUs, replayBeginUs - refinementEndUs,
+            replayEndUs - replayBeginUs, replayEndUs - finalizeBeginUs, _actualLoopCount,
+            static_cast<int>(bool(_replayInfo)));
     }
     _context->clearScheduleView();
     return true;
@@ -1005,10 +1097,11 @@ navi::ErrorCode CostSchedulerPrepareKernel::init(navi::KernelInitContext &)
                             : static_cast<uint64_t>(autil::TimeUtility::currentTime());
     std::mt19937_64 random(_randomWeightSeed);
     std::uniform_real_distribution<double> distribution(1.0, 2.0);
-    _randomWeights.resize(RANDOM_WEIGHT_COUNT);
-    for (auto &weight : _randomWeights) {
+    auto randomWeights = std::make_shared<std::vector<double>>(RANDOM_WEIGHT_COUNT);
+    for (auto &weight : *randomWeights) {
         weight = distribution(random);
     }
+    _randomWeights = std::move(randomWeights);
     return navi::EC_NONE;
 }
 
@@ -1027,9 +1120,12 @@ navi::ErrorCode CostSchedulerPrepareKernel::compute(navi::KernelComputeContext &
         if (randomWeightSeed != _randomWeightSeed) {
             std::mt19937_64 random(randomWeightSeed);
             std::uniform_real_distribution<double> distribution(1.0, 2.0);
-            for (auto &weight : _randomWeights) {
+            auto randomWeights =
+                std::make_shared<std::vector<double>>(RANDOM_WEIGHT_COUNT);
+            for (auto &weight : *randomWeights) {
                 weight = distribution(random);
             }
+            _randomWeights = std::move(randomWeights);
             _randomWeightSeed = randomWeightSeed;
         }
         auto context = MasterScheduleContextData::getContext(input);
@@ -1063,8 +1159,7 @@ navi::ErrorCode CostSchedulerPrepareKernel::compute(navi::KernelComputeContext &
                 output = std::make_shared<CostSchedulerGraphData>(nullptr, context);
             } else {
                 auto state = CostSchedulerGraphState::create(
-                    context, config, _workerCount, _randomWeights.data(),
-                    _randomWeights.size());
+                    context, config, _workerCount, _randomWeights);
                 if (!state) {
                     context->fail("scheduler_error");
                     output = std::make_shared<CostSchedulerGraphData>(nullptr, context);

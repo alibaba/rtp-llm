@@ -21,8 +21,8 @@ struct AgentSchedulerConfig : public autil::legacy::Jsonizable {
     std::string validationError() const;
     LatencyResidualModel::RuntimeConfig residualRuntimeConfig() const;
 
-    static AgentSchedulerConfig fromServiceConfig(
-        const NaviSchedConfig &config, double timeCompression = 1.0);
+    static AgentSchedulerConfig fromServiceConfig(const NaviSchedConfig &config,
+                                                  double timeCompression = 1.0);
 
     int64_t batchTimeoutMs = 10;
     int64_t closedBatchKeepMs = 60 * 1000;
@@ -31,9 +31,10 @@ struct AgentSchedulerConfig : public autil::legacy::Jsonizable {
     double latencyLearningRate = 0.05;
     double latencyOnlineLearningRateScale = 1.0;
     double latencyCurrentSampleWeight = 4.0;
+    double latencyErrorClipMs = 5000.0;
     std::vector<double> latencyParameterLearningRateScales;
     double latencyNonlinearScale = 1500.0;
-    double queueLearningRate = 0.02;
+    double queueLearningRate = 0.002;
     bool latencyCheckGradient = false;
     size_t latencyColdStartFitEpochs = 100;
     size_t latencyHistoryLimit = 2000;

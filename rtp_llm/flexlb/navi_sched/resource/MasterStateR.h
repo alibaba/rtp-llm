@@ -114,6 +114,7 @@ public:
         uint64_t pendingCacheStateMismatchCount = 0;
         uint64_t pendingCacheResyncTriggerCount = 0;
         bool pendingCacheSnapshotReady = false;
+        int64_t fullAttentionQueryDropTokens = 0;
     };
     struct CacheMatchBreakdown {
         int64_t staticMatchedBlockCount = 0;
@@ -125,164 +126,7 @@ public:
         size_t pendingBlockCount = 0;
         bool valid = false;
     };
-    class NodeState : public NaviSchedNode {
-    public:
-        NaviSchedNodeInfo getInfo() const override;
-        bool getScheduleSnapshot(const std::string &bizName,
-                                 NaviSchedNodeSnapshot &snapshot) const override;
-        int64_t getMatchedBlockCount(
-            const NaviSchedBlockHashes &blockHashes) const override;
-        int64_t getMatchedBlockCountForRequest(
-            const NaviSchedScheduleRequest &request) const override;
-        void getMatchedBlockCounts(
-            const std::vector<NaviSchedScheduleItem> &requests,
-            int64_t *matchedBlockCounts) const override;
-        void getMatchedBlockCounts(
-            const std::vector<NaviSchedScheduleItem> &requests,
-            int64_t *matchedBlockCounts,
-            const std::vector<size_t> &commonPrefixes) const override;
-        double getExecutionUtilization() const override;
-        double getExecutionBusyUtilization() const override;
-        size_t getCachedBlockCount() const;
-        std::shared_ptr<const LatencyInfo> getLatencyInfo() const;
-        LatencyResidualModel::RuntimeConfig getResidualRuntimeConfig() const;
-        NodeDispatchStats getDispatchStats() const;
-        ReservationStats getReservationStats() const;
-        CacheSyncStats getCacheSyncStats() const;
-        bool getCachePolicy(NaviSchedCachePolicy &policy) const;
-        CacheMatchBreakdown getCacheMatchBreakdown(
-            const NaviSchedScheduleRequest &request) const;
-        autil::legacy::json::JsonMap makePendingReplayState() const;
-
-    private:
-        friend class MasterStateR;
-        friend class MasterDispatchHandle;
-        friend class ::NaviSchedResourceTest;
-        friend class ::NaviSchedClusterTest;
-        std::atomic<double> _executionUtilization{-1.0};
-        std::atomic<double> _executionBusyUtilization{-1.0};
-        struct RuntimeState {
-            NaviSchedNodeLoad load;
-            double lastRequestLatencyMs = 0.0;
-            NaviSchedAgentEvent::Type lastEvent = NaviSchedAgentEvent::UNKNOWN;
-            int64_t lastEventTimeUs = 0;
-            NaviSchedAgentEvent::Type lastRequestEvent = NaviSchedAgentEvent::UNKNOWN;
-            int64_t lastRequestEventTimeUs = 0;
-            int64_t lastReceiveTimeUs = 0;
-            NaviSchedLatencyValidationStats latencyValidation;
-            NaviSchedWorkloadSnapshot workload;
-            bool unifiedLatencyPrediction = false;
-            int64_t workloadReportReceiveTimeUs = 0;
-            uint64_t workloadStaleUpdateCount = 0;
-            int64_t agentStartTimeUs = 0;
-        };
-        struct PublishedSnapshot {
-            std::shared_ptr<const NaviSchedNodeInfo> info;
-            std::shared_ptr<const LatencyInfo> latencyModel;
-        };
-        struct PendingBatchReservation;
-        using ReservationPtr = std::shared_ptr<PendingBatchReservation>;
-        using ReservationList = std::list<ReservationPtr>;
-        struct PendingBatchReservation {
-            MasterBatchReservation batch;
-            std::unordered_map<uint64_t, std::weak_ptr<navi::AsyncPipe>>
-                dispatchWaiters;
-            ReservationList::iterator position;
-            bool attached = false;
-        };
-        struct PendingReplaySnapshot {
-            int64_t captureTimeUs = 0;
-            std::string agentId;
-            uint64_t agentIdHash = 0;
-            NaviSchedBlockHashes cachedBlockHashes;
-            NaviSchedBlockHashes fullReadyBlockHashes;
-            NaviSchedBlockHashes tailReadyBlockHashes;
-            bool hybridTailRequired = false;
-            int64_t blockSize = -1;
-            std::vector<MasterBatchReservation> reservations;
-            bool hasPendingCache = false;
-            MasterPendingCacheR::ReplaySnapshot pendingCache;
-
-            autil::legacy::json::JsonMap toJson() const;
-        };
-        PendingReplaySnapshot capturePendingReplaySnapshot() const;
-        void rebuildInfoSnapshot();
-        void setLatencyModelSlot(
-            const MasterLatencyModelR::LiveModelSlotPtr &slot);
-        void clearLatencyModelSlot();
-        void fillDynamicInfo(NaviSchedNodeInfo &info) const;
-        RuntimeState getRuntimeState() const;
-        NaviSchedNodeLoad getScheduleLoad(int64_t currentTimeUs) const;
-        NaviSchedNodeLoad getScheduleLoadLocked(int64_t currentTimeUs) const;
-        struct ReservationTiming {
-            const char *failureReason = nullptr;
-            int64_t initUs = 0;
-            int64_t initCpuUs = 0;
-            int64_t runtimeWaitUs = 0;
-            int64_t runtimeHoldUs = 0;
-            int64_t runtimeHoldCpuUs = 0;
-            int64_t pendingPublishUs = 0;
-            int64_t pendingPublishCpuUs = 0;
-            int64_t totalUs = 0;
-            int64_t totalCpuUs = 0;
-        };
-        struct FailureTiming {
-            int64_t copyUs = 0;
-            int64_t markFailedUs = 0;
-            int64_t predictionUs = 0;
-            int64_t pendingUpdateUs = 0;
-            int64_t commitUs = 0;
-        };
-        bool reserveBatch(
-            int64_t batchId, int64_t scheduleTimeUs,
-            double predictedLatencyMs,
-            std::vector<MasterBatchReservation::Request> requests,
-            const NaviSchedCachePolicy *cachePolicy = nullptr,
-            bool *pendingCacheTracked = nullptr,
-            ReservationPtr *reserved = nullptr,
-            ReservationTiming *timing = nullptr);
-        bool registerDispatchWaiter(int64_t batchId, uint64_t requestId,
-                                    const navi::AsyncPipePtr &pipe,
-                                    bool &acknowledged);
-        bool unregisterDispatchWaiter(int64_t batchId, uint64_t requestId,
-                                      const navi::AsyncPipePtr &pipe);
-        bool cancelDispatchWaiter(int64_t batchId, uint64_t requestId,
-                                  const navi::AsyncPipePtr &pipe,
-                                  bool &batchReleased);
-        bool reportDispatchFailed(int64_t batchId, uint64_t requestId,
-                                  bool &batchReleased);
-        bool reportDispatchFailures(int64_t batchId,
-                                    const std::vector<uint64_t> &requestIds,
-                                    bool &batchReleased);
-        bool abandonUnownedDispatch(int64_t batchId, uint64_t requestId,
-                                    bool &batchReleased);
-        PendingBatchReservation *findReservationLocked(int64_t batchId);
-        void eraseReservationLocked(PendingBatchReservation &reservation);
-        void clearReservationsLocked();
-        bool updateReservationPendingCacheLocked(
-            const MasterBatchReservation &reservation,
-            const MasterBatchReservation::Transition *transition = nullptr);
-        bool refreshReservationPredictionLocked(
-            MasterBatchReservation &batch, bool recomputeCacheHits);
-        void clearCacheStateLocked();
-        static void collectDispatchWaitersLocked(
-            PendingBatchReservation &reservation,
-            const std::vector<uint64_t> &requestIds,
-            std::vector<navi::AsyncPipePtr> &pipes);
-        bool failRequestLocked(PendingBatchReservation &reservation,
-                               uint64_t requestId, bool &batchReleased);
-        bool failRequestsLocked(PendingBatchReservation &reservation,
-                                const std::vector<uint64_t> &requestIds,
-                                bool &batchReleased);
-        bool failRequestIndexesLocked(PendingBatchReservation &reservation,
-                                      const std::vector<size_t> &requestIndexes,
-                                      bool &batchReleased,
-                                      FailureTiming *timing = nullptr);
-        int64_t matchBlockCount(const NaviSchedBlockHashes &blockHashes) const;
-        mutable autil::ReadWriteLock _infoLock;
-        NaviSchedNodeInfo _info;
-        std::shared_ptr<const NaviSchedNodeInfo> _infoSnapshot;
-        std::shared_ptr<const PublishedSnapshot> _publishedSnapshot;
+    struct NodeCacheState {
         mutable autil::ReadWriteLock _cacheLock;
         MasterPendingCacheR::PhysicalBlockSet _cachedBlockHashes;
         MasterPendingCacheR::PhysicalBlockSet _fullReadyBlockHashes;
@@ -308,6 +152,199 @@ public:
         uint64_t _rtpCacheMirrorSampleCount = 0;
         uint64_t _rtpCacheMirrorMismatchCount = 0;
         std::atomic<uint64_t> _pendingCacheResyncTriggerCount{0};
+        void clear();
+    };
+    class NodeState : public NaviSchedNode, public NodeCacheState {
+    public:
+        NaviSchedNodeInfo getInfo() const override;
+        bool getScheduleSnapshot(const std::string &bizName,
+                                 NaviSchedNodeSnapshot &snapshot) const override;
+        int64_t getMatchedBlockCount(
+            const NaviSchedBlockHashes &blockHashes) const override;
+        int64_t getMatchedBlockCountForRequest(
+            const NaviSchedScheduleRequest &request) const override;
+        bool getExecutionCacheInputs(const NaviSchedScheduleRequest &request,
+                                     int64_t &computedTokens,
+                                     int64_t &sharedPrefixBoundary) const override;
+        bool getExecutionCacheInputs(const std::vector<NaviSchedScheduleItem> &requests,
+                                     std::vector<TPUPrefillRequestInput> &inputs,
+                                     int64_t *externalSuffixBlockCounts = nullptr,
+                                     ::navi_sched::TPUPrefillCacheObservationBatch
+                                         *observation = nullptr) const override;
+        void getMatchedBlockCounts(
+            const std::vector<NaviSchedScheduleItem> &requests,
+            int64_t *matchedBlockCounts,
+            int64_t *externalSuffixBlockCounts = nullptr) const override;
+        bool getReadyExternalCacheKeyStates(const NaviSchedBlockHashes &keys,
+                                            std::vector<uint8_t> &states,
+                                            NaviSchedCachePolicy &policy) const override;
+        bool getReadyExternalCacheCounts(
+            const std::vector<NaviSchedScheduleItem> &requests,
+            std::vector<int64_t> &counts, NaviSchedCachePolicy &policy) const override;
+        size_t getCachedBlockCount(
+            NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+        void getMatchedBlockCounts(
+            const std::vector<NaviSchedScheduleItem> &requests,
+            int64_t *matchedBlockCounts,
+            const std::vector<size_t> &commonPrefixes) const override;
+        double getExecutionUtilization() const override;
+        double getExecutionBusyUtilization() const override;
+        std::shared_ptr<const LatencyInfo> getLatencyInfo() const;
+        LatencyResidualModel::RuntimeConfig getResidualRuntimeConfig() const;
+        NodeDispatchStats getDispatchStats() const;
+        ReservationStats getReservationStats() const;
+        CacheSyncStats getCacheSyncStats(
+            NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+        bool getCachePolicy(
+            NaviSchedCachePolicy &policy,
+            NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+        CacheMatchBreakdown getCacheMatchBreakdown(
+            const NaviSchedScheduleRequest &request,
+            NaviSchedCacheKeyType cacheKeyType = NaviSchedCacheKeyType::BLOCK_POOL) const;
+        autil::legacy::json::JsonMap makePendingReplayState() const;
+
+    private:
+        friend class MasterStateR;
+        friend class MasterDispatchHandle;
+        friend class ::NaviSchedResourceTest;
+        friend class ::NaviSchedClusterTest;
+        std::atomic<double> _executionUtilization{-1.0};
+        std::atomic<double> _executionBusyUtilization{-1.0};
+        struct RuntimeState {
+            NaviSchedNodeLoad load;
+            double lastRequestLatencyMs = 0.0;
+            NaviSchedAgentEvent::Type lastEvent = NaviSchedAgentEvent::UNKNOWN;
+            int64_t lastEventTimeUs = 0;
+            NaviSchedAgentEvent::Type lastRequestEvent = NaviSchedAgentEvent::UNKNOWN;
+            int64_t lastRequestEventTimeUs = 0;
+            int64_t lastReceiveTimeUs = 0;
+            NaviSchedLatencyValidationStats latencyValidation;
+            NaviSchedWorkloadSnapshot workload;
+            bool unifiedLatencyPrediction = false;
+            int64_t workloadReportReceiveTimeUs = 0;
+            uint64_t workloadStaleUpdateCount = 0;
+            int64_t agentStartTimeUs = 0;
+            bool peerCacheReadAvailable = false;
+            uint64_t peerCacheReadRevision = 0;
+        };
+        struct PublishedSnapshot {
+            std::shared_ptr<const NaviSchedNodeInfo> info;
+            std::shared_ptr<const LatencyInfo> latencyModel;
+            bool executionGeometryValid = true;
+            std::optional<TPUPrefillExecutionPolicyConfig> prefillExecutionPolicy;
+        };
+        struct PendingBatchReservation;
+        using ReservationPtr = std::shared_ptr<PendingBatchReservation>;
+        using ReservationList = std::list<ReservationPtr>;
+        struct PendingBatchReservation {
+            MasterBatchReservation batch;
+            std::unordered_map<uint64_t, std::weak_ptr<navi::AsyncPipe>> dispatchWaiters;
+            ReservationList::iterator position;
+            bool attached = false;
+        };
+        struct PendingReplaySnapshot {
+            int64_t captureTimeUs = 0;
+            std::string agentId;
+            uint64_t agentIdHash = 0;
+            NaviSchedBlockHashes cachedBlockHashes;
+            NaviSchedBlockHashes fullReadyBlockHashes;
+            NaviSchedBlockHashes tailReadyBlockHashes;
+            bool hybridTailRequired = false;
+            int64_t blockSize = -1;
+            std::vector<MasterBatchReservation> reservations;
+            bool hasPendingCache = false;
+            MasterPendingCacheR::ReplaySnapshot pendingCache;
+
+            autil::legacy::json::JsonMap toJson() const;
+        };
+        PendingReplaySnapshot capturePendingReplaySnapshot() const;
+        void rebuildInfoSnapshot();
+        void setLatencyModelSlot(const MasterLatencyModelR::LiveModelSlotPtr &slot);
+        void clearLatencyModelSlot();
+        void fillDynamicInfo(NaviSchedNodeInfo &info) const;
+        RuntimeState getRuntimeState() const;
+        NaviSchedNodeLoad getScheduleLoad(int64_t currentTimeUs) const;
+        NaviSchedNodeLoad getScheduleLoadLocked(int64_t currentTimeUs) const;
+        struct ReservationTiming {
+            const char *failureReason = nullptr;
+            int64_t initUs = 0;
+            int64_t initCpuUs = 0;
+            int64_t runtimeWaitUs = 0;
+            int64_t runtimeHoldUs = 0;
+            int64_t runtimeHoldCpuUs = 0;
+            int64_t pendingPublishUs = 0;
+            int64_t pendingPublishCpuUs = 0;
+            int64_t totalUs = 0;
+            int64_t totalCpuUs = 0;
+        };
+        struct FailureTiming {
+            int64_t copyUs = 0;
+            int64_t markFailedUs = 0;
+            int64_t predictionUs = 0;
+            int64_t pendingUpdateUs = 0;
+            int64_t commitUs = 0;
+        };
+        bool reserveBatch(int64_t batchId, int64_t scheduleTimeUs,
+                          double predictedLatencyMs,
+                          std::vector<MasterBatchReservation::Request> requests,
+                          const NaviSchedCachePolicy *cachePolicy = nullptr,
+                          bool *pendingCacheTracked = nullptr,
+                          double *queueLatencyMs = nullptr, int64_t predictionTimeUs = 0,
+                          double timeCompression = 1.0, ReservationPtr *reserved = nullptr,
+                          ReservationTiming *timing = nullptr);
+        bool registerDispatchWaiter(int64_t batchId, uint64_t requestId,
+                                    const navi::AsyncPipePtr &pipe, bool &acknowledged);
+        bool unregisterDispatchWaiter(int64_t batchId, uint64_t requestId,
+                                      const navi::AsyncPipePtr &pipe);
+        bool cancelDispatchWaiter(int64_t batchId, uint64_t requestId,
+                                  const navi::AsyncPipePtr &pipe, bool &batchReleased);
+        bool reportDispatchFailed(int64_t batchId, uint64_t requestId,
+                                  bool &batchReleased);
+        bool reportDispatchFailures(int64_t batchId,
+                                    const std::vector<uint64_t> &requestIds,
+                                    bool &batchReleased);
+        bool abandonUnownedDispatch(int64_t batchId, uint64_t requestId,
+                                    bool &batchReleased);
+        PendingBatchReservation *findReservationLocked(int64_t batchId);
+        void eraseReservationLocked(PendingBatchReservation &reservation);
+        void clearReservationsLocked();
+        bool updateReservationPendingCacheLocked(
+            const MasterBatchReservation &reservation,
+            const MasterBatchReservation::Transition *transition = nullptr);
+        bool refreshReservationPredictionLocked(MasterBatchReservation &batch,
+                                                bool recomputeCacheHits);
+        void clearCacheStateLocked();
+        static void collectDispatchWaitersLocked(PendingBatchReservation &reservation,
+                                                 const std::vector<uint64_t> &requestIds,
+                                                 std::vector<navi::AsyncPipePtr> &pipes);
+        bool failRequestLocked(PendingBatchReservation &reservation, uint64_t requestId,
+                               bool &batchReleased);
+        bool failRequestsLocked(PendingBatchReservation &reservation,
+                                const std::vector<uint64_t> &requestIds,
+                                bool &batchReleased);
+        bool failRequestIndexesLocked(PendingBatchReservation &reservation,
+                                      const std::vector<size_t> &requestIndexes,
+                                      bool &batchReleased,
+                                      FailureTiming *timing = nullptr);
+        int64_t matchBlockCount(const NaviSchedBlockHashes &blockHashes) const;
+        bool matchCacheBatch(const std::vector<NaviSchedScheduleItem> &requests,
+                             int64_t *matchedBlockCounts,
+                             int64_t *sharedPrefixBoundaries = nullptr,
+                             int64_t *externalSuffixBlockCounts = nullptr,
+                             TPUPrefillCacheObservation *observation = nullptr,
+                             int64_t *fullPrefixBlockCounts = nullptr,
+                             const std::vector<size_t> *commonPrefixes = nullptr) const;
+        int64_t matchExternalSuffix(
+            const NaviSchedBlockHashes &blockHashes, int64_t promptTokens,
+            int64_t blockSize, int64_t localBlocks, int64_t excludedScheduleBatchId = 0,
+            MasterPendingCacheR::MatchBreakdown *details = nullptr) const;
+        mutable autil::ReadWriteLock _infoLock;
+        NaviSchedNodeInfo _info;
+        std::shared_ptr<const NaviSchedNodeInfo> _infoSnapshot;
+        std::shared_ptr<const PublishedSnapshot> _publishedSnapshot;
+        NodeCacheState _v6dCacheState;
+        NodeCacheState &cacheForType(NaviSchedCacheKeyType type);
+        const NodeCacheState &cacheForType(NaviSchedCacheKeyType type) const;
         MasterPendingCacheR *_pendingCacheR = nullptr;
         std::shared_ptr<MasterLatencyModelR::LiveModelSlot> _latencyModelSlot;
         std::shared_ptr<const LatencyResidualModel::RuntimeConfig>
@@ -338,10 +375,8 @@ public:
                              const std::string &address, int64_t totalBlocks);
     bool removeAgent(const NodeStatePtr &state);
     bool openAgentCollector(const std::string &nodeId, const std::string &collectGraphId);
-    bool closeAgentCollector(const std::string &nodeId,
-                             const std::string &collectorId);
-    bool stopAgentCollector(const std::string &nodeId,
-                            const std::string &collectorId);
+    bool closeAgentCollector(const std::string &nodeId, const std::string &collectorId);
+    bool stopAgentCollector(const std::string &nodeId, const std::string &collectorId);
     bool bindAgentCollector(const std::string &collectorId, const std::string &nodeId,
                             const NodeStatePtr &state = nullptr);
     bool unbindAgentCollector(const std::string &collectorId);
@@ -354,11 +389,9 @@ public:
                      const AgentUpdateToMasterDataConstPtr &update,
                      bool *resyncRequired = nullptr,
                      bool *pendingCacheResyncRequired = nullptr,
-                     MasterPendingCacheR::ApplyResult *pendingCacheApplyResult =
-                         nullptr,
+                     MasterPendingCacheR::ApplyResult *pendingCacheApplyResult = nullptr,
                      const std::string &latencySourceId = "",
-                     MasterLatencyModelR::RecordResult *latencyRecordResult =
-                         nullptr,
+                     MasterLatencyModelR::RecordResult *latencyRecordResult = nullptr,
                      AgentUpdateTiming *timing = nullptr);
     bool receiveClientRequest(const ClientRequestToMasterData &request);
     static NaviSchedScheduleItem makeScheduleItem(
@@ -369,15 +402,12 @@ public:
     void reserveScheduleNodeBatch(NaviSchedScheduleContext &context, size_t nodeIndex,
                                   const std::vector<size_t> &requestIndexes);
     bool registerDispatchWaiter(const NaviSchedTarget &target, int64_t batchId,
-                                uint64_t requestId,
-                                const navi::AsyncPipePtr &pipe,
+                                uint64_t requestId, const navi::AsyncPipePtr &pipe,
                                 bool &acknowledged);
     bool unregisterDispatchWaiter(const NaviSchedTarget &target, int64_t batchId,
-                                  uint64_t requestId,
-                                  const navi::AsyncPipePtr &pipe);
+                                  uint64_t requestId, const navi::AsyncPipePtr &pipe);
     bool cancelDispatchWaiter(const NaviSchedTarget &target, int64_t batchId,
-                              uint64_t requestId,
-                              const navi::AsyncPipePtr &pipe);
+                              uint64_t requestId, const navi::AsyncPipePtr &pipe);
     bool reportDispatchFailed(const NaviSchedTarget &target, int64_t batchId,
                               uint64_t requestId);
     bool reportDispatchFailures(const NaviSchedTarget &target, int64_t batchId,
@@ -410,8 +440,7 @@ private:
     NodeStatePtr getOrCreateNode(uint64_t agentIdHash, const std::string &agentId);
     bool resetAgentState(const NodeStatePtr &state,
                          MasterPendingCacheR::Stats *clearedPendingStats = nullptr);
-    bool isCurrentNodeStateLocked(uint64_t agentIdHash,
-                                  const NodeStatePtr &state) const;
+    bool isCurrentNodeStateLocked(uint64_t agentIdHash, const NodeStatePtr &state) const;
     void updateNodeBiz(uint64_t agentIdHash, const NodeStatePtr &state,
                        const std::string &bizName);
     void refreshBizNode(const NodeStatePtr &state);

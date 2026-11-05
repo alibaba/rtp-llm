@@ -1,6 +1,7 @@
 #pragma once
 
 #include "aios/navi_sched/common/NaviSchedScheduleData.h"
+#include "aios/navi_sched/common/TPUPrefillExecutionPolicy.h"
 #include "aios/navi_sched/data/LatencyModelGlobalData.h"
 #include "aios/navi_sched/data/MasterDispatchHandle.h"
 #include "aios/navi_sched/data/NaviSchedLatencySample.h"
@@ -10,6 +11,8 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace navi_sched {
@@ -20,12 +23,25 @@ class MasterScheduleResultKernel;
 class MasterStateR;
 class MasterLatencyModelR;
 class CostSchedulerGraphState;
+
+// Continuous optimization coordinates only. Exact batch prediction still uses
+// TPUPrefillExecutionPolicy and integer geometry at the selected assignment.
+struct NaviSchedGeometryOptimizationInput {
+    double linearCost = 0.0;
+    double sharedTokens = 0.0;
+    double fixedChunkCount = 0.0;
+    double fixedAttentionPairs = 0.0;
+    bool shared = false;
+    bool cacheHit = false;
+    double externalReadTokens = 0.0;
+};
 class CostSchedulerPrepareKernel;
 class CostSchedulerKernel;
 class CostSchedulerColdStartStrategy;
 class NaviSchedNode;
 class SchedulerBaseKernel;
 struct NaviSchedLatencyModel;
+struct NaviSchedPeerCacheSuffixLookup;
 
 struct NaviSchedColdStartRoutingStats {
     struct TargetRandomDecision {
@@ -69,6 +85,11 @@ struct NaviSchedNodeSnapshot;
 using MasterScheduleRequestDataPtr = std::shared_ptr<MasterScheduleRequestData>;
 using NaviSchedNodeConstPtr = std::shared_ptr<const NaviSchedNode>;
 
+struct NaviSchedExecutionCacheInputCapture {
+    std::vector<TPUPrefillRequestInput> inputs;
+    TPUPrefillCacheObservationBatch observation;
+};
+
 class NaviSchedScheduleNode {
 public:
     double getExecutionUtilization() const;
@@ -85,8 +106,24 @@ public:
     int32_t getRunningRequests() const;
     uint64_t getBatchTimeoutCount() const;
     uint64_t getAbnormalBatchFinishCount() const;
-    double getEstimatedQueueWaitMs() const;
-    double getEstimatedQueueWaitMsAt(int64_t predictionTimeUs) const;
+    double getEstimatedQueueWaitMs(double hitMemberWeight = 0.0, double batchWeight = 0.0,
+                                   double lookupMemberWeight = 0.0,
+                                   double *hitDerivative = nullptr,
+                                   double *batchDerivative = nullptr,
+                                   double *lookupDerivative = nullptr) const;
+    double getEstimatedQueueWaitMsAt(int64_t predictionTimeUs,
+                                     double hitMemberWeight = 0.0,
+                                     double batchWeight = 0.0,
+                                     double lookupMemberWeight = 0.0) const;
+    bool hasQueueLookupOpportunity(int64_t promptTokens) const
+    {
+        return promptTokens > _queueLookupPromptBoundary;
+    }
+    double getEstimatedQueueBaseMsAt(int64_t predictionTimeUs) const;
+    bool usesCacheMemberQueuePrediction() const
+    {
+        return !usesUnifiedLatencyPrediction() && _queueModel.cacheMemberWeightMs != 0.0;
+    }
     double getEstimatedBacklogLatencyMs() const;
     bool hasLatencyModel() const;
     bool hasValidLatencyModel() const;
@@ -102,8 +139,11 @@ public:
     const std::vector<double> &getLatencyParameters() const;
     double applyLatencyResidual(double basePredictionMs,
                                 double *derivativeFactor = nullptr) const;
+    double predictBaseLatency(const NaviSchedLatencyFeatures &features) const;
     double predictLatency(const NaviSchedLatencyFeatures &features) const;
     bool usesUnifiedLatencyPrediction() const;
+    const std::optional<TPUPrefillExecutionPolicyConfig> &getPrefillExecutionPolicy()
+        const;
     const NaviSchedLatencyFeatures &getWorkloadFeatures() const;
     const NaviSchedLatencyFeatures &getReportedWorkloadFeatures() const;
     const NaviSchedLatencyFeatures &getReservedWorkloadFeatures() const;
@@ -135,8 +175,20 @@ private:
 
 private:
     NaviSchedNodeConstPtr _node;
+    std::optional<TPUPrefillExecutionPolicyConfig> _prefillExecutionPolicy;
+    int64_t _queueLookupPromptBoundary = std::numeric_limits<int64_t>::max();
+    mutable std::shared_ptr<const NaviSchedExecutionCacheInputCapture>
+        _executionCacheInputs;
+    mutable std::shared_ptr<const std::vector<int64_t>> _localCacheBlockCounts;
+    std::shared_ptr<const NaviSchedPeerCacheSuffixLookup> _peerCacheSuffixLookup;
+    bool _peerCacheReadAvailable = false;
+    uint64_t _peerCacheReadRevision = 0;
+    mutable std::shared_ptr<const std::vector<int64_t>> _matchedBlockCounts;
+    mutable std::shared_ptr<const std::vector<NaviSchedGeometryOptimizationInput>>
+        _geometryOptimizationInputs;
     std::shared_ptr<const NaviSchedNodeInfo> _info;
     std::shared_ptr<const NaviSchedLatencyModel> _latencyModel;
+    std::vector<double> _legacyLatencyParameters;
     LatencyResidualModel::RuntimeConfig _residualRuntimeConfig;
     int64_t _totalBlocks = 0;
     int32_t _inflightRequests = 0;
@@ -148,6 +200,7 @@ private:
     uint64_t _abnormalBatchFinishCount = 0;
     double _queueTotalPredictedLatencyMs = 0.0;
     double _queueDecayHeadRemainingMs = 0.0;
+    NaviSchedQueueModelState _queueModel;
     int64_t _queueReportReceiveTimeUs = 0;
     int64_t _scheduleTimeUs = 0;
     double _timeCompression = 1.0;
@@ -195,6 +248,15 @@ public:
     const NaviSchedScheduleItem &getRequest(size_t requestIndex) const;
     const NaviSchedScheduleNode &getNode(size_t nodeIndex) const;
     int64_t getCacheHitBlockCount(size_t requestIndex, size_t nodeIndex) const;
+    std::shared_ptr<const std::vector<int64_t>> getCacheHitBlockCountsSnapshot(
+        size_t nodeIndex) const;
+    int64_t getCacheHitBlockCount(const std::vector<int64_t> &counts,
+                                  size_t requestIndex) const
+    {
+        const auto index = _scheduleViewActive ? _scheduleViewRequestIndexes[requestIndex]
+                                               : requestIndex;
+        return counts[index];
+    }
     bool getCacheHitBlockCounts(size_t nodeIndex,
                                 std::vector<int64_t> &matchedBlockCounts) const;
     void prepareCacheMatchPrefixes();
@@ -224,9 +286,20 @@ public:
         _discreteSearchEvaluations = evaluations;
         _discreteSearchMoves = moves;
     }
+    // Complete ordered batch only; no per-request padding sum is equivalent.
+    bool buildExecutionGeometryFeatures(size_t nodeIndex,
+                                        const std::vector<size_t> &requestIndexes,
+                                        NaviSchedLatencyFeatures &features) const;
     double estimateBatchExecutionLatencyMs(
         size_t nodeIndex, const std::vector<size_t> &requestIndexes,
         NaviSchedLatencyPrediction *latencyPrediction = nullptr) const;
+    const NaviSchedGeometryOptimizationInput *getGeometryOptimizationInput(
+        size_t nodeIndex, size_t requestIndex) const;
+    std::shared_ptr<const std::vector<NaviSchedGeometryOptimizationInput>>
+    getGeometryOptimizationInputs(size_t nodeIndex) const;
+    const NaviSchedGeometryOptimizationInput *getGeometryOptimizationInput(
+        const std::vector<NaviSchedGeometryOptimizationInput> &inputs,
+        size_t requestIndex) const;
     bool selectNode(size_t requestIndex, size_t nodeIndex, const std::string &reason,
                     NaviSchedLatencyTrainingPhase latencyTrainingPhase =
                         NaviSchedLatencyTrainingPhase::NORMAL);
@@ -238,6 +311,8 @@ private:
         NaviSchedLatencyPrediction *latencyPrediction,
         const std::vector<int64_t> *matchedBlockCounts) const;
 
+    std::shared_ptr<const std::vector<TPUPrefillRequestInput>> getExecutionCacheInputs(
+        size_t storageNodeIndex) const;
     friend class MasterScheduleContextKernel;
     friend class MasterScheduleResultKernel;
     friend class MasterScheduleResultPrepareKernel;
@@ -255,6 +330,7 @@ private:
                   std::vector<NaviSchedNodeSnapshot> nodeSnapshots);
     void setReplay(const std::shared_ptr<NaviSchedScheduleReplay> &replay);
     bool prepare();
+    void preparePeerCacheCounts();
     bool activateScheduleView(const std::vector<size_t> &requestIndexes,
                               const std::vector<size_t> &nodeIndexes);
     void clearScheduleView();
@@ -280,6 +356,8 @@ private:
     std::shared_ptr<void> _scheduleRequestCompletion;
     uint64_t _scheduleId = 0;
     double _timeCompression = 1.0;
+    bool _peerCacheEnabled = false;
+    std::shared_ptr<const std::unordered_set<std::string>> _peerCacheReadyAgents;
     double _scheduleLoss = 0.0;
     int64_t _scheduleLatencyUs = 0;
     int64_t _masterPrepareUs = -1;

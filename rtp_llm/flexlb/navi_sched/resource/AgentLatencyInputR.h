@@ -15,6 +15,7 @@ namespace navi_sched {
 enum class AgentLatencyInputType {
     BATCH_READY,
     BATCH_STARTED,
+    BATCH_CACHE_RESOLVED,
     BATCH_FINISHED,
     BATCH_ABORTED,
     BATCH_REQUESTS_ABORTED,
@@ -26,6 +27,8 @@ struct AgentLatencyInput {
     static void appendFeatures(NaviSchedLatencyFeatures &features,
                                const NaviSchedRequestStats &query);
     NaviSchedLatencySample makeLatencySample() const;
+    bool hasCompatibleGeometryFeatureOrigin(int32_t modelBinaryVersion) const;
+    static constexpr int32_t PROJECTED_GEOMETRY_FEATURE_VERSION = 29;
     NaviSchedLatencyTrainingPhase getLatencyTrainingPhase() const;
 
     AgentLatencyInputType type = AgentLatencyInputType::BATCH_READY;
@@ -54,6 +57,11 @@ struct AgentLatencyInput {
     int32_t completedRequestCount = 0;
     int64_t eventTimeUs = 0;
     bool graphRecovery = false;
+    int64_t executionStepCount = 0;
+    int64_t globalPaddedTokens = 0;
+    int64_t projectedExecutionStepCount = 0;
+    int64_t projectedGlobalPaddedTokens = 0;
+    int32_t geometryFeatureOriginVersion = 0;
 };
 
 class AgentLatencyInputR : public navi::ExternalResource {
@@ -80,37 +88,63 @@ public:
     bool submitBatchReady(const NaviSchedBatchPtr &batch, int32_t batchWaitingRequests,
                           int32_t queuedBatchRequests, int32_t runningRequests,
                           int64_t eventTimeUs);
+    bool submitBatchCacheResolved(const NaviSchedBatchPtr &batch,
+                                  const AgentLatencyInput &executionState);
     bool submitBatchStarted(int64_t batchId, int32_t batchWaitingRequests,
                             int32_t queuedBatchRequests, int32_t runningRequests,
                             int64_t eventTimeUs);
-    bool submitBatchFinished(const std::vector<NaviSchedRequestStats> &requests,
-                             double latencyMs, double backendQueueLatencyMs,
-                             double predictedQueueLatencyMs,
-                             double predictedExecutionLatencyMs,
-                             int64_t predictedCacheHitTokenCount,
-                             int64_t actualCacheHitTokenCount,
-                             int32_t cacheHitMismatchRequestCount,
-                             int64_t cacheHitAbsoluteErrorTokenCount,
-                             int64_t cacheHitMaxAbsoluteErrorTokenCount,
-                             int64_t batchId, int32_t inflightRequests,
-                             int32_t batchWaitingRequests, int32_t queuedBatchRequests,
-                             int32_t runningRequests, int64_t eventTimeUs,
-                             const NaviSchedLatencyFeatures &precedingFeatures = {},
-                             double unifiedLatencyMs = -1.0,
-                             bool latencySampleValid = true,
-                             bool latencyValidationValid = true,
-                             const NaviSchedLocalBatchInfo &localBatch = {});
+    bool submitBatchFinished(
+        const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
+        double backendQueueLatencyMs, double predictedQueueLatencyMs,
+        double predictedExecutionLatencyMs, int64_t predictedCacheHitTokenCount,
+        int64_t actualCacheHitTokenCount, int32_t cacheHitMismatchRequestCount,
+        int64_t cacheHitAbsoluteErrorTokenCount,
+        int64_t cacheHitMaxAbsoluteErrorTokenCount, int64_t batchId,
+        int32_t inflightRequests, int32_t batchWaitingRequests,
+        int32_t queuedBatchRequests, int32_t runningRequests, int64_t eventTimeUs,
+        const NaviSchedLatencyFeatures &precedingFeatures = {},
+        double unifiedLatencyMs = -1.0, bool latencySampleValid = true,
+        bool latencyValidationValid = true,
+        const NaviSchedLocalBatchInfo &localBatch = {});
+    bool submitBatchFinishedWithExecutionGeometry(
+        const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
+        double backendQueueLatencyMs, double predictedQueueLatencyMs,
+        double predictedExecutionLatencyMs, int64_t predictedCacheHitTokenCount,
+        int64_t actualCacheHitTokenCount, int32_t cacheHitMismatchRequestCount,
+        int64_t cacheHitAbsoluteErrorTokenCount,
+        int64_t cacheHitMaxAbsoluteErrorTokenCount, int64_t batchId,
+        int32_t inflightRequests, int32_t batchWaitingRequests,
+        int32_t queuedBatchRequests, int32_t runningRequests, int64_t eventTimeUs,
+        const NaviSchedLatencyFeatures &precedingFeatures, double unifiedLatencyMs,
+        bool latencySampleValid, bool latencyValidationValid,
+        const NaviSchedLocalBatchInfo &localBatch, int64_t executionStepCount,
+        int64_t globalPaddedTokens);
+    bool submitBatchFinishedWithProjectedExecutionGeometry(
+        const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
+        double backendQueueLatencyMs, double predictedQueueLatencyMs,
+        double predictedExecutionLatencyMs, int64_t predictedCacheHitTokenCount,
+        int64_t actualCacheHitTokenCount, int32_t cacheHitMismatchRequestCount,
+        int64_t cacheHitAbsoluteErrorTokenCount,
+        int64_t cacheHitMaxAbsoluteErrorTokenCount, int64_t batchId,
+        int32_t inflightRequests, int32_t batchWaitingRequests,
+        int32_t queuedBatchRequests, int32_t runningRequests, int64_t eventTimeUs,
+        const NaviSchedLatencyFeatures &precedingFeatures, double unifiedLatencyMs,
+        bool latencySampleValid, bool latencyValidationValid,
+        const NaviSchedLocalBatchInfo &localBatch, int64_t executionStepCount,
+        int64_t globalPaddedTokens, int64_t projectedExecutionStepCount,
+        int64_t projectedGlobalPaddedTokens);
     bool submitBatchAborted(int32_t completedRequestCount, int64_t batchId,
                             int32_t inflightRequests, int32_t batchWaitingRequests,
                             int32_t queuedBatchRequests, int32_t runningRequests,
                             int64_t eventTimeUs,
                             const NaviSchedLocalBatchInfo &localBatch);
-    bool submitBatchRequestsAborted(
-        const std::vector<NaviSchedRequestStats> &requests,
-        const NaviSchedBatchPtr &remainingBatch, int64_t batchId,
-        int32_t inflightRequests, int32_t batchWaitingRequests,
-        int32_t queuedBatchRequests, int32_t runningRequests,
-        int64_t eventTimeUs, const NaviSchedLocalBatchInfo &localBatch);
+    bool submitBatchRequestsAborted(const std::vector<NaviSchedRequestStats> &requests,
+                                    const NaviSchedBatchPtr &remainingBatch,
+                                    int64_t batchId, int32_t inflightRequests,
+                                    int32_t batchWaitingRequests,
+                                    int32_t queuedBatchRequests, int32_t runningRequests,
+                                    int64_t eventTimeUs,
+                                    const NaviSchedLocalBatchInfo &localBatch);
     bool submitObservedBatchFinished(const std::vector<NaviSchedRequestStats> &requests,
                                      double latencyMs, int32_t inflightRequests,
                                      int64_t eventTimeUs);
@@ -123,8 +157,7 @@ public:
     void replaceGraphRecoveryInputs(std::vector<AgentLatencyInput> inputs);
     void prepareGraphStart();
     uint64_t beginInputPipeGeneration();
-    bool setInputPipe(uint64_t generation,
-                      const navi::AsyncPipePtr &inputPipe);
+    bool setInputPipe(uint64_t generation, const navi::AsyncPipePtr &inputPipe);
     bool waitInputPipe(uint64_t generation, int64_t timeoutMs) const;
     void clearInputPipe(uint64_t generation);
     bool finish();
@@ -136,6 +169,20 @@ public:
     static const std::string RESOURCE_ID;
 
 private:
+    bool submitBatchFinishedImpl(
+        const std::vector<NaviSchedRequestStats> &requests, double latencyMs,
+        double backendQueueLatencyMs, double predictedQueueLatencyMs,
+        double predictedExecutionLatencyMs, int64_t predictedCacheHitTokenCount,
+        int64_t actualCacheHitTokenCount, int32_t cacheHitMismatchRequestCount,
+        int64_t cacheHitAbsoluteErrorTokenCount,
+        int64_t cacheHitMaxAbsoluteErrorTokenCount, int64_t batchId,
+        int32_t inflightRequests, int32_t batchWaitingRequests,
+        int32_t queuedBatchRequests, int32_t runningRequests, int64_t eventTimeUs,
+        const NaviSchedLatencyFeatures &precedingFeatures, double unifiedLatencyMs,
+        bool latencySampleValid, bool latencyValidationValid,
+        const NaviSchedLocalBatchInfo &localBatch, int64_t executionStepCount,
+        int64_t globalPaddedTokens, int64_t projectedExecutionStepCount = 0,
+        int64_t projectedGlobalPaddedTokens = 0);
     bool submit(AgentLatencyInput &&input);
 
 private:

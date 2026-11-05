@@ -43,8 +43,7 @@ public:
     std::vector<AgentResult> agentResults;
 };
 
-using SchedulerConfigResponseDataPtr =
-    std::shared_ptr<SchedulerConfigResponseData>;
+using SchedulerConfigResponseDataPtr = std::shared_ptr<SchedulerConfigResponseData>;
 
 class SchedulerConfigR : public navi::Resource {
 public:
@@ -53,11 +52,13 @@ public:
         bool valid() const;
 
         CostSchedulerConfig cost;
+        bool peerCacheEnabled = false;
+        std::vector<std::string> peerCacheReadyAgents;
         size_t maxWaitScheduleCount = 30;
         int64_t maxWaitScheduleTimeMs = 30;
         int64_t queueOverloadStartCycleMultiplier = 10;
         int64_t queueOverloadFullCycleMultiplier = 30;
-        std::string overloadControlStrategy = "execution_utilization";
+        std::string overloadControlStrategy = "latency";
         ExecutionUtilizationController::Config executionUtilization;
         int64_t admissionTimeoutMs = 1000;
         AgentSchedulerConfig agent;
@@ -66,8 +67,7 @@ public:
     struct Snapshot {
         Config config;
         uint64_t generation = 1;
-        std::string agentConfigHash =
-            AgentSchedulerConfigR::hashConfig(config.agent);
+        std::string agentConfigHash = AgentSchedulerConfigR::hashConfig(config.agent);
     };
 
     struct Request {
@@ -94,27 +94,20 @@ public:
     bool stopSyncPipe();
     bool submit(Request request);
     bool takeRequest(Request &request);
-    bool processRequest(const Request &request,
-                        SchedulerConfigResponseDataPtr &response,
+    bool processRequest(const Request &request, SchedulerConfigResponseDataPtr &response,
                         bool &waitingForAgents);
-    bool finishAgentSync(bool timedOut,
-                         SchedulerConfigResponseDataPtr &response,
+    bool finishAgentSync(bool timedOut, SchedulerConfigResponseDataPtr &response,
                          navi::AsyncPipePtr &responsePipe);
     bool hasActiveAgentSync() const;
     int64_t getAgentSyncRemainingTimeoutMs(int64_t currentTimeUs) const;
     bool subscribe(const std::string &subscriberId,
                    const navi::AsyncPipePtr &notificationPipe);
-    bool activateSubscriber(const std::string &subscriberId,
-                            const std::string &agentId,
-                            const std::string &agentIp,
-                            uint64_t configGeneration,
-                            const std::string &configHash,
-                            const std::string &configJson,
+    bool activateSubscriber(const std::string &subscriberId, const std::string &agentId,
+                            const std::string &agentIp, uint64_t configGeneration,
+                            const std::string &configHash, const std::string &configJson,
                             const std::string &latencyModelFingerprint = "");
-    void reportAgentConfig(const std::string &subscriberId,
-                           uint64_t requestGeneration,
-                           uint64_t configGeneration,
-                           const std::string &configHash,
+    void reportAgentConfig(const std::string &subscriberId, uint64_t requestGeneration,
+                           uint64_t configGeneration, const std::string &configHash,
                            const std::string &configJson,
                            const std::string &errorMessage);
     bool getPendingAgentUpdate(const std::string &subscriberId,
@@ -134,21 +127,19 @@ private:
                            Config &updated, std::string &errorMessage);
     static bool applyAgentPatch(const AgentSchedulerConfig &current,
                                 const std::string &configJson,
-                                AgentSchedulerConfig &updated,
-                                bool &hasAgentFields,
+                                AgentSchedulerConfig &updated, bool &hasAgentFields,
                                 std::string &errorMessage);
     static bool mergeAgentPatch(const std::string &currentPatchJson,
                                 const std::string &configJson,
-                                std::string &updatedPatchJson,
-                                bool &hasAgentFields,
+                                std::string &updatedPatchJson, bool &hasAgentFields,
                                 std::string &errorMessage);
-    static std::string extractHardware(
-        const std::string &latencyModelFingerprint);
-    bool applyStoredAgentPatchesLocked(
-        const AgentSchedulerConfig &current, const std::string &hardware,
-        const std::string *globalPatchOverride,
-        const std::string *hardwarePatchOverride,
-        AgentSchedulerConfig &updated, std::string &errorMessage) const;
+    static std::string extractHardware(const std::string &latencyModelFingerprint);
+    bool applyStoredAgentPatchesLocked(const AgentSchedulerConfig &current,
+                                       const std::string &hardware,
+                                       const std::string *globalPatchOverride,
+                                       const std::string *hardwarePatchOverride,
+                                       AgentSchedulerConfig &updated,
+                                       std::string &errorMessage) const;
 
     struct Subscriber {
         std::weak_ptr<navi::AsyncPipe> notificationPipe;
@@ -189,9 +180,8 @@ private:
     void releaseUpdateTokenLocked(uint64_t updateToken);
     void logRejectedUpdateLocked(const std::string &configJson,
                                  const std::string &errorMessage) const;
-    void logCompletedUpdateLocked(uint64_t generation, bool accepted,
-                                  bool timedOut, size_t targetAgentCount,
-                                  size_t updatedAgentCount,
+    void logCompletedUpdateLocked(uint64_t generation, bool accepted, bool timedOut,
+                                  size_t targetAgentCount, size_t updatedAgentCount,
                                   size_t failedAgentCount,
                                   const std::string &errorMessage) const;
     SchedulerConfigResponseDataPtr makeResponseLocked(

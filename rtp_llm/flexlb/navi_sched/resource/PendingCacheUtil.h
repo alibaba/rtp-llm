@@ -17,23 +17,27 @@ struct PendingCacheReferencedRequest {
     const NaviSchedBlockHashes *blockHashes = nullptr;
     int64_t totalTokenCount = 0;
     int64_t blockSize = 0;
+    int64_t cachePublicationTokenCount = -1;
+    // Tokens reused before this execution do not produce a new publication.
+    int64_t cachePublicationStartTokenCount = 0;
 };
 
 class PendingCacheUtil {
 public:
+    static bool isTailReady(
+        int64_t totalTokens, size_t depth, const NaviSchedCachePolicy &policy,
+        NaviSchedCacheKeyType type = NaviSchedCacheKeyType::BLOCK_POOL);
     static bool makeReservation(
         int64_t batchId, const std::vector<PendingCacheReferencedRequest> &requests,
-        const NaviSchedCachePolicy &policy,
-        NaviSchedPendingCacheReservation &reservation);
-    static bool validReservation(
-        const NaviSchedPendingCacheReservation &reservation);
-    static bool equalReservation(
-        const NaviSchedPendingCacheReservation &left,
-        const NaviSchedPendingCacheReservation &right);
+        const NaviSchedCachePolicy &policy, NaviSchedPendingCacheReservation &reservation,
+        NaviSchedCacheKeyType type = NaviSchedCacheKeyType::BLOCK_POOL);
+    static bool validReservation(const NaviSchedPendingCacheReservation &reservation);
+    static bool equalReservation(const NaviSchedPendingCacheReservation &left,
+                                 const NaviSchedPendingCacheReservation &right);
     static uint64_t reservationChecksum(
         const NaviSchedPendingCacheReservation &reservation);
     static uint64_t reservationBlockChecksum(int64_t batchId, uint64_t blockHash,
-                                            bool tailReady);
+                                             bool tailReady);
 };
 
 struct PendingCacheStateStats {
@@ -45,15 +49,12 @@ struct PendingCacheStateStats {
 
 class PendingCacheState {
 public:
-    bool upsert(const NaviSchedPendingCacheReservation &reservation,
-                bool replaceExisting, bool &changed,
-                const PendingCacheState *other = nullptr,
+    bool upsert(const NaviSchedPendingCacheReservation &reservation, bool replaceExisting,
+                bool &changed, const PendingCacheState *other = nullptr,
                 PendingCacheStateStats *overlap = nullptr);
-    bool erase(int64_t batchId, bool &changed,
-               const PendingCacheState *other = nullptr,
+    bool erase(int64_t batchId, bool &changed, const PendingCacheState *other = nullptr,
                PendingCacheStateStats *overlap = nullptr);
-    bool replace(
-        const std::vector<NaviSchedPendingCacheReservation> &reservations);
+    bool replace(const std::vector<NaviSchedPendingCacheReservation> &reservations);
     void clear();
 
     bool containsFullReady(uint64_t blockHash) const;
@@ -74,11 +75,9 @@ public:
 
 private:
     friend class MasterPendingCacheR;
-    bool upsertGenerated(
-        const NaviSchedPendingCacheReservation &reservation,
-        bool replaceExisting, bool &changed,
-        const PendingCacheState *other,
-        PendingCacheStateStats *overlap);
+    bool upsertGenerated(const NaviSchedPendingCacheReservation &reservation,
+                         bool replaceExisting, bool &changed,
+                         const PendingCacheState *other, PendingCacheStateStats *overlap);
     bool removeGeneratedBlocks(int64_t batchId,
                                const std::vector<uint64_t> &fullReadyBlockHashes,
                                const std::vector<uint64_t> &tailReadyBlockHashes,

@@ -1,6 +1,7 @@
 import os
 
 NAVI_SCHED_MEDIA_ERROR_PREFIX = "navi_sched_media_error:"
+from navi_sched.spectrum_kmon import spectrum_kmon_tags
 
 
 def split_address(address: str):
@@ -34,6 +35,7 @@ def make_kmon_tags(role: str, environ=None) -> dict[str, str]:
     deployment_name = (
         values.get("DEPLOYMENT_NAME", "").strip()
         or values.get("HIPPO_ROLE", "").strip()
+        or values.get("SPECTRUM_DEPLOYMENT_NAME", "").strip()
     )
     if deployment_name:
         tags["deployment_name"] = deployment_name
@@ -47,6 +49,7 @@ def make_kmon_tags(role: str, environ=None) -> dict[str, str]:
         value = values.get(env_name, "").strip()
         if value:
             tags[tag_name] = value
+    tags.update(spectrum_kmon_tags(values))
     physical_host_ip = values.get("HIPPO_SLAVE_IP", "").strip()
     instance_ip = (
         values.get("VLLM_NAVI_SCHED_SERVER_IP", "").strip()

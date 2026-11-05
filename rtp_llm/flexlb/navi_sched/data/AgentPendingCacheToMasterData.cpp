@@ -2,8 +2,7 @@
 
 namespace navi_sched {
 
-void NaviSchedPendingCacheReservation::serialize(
-    autil::DataBuffer &dataBuffer) const
+void NaviSchedPendingCacheReservation::serialize(autil::DataBuffer &dataBuffer) const
 {
     dataBuffer.write(batchId);
     dataBuffer.write(scheduleBatchId);
@@ -11,8 +10,7 @@ void NaviSchedPendingCacheReservation::serialize(
     dataBuffer.write(tailReadyBlockHashes);
 }
 
-void NaviSchedPendingCacheReservation::deserialize(
-    autil::DataBuffer &dataBuffer)
+void NaviSchedPendingCacheReservation::deserialize(autil::DataBuffer &dataBuffer)
 {
     dataBuffer.read(batchId);
     dataBuffer.read(scheduleBatchId);
@@ -20,9 +18,9 @@ void NaviSchedPendingCacheReservation::deserialize(
     dataBuffer.read(tailReadyBlockHashes);
 }
 
-void AgentPendingCacheToMasterData::serialize(
-    autil::DataBuffer &dataBuffer) const
+void AgentPendingCacheToMasterData::serialize(autil::DataBuffer &dataBuffer) const
 {
+    dataBuffer.write(cacheKeyType);
     dataBuffer.write(fullSnapshot);
     dataBuffer.write(addedReservations);
     dataBuffer.write(removedBatchIds);
@@ -35,6 +33,7 @@ void AgentPendingCacheToMasterData::serialize(
 
 void AgentPendingCacheToMasterData::deserialize(autil::DataBuffer &dataBuffer)
 {
+    dataBuffer.read(cacheKeyType);
     dataBuffer.read(fullSnapshot);
     dataBuffer.read(addedReservations);
     dataBuffer.read(removedBatchIds);

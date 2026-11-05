@@ -22,7 +22,7 @@ class NaviSchedMaster(RoleFacade):
         max_wait_schedule_time_ms: int = 10,
         queue_overload_start_cycle_multiplier: int = 0,
         queue_overload_full_cycle_multiplier: int = 0,
-        scheduler_name: str = "random",
+        scheduler_name: str = "cost",
         scheduler_config: str = "",
         time_compression: float = 1.0,
         latency_model_pool_state_file: Optional[str] = None,
@@ -37,9 +37,7 @@ class NaviSchedMaster(RoleFacade):
         configureNaviSchedAlog()
         navi_sched = naviSchedModule()
         options.setdefault("snapshot_dir", DEFAULT_MASTER_SNAPSHOT_DIR)
-        options.setdefault(
-            "snapshot_keep_count", DEFAULT_MASTER_SNAPSHOT_KEEP_COUNT
-        )
+        options.setdefault("snapshot_keep_count", DEFAULT_MASTER_SNAPSHOT_KEEP_COUNT)
         if latency_model_pool_state_file is None:
             latency_model_pool_state_file = os.path.join(
                 str(options["snapshot_dir"]),
@@ -67,9 +65,7 @@ class NaviSchedMaster(RoleFacade):
         config.scheduler_name = str(scheduler_name)
         config.scheduler_config = str(scheduler_config)
         config.time_compression = float(time_compression)
-        config.latency_model_pool_state_file = str(
-            latency_model_pool_state_file
-        )
+        config.latency_model_pool_state_file = str(latency_model_pool_state_file)
         config.latency_model_pool_source_min_revision = int(
             latency_model_pool_source_min_revision
         )
@@ -81,5 +77,6 @@ class NaviSchedMaster(RoleFacade):
         )
         service = navi_sched.NaviSchedMaster(config)
         super().__init__(navi_sched, service)
+
 
 __all__ = ["NaviSchedMaster"]

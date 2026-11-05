@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import sys
 import threading
 import time
 from collections import deque
@@ -16,12 +17,20 @@ from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
-from navi_sched import NaviSchedAgent
 from navi_sched.util import DEFAULT_AGENT_RUNTIME_NAME, naviSchedModule
 
+from navi_sched import NaviSchedAgent
+
+from . import ExecutionTimingProbe as _execution_timing_probe
 from .VLLMAdapterUtils import NAVI_SCHED_MEDIA_ERROR_PREFIX, make_kmon_tags
 from .VLLMBlockHash import block_hash_to_uint64, stable_request_id
-from .VLLMCachePolicy import VLLMCachePolicy, VLLMCacheState
+from .VLLMCachePolicy import (
+    VLLMCachePolicy,
+    VLLMCacheState,
+    get_vllm_full_attention_query_drop_tokens,
+    is_vllm_eagle_block_drop_enabled,
+    is_vllm_native_pd_prefill,
+)
 from .VLLMImageCacheMap import VLLMImageCacheMap
 
 logger = logging.getLogger("vllm.navi_sched.agent")
@@ -32,19 +41,81 @@ _STALLED_RUNNING_LOG_INTERVAL_NS = 60_000_000_000
 _STALLED_RUNNING_MAX_LOGS_PER_SCAN = 4
 _SLOW_ENGINE_STAGE_NS = 100_000_000
 _SEVERE_ENGINE_STAGE_NS = 1_000_000_000
+_CACHE_SNAPSHOT_INTERVAL_NS = 100_000_000
 _SLOW_ENGINE_STAGE_LOG_INTERVAL_NS = 5_000_000_000
 
 _LATENCY_PARAMETER_LEARNING_RATE_SCALES = (
-    4.0, 4.0, 4.0, 0.8786028245332912, 1.0,
-    0.10067484459438397, 1.0, 4.0, 4.0, 4.0,
-    2.361137720592015, 4.0, 0.014903028756332782,
-    0.00647920238757579, 0.013073034322480767,
-    4.0, 4.0, 1.0, 1.0,
+    4.0,
+    4.0,
+    4.0,
+    0.8786028245332912,
+    1.0,
+    0.10067484459438397,
+    1.0,
+    4.0,
+    4.0,
+    4.0,
+    2.361137720592015,
+    4.0,
+    0.014903028756332782,
+    0.00647920238757579,
+    0.013073034322480767,
+    4.0,
+    4.0,
+    1.0,
+    1.0,
 )
 
 
 class _MediaPreprocessingError(ValueError):
     pass
+
+
+def _v6d_peer_cache_enabled(scheduler) -> bool:
+    """Read the connected client's cached capability once, before Agent init."""
+    module = sys.modules.get("kvs_connector.v6d_object_connector")
+    connector_type = getattr(module, "V6dObjectConnector", None)
+    if connector_type is None:
+        return False
+    connectors = [getattr(scheduler, "connector", None)]
+    while connectors:
+        connector = connectors.pop()
+        if isinstance(connector, connector_type):
+            source = connector.scheduler
+            # Multi-node TP needs per-shard capability/domain reporting first.
+            if getattr(source, "_is_cross_node_tp", False):
+                return False
+            context = getattr(source, "_client_context", None)
+            client = getattr(context, "client", None)
+            info = getattr(client, "peer_info", None)
+            if not isinstance(info, dict):
+                return False
+            # The existing SDK finishes lazy transfer initialization in its own
+            # startup thread after the connector publishes the cache spec.
+            polling_thread = getattr(client, "_polling_thread", None)
+            if (
+                info.get("is_lazy_strategy") is True
+                and getattr(client, "tair_kvcm_runtime", None) is None
+                and polling_thread is not None
+            ):
+                polling_thread.join(timeout=30.0)
+                info = getattr(client, "peer_info", None)
+                if not isinstance(info, dict):
+                    return False
+            status = info.get("kvcm_status", {})
+            if not isinstance(status, dict):
+                return False
+            ready = (
+                info.get("peer_type") == "vineyard"
+                and status.get("mode") == "report-event-and-cache-transfer"
+                and status.get("report_event_ready") is True
+                and status.get("cache_transfer_ready") is True
+            )
+            if info.get("is_lazy_strategy") is True:
+                ready = ready and getattr(client, "tair_kvcm_runtime", None) is not None
+            return bool(ready)
+        connectors.extend(getattr(connector, "_connectors", ()))
+    return False
 
 
 @dataclass(frozen=True)
@@ -59,6 +130,7 @@ class _AgentConfig:
     latency_learning_rate: float
     latency_online_learning_rate_scale: float
     latency_current_sample_weight: float
+    latency_error_clip_ms: float
     latency_parameter_learning_rate_scales: list[float]
     queue_learning_rate: float
     latency_cold_start_fit_epochs: int
@@ -68,6 +140,8 @@ class _AgentConfig:
     latency_persist_interval_ms: int
     latency_warmup_sample_count: int
     latency_validation_enabled: bool
+    execution_geometry_enabled: bool
+    execution_cache_source_enabled: bool
     latency_model_state_file: str
     residual_learning_rate: float
     residual_update_error_floor_ms: float
@@ -78,6 +152,12 @@ class _AgentConfig:
     @classmethod
     def from_env(cls) -> "_AgentConfig":
         tuning_defaults = _latency_tuning_defaults()
+        cache_source_enabled = _read_bool_env(
+            "VLLM_NAVI_SCHED_EXECUTION_CACHE_SOURCE_ENABLED", False
+        )
+        default_parameter_rates = (
+            () if cache_source_enabled else _LATENCY_PARAMETER_LEARNING_RATE_SCALES
+        )
         config = cls(
             biz_name=os.environ.get("VLLM_NAVI_SCHED_BIZ_NAME", "").strip(),
             server_ip=os.environ.get("VLLM_NAVI_SCHED_SERVER_IP", "").strip(),
@@ -101,19 +181,20 @@ class _AgentConfig:
                     str(tuning_defaults["latency_online_learning_rate_scale"]),
                 )
             ),
+            latency_error_clip_ms=float(
+                os.environ.get("VLLM_NAVI_SCHED_LATENCY_ERROR_CLIP_MS", "5000")
+            ),
             latency_current_sample_weight=float(
-                os.environ.get(
-                    "VLLM_NAVI_SCHED_LATENCY_CURRENT_SAMPLE_WEIGHT", "4.0"
-                )
+                os.environ.get("VLLM_NAVI_SCHED_LATENCY_CURRENT_SAMPLE_WEIGHT", "4.0")
             ),
             latency_parameter_learning_rate_scales=json.loads(
                 os.environ.get(
                     "VLLM_NAVI_SCHED_LATENCY_PARAMETER_LEARNING_RATE_SCALES",
-                    json.dumps(_LATENCY_PARAMETER_LEARNING_RATE_SCALES),
+                    json.dumps(default_parameter_rates),
                 )
             ),
             queue_learning_rate=float(
-                os.environ.get("VLLM_NAVI_SCHED_QUEUE_LEARNING_RATE", "0.02")
+                os.environ.get("VLLM_NAVI_SCHED_QUEUE_LEARNING_RATE", "0.002")
             ),
             latency_cold_start_fit_epochs=int(
                 os.environ.get("VLLM_NAVI_SCHED_LATENCY_COLD_START_FIT_EPOCHS", "100")
@@ -122,17 +203,13 @@ class _AgentConfig:
                 os.environ.get("VLLM_NAVI_SCHED_LATENCY_HISTORY_LIMIT", "2000")
             ),
             latency_history_bucket_capacity=int(
-                os.environ.get(
-                    "VLLM_NAVI_SCHED_LATENCY_HISTORY_BUCKET_CAPACITY", "64"
-                )
+                os.environ.get("VLLM_NAVI_SCHED_LATENCY_HISTORY_BUCKET_CAPACITY", "64")
             ),
             latency_persist_interval=int(
                 os.environ.get("VLLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL", "256")
             ),
             latency_persist_interval_ms=int(
-                os.environ.get(
-                    "VLLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL_MS", "10000"
-                )
+                os.environ.get("VLLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL_MS", "10000")
             ),
             latency_warmup_sample_count=int(
                 os.environ.get("VLLM_NAVI_SCHED_LATENCY_WARMUP_SAMPLE_COUNT", "10")
@@ -140,6 +217,10 @@ class _AgentConfig:
             latency_validation_enabled=_read_bool_env(
                 "VLLM_NAVI_SCHED_LATENCY_VALIDATION", True
             ),
+            execution_geometry_enabled=_read_bool_env(
+                "VLLM_NAVI_SCHED_EXECUTION_GEOMETRY_ENABLED", False
+            ),
+            execution_cache_source_enabled=cache_source_enabled,
             latency_model_state_file=os.environ.get(
                 "VLLM_NAVI_SCHED_LATENCY_MODEL_STATE_FILE", ""
             ).strip(),
@@ -155,19 +236,13 @@ class _AgentConfig:
                 )
             ),
             residual_update_error_ratio=float(
-                os.environ.get(
-                    "VLLM_NAVI_SCHED_RESIDUAL_UPDATE_ERROR_RATIO", "0.1"
-                )
+                os.environ.get("VLLM_NAVI_SCHED_RESIDUAL_UPDATE_ERROR_RATIO", "0.1")
             ),
             residual_idle_decay_start_ms=int(
-                os.environ.get(
-                    "VLLM_NAVI_SCHED_RESIDUAL_IDLE_DECAY_START_MS", "120000"
-                )
+                os.environ.get("VLLM_NAVI_SCHED_RESIDUAL_IDLE_DECAY_START_MS", "120000")
             ),
             residual_idle_decay_end_ms=int(
-                os.environ.get(
-                    "VLLM_NAVI_SCHED_RESIDUAL_IDLE_DECAY_END_MS", "300000"
-                )
+                os.environ.get("VLLM_NAVI_SCHED_RESIDUAL_IDLE_DECAY_END_MS", "300000")
             ),
         )
         if not config.biz_name:
@@ -216,23 +291,38 @@ class _AgentConfig:
         ):
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"VLLM_NAVI_SCHED_{name} must be positive and finite")
+        if (
+            not math.isfinite(config.latency_error_clip_ms)
+            or config.latency_error_clip_ms < 0
+        ):
+            raise ValueError(
+                "VLLM_NAVI_SCHED_LATENCY_ERROR_CLIP_MS must be nonnegative and finite"
+            )
         rates = config.latency_parameter_learning_rate_scales
+        source_rates = config.execution_cache_source_enabled
         if (
             not isinstance(rates, list)
-            or len(rates) not in (0, 10, 17, 19)
+            or len(rates) not in ((0, 21) if source_rates else (0, 10, 17, 19))
             or any(
                 not isinstance(rate, (int, float))
                 or isinstance(rate, bool)
                 or not math.isfinite(rate)
                 or rate < 0.0
-                or (rate == 0.0 and index < 17)
+                or (source_rates and (rate != 0.0 if 10 <= index < 19 else rate <= 0.0))
+                or (not source_rates and rate == 0.0 and index < 17)
                 for index, rate in enumerate(rates)
             )
         ):
+            expected = (
+                "21 finite numbers; inactive entries 10 through 18 must be zero "
+                "and active entries must be positive"
+                if source_rates
+                else "10, 17, or 19 finite numbers; only decode-progress entries "
+                "17 and 18 may be zero"
+            )
             raise ValueError(
                 "VLLM_NAVI_SCHED_LATENCY_PARAMETER_LEARNING_RATE_SCALES "
-                "must be a JSON array of 10, 17, or 19 finite numbers; "
-                "only decode-progress entries 17 and 18 may be zero"
+                "must be an empty array or a JSON array of " + expected
             )
         if not math.isfinite(config.queue_learning_rate) or (
             config.queue_learning_rate <= 0.0
@@ -243,9 +333,7 @@ class _AgentConfig:
         if not math.isfinite(config.residual_learning_rate) or not (
             0.0 <= config.residual_learning_rate <= 1.0
         ):
-            raise ValueError(
-                "VLLM_NAVI_SCHED_RESIDUAL_LEARNING_RATE must be in [0, 1]"
-            )
+            raise ValueError("VLLM_NAVI_SCHED_RESIDUAL_LEARNING_RATE must be in [0, 1]")
         for name, value in (
             (
                 "RESIDUAL_UPDATE_ERROR_FLOOR_MS",
@@ -257,14 +345,13 @@ class _AgentConfig:
             ),
         ):
             if not math.isfinite(value) or value < 0.0:
-                raise ValueError(f"VLLM_NAVI_SCHED_{name} must be finite and non-negative")
+                raise ValueError(
+                    f"VLLM_NAVI_SCHED_{name} must be finite and non-negative"
+                )
         if config.residual_idle_decay_start_ms < 0 or (
-            config.residual_idle_decay_end_ms
-            <= config.residual_idle_decay_start_ms
+            config.residual_idle_decay_end_ms <= config.residual_idle_decay_start_ms
         ):
-            raise ValueError(
-                "VLLM_NAVI_SCHED residual idle decay interval is invalid"
-            )
+            raise ValueError("VLLM_NAVI_SCHED residual idle decay interval is invalid")
         return config
 
 
@@ -320,9 +407,7 @@ def _model_fingerprint_values(model: Any, prefix: str = "") -> dict[str, Any]:
     hf_config = getattr(model, "hf_config", None)
     return {
         f"{prefix}model": _stable_model_identity(getattr(model, "model", "")),
-        f"{prefix}revision": _stable_fingerprint_value(
-            getattr(model, "revision", "")
-        ),
+        f"{prefix}revision": _stable_fingerprint_value(getattr(model, "revision", "")),
         f"{prefix}code_revision": _stable_fingerprint_value(
             getattr(model, "code_revision", "")
         ),
@@ -435,15 +520,15 @@ def _latency_model_fingerprint(vllm_config: Any) -> str:
         "draft_data_parallel_size",
     )
     values = {
-        "fingerprint_version": 2,
+        "fingerprint_version": 3,
+        "navi_sched_model_version": (
+            os.environ.get("NAVI_SCHED_MODEL_VERSION", "").strip()
+            or "native-start-output-complete-v34"
+        ),
         "framework": "vllm",
         "hardware": _runtime_hardware_fingerprint(),
-        "tensor_parallel_size": int(
-            getattr(parallel, "tensor_parallel_size", 1)
-        ),
-        "pipeline_parallel_size": int(
-            getattr(parallel, "pipeline_parallel_size", 1)
-        ),
+        "tensor_parallel_size": int(getattr(parallel, "tensor_parallel_size", 1)),
+        "pipeline_parallel_size": int(getattr(parallel, "pipeline_parallel_size", 1)),
         "data_parallel_size": int(getattr(parallel, "data_parallel_size", 1)),
         "decode_context_parallel_size": int(
             getattr(parallel, "decode_context_parallel_size", 1)
@@ -456,9 +541,7 @@ def _latency_model_fingerprint(vllm_config: Any) -> str:
         ),
         "model": _stable_model_identity(getattr(model, "model", "")),
         "dtype": _stable_fingerprint_value(getattr(model, "dtype", "")),
-        "quantization": _stable_fingerprint_value(
-            getattr(model, "quantization", "")
-        ),
+        "quantization": _stable_fingerprint_value(getattr(model, "quantization", "")),
         "speculative": {
             key: speculative.get(key, "") for key in formula_speculative_keys
         },
@@ -511,6 +594,54 @@ def _latency_history_fingerprint(
     return json.dumps(values, separators=(",", ":"), sort_keys=True)
 
 
+def _native_pd_latency_model_fingerprint(
+    formula_fingerprint: str,
+    cache_policy: VLLMCachePolicy,
+    execution_policy=None,
+    execution_geometry_enabled: bool = False,
+    projected_execution_geometry_enabled: bool = False,
+    execution_cache_source_enabled: bool = False,
+) -> str:
+    """Separate TPU PD training state when vLLM's effective cache geometry changes."""
+    values = json.loads(formula_fingerprint)
+    values["navi_latency_mode"] = (
+        "split_native_start_execution_geometry_v32"
+        if execution_geometry_enabled
+        else "split_native_start_output_complete_v3"
+    )
+    values["execution_geometry_enabled"] = bool(execution_geometry_enabled)
+    if execution_geometry_enabled and projected_execution_geometry_enabled:
+        values["navi_latency_mode"] = "split_native_start_lookup_projected_geometry_v33"
+        values["projected_execution_geometry_enabled"] = True
+        values["prefill_execution_feature_protocol"] = 1
+    if execution_cache_source_enabled:
+        if not execution_geometry_enabled:
+            raise ValueError("cache source requires execution geometry")
+        values["navi_latency_mode"] = (
+            "split_native_start_cache_source_geometry_v34"
+            if projected_execution_geometry_enabled
+            else "split_native_start_measured_cache_source_geometry_v35"
+        )
+        values["projected_execution_geometry_enabled"] = bool(
+            projected_execution_geometry_enabled
+        )
+        if not projected_execution_geometry_enabled:
+            values["training_geometry_origin"] = "observed_runner"
+            values["dispatch_geometry_origin"] = "all_cache_resolved_forecast"
+        values["execution_cache_source_feature_protocol"] = 1
+    values["cache_prediction_version"] = 1
+    values["execution_completion_boundary"] = "scheduler_update_complete_v1"
+    values["execution_start_boundary"] = "native_start_call_v1"
+    if execution_geometry_enabled and execution_policy is not None:
+        values["runtime_prefill_execution_policy"] = execution_policy
+    values["effective_cache_policy"] = {
+        "block_size": cache_policy.block_size,
+        "linear_step": cache_policy.linear_step,
+        "hybrid_tail_required": cache_policy.hybrid_tail_required,
+    }
+    return json.dumps(values, separators=(",", ":"), sort_keys=True)
+
+
 class _BatchCompletion:
     def __init__(self, observer, execution_step):
         self._observer = observer
@@ -526,6 +657,8 @@ class _BatchCompletion:
 class _ExecutionStep:
     started_ns: int
     submitted_ns: int = 0
+    future_completed_ns: int = 0
+    global_padded_tokens: int | None = None
     scheduler_output_key: int = 0
     backend_execution_started: bool = False
     backend_completion_recorded: bool = False
@@ -624,9 +757,7 @@ class _PrefillWorkloadSliceAggregate:
         self.context_tokens += context_tokens
         self.compute_tokens += compute_tokens
         self.compute_token_square_sum += float(compute_tokens**2)
-        self.context_compute_token_product_sum += float(
-            context_tokens * compute_tokens
-        )
+        self.context_compute_token_product_sum += float(context_tokens * compute_tokens)
 
     def snapshot(self) -> _PrefillWorkloadSlice:
         return _PrefillWorkloadSlice(
@@ -634,9 +765,7 @@ class _PrefillWorkloadSliceAggregate:
             context_tokens=self.context_tokens,
             compute_tokens=self.compute_tokens,
             compute_token_square_sum=self.compute_token_square_sum,
-            context_compute_token_product_sum=(
-                self.context_compute_token_product_sum
-            ),
+            context_compute_token_product_sum=(self.context_compute_token_product_sum),
         )
 
 
@@ -694,9 +823,7 @@ class _ObservedWorkload:
                 self.scheduler_running_prefill.request_count > 0
                 or self.running_elapsed_time_ms == 0.0
             )
-            and 0
-            <= self.running_decode_request_count
-            <= self.running_request_count
+            and 0 <= self.running_decode_request_count <= self.running_request_count
             and self.running_decode_generated_tokens
             >= self.running_decode_request_count
             and (
@@ -728,17 +855,14 @@ class _ObservedWorkload:
             and self.total_prompt_tokens >= 0
             and self.inflight_scheduled_tokens >= 0
             and self.max_running_request_count >= 0
-            and 0
-            <= self.running_capacity_slot_count
-            <= self.max_running_request_count
+            and 0 <= self.running_capacity_slot_count <= self.max_running_request_count
             and self.running_capacity_prefill.valid()
             and self.running_capacity_prefill.request_count
             <= self.running_capacity_slot_count
             and self.waiting_capacity_prefill.valid()
             and (
                 self.waiting_capacity_prefill.request_count == 0
-                or self.running_capacity_slot_count
-                == self.max_running_request_count
+                or self.running_capacity_slot_count == self.max_running_request_count
             )
             and self.remaining_prefill_request_count
             == self.running_capacity_prefill.request_count
@@ -808,9 +932,7 @@ class _WorkloadAggregate:
         return cls(
             batch_count=workload.batch_count,
             request_count=workload.request_count,
-            remaining_prefill_request_count=(
-                workload.remaining_prefill_request_count
-            ),
+            remaining_prefill_request_count=(workload.remaining_prefill_request_count),
             remaining_prefill_context_tokens=(
                 workload.remaining_prefill_context_tokens
             ),
@@ -872,8 +994,7 @@ class _WorkloadAggregate:
                 contribution.remaining_total_tokens**2
             )
             self.context_remaining_total_token_product_sum += sign * float(
-                contribution.total_context_tokens
-                * contribution.remaining_total_tokens
+                contribution.total_context_tokens * contribution.remaining_total_tokens
             )
 
     def snapshot(
@@ -906,9 +1027,7 @@ class _WorkloadAggregate:
             ),
             observed_time_ns=observed_time_ns,
             waiting_request_count=waiting_request_count,
-            remaining_prefill_context_tokens=(
-                self.remaining_prefill_context_tokens
-            ),
+            remaining_prefill_context_tokens=(self.remaining_prefill_context_tokens),
             remaining_prefill_tokens=self.remaining_prefill_tokens,
             remaining_prefill_token_square_sum=(
                 self.remaining_prefill_token_square_sum
@@ -972,6 +1091,12 @@ class _ForwardBatchState:
     cancelled_request_ids: set[int] = field(default_factory=set)
     handle: Any = None
     initial_cache_hits: dict[int, int] = field(default_factory=dict)
+    initial_external_cache_hits: dict[int, int] = field(default_factory=dict)
+    initial_execution_policy_inputs: dict[int, tuple[int, int, int]] = field(
+        default_factory=dict
+    )
+    execution_cache_reported: bool = False
+    projected_execution_exclusive: bool = True
     tracking_aborted: bool = False
     submission_failed: bool = False
     prefill_complete: bool = False
@@ -982,6 +1107,8 @@ class _ForwardBatchState:
     execution_started_ns: int = 0
     execution_step_count: int = 0
     execution_step_ms: float = 0.0
+    geometry_execution_step_count: int = 0
+    global_padded_tokens: int = 0
     execution_prefill_request_count: int = 0
     execution_prefill_tokens: int = 0
     execution_decode_request_count: int = 0
@@ -1010,6 +1137,40 @@ class _NaviSchedScheduler:
     def __init__(self, scheduler, observer):
         self._scheduler = scheduler
         self._observer = observer
+        self._forward_enqueue_sequence = 0
+        self._native_component_probe = None
+        observer._native_scheduler_component_profile = None
+        observer._native_scheduler_component_bound_hooks = 0
+        observer._native_scheduler_component_install_failures = 0
+        try:
+            self._native_component_probe = (
+                _execution_timing_probe.prepare_native_scheduler_component_probe(
+                    scheduler
+                )
+            )
+            if self._native_component_probe is not None:
+                observer._native_scheduler_component_bound_hooks = len(
+                    self._native_component_probe.bindings
+                )
+        except Exception:
+            observer._native_scheduler_component_install_failures += 1
+        observer._runtime_pipeline_diagnostic_bindings = None
+        observer._runtime_pipeline_diagnostic_install_failures = 0
+        try:
+            observer._runtime_pipeline_diagnostic_bindings = (
+                _execution_timing_probe.install_engine_runtime_diagnostic_logging()
+            )
+        except Exception:
+            observer._runtime_pipeline_diagnostic_install_failures += 1
+        observer._main_thread_stdio_probe = None
+        observer._stdio_probe_install_failures = 0
+        if self._native_component_probe is not None:
+            try:
+                observer._main_thread_stdio_probe = (
+                    _execution_timing_probe.install_main_thread_stdio_probe(observer)
+                )
+            except Exception:
+                observer._stdio_probe_install_failures += 1
 
     def __getattr__(self, name):
         return getattr(self._scheduler, name)
@@ -1042,6 +1203,36 @@ class _NaviSchedScheduler:
                     pass
 
     def _add_request(self, request, timing):
+        # DashLLM also delivers Master-forwarded ADDs through this same
+        # EngineCore queue. Keep their admission metadata so execution does
+        # not register an already-owned request as a second local batch.
+        if (
+            self._observer._native_ingress
+            and self._observer._navi_request_id(request)
+            not in self._observer._pending_forward_batches
+        ):
+            timing["phase"] = "native_ingress"
+            phase_started_ns = time.perf_counter_ns()
+            try:
+                self._scheduler.add_request(request)
+            finally:
+                timing["native_add_ms"] = (
+                    time.perf_counter_ns() - phase_started_ns
+                ) / 1_000_000.0
+            timing["phase"] = "report_native_ingress"
+            phase_started_ns = time.perf_counter_ns()
+            try:
+                self._observer._refresh_and_report_workload(
+                    self._scheduler,
+                    (str(request.request_id),),
+                    "native_ingress_admission",
+                )
+            finally:
+                timing["report_ms"] = (
+                    time.perf_counter_ns() - phase_started_ns
+                ) / 1_000_000.0
+            timing["phase"] = "done"
+            return
         if bool(getattr(request, "navi_sched_local_fallback", False)):
             timing["phase"] = "native_local_fallback"
             phase_started_ns = time.perf_counter_ns()
@@ -1088,6 +1279,10 @@ class _NaviSchedScheduler:
                 for request_id in state.request_ids:
                     forwarded = state.requests.get(request_id)
                     if forwarded is not None:
+                        forwarded._navi_forward_enqueue_order = (
+                            self._forward_enqueue_sequence
+                        )
+                        self._forward_enqueue_sequence += 1
                         self._scheduler.add_request(forwarded)
                         added_request_ids.append(forwarded.request_id)
             except BaseException:
@@ -1173,7 +1368,8 @@ class _NaviSchedScheduler:
             )
 
     def has_requests(self):
-        return self._scheduler.has_requests()
+        has_requests = self._scheduler.has_requests()
+        return has_requests
 
     def finish_requests(self, request_ids, finished_status):
         if request_ids is None:
@@ -1199,44 +1395,54 @@ class _NaviSchedScheduler:
                     request is not None
                     and request.request_id not in self._scheduler.requests
                 ):
-                    held_results.append(
-                        (
-                            request.request_id,
-                            int(getattr(request, "client_index", 0)),
-                        )
-                    )
+                    request.status = finished_status
+                    held_results.append(request)
             self._observer._abort_forward_requests(state, cancelled_ids)
 
         native_results = self._scheduler.finish_requests(request_ids, finished_status)
-        native_ids = {request_id for request_id, _ in native_results}
-        changed_request_ids = {
-            request_id for request_id, _ in native_results
-        }
+        native_ids = {request.request_id for request in native_results}
+        changed_request_ids = set(native_ids)
         if requested is None:
             with self._observer._workload_lock:
-                changed_request_ids.update(
-                    self._observer._workload_contributions
-                )
+                changed_request_ids.update(self._observer._workload_contributions)
         else:
             changed_request_ids.update(requested)
         self._observer._refresh_and_report_workload(
             self._scheduler, changed_request_ids, "finish_requests"
         )
         return native_results + [
-            value
-            for value in held_results
-            if value[0] not in native_ids
+            request for request in held_results if request.request_id not in native_ids
         ]
 
-    def schedule(self):
+    def schedule(self, throttle_prefills: bool | None = None):
         started_ns = time.perf_counter_ns()
         self._observer._promote_arrived_cache_touches(self._scheduler)
         self._observer._cleanup_finished_forward_requests(
             self._scheduler.requests,
         )
+        probe = self._native_component_probe
+        probe_active = False
+        self._observer._native_scheduler_component_profile = None
+        if probe is not None:
+            try:
+                probe_active = probe.begin()
+            except Exception:
+                self._observer._native_scheduler_component_install_failures += 1
         before_native_ns = time.perf_counter_ns()
-        scheduler_output = self._scheduler.schedule()
-        after_native_ns = time.perf_counter_ns()
+        try:
+            if throttle_prefills is None:
+                scheduler_output = self._scheduler.schedule()
+            else:
+                scheduler_output = self._scheduler.schedule(throttle_prefills)
+        finally:
+            after_native_ns = time.perf_counter_ns()
+            if probe_active:
+                try:
+                    self._observer._native_scheduler_component_profile = probe.finish(
+                        before_native_ns, after_native_ns
+                    )
+                except Exception:
+                    self._observer._native_scheduler_component_install_failures += 1
         self._observer._register_scheduled_work(scheduler_output)
         touched_request_ids = set(scheduler_output.num_scheduled_tokens)
         touched_request_ids.update(
@@ -1332,6 +1538,8 @@ class VLLMEngineObserver:
         kv_cache_config,
         max_concurrent_batches: int = 1,
     ):
+        self._native_ingress = is_vllm_native_pd_prefill()
+        _execution_timing_probe.install_gc_timing_audit()
         cache_config = vllm_config.cache_config
         if not cache_config.enable_prefix_caching:
             raise ValueError("NaviSched requires vLLM prefix caching")
@@ -1339,22 +1547,48 @@ class VLLMEngineObserver:
         self._cache_policy = VLLMCachePolicy.from_engine_config(
             vllm_config, kv_cache_config
         )
-        self._cache_state = VLLMCacheState(self._cache_policy)
+        self._cache_states = {
+            cache_key_type: VLLMCacheState(self._cache_policy)
+            for cache_key_type in (0, 1)
+        }
         self._image_cache_map = VLLMImageCacheMap(
-            self._cache_state, self._cache_policy.hybrid_tail_required,
+            self._cache_states[0],
+            self._cache_policy.hybrid_tail_required,
         )
         self._cache_lifecycle_lock = threading.Lock()
-        self._cache_lifecycle_sequence = 0
+        self._cache_lifecycle_sequences = {0: 0, 1: 0}
+        self._v6d_scheduler = None
+        self._v6d_publication_restore = []
+        self._v6d_unpublished_candidates = {}
+        self._v6d_snapshot_future = None
+        self._next_v6d_snapshot_poll_ns = 0
         self._block_size = self._cache_policy.block_size
         if os.environ.get("PYTHONHASHSEED") != "0":
             raise ValueError("NaviSched requires PYTHONHASHSEED=0")
 
         scheduler_config = vllm_config.scheduler_config
+        config = _AgentConfig.from_env()
+        self._execution_geometry_enabled = (
+            self._native_ingress and config.execution_geometry_enabled
+        )
+        if (
+            config.execution_cache_source_enabled
+            and not self._execution_geometry_enabled
+        ):
+            raise ValueError(
+                "execution cache source requires native execution geometry"
+            )
+        self._prefill_execution_policy = None
         latency_model_fingerprint = _latency_model_fingerprint(vllm_config)
+        if self._native_ingress:
+            latency_model_fingerprint = _native_pd_latency_model_fingerprint(
+                latency_model_fingerprint,
+                self._cache_policy,
+                execution_geometry_enabled=self._execution_geometry_enabled,
+            )
         latency_history_fingerprint = _latency_history_fingerprint(
             vllm_config, latency_model_fingerprint
         )
-        config = _AgentConfig.from_env()
         self._native_prepare_port = config.server_port
         self._batch_ids = itertools.count(1)
         self._batch_id_prefix = (os.getpid() & 0x7FFFFFFF) << 32
@@ -1365,6 +1599,8 @@ class VLLMEngineObserver:
         self._render_config = vllm_config
         self._render_continuation = None
         self._forward_stop = threading.Event()
+        self._pd_forward_slot = threading.Event()
+        self._pd_forward_slot.set()
         self._shutdown_lock = threading.Lock()
         self._shutdown_started = False
         self._forward_thread = None
@@ -1382,6 +1618,14 @@ class VLLMEngineObserver:
         self._pending_engine_abort_request_ids: list[str] = []
         self._response_lock = threading.Lock()
         self._execution_lock = threading.Lock()
+        # The TPU execute_model future completes before sample_tokens waits for
+        # the device output. PD batches finish only after that output is ready.
+        self._pd_output_lock = threading.Lock()
+        self._pd_output_completed_ns: dict[int, tuple[int, int]] = {}
+        self._pd_output_geometry: dict[int, int | None] = {}
+        self._pd_ready_finishes: dict[
+            int, list[Any] | tuple[_ExecutionStep, Future]
+        ] = {}
         self._workload_lock = threading.Lock()
         self._workload_report_lock = threading.Lock()
         self._prepared_workload_lock = threading.Lock()
@@ -1408,7 +1652,10 @@ class VLLMEngineObserver:
         self._slow_engine_stage_last_log_ns: dict[str, int] = {}
         self._request_audit_session = f"{os.getpid()}-{time.time_ns()}"
         self._request_audit_failures = 0
-        self._agent = NaviSchedAgent(
+        self._vllm_config = vllm_config
+        self._agent = None
+        self._bridge = None
+        self._agent_options = dict(
             biz_name=config.biz_name,
             server_ip=config.server_ip,
             server_port=config.server_port,
@@ -1416,8 +1663,30 @@ class VLLMEngineObserver:
             block_size=self._block_size,
             linear_step=self._cache_policy.linear_step,
             hybrid_tail_required=self._cache_policy.hybrid_tail_required,
-            pd_separated=False,
-            latency_prediction_mode="unified",
+            full_attention_query_drop_tokens=(
+                self._cache_policy.full_attention_query_drop_tokens
+            ),
+            pd_separated=self._native_ingress,
+            mamba_replay_stop_shift=(
+                self._native_ingress
+                and self._cache_policy.hybrid_tail_required
+                and getattr(vllm_config.cache_config, "mamba_cache_mode", None)
+                == "align"
+                and is_vllm_eagle_block_drop_enabled(vllm_config)
+            ),
+            mamba_align=(
+                self._native_ingress
+                and self._cache_policy.hybrid_tail_required
+                and getattr(cache_config, "mamba_cache_mode", None) == "align"
+            ),
+            mamba_retention_interval=(
+                -1
+                if not self._native_ingress
+                or getattr(cache_config, "prefix_cache_retention_interval", None)
+                is None
+                else int(cache_config.prefix_cache_retention_interval)
+            ),
+            latency_prediction_mode=("split" if self._native_ingress else "unified"),
             latency_model_fingerprint=latency_model_fingerprint,
             latency_history_fingerprint=latency_history_fingerprint,
             latency_history_binary_fingerprint=_vllm_binary_fingerprint(),
@@ -1433,35 +1702,33 @@ class VLLMEngineObserver:
                 config.latency_online_learning_rate_scale
             ),
             latency_current_sample_weight=config.latency_current_sample_weight,
+            latency_error_clip_ms=config.latency_error_clip_ms,
             latency_parameter_learning_rate_scales=(
                 config.latency_parameter_learning_rate_scales
             ),
             queue_learning_rate=config.queue_learning_rate,
             latency_cold_start_fit_epochs=config.latency_cold_start_fit_epochs,
             latency_history_limit=config.latency_history_limit,
-            latency_history_bucket_capacity=(
-                config.latency_history_bucket_capacity
-            ),
+            latency_history_bucket_capacity=(config.latency_history_bucket_capacity),
             latency_persist_interval=config.latency_persist_interval,
             latency_persist_interval_ms=config.latency_persist_interval_ms,
             latency_warmup_sample_count=config.latency_warmup_sample_count,
             latency_validation_enabled=config.latency_validation_enabled,
+            execution_cache_source_enabled=config.execution_cache_source_enabled,
             latency_model_state_file=config.latency_model_state_file,
             residual_learning_rate=config.residual_learning_rate,
             residual_update_error_floor_ms=config.residual_update_error_floor_ms,
             residual_update_error_ratio=config.residual_update_error_ratio,
             residual_idle_decay_start_ms=config.residual_idle_decay_start_ms,
             residual_idle_decay_end_ms=config.residual_idle_decay_end_ms,
-        ).init()
-        self._bridge = naviSchedModule()._VLLMAgentBridge(self._agent)
-        if not self._bridge.enable_forwarding():
-            self.shutdown()
-            raise RuntimeError("failed to enable NaviSched Agent forwarding")
+        )
+        if not self._execution_geometry_enabled:
+            self._initialize_agent()
         logger.info(
             "enabled NaviSched VLLM adapter: biz_name=%s server=%s:%d "
             "agent_grpc_port=%d block_size=%d total_blocks=%d "
             "linear_step=%d hybrid_tail_required=%s cache_specs=%s "
-            "pd_separated=false latency_prediction_mode=unified "
+            "pd_separated=%s latency_prediction_mode=%s "
             "native_scheduler=true prefill_service_interval=true "
             "max_concurrent_batches=%d "
             "batch_timeout_ms=%d latency_fit_batch_size=%d "
@@ -1479,6 +1746,8 @@ class VLLMEngineObserver:
             self._cache_policy.linear_step,
             str(self._cache_policy.hybrid_tail_required).lower(),
             ",".join(self._cache_policy.spec_names),
+            str(self._native_ingress).lower(),
+            "split" if self._native_ingress else "unified",
             max_concurrent_batches,
             config.batch_timeout_ms,
             config.latency_fit_batch_size,
@@ -1499,23 +1768,97 @@ class VLLMEngineObserver:
         )
         logger.info(
             "NaviSched VLLM native scheduler config: "
-            "enable_chunked_prefill=%s max_num_partial_prefills=%d "
-            "max_long_partial_prefills=%d long_prefill_token_threshold=%d "
+            "enable_chunked_prefill=%s max_num_partial_prefills=%s "
+            "max_long_partial_prefills=%s long_prefill_token_threshold=%d "
             "max_num_scheduled_tokens=%d",
             str(scheduler_config.enable_chunked_prefill).lower(),
-            scheduler_config.max_num_partial_prefills,
-            scheduler_config.max_long_partial_prefills,
+            getattr(scheduler_config, "max_num_partial_prefills", None),
+            getattr(scheduler_config, "max_long_partial_prefills", None),
             scheduler_config.long_prefill_token_threshold,
             scheduler_config.max_num_scheduled_tokens
             or scheduler_config.max_num_batched_tokens,
         )
+
+    def _initialize_agent(self, scheduler=None) -> None:
+        if self._agent is not None:
+            return
+        options = dict(self._agent_options)
+        if self._native_ingress:
+            options["execution_geometry_enabled"] = self._execution_geometry_enabled
+        if self._execution_geometry_enabled:
+            from .VLLMExecutionGeometry import resolved_prefill_execution_policy
+
+            policy = resolved_prefill_execution_policy(
+                scheduler, self._vllm_config, self._cache_policy
+            )
+            fingerprint = _native_pd_latency_model_fingerprint(
+                _latency_model_fingerprint(self._vllm_config),
+                self._cache_policy,
+                policy,
+                execution_geometry_enabled=True,
+                projected_execution_geometry_enabled=False,
+                execution_cache_source_enabled=bool(
+                    options.get("execution_cache_source_enabled", False)
+                ),
+            )
+            native_policy = naviSchedModule().TPUPrefillExecutionPolicyConfig()
+            for name, value in policy.items():
+                setattr(native_policy, name, value)
+            self._prefill_execution_policy = native_policy
+            options["prefill_execution_policy"] = native_policy
+            options["latency_model_fingerprint"] = fingerprint
+            options["latency_history_fingerprint"] = _latency_history_fingerprint(
+                self._vllm_config, fingerprint
+            )
+            options["execution_geometry_enabled"] = True
+            options["projected_execution_geometry_enabled"] = False
+            logger.info("NaviSched resolved latency model fingerprint: %s", fingerprint)
+        options["peer_cache_enabled"] = (
+            self._native_ingress and _v6d_peer_cache_enabled(scheduler)
+        )
+        logger.info(
+            "NaviSched peer cache capability: enabled=%s", options["peer_cache_enabled"]
+        )
+        self._agent = NaviSchedAgent(**options)
+        self._agent.init()
+        self._bridge = naviSchedModule()._VLLMAgentBridge(
+            self._agent, pd_separated=self._native_ingress
+        )
+        if not self._bridge.enable_forwarding():
+            self.shutdown()
+            raise RuntimeError("failed to enable NaviSched Agent forwarding")
 
     def bind_engine_core(self, engine_core) -> None:
         from vllm.v1.serial_utils import MsgpackEncoder
 
         if self._engine_core is not None:
             raise RuntimeError("NaviSched VLLM observer is already bound")
+        # The PD-separated Prefill path must consume each vLLM step before
+        # submitting another. Preserve vLLM's original queue behavior for
+        # unified serving, whose adapter has no PD batch serialization rule.
+        if self._native_ingress and engine_core.batch_queue is not None:
+            if engine_core.batch_queue:
+                raise RuntimeError("cannot disable a nonempty vLLM batch queue")
+            engine_core.batch_queue = None
+            engine_core.batch_queue_size = 1
+            engine_core.step_fn = engine_core.step
+            logger.info("NaviSched disabled vLLM speculative batch queue")
         self._engine_core = engine_core
+        _execution_timing_probe.bind_engine_loop_audit(self, engine_core)
+        if self._native_ingress:
+            from .VLLMExecutionGeometry import capture_execution_policy
+
+            logger.info(
+                "NaviSched resolved execution policy: %s",
+                json.dumps(
+                    capture_execution_policy(
+                        getattr(engine_core, "scheduler", None),
+                        getattr(engine_core, "vllm_config", None),
+                    ),
+                    sort_keys=True,
+                ),
+            )
+        self._bind_v6d_cache_source(engine_core)
         self._response_encoder = MsgpackEncoder()
         engine_core.output_queue = _RoutingOutputQueue(engine_core.output_queue, self)
         self._forward_thread = threading.Thread(
@@ -1524,6 +1867,243 @@ class VLLMEngineObserver:
             daemon=True,
         )
         self._forward_thread.start()
+
+    def _bind_v6d_cache_source(self, engine_core) -> None:
+        if not self._native_ingress:
+            return
+        module = sys.modules.get("kvs_connector.v6d_object_connector")
+        if module is None:
+            return
+        connectors = [engine_core.scheduler.connector]
+        while connectors:
+            connector = connectors.pop()
+            if isinstance(connector, module.V6dObjectConnector):
+                source = connector.scheduler
+                config = source.vllm_config.cache_config
+                speculative = source.vllm_config.speculative_config
+                eagle = speculative is not None and speculative.use_eagle()
+                hybrid = bool(source.mamba_group_ids)
+                align = hybrid and config.mamba_cache_mode == "align"
+                retention = config.prefix_cache_retention_interval
+                self._agent.report_cache_status(
+                    -1,
+                    source.hash_block_size,
+                    source.lcm_block_size // source.hash_block_size,
+                    hybrid,
+                    cache_key_type=1,
+                    full_attention_query_drop_tokens=int(eagle),
+                    mamba_replay_stop_shift=bool(align and eagle),
+                    mamba_retention_interval=(
+                        -1 if retention is None else int(retention)
+                    ),
+                    mamba_align=align,
+                )
+                self._v6d_scheduler = source
+                return
+            connectors.extend(getattr(connector, "_connectors", ()))
+
+    def _report_v6d_publication_failure(self, reporter, groups, request_id) -> None:
+        full, tail = set(), set()
+        for group_id, hashes in groups.items():
+            target = (
+                full if self._cache_policy.group_roles[group_id] == "full" else tail
+            )
+            target.update(self._wire_event_hashes(group_id, tuple(hashes)))
+        if not reporter(sorted(full), sorted(tail), 1):
+            raise RuntimeError("failed to retire NaviSched V6D publication keys")
+        self.on_request_lifecycle_event(
+            {
+                "event": "cache_publication_failed",
+                "event_time_us": time.time_ns() // 1000,
+                "request_id": request_id,
+                "cache_key_type": 1,
+                "failed_full_hashes": sorted(full),
+                "failed_tail_hashes": sorted(tail),
+            }
+        )
+
+    def _report_v6d_job_failure(self, job, groups) -> None:
+        reported = getattr(job, "_navi_sched_reported_publication_failures", None)
+        if reported is None:
+            reported = job._navi_sched_reported_publication_failures = {}
+        for reporter, interested, request_id in job._navi_sched_publication_reporter:
+            prior = reported.setdefault(request_id, {})
+            failed = {
+                group: set(hashes)
+                .intersection(interested.get(group, ()))
+                .difference(prior.get(group, ()))
+                for group, hashes in groups.items()
+            }
+            failed = {group: hashes for group, hashes in failed.items() if hashes}
+            if failed:
+                self._report_v6d_publication_failure(reporter, failed, request_id)
+                for group, hashes in failed.items():
+                    prior.setdefault(group, set()).update(hashes)
+
+    def _attach_v6d_publication_reporters(self, reporters) -> None:
+        source = self._v6d_scheduler
+        if not self._v6d_publication_restore:
+            original_store = source._get_reqs_to_store
+
+            def get_reqs_to_store(scheduler_output):
+                result = original_store(scheduler_output)
+                # r50 coalesces allocation across requests. Attribute missing
+                # candidates after it assigns shared objects to their owner.
+                for request_id, groups in source._navi_sched_store_candidates.items():
+                    state = source._request_states[request_id]
+                    for group_id, candidates in groups.items():
+                        missing = set(candidates).difference(
+                            state.storing_hashes.get(group_id, ())
+                        )
+                        if missing:
+                            self._v6d_unpublished_candidates.setdefault(
+                                str(request_id), {}
+                            ).setdefault(group_id, set()).update(missing)
+                return result
+
+            source._get_reqs_to_store = get_reqs_to_store
+            self._v6d_publication_restore.append(
+                (source, "_get_reqs_to_store", original_store)
+            )
+            original_drain = source._drain_publications
+
+            def drain_publications():
+                completed = [
+                    (future, job)
+                    for future, job in source._publications.items()
+                    if future.done()
+                ]
+                result = original_drain()
+                for future, job in completed:
+                    status, _duration, _finished_at = future.result()
+                    if status in ("error", "nan"):
+                        self._report_v6d_job_failure(job, job.hashes)
+                return result
+
+            source._drain_publications = drain_publications
+            self._v6d_publication_restore.append(
+                (source, "_drain_publications", original_drain)
+            )
+            original_update = source.update_connector_output
+
+            def update_connector_output(connector_output):
+                output = connector_output
+                metadata = getattr(output, "kv_connector_worker_meta", None)
+                failed = []
+                if metadata is not None:
+                    for job_id, results in metadata.store_results.items():
+                        job = source._store_jobs.get(job_id)
+                        if job is None:
+                            continue
+                        state = source._request_states[job.req_id]
+                        if (
+                            job.req_id in metadata.nan_failed_reqs
+                            or state.nan_store_failed
+                            or any(error is not None for error in results.values())
+                            or any(error is not None for error in job.results.values())
+                        ):
+                            failed.append(job)
+                result = original_update(output)
+                for job in failed:
+                    self._report_v6d_job_failure(job, job.hashes)
+                return result
+
+            source.update_connector_output = update_connector_output
+            self._v6d_publication_restore.append(
+                (source, "update_connector_output", original_update)
+            )
+            for group_id, manager in source.managers.items():
+                original_seal = manager.seal
+
+                def seal(
+                    block_hashes,
+                    request_id=None,
+                    *,
+                    _group=group_id,
+                    _seal=original_seal,
+                ):
+                    hashes = tuple(block_hashes)
+                    result = _seal(hashes, request_id=request_id)
+                    if not result:
+                        for job in tuple(source._store_jobs.values()):
+                            if job.req_id == request_id:
+                                failed_hashes = set(hashes).intersection(
+                                    job.hashes.get(_group, ())
+                                )
+                                if failed_hashes:
+                                    self._report_v6d_job_failure(
+                                        job, {_group: failed_hashes}
+                                    )
+                    return result
+
+                manager.seal = seal
+                self._v6d_publication_restore.append((manager, "seal", original_seal))
+        for job in source._store_jobs.values():
+            if (
+                not hasattr(job, "_navi_sched_publication_reporter")
+                and str(job.req_id) in reporters
+            ):
+                job._navi_sched_publication_reporter = [
+                    (
+                        reporters[str(job.req_id)].make_cache_publication_reporter(),
+                        job.hashes,
+                        str(job.req_id),
+                    )
+                ]
+        for request_id in tuple(self._v6d_unpublished_candidates):
+            if request_id not in reporters and request_id not in source._request_states:
+                self._v6d_unpublished_candidates.pop(request_id)
+                continue
+            if request_id in reporters:
+                groups = self._v6d_unpublished_candidates.pop(request_id)
+                reporter = reporters[request_id].make_cache_publication_reporter()
+                for job in source._store_jobs.values():
+                    shared = {
+                        group: set(hashes).intersection(job.hashes.get(group, ()))
+                        for group, hashes in groups.items()
+                    }
+                    shared = {
+                        group: hashes for group, hashes in shared.items() if hashes
+                    }
+                    if shared:
+                        job._navi_sched_publication_reporter.append(
+                            (reporter, shared, request_id)
+                        )
+                        for group, hashes in shared.items():
+                            groups[group].difference_update(hashes)
+                groups = {group: hashes for group, hashes in groups.items() if hashes}
+                if groups:
+                    self._report_v6d_publication_failure(reporter, groups, request_id)
+
+    def _restore_v6d_publication_observers(self) -> None:
+        for owner, name, original in reversed(self._v6d_publication_restore):
+            setattr(owner, name, original)
+        self._v6d_publication_restore.clear()
+        self._v6d_unpublished_candidates.clear()
+
+    def _poll_v6d_cache_source(self) -> None:
+        if self._forward_stop.is_set() or self._v6d_scheduler is None:
+            return
+        future = self._v6d_snapshot_future
+        if future is not None:
+            if not future.done():
+                return
+            self._v6d_snapshot_future = None
+            try:
+                self.on_v6d_cache_snapshots(future.result())
+            except Exception:
+                # Observation failure is not an upstream circuit-state update.
+                logger.exception("failed to read V6D resident cache snapshot")
+        now = time.monotonic_ns()
+        if now >= self._next_v6d_snapshot_poll_ns:
+            self._next_v6d_snapshot_poll_ns = now + _CACHE_SNAPSHOT_INTERVAL_NS
+            try:
+                self._v6d_snapshot_future = (
+                    self._v6d_scheduler.submit_local_cache_snapshots()
+                )
+            except Exception:
+                # Keep the last state explicitly supplied by the upstream cache.
+                logger.exception("failed to submit V6D resident cache snapshot")
 
     def _forward_batches(self) -> None:
         if _read_bool_env("VLLM_NAVI_SCHED_DEFER_RENDER", False):
@@ -1536,8 +2116,19 @@ class VLLMEngineObserver:
 
         decoder = MsgpackDecoder(EngineCoreRequest)
         while True:
+            self._poll_v6d_cache_source()
             if not self._drain_cancelled_requests(EngineCoreRequestType):
                 if self._forward_stop.wait(0.1):
+                    return
+                continue
+            if self._native_ingress and not self._pd_forward_slot.is_set():
+                # Requests accepted for later native batches still need their
+                # cache-touch preparation while the current PD batch runs.
+                # Otherwise a busy Prefill node never drains the touch queue.
+                self._drain_forward_request_touches(
+                    decoder, msgspec.msgpack, max_count=1
+                )
+                if self._forward_stop.wait(0.01):
                     return
                 continue
             stopping = self._forward_stop.is_set()
@@ -1561,6 +2152,15 @@ class VLLMEngineObserver:
                         decoder, msgspec.msgpack, max_count=1
                     )
                 continue
+            if self._native_ingress:
+                self._pd_forward_slot.clear()
+                # The PD bridge transfers pending touches with the ready batch
+                # instead of dropping them. Prepare these before decoding so
+                # vLLM can reuse and promote the preprocessed requests.
+                self._prepare_forward_request_touches(
+                    getattr(native_batch, "touches", ()), decoder, msgspec.msgpack
+                )
+            # The stop flag may change while the native queue wait releases the GIL.
             stopping = self._forward_stop.is_set()
             python_take_ns = time.monotonic_ns()
             if self._discard_cancelled_forward_requests(native_batch):
@@ -1576,10 +2176,14 @@ class VLLMEngineObserver:
             image_predictions = {}
             try:
                 decoded = self._decode_forward_batch(
-                    native_batch, decoder, msgspec.msgpack, image_predictions=image_predictions
+                    native_batch,
+                    decoder,
+                    msgspec.msgpack,
+                    image_predictions=image_predictions,
                 )
             except Exception:
                 self._release_native_forward_batch(native_batch)
+                self._pd_forward_slot.set()
                 logger.exception("failed to decode NaviSched VLLM forwarded batch")
                 continue
             if stopping:
@@ -1588,6 +2192,7 @@ class VLLMEngineObserver:
                 )
                 self._discard_cancelled_before_decode(native_batch.request_ids)
                 self._release_native_forward_batch(native_batch)
+                self._pd_forward_slot.set()
                 continue
             decode_done_ns = time.time_ns()
             try:
@@ -1600,7 +2205,8 @@ class VLLMEngineObserver:
                     image_predictions=image_predictions,
                 )
                 enqueue_done_ns = time.time_ns()
-                logger.info(
+                _execution_timing_probe._diagnostic_format_info(
+                    logger,
                     "NAVI_SCHED_VLLM_AGENT_BATCH batch_id=%d batch_size=%d "
                     "python_take_us=%.3f decode_us=%.3f enqueue_us=%.3f "
                     "ready_to_queue_us=%.3f",
@@ -1616,6 +2222,14 @@ class VLLMEngineObserver:
                     (enqueue_done_ns - ready_ns) / 1000.0,
                 )
             except Exception:
+                # A partial enqueue leaves requests in vLLM until their ABORTs
+                # arrive. Keep the PD slot closed until that state is released.
+                if self._native_ingress and not any(
+                    request_id in self._pending_forward_batches
+                    or request_id in self._scheduled_forward_batches
+                    for request_id in native_batch.request_ids
+                ):
+                    self._pd_forward_slot.set()
                 logger.exception("failed to submit NaviSched VLLM forwarded batch")
 
     async def _forward_render_batches(self) -> None:
@@ -1642,14 +2256,18 @@ class VLLMEngineObserver:
                     await asyncio.sleep(0.1)
                     continue
                 if native_batch is None:
-                    self._drain_forward_request_touches(decoder, msgspec.msgpack, max_count=1)
+                    self._drain_forward_request_touches(
+                        decoder, msgspec.msgpack, max_count=1
+                    )
                     await asyncio.sleep(0.001)
                     continue
                 if self._discard_cancelled_forward_requests(native_batch):
                     continue
-                task = asyncio.create_task(self._prepare_rendered_batch(
-                    native_batch, decoder, msgspec.msgpack, EngineCoreRequestType
-                ))
+                task = asyncio.create_task(
+                    self._prepare_rendered_batch(
+                        native_batch, decoder, msgspec.msgpack, EngineCoreRequestType
+                    )
+                )
                 pending.add(task)
                 task.add_done_callback(pending.discard)
                 await asyncio.sleep(0)
@@ -1670,13 +2288,16 @@ class VLLMEngineObserver:
                 self._render_continuation = None
                 await continuation.aclose()
 
-    async def _prepare_rendered_batch(self, native_batch, decoder, msgpack, request_type):
+    async def _prepare_rendered_batch(
+        self, native_batch, decoder, msgpack, request_type
+    ):
         owned = True
         started_ns = time.perf_counter_ns()
         native_ready_ns = int(getattr(native_batch, "ready_time_ns", 0))
         native_ready_to_prepare_ms = (
             (time.monotonic_ns() - native_ready_ns) / 1_000_000.0
-            if native_ready_ns > 0 else -1.0
+            if native_ready_ns > 0
+            else -1.0
         )
         original_size = len(native_batch.request_ids)
         decoded = []
@@ -1689,21 +2310,30 @@ class VLLMEngineObserver:
         try:
             preceding_workload = self._capture_arrival_workload()
             decoded = self._decode_forward_batch(
-                native_batch, decoder, msgpack, resume_rendering=False,
+                native_batch,
+                decoder,
+                msgpack,
+                resume_rendering=False,
                 image_predictions=image_predictions,
             )
             decode_ms = (time.perf_counter_ns() - started_ns) / 1_000_000.0
             phase = "render"
             phase_started_ns = time.perf_counter_ns()
-            deferred = [request for _, request in decoded
-                        if getattr(request, "navi_sched_render_call", None) is not None]
+            deferred = [
+                request
+                for _, request in decoded
+                if getattr(request, "navi_sched_render_call", None) is not None
+            ]
             if deferred:
                 if self._render_continuation is None:
                     from .VLLMNativePreparation import NativePreparationClient
 
-                    self._render_continuation = NativePreparationClient(self._native_prepare_port)
+                    self._render_continuation = NativePreparationClient(
+                        self._native_prepare_port
+                    )
                 results = await self._render_continuation.resume_async(
-                    deferred, return_exceptions=True,
+                    deferred,
+                    return_exceptions=True,
                     schedule_batch_id=int(native_batch.schedule_batch_id),
                     local_batch_id=int(native_batch.batch_id),
                 )
@@ -1711,15 +2341,25 @@ class VLLMEngineObserver:
                 failed = self._render_failure_ids(deferred, results)
                 if failed:
                     if len(failed) == len(decoded):
-                        raise _MediaPreprocessingError("all forwarded requests failed native rendering")
-                    if not self._bridge.abort_forward_batch_requests(native_batch, failed):
-                        raise RuntimeError("failed to isolate native rendering failures")
+                        raise _MediaPreprocessingError(
+                            "all forwarded requests failed native rendering"
+                        )
+                    if not self._bridge.abort_forward_batch_requests(
+                        native_batch, failed
+                    ):
+                        raise RuntimeError(
+                            "failed to isolate native rendering failures"
+                        )
                     self._fail_forward_responses(
-                        failed, NAVI_SCHED_MEDIA_ERROR_PREFIX + "vLLM media preprocessing failed"
+                        failed,
+                        NAVI_SCHED_MEDIA_ERROR_PREFIX
+                        + "vLLM media preprocessing failed",
                     )
                     self._discard_cache_touch_requests(failed)
                     self._discard_cancelled_before_decode(failed)
-                    decoded = [(key, value) for key, value in decoded if key not in failed]
+                    decoded = [
+                        (key, value) for key, value in decoded if key not in failed
+                    ]
             else:
                 render_ms = 0.0
             if self._forward_stop.is_set():
@@ -1737,7 +2377,11 @@ class VLLMEngineObserver:
             phase_started_ns = prepared_ns
             owned = False
             self._enqueue_forward_batch(
-                native_batch, decoded, request_type, preceding_workload, started_ns,
+                native_batch,
+                decoded,
+                request_type,
+                preceding_workload,
+                started_ns,
                 render_ms,
                 image_predictions=image_predictions,
             )
@@ -1752,9 +2396,11 @@ class VLLMEngineObserver:
         except Exception as error:
             self._fail_forward_responses(
                 native_batch.request_ids,
-                NAVI_SCHED_MEDIA_ERROR_PREFIX + "vLLM media preprocessing failed"
-                if isinstance(error, _MediaPreprocessingError)
-                else "invalid NaviSched VLLM forward request",
+                (
+                    NAVI_SCHED_MEDIA_ERROR_PREFIX + "vLLM media preprocessing failed"
+                    if isinstance(error, _MediaPreprocessingError)
+                    else "invalid NaviSched VLLM forward request"
+                ),
             )
             logger.exception("failed to prepare NaviSched VLLM forwarded batch")
         finally:
@@ -1769,12 +2415,18 @@ class VLLMEngineObserver:
                 "original_size=%d status=%s phase=%s phase_ms=%.3f "
                 "native_ready_to_prepare_ms=%.3f decode_ms=%.3f render_ms=%.3f "
                 "total_ms=%.3f",
-                native_batch.batch_id, len(decoded),
+                native_batch.batch_id,
+                len(decoded),
                 ((prepared_ns - started_ns) / 1_000_000.0 if prepared_ns else -1.0),
-                enqueue_ms, native_batch.schedule_batch_id,
-                original_size, status, phase,
+                enqueue_ms,
+                native_batch.schedule_batch_id,
+                original_size,
+                status,
+                phase,
                 (finished_ns - phase_started_ns) / 1_000_000.0,
-                native_ready_to_prepare_ms, decode_ms, render_ms,
+                native_ready_to_prepare_ms,
+                decode_ms,
+                render_ms,
                 (finished_ns - started_ns) / 1_000_000.0,
             )
 
@@ -1806,8 +2458,15 @@ class VLLMEngineObserver:
             self._discard_cancelled_before_decode(cancelled)
         return False
 
-    def _decode_forward_batch(self, native_batch, decoder, msgpack, *, resume_rendering=True,
-                              image_predictions=None):
+    def _decode_forward_batch(
+        self,
+        native_batch,
+        decoder,
+        msgpack,
+        *,
+        resume_rendering=True,
+        image_predictions=None,
+    ):
         decoded = []
         try:
             for request_id, payload in zip(
@@ -1829,28 +2488,41 @@ class VLLMEngineObserver:
                     )
                 decoded.append((request_id, request))
                 features = getattr(request, "mm_features", None)
-                if (image_predictions is not None and features
-                        and getattr(request, "navi_sched_render_call", None) is not None
-                        and all(f.modality == "image" and f.mm_position.length == 1
-                                for f in features)):
+                if (
+                    image_predictions is not None
+                    and features
+                    and getattr(request, "navi_sched_render_call", None) is not None
+                    and all(
+                        f.modality == "image" and f.mm_position.length == 1
+                        for f in features
+                    )
+                ):
                     image_predictions[request_id] = SimpleNamespace(
-                        prompt_token_ids=request.prompt_token_ids, mm_features=features,
+                        prompt_token_ids=request.prompt_token_ids,
+                        mm_features=features,
                     )
             request_ids = tuple(int(value) for value in native_batch.request_ids)
             if len(decoded) != len(request_ids) or len(set(request_ids)) != len(
                 request_ids
             ):
                 raise ValueError("invalid NaviSched forwarded VLLM batch")
-            failed = self._resume_rendered_requests(
-                [request for _, request in decoded], isolate_failures=True
-            ) if resume_rendering else []
+            failed = (
+                self._resume_rendered_requests(
+                    [request for _, request in decoded], isolate_failures=True
+                )
+                if resume_rendering
+                else []
+            )
             if failed:
                 if len(failed) == len(decoded):
-                    raise _MediaPreprocessingError("all forwarded requests failed native rendering")
+                    raise _MediaPreprocessingError(
+                        "all forwarded requests failed native rendering"
+                    )
                 if not self._bridge.abort_forward_batch_requests(native_batch, failed):
                     raise RuntimeError("failed to isolate native rendering failures")
                 self._fail_forward_responses(
-                    failed, NAVI_SCHED_MEDIA_ERROR_PREFIX + "vLLM media preprocessing failed"
+                    failed,
+                    NAVI_SCHED_MEDIA_ERROR_PREFIX + "vLLM media preprocessing failed",
                 )
                 self._discard_cache_touch_requests(failed)
                 self._discard_cancelled_before_decode(failed)
@@ -1860,9 +2532,11 @@ class VLLMEngineObserver:
                 raise
             self._fail_forward_responses(
                 native_batch.request_ids,
-                NAVI_SCHED_MEDIA_ERROR_PREFIX + "vLLM media preprocessing failed"
-                if isinstance(error, _MediaPreprocessingError)
-                else "invalid NaviSched VLLM forward request",
+                (
+                    NAVI_SCHED_MEDIA_ERROR_PREFIX + "vLLM media preprocessing failed"
+                    if isinstance(error, _MediaPreprocessingError)
+                    else "invalid NaviSched VLLM forward request"
+                ),
             )
             self._discard_cache_touch_requests(native_batch.request_ids)
             self._discard_cancelled_before_decode(native_batch.request_ids)
@@ -1870,8 +2544,11 @@ class VLLMEngineObserver:
         return decoded
 
     def _resume_rendered_requests(self, requests, *, isolate_failures=False):
-        deferred = [request for request in requests
-                    if getattr(request, "navi_sched_render_call", None) is not None]
+        deferred = [
+            request
+            for request in requests
+            if getattr(request, "navi_sched_render_call", None) is not None
+        ]
         if not deferred:
             return []
         if self._render_continuation is None:
@@ -1896,7 +2573,8 @@ class VLLMEngineObserver:
                 failed.append(int(request.request_id))
                 logger.error(
                     "NaviSched native media rendering failed: request_id=%s error_type=%s",
-                    request.request_id, type(result).__name__,
+                    request.request_id,
+                    type(result).__name__,
                     exc_info=(type(result), result, result.__traceback__),
                 )
         return failed
@@ -1919,6 +2597,12 @@ class VLLMEngineObserver:
             touches = self._bridge.take_forward_request_touches(max_count)
         except Exception:
             logger.exception("failed to receive NaviSched VLLM cache-touch requests")
+            return
+        self._prepare_forward_request_touches(touches, decoder, msgpack)
+
+    def _prepare_forward_request_touches(self, touches, decoder, msgpack) -> None:
+        engine_core = self._engine_core
+        if engine_core is None:
             return
         for native_touch in touches:
             request_id = int(native_touch.request_id)
@@ -1956,6 +2640,8 @@ class VLLMEngineObserver:
                 )
 
     def _promote_arrived_cache_touches(self, scheduler) -> None:
+        if self._native_ingress and self._v6d_scheduler is not None:
+            self._attach_v6d_publication_reporters({})
         with self._cache_touch_lock:
             if not self._cache_touch_queue:
                 return
@@ -1968,7 +2654,17 @@ class VLLMEngineObserver:
         now_ns = time.monotonic_ns()
         for request_id, request, accepted_time_ns in touches:
             try:
-                promoted += scheduler.kv_cache_manager.promote_cached_blocks(request)
+                cache_manager = scheduler.kv_cache_manager
+                cached_blocks, _, _ = cache_manager.get_computed_blocks(request)
+                blocks = [block for group in cached_blocks.blocks for block in group]
+                if blocks:
+                    # vLLM 0.29 exposes cache lookup and block-pool touch/free,
+                    # rather than a KVCacheManager promotion method. Releasing
+                    # the temporary references moves free cached blocks to the
+                    # back of the eviction queue without pinning them.
+                    cache_manager.block_pool.touch(blocks)
+                    cache_manager.block_pool.free_blocks(blocks)
+                promoted += len(blocks)
             except Exception:
                 logger.exception(
                     "failed to promote NaviSched VLLM cache-touch request: "
@@ -1977,9 +2673,7 @@ class VLLMEngineObserver:
                 )
                 continue
             if 0 < accepted_time_ns <= now_ns:
-                max_lag_ms = max(
-                    max_lag_ms, (now_ns - accepted_time_ns) / 1_000_000.0
-                )
+                max_lag_ms = max(max_lag_ms, (now_ns - accepted_time_ns) / 1_000_000.0)
         processing_ms = (time.monotonic_ns() - processing_started_ns) / 1_000_000.0
 
         self._cache_touch_count += len(touches)
@@ -2004,9 +2698,7 @@ class VLLMEngineObserver:
             self._preprocessed_cache_touches.pop(request_id, None)
         with self._cache_touch_lock:
             self._cache_touch_queue = deque(
-                value
-                for value in self._cache_touch_queue
-                if value[0] not in discarded
+                value for value in self._cache_touch_queue if value[0] not in discarded
             )
 
     @staticmethod
@@ -2100,8 +2792,8 @@ class VLLMEngineObserver:
             for request_id, request in decoded
             if request_id not in cancelled_request_ids
             and scheduler is not None
-            and not scheduler.supports_mm_inputs
             and getattr(request, "mm_features", None)
+            and not getattr(scheduler, "supports_mm_inputs", False)
         }
         if unsupported_request_ids:
             reason = "multimodal request is unsupported by target model"
@@ -2166,12 +2858,18 @@ class VLLMEngineObserver:
 
         if preceding_workload is None:
             preceding_workload = self._capture_arrival_workload()
-        self._set_admission_state(
-            state,
-            [value[0] for _, value in processed],
-            preceding_workload,
-            admission_started_ns,
-        )
+        try:
+            self._set_admission_state(
+                state,
+                [value[0] for _, value in processed],
+                preceding_workload,
+                admission_started_ns,
+            )
+        except Exception:
+            self._fail_forward_responses(request_ids, "vLLM admission tracking failed")
+            self._remove_response_requests(request_ids)
+            self._release_forward_batch(state)
+            raise
 
         for request_id, _ in processed:
             self._pending_forward_batches[request_id] = state
@@ -2209,7 +2907,9 @@ class VLLMEngineObserver:
             self._report_prepared_workload("submission_failed")
             raise
 
-    def _register_image_cache_mappings(self, native_batch, processed, image_predictions=None):
+    def _register_image_cache_mappings(
+        self, native_batch, processed, image_predictions=None
+    ):
         if not image_predictions:
             return
         for request_id, value in processed:
@@ -2223,7 +2923,10 @@ class VLLMEngineObserver:
                         if int(request_id) not in self._response_request_ids:
                             continue
                         delta = self._image_cache_map.register(
-                            int(request_id), prediction, value[0], self._block_size,
+                            int(request_id),
+                            prediction,
+                            value[0],
+                            self._block_size,
                             logical_hashes=logical_hashes,
                         )
                         self._response_image_positions[int(request_id)] = tuple(
@@ -2232,8 +2935,10 @@ class VLLMEngineObserver:
                         )
                     self._report_cache_delta(delta)
             except Exception:
-                logger.exception("failed to register scheduling image cache mapping: request_id=%s",
-                                 request_id)
+                logger.exception(
+                    "failed to register scheduling image cache mapping: request_id=%s",
+                    request_id,
+                )
 
     def _register_response_requests(self, decoded) -> set[int]:
         cancelled = set()
@@ -2254,7 +2959,9 @@ class VLLMEngineObserver:
     def _remove_response_requests(self, request_ids) -> None:
         request_ids = tuple(request_ids)
         image_cache_map = getattr(self, "_image_cache_map", None)
-        with self._cache_lifecycle_lock if image_cache_map is not None else nullcontext():
+        with (
+            self._cache_lifecycle_lock if image_cache_map is not None else nullcontext()
+        ):
             with self._response_lock:
                 for request_id in request_ids:
                     request_id = int(request_id)
@@ -2294,9 +3001,7 @@ class VLLMEngineObserver:
         except Exception:
             with self._response_lock:
                 self._pending_engine_abort_request_ids = list(
-                    dict.fromkeys(
-                        self._pending_engine_abort_request_ids + request_ids
-                    )
+                    dict.fromkeys(self._pending_engine_abort_request_ids + request_ids)
                 )
             logger.exception(
                 "failed to deliver cancelled NaviSched VLLM requests: "
@@ -2387,6 +3092,7 @@ class VLLMEngineObserver:
                 raise RuntimeError("NaviSched VLLM response encoder is not initialized")
             response_outputs = outputs
             if image_positions:
+
                 def project_prefix(count):
                     removed = 0
                     for offset, length in image_positions:
@@ -2403,12 +3109,14 @@ class VLLMEngineObserver:
                     cached = value.num_cached_tokens
                     projected.num_cached_tokens = project_prefix(cached)
                     projected.num_external_computed_tokens = (
-                        projected.num_cached_tokens - project_prefix(
-                            cached - value.num_external_computed_tokens
-                        )
+                        projected.num_cached_tokens
+                        - project_prefix(cached - value.num_external_computed_tokens)
                     )
                     response_outputs.outputs.append(projected)
-            frames = [bytes(value) for value in self._response_encoder.encode(response_outputs)]
+            frames = [
+                bytes(value)
+                for value in self._response_encoder.encode(response_outputs)
+            ]
             published = self._bridge.publish_forward_response(
                 request_id, frames, terminal
             )
@@ -2448,25 +3156,55 @@ class VLLMEngineObserver:
     def create_scheduler(self, scheduler_cls, **kwargs):
         try:
             scheduler = scheduler_cls(**kwargs)
+            if self._native_ingress:
+                coordinator = scheduler.kv_cache_manager.coordinator
+                actual_drop = get_vllm_full_attention_query_drop_tokens(
+                    coordinator, self._block_size
+                )
+                if actual_drop != self._cache_policy.full_attention_query_drop_tokens:
+                    raise ValueError(
+                        "vLLM Full query policy differs from actual coordinator"
+                    )
+                logger.info(
+                    "NaviSched actual Full query policy: full_attention_query_drop_tokens=%d groups=%s",
+                    actual_drop,
+                    [
+                        (type(group.spec).__name__, group.group_ids, group.use_eagle)
+                        for group in getattr(coordinator, "attention_groups", ())
+                    ],
+                )
+            self._initialize_agent(scheduler)
             scheduler.kv_cache_manager.block_pool.set_block_lifecycle_listener(
                 self.on_block_lifecycle_event
             )
-            lifecycle_setter = getattr(scheduler, "set_request_lifecycle_listener", None)
+            lifecycle_setter = getattr(
+                scheduler, "set_request_lifecycle_listener", None
+            )
             if lifecycle_setter is not None:
                 lifecycle_setter(self.on_request_lifecycle_event)
             config = getattr(scheduler, "scheduler_config", None)
-            self.on_request_lifecycle_event({
-                "event": "scheduler_config",
-                "event_time_us": time.time_ns() // 1000,
-                "lifecycle_supported": lifecycle_setter is not None,
-                "scheduler_class": type(scheduler).__qualname__,
-                **{name: getattr(config, name, None) for name in (
-                    "max_num_seqs", "max_num_batched_tokens",
-                    "max_num_scheduled_tokens", "enable_chunked_prefill",
-                    "long_prefill_token_threshold", "max_num_partial_prefills",
-                    "max_long_partial_prefills", "policy", "async_scheduling",
-                )},
-            })
+            self.on_request_lifecycle_event(
+                {
+                    "event": "scheduler_config",
+                    "event_time_us": time.time_ns() // 1000,
+                    "lifecycle_supported": lifecycle_setter is not None,
+                    "scheduler_class": type(scheduler).__qualname__,
+                    **{
+                        name: getattr(config, name, None)
+                        for name in (
+                            "max_num_seqs",
+                            "max_num_batched_tokens",
+                            "max_num_scheduled_tokens",
+                            "enable_chunked_prefill",
+                            "long_prefill_token_threshold",
+                            "max_num_partial_prefills",
+                            "max_long_partial_prefills",
+                            "policy",
+                            "async_scheduling",
+                        )
+                    },
+                }
+            )
             wrapped = _NaviSchedScheduler(scheduler, self)
             self._refresh_and_report_workload(scheduler, (), "initialize")
             return wrapped
@@ -2495,6 +3233,9 @@ class VLLMEngineObserver:
                 if request_id in state.arrived_request_ids:
                     raise ValueError("duplicate vLLM request in NaviSched batch")
                 state.arrived_request_ids.add(request_id)
+                request._navi_forward_batch_id = state.batch_id
+                request._navi_plan_trace_request_id = request_id
+                request._navi_plan_trace_batch_id = state.batch_id
                 if request_id not in state.cancelled_request_ids:
                     state.requests[request_id] = request
                     self._forward_request_states[external_request_id] = state
@@ -2585,9 +3326,7 @@ class VLLMEngineObserver:
             admission_contributions[request_id] = _WorkloadContribution(
                 batch_id=state.batch_id,
                 prompt_tokens=prompt_tokens,
-                prefill_context_tokens=(
-                    cache_hit_tokens if compute_tokens > 0 else 0
-                ),
+                prefill_context_tokens=(cache_hit_tokens if compute_tokens > 0 else 0),
                 remaining_prefill_tokens=compute_tokens,
                 total_context_tokens=cache_hit_tokens,
                 remaining_total_tokens=compute_tokens,
@@ -2600,13 +3339,9 @@ class VLLMEngineObserver:
         admission_state = _AdmissionState(
             preceding_workload=preceding_workload,
             incoming_request_count=len(requests),
-            incoming_predicted_cache_hit_tokens=(
-                incoming_predicted_cache_hit_tokens
-            ),
+            incoming_predicted_cache_hit_tokens=(incoming_predicted_cache_hit_tokens),
             incoming_compute_tokens=incoming_compute_tokens,
-            incoming_compute_token_square_sum=(
-                incoming_compute_token_square_sum
-            ),
+            incoming_compute_token_square_sum=(incoming_compute_token_square_sum),
             incoming_hit_compute_token_product_sum=(
                 incoming_hit_compute_token_product_sum
             ),
@@ -2624,21 +3359,21 @@ class VLLMEngineObserver:
                 state.admission_contributions = admission_contributions
                 if not state.released and not state.submission_failed:
                     with self._prepared_workload_lock:
-                        for request_id, contribution in (
-                            admission_contributions.items()
-                        ):
+                        for request_id, contribution in admission_contributions.items():
                             if request_id not in state.cancelled_request_ids:
                                 previous = self._prepared_contributions.get(request_id)
                                 if previous is not None:
                                     self._prepared_workload.apply(previous[1], -1)
                                 self._prepared_contributions[request_id] = (
-                                    state, contribution
+                                    state,
+                                    contribution,
                                 )
                                 self._prepared_workload.apply(contribution, 1)
                         self._native_handoff_batches[state.batch_id] = None
                 recorded = True
         if recorded:
-            logger.info(
+            _execution_timing_probe._diagnostic_format_info(
+                logger,
                 "[navi-vllm-admission] batch_id=%d batch_size=%d "
                 "predicted_cache_hit_tokens=%d compute_tokens=%d "
                 "compute_token_square_sum=%.0f "
@@ -2706,12 +3441,11 @@ class VLLMEngineObserver:
             for name in _WorkloadAggregate.__dataclass_fields__:
                 if name != "batch_request_counts":
                     setattr(
-                        aggregate, name,
+                        aggregate,
+                        name,
                         getattr(aggregate, name) + getattr(pending, name),
                     )
-            slots = max(
-                0, base.max_running_request_count - running_capacity_slot_count
-            )
+            slots = max(0, base.max_running_request_count - running_capacity_slot_count)
             for _, contribution in itertools.islice(
                 self._prepared_contributions.values(), slots
             ):
@@ -2730,15 +3464,18 @@ class VLLMEngineObserver:
             running_value = getattr(prepared_running, name)
             pending_value = getattr(pending_prefill, name)
             setattr(
-                running_capacity, name,
+                running_capacity,
+                name,
                 getattr(running_capacity, name) + running_value,
             )
             setattr(
-                waiting_capacity, name,
+                waiting_capacity,
+                name,
                 getattr(waiting_capacity, name) + pending_value - running_value,
             )
             setattr(
-                scheduler_waiting, name,
+                scheduler_waiting,
+                name,
                 getattr(scheduler_waiting, name) + pending_value,
             )
         workload = aggregate.snapshot(
@@ -2818,8 +3555,7 @@ class VLLMEngineObserver:
             )
             target = (
                 running_capacity
-                if request_id
-                in admission_state.incoming_running_capacity_request_ids
+                if request_id in admission_state.incoming_running_capacity_request_ids
                 else waiting_capacity
             )
             target.apply_request(
@@ -2874,9 +3610,7 @@ class VLLMEngineObserver:
         state = self._forward_request_state(request.request_id)
         return _WorkloadContribution(
             batch_id=(
-                state.batch_id
-                if state is not None
-                else self._navi_request_id(request)
+                state.batch_id if state is not None else self._navi_request_id(request)
             ),
             prompt_tokens=prompt_tokens,
             prefill_context_tokens=(
@@ -2927,9 +3661,7 @@ class VLLMEngineObserver:
             waiting = tuple(scheduler.waiting)
         except (AttributeError, TypeError):
             waiting = ()
-        configured_capacity = max(
-            0, int(getattr(scheduler, "max_num_running_reqs", 0))
-        )
+        configured_capacity = max(0, int(getattr(scheduler, "max_num_running_reqs", 0)))
         max_running_request_count = max(configured_capacity, len(running))
         running_capacity = _PrefillWorkloadSliceAggregate()
         waiting_capacity = _PrefillWorkloadSliceAggregate()
@@ -2950,10 +3682,7 @@ class VLLMEngineObserver:
                     scheduler_running.apply(contribution)
                 else:
                     scheduler_waiting.apply(contribution)
-            if (
-                running_now
-                or running_capacity_slot_count < max_running_request_count
-            ):
+            if running_now or running_capacity_slot_count < max_running_request_count:
                 if contribution is not None:
                     running_capacity.apply(contribution)
                 running_capacity_slot_count += 1
@@ -3006,9 +3735,7 @@ class VLLMEngineObserver:
         running_decode_generated_tokens = 0
         running_decode_remaining_token_budget = 0
         for request in running:
-            output_tokens = max(
-                0, int(getattr(request, "num_output_tokens", 0))
-            )
+            output_tokens = max(0, int(getattr(request, "num_output_tokens", 0)))
             running_decode_generated_tokens += output_tokens
             if output_tokens > 0:
                 running_decode_request_count += 1
@@ -3084,8 +3811,7 @@ class VLLMEngineObserver:
                 continue
             _, last_progress_ns, last_log_ns = previous
             if now_ns - last_progress_ns < _STALLED_RUNNING_THRESHOLD_NS or (
-                last_log_ns
-                and now_ns - last_log_ns < _STALLED_RUNNING_LOG_INTERVAL_NS
+                last_log_ns and now_ns - last_log_ns < _STALLED_RUNNING_LOG_INTERVAL_NS
             ):
                 continue
             stalled.append(
@@ -3144,17 +3870,20 @@ class VLLMEngineObserver:
                 getattr(scheduler, "max_num_encoder_input_tokens", None),
             )
             self._running_request_progress[request_id] = (
-                progress, last_progress_ns, now_ns
+                progress,
+                last_progress_ns,
+                now_ns,
             )
         for request_id in self._running_request_progress.keys() - active_ids:
             del self._running_request_progress[request_id]
 
     def _report_core_step_stage(self, stage, elapsed_ms):
-        self._bridge.report_core_step(
-            elapsed_ms, stage != "engine_step"
-        )
+        self._bridge.report_core_step(elapsed_ms, stage != "engine_step")
 
     def _log_slow_engine_stage(self, stage, started_ns, finished_ns, **details):
+        _execution_timing_probe.engine_stage_event(
+            self, stage, started_ns, finished_ns, details
+        )
         elapsed_ns = finished_ns - started_ns
         if elapsed_ns < _SLOW_ENGINE_STAGE_NS:
             return
@@ -3205,8 +3934,7 @@ class VLLMEngineObserver:
             self._current_workload = workload
             return workload
         logger.error(
-            "rebuilt NaviSched vLLM workload remains invalid; "
-            "skipping report: %r",
+            "rebuilt NaviSched vLLM workload remains invalid; " "skipping report: %r",
             workload,
         )
         return None
@@ -3228,9 +3956,7 @@ class VLLMEngineObserver:
     ) -> None:
         with self._workload_report_lock:
             with self._workload_lock:
-                workload = self._synchronize_workload_locked(
-                    scheduler, request_ids
-                )
+                workload = self._synchronize_workload_locked(scheduler, request_ids)
                 if workload is None:
                     return
                 if admitted_state is not None:
@@ -3249,9 +3975,7 @@ class VLLMEngineObserver:
             pending_admissions = self._pending_admission_states(admitted_state)
             if pending_admissions:
                 for state in pending_admissions:
-                    if self._report_workload_locked(
-                        reported_workload, reason, state
-                    ):
+                    if self._report_workload_locked(reported_workload, reason, state):
                         with state.lock:
                             state.admission_reported = True
                 return
@@ -3303,9 +4027,7 @@ class VLLMEngineObserver:
                     and admitted_request_count == len(admitted_state.request_ids)
                 ):
                     admitted_request_ids = []
-                admitted_pending_cache_tracked = (
-                    admitted_state.pending_cache_tracked
-                )
+                admitted_pending_cache_tracked = admitted_state.pending_cache_tracked
         try:
             reported = self._bridge.report_workload(
                 time.time_ns() // 1000,
@@ -3516,17 +4238,13 @@ class VLLMEngineObserver:
         return stable_request_id(external_request_id)
 
     def _forget_forward_request(self, external_request_id):
+        self._v6d_unpublished_candidates.pop(external_request_id, None)
         self._forward_request_states.pop(external_request_id, None)
 
     def _cleanup_finished_forward_requests(self, native_requests):
-        for external_request_id, state in list(
-            self._forward_request_states.items()
-        ):
+        for external_request_id, state in list(self._forward_request_states.items()):
             with state.lock:
-                if (
-                    state.released
-                    and external_request_id not in native_requests
-                ):
+                if state.released and external_request_id not in native_requests:
                     self._forward_request_states.pop(external_request_id, None)
 
     def wrap_execute_model(
@@ -3546,10 +4264,12 @@ class VLLMEngineObserver:
         scheduler_output,
         non_block=False,
     ):
+        has_tokens = bool(scheduler_output.num_scheduled_tokens)
         execution_step = _ExecutionStep(
             started_ns=time.perf_counter_ns(),
             scheduler_output_key=id(scheduler_output),
         )
+        _execution_timing_probe.mark_entry(execution_step)
         with self._execution_lock:
             scheduled_work_registered = (
                 execution_step.scheduler_output_key in self._scheduled_work_by_output
@@ -3564,9 +4284,7 @@ class VLLMEngineObserver:
             self._abort_execution_step(execution_step)
             logger.exception("failed to start NaviSched vLLM batch")
         try:
-            self._start_execution_tracking(
-                execution_step, scheduler, scheduler_output
-            )
+            self._start_execution_tracking(execution_step, scheduler, scheduler_output)
             self._record_execution_start_state(execution_step)
         except Exception:
             logger.exception("failed to collect NaviSched vLLM execution state")
@@ -3574,13 +4292,30 @@ class VLLMEngineObserver:
         try:
             running = getattr(scheduler, "running", None)
             running_request_count = (
-                len(running) if running is not None
+                len(running)
+                if running is not None
                 else len(scheduler_output.num_scheduled_tokens)
             )
-            execution_step.backend_execution_started = bool(
-                self._bridge.begin_backend_execution(running_request_count)
-            )
-            if not execution_step.backend_execution_started:
+            # Zero-token rounds do not open native execution intervals.
+            # Pending scheduler/cache work is not execution training time.
+            if self._native_ingress:
+                if not has_tokens:
+                    _execution_timing_probe.begin_control(execution_step)
+                if has_tokens:
+                    execution_step.backend_execution_started = bool(
+                        _execution_timing_probe.begin(
+                            execution_step, self._bridge.begin_backend_execution, 0, running_request_count
+                        )
+                    )
+            else:
+                execution_step.backend_execution_started = bool(
+                    _execution_timing_probe.begin(
+                        execution_step, self._bridge.begin_backend_execution, 0, running_request_count
+                    )
+                )
+            if not execution_step.backend_execution_started and (
+                not self._native_ingress or has_tokens
+            ):
                 logger.error("failed to start vLLM backend execution timing")
         except Exception:
             logger.exception("failed to start vLLM backend execution timing")
@@ -3659,27 +4394,19 @@ class VLLMEngineObserver:
             self._active_prefill_execution_count += int(
                 execution_step.prefill_tokens > 0
             )
-            self._active_decode_execution_count += int(
-                execution_step.decode_tokens > 0
-            )
+            self._active_decode_execution_count += int(execution_step.decode_tokens > 0)
             execution_step.execution_tracking_registered = True
 
     def _record_execution_start_state(self, execution_step) -> None:
         start_state = _ExecutionStartState(
             active_executions=execution_step.active_executions_before,
-            active_prefill_executions=(
-                execution_step.active_prefill_executions_before
-            ),
+            active_prefill_executions=(execution_step.active_prefill_executions_before),
             active_decode_executions=execution_step.active_decode_executions_before,
             active_scheduled_tokens=execution_step.active_scheduled_tokens_before,
             running_requests=execution_step.running_request_count,
-            running_prefill_requests=(
-                execution_step.running_prefill_request_count
-            ),
+            running_prefill_requests=(execution_step.running_prefill_request_count),
             running_decode_requests=execution_step.running_decode_request_count,
-            running_recompute_requests=(
-                execution_step.running_recompute_request_count
-            ),
+            running_recompute_requests=(execution_step.running_recompute_request_count),
             waiting_requests=execution_step.waiting_request_count,
             preempted_requests=execution_step.preempted_request_count,
             resumed_requests=execution_step.resumed_request_count,
@@ -3695,8 +4422,8 @@ class VLLMEngineObserver:
             with state.lock:
                 if (
                     state.execution_started_ns == execution_step.started_ns
-                    and state.execution_start_state is None
-                ):
+                    or (self._native_ingress and state.execution_step_count == 0)
+                ) and state.execution_start_state is None:
                     state.execution_start_state = start_state
 
     def _finish_execution_tracking(self, execution_step) -> None:
@@ -3732,12 +4459,24 @@ class VLLMEngineObserver:
                 decrement,
             )
 
-    def _end_backend_execution(self, execution_step) -> None:
+    def _end_backend_execution(self, execution_step, completed_ns=0) -> None:
         if not execution_step.backend_execution_started:
+            _execution_timing_probe.end_control(execution_step)
             return
         execution_step.backend_execution_started = False
         try:
-            if not self._bridge.end_backend_execution():
+            finished = (
+                _execution_timing_probe.end(
+                    execution_step,
+                    self._bridge.end_backend_execution,
+                    completed_ns // 1000,
+                )
+                if self._native_ingress and completed_ns > 0
+                else _execution_timing_probe.end(
+                    execution_step, self._bridge.end_backend_execution
+                )
+            )
+            if not finished:
                 logger.error("failed to finish vLLM backend execution timing")
         except Exception:
             logger.exception("failed to finish vLLM backend execution timing")
@@ -3748,8 +4487,12 @@ class VLLMEngineObserver:
             return
 
         def finished(unused_future=None):
-            completion = unused_future if isinstance(unused_future, Future) else execution_future
-            self._complete_backend_execution(execution_step, completion, output_complete=True)
+            completion = (
+                unused_future if isinstance(unused_future, Future) else execution_future
+            )
+            self._complete_backend_execution(
+                execution_step, completion, output_complete=True
+            )
             execution_future.__dict__.pop("_navi_backend_execution_step", None)
 
         if isinstance(output, Future):
@@ -3772,43 +4515,100 @@ class VLLMEngineObserver:
             return
         execution_step.backend_completion_recorded = True
         completed_ns = time.perf_counter_ns()
+        completed_time_us = 0
+        execution_step.future_completed_ns = completed_ns
+        if (
+            self._native_ingress
+            and (
+                execution_step.batch_progress
+                or execution_step.prefill_tokens > 0
+                or execution_step.decode_tokens > 0
+            )
+            and future.done()
+            and not future.cancelled()
+            and future.exception() is None
+        ):
+            with self._pd_output_lock:
+                output_completed_ns = self._pd_output_completed_ns.get(
+                    execution_step.scheduler_output_key
+                )
+                if output_completed_ns is None:
+                    self._pd_ready_finishes[execution_step.scheduler_output_key] = (
+                        execution_step,
+                        future,
+                    )
+                    return
+            completed_ns, completed_time_us = output_completed_ns
+        self._finalize_backend_execution(
+            execution_step, future, completed_ns, completed_time_us
+        )
+
+    def _finalize_backend_execution(
+        self,
+        execution_step: _ExecutionStep,
+        future: Future,
+        completed_ns: int,
+        completed_time_us: int = 0,
+    ) -> None:
+        if self._native_ingress:
+            with self._pd_output_lock:
+                execution_step.global_padded_tokens = self._pd_output_geometry.pop(
+                    execution_step.scheduler_output_key, None
+                )
         self._finish_execution_tracking(execution_step)
-        self._end_backend_execution(execution_step)
+        self._end_backend_execution(execution_step, completed_ns)
+        success = (
+            future.done() and not future.cancelled() and future.exception() is None
+        )
         future.__dict__.pop("_navi_backend_execution_step", None)
         try:
-            self.on_request_lifecycle_event({
-                "event": "execution_step",
-                "event_time_us": time.time_ns() // 1000,
-                "step_id": execution_step.started_ns,
-                "started_perf_ns": execution_step.started_ns,
-                "completed_perf_ns": completed_ns,
-                "callback_elapsed_ms": (completed_ns - execution_step.started_ns) / 1e6,
-                "pre_submit_ms": (
-                    (execution_step.submitted_ns - execution_step.started_ns) / 1e6
-                    if execution_step.submitted_ns else None
-                ),
-                "future_callback_ms": (
-                    (completed_ns - execution_step.submitted_ns) / 1e6
-                    if execution_step.submitted_ns else None
-                ),
-                "prefill_requests": execution_step.prefill_request_count,
-                "prefill_tokens": execution_step.prefill_tokens,
-                "decode_requests": execution_step.decode_request_count,
-                "decode_tokens": execution_step.decode_tokens,
-                "workload_counts_collected": execution_step.workload_counts_collected,
-                "running_count": execution_step.running_request_count,
-                "waiting_count": execution_step.waiting_request_count,
-                "active_executions_before": execution_step.active_executions_before,
-                "preempted_requests": execution_step.preempted_request_count,
-                "resumed_requests": execution_step.resumed_request_count,
-                "success": future.done() and not future.cancelled()
-                and future.exception() is None,
-            })
+            self.on_request_lifecycle_event(
+                {
+                    "event": "execution_step",
+                    **_execution_timing_probe.event_fields(execution_step),
+                    "event_time_us": time.time_ns() // 1000,
+                    "step_id": execution_step.started_ns,
+                    "scheduler_output_key": execution_step.scheduler_output_key,
+                    "started_perf_ns": execution_step.started_ns,
+                    "completed_perf_ns": completed_ns,
+                    "callback_elapsed_ms": (completed_ns - execution_step.started_ns)
+                    / 1e6,
+                    "pre_submit_ms": (
+                        (execution_step.submitted_ns - execution_step.started_ns) / 1e6
+                        if execution_step.submitted_ns
+                        else None
+                    ),
+                    "future_callback_ms": (
+                        (
+                            execution_step.future_completed_ns
+                            - execution_step.submitted_ns
+                        )
+                        / 1e6
+                        if execution_step.submitted_ns
+                        else None
+                    ),
+                    "output_wait_ms": max(
+                        completed_ns - execution_step.future_completed_ns, 0
+                    )
+                    / 1e6,
+                    "prefill_requests": execution_step.prefill_request_count,
+                    "prefill_tokens": execution_step.prefill_tokens,
+                    "decode_requests": execution_step.decode_request_count,
+                    "decode_tokens": execution_step.decode_tokens,
+                    "workload_counts_collected": execution_step.workload_counts_collected,
+                    "running_count": execution_step.running_request_count,
+                    "waiting_count": execution_step.waiting_request_count,
+                    "active_executions_before": execution_step.active_executions_before,
+                    "preempted_requests": execution_step.preempted_request_count,
+                    "resumed_requests": execution_step.resumed_request_count,
+                    "success": success,
+                }
+            )
         except Exception:
             self._request_audit_failures += 1
         if future.done() and not future.cancelled():
             try:
-                if future.exception() is None:
+                if success:
                     self._bridge.report_execution_step(
                         (completed_ns - execution_step.started_ns) / 1e6,
                         execution_step.prefill_tokens,
@@ -3820,8 +4620,125 @@ class VLLMEngineObserver:
             try:
                 self._complete_execution_step(execution_step, future, completed_ns)
             except Exception:
+                self._discard_pd_output(execution_step.scheduler_output_key)
                 self._abort_execution_step(execution_step)
                 logger.exception("failed to complete NaviSched vLLM execution step")
+        elif self._native_ingress:
+            self._defer_pd_batch_finish(execution_step.scheduler_output_key, [])
+
+    def _discard_pd_output(self, output_key: int) -> None:
+        if not self._native_ingress:
+            return
+        with self._pd_output_lock:
+            self._pd_output_completed_ns.pop(output_key, None)
+            self._pd_output_geometry.pop(output_key, None)
+            self._pd_ready_finishes.pop(output_key, None)
+
+    def _defer_pd_batch_finish(self, output_key: int, batches: list[Any]) -> None:
+        with self._pd_output_lock:
+            completed_ns = self._pd_output_completed_ns.pop(output_key, None)
+            if completed_ns is not None:
+                self._pd_output_geometry.pop(output_key, None)
+            if completed_ns is None:
+                self._pd_ready_finishes[output_key] = batches
+                return
+        for batch in batches:
+            self._finish_batch(batch, *completed_ns)
+
+    @staticmethod
+    def _validated_global_padded_tokens(geometry, scheduled_tokens):
+        """Accept observed Worker layout metadata, never infer missing geometry."""
+        if (
+            not isinstance(geometry, dict)
+            or type(geometry.get("version")) is not int
+            or geometry["version"] != 1
+        ):
+            return None
+        chunks = geometry.get("chunks")
+        if not isinstance(chunks, list) or not chunks:
+            return None
+        total_scheduled = 0
+        total_padded = 0
+        for chunk in chunks:
+            names = (
+                "scheduled_tokens",
+                "pcp_size",
+                "interleave_size",
+                "max_local_tokens",
+                "local_padded_tokens",
+                "global_padded_tokens",
+            )
+            if not isinstance(chunk, dict) or any(
+                type(chunk.get(name)) is not int or chunk[name] <= 0 for name in names
+            ):
+                return None
+            if (
+                chunk["global_padded_tokens"]
+                != chunk["pcp_size"] * chunk["local_padded_tokens"]
+                or chunk["max_local_tokens"] > chunk["local_padded_tokens"]
+            ):
+                return None
+            cycles, remainder = divmod(
+                chunk["scheduled_tokens"], chunk["pcp_size"] * chunk["interleave_size"]
+            )
+            if chunk["max_local_tokens"] != cycles * chunk["interleave_size"] + min(
+                remainder, chunk["interleave_size"]
+            ):
+                return None
+            dp_target = chunk.get("dp_target_bucket")
+            if dp_target is not None and (
+                type(dp_target) is not int
+                or not 0 <= dp_target <= chunk["local_padded_tokens"]
+            ):
+                return None
+            total_scheduled += chunk["scheduled_tokens"]
+            total_padded += chunk["global_padded_tokens"]
+        if total_scheduled != scheduled_tokens or total_padded > (1 << 63) - 1:
+            return None
+        return total_padded
+
+    def on_model_output(self, scheduler_output: Any, model_output: Any = None) -> None:
+        """Complete PD prefill after synchronous scheduler/cache output processing."""
+        if not self._native_ingress:
+            return
+        output_key = id(scheduler_output)
+        completed_ns = time.perf_counter_ns()
+        completed_time_us = time.time_ns() // 1000
+        geometry = getattr(model_output, "execution_geometry", None)
+        if geometry is not None:
+            try:
+                self.on_request_lifecycle_event(
+                    {
+                        "event": "execution_geometry",
+                        "event_time_us": time.time_ns() // 1000,
+                        "scheduler_output_key": output_key,
+                        "output_completed_perf_ns": completed_ns,
+                        "geometry": geometry,
+                    }
+                )
+            except Exception:
+                logger.exception("failed to audit TPU execution geometry")
+        scheduled = getattr(scheduler_output, "num_scheduled_tokens", {})
+        padded = self._validated_global_padded_tokens(
+            geometry, sum(scheduled.values()) if isinstance(scheduled, dict) else -1
+        )
+        with self._pd_output_lock:
+            self._pd_output_geometry[output_key] = padded
+            batches = self._pd_ready_finishes.pop(output_key, None)
+            if batches is None or isinstance(batches, tuple):
+                self._pd_output_completed_ns[output_key] = (
+                    completed_ns,
+                    completed_time_us,
+                )
+            if batches is None:
+                return
+        if isinstance(batches, tuple):
+            self._finalize_backend_execution(*batches, completed_ns, completed_time_us)
+            return
+        with self._pd_output_lock:
+            self._pd_output_geometry.pop(output_key, None)
+        for batch in batches:
+            self._finish_batch(batch, completed_ns, completed_time_us)
 
     def _prepare_execution_step(
         self, scheduler_output, get_request, execution_step
@@ -3829,6 +4746,9 @@ class VLLMEngineObserver:
         progress_by_state = {}
         local_batch_requests = []
         local_request_stats = []
+        publication_prompt_tokens = {}
+        publication_reporters = {}
+        local_publication_requests = {}
         local_request_ids = set()
         for internal_request_id in scheduler_output.num_scheduled_tokens:
             request = get_request(internal_request_id)
@@ -3878,6 +4798,59 @@ class VLLMEngineObserver:
                 for value in request.block_hashes[:full_block_count]
             ]
             state = self._scheduled_forward_batches.get(request_id)
+            prefill_stats = getattr(request, "prefill_stats", None)
+            local_cache_hits = getattr(prefill_stats, "num_local_cached_tokens", -1)
+            external_cache_hits = getattr(
+                prefill_stats, "num_external_cached_tokens", -1
+            )
+            local_cache_hits = (
+                max(-1, int(local_cache_hits)) if local_cache_hits is not None else -1
+            )
+            external_cache_hits = (
+                max(-1, int(external_cache_hits))
+                if external_cache_hits is not None
+                else -1
+            )
+            if local_cache_hits >= 0 and external_cache_hits >= 0:
+                prefix_cache_hits = local_cache_hits + external_cache_hits
+                prefix_cache_hit_source = "prefill_stats"
+            else:
+                legacy_cache_hits = getattr(request, "num_cached_tokens", -1)
+                prefix_cache_hits = (
+                    max(-1, int(legacy_cache_hits))
+                    if legacy_cache_hits is not None
+                    else -1
+                )
+                prefix_cache_hit_source = (
+                    "request.num_cached_tokens" if prefix_cache_hits >= 0 else "unknown"
+                )
+            self.on_request_lifecycle_event(
+                {
+                    "event": "prefill_cache_observation",
+                    "event_time_us": time.time_ns() // 1000,
+                    "backend_step_started_ns": execution_step.started_ns,
+                    "request_id": external_request_id,
+                    "navi_request_id": request_id,
+                    "sample_scope": "forwarded" if state is not None else "local",
+                    "prefix_cache_hit_tokens": prefix_cache_hits,
+                    "prefix_cache_hit_local_tokens": local_cache_hits,
+                    "prefix_cache_hit_external_tokens": external_cache_hits,
+                    "prefix_cache_hit_source": prefix_cache_hit_source,
+                    "computed_context_tokens": computed_before_schedule,
+                    "scheduled_prefill_tokens": prefill_tokens,
+                    "prompt_tokens": int(request.num_prompt_tokens),
+                    "request_num_tokens": getattr(request, "num_tokens", None),
+                    "shared_prefix_boundary": getattr(
+                        request, "shared_prefix_boundary", None
+                    ),
+                    **self._explicit_checkpoint_audit_fields(request, self._block_size),
+                    "first_forwarded_step": (
+                        request_id not in state.initial_cache_hits
+                        if state is not None
+                        else None
+                    ),
+                }
+            )
             if state is None:
                 retained_state = self._forward_request_state(external_request_id)
                 if retained_state is not None:
@@ -3891,12 +4864,12 @@ class VLLMEngineObserver:
                         "NaviSched requires unique request ids within a vLLM step"
                     )
                 local_request_ids.add(request_id)
+                publication_prompt_tokens[request_id] = int(request.num_prompt_tokens)
+                local_publication_requests[request_id] = external_request_id
                 local_batch_requests.append(
                     (request_id, total_tokens, self._block_size, block_hashes)
                 )
-                local_request_stats.append(
-                    (request_id, total_tokens, cache_hit_tokens)
-                )
+                local_request_stats.append((request_id, total_tokens, cache_hit_tokens))
                 continue
 
             with state.lock:
@@ -3924,8 +4897,11 @@ class VLLMEngineObserver:
                         if value not in state.cancelled_request_ids
                     ]
                     try:
-                        state.handle = self._bridge.start_forward_batch(
-                            state.native_batch, active_request_ids
+                        state.handle = _execution_timing_probe.batch_begin(
+                            state,
+                            self._bridge.start_forward_batch,
+                            state.native_batch,
+                            active_request_ids,
                         )
                     except Exception:
                         self._release_forward_batch(state)
@@ -3939,7 +4915,25 @@ class VLLMEngineObserver:
                     progress.batch_handle = state.handle
                 if state.execution_started_ns == 0:
                     state.execution_started_ns = execution_step.started_ns
+                if request_id not in state.initial_cache_hits:
+                    state.initial_external_cache_hits[request_id] = (
+                        external_cache_hits
+                        if local_cache_hits >= 0
+                        and external_cache_hits >= 0
+                        and local_cache_hits + external_cache_hits == cache_hit_tokens
+                        else -1
+                    )
+                    boundary = getattr(request, "shared_prefix_boundary", None)
+                    if type(boundary) is int and 0 <= boundary <= int(
+                        request.num_prompt_tokens
+                    ):
+                        state.initial_execution_policy_inputs[request_id] = (
+                            int(request.num_prompt_tokens),
+                            cache_hit_tokens,
+                            boundary,
+                        )
                 state.initial_cache_hits.setdefault(request_id, cache_hit_tokens)
+                publication_reporters[external_request_id] = state.handle
 
         for progress in execution_step.batch_progress:
             state = progress.state
@@ -3948,18 +4942,60 @@ class VLLMEngineObserver:
             with state.lock:
                 if state.released or state.tracking_aborted:
                     continue
+                active_ids = [
+                    request_id
+                    for request_id in state.request_ids
+                    if request_id not in state.cancelled_request_ids
+                ]
+                if (
+                    not state.execution_cache_reported
+                    and state.handle is not None
+                    and active_ids
+                    and all(
+                        request_id in state.initial_execution_policy_inputs
+                        for request_id in active_ids
+                    )
+                ):
+                    resolved = [
+                        (
+                            request_id,
+                            *state.initial_execution_policy_inputs[request_id],
+                            state.initial_external_cache_hits.get(request_id, -1),
+                        )
+                        for request_id in active_ids
+                    ]
+                    if not self._bridge.resolve_forward_execution_cache(
+                        state.handle, resolved
+                    ):
+                        raise RuntimeError(
+                            "failed to publish resolved execution cache features"
+                        )
+                    state.execution_cache_reported = True
                 state.chunk_count += 1
                 state.pending_prefill_steps += 1
 
         if local_batch_requests:
             batch_id = self._batch_id_prefix | next(self._batch_ids)
-            handle = self._bridge.start_batch(batch_id, local_batch_requests)
+            if self._native_ingress:
+                handle = self._bridge.start_batch(
+                    batch_id,
+                    local_batch_requests,
+                    prefix_cache_prompt_tokens=publication_prompt_tokens,
+                )
+            else:
+                handle = self._bridge.start_batch(batch_id, local_batch_requests)
             if handle is None:
                 logger.error("failed to start NaviSched batch %d", batch_id)
             else:
                 execution_step.batch_progress.append(
                     _BatchProgress((handle, local_request_stats), None)
                 )
+                publication_reporters.update(
+                    (external_id, handle)
+                    for external_id in local_publication_requests.values()
+                )
+        if self._native_ingress and self._v6d_scheduler is not None:
+            self._attach_v6d_publication_reporters(publication_reporters)
 
     def _abort_execution_step(self, execution_step) -> None:
         released_states = set()
@@ -3971,6 +5007,12 @@ class VLLMEngineObserver:
             self._release_forward_batch(state)
 
     @staticmethod
+    def _explicit_checkpoint_audit_fields(request, scheduler_block_size):
+        return _execution_timing_probe.explicit_checkpoint_audit_fields(
+            request, scheduler_block_size
+        )
+
+    @staticmethod
     def _claim_forward_batch_prefill_complete(state) -> bool:
         if (
             state.released
@@ -3978,9 +5020,7 @@ class VLLMEngineObserver:
             or state.prefill_complete
             or state.pending_prefill_steps != 0
             or not state.requests
-            or not set(state.requests).issubset(
-                state.completed_prefill_request_ids
-            )
+            or not set(state.requests).issubset(state.completed_prefill_request_ids)
         ):
             return False
         state.prefill_complete = True
@@ -4003,10 +5043,11 @@ class VLLMEngineObserver:
                 if progress.state is not None
             }
         )
-        logger.info(
+        _execution_timing_probe._diagnostic_format_info(
+            logger,
             "[navi-vllm-execution-step] batch_ids=%s tracked_batches=%d "
             "prefill_requests=%d prefill_tokens=%d decode_requests=%d "
-            "decode_tokens=%d execute_model_ms=%.3f success=%d",
+            "decode_tokens=%d execute_model_ms=%.3f success=%d backend_step_started_ns=%d",
             ",".join(str(value) for value in batch_ids) or "<local-or-recompute>",
             len(batch_ids),
             execution_step.prefill_request_count,
@@ -4015,25 +5056,63 @@ class VLLMEngineObserver:
             execution_step.decode_tokens,
             step_ms,
             int(error is None),
+            execution_step.started_ns,
         )
         if error is not None:
+            self._discard_pd_output(execution_step.scheduler_output_key)
             self._abort_execution_step(execution_step)
             return
 
-        finished_states = []
+        finished_batches = []
         for progress in execution_step.batch_progress:
             state = progress.state
             if state is None:
-                self._finish_batch(progress.batch_handle, completed_ns)
+                if self._native_ingress:
+                    # TPU execute_model returns before the device output is ready.
+                    # Local Prefill batches must use the same completion barrier
+                    # as NaviSched-forwarded batches for truthful training targets.
+                    finished_batches.append(progress.batch_handle)
+                else:
+                    self._finish_batch(progress.batch_handle, completed_ns)
                 continue
             with state.lock:
                 if state.released or state.tracking_aborted:
                     continue
                 state.execution_step_count += 1
-                state.execution_step_ms += step_ms
-                state.execution_prefill_request_count += (
-                    progress.prefill_request_count
+                # Missing runner telemetry is different from a known shared or
+                # decode-containing target: only the former can use a projected
+                # feature pair without assigning another batch's latency here.
+                if (
+                    len(execution_step.batch_progress) != 1
+                    or progress.prefill_tokens != execution_step.prefill_tokens
+                    or execution_step.decode_request_count != 0
+                    or execution_step.decode_tokens != 0
+                ):
+                    state.projected_execution_exclusive = False
+                # Shared Core steps cannot be apportioned to individual batches.
+                if (
+                    self._native_ingress
+                    and len(execution_step.batch_progress) == 1
+                    and progress.prefill_tokens == execution_step.prefill_tokens
+                    and execution_step.decode_request_count == 0
+                    and execution_step.decode_tokens == 0
+                    and execution_step.global_padded_tokens is not None
+                    and not state.cancelled_request_ids
+                    and state.global_padded_tokens + execution_step.global_padded_tokens
+                    <= (1 << 63) - 1
+                ):
+                    state.geometry_execution_step_count += 1
+                    state.global_padded_tokens += execution_step.global_padded_tokens
+                state.execution_step_ms += (
+                    (
+                        completed_ns
+                        - max(execution_step.started_ns, state.execution_started_ns)
+                    )
+                    / 1e6
+                    if self._native_ingress
+                    else step_ms
                 )
+                state.execution_prefill_request_count += progress.prefill_request_count
                 state.execution_prefill_tokens += progress.prefill_tokens
                 state.execution_decode_request_count += (
                     execution_step.decode_request_count
@@ -4053,11 +5132,18 @@ class VLLMEngineObserver:
                 else:
                     state.pending_prefill_steps -= 1
                 if self._claim_forward_batch_prefill_complete(state):
-                    finished_states.append(state)
-        for state in finished_states:
-            self._finish_batch(state, completed_ns)
+                    finished_batches.append(state)
+        if self._native_ingress:
+            self._defer_pd_batch_finish(
+                execution_step.scheduler_output_key, finished_batches
+            )
+        else:
+            for batch in finished_batches:
+                self._finish_batch(batch, completed_ns)
 
-    def _finish_batch(self, batch_handle, completed_ns=None) -> None:
+    def _finish_batch(
+        self, batch_handle, completed_ns=None, completed_time_us=0
+    ) -> None:
         if isinstance(batch_handle, _ForwardBatchState):
             state = batch_handle
             error = None
@@ -4118,6 +5204,10 @@ class VLLMEngineObserver:
                             state.initial_cache_hits.get(request_id, 0)
                             for request_id in active_request_ids
                         ),
+                    )
+                    geometry = (
+                        state.geometry_execution_step_count,
+                        state.global_padded_tokens,
                     )
                     self._mark_forward_batch_released(state)
             finally:
@@ -4192,7 +5282,8 @@ class VLLMEngineObserver:
                     wall_ms,
                     execution_step_ms,
                 )
-            logger.info(
+            _execution_timing_probe._diagnostic_format_info(
+                logger,
                 "[navi-vllm-execution-batch] batch_id=%d chunks=%d steps=%d "
                 "prefill_request_steps=%d prefill_tokens=%d "
                 "decode_request_steps=%d decode_tokens=%d wall_ms=%.3f "
@@ -4346,7 +5437,7 @@ class VLLMEngineObserver:
                 execution_prefill_tokens,
                 execution_decode_request_count,
                 execution_decode_tokens,
-                admission_to_prefill_complete_ms,
+                -1.0 if self._native_ingress else admission_to_prefill_complete_ms,
                 preceding.request_count,
                 sample_batch_count,
                 sample_running_capacity.request_count,
@@ -4367,12 +5458,48 @@ class VLLMEngineObserver:
                 native_preparation_ms,
             )
             try:
-                if not self._bridge.finish_batch_with_execution(
-                    handle, request_stats, *execution_breakdown
+                execution_finish = (completed_time_us,) if self._native_ingress else ()
+                # The runner's completed geometry is a training feature. A
+                # dispatch projection must never be substituted for that fact.
+                if (
+                    self._execution_geometry_enabled
+                    and geometry[0] == execution_step_count
+                    and geometry[0] > 0
+                    and geometry[1] > 0
+                    and not state.cancelled_request_ids
                 ):
+                    finished = _execution_timing_probe.batch_finish(
+                        state,
+                        self._bridge.finish_batch_with_execution_geometry,
+                        handle,
+                        request_stats,
+                        *execution_breakdown,
+                        *geometry,
+                        *execution_finish,
+                    )
+                else:
+                    finished = _execution_timing_probe.batch_finish(
+                        state,
+                        self._bridge.finish_batch_with_execution,
+                        handle,
+                        request_stats,
+                        *execution_breakdown,
+                        *execution_finish,
+                    )
+                if not finished:
                     logger.error("failed to finish NaviSched vLLM batch")
             except Exception:
                 logger.exception("failed to finish NaviSched vLLM batch")
+            finally:
+                self.on_request_lifecycle_event(
+                    {
+                        "event": "legacy_native_batch_clock",
+                        "event_time_us": time.time_ns() // 1000,
+                        "native_batch_id": state.batch_id,
+                        "native_schedule_batch_id": state.schedule_batch_id,
+                        **_execution_timing_probe.batch_event_fields(state),
+                    }
+                )
             return
         handle, request_stats = batch_handle
         try:
@@ -4461,6 +5588,7 @@ class VLLMEngineObserver:
                     self._forget_forward_request(external_request_id)
                 state.requests.pop(request_id, None)
                 state.initial_cache_hits.pop(request_id, None)
+                state.initial_external_cache_hits.pop(request_id, None)
                 state.admission_contributions.pop(request_id, None)
             if abort_entire_batch:
                 self._release_forward_reporter(state)
@@ -4469,8 +5597,8 @@ class VLLMEngineObserver:
                 ):
                     self._release_forward_batch(state)
             else:
-                finish_remaining_batch = (
-                    self._claim_forward_batch_prefill_complete(state)
+                finish_remaining_batch = self._claim_forward_batch_prefill_complete(
+                    state
                 )
         self._remove_response_requests(response_requests_to_remove)
         if finish_remaining_batch:
@@ -4521,6 +5649,8 @@ class VLLMEngineObserver:
             if self._scheduled_forward_batches.get(request_id) is state:
                 self._scheduled_forward_batches.pop(request_id, None)
         self._release_native_forward_batch(native_batch)
+        if self._native_ingress:
+            self._pd_forward_slot.set()
 
     def _release_forward_batch(self, state) -> None:
         with state.lock:
@@ -4529,84 +5659,156 @@ class VLLMEngineObserver:
             self._mark_forward_batch_released(state)
         self._cleanup_released_forward_batch(state)
 
+    def on_v6d_cache_snapshots(self, snapshots: list[dict]) -> None:
+        """Feed existing resident-object snapshots into the original KV path."""
+        if not snapshots:
+            raise ValueError("V6D snapshot requires every physical node")
+        if any(
+            type(snapshot["peer_cache_read_available"]) is not bool
+            for snapshot in snapshots
+        ):
+            raise ValueError("invalid V6D peer cache read availability")
+        peer_cache_read_available = all(
+            snapshot["peer_cache_read_available"] for snapshot in snapshots
+        )
+        common = None
+        for snapshot in snapshots:
+            groups = {}
+            for obj in snapshot["objects"]:
+                if obj["tier"] != "vineyard" or obj["sealedResident"] is not True:
+                    continue
+                identity = obj["meta"].get("navi_sched_cache")
+                if identity is None:
+                    continue
+                identity = json.loads(identity)
+                group_id = identity["group_id"]
+                if type(group_id) is not int or not 0 <= group_id < len(
+                    self._cache_policy.group_roles
+                ):
+                    raise ValueError("invalid V6D cache group")
+                hashes = [bytes.fromhex(value) for value in identity["block_hashes"]]
+                if not hashes or any(len(value) != 32 for value in hashes):
+                    raise ValueError("invalid V6D source block hash")
+                groups.setdefault(group_id, set()).update(hashes)
+            if common is None:
+                common = groups
+            else:
+                for group_id in common:
+                    common[group_id].intersection_update(groups.get(group_id, ()))
+        self.on_block_lifecycle_event(
+            "snapshot",
+            None,
+            {group_id: tuple(sorted(hashes)) for group_id, hashes in common.items()},
+            cause="v6d_resident_snapshot",
+            cache_key_type=1,
+        )
+        self._bridge.report_peer_cache_read_available(peer_cache_read_available)
+
     def on_block_lifecycle_event(
         self,
         event_type: str,
         group_id: int | None,
-        block_hashes: tuple[bytes, ...],
+        block_hashes: tuple[bytes, ...] | dict[int, tuple[bytes, ...]],
         cause_request_id: str | None = None,
         cause: str = "unspecified",
+        cache_key_type: int = 0,
     ) -> None:
+        if type(cache_key_type) is not int or cache_key_type not in (0, 1):
+            raise ValueError("invalid cache key type")
         with self._cache_lifecycle_lock:
             try:
-                self._cache_lifecycle_sequence += 1
-                sequence = self._cache_lifecycle_sequence
+                cache_state = self._cache_states[cache_key_type]
+                if event_type == "snapshot":
+                    delta = cache_state.replace(block_hashes)
+                    if delta.empty():
+                        return
+                else:
+                    delta = cache_state.apply(event_type, group_id, block_hashes)
+                self._cache_lifecycle_sequences[cache_key_type] += 1
+                sequence = self._cache_lifecycle_sequences[cache_key_type]
                 event_time_us = time.time_ns() // 1000
-                delta = self._cache_state.apply(event_type, group_id, block_hashes)
-                alias_delta = self._image_cache_map.update(
-                    tuple(expanded for value in block_hashes
-                          for expanded in self._cache_policy.expand_group_hash(group_id, value))
-                    if group_id is not None else (),
-                    cleared=event_type == "cleared",
-                )
+                alias_delta = None
+                if cache_key_type == 0:
+                    alias_delta = self._image_cache_map.update(
+                        (
+                            tuple(
+                                expanded
+                                for value in block_hashes
+                                for expanded in self._cache_policy.expand_group_hash(
+                                    group_id, value
+                                )
+                            )
+                            if group_id is not None
+                            else ()
+                        ),
+                        cleared=event_type == "cleared",
+                    )
                 cause_batch_id, cause_schedule_batch_id = self._cause_batch_ids(
                     cause_request_id
                 )
                 audit = {
                     "event_time_us": event_time_us,
                     "sequence": sequence,
+                    "cache_key_type": cache_key_type,
                     "event_type": event_type,
                     "group_id": group_id,
                     "cause": cause,
                     "cause_request_id": cause_request_id,
                     "cause_batch_id": cause_batch_id,
                     "cause_schedule_batch_id": cause_schedule_batch_id,
-                    "event_hashes": self._wire_event_hashes(
-                        group_id, block_hashes
-                    ),
+                    "event_hashes": self._wire_event_hashes(group_id, block_hashes),
                     "added": self._wire_hashes(delta.added),
                     "removed": self._wire_hashes(delta.removed),
-                    "added_full_ready": self._wire_hashes(
-                        delta.added_full_ready
-                    ),
-                    "removed_full_ready": self._wire_hashes(
-                        delta.removed_full_ready
-                    ),
-                    "added_tail_ready": self._wire_hashes(
-                        delta.added_tail_ready
-                    ),
-                    "removed_tail_ready": self._wire_hashes(
-                        delta.removed_tail_ready
-                    ),
+                    "added_full_ready": self._wire_hashes(delta.added_full_ready),
+                    "removed_full_ready": self._wire_hashes(delta.removed_full_ready),
+                    "added_tail_ready": self._wire_hashes(delta.added_tail_ready),
+                    "removed_tail_ready": self._wire_hashes(delta.removed_tail_ready),
                 }
                 self._bridge.log_cache_lifecycle_audit(
                     json.dumps(audit, separators=(",", ":"), sort_keys=True)
                 )
-                self._report_cache_delta(delta, alias_delta)
+                self._report_cache_delta(delta, alias_delta, cache_key_type)
             except Exception:
                 logger.exception("failed to process vLLM block lifecycle event")
 
-    def _report_cache_delta(self, delta, aliases=None):
+    def _report_cache_delta(self, delta, aliases=None, cache_key_type=0):
         if not delta.empty() or (aliases is not None and not aliases.empty()):
-            fields = ("added", "removed", "added_full_ready", "removed_full_ready",
-                      "added_tail_ready", "removed_tail_ready")
-            self._bridge.report_cache_updated(*(
-                self._wire_hashes(getattr(delta, name) + (
-                    getattr(aliases, name) if aliases is not None else ()
-                )) for name in fields
-            ))
+            fields = (
+                "added",
+                "removed",
+                "added_full_ready",
+                "removed_full_ready",
+                "added_tail_ready",
+                "removed_tail_ready",
+            )
+            self._bridge.report_cache_updated(
+                *(
+                    self._wire_hashes(
+                        getattr(delta, name)
+                        + (getattr(aliases, name) if aliases is not None else ())
+                    )
+                    for name in fields
+                ),
+                *((cache_key_type,) if cache_key_type else ()),
+            )
 
     def on_request_lifecycle_event(self, event: dict) -> None:
         try:
             request_id = event.get("request_id")
             batch_id, schedule_batch_id = self._cause_batch_ids(request_id)
-            self._bridge.log_request_lifecycle_audit(json.dumps({
-                **event,
-                "session": self._request_audit_session,
-                "audit_failures": self._request_audit_failures,
-                "batch_id": batch_id,
-                "schedule_batch_id": schedule_batch_id,
-            }, separators=(",", ":"), sort_keys=True))
+            self._bridge.log_request_lifecycle_audit(
+                json.dumps(
+                    {
+                        **event,
+                        "session": self._request_audit_session,
+                        "audit_failures": self._request_audit_failures,
+                        "batch_id": batch_id,
+                        "schedule_batch_id": schedule_batch_id,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
         except Exception:
             self._request_audit_failures += 1
 
@@ -4649,13 +5851,17 @@ class VLLMEngineObserver:
     def _shutdown_locked(self) -> None:
         self._forward_stop.set()
         try:
-            if not self._bridge.disable_forwarding():
+            if self._bridge is not None and not self._bridge.disable_forwarding():
                 logger.error("failed to disable NaviSched VLLM forwarding")
         except Exception:
             logger.exception("failed to disable NaviSched VLLM forwarding")
         for thread in (self._forward_thread,):
             if thread is not None and thread is not threading.current_thread():
                 thread.join()
+        if self._v6d_snapshot_future is not None:
+            self._v6d_snapshot_future.cancel()
+            self._v6d_snapshot_future = None
+        self._restore_v6d_publication_observers()
         for state in self._matching_forward_batches(None):
             self._fail_forward_responses(
                 state.request_ids, "NaviSched vLLM Agent stopped"
@@ -4687,6 +5893,10 @@ class VLLMEngineObserver:
             self._inflight_scheduled_tokens.clear()
             self._workload_dirty_request_ids.clear()
             self._active_scheduled_tokens = 0
+        with self._pd_output_lock:
+            self._pd_output_completed_ns.clear()
+            self._pd_output_geometry.clear()
+            self._pd_ready_finishes.clear()
         if self._agent is not None:
             try:
                 self._agent.stop()

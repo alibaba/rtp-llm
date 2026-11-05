@@ -7,21 +7,25 @@ void verifyNaviSchedPublicApiCompile(const NaviSchedAgentConfig &agentConfig,
 {
     auto agentInit = &NaviSchedAgent::init;
     auto agentReportCacheInserted = &NaviSchedAgent::reportCacheInserted;
-    bool (NaviSchedBatchFinishReporter::*startBatch)(
-        const std::vector<uint64_t> &) = &NaviSchedBatchFinishReporter::startBatch;
-    bool (NaviSchedBatchFinishReporter::*startBatchAt)(
-        const std::vector<uint64_t> &, int64_t) =
+    bool (NaviSchedBatchFinishReporter::*startBatch)(const std::vector<uint64_t> &) =
+        &NaviSchedBatchFinishReporter::startBatch;
+    bool (NaviSchedBatchFinishReporter::*startBatchAt)(const std::vector<uint64_t> &,
+                                                       int64_t) =
         &NaviSchedBatchFinishReporter::startBatch;
     bool (NaviSchedBatchFinishReporter::*finishBatch)(
         const std::vector<NaviSchedRequestStats> &) =
         &NaviSchedBatchFinishReporter::finishBatch;
     bool (NaviSchedBatchFinishReporter::*finishBatchWithExecution)(
-        const std::vector<NaviSchedRequestStats> &, double, double, int64_t,
-        int64_t, int64_t, int64_t, double) = &NaviSchedBatchFinishReporter::finishBatch;
+        const std::vector<NaviSchedRequestStats> &, double, double, int64_t, int64_t,
+        int64_t, int64_t, double, int64_t) = &NaviSchedBatchFinishReporter::finishBatch;
     bool (NaviSchedBatchFinishReporter::*finishBatchWithNativePreparation)(
-        const std::vector<NaviSchedRequestStats> &, double, double, int64_t,
-        int64_t, int64_t, int64_t, double, double) =
-        &NaviSchedBatchFinishReporter::finishBatch;
+        const std::vector<NaviSchedRequestStats> &, double, double, int64_t, int64_t,
+        int64_t, int64_t, double, double, int64_t) = &NaviSchedBatchFinishReporter::finishBatch;
+    bool (NaviSchedBatchFinishReporter::*finishGeometry)(
+        const std::vector<NaviSchedRequestStats> &, double, double, int64_t, int64_t,
+        int64_t, int64_t, double, int64_t, int64_t, double) =
+        &NaviSchedBatchFinishReporter::finishBatchWithExecutionGeometry;
+    (void)finishGeometry;
     (void)agentInit;
     (void)agentReportCacheInserted;
     (void)startBatch;

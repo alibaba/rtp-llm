@@ -4,6 +4,7 @@
 #include "unittest/unittest.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace navi_sched {
 namespace {
@@ -46,6 +47,151 @@ void writeNegativeBatchSample(autil::DataBuffer &buffer)
 }
 
 class LatencyHistorySamplerTest : public TESTBASE {};
+
+TEST_F(LatencyHistorySamplerTest, testColdHistoryAmplifiesIsolatedRuntimeStall)
+{
+    const auto source34Sample = [](double latencyMs, int64_t identity) {
+        NaviSchedLatencySample sample;
+        sample.features.appendBatchCount(1);
+        sample.features.appendRequest(0, 2350);
+        sample.features.setExecutionGeometry(1, 4096);
+        sample.features.setExecutionCacheSource(0, 0);
+        sample.latencyMs = latencyMs;
+        sample.eventTimeUs = identity;
+        return sample;
+    };
+    LatencyHistorySampler retained;
+    retained.configure(2000, 64);
+    // Representative latency bucket, not a latency-model accuracy dataset.
+    for (int64_t i = 0; i < 64; ++i) {
+        retained.append(source34Sample(2300.0 + i, i + 1));
+    }
+    autil::DataBuffer beforeReset;
+    ASSERT_TRUE(retained.serializeWithExecutionCacheSource(beforeReset));
+    const std::string bytes(beforeReset.getData(), beforeReset.getDataLen());
+    const int64_t stallIdentity = 1000000;
+    auto countStallDraws = [&](bool reset) {
+        LatencyHistorySampler sampler;
+        autil::DataBuffer saved(const_cast<char *>(bytes.data()), bytes.size());
+        EXPECT_TRUE(sampler.deserializeWithExecutionCacheSource(saved));
+        const char *mutation = std::getenv("NAVI_TEST_HISTORY_COLD_BUCKET_MUTANT");
+        if (reset || (mutation && std::string(mutation) == "hide_reset")) {
+            sampler.clear();
+        }
+        sampler.append(source34Sample(2266.38, stallIdentity));
+        size_t draws = 0;
+        for (int64_t round = 0; round < 475; ++round) {
+            for (int64_t index = 0; index < 4; ++index) {
+                sampler.append(source34Sample(107.0, 2000000 + round * 4 + index));
+            }
+            const auto batches = sampler.getOnlineFitBatches(4);
+            EXPECT_EQ(4u, batches.size());
+            for (const auto &batch : batches) {
+                draws +=
+                    std::count_if(batch.begin(), batch.end(), [&](const auto &sample) {
+                        return sample.eventTimeUs == stallIdentity;
+                    });
+            }
+        }
+        return draws;
+    };
+    const auto cold = countStallDraws(true);
+    const auto retainedHistory = countStallDraws(false);
+    const auto reintroducedReset = countStallDraws(true);
+    EXPECT_EQ(1900u, cold);
+    EXPECT_LT(retainedHistory, cold / 10);
+    EXPECT_GT(retainedHistory, 0u);
+    EXPECT_EQ(cold, reintroducedReset);
+}
+
+TEST_F(LatencyHistorySamplerTest, testRecentUniformExcludesPendingFutureAndExpiredStall)
+{
+    LatencyHistorySampler sampler;
+    sampler.configure(16, 64);
+    sampler.append(makeSample(10525.291, 1));
+    for (int64_t sequence = 2; sequence <= 24; ++sequence) {
+        sampler.append(makeSample(100.0, sequence));
+    }
+    // The rare bucket still contains the expired stall. Sampling must use the
+    // recent FIFO, even though the archive can still round-trip that bucket.
+    ASSERT_EQ(
+        1u, sampler.bucketSampleCount(LatencyHistorySampler::getBucketIndex(10525.291)));
+    const char *mutant = std::getenv("NAVI_TEST_RECENT_HISTORY_MUTANT");
+    const auto batches = mutant && std::string(mutant) == "legacy"
+                             ? sampler.getOnlineFitBatches(4)
+                             : sampler.getRecentUniformFitBatches(4, 8);
+    ASSERT_EQ(4u, batches.size());
+    for (size_t index = 0; index < batches.size(); ++index) {
+        const int64_t current = 21 + index;
+        ASSERT_EQ(9u, batches[index].size());
+        EXPECT_EQ(current, batches[index].back().eventTimeUs);
+        std::vector<int64_t> selected;
+        for (size_t h = 0; h + 1 < batches[index].size(); ++h) {
+            const auto identity = batches[index][h].eventTimeUs;
+            EXPECT_GE(identity, 9);
+            EXPECT_LT(identity, current);
+            selected.emplace_back(identity);
+        }
+        std::sort(selected.begin(), selected.end());
+        EXPECT_EQ(selected.end(), std::unique(selected.begin(), selected.end()));
+    }
+    const auto reintroduced = sampler.getOnlineFitBatches(4);
+    for (const auto &batch : reintroduced) {
+        ASSERT_EQ(2u, batch.size());
+        EXPECT_EQ(1, batch.front().eventTimeUs);
+    }
+}
+
+TEST_F(LatencyHistorySamplerTest, testRecentUniformPreservesSameLatencyHistory)
+{
+    LatencyHistorySampler sampler(17);
+    sampler.configure(32, 64);
+    for (int64_t sequence = 1; sequence <= 12; ++sequence) {
+        sampler.append(makeSample(100.0, sequence));
+    }
+    const auto batches = sampler.getRecentUniformFitBatches(3, 8);
+    ASSERT_EQ(3u, batches.size());
+    for (size_t i = 0; i < batches.size(); ++i) {
+        ASSERT_EQ(9u, batches[i].size());
+        EXPECT_EQ(10 + i, batches[i].back().eventTimeUs);
+    }
+    autil::DataBuffer buffer;
+    sampler.serialize(buffer);
+    LatencyHistorySampler restored(17);
+    autil::DataBuffer input(buffer.getData(), buffer.getDataLen());
+    ASSERT_TRUE(restored.deserialize(input));
+    const auto replay = restored.getRecentUniformFitBatches(3, 8);
+    ASSERT_EQ(batches.size(), replay.size());
+    for (size_t i = 0; i < batches.size(); ++i) {
+        ASSERT_EQ(batches[i].size(), replay[i].size());
+        for (size_t j = 0; j < batches[i].size(); ++j) {
+            EXPECT_EQ(batches[i][j].eventTimeUs, replay[i][j].eventTimeUs);
+            EXPECT_DOUBLE_EQ(batches[i][j].latencyMs, replay[i][j].latencyMs);
+        }
+    }
+}
+
+TEST_F(LatencyHistorySamplerTest, testRecentUniformSmallHistoryAndNoHistory)
+{
+    LatencyHistorySampler sampler;
+    EXPECT_TRUE(sampler.getRecentUniformFitBatches(4, 8).empty());
+    for (int64_t sequence = 1; sequence <= 3; ++sequence) {
+        sampler.append(makeSample(100.0, sequence));
+    }
+    EXPECT_TRUE(sampler.getRecentUniformFitBatches(0, 8).empty());
+    const auto batches = sampler.getRecentUniformFitBatches(100, 8);
+    ASSERT_EQ(3u, batches.size());
+    for (size_t i = 0; i < batches.size(); ++i) {
+        ASSERT_EQ(i + 1, batches[i].size());
+        EXPECT_EQ(i + 1, batches[i].back().eventTimeUs);
+    }
+    const auto currentOnly = sampler.getRecentUniformFitBatches(3, 0);
+    ASSERT_EQ(3u, currentOnly.size());
+    for (size_t i = 0; i < currentOnly.size(); ++i) {
+        ASSERT_EQ(1u, currentOnly[i].size());
+        EXPECT_EQ(i + 1, currentOnly[i].back().eventTimeUs);
+    }
+}
 
 TEST_F(LatencyHistorySamplerTest, testLog2LatencyBucketBoundaries)
 {
@@ -100,13 +246,12 @@ TEST_F(LatencyHistorySamplerTest, testBuildsOneHistoricalBatchPerCurrentSample)
         std::vector<int32_t> buckets;
         buckets.reserve(batch.size());
         for (const auto &sample : batch) {
-            buckets.emplace_back(
-                LatencyHistorySampler::getBucketIndex(sample.latencyMs));
+            buckets.emplace_back(LatencyHistorySampler::getBucketIndex(sample.latencyMs));
         }
         std::sort(buckets.begin(), buckets.end());
-        EXPECT_EQ((std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7,
-                                        8, 9, 10, 11, 12, 13, 14, 15}),
-                  buckets);
+        EXPECT_EQ(
+            (std::vector<int32_t>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}),
+            buckets);
     }
 }
 
@@ -129,8 +274,8 @@ TEST_F(LatencyHistorySamplerTest, testSelectionIsDeterministicForSameHistory)
     ASSERT_EQ(firstBatches.size(), secondBatches.size());
     for (size_t batchIndex = 0; batchIndex < firstBatches.size(); ++batchIndex) {
         ASSERT_EQ(firstBatches[batchIndex].size(), secondBatches[batchIndex].size());
-        for (size_t sampleIndex = 0;
-             sampleIndex < firstBatches[batchIndex].size(); ++sampleIndex) {
+        for (size_t sampleIndex = 0; sampleIndex < firstBatches[batchIndex].size();
+             ++sampleIndex) {
             const auto &left = firstBatches[batchIndex][sampleIndex];
             const auto &right = secondBatches[batchIndex][sampleIndex];
             EXPECT_EQ(left.eventTimeUs, right.eventTimeUs);
@@ -165,8 +310,7 @@ TEST_F(LatencyHistorySamplerTest, testCurrentBucketExtraSamplesExcludeCurrentSam
     EXPECT_EQ(2, sameBucketHistoricalCount);
 }
 
-TEST_F(LatencyHistorySamplerTest,
-       testCurrentBucketExtraSamplesKeepOtherPressureBucket)
+TEST_F(LatencyHistorySamplerTest, testCurrentBucketExtraSamplesKeepOtherPressureBucket)
 {
     LatencyHistorySampler sampler(24);
     sampler.configure(128, 64);
@@ -289,7 +433,8 @@ TEST_F(LatencyHistorySamplerTest, testHistorySnapshotUsesCopyOnWrite)
     EXPECT_EQ(2, second->back().eventTimeUs);
 }
 
-TEST_F(LatencyHistorySamplerTest, testDeserializeRejectsDuplicateHistorySequenceAtomically)
+TEST_F(LatencyHistorySamplerTest,
+       testDeserializeRejectsDuplicateHistorySequenceAtomically)
 {
     LatencyHistorySampler sampler(43);
     sampler.append(makeSample(4.0, 99));
@@ -352,4 +497,55 @@ TEST_F(LatencyHistorySamplerTest, testDeserializeRejectsInvalidFeaturesAtomicall
     EXPECT_EQ(99, history->front().eventTimeUs);
 }
 
+TEST_F(LatencyHistorySamplerTest, testGeometryShapeRoundTripAndLegacyBytes)
+{
+    LatencyHistorySampler sampler;
+    auto sample = makeSample(32, 1);
+    ASSERT_TRUE(sample.features.setExecutionGeometry(2, 8192));
+    sampler.append(sample);
+    autil::DataBuffer geometry;
+    ASSERT_TRUE(sampler.serializeWithExecutionGeometry(geometry));
+    LatencyHistorySampler loaded;
+    ASSERT_TRUE(loaded.deserializeWithExecutionGeometry(geometry));
+    ASSERT_EQ(1, loaded.historySize());
+    EXPECT_EQ(2, loaded.getHistory()->front().features.getExecutionStepCount());
+    EXPECT_EQ(8192, loaded.getHistory()->front().features.getGlobalPaddedTokens());
+    ASSERT_EQ(1, loaded.getOnlineFitBatch().size());
+    EXPECT_TRUE(loaded.getOnlineFitBatch().front().features.hasExecutionGeometry());
+    auto plain = sample;
+    plain.features.clearExecutionGeometry();
+    LatencyHistorySampler legacy;
+    legacy.append(plain);
+    autil::DataBuffer originalLayout, geometryUsingLegacyLayout;
+    legacy.serialize(originalLayout);
+    sampler.serialize(geometryUsingLegacyLayout);
+    EXPECT_EQ(std::string(originalLayout.getData(), originalLayout.getDataLen()),
+              std::string(geometryUsingLegacyLayout.getData(),
+                          geometryUsingLegacyLayout.getDataLen()));
+    LatencyHistorySampler legacyLoaded;
+    ASSERT_TRUE(legacyLoaded.deserialize(geometryUsingLegacyLayout));
+    EXPECT_FALSE(legacyLoaded.getHistory()->front().features.hasExecutionGeometry());
+    autil::DataBuffer rejected;
+    EXPECT_FALSE(legacy.serializeWithExecutionGeometry(rejected));
+    EXPECT_EQ(0, rejected.getDataLen());
 }
+
+TEST_F(LatencyHistorySamplerTest, testInvalidGeometryDecodeDoesNotMutateSampler)
+{
+    LatencyHistorySampler sampler;
+    sampler.append(makeSample(4, 9));
+    autil::DataBuffer invalid;
+    invalid.write(uint64_t(2));
+    invalid.write(uint32_t(1));
+    invalid.write(uint64_t(1));
+    auto sample = makeSample(32, 1);
+    sample.features.serialize(invalid);
+    invalid.write(int64_t(2));
+    invalid.write(int64_t(0));
+    EXPECT_FALSE(sampler.deserializeWithExecutionGeometry(invalid));
+    ASSERT_EQ(1, sampler.historySize());
+    EXPECT_EQ(9, sampler.getHistory()->front().eventTimeUs);
+    EXPECT_EQ(4, sampler.getHistory()->front().latencyMs);
+}
+
+} // namespace navi_sched

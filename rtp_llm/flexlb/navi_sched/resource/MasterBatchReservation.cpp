@@ -32,12 +32,13 @@ autil::legacy::json::JsonMap MasterBatchReservation::makeReplayState() const
         request["request_id"] = ToJson(entry.request.requestId);
         request["total_token_count"] = ToJson(entry.request.totalTokenCount);
         request["block_size"] = ToJson(entry.request.blockSize);
-        request["cache_hit_token_count"] = ToJson(entry.request.predictedCacheHitTokenCount);
+        request["cache_hit_token_count"] =
+            ToJson(entry.request.predictedCacheHitTokenCount);
         request["predicted_latency_ms"] = ToJson(entry.request.predictedLatencyMs);
         request["has_block_hashes"] = ToJson(bool(entry.request.blockHashes));
-        request["block_hashes"] = ToJson(entry.request.blockHashes
-                                              ? *entry.request.blockHashes
-                                              : NaviSchedBlockHashes());
+        request["block_hashes"] =
+            ToJson(entry.request.blockHashes ? *entry.request.blockHashes
+                                             : NaviSchedBlockHashes());
         request["state"] = ToJson(static_cast<uint32_t>(entry.state));
         request["dispatch_acknowledged"] = ToJson(entry.dispatchAcknowledged);
         request["awaiting_batch_ready"] = ToJson(entry.awaitingBatchReady);
@@ -50,8 +51,7 @@ autil::legacy::json::JsonMap MasterBatchReservation::makeReplayState() const
     return state;
 }
 
-bool MasterBatchReservation::restoreReplayState(
-    const autil::legacy::json::JsonMap &state)
+bool MasterBatchReservation::restoreReplayState(const autil::legacy::json::JsonMap &state)
 {
     using autil::legacy::FromJson;
     try {
@@ -77,7 +77,8 @@ bool MasterBatchReservation::restoreReplayState(
             FromJson(request.requestId, record.at("request_id"));
             FromJson(request.totalTokenCount, record.at("total_token_count"));
             FromJson(request.blockSize, record.at("block_size"));
-            FromJson(request.predictedCacheHitTokenCount, record.at("cache_hit_token_count"));
+            FromJson(request.predictedCacheHitTokenCount,
+                     record.at("cache_hit_token_count"));
             FromJson(request.predictedLatencyMs, record.at("predicted_latency_ms"));
             FromJson(hasHashes, record.at("has_block_hashes"));
             if (hasHashes) {
@@ -103,39 +104,53 @@ bool MasterBatchReservation::restoreReplayState(
             bool unreported = false;
             double unreportedLatency = 0;
             FromJson(requestState, record.at("state"));
-            if (requestState > static_cast<uint32_t>(RequestState::COMPLETED)) return false;
+            if (requestState > static_cast<uint32_t>(RequestState::COMPLETED))
+                return false;
             FromJson(entry.dispatchAcknowledged, record.at("dispatch_acknowledged"));
             const auto awaiting = record.find("awaiting_batch_ready");
-            if (awaiting != record.end()) FromJson(entry.awaitingBatchReady, awaiting->second);
+            if (awaiting != record.end())
+                FromJson(entry.awaitingBatchReady, awaiting->second);
             FromJson(unreported, record.at("unreported"));
             FromJson(unreportedLatency, record.at("unreported_latency_ms"));
             entry.unreportedInflight = false;
             const auto restoredState = static_cast<RequestState>(requestState);
-            if (restoredState == RequestState::FAILED || restoredState == RequestState::COMPLETED) {
-                if (!candidate.removeCacheRequestReferences(i, restoredTransition)) return false;
+            if (restoredState == RequestState::FAILED ||
+                restoredState == RequestState::COMPLETED) {
+                if (!candidate.removeCacheRequestReferences(i, restoredTransition))
+                    return false;
                 removed = true;
             }
             entry.state = restoredState;
             switch (entry.state) {
-            case RequestState::WAITING:
-                ++candidate._waitingRequestCount;
-                candidate._acknowledgedWaitingRequestCount += entry.dispatchAcknowledged;
-                break;
-            case RequestState::DISPATCHED: ++candidate._dispatchedRequestCount; break;
-            case RequestState::FAILED: ++candidate._failedRequestCount; break;
-            case RequestState::COMPLETED: ++candidate._completedRequestCount; break;
+                case RequestState::WAITING:
+                    ++candidate._waitingRequestCount;
+                    candidate._acknowledgedWaitingRequestCount +=
+                        entry.dispatchAcknowledged;
+                    break;
+                case RequestState::DISPATCHED:
+                    ++candidate._dispatchedRequestCount;
+                    break;
+                case RequestState::FAILED:
+                    ++candidate._failedRequestCount;
+                    break;
+                case RequestState::COMPLETED:
+                    ++candidate._completedRequestCount;
+                    break;
             }
-            if (unreported && !candidate.addUnreportedRequest(i, unreportedLatency)) return false;
+            if (unreported && !candidate.addUnreportedRequest(i, unreportedLatency))
+                return false;
         }
         if ((removed && !candidate.rebuildPendingCacheReservation()) ||
-            !candidate.rebuildWaitingFeatures(nullptr)) return false;
+            !candidate.rebuildWaitingFeatures(nullptr))
+            return false;
         if (candidate.isResolved() && !treeBuilt) {
             candidate._pendingBlockHashes.reset();
             candidate._pendingReferences.clear();
             candidate._requestBlockIndexes.reset();
         }
         FromJson(candidate._pendingRebuildCount, state.at("pending_rebuild_count"));
-        FromJson(candidate._pendingRebuildVisitedNodes, state.at("pending_rebuild_visited_nodes"));
+        FromJson(candidate._pendingRebuildVisitedNodes,
+                 state.at("pending_rebuild_visited_nodes"));
         *this = std::move(candidate);
         return true;
     } catch (const std::exception &) {
@@ -163,7 +178,9 @@ bool MasterBatchReservation::init(int64_t batchId, int64_t scheduleTimeUs,
     bool cacheTrackable = cachePolicy != nullptr;
     for (const auto &request : requests) {
         if (request.requestId == 0 || request.totalTokenCount < 0 ||
-            request.blockSize <= 0 || request.predictedCacheHitTokenCount < 0 ||
+            request.blockSize <= 0 || request.explicitCacheCheckpointPosition < 0 ||
+            request.explicitCacheCheckpointPosition > request.totalTokenCount ||
+            request.predictedCacheHitTokenCount < 0 ||
             request.predictedCacheHitTokenCount > request.totalTokenCount ||
             !std::isfinite(request.predictedLatencyMs) ||
             request.predictedLatencyMs < 0.0 ||
@@ -200,9 +217,11 @@ bool MasterBatchReservation::init(int64_t batchId, int64_t scheduleTimeUs,
         PendingCacheUtil::makeReservation(batchId, referencedRequests, *cachePolicy,
                                           pendingCacheReservation)) {
         candidate._cachePolicy = *cachePolicy;
+        candidate._pendingCachePolicies[NaviSchedCacheKeyType::BLOCK_POOL] = *cachePolicy;
         candidate._cacheTracked = true;
         candidate._pendingCacheReservation =
-            std::make_shared<const NaviSchedPendingCacheReservation>(std::move(pendingCacheReservation));
+            std::make_shared<const NaviSchedPendingCacheReservation>(
+                std::move(pendingCacheReservation));
     }
 
     candidate._batchId = batchId;
@@ -265,8 +284,8 @@ bool MasterBatchReservation::markFailed(uint64_t requestId, Transition &transiti
     return true;
 }
 
-bool MasterBatchReservation::markFailed(
-    const std::vector<uint64_t> &requestIds, Transition &transition)
+bool MasterBatchReservation::markFailed(const std::vector<uint64_t> &requestIds,
+                                        Transition &transition)
 {
     resetTransition(transition);
     if (requestIds.empty()) {
@@ -284,19 +303,21 @@ bool MasterBatchReservation::markFailed(
     return markFailedIndexes(indexes, transition);
 }
 
-bool MasterBatchReservation::markFailedIndexes(
-    const std::vector<size_t> &indexes, Transition &transition)
+bool MasterBatchReservation::markFailedIndexes(const std::vector<size_t> &indexes,
+                                               Transition &transition)
 {
     resetTransition(transition);
-    if (indexes.empty() || std::any_of(indexes.begin(), indexes.end(),
-            [this](size_t index) { return index >= _requests.size(); })) {
+    if (indexes.empty() ||
+        std::any_of(indexes.begin(), indexes.end(),
+                    [this](size_t index) { return index >= _requests.size(); })) {
         return false;
     }
     const auto activeCount = _waitingRequestCount + _dispatchedRequestCount;
     bool fullFailure = activeCount > 0 && indexes.size() >= activeCount;
     if (fullFailure) {
         size_t position = 0;
-        const bool canonical = indexes.size() == _requests.size() &&
+        const bool canonical =
+            indexes.size() == _requests.size() &&
             std::all_of(indexes.begin(), indexes.end(),
                         [&position](size_t index) { return index == position++; });
         if (!canonical) {
@@ -306,8 +327,8 @@ bool MasterBatchReservation::markFailedIndexes(
                 if (selected[index]) continue;
                 selected[index] = true;
                 const auto state = _requests[index].state;
-                selectedActiveCount += state == RequestState::WAITING ||
-                                       state == RequestState::DISPATCHED;
+                selectedActiveCount +=
+                    state == RequestState::WAITING || state == RequestState::DISPATCHED;
             }
             fullFailure = selectedActiveCount == activeCount;
         }
@@ -315,7 +336,8 @@ bool MasterBatchReservation::markFailedIndexes(
     if (fullFailure) {
         for (size_t index = 0; index < _requests.size(); ++index) {
             const auto state = _requests[index].state;
-            if (state != RequestState::WAITING && state != RequestState::DISPATCHED) continue;
+            if (state != RequestState::WAITING && state != RequestState::DISPATCHED)
+                continue;
             auto &entry = _requests.writable(index);
             if (state == RequestState::WAITING) entry.dispatchAcknowledged = false;
             entry.unreportedInflight = false;
@@ -342,7 +364,8 @@ bool MasterBatchReservation::markFailedIndexes(
     }
     for (auto index : indexes) {
         auto &entry = _requests.writable(index);
-        if (entry.state == RequestState::FAILED || entry.state == RequestState::COMPLETED) {
+        if (entry.state == RequestState::FAILED ||
+            entry.state == RequestState::COMPLETED) {
             continue;
         }
         if ((entry.unreportedInflight && !removeUnreportedRequest(index)) ||
@@ -540,7 +563,8 @@ bool MasterBatchReservation::markAcceptedWorkloadReported(uint64_t requestId)
 bool MasterBatchReservation::isAwaitingBatchReady(uint64_t requestId) const
 {
     const auto index = findRequest(requestId);
-    return index != _requests.size() && _requests[index].state == RequestState::DISPATCHED &&
+    return index != _requests.size() &&
+           _requests[index].state == RequestState::DISPATCHED &&
            _requests[index].awaitingBatchReady;
 }
 
@@ -636,7 +660,8 @@ bool MasterBatchReservation::appendWaitingCapacityFeatures(
             1, running.getBatchSize(), running.getCacheHitTokenCount(),
             running.getCacheMissTokenCount(), running.getCacheMissTokenSquareSum(),
             running.getCacheHitMissTokenProductSum(), waitingFeatures.getBatchSize(),
-            waitingFeatures.getCacheHitTokenCount(), waitingFeatures.getCacheMissTokenCount(),
+            waitingFeatures.getCacheHitTokenCount(),
+            waitingFeatures.getCacheMissTokenCount(),
             waitingFeatures.getCacheMissTokenSquareSum(),
             waitingFeatures.getCacheHitMissTokenProductSum()) ||
         !aggregate.appendPrecedingRequestCount(requestCount)) {
@@ -661,6 +686,37 @@ bool MasterBatchReservation::setPredictedLatencyMs(double predictedLatencyMs)
     return true;
 }
 
+bool MasterBatchReservation::adjustInitialRequestLatencyMs(double deltaMs)
+{
+    if (!std::isfinite(deltaMs) || _requests.empty() ||
+        _waitingRequestCount != _requests.size() ||
+        _acknowledgedWaitingRequestCount != 0 ||
+        _unreportedStats.requestCount != _requests.size()) {
+        return false;
+    }
+    long double sum = 0.0;
+    for (const auto &entry : _requests) {
+        const auto latencyMs = entry.request.predictedLatencyMs + deltaMs;
+        if (entry.state != RequestState::WAITING || entry.dispatchAcknowledged ||
+            entry.awaitingBatchReady || !entry.unreportedInflight ||
+            !std::isfinite(latencyMs) || latencyMs < 0.0) {
+            return false;
+        }
+        sum += static_cast<long double>(latencyMs);
+        if (!std::isfinite(sum) || sum > std::numeric_limits<double>::max()) {
+            return false;
+        }
+    }
+    // Validation precedes mutation. Match init's sum of rounded per-request doubles.
+    for (size_t index = 0; index < _requests.size(); ++index) {
+        auto &entry = _requests.writable(index);
+        entry.request.predictedLatencyMs += deltaMs;
+        entry.unreportedLatencyMs = entry.request.predictedLatencyMs;
+    }
+    _unreportedLatencySumMs = sum;
+    return true;
+}
+
 bool MasterBatchReservation::sameDefinition(const MasterBatchReservation &other) const
 {
     if (_batchId != other._batchId || _scheduleTimeUs != other._scheduleTimeUs ||
@@ -672,14 +728,40 @@ bool MasterBatchReservation::sameDefinition(const MasterBatchReservation &other)
     if (_cacheTracked &&
         (_cachePolicy.blockSize != other._cachePolicy.blockSize ||
          _cachePolicy.linearStep != other._cachePolicy.linearStep ||
-         _cachePolicy.hybridTailRequired != other._cachePolicy.hybridTailRequired)) {
+         _cachePolicy.hybridTailRequired != other._cachePolicy.hybridTailRequired ||
+         _cachePolicy.mambaAlign != other._cachePolicy.mambaAlign ||
+         _cachePolicy.mambaRetentionInterval !=
+             other._cachePolicy.mambaRetentionInterval ||
+         _cachePolicy.mambaReplayStopShift != other._cachePolicy.mambaReplayStopShift ||
+         _cachePolicy.fullAttentionQueryDropTokens !=
+             other._cachePolicy.fullAttentionQueryDropTokens)) {
         return false;
+    }
+    if (_pendingCachePolicies.size() != other._pendingCachePolicies.size()) {
+        return false;
+    }
+    for (const auto &entry : _pendingCachePolicies) {
+        const auto it = other._pendingCachePolicies.find(entry.first);
+        if (it == other._pendingCachePolicies.end()) {
+            return false;
+        }
+        const auto &a = entry.second;
+        const auto &b = it->second;
+        if (a.blockSize != b.blockSize || a.linearStep != b.linearStep ||
+            a.hybridTailRequired != b.hybridTailRequired ||
+            a.mambaAlign != b.mambaAlign ||
+            a.mambaRetentionInterval != b.mambaRetentionInterval ||
+            a.mambaReplayStopShift != b.mambaReplayStopShift ||
+            a.fullAttentionQueryDropTokens != b.fullAttentionQueryDropTokens) {
+            return false;
+        }
     }
     for (size_t index = 0; index < _requests.size(); ++index) {
         const auto &lhs = _requests[index].request;
         const auto &rhs = other._requests[index].request;
         if (lhs.requestId != rhs.requestId ||
             lhs.totalTokenCount != rhs.totalTokenCount ||
+            lhs.explicitCacheCheckpointPosition != rhs.explicitCacheCheckpointPosition ||
             lhs.blockSize != rhs.blockSize ||
             lhs.predictedCacheHitTokenCount != rhs.predictedCacheHitTokenCount ||
             lhs.predictedLatencyMs != rhs.predictedLatencyMs ||
@@ -734,9 +816,67 @@ bool MasterBatchReservation::isResolved() const
     return _waitingRequestCount == 0 && _dispatchedRequestCount == 0;
 }
 
+bool MasterBatchReservation::setPendingCachePolicy(NaviSchedCacheKeyType type,
+                                                   const NaviSchedCachePolicy &policy)
+{
+    if (!validCacheKeyType(type) || !policy.valid(type)) {
+        return false;
+    }
+    std::vector<PendingCacheReferencedRequest> referenced;
+    for (const auto &entry : _requests) {
+        if (!entry.request.blockHashes || entry.request.blockSize != policy.blockSize) {
+            return false;
+        }
+        referenced.push_back({entry.request.blockHashes.get(),
+                              entry.request.totalTokenCount, entry.request.blockSize});
+    }
+    NaviSchedPendingCacheReservation reservation;
+    if (!PendingCacheUtil::makeReservation(_batchId, referenced, policy, reservation,
+                                           type)) {
+        return false;
+    }
+    _pendingCachePolicies[type] = policy;
+    return true;
+}
+
+const std::map<NaviSchedCacheKeyType, NaviSchedCachePolicy> &
+MasterBatchReservation::getPendingCachePolicies() const
+{
+    return _pendingCachePolicies;
+}
+
+bool MasterBatchReservation::makePendingCacheReservation(
+    NaviSchedCacheKeyType type, NaviSchedPendingCacheReservation &reservation) const
+{
+    const auto it = _pendingCachePolicies.find(type);
+    if (it == _pendingCachePolicies.end()) {
+        return false;
+    }
+    if (type == NaviSchedCacheKeyType::BLOCK_POOL) {
+        reservation = getPendingCacheReservation();
+        return true;
+    }
+    std::vector<PendingCacheReferencedRequest> referenced;
+    for (const auto &entry : _requests) {
+        if (entry.state == RequestState::WAITING) {
+            referenced.push_back({entry.request.blockHashes.get(),
+                                  entry.request.totalTokenCount,
+                                  entry.request.blockSize});
+        }
+    }
+    reservation = {};
+    reservation.batchId = _batchId;
+    reservation.scheduleBatchId = _batchId;
+    return referenced.empty() || PendingCacheUtil::makeReservation(
+                                     _batchId, referenced, it->second, reservation, type);
+}
+
 bool MasterBatchReservation::tracksPendingCache() const { return _cacheTracked; }
 
-bool MasterBatchReservation::hasPendingCacheReferences() const { return !_pendingReferences.empty(); }
+bool MasterBatchReservation::hasPendingCacheReferences() const
+{
+    return !_pendingReferences.empty();
+}
 
 bool MasterBatchReservation::containsRequest(uint64_t requestId) const
 {
@@ -897,8 +1037,8 @@ bool MasterBatchReservation::buildPendingCacheReferences()
         }
         const auto &hashes = *entry.request.blockHashes;
         for (size_t blockIndex = 0; blockIndex < hashes.size(); ++blockIndex) {
-            auto [it, inserted] =
-                hashIndexes.emplace(hashes[blockIndex], static_cast<uint32_t>(references.size()));
+            auto [it, inserted] = hashIndexes.emplace(
+                hashes[blockIndex], static_cast<uint32_t>(references.size()));
             if (inserted) {
                 if (references.size() >= INVALID_BLOCK_INDEX) {
                     return false;
@@ -933,9 +1073,11 @@ bool MasterBatchReservation::removeCacheRequestReferences(size_t requestIndex,
         return false;
     }
     auto &entry = _requests.writable(requestIndex);
-    const auto blockCount = entry.request.blockHashes ? entry.request.blockHashes->size() : 0;
+    const auto blockCount =
+        entry.request.blockHashes ? entry.request.blockHashes->size() : 0;
     for (size_t blockIndex = 0; blockIndex < blockCount; ++blockIndex) {
-        const auto nodeIndex = (*_requestBlockIndexes)[entry.blockIndexBegin + blockIndex];
+        const auto nodeIndex =
+            (*_requestBlockIndexes)[entry.blockIndexBegin + blockIndex];
         auto &node = _pendingReferences.writable(nodeIndex);
         const auto hash = (*_pendingBlockHashes)[nodeIndex];
         if (node.fullRefCount == 0) {
@@ -984,8 +1126,10 @@ bool MasterBatchReservation::rebuildPendingCacheReservation()
             reservation.tailReadyBlockHashes.emplace_back(hash);
         }
     }
-    std::sort(reservation.fullReadyBlockHashes.begin(), reservation.fullReadyBlockHashes.end());
-    std::sort(reservation.tailReadyBlockHashes.begin(), reservation.tailReadyBlockHashes.end());
+    std::sort(reservation.fullReadyBlockHashes.begin(),
+              reservation.fullReadyBlockHashes.end());
+    std::sort(reservation.tailReadyBlockHashes.begin(),
+              reservation.tailReadyBlockHashes.end());
     _pendingCacheDirty = false;
     if (reservation.fullReadyBlockHashes.empty()) {
         _pendingCacheReservation.reset();
@@ -1004,8 +1148,9 @@ bool MasterBatchReservation::subtractWaitingRequest(const Request &request)
         return true;
     }
     NaviSchedLatencyFeatures contribution;
-    contribution.appendRequest(request.predictedCacheHitTokenCount,
-                               request.totalTokenCount - request.predictedCacheHitTokenCount);
+    contribution.appendRequest(
+        request.predictedCacheHitTokenCount,
+        request.totalTokenCount - request.predictedCacheHitTokenCount);
     return _waitingFeatures.subtract(contribution);
 }
 
@@ -1059,18 +1204,14 @@ bool MasterBatchReservation::rebuildWaitingFeatures(const CacheMatch *cacheMatch
     return true;
 }
 
-bool MasterBatchReservation::isTailReady(const RequestEntry &request,
-                                         size_t depth) const
+bool MasterBatchReservation::isTailReady(const RequestEntry &request, size_t depth) const
 {
     if (!_cachePolicy.hybridTailRequired || depth == 0 || !request.request.blockHashes ||
         depth > request.request.blockHashes->size()) {
         return false;
     }
-    const auto blockCount = request.request.blockHashes->size();
-    const bool blockAligned =
-        request.request.totalTokenCount % request.request.blockSize == 0;
-    return depth % _cachePolicy.linearStep == 0 || depth == blockCount ||
-           (blockAligned && blockCount >= 2 && depth + 1 == blockCount);
+    return PendingCacheUtil::isTailReady(request.request.totalTokenCount, depth,
+                                         _cachePolicy);
 }
 
 size_t MasterBatchReservation::findRequest(uint64_t requestId) const
@@ -1088,4 +1229,25 @@ void MasterBatchReservation::resetTransition(Transition &transition) const
     transition.resolved = isResolved();
 }
 
+} // namespace navi_sched
+
+namespace navi_sched {
+std::vector<MasterBatchReservation::Request> MasterBatchReservation::getWaitingRequests()
+    const
+{
+    std::vector<Request> requests;
+    requests.reserve(_waitingRequestCount);
+    for (const auto &entry : _requests) {
+        if (entry.state == RequestState::WAITING) {
+            requests.push_back(entry.request);
+        }
+    }
+    // Match exact cost geometry and native forwarding, including after a
+    // partial admission removes members from the original reservation.
+    std::sort(requests.begin(), requests.end(),
+              [](const Request &left, const Request &right) {
+                  return left.requestId < right.requestId;
+              });
+    return requests;
 }
+} // namespace navi_sched

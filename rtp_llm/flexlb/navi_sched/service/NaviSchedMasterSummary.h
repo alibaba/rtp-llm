@@ -25,6 +25,12 @@ public:
     std::string serverAddress;
     bool online = false;
     bool pdSeparated = true;
+    bool peerCacheEnabled = false;
+    // Live Master diagnostics; intentionally excluded from persisted model/replay wire
+    // data.
+    bool peerCacheReadAvailable = false;
+    uint64_t peerCacheReadRevision = 0;
+    int64_t peerCacheReadAgentStartTimeUs = 0;
     int64_t totalBlocks = 0;
     size_t cachedBlockCount = 0;
     uint64_t agentCacheRevision = 0;
@@ -44,6 +50,7 @@ public:
     uint64_t cacheStateMismatchCount = 0;
     uint64_t rtpCacheMirrorSampleCount = 0;
     uint64_t rtpCacheMirrorMismatchCount = 0;
+    std::map<std::string, uint64_t> v6dCacheStats;
     size_t pendingCacheBatchCount = 0;
     size_t pendingCacheBlockCount = 0;
     size_t pendingCacheScheduledBatchCount = 0;
@@ -75,6 +82,7 @@ public:
     size_t liveDispatchWaiterCount = 0;
     double lastRequestLatencyMs = 0.0;
     double queueTotalPredictedLatencyMs = 0.0;
+    double queueRawDecayFactor = 1.0;
     int64_t queueReportReceiveTimeUs = 0;
     NaviSchedWorkloadSnapshot workload;
     double workloadEffectiveRunningElapsedTimeMs = 0.0;

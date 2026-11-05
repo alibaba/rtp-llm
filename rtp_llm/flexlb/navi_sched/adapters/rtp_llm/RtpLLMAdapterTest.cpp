@@ -152,7 +152,7 @@ TEST_F(RtpLLMAdapterTest, testLatencyFitBatchSizeHasOneDefault)
     ASSERT_DOUBLE_EQ(1.0, NaviSchedConfig().latencyOnlineLearningRateScale);
     ASSERT_DOUBLE_EQ(4.0, NaviSchedConfig().latencyCurrentSampleWeight);
     ASSERT_DOUBLE_EQ(1500.0, NaviSchedConfig().latencyNonlinearScale);
-    ASSERT_DOUBLE_EQ(0.02, NaviSchedConfig().queueLearningRate);
+    ASSERT_DOUBLE_EQ(0.002, NaviSchedConfig().queueLearningRate);
     ASSERT_EQ(100, NaviSchedConfig().latencyColdStartFitEpochs);
     ASSERT_EQ(10000, NaviSchedConfig().latencyPersistIntervalMs);
     ASSERT_EQ(64, NaviSchedConfig().latencyHistoryBucketCapacity);
@@ -346,6 +346,12 @@ TEST_F(RtpLLMAdapterTest, testRetainedBatchFollowsExecutorLifecycle)
     recordRtpLLMPrefillBatch(agent, queries, 8000, 100);
     retainedLease.reset();
     ASSERT_FALSE(abortRetainedRtpLLMBatch(20));
+    // BATCH_READY is consumed by the latency graph asynchronously and owns a
+    // copy of the batch until that input is processed. Registry removal above
+    // is synchronous; reporter destruction additionally waits for that owner.
+    for (size_t attempt = 0; attempt < 1000 && !retainedReporter.expired(); ++attempt) {
+        usleep(1000);
+    }
     ASSERT_TRUE(retainedReporter.expired());
     agent->stop();
 }
@@ -659,6 +665,9 @@ TEST_F(RtpLLMAdapterTest, testForwardedRequestsAreSubmittedAsOneBatch)
     EXPECT_EQ(AgentResponseKind::ERROR, response->kind);
     EXPECT_TRUE(response->terminal);
     EXPECT_EQ("agent forwarding disabled", response->errorMessage);
+    // The handler accepted the first batch but this test never runs an executor.
+    // Releasing its reporter aborts that batch before stopping the Agent.
+    finishReporter.reset();
     agent->stop();
 }
 
@@ -830,18 +839,15 @@ TEST_F(RtpLLMAdapterTest, testAgentAlwaysUsesRtpKmonServiceName)
     EXPECT_NE(std::string::npos, impl->_latencyModelFingerprint.find("fp8"));
     EXPECT_NE(std::string::npos, impl->_latencyModelFingerprint.find("mtp"));
     EXPECT_EQ(std::string::npos, impl->_latencyModelFingerprint.find("model-revision-a"));
-    const auto historyFingerprint =
-        autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
-            autil::legacy::json::ParseJson(impl->_latencyHistoryFingerprint));
-    EXPECT_EQ("model-revision-a",
-              autil::legacy::AnyCast<std::string>(
-                  historyFingerprint.at("model_revision")));
-    EXPECT_EQ("/models/qwen3/revision-a",
-              autil::legacy::AnyCast<std::string>(
-                  historyFingerprint.at("checkpoint_path")));
-    EXPECT_EQ("/tokenizers/qwen3/revision-a",
-              autil::legacy::AnyCast<std::string>(
-                  historyFingerprint.at("tokenizer_path")));
+    const auto historyFingerprint = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+        autil::legacy::json::ParseJson(impl->_latencyHistoryFingerprint));
+    EXPECT_EQ("model-revision-a", autil::legacy::AnyCast<std::string>(
+                                      historyFingerprint.at("model_revision")));
+    EXPECT_EQ("/models/qwen3/revision-a", autil::legacy::AnyCast<std::string>(
+                                              historyFingerprint.at("checkpoint_path")));
+    EXPECT_EQ(
+        "/tokenizers/qwen3/revision-a",
+        autil::legacy::AnyCast<std::string>(historyFingerprint.at("tokenizer_path")));
     EXPECT_EQ(std::string::npos,
               impl->_latencyModelFingerprint.find("/models/qwen3/revision-a"));
     EXPECT_NE(std::string::npos, impl->_latencyModelFingerprint.find("\"4\""));
@@ -873,8 +879,8 @@ TEST_F(RtpLLMAdapterTest, testEnvironmentLatencyModelConfig)
         "RTP_LLM_NAVI_SCHED_LATENCY_ONLINE_LEARNING_RATE_SCALE", "2.5");
     autil::EnvGuard currentSampleWeight(
         "RTP_LLM_NAVI_SCHED_LATENCY_CURRENT_SAMPLE_WEIGHT", "3.0");
-    autil::EnvGuard nonlinearScale(
-        "RTP_LLM_NAVI_SCHED_LATENCY_NONLINEAR_SCALE", "2048.0");
+    autil::EnvGuard nonlinearScale("RTP_LLM_NAVI_SCHED_LATENCY_NONLINEAR_SCALE",
+                                   "2048.0");
     autil::EnvGuard queueLearningRate("RTP_LLM_NAVI_SCHED_QUEUE_LEARNING_RATE", "0.003");
     autil::EnvGuard batchTimeout("RTP_LLM_NAVI_SCHED_BATCH_TIMEOUT_MS", "20");
     autil::EnvGuard coldStartFitEpochs("RTP_LLM_NAVI_SCHED_LATENCY_COLD_START_FIT_EPOCHS",
@@ -882,19 +888,19 @@ TEST_F(RtpLLMAdapterTest, testEnvironmentLatencyModelConfig)
     autil::EnvGuard historyLimit("RTP_LLM_NAVI_SCHED_LATENCY_HISTORY_LIMIT", "1000");
     autil::EnvGuard historyBucketCapacity(
         "RTP_LLM_NAVI_SCHED_LATENCY_HISTORY_BUCKET_CAPACITY", "17");
-    autil::EnvGuard residualLearningRate(
-        "RTP_LLM_NAVI_SCHED_RESIDUAL_LEARNING_RATE", "0.07");
+    autil::EnvGuard residualLearningRate("RTP_LLM_NAVI_SCHED_RESIDUAL_LEARNING_RATE",
+                                         "0.07");
     autil::EnvGuard residualUpdateErrorFloor(
         "RTP_LLM_NAVI_SCHED_RESIDUAL_UPDATE_ERROR_FLOOR_MS", "25.0");
     autil::EnvGuard residualUpdateErrorRatio(
         "RTP_LLM_NAVI_SCHED_RESIDUAL_UPDATE_ERROR_RATIO", "0.2");
-    autil::EnvGuard residualDecayStart(
-        "RTP_LLM_NAVI_SCHED_RESIDUAL_IDLE_DECAY_START_MS", "4000");
-    autil::EnvGuard residualDecayEnd(
-        "RTP_LLM_NAVI_SCHED_RESIDUAL_IDLE_DECAY_END_MS", "9000");
+    autil::EnvGuard residualDecayStart("RTP_LLM_NAVI_SCHED_RESIDUAL_IDLE_DECAY_START_MS",
+                                       "4000");
+    autil::EnvGuard residualDecayEnd("RTP_LLM_NAVI_SCHED_RESIDUAL_IDLE_DECAY_END_MS",
+                                     "9000");
     autil::EnvGuard persistInterval("RTP_LLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL", "32");
-    autil::EnvGuard persistIntervalMs(
-        "RTP_LLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL_MS", "4000");
+    autil::EnvGuard persistIntervalMs("RTP_LLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL_MS",
+                                      "4000");
     autil::EnvGuard stateFile("RTP_LLM_NAVI_SCHED_LATENCY_MODEL_STATE_FILE",
                               GET_TEMP_DATA_PATH() + "rtp_llm_environment_latency.state");
     autil::EnvGuard fingerprint("RTP_LLM_NAVI_SCHED_LATENCY_MODEL_FINGERPRINT",
@@ -932,34 +938,31 @@ TEST_F(RtpLLMAdapterTest, testEnvironmentRejectsInvalidLatencyNonlinearScale)
 {
     autil::EnvGuard masterType("RTP_LLM_MASTER_TYPE", "navi_sched");
     autil::EnvGuard bizName("RTP_LLM_NAVI_SCHED_BIZ_NAME", "agent_biz");
-    autil::EnvGuard nonlinearScale(
-        "RTP_LLM_NAVI_SCHED_LATENCY_NONLINEAR_SCALE", "0");
+    autil::EnvGuard nonlinearScale("RTP_LLM_NAVI_SCHED_LATENCY_NONLINEAR_SCALE", "0");
     std::shared_ptr<NaviSchedAgent> agent;
     std::string errorMessage;
-    const auto status = createRtpLLMAgentFromEnvironment(
-        true, "127.0.0.1", 9000, agent, errorMessage);
+    const auto status =
+        createRtpLLMAgentFromEnvironment(true, "127.0.0.1", 9000, agent, errorMessage);
     ASSERT_EQ(RtpLLMAgentInitStatus::INVALID_CONFIG, status);
     ASSERT_FALSE(agent);
-    ASSERT_EQ(
-        "RTP_LLM_NAVI_SCHED_LATENCY_NONLINEAR_SCALE must be positive and finite",
-        errorMessage);
+    ASSERT_EQ("RTP_LLM_NAVI_SCHED_LATENCY_NONLINEAR_SCALE must be positive and finite",
+              errorMessage);
 }
 
 TEST_F(RtpLLMAdapterTest, testEnvironmentRejectsInvalidLatencyPersistIntervalMs)
 {
     autil::EnvGuard masterType("RTP_LLM_MASTER_TYPE", "navi_sched");
     autil::EnvGuard bizName("RTP_LLM_NAVI_SCHED_BIZ_NAME", "agent_biz");
-    autil::EnvGuard persistIntervalMs(
-        "RTP_LLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL_MS", "0");
+    autil::EnvGuard persistIntervalMs("RTP_LLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL_MS",
+                                      "0");
     std::shared_ptr<NaviSchedAgent> agent;
     std::string errorMessage;
-    const auto status = createRtpLLMAgentFromEnvironment(
-        true, "127.0.0.1", 9000, agent, errorMessage);
+    const auto status =
+        createRtpLLMAgentFromEnvironment(true, "127.0.0.1", 9000, agent, errorMessage);
     ASSERT_EQ(RtpLLMAgentInitStatus::INVALID_CONFIG, status);
     ASSERT_FALSE(agent);
-    ASSERT_EQ(
-        "RTP_LLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL_MS must be positive",
-        errorMessage);
+    ASSERT_EQ("RTP_LLM_NAVI_SCHED_LATENCY_PERSIST_INTERVAL_MS must be positive",
+              errorMessage);
 }
 
 TEST_F(RtpLLMAdapterTest, testUnifiedConfigOverridesLegacyAgentConfig)

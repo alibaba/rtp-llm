@@ -25,10 +25,9 @@ extern const std::string COST_SCHEDULER_GRAPH_DATA_TYPE_ID;
 class CostSchedulerGraphState {
 public:
     static std::shared_ptr<CostSchedulerGraphState> create(
-        const NaviSchedScheduleContextPtr &context,
-        const CostSchedulerConfig &config, size_t workerCount,
-        const double *randomWeights = nullptr,
-        size_t randomWeightCount = 0);
+        const NaviSchedScheduleContextPtr &context, const CostSchedulerConfig &config,
+        size_t workerCount,
+        std::shared_ptr<const std::vector<double>> randomWeights = nullptr);
     ~CostSchedulerGraphState();
 
     bool runRow(size_t workerIndex, size_t iteration);
@@ -56,14 +55,12 @@ private:
     struct WorkerState;
 
     CostSchedulerGraphState(NaviSchedScheduleContextPtr context,
-                            CostSchedulerConfig config,
-                            size_t workerCount);
-    bool init(const double *randomWeights, size_t randomWeightCount);
+                            CostSchedulerConfig config, size_t workerCount);
+    bool init(std::shared_ptr<const std::vector<double>> randomWeights);
     void beginOptimization();
     void fail();
     bool updateBestResult(double loss);
-    bool evaluateDiscreteCandidate(size_t iteration,
-                                   double continuousLoss);
+    bool evaluateDiscreteCandidate(size_t iteration, double continuousLoss);
     std::pair<size_t, size_t> nodeRange(size_t workerIndex) const;
     std::pair<size_t, size_t> requestRange(size_t workerIndex) const;
 
@@ -93,8 +90,7 @@ private:
     double _bestLoss = std::numeric_limits<double>::infinity();
     double _stepAlpha = 0.0;
     double _repairAlpha = 0.0;
-    CostSchedulerKernelInternal::DiscreteForwardWorkspace
-        _discreteForwardWorkspace;
+    CostSchedulerKernelInternal::DiscreteForwardWorkspace _discreteForwardWorkspace;
     int64_t _runBeginUs = 0;
     int64_t _stepBeginUs = 0;
     int64_t _optimizationBeginUs = 0;
@@ -107,7 +103,7 @@ private:
     size_t _actualLoopCount = 0;
     size_t _allowedLoopCount = 0;
     std::string _stopReason = "max_loop_count";
-    const double *_randomWeights = nullptr;
+    std::shared_ptr<const std::vector<double>> _randomWeights;
     size_t _randomWeightCount = 0;
     bool _parallelPreparation = false;
     bool _discreteRepairActive = false;
@@ -120,9 +116,8 @@ NAVI_TYPEDEF_PTR(CostSchedulerGraphState);
 
 class CostSchedulerGraphData final : public navi::Data {
 public:
-    explicit CostSchedulerGraphData(
-        CostSchedulerGraphStatePtr state,
-        NaviSchedScheduleContextPtr context = nullptr);
+    explicit CostSchedulerGraphData(CostSchedulerGraphStatePtr state,
+                                    NaviSchedScheduleContextPtr context = nullptr);
 
     CostSchedulerGraphStatePtr state;
     NaviSchedScheduleContextPtr context;
@@ -149,7 +144,7 @@ private:
 
     CostSchedulerConfig _config;
     size_t _workerCount = 0;
-    std::vector<double> _randomWeights;
+    std::shared_ptr<const std::vector<double>> _randomWeights;
     uint64_t _randomWeightSeed = 0;
     multi_call::RandomGenerator _randomGenerator;
 };
@@ -265,20 +260,16 @@ public:
 class CostSchedulerGraphBuilder {
 public:
     static size_t getWorkerCount(int32_t configuredParallelism);
-    static bool add(navi::GraphBuilder &builder,
-                    const navi::N &context,
-                    const navi::N &result,
-                    const std::string &schedulerKernelConfig);
+    static bool add(navi::GraphBuilder &builder, const navi::N &context,
+                    const navi::N &result, const std::string &schedulerKernelConfig);
 
 private:
-    static std::string makePrepareConfig(
-        const CostSchedulerConfig &config, size_t workerCount);
+    static std::string makePrepareConfig(const CostSchedulerConfig &config,
+                                         size_t workerCount);
     static std::string makeWorkerConfig(size_t workerIndex);
     static std::string makeBarrierConfig(size_t workerCount);
-    static bool add(navi::GraphBuilder &builder,
-                    const navi::N &context,
-                    const navi::N &result,
-                    const CostSchedulerConfig &config,
+    static bool add(navi::GraphBuilder &builder, const navi::N &context,
+                    const navi::N &result, const CostSchedulerConfig &config,
                     size_t workerCount);
 };
 

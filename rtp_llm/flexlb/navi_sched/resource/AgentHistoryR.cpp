@@ -11,6 +11,22 @@
 
 namespace navi_sched {
 const int32_t LATENCY_STATE_VERSION = 6;
+namespace {
+constexpr int32_t GEOMETRY_LATENCY_STATE_VERSION = 7;
+constexpr size_t ONLINE_RECENT_HISTORY_SAMPLES = 8;
+int32_t stateVersionForBinary(int64_t binaryVersion)
+{
+    if (NonLinearPrefillModelR::usesCacheSourceForVersion(binaryVersion)) {
+        return 11;
+    }
+    if (binaryVersion == NonLinearPrefillModelR::PROJECTED_GEOMETRY_BINARY_VERSION) {
+        return 10;
+    }
+    return NonLinearPrefillModelR::usesGeometryForVersion(binaryVersion)
+               ? GEOMETRY_LATENCY_STATE_VERSION
+               : LATENCY_STATE_VERSION;
+}
+} // namespace
 const std::string LATENCY_STATE_MAGIC = "navi_sched_latency_state";
 
 const std::string AgentHistoryR::RESOURCE_ID = "navi_sched.agent_history_r";
@@ -50,8 +66,7 @@ bool AgentHistoryR::load(NonLinearPrefillModelR &model,
                          std::shared_ptr<const NaviSchedLatencyModelSnapshot> &snapshot,
                          bool &fitOnStart)
 {
-    return load(model, snapshot, fitOnStart,
-                LatencyResidualModel::RuntimeConfig());
+    return load(model, snapshot, fitOnStart, LatencyResidualModel::RuntimeConfig());
 }
 
 bool AgentHistoryR::load(NonLinearPrefillModelR &model,
@@ -104,15 +119,15 @@ bool AgentHistoryR::load(NonLinearPrefillModelR &model,
         if (LATENCY_STATE_MAGIC != magic) {
             return false;
         }
-        if (stateVersion != LATENCY_STATE_VERSION) {
+        if (stateVersion != stateVersionForBinary(model.getBinaryVersion())) {
             return true;
         }
         std::string payload;
         uint32_t expectedChecksum = 0;
         dataBuffer.read(expectedChecksum);
         dataBuffer.read(payload);
-        const auto actualChecksum = autil::CRC32C::Mask(
-            autil::CRC32C::Value(payload.data(), payload.size()));
+        const auto actualChecksum =
+            autil::CRC32C::Mask(autil::CRC32C::Value(payload.data(), payload.size()));
         if (dataBuffer.getDataLen() != 0 || actualChecksum != expectedChecksum) {
             return true;
         }
@@ -129,11 +144,9 @@ bool AgentHistoryR::load(NonLinearPrefillModelR &model,
         stateBuffer.read(warmStarted);
         stateBuffer.read(parameters);
         if (!overloadPredictionTrusted || _formulaFingerprint.empty() ||
-            formulaFingerprint != _formulaFingerprint ||
-            formula != model.getFormula() ||
-            binaryVersion != model.getBinaryVersion() ||
-            revision <= 0 ||
-            !model.validateParameters(parameters) ||
+            formulaFingerprint != _formulaFingerprint || formula != model.getFormula() ||
+            binaryVersion != model.getBinaryVersion() || revision <= 0 ||
+            !model.validateConfiguredParameters(parameters) ||
             parameters.size() != model.getInitialParameters().size()) {
             return true;
         }
@@ -156,15 +169,13 @@ bool AgentHistoryR::load(NonLinearPrefillModelR &model,
             !LatencyResidualModel::validateParameters(loaded->residualParameters) ||
             loaded->residualLastUpdateTimeUs < 0) {
             loaded->residualVersion = LatencyResidualModel::VERSION;
-            loaded->residualParameters =
-                LatencyResidualModel::makeInitialParameters();
+            loaded->residualParameters = LatencyResidualModel::makeInitialParameters();
             loaded->residualLastUpdateTimeUs = 0;
         }
-        if (LatencyResidualModel::expired(
-                loaded->residualLastUpdateTimeUs,
-                autil::TimeUtility::currentTime(), residualConfig)) {
-            loaded->residualParameters =
-                LatencyResidualModel::makeInitialParameters();
+        if (LatencyResidualModel::expired(loaded->residualLastUpdateTimeUs,
+                                          autil::TimeUtility::currentTime(),
+                                          residualConfig)) {
+            loaded->residualParameters = LatencyResidualModel::makeInitialParameters();
             loaded->residualLastUpdateTimeUs = 0;
         }
         const auto sameHistory =
@@ -174,7 +185,13 @@ bool AgentHistoryR::load(NonLinearPrefillModelR &model,
         if (sameHistory && sameBinary) {
             if (adamMoment1.size() != loaded->parameters.size() ||
                 adamMoment2.size() != loaded->parameters.size() ||
-                !_sampler.deserialize(stateBuffer) ||
+                !(NonLinearPrefillModelR::usesCacheSourceForVersion(
+                      model.getBinaryVersion())
+                      ? _sampler.deserializeWithExecutionCacheSource(stateBuffer)
+                  : NonLinearPrefillModelR::usesGeometryForVersion(
+                        model.getBinaryVersion())
+                      ? _sampler.deserializeWithExecutionGeometry(stateBuffer)
+                      : _sampler.deserialize(stateBuffer)) ||
                 stateBuffer.getDataLen() != 0) {
                 _sampler.clear();
                 return true;
@@ -220,8 +237,7 @@ bool AgentHistoryR::append(const NaviSchedLatencySample &sample,
         ++_warmupSamplesSkipped;
         if (_warmupSamplesSkipped == _warmupSampleCount) {
             _warmupLocalBatchIdCutoff = std::max<int64_t>(
-                0, std::max(sample.localBatchId,
-                            sample.latestAllocatedLocalBatchId));
+                0, std::max(sample.localBatchId, sample.latestAllocatedLocalBatchId));
         }
         return false;
     }
@@ -251,8 +267,7 @@ bool AgentHistoryR::append(const NaviSchedLatencySample &sample,
         return true;
     }
     result.lateRampSample =
-        NaviSchedLatencyTrainingPhase::RAMP == trainingPhase &&
-        _rampCollectionCompleted;
+        NaviSchedLatencyTrainingPhase::RAMP == trainingPhase && _rampCollectionCompleted;
     result.fitReady = advanceFitCadence(_sampler.historySize(), _samplesSinceFit);
     return true;
 }
@@ -279,11 +294,12 @@ std::vector<NaviSchedLatencySample> AgentHistoryR::getOnlineFitBatch() const
     return _sampler.getOnlineFitBatch();
 }
 
-std::vector<std::vector<NaviSchedLatencySample>>
-AgentHistoryR::getOnlineFitBatches() const
+std::vector<std::vector<NaviSchedLatencySample>> AgentHistoryR::getOnlineFitBatches()
+    const
 {
     autil::ScopedLock lock(_lock);
-    return _sampler.getOnlineFitBatches(_pendingFitSampleCount);
+    return _sampler.getRecentUniformFitBatches(_pendingFitSampleCount,
+                                               ONLINE_RECENT_HISTORY_SAMPLES);
 }
 
 void AgentHistoryR::clearPendingFitSamples()
@@ -292,12 +308,12 @@ void AgentHistoryR::clearPendingFitSamples()
     _pendingFitSampleCount = 0;
 }
 
-std::vector<std::vector<NaviSchedLatencySample>>
-AgentHistoryR::getOnlineFitReplayBatches(bool includePendingTail) const
+std::vector<std::vector<NaviSchedLatencySample>> AgentHistoryR::getOnlineFitReplayBatches(
+    bool includePendingTail) const
 {
     autil::ScopedLock lock(_lock);
     std::vector<std::vector<NaviSchedLatencySample>> batches;
-    LatencyHistorySampler replay(1);
+    LatencyHistorySampler replay;
     replay.configure(_historyLimit, _historyBucketCapacity);
     size_t samplesSinceFit = 0;
     size_t pendingFitSampleCount = 0;
@@ -305,27 +321,27 @@ AgentHistoryR::getOnlineFitReplayBatches(bool includePendingTail) const
         replay.append(sample);
         ++pendingFitSampleCount;
         if (advanceFitCadence(replay.historySize(), samplesSinceFit)) {
-            auto current = replay.getOnlineFitBatches(pendingFitSampleCount);
+            auto current = replay.getRecentUniformFitBatches(
+                pendingFitSampleCount, ONLINE_RECENT_HISTORY_SAMPLES);
             batches.insert(batches.end(), std::make_move_iterator(current.begin()),
                            std::make_move_iterator(current.end()));
             pendingFitSampleCount = 0;
         }
     }
     if (includePendingTail && pendingFitSampleCount > 0) {
-        auto current = replay.getOnlineFitBatches(pendingFitSampleCount);
+        auto current = replay.getRecentUniformFitBatches(pendingFitSampleCount,
+                                                         ONLINE_RECENT_HISTORY_SAMPLES);
         batches.insert(batches.end(), std::make_move_iterator(current.begin()),
                        std::make_move_iterator(current.end()));
     }
     return batches;
 }
 
-bool AgentHistoryR::advanceFitCadence(size_t historySize,
-                                      size_t &samplesSinceFit) const
+bool AgentHistoryR::advanceFitCadence(size_t historySize, size_t &samplesSinceFit) const
 {
     const auto fitInterval = _fitInterval > 0 ? _fitInterval : _fitBatchSize;
     ++samplesSinceFit;
-    const auto fitReady =
-        historySize >= _fitBatchSize && samplesSinceFit >= fitInterval;
+    const auto fitReady = historySize >= _fitBatchSize && samplesSinceFit >= fitInterval;
     if (fitReady) {
         samplesSinceFit = 0;
     }
@@ -419,7 +435,18 @@ bool AgentHistoryR::makeSavePayload(
     payloadBuffer.write(snapshot->residualLastUpdateTimeUs);
     {
         autil::ScopedLock lock(_lock);
-        _sampler.serialize(payloadBuffer);
+        if (NonLinearPrefillModelR::usesCacheSourceForVersion(snapshot->binaryVersion)) {
+            if (!_sampler.serializeWithExecutionCacheSource(payloadBuffer)) {
+                return false;
+            }
+        } else if (NonLinearPrefillModelR::usesGeometryForVersion(
+                       snapshot->binaryVersion)) {
+            if (!_sampler.serializeWithExecutionGeometry(payloadBuffer)) {
+                return false;
+            }
+        } else {
+            _sampler.serialize(payloadBuffer);
+        }
     }
     payload.assign(payloadBuffer.getData(), payloadBuffer.getDataLen());
     return true;
@@ -427,17 +454,23 @@ bool AgentHistoryR::makeSavePayload(
 
 bool AgentHistoryR::savePayload(const std::string &payload) const
 {
+    // Preserve the legacy single-argument ABI and state-6 envelope.
+    return savePayload(payload, NonLinearPrefillModelR::BINARY_VERSION);
+}
+
+bool AgentHistoryR::savePayload(const std::string &payload, int64_t binaryVersion) const
+{
     if (_stateFile.empty()) {
         return true;
     }
     if (payload.empty()) {
         return false;
     }
-    const auto checksum = autil::CRC32C::Mask(
-        autil::CRC32C::Value(payload.data(), payload.size()));
+    const auto checksum =
+        autil::CRC32C::Mask(autil::CRC32C::Value(payload.data(), payload.size()));
     autil::DataBuffer dataBuffer;
     dataBuffer.write(LATENCY_STATE_MAGIC);
-    dataBuffer.write(LATENCY_STATE_VERSION);
+    dataBuffer.write(stateVersionForBinary(binaryVersion));
     dataBuffer.write(checksum);
     dataBuffer.write(payload);
     std::filesystem::path statePath(_stateFile);
@@ -470,7 +503,9 @@ bool AgentHistoryR::save(
     const NonLinearPrefillModelR::OptimizerState &optimizerState) const
 {
     std::string payload;
-    return makeSavePayload(snapshot, optimizerState, payload) && savePayload(payload);
+    return makeSavePayload(snapshot, optimizerState, payload) &&
+           savePayload(payload, snapshot ? snapshot->binaryVersion
+                                         : NonLinearPrefillModelR::BINARY_VERSION);
 }
 
 bool AgentHistoryR::enabled() const { return !_stateFile.empty(); }
@@ -510,10 +545,8 @@ navi::SummaryErrorCode AgentHistoryR::getSummary(const std::string &query,
     TABLE_ADD_COLUMN_VALUE(table, "warmup_samples_skipped", _warmupSamplesSkipped);
     TABLE_ADD_COLUMN_VALUE(table, "warmup_local_batch_id_cutoff",
                            _warmupLocalBatchIdCutoff);
-    TABLE_ADD_COLUMN_VALUE(table, "ramp_collection_observed",
-                           _rampCollectionObserved);
-    TABLE_ADD_COLUMN_VALUE(table, "ramp_collection_completed",
-                           _rampCollectionCompleted);
+    TABLE_ADD_COLUMN_VALUE(table, "ramp_collection_observed", _rampCollectionObserved);
+    TABLE_ADD_COLUMN_VALUE(table, "ramp_collection_completed", _rampCollectionCompleted);
     TABLE_ADD_COLUMN_VALUE(table, "samples_since_fit", _samplesSinceFit);
     TABLE_ADD_COLUMN_VALUE(table, "samples_since_persist", _samplesSincePersist);
     return navi::SEC_OK;

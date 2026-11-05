@@ -8,8 +8,9 @@ namespace navi_sched {
 bool NaviSchedLatencyModelSnapshot::valid() const
 {
     return NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL == formula &&
-           NonLinearPrefillModelR::BINARY_VERSION == binaryVersion && revision > 0 &&
-           NonLinearPrefillModelR::validateParameters(parameters) &&
+           NonLinearPrefillModelR::supportsBinaryVersion(binaryVersion) && revision > 0 &&
+           NonLinearPrefillModelR::validateParametersForVersion(parameters,
+                                                                binaryVersion) &&
            NonLinearPrefillModelR::validateOptimizerState(optimizerState,
                                                           parameters.size()) &&
            LatencyResidualModel::VERSION == residualVersion &&
@@ -53,8 +54,8 @@ navi::ErrorCode LatencyModelR::init(navi::ResourceInitContext &ctx)
             std::memory_order_release);
     }
     std::shared_ptr<const NaviSchedLatencyModelSnapshot> restoredSnapshot;
-    if (!_agentHistoryR->load(*_nonLinearPrefillModelR, restoredSnapshot,
-                              _fitOnStart, getResidualRuntimeConfig())) {
+    if (!_agentHistoryR->load(*_nonLinearPrefillModelR, restoredSnapshot, _fitOnStart,
+                              getResidualRuntimeConfig())) {
         return navi::EC_INIT_RESOURCE;
     }
     if (restoredSnapshot) {
@@ -68,9 +69,8 @@ navi::ErrorCode LatencyModelR::init(navi::ResourceInitContext &ctx)
             repaired->parameters[zeroPointIndex] = initialParameters[zeroPointIndex];
             repaired->optimizerState.adamMoment1[zeroPointIndex] = 0.0;
             repaired->optimizerState.adamMoment2[zeroPointIndex] = 0.0;
-            if (!repaired->valid() ||
-                !_nonLinearPrefillModelR->restoreOptimizerState(
-                    repaired->optimizerState)) {
+            if (!repaired->valid() || !_nonLinearPrefillModelR->restoreOptimizerState(
+                                          repaired->optimizerState)) {
                 NAVI_KERNEL_LOG(
                     ERROR,
                     "failed to repair restored latency zero point, value [%f], "
@@ -80,8 +80,7 @@ navi::ErrorCode LatencyModelR::init(navi::ResourceInitContext &ctx)
                 return navi::EC_INIT_RESOURCE;
             }
             NAVI_KERNEL_LOG(
-                WARN,
-                "repair restored latency zero point, value [%f], restored [%f]",
+                WARN, "repair restored latency zero point, value [%f], restored [%f]",
                 restoredSnapshot->parameters[zeroPointIndex],
                 repaired->parameters[zeroPointIndex]);
             restoredSnapshot = std::move(repaired);
@@ -99,7 +98,7 @@ navi::ErrorCode LatencyModelR::init(navi::ResourceInitContext &ctx)
         return navi::EC_NONE;
     }
     auto parameters = _nonLinearPrefillModelR->getInitialParameters();
-    if (!_nonLinearPrefillModelR->validateParameters(parameters)) {
+    if (!_nonLinearPrefillModelR->validateConfiguredParameters(parameters)) {
         return navi::EC_INIT_RESOURCE;
     }
     auto initialSnapshot = std::make_shared<NaviSchedLatencyModelSnapshot>();
@@ -108,8 +107,7 @@ navi::ErrorCode LatencyModelR::init(navi::ResourceInitContext &ctx)
     initialSnapshot->revision = 1;
     initialSnapshot->parameters = std::move(parameters);
     initialSnapshot->optimizerState = _nonLinearPrefillModelR->getOptimizerState();
-    initialSnapshot->residualParameters =
-        LatencyResidualModel::makeInitialParameters();
+    initialSnapshot->residualParameters = LatencyResidualModel::makeInitialParameters();
     initialSnapshot->sessionSampleCount = _agentHistoryR->getSessionSampleCount();
     publishSnapshot(initialSnapshot);
     if (validateRestoredParameters) {
@@ -120,8 +118,7 @@ navi::ErrorCode LatencyModelR::init(navi::ResourceInitContext &ctx)
             restoredSnapshot->optimizerState, restoredSnapshot->parameters.size());
         candidate.residualVersion = restoredSnapshot->residualVersion;
         candidate.residualParameters = restoredSnapshot->residualParameters;
-        candidate.residualLastUpdateTimeUs =
-            restoredSnapshot->residualLastUpdateTimeUs;
+        candidate.residualLastUpdateTimeUs = restoredSnapshot->residualLastUpdateTimeUs;
         if (!addColdStartCandidates({candidate})) {
             return navi::EC_INIT_RESOURCE;
         }
@@ -138,7 +135,11 @@ bool LatencyModelR::recordSample(
     updatedSnapshot.reset();
     saveNeeded = false;
     if (!std::isfinite(sample.latencyMs) || sample.latencyMs < 0.0 ||
-        !validLatencyTrainingPhase(trainingPhase)) {
+        !validLatencyTrainingPhase(trainingPhase) ||
+        (_nonLinearPrefillModelR->usesExecutionCacheSource() &&
+         !sample.features.hasExecutionCacheSource()) ||
+        (_nonLinearPrefillModelR->usesExecutionGeometry() &&
+         !sample.features.hasExecutionGeometry())) {
         return false;
     }
     autil::ScopedLock fitLock(_fitMutex);
@@ -146,8 +147,7 @@ bool LatencyModelR::recordSample(
         _rampFinished = true;
     }
     AgentHistoryR::AppendResult appendResult;
-    const auto appended =
-        _agentHistoryR->append(sample, trainingPhase, appendResult);
+    const auto appended = _agentHistoryR->append(sample, trainingPhase, appendResult);
     if (appendResult.trainingDeferred) {
         _rampDeferredSampleCount.fetch_add(1, std::memory_order_relaxed);
         auto current = getSnapshot();
@@ -180,9 +180,8 @@ bool LatencyModelR::recordSample(
     if (historyAlreadyReplayed) {
         _agentHistoryR->clearPendingFitSamples();
     }
-    if (appendResult.fitReady &&
-        (!evaluatingColdStart ||
-         (coldStartSelectionCompleted && !historyAlreadyReplayed))) {
+    if (appendResult.fitReady && (!evaluatingColdStart || (coldStartSelectionCompleted &&
+                                                           !historyAlreadyReplayed))) {
         const auto fitted = fit(getOnlineFitBatches(), updatedSnapshot);
         _agentHistoryR->clearPendingFitSamples();
         if (!fitted) {
@@ -194,10 +193,9 @@ bool LatencyModelR::recordSample(
     if (rampReplayCompleted) {
         _rampReplayCount.fetch_add(1, std::memory_order_relaxed);
     }
-    saveNeeded =
-        (coldStartSelectionCompleted ||
-         (!evaluatingColdStart && appendResult.persistReady)) &&
-        _agentHistoryR->enabled();
+    saveNeeded = (coldStartSelectionCompleted ||
+                  (!evaluatingColdStart && appendResult.persistReady)) &&
+                 _agentHistoryR->enabled();
     refreshTrustLocked(updatedSnapshot);
     return true;
 }
@@ -218,7 +216,7 @@ bool LatencyModelR::fitHistoryOnStart(
     auto current = getSnapshot();
     auto parameters =
         current ? current->parameters : _nonLinearPrefillModelR->getInitialParameters();
-    if (!_nonLinearPrefillModelR->validateParameters(parameters)) {
+    if (!_nonLinearPrefillModelR->validateConfiguredParameters(parameters)) {
         return false;
     }
     std::vector<double> updatedParameters;
@@ -247,10 +245,10 @@ double LatencyModelR::predict(const NaviSchedLatencyFeatures &features) const
         return 0.0;
     }
     const auto basePrediction = predict(features, snapshot->parameters);
-    return LatencyResidualModel::evaluate(
-               basePrediction, snapshot->residualParameters,
-               snapshot->residualLastUpdateTimeUs,
-               autil::TimeUtility::currentTime(), getResidualRuntimeConfig())
+    return LatencyResidualModel::evaluate(basePrediction, snapshot->residualParameters,
+                                          snapshot->residualLastUpdateTimeUs,
+                                          autil::TimeUtility::currentTime(),
+                                          getResidualRuntimeConfig())
         .predictionMs;
 }
 
@@ -261,12 +259,11 @@ double LatencyModelR::predict(const NaviSchedLatencyFeatures &features,
 }
 
 std::optional<NonLinearPrefillModelR::NonlinearOperatingPoint>
-LatencyModelR::getNonlinearOperatingPoint(
-    const NaviSchedLatencyFeatures &features,
-    const std::vector<double> &parameters) const
+LatencyModelR::getNonlinearOperatingPoint(const NaviSchedLatencyFeatures &features,
+                                          const std::vector<double> &parameters) const
 {
-    return _nonLinearPrefillModelR->getNonlinearOperatingPointConfigured(
-        features, parameters);
+    return _nonLinearPrefillModelR->getNonlinearOperatingPointConfigured(features,
+                                                                         parameters);
 }
 
 NonLinearPrefillModelR::OptimizerState LatencyModelR::getOptimizerState() const
@@ -278,18 +275,20 @@ bool LatencyModelR::saveState()
 {
     autil::ScopedLock persistLock(_persistMutex);
     std::string payload;
+    int64_t binaryVersion = 0;
     {
         autil::ScopedLock fitLock(_fitMutex);
         auto snapshot = getSnapshot();
         if (!snapshot || !snapshot->overloadPredictionTrusted) {
             return true;
         }
-        if (!_agentHistoryR->makeSavePayload(
-                snapshot, snapshot->optimizerState, payload)) {
+        binaryVersion = snapshot->binaryVersion;
+        if (!_agentHistoryR->makeSavePayload(snapshot, snapshot->optimizerState,
+                                             payload)) {
             return false;
         }
     }
-    return _agentHistoryR->savePayload(payload);
+    return _agentHistoryR->savePayload(payload, binaryVersion);
 }
 
 bool LatencyModelR::applyColdStartCandidates(
@@ -301,11 +300,11 @@ bool LatencyModelR::applyColdStartCandidates(
                             warmup.fingerprint != _latencyModelFingerprint)) {
         return false;
     }
-    const auto selected = std::max_element(
-        warmup.candidates.begin(), warmup.candidates.end(),
-        [](const auto &left, const auto &right) {
-            return left.sourceRevision < right.sourceRevision;
-        });
+    const auto selected =
+        std::max_element(warmup.candidates.begin(), warmup.candidates.end(),
+                         [](const auto &left, const auto &right) {
+                             return left.sourceRevision < right.sourceRevision;
+                         });
     if (selected == warmup.candidates.end() ||
         selected->sourceRevision < COLD_START_SOURCE_MIN_REVISION) {
         return true;
@@ -315,7 +314,7 @@ bool LatencyModelR::applyColdStartCandidates(
     if (!current || current->formula != warmup.formula ||
         current->binaryVersion != warmup.binaryVersion ||
         current->parameters.size() != selected->parameters.size() ||
-        !_nonLinearPrefillModelR->validateParameters(selected->parameters) ||
+        !_nonLinearPrefillModelR->validateConfiguredParameters(selected->parameters) ||
         selected->residualVersion != LatencyResidualModel::VERSION ||
         !LatencyResidualModel::validateParameters(selected->residualParameters) ||
         selected->residualLastUpdateTimeUs < 0) {
@@ -326,8 +325,8 @@ bool LatencyModelR::applyColdStartCandidates(
         return true;
     }
     NonLinearPrefillModelR::OptimizerState selectedOptimizer;
-    if (!NonLinearPrefillModelR::makeOptimizerState(
-            selected->optimizerState, selectedOptimizer) ||
+    if (!NonLinearPrefillModelR::makeOptimizerState(selected->optimizerState,
+                                                    selectedOptimizer) ||
         !_nonLinearPrefillModelR->restoreOptimizerState(selectedOptimizer)) {
         return false;
     }
@@ -342,8 +341,7 @@ bool LatencyModelR::applyColdStartCandidates(
     snapshot->residualParameters = selected->residualParameters;
     snapshot->residualLastUpdateTimeUs = autil::TimeUtility::currentTime();
     if (!LatencyResidualModel::applyIdleDecay(
-            snapshot->residualParameters,
-            selected->residualLastUpdateTimeUs,
+            snapshot->residualParameters, selected->residualLastUpdateTimeUs,
             snapshot->residualLastUpdateTimeUs, getResidualRuntimeConfig())) {
         return false;
     }
@@ -412,8 +410,7 @@ bool LatencyModelR::selectColdStartCandidate(
         return true;
     }
     const auto history = _agentHistoryR->getHistory();
-    if (_agentHistoryR->getSessionSampleCount() <
-        COLD_START_MIN_HISTORY_SAMPLE_COUNT) {
+    if (_agentHistoryR->getSessionSampleCount() < COLD_START_MIN_HISTORY_SAMPLE_COUNT) {
         return true;
     }
     if (_coldStartCandidates.size() != _coldStartCandidateImported.size()) {
@@ -454,16 +451,14 @@ bool LatencyModelR::selectColdStartCandidate(
         int64_t selectedResidualLastUpdateTimeUs = 0;
         int64_t localUpdateCount = 0;
         auto refitValid = refitColdStartCandidate(
-            candidateParameters, candidateOptimizer,
-            candidateResidualParameters, candidateResidualLastUpdateTimeUs,
-            selectedParameters, selectedResidualParameters,
-            selectedResidualLastUpdateTimeUs, localUpdateCount);
+            candidateParameters, candidateOptimizer, candidateResidualParameters,
+            candidateResidualLastUpdateTimeUs, selectedParameters,
+            selectedResidualParameters, selectedResidualLastUpdateTimeUs,
+            localUpdateCount);
         double refittedError = 0.0;
         refitValid = refitValid &&
-                     calculateAbsoluteError(
-                         *history, selectedParameters,
-                         selectedResidualParameters,
-                         refittedError);
+                     calculateAbsoluteError(*history, selectedParameters,
+                                            selectedResidualParameters, refittedError);
         if (refitValid && refittedError <= selectedRawError) {
             auto snapshot = std::make_shared<NaviSchedLatencyModelSnapshot>();
             snapshot->formula = current->formula;
@@ -471,14 +466,10 @@ bool LatencyModelR::selectColdStartCandidate(
             snapshot->revision = calculateRefittedCandidateRevision(
                 _coldStartCandidates[best].sourceRevision, localUpdateCount);
             snapshot->parameters = std::move(selectedParameters);
-            snapshot->optimizerState =
-                _nonLinearPrefillModelR->getOptimizerState();
-            snapshot->residualParameters =
-                std::move(selectedResidualParameters);
-            snapshot->residualLastUpdateTimeUs =
-                selectedResidualLastUpdateTimeUs;
-            snapshot->overloadPredictionTrusted =
-                shouldTrustLocked(snapshot->revision);
+            snapshot->optimizerState = _nonLinearPrefillModelR->getOptimizerState();
+            snapshot->residualParameters = std::move(selectedResidualParameters);
+            snapshot->residualLastUpdateTimeUs = selectedResidualLastUpdateTimeUs;
+            snapshot->overloadPredictionTrusted = shouldTrustLocked(snapshot->revision);
             snapshot->warmStarted = true;
             snapshot->onlineFitUpdate = true;
             snapshot->sessionSampleCount = _agentHistoryR->getSessionSampleCount();
@@ -492,8 +483,7 @@ bool LatencyModelR::selectColdStartCandidate(
                 return false;
             }
             if (!calculateAbsoluteError(*history, current->parameters,
-                                        current->residualParameters,
-                                        selectedError)) {
+                                        current->residualParameters, selectedError)) {
                 return false;
             }
             selectedSource = "local_after_refit_rejected";
@@ -504,15 +494,14 @@ bool LatencyModelR::selectColdStartCandidate(
         result = ColdStartSelectionResult::LOCAL_SELECTED;
     }
     const auto selectedSnapshot = getSnapshot();
-    NAVI_KERNEL_LOG(
-        INFO,
-        "select cold-start latency model, source [%s], rawError [%.6f], "
-        "selectedError [%.6f], historySamples [%lu], revision [%ld], "
-        "trusted [%d], warmStarted [%d]",
-        selectedSource, selectedRawError, selectedError, history->size(),
-        selectedSnapshot->revision,
-        static_cast<int>(selectedSnapshot->overloadPredictionTrusted),
-        static_cast<int>(selectedSnapshot->warmStarted));
+    NAVI_KERNEL_LOG(INFO,
+                    "select cold-start latency model, source [%s], rawError [%.6f], "
+                    "selectedError [%.6f], historySamples [%lu], revision [%ld], "
+                    "trusted [%d], warmStarted [%d]",
+                    selectedSource, selectedRawError, selectedError, history->size(),
+                    selectedSnapshot->revision,
+                    static_cast<int>(selectedSnapshot->overloadPredictionTrusted),
+                    static_cast<int>(selectedSnapshot->warmStarted));
     clearColdStartCandidates();
     _coldStartSelectedCount.fetch_add(1, std::memory_order_relaxed);
     return true;
@@ -527,11 +516,11 @@ bool LatencyModelR::addColdStartCandidates(
     }
     for (const auto &candidate : candidates) {
         if (candidate.parameters.size() != current->parameters.size() ||
-            !_nonLinearPrefillModelR->validateParameters(candidate.parameters) ||
+            !_nonLinearPrefillModelR->validateConfiguredParameters(
+                candidate.parameters) ||
             !candidate.optimizerState.valid(candidate.parameters.size()) ||
             candidate.residualVersion != LatencyResidualModel::VERSION ||
-            !LatencyResidualModel::validateParameters(
-                candidate.residualParameters) ||
+            !LatencyResidualModel::validateParameters(candidate.residualParameters) ||
             candidate.residualLastUpdateTimeUs < 0) {
             return false;
         }
@@ -539,15 +528,17 @@ bool LatencyModelR::addColdStartCandidates(
     const auto currentTimeUs = autil::TimeUtility::currentTime();
     if (_coldStartCandidates.empty()) {
         NaviSchedLatencyModelCandidate localCandidate{
-            current->revision, current->parameters,
-            NonLinearPrefillModelR::makeOptimizerStateData(
-                current->optimizerState, current->parameters.size()),
-            current->residualVersion, current->residualParameters,
+            current->revision,
+            current->parameters,
+            NonLinearPrefillModelR::makeOptimizerStateData(current->optimizerState,
+                                                           current->parameters.size()),
+            current->residualVersion,
+            current->residualParameters,
             current->residualLastUpdateTimeUs};
-        if (!LatencyResidualModel::applyIdleDecay(
-                localCandidate.residualParameters,
-                localCandidate.residualLastUpdateTimeUs, currentTimeUs,
-                getResidualRuntimeConfig())) {
+        if (!LatencyResidualModel::applyIdleDecay(localCandidate.residualParameters,
+                                                  localCandidate.residualLastUpdateTimeUs,
+                                                  currentTimeUs,
+                                                  getResidualRuntimeConfig())) {
             return false;
         }
         localCandidate.residualLastUpdateTimeUs = currentTimeUs;
@@ -557,22 +548,22 @@ bool LatencyModelR::addColdStartCandidates(
     auto sorted = candidates;
     for (auto &candidate : sorted) {
         if (!LatencyResidualModel::applyIdleDecay(
-                candidate.residualParameters,
-                candidate.residualLastUpdateTimeUs, currentTimeUs,
-                getResidualRuntimeConfig())) {
+                candidate.residualParameters, candidate.residualLastUpdateTimeUs,
+                currentTimeUs, getResidualRuntimeConfig())) {
             return false;
         }
         candidate.residualLastUpdateTimeUs = currentTimeUs;
     }
-    std::stable_sort(sorted.begin(), sorted.end(), [](const auto &left, const auto &right) {
-        return left.sourceRevision > right.sourceRevision;
-    });
+    std::stable_sort(sorted.begin(), sorted.end(),
+                     [](const auto &left, const auto &right) {
+                         return left.sourceRevision > right.sourceRevision;
+                     });
     for (auto &candidate : sorted) {
-        const auto duplicate = std::find_if(
-            _coldStartCandidates.begin(), _coldStartCandidates.end(),
-            [&candidate](const auto &existing) {
-                return existing.parameters == candidate.parameters;
-            });
+        const auto duplicate =
+            std::find_if(_coldStartCandidates.begin(), _coldStartCandidates.end(),
+                         [&candidate](const auto &existing) {
+                             return existing.parameters == candidate.parameters;
+                         });
         if (duplicate != _coldStartCandidates.end()) {
             const auto index = static_cast<size_t>(
                 std::distance(_coldStartCandidates.begin(), duplicate));
@@ -589,57 +580,51 @@ bool LatencyModelR::addColdStartCandidates(
     return true;
 }
 
-bool LatencyModelR::fitParameters(
-    const std::vector<NaviSchedLatencySample> &samples,
-    const std::vector<double> &initialParameters,
-    std::vector<double> &updatedParameters, double learningRateScale,
-    double currentSampleWeight,
-    const std::vector<double> *parameterLearningRateScales,
-    bool rejectNonPositiveWaitingCandidate)
+bool LatencyModelR::fitParameters(const std::vector<NaviSchedLatencySample> &samples,
+                                  const std::vector<double> &initialParameters,
+                                  std::vector<double> &updatedParameters,
+                                  double learningRateScale, double currentSampleWeight,
+                                  const std::vector<double> *parameterLearningRateScales,
+                                  bool rejectNonPositiveWaitingCandidate)
 {
-    return _nonLinearPrefillModelR->validateParameters(initialParameters) &&
-           _nonLinearPrefillModelR->fit(
-               samples, initialParameters, updatedParameters, learningRateScale,
-               currentSampleWeight, parameterLearningRateScales,
-               rejectNonPositiveWaitingCandidate) &&
-           _nonLinearPrefillModelR->validateParameters(updatedParameters);
+    return _nonLinearPrefillModelR->validateConfiguredParameters(initialParameters) &&
+           _nonLinearPrefillModelR->fit(samples, initialParameters, updatedParameters,
+                                        learningRateScale, currentSampleWeight,
+                                        parameterLearningRateScales,
+                                        rejectNonPositiveWaitingCandidate) &&
+           _nonLinearPrefillModelR->validateConfiguredParameters(updatedParameters);
 }
 
 bool LatencyModelR::fitOnlineParameters(
     const std::vector<NaviSchedLatencySample> &samples,
-    const std::vector<double> &initialParameters,
-    std::vector<double> &updatedParameters, double learningRateScale,
-    double currentSampleWeight,
+    const std::vector<double> &initialParameters, std::vector<double> &updatedParameters,
+    double learningRateScale, double currentSampleWeight,
     const std::vector<double> *parameterLearningRateScales,
     bool rejectNonPositiveWaitingCandidate)
 {
-    return fitParameters(samples, initialParameters, updatedParameters,
-                         learningRateScale, currentSampleWeight,
-                         parameterLearningRateScales,
+    return fitParameters(samples, initialParameters, updatedParameters, learningRateScale,
+                         currentSampleWeight, parameterLearningRateScales,
                          rejectNonPositiveWaitingCandidate);
 }
 
 bool LatencyModelR::fitHistoryParameters(
     const std::deque<NaviSchedLatencySample> &history,
-    const std::vector<double> &initialParameters,
-    std::vector<double> &updatedParameters)
+    const std::vector<double> &initialParameters, std::vector<double> &updatedParameters)
 {
-    return _nonLinearPrefillModelR->validateParameters(initialParameters) &&
-           _nonLinearPrefillModelR->fitHistory(
-               history, _agentHistoryR->getFitBatchSize(), _coldStartFitEpochs,
-               initialParameters, updatedParameters) &&
-           _nonLinearPrefillModelR->validateParameters(updatedParameters);
+    return _nonLinearPrefillModelR->validateConfiguredParameters(initialParameters) &&
+           _nonLinearPrefillModelR->fitHistory(history, _agentHistoryR->getFitBatchSize(),
+                                               _coldStartFitEpochs, initialParameters,
+                                               updatedParameters) &&
+           _nonLinearPrefillModelR->validateConfiguredParameters(updatedParameters);
 }
 
 bool LatencyModelR::refitColdStartCandidate(
     const std::vector<double> &initialParameters,
     const NaviSchedLatencyOptimizerState &initialOptimizerState,
     const std::vector<double> &initialResidualParameters,
-    int64_t initialResidualLastUpdateTimeUs,
-    std::vector<double> &updatedParameters,
+    int64_t initialResidualLastUpdateTimeUs, std::vector<double> &updatedParameters,
     std::vector<double> &updatedResidualParameters,
-    int64_t &updatedResidualLastUpdateTimeUs,
-    int64_t &localUpdateCount)
+    int64_t &updatedResidualLastUpdateTimeUs, int64_t &localUpdateCount)
 {
     localUpdateCount = 0;
     const auto replayBatches = _agentHistoryR->getOnlineFitReplayBatches(true);
@@ -648,8 +633,8 @@ bool LatencyModelR::refitColdStartCandidate(
     }
     const auto previousOptimizer = _nonLinearPrefillModelR->getOptimizerState();
     NonLinearPrefillModelR::OptimizerState candidateOptimizer;
-    if (!NonLinearPrefillModelR::makeOptimizerState(
-            initialOptimizerState, candidateOptimizer) ||
+    if (!NonLinearPrefillModelR::makeOptimizerState(initialOptimizerState,
+                                                    candidateOptimizer) ||
         !_nonLinearPrefillModelR->restoreOptimizerState(candidateOptimizer)) {
         return false;
     }
@@ -664,10 +649,8 @@ bool LatencyModelR::refitColdStartCandidate(
         std::vector<double> nextResidualParameters;
         int64_t nextResidualLastUpdateTimeUs = 0;
         if (!fitOnlineBatch(batch, parameters, residualParameters,
-                            residualLastUpdateTimeUs, runtimeConfig,
-                            nextParameters,
-                            nextResidualParameters,
-                            nextResidualLastUpdateTimeUs)) {
+                            residualLastUpdateTimeUs, runtimeConfig, nextParameters,
+                            nextResidualParameters, nextResidualLastUpdateTimeUs)) {
             if (!_nonLinearPrefillModelR->restoreOptimizerState(previousOptimizer)) {
                 NAVI_KERNEL_LOG(ERROR,
                                 "restore latency optimizer after cold-start refit "
@@ -680,7 +663,7 @@ bool LatencyModelR::refitColdStartCandidate(
         residualLastUpdateTimeUs = nextResidualLastUpdateTimeUs;
         ++localUpdateCount;
     }
-    if (!_nonLinearPrefillModelR->validateParameters(parameters) ||
+    if (!_nonLinearPrefillModelR->validateConfiguredParameters(parameters) ||
         !LatencyResidualModel::validateParameters(residualParameters) ||
         residualLastUpdateTimeUs < 0) {
         if (!_nonLinearPrefillModelR->restoreOptimizerState(previousOptimizer)) {
@@ -696,16 +679,15 @@ bool LatencyModelR::refitColdStartCandidate(
     return true;
 }
 
-bool LatencyModelR::fitOnlineBatch(
-    const std::vector<NaviSchedLatencySample> &samples,
-    const std::vector<double> &initialParameters,
-    const std::vector<double> &initialResidualParameters,
-    int64_t initialResidualLastUpdateTimeUs,
-    const AgentSchedulerConfig &runtimeConfig,
-    std::vector<double> &updatedParameters,
-    std::vector<double> &updatedResidualParameters,
-    int64_t &updatedResidualLastUpdateTimeUs,
-    bool rejectNonPositiveWaitingCandidate)
+bool LatencyModelR::fitOnlineBatch(const std::vector<NaviSchedLatencySample> &samples,
+                                   const std::vector<double> &initialParameters,
+                                   const std::vector<double> &initialResidualParameters,
+                                   int64_t initialResidualLastUpdateTimeUs,
+                                   const AgentSchedulerConfig &runtimeConfig,
+                                   std::vector<double> &updatedParameters,
+                                   std::vector<double> &updatedResidualParameters,
+                                   int64_t &updatedResidualLastUpdateTimeUs,
+                                   bool rejectNonPositiveWaitingCandidate)
 {
     if (samples.empty() ||
         !LatencyResidualModel::validateParameters(initialResidualParameters) ||
@@ -715,8 +697,7 @@ bool LatencyModelR::fitOnlineBatch(
     const auto &currentSample = samples.back();
     auto residualConfig = runtimeConfig.residualRuntimeConfig();
     std::vector<double> nextParameters;
-    const auto &parameterScales =
-        runtimeConfig.latencyParameterLearningRateScales;
+    const auto &parameterScales = runtimeConfig.latencyParameterLearningRateScales;
     if (!fitOnlineParameters(samples, initialParameters, nextParameters,
                              runtimeConfig.latencyOnlineLearningRateScale,
                              runtimeConfig.latencyCurrentSampleWeight,
@@ -735,10 +716,10 @@ bool LatencyModelR::fitOnlineBatch(
         return false;
     }
     if (residualConfig.learningRate > 0.0) {
-        if (!LatencyResidualModel::update(
-                basePrediction, currentSample.latencyMs, nextResidualParameters,
-                nextResidualLastUpdateTimeUs, currentSample.eventTimeUs,
-                residualConfig)) {
+        if (!LatencyResidualModel::update(basePrediction, currentSample.latencyMs,
+                                          nextResidualParameters,
+                                          nextResidualLastUpdateTimeUs,
+                                          currentSample.eventTimeUs, residualConfig)) {
             return false;
         }
     }
@@ -748,23 +729,24 @@ bool LatencyModelR::fitOnlineBatch(
     return true;
 }
 
-bool LatencyModelR::calculateAbsoluteError(
-    const AgentHistoryR::History &history,
-    const std::vector<double> &parameters,
-    const std::vector<double> &residualParameters, double &error) const
+bool LatencyModelR::calculateAbsoluteError(const AgentHistoryR::History &history,
+                                           const std::vector<double> &parameters,
+                                           const std::vector<double> &residualParameters,
+                                           double &error) const
 {
     error = 0.0;
     if (history.empty() ||
-        !_nonLinearPrefillModelR->validateParameters(parameters) ||
+        !_nonLinearPrefillModelR->validateConfiguredParameters(parameters) ||
         !LatencyResidualModel::validateParameters(residualParameters)) {
         return false;
     }
     for (const auto &sample : history) {
-        const auto basePrediction = _nonLinearPrefillModelR->predictConfigured(
-            sample.features, parameters);
-        const auto prediction = LatencyResidualModel::evaluate(
-            basePrediction, residualParameters, 0, 0,
-            getResidualRuntimeConfig()).predictionMs;
+        const auto basePrediction =
+            _nonLinearPrefillModelR->predictConfigured(sample.features, parameters);
+        const auto prediction =
+            LatencyResidualModel::evaluate(basePrediction, residualParameters, 0, 0,
+                                           getResidualRuntimeConfig())
+                .predictionMs;
         if (!std::isfinite(prediction)) {
             return false;
         }
@@ -773,11 +755,10 @@ bool LatencyModelR::calculateAbsoluteError(
     return std::isfinite(error);
 }
 
-int64_t LatencyModelR::calculateRefittedCandidateRevision(
-    int64_t sourceRevision, int64_t localUpdateCount) const
+int64_t LatencyModelR::calculateRefittedCandidateRevision(int64_t sourceRevision,
+                                                          int64_t localUpdateCount) const
 {
-    const auto cappedSourceRevision =
-        std::min(_trustMinRevision, sourceRevision);
+    const auto cappedSourceRevision = std::min(_trustMinRevision, sourceRevision);
     const auto remainingRevision = _trustMinRevision - cappedSourceRevision;
     return cappedSourceRevision +
            std::min(remainingRevision, std::max<int64_t>(0, localUpdateCount));
@@ -792,8 +773,8 @@ void LatencyModelR::refreshTrustLocked(
     std::shared_ptr<const NaviSchedLatencyModelSnapshot> &updatedSnapshot)
 {
     auto current = getSnapshot();
-    if (!current || current->overloadPredictionTrusted ==
-                        shouldTrustLocked(current->revision)) {
+    if (!current ||
+        current->overloadPredictionTrusted == shouldTrustLocked(current->revision)) {
         return;
     }
     auto refreshed = std::make_shared<NaviSchedLatencyModelSnapshot>(*current);
@@ -828,7 +809,7 @@ bool LatencyModelR::fit(
         currentParameters = current->parameters;
     }
     if (currentParameters.empty() ||
-        !_nonLinearPrefillModelR->validateParameters(currentParameters)) {
+        !_nonLinearPrefillModelR->validateConfiguredParameters(currentParameters)) {
         return false;
     }
     const auto previousOptimizer = _nonLinearPrefillModelR->getOptimizerState();
@@ -844,14 +825,12 @@ bool LatencyModelR::fit(
         int64_t nextResidualLastUpdateTimeUs = 0;
         if (batch.empty() ||
             !fitOnlineBatch(batch, newParameters, residualParameters,
-                            residualLastUpdateTimeUs, runtimeConfig,
-                            nextParameters,
-                            nextResidualParameters,
-                            nextResidualLastUpdateTimeUs,
+                            residualLastUpdateTimeUs, runtimeConfig, nextParameters,
+                            nextResidualParameters, nextResidualLastUpdateTimeUs,
                             current->overloadPredictionTrusted)) {
             if (!_nonLinearPrefillModelR->restoreOptimizerState(previousOptimizer)) {
-                NAVI_KERNEL_LOG(ERROR,
-                                "restore latency optimizer after online fit failure failed");
+                NAVI_KERNEL_LOG(
+                    ERROR, "restore latency optimizer after online fit failure failed");
             }
             return false;
         }
@@ -887,8 +866,8 @@ std::vector<NaviSchedLatencySample> LatencyModelR::getOnlineFitBatch() const
     return _agentHistoryR->getOnlineFitBatch();
 }
 
-std::vector<std::vector<NaviSchedLatencySample>>
-LatencyModelR::getOnlineFitBatches() const
+std::vector<std::vector<NaviSchedLatencySample>> LatencyModelR::getOnlineFitBatches()
+    const
 {
     return _agentHistoryR->getOnlineFitBatches();
 }
@@ -921,8 +900,8 @@ bool LatencyModelR::applyRuntimeConfig(const AgentSchedulerConfig &config)
     }
     auto sanitizedParameters = current->parameters;
     auto sanitizedOptimizer = current->optimizerState;
-    if (!_nonLinearPrefillModelR->sanitizeInactiveParameters(
-            sanitizedParameters, sanitizedOptimizer)) {
+    if (!_nonLinearPrefillModelR->sanitizeInactiveParameters(sanitizedParameters,
+                                                             sanitizedOptimizer)) {
         return false;
     }
     const auto parameterStateChanged =
@@ -934,8 +913,8 @@ bool LatencyModelR::applyRuntimeConfig(const AgentSchedulerConfig &config)
         return false;
     }
     const auto trusted = shouldTrustLocked(current->revision);
-    if (trusted == current->overloadPredictionTrusted &&
-        !parameterStateChanged && !fixedLearningRateChanged) {
+    if (trusted == current->overloadPredictionTrusted && !parameterStateChanged &&
+        !fixedLearningRateChanged) {
         return false;
     }
     auto updated = std::make_shared<NaviSchedLatencyModelSnapshot>(*current);
@@ -952,8 +931,8 @@ bool LatencyModelR::applyRuntimeConfig(const AgentSchedulerConfig &config)
 
 LatencyResidualModel::RuntimeConfig LatencyModelR::getResidualRuntimeConfig() const
 {
-    const auto config = std::atomic_load_explicit(
-        &_residualRuntimeConfig, std::memory_order_acquire);
+    const auto config =
+        std::atomic_load_explicit(&_residualRuntimeConfig, std::memory_order_acquire);
     return config ? *config : LatencyResidualModel::RuntimeConfig();
 }
 
@@ -993,22 +972,19 @@ navi::SummaryErrorCode LatencyModelR::getSummary(const std::string &query,
     TABLE_ADD_COLUMN_VALUE(overview, "residual_last_update_time_us",
                            snapshot ? snapshot->residualLastUpdateTimeUs : 0);
     const auto currentTimeUs = autil::TimeUtility::currentTime();
-    const auto residualDecay = snapshot
-        ? LatencyResidualModel::decayFactor(
-              snapshot->residualLastUpdateTimeUs, currentTimeUs,
-              getResidualRuntimeConfig())
-        : 0.0;
+    const auto residualDecay = snapshot ? LatencyResidualModel::decayFactor(
+                                              snapshot->residualLastUpdateTimeUs,
+                                              currentTimeUs, getResidualRuntimeConfig())
+                                        : 0.0;
     TABLE_ADD_COLUMN_VALUE(overview, "residual_decay_factor", residualDecay);
     TABLE_ADD_COLUMN_VALUE(overview, "online_fit_count",
                            _onlineFitCount.load(std::memory_order_relaxed));
-    TABLE_ADD_COLUMN_VALUE(
-        overview, "ramp_deferred_sample_count",
-        _rampDeferredSampleCount.load(std::memory_order_relaxed));
+    TABLE_ADD_COLUMN_VALUE(overview, "ramp_deferred_sample_count",
+                           _rampDeferredSampleCount.load(std::memory_order_relaxed));
     TABLE_ADD_COLUMN_VALUE(overview, "ramp_replay_count",
                            _rampReplayCount.load(std::memory_order_relaxed));
-    TABLE_ADD_COLUMN_VALUE(
-        overview, "late_ramp_sample_count",
-        _lateRampSampleCount.load(std::memory_order_relaxed));
+    TABLE_ADD_COLUMN_VALUE(overview, "late_ramp_sample_count",
+                           _lateRampSampleCount.load(std::memory_order_relaxed));
     TABLE_ADD_COLUMN_VALUE(overview, "overload_prediction_trusted",
                            snapshot ? snapshot->overloadPredictionTrusted : false);
     TABLE_ADD_COLUMN_VALUE(overview, "warm_started",
@@ -1017,20 +993,16 @@ navi::SummaryErrorCode LatencyModelR::getSummary(const std::string &query,
                            coldStartCandidateCount);
     TABLE_ADD_COLUMN_VALUE(overview, "cold_start_evaluated_sample_count",
                            coldStartEvaluatedSampleCount);
-    TABLE_ADD_COLUMN_VALUE(
-        overview, "zero_anchor_max_ms", _zeroAnchorMaxMs);
-    TABLE_ADD_COLUMN_VALUE(
-        overview, "zero_anchor_min_samples", _zeroAnchorMinSamples);
-    TABLE_ADD_COLUMN_VALUE(
-        overview, "zero_anchor_retained_sample_count",
-        zeroAnchorRetainedSampleCount);
+    TABLE_ADD_COLUMN_VALUE(overview, "zero_anchor_max_ms", _zeroAnchorMaxMs);
+    TABLE_ADD_COLUMN_VALUE(overview, "zero_anchor_min_samples", _zeroAnchorMinSamples);
+    TABLE_ADD_COLUMN_VALUE(overview, "zero_anchor_retained_sample_count",
+                           zeroAnchorRetainedSampleCount);
     TABLE_ADD_COLUMN_VALUE(overview, "cold_start_applied_count",
                            _coldStartAppliedCount.load(std::memory_order_relaxed));
     TABLE_ADD_COLUMN_VALUE(overview, "cold_start_selected_count",
                            _coldStartSelectedCount.load(std::memory_order_relaxed));
-    TABLE_ADD_COLUMN_VALUE(
-        overview, "cold_start_refit_rejected_count",
-        _coldStartRefitRejectedCount.load(std::memory_order_relaxed));
+    TABLE_ADD_COLUMN_VALUE(overview, "cold_start_refit_rejected_count",
+                           _coldStartRefitRejectedCount.load(std::memory_order_relaxed));
     TABLE_ADD_COLUMN_VALUE(overview, "global_zero_point_valid", globalZeroPoint.valid());
     TABLE_ADD_COLUMN_VALUE(overview, "global_zero_point_master_epoch",
                            globalZeroPoint.masterEpoch);

@@ -5,6 +5,7 @@ namespace navi_sched {
 
 void AgentCacheToMasterData::serialize(autil::DataBuffer &dataBuffer) const
 {
+    dataBuffer.write(cacheKeyType);
     dataBuffer.write(totalBlocks);
     dataBuffer.write(fullSnapshot);
     BlockHashUtil::write(dataBuffer, addedBlockHashes);
@@ -28,6 +29,7 @@ void AgentCacheToMasterData::serialize(autil::DataBuffer &dataBuffer) const
 
 void AgentCacheToMasterData::deserialize(autil::DataBuffer &dataBuffer)
 {
+    dataBuffer.read(cacheKeyType);
     dataBuffer.read(totalBlocks);
     dataBuffer.read(fullSnapshot);
     BlockHashUtil::read(dataBuffer, addedBlockHashes);

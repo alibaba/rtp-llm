@@ -1,6 +1,8 @@
 #include "aios/navi_sched/kernel/AgentLatencyKernel.h"
 #include "autil/TimeUtility.h"
+#include "aios/navi_sched/resource/MasterStateR.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iomanip>
 #include <limits>
@@ -57,13 +59,111 @@ int64_t AgentLatencyKernel::predictBatchLatencyUs(const NaviSchedBatchPtr &batch
     if (!batch) {
         return 0;
     }
+    const auto fallback = [&]() -> int64_t {
+        const auto &carried = AgentBatchR::getRequestStats(*batch);
+        const auto predictionMs = carried.empty()
+                                      ? std::numeric_limits<double>::quiet_NaN()
+                                      : carried.front().predictedExecutionLatencyMs;
+        const bool consistent =
+            !carried.empty() &&
+            std::all_of(carried.begin(), carried.end(), [&](const auto &request) {
+                return request.predictedExecutionLatencyMs == predictionMs;
+            });
+        if (consistent && std::isfinite(predictionMs) && predictionMs >= 0.0 &&
+            predictionMs <
+                static_cast<double>(std::numeric_limits<int64_t>::max()) / 1000.0) {
+            ++_queueProjectionFallbackCount;
+            NAVI_KERNEL_LOG(
+                ERROR,
+                "[navi-queue-prediction-fallback] batch_id=%ld source=carried_master "
+                "execution_ms=%.9f projection_valid=0 fallback_count=%lu",
+                batch->batchId, predictionMs, _queueProjectionFallbackCount);
+            return std::llround(predictionMs * 1000.0);
+        }
+        ++_queueProjectionUnknownCount;
+        NAVI_KERNEL_LOG(ERROR,
+                        "[navi-queue-prediction-fallback] batch_id=%ld source=unknown "
+                        "projection_valid=0 unknown_count=%lu lifecycle_preserved=1",
+                        batch->batchId, _queueProjectionUnknownCount);
+        return -1;
+    };
     const auto &requests = AgentBatchR::getRequestStats(*batch);
     NaviSchedLatencyFeatures features;
     features.appendBatchCount(1);
     for (const auto &request : requests) {
         AgentLatencyInput::appendFeatures(features, request);
     }
-    return std::llround(_latencyModelR->predict(features) * 1000.0);
+    const auto snapshot = _latencyModelR->getSnapshot();
+    if (snapshot &&
+        NonLinearPrefillModelR::usesGeometryForVersion(snapshot->binaryVersion)) {
+        const auto &policy = _agentReportR->getPrefillExecutionPolicy();
+        const bool projected = NonLinearPrefillModelR::usesProjectedGeometryForVersion(
+            snapshot->binaryVersion);
+        if (!TPUPrefillExecutionPolicy::validate(policy)) {
+            NAVI_KERNEL_LOG(
+                ERROR,
+                "queue batch prediction lacks valid typed runtime policy, batchId [%ld]",
+                batch->batchId);
+            return fallback();
+        }
+        std::vector<TPUPrefillRequestInput> ordered;
+        size_t maxSteps = 0;
+        for (const auto &request : requests) {
+            const auto remaining = request.totalTokenCount - request.cacheHitTokenCount;
+            if (request.totalTokenCount <= 0 || request.cacheHitTokenCount < 0 ||
+                remaining <= 0 || request.executionSharedPrefixBoundary < 0 ||
+                request.executionSharedPrefixBoundary > request.totalTokenCount ||
+                static_cast<uint64_t>(remaining) >
+                    std::numeric_limits<size_t>::max() - maxSteps) {
+                NAVI_KERNEL_LOG(
+                    ERROR,
+                    "queue batch prediction invalid admission geometry, batchId [%ld]",
+                    batch->batchId);
+                return fallback();
+            }
+            maxSteps += static_cast<size_t>(remaining);
+            ordered.push_back({request.totalTokenCount, request.cacheHitTokenCount,
+                               request.executionSharedPrefixBoundary});
+        }
+        TPUPrefillExecutionProjection geometry;
+        const bool valid = projected
+                               ? TPUPrefillExecutionPolicy::projectLatencyFeatures(
+                                     ordered, policy, maxSteps, geometry)
+                               : TPUPrefillExecutionPolicy::projectCacheResolvedBatch(
+                                     ordered, policy, maxSteps, geometry);
+        if (!valid || !features.setExecutionGeometry(geometry.stepCount,
+                                                     geometry.globalPaddedTokenSum)) {
+            NAVI_KERNEL_LOG(ERROR, "queue batch policy projection failed, batchId [%ld]",
+                            batch->batchId);
+            return fallback();
+        }
+        if (NonLinearPrefillModelR::usesCacheSourceForVersion(snapshot->binaryVersion)) {
+            int64_t readRequests = 0, maxReadTokens = 0;
+            for (const auto &request : requests) {
+                if (request.executionExternalReadTokens < 0 ||
+                    request.executionExternalReadTokens > request.cacheHitTokenCount) {
+                    return fallback();
+                }
+                readRequests += request.executionExternalReadTokens > 0;
+                maxReadTokens =
+                    std::max(maxReadTokens, request.executionExternalReadTokens);
+            }
+            if (!features.setExecutionCacheSource(readRequests, maxReadTokens)) {
+                return fallback();
+            }
+        }
+    }
+    const auto predictionMs = _latencyModelR->predict(features);
+    if (!std::isfinite(predictionMs) || predictionMs < 0.0 ||
+        predictionMs >=
+            static_cast<double>(std::numeric_limits<int64_t>::max()) / 1000.0) {
+        NAVI_KERNEL_LOG(
+            ERROR,
+            "queue batch prediction invalid scalar, batchId [%ld], predictionMs [%f]",
+            batch->batchId, predictionMs);
+        return fallback();
+    }
+    return std::llround(predictionMs * 1000.0);
 }
 
 double AgentLatencyKernel::getRawQueueLatencyMs(int64_t currentTimeUs) const
@@ -102,11 +202,11 @@ AgentLatencyKernel::QueueFeatures AgentLatencyKernel::getQueueFeatures(
 
 double AgentLatencyKernel::predictQueueLatencyMs(const QueueFeatures &features) const
 {
-    const auto prediction =
-        features.rawLatencyMs + _queueWeights[0] +
-        _queueWeights[1] * features.rawLatencyMs / QUEUE_RAW_LATENCY_SCALE_MS +
-        _queueWeights[2] * features.precedingBatchCount;
-    return std::max(0.0, prediction);
+    return NaviSchedQueueModel::predictMs(
+        NaviSchedQueueModel::basePredictionMs(
+            features.rawLatencyMs, features.precedingBatchCount, _queueWeights),
+        _queueWeights[3], _queueWeights[4], features.cacheHitMemberFraction,
+        features.lookupMemberFraction, 1.0);
 }
 
 double AgentLatencyKernel::getQueueLatencyMs(int64_t currentTimeUs) const
@@ -118,10 +218,20 @@ AgentLatencyKernel::QueueLoadPrediction AgentLatencyKernel::getQueueLoadPredicti
     int64_t currentTimeUs) const
 {
     QueueLoadPrediction prediction;
-    if (_batchLatencyUs.empty()) {
-        return prediction;
+    if (!_unknownQueueBatches.empty()) {
+        NAVI_KERNEL_LOG(ERROR,
+                        "[navi-queue-prediction-incomplete] unknown_batch_count=%lu "
+                        "scalar_scope=known_work_lower_bound projection_valid=0",
+                        _unknownQueueBatches.size());
     }
-    prediction.totalLatencyMs = getQueueLatencyMs(currentTimeUs);
+    const auto features = getQueueFeatures(currentTimeUs);
+    prediction.model.setBaseMs(
+        NaviSchedQueueModel::basePredictionMs(
+            features.rawLatencyMs, features.precedingBatchCount, _queueWeights),
+        prediction.totalLatencyMs);
+    prediction.model.cacheMemberWeightMs = _queueWeights[3];
+    prediction.model.lookupMemberWeightMs = _queueWeights[4];
+    prediction.model.rawDecayFactor = 1.0 + _queueWeights[1] / QUEUE_RAW_LATENCY_SCALE_MS;
     int64_t headRemainingUs = 0;
     int64_t earliestStartTimeUs = std::numeric_limits<int64_t>::max();
     int64_t earliestBatchId = std::numeric_limits<int64_t>::max();
@@ -137,8 +247,7 @@ AgentLatencyKernel::QueueLoadPrediction AgentLatencyKernel::getQueueLoadPredicti
         earliestBatchId = batchId;
         headRemainingUs = std::max<int64_t>(0, running.predictedLatencyUs - elapsedUs);
     }
-    prediction.decayHeadRemainingMs = std::min(
-        prediction.totalLatencyMs, std::max<int64_t>(0, headRemainingUs) / 1000.0);
+    prediction.decayHeadRemainingMs = std::max<int64_t>(0, headRemainingUs) / 1000.0;
     return prediction;
 }
 
@@ -174,22 +283,27 @@ void AgentLatencyKernel::fitQueueLatency(const QueueFeatures &features,
     if (!std::isfinite(actualQueueLatencyMs) || actualQueueLatencyMs < 0.0) {
         return;
     }
-    const std::array<double, 3> input = {
+    const NaviSchedQueueModel::Parameters input = {
         1.0,
         features.rawLatencyMs / QUEUE_RAW_LATENCY_SCALE_MS,
         features.precedingBatchCount,
+        features.cacheHitMemberFraction,
+        features.lookupMemberFraction,
     };
-    const auto difference = features.predictedLatencyMs - actualQueueLatencyMs;
+    const auto difference = (features.predictedLatencyMs - actualQueueLatencyMs) /
+                            NaviSchedQueueModel::TARGET_SCALE_MS;
     const auto correction = _queueLearningRate *
                             std::sqrt(1.0 - std::pow(QUEUE_BETA_2, _queueFitStep)) /
                             (1.0 - std::pow(QUEUE_BETA_1, _queueFitStep));
     for (size_t index = 0; index < _queueWeights.size(); ++index) {
-        const auto gradient = difference * input[index];
+        const auto parameterScale = NaviSchedQueueModel::PARAMETER_SCALES[index];
+        const auto gradient = difference * input[index] * parameterScale /
+                              NaviSchedQueueModel::TARGET_SCALE_MS;
         _queueAdamMoment1[index] =
             QUEUE_BETA_1 * _queueAdamMoment1[index] + (1.0 - QUEUE_BETA_1) * gradient;
         _queueAdamMoment2[index] = QUEUE_BETA_2 * _queueAdamMoment2[index] +
                                    (1.0 - QUEUE_BETA_2) * gradient * gradient;
-        _queueWeights[index] -= correction * _queueAdamMoment1[index] /
+        _queueWeights[index] -= parameterScale * correction * _queueAdamMoment1[index] /
                                 std::sqrt(_queueAdamMoment2[index] + QUEUE_EPSILON);
     }
     ++_queueFitStep;
@@ -238,7 +352,7 @@ void AgentLatencyKernel::reportExecutionLoad(
         _latestBatchWaitingRequests, _latestQueuedBatchRequests, _latestRunningRequests,
         prediction.totalLatencyMs, prediction.decayHeadRemainingMs,
         _agentBatchR->getTimeoutBatchCount(), _agentBatchR->getAbnormalBatchFinishCount(),
-        0, localBatch);
+        0, localBatch, prediction.model);
 }
 
 bool AgentLatencyKernel::derivesUnifiedWorkloadFromBatches() const
@@ -639,6 +753,21 @@ void AgentLatencyKernel::logLatencyTrainingSample(
                  : operatingPoint->region > 0 ? "positive_far"
                                               : "transition";
     }
+    const std::string projectedGeometryAudit =
+        snapshot && NonLinearPrefillModelR::usesProjectedGeometryForVersion(
+                        snapshot->binaryVersion)
+            ? std::string(" model_geometry_source=policy_projection_a_lookup") +
+                  " model_projected_execution_step_count=" +
+                  std::to_string(input.projectedExecutionStepCount) +
+                  " model_projected_global_padded_tokens=" +
+                  std::to_string(input.projectedGlobalPaddedTokens) +
+                  " actual_execution_step_count=" +
+                  std::to_string(input.executionStepCount) +
+                  " actual_global_padded_tokens=" +
+                  std::to_string(input.globalPaddedTokens) + " actual_geometry_valid=" +
+                  (input.executionStepCount > 0 && input.globalPaddedTokens > 0 ? "1"
+                                                                                : "0")
+            : std::string();
     const auto requestIds = formatRequestIds(input);
     NAVI_KERNEL_LOG(
         INFO,
@@ -676,8 +805,14 @@ void AgentLatencyKernel::logLatencyTrainingSample(
         "queue_features_valid=%d queue_raw_at_ready_ms=%.9f "
         "agent_queue_at_ready_ms=%.9f queue_preceding_batch_count=%.0f "
         "queue_fit_step_at_ready=%lu "
-        "queue_weights_at_ready=[%.9f,%.9f,%.9f] "
-        "latest_local_batch_id=%ld revision_before=%ld",
+        "queue_cache_hit_member_fraction=%.9f "
+        "queue_lookup_member_fraction=%.9f "
+        "queue_weights_at_ready=[%.9f,%.9f,%.9f,%.9f,%.9f] "
+        "latest_local_batch_id=%ld revision_before=%ld "
+        "model_binary_version=%ld execution_geometry_valid=%d "
+        "execution_step_count=%ld global_padded_tokens=%ld "
+        "execution_cache_source_valid=%d external_read_request_count=%ld "
+        "max_external_read_tokens=%ld%s",
         sampleSequence, getLatencyInputTypeName(input.type), sample.eventTimeUs,
         input.batchId, input.localBatch.scheduleBatchId, requestIds.c_str(),
         input.inflightRequests, sample.features.getBatchCount(),
@@ -722,10 +857,20 @@ void AgentLatencyKernel::logLatencyTrainingSample(
         queueFeatures ? queueFeatures->predictedLatencyMs : 0.0,
         queueFeatures ? queueFeatures->precedingBatchCount : 0.0,
         queueFeatures ? queueFeatures->fitStep : 0,
+        queueFeatures ? queueFeatures->cacheHitMemberFraction : 0.0,
+        queueFeatures ? queueFeatures->lookupMemberFraction : 0.0,
         queueFeatures ? queueFeatures->weights[0] : 0.0,
         queueFeatures ? queueFeatures->weights[1] : 0.0,
         queueFeatures ? queueFeatures->weights[2] : 0.0,
-        sample.latestAllocatedLocalBatchId, snapshot ? snapshot->revision : 0);
+        queueFeatures ? queueFeatures->weights[3] : 0.0,
+        queueFeatures ? queueFeatures->weights[4] : 0.0,
+        sample.latestAllocatedLocalBatchId, snapshot ? snapshot->revision : 0,
+        snapshot ? snapshot->binaryVersion : 0,
+        sample.features.hasExecutionGeometry() ? 1 : 0,
+        sample.features.getExecutionStepCount(), sample.features.getGlobalPaddedTokens(),
+        sample.features.hasExecutionCacheSource() ? 1 : 0,
+        sample.features.getExternalReadRequestCount(),
+        sample.features.getMaxExternalReadTokens(), projectedGeometryAudit.c_str());
 }
 
 void AgentLatencyKernel::logLatencyTrainingUpdate(
@@ -798,7 +943,9 @@ void AgentLatencyKernel::logQueueDebugSample(
                     "actual_queue_ms=%.6f preceding_batch_count=%.0f "
                     "master_execution_ms=%.6f agent_execution_ms=%.6f "
                     "actual_execution_ms=%.6f queue_fit_step=%lu "
-                    "queue_weights=[%.9f,%.9f,%.9f]",
+                    "queue_cache_hit_member_fraction=%.9f "
+                    "queue_lookup_member_fraction=%.9f "
+                    "queue_weights=[%.9f,%.9f,%.9f,%.9f,%.9f]",
                     scheduleBatchId, input.batchId, features.requestCount,
                     features.readyTimeUs, features.queueEndCanRunTimeUs,
                     input.eventTimeUs, features.masterPredictedQueueLatencyMs,
@@ -806,7 +953,9 @@ void AgentLatencyKernel::logQueueDebugSample(
                     input.backendQueueLatencyMs, features.precedingBatchCount,
                     features.masterPredictedExecutionLatencyMs,
                     agentPredictedExecutionLatencyMs, input.latencyMs, features.fitStep,
-                    features.weights[0], features.weights[1], features.weights[2]);
+                    features.cacheHitMemberFraction, features.lookupMemberFraction,
+                    features.weights[0], features.weights[1], features.weights[2],
+                    features.weights[3], features.weights[4]);
 }
 
 void AgentLatencyKernel::buildGraph(navi::GraphBuilder &builder,
@@ -893,6 +1042,30 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
     _agentLatencyInputR->take(inputs);
     bool saveNeeded = false;
     for (auto input : inputs) {
+        const auto featureSnapshot = _latencyModelR->getSnapshot();
+        if ((input.type == AgentLatencyInputType::BATCH_FINISHED ||
+             input.type == AgentLatencyInputType::OBSERVED_BATCH_FINISHED) &&
+            featureSnapshot &&
+            NonLinearPrefillModelR::usesCacheSourceForVersion(
+                featureSnapshot->binaryVersion) &&
+            !input.makeLatencySample().features.hasExecutionCacheSource()) {
+            input.latencySampleValid = false;
+            input.latencyValidationValid = false;
+            NAVI_KERNEL_LOG(ERROR, "reject missing execution cache source: batch [%ld]",
+                            input.batchId);
+        }
+        if ((input.type == AgentLatencyInputType::BATCH_FINISHED ||
+             input.type == AgentLatencyInputType::OBSERVED_BATCH_FINISHED) &&
+            featureSnapshot &&
+            !input.hasCompatibleGeometryFeatureOrigin(featureSnapshot->binaryVersion)) {
+            input.latencySampleValid = false;
+            input.latencyValidationValid = false;
+            NAVI_KERNEL_LOG(
+                WARN,
+                "reject latency feature origin: model [%ld] origin [%d] batch [%ld]",
+                featureSnapshot->binaryVersion, input.geometryFeatureOriginVersion,
+                input.batchId);
+        }
         std::optional<QueueFeatures> completedQueueFeatures;
         const bool observedBatch =
             AgentLatencyInputType::OBSERVED_BATCH_FINISHED == input.type;
@@ -913,6 +1086,21 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
             if (input.batch) {
                 const auto &requests = AgentBatchR::getRequestStats(*input.batch);
                 queueFeatures.requestCount = static_cast<int32_t>(requests.size());
+                size_t hitMembers = 0, lookupMembers = 0;
+                const auto &policy = _agentReportR->getPrefillExecutionPolicy();
+                for (const auto &request : requests) {
+                    hitMembers += request.predictedCacheHitTokenCount > 0;
+                    lookupMembers += TPUPrefillExecutionPolicy::hasAsyncLookupOpportunity(
+                        request.totalTokenCount, policy);
+                }
+                queueFeatures.cacheHitMemberFraction =
+                    requests.empty() ? 0.0
+                                     : static_cast<double>(hitMembers) / requests.size();
+                queueFeatures.lookupMemberFraction =
+                    requests.empty()
+                        ? 0.0
+                        : static_cast<double>(lookupMembers) / requests.size();
+                queueFeatures.predictedLatencyMs = predictQueueLatencyMs(queueFeatures);
                 if (!requests.empty()) {
                     queueFeatures.masterPredictedQueueLatencyMs =
                         requests.front().predictedQueueLatencyMs;
@@ -939,6 +1127,12 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
             auto latencyUs = _agentReportR->usesUnifiedLatencyPrediction()
                                  ? 0
                                  : predictBatchLatencyUs(input.batch);
+            if (latencyUs < 0) {
+                _unknownQueueBatches.insert(input.batchId);
+                // Accumulate known work only; this batch remains explicitly
+                // unknown, never a successful zero-valued projection.
+                latencyUs = 0;
+            }
             _batchLatencyUs.emplace(input.batchId, latencyUs);
             _batchQueueFeatures.emplace(input.batchId, std::move(queueFeatures));
             _queueLatencyUs.fetch_add(latencyUs, std::memory_order_relaxed);
@@ -948,6 +1142,47 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
             }
             reportExecutionLoad(batchDerivedUnified ? NaviSchedLocalBatchInfo()
                                                     : localBatch);
+            continue;
+        }
+        if (AgentLatencyInputType::BATCH_CACHE_RESOLVED == input.type) {
+            auto latency = _batchLatencyUs.find(input.batchId);
+            auto running = _runningBatches.find(input.batchId);
+            if (latency == _batchLatencyUs.end() || running == _runningBatches.end() ||
+                !input.batch) {
+                NAVI_KERNEL_LOG(
+                    ERROR, "reject resolved execution cache for untracked batch [%ld]",
+                    input.batchId);
+                continue;
+            }
+            if (batchDerivedUnified) {
+                auto features = _batchQueueFeatures.find(input.batchId);
+                if (features == _batchQueueFeatures.end() ||
+                    !features->second.contributesToUnifiedWorkload ||
+                    !replaceUnifiedBatch(input, features->second.unifiedBatch)) {
+                    NAVI_KERNEL_LOG(ERROR, "reject resolved unified batch [%ld]",
+                                    input.batchId);
+                    continue;
+                }
+                reportUnifiedWorkload(input.eventTimeUs);
+                reportExecutionLoad();
+                continue;
+            }
+            const auto corrected = predictBatchLatencyUs(input.batch);
+            if (corrected < 0) {
+                _unknownQueueBatches.insert(input.batchId);
+                continue;
+            }
+            const auto previous = latency->second;
+            latency->second = corrected;
+            running->second.predictedLatencyUs = corrected;
+            _unknownQueueBatches.erase(input.batchId);
+            _queueLatencyUs.fetch_add(corrected - previous, std::memory_order_relaxed);
+            NAVI_KERNEL_LOG(INFO,
+                            "[navi-queue-cache-resolved] batch_id=%ld event_time_us=%ld "
+                            "previous_execution_ms=%.9f corrected_execution_ms=%.9f",
+                            input.batchId, input.eventTimeUs, previous / 1000.0,
+                            corrected / 1000.0);
+            reportExecutionLoad();
             continue;
         }
         if (AgentLatencyInputType::BATCH_STARTED == input.type) {
@@ -999,10 +1234,15 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
                                     input.batchId);
                 } else {
                     const auto oldLatencyUs = latencyIt->second;
-                    const auto newLatencyUs =
-                        _agentReportR->usesUnifiedLatencyPrediction()
-                            ? 0
-                            : predictBatchLatencyUs(input.batch);
+                    auto newLatencyUs = _agentReportR->usesUnifiedLatencyPrediction()
+                                            ? 0
+                                            : predictBatchLatencyUs(input.batch);
+                    if (newLatencyUs < 0) {
+                        _unknownQueueBatches.insert(input.batchId);
+                        newLatencyUs = 0;
+                    } else {
+                        _unknownQueueBatches.erase(input.batchId);
+                    }
                     latencyIt->second = newLatencyUs;
                     _queueLatencyUs.fetch_add(newLatencyUs - oldLatencyUs,
                                               std::memory_order_relaxed);
@@ -1027,8 +1267,8 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
                          queuePrediction.decayHeadRemainingMs,
                          _agentBatchR->getTimeoutBatchCount(),
                          _agentBatchR->getAbnormalBatchFinishCount(),
-                         input.completedRequestCount, input.eventTimeUs,
-                         input.localBatch) &&
+                         input.completedRequestCount, input.eventTimeUs, input.localBatch,
+                         queuePrediction.model) &&
                 _agentReportR->getSubscriberCount() > 0) {
                 NAVI_KERNEL_LOG(ERROR,
                                 "failed to report partially aborted batch, "
@@ -1093,6 +1333,7 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
                                                                  _queueWeights.end());
                 _latencyValidationStats.queueModelFitStep = _queueFitStep - 1;
             }
+            _unknownQueueBatches.erase(input.batchId);
             auto latencyIt = _batchLatencyUs.find(input.batchId);
             if (_batchLatencyUs.end() != latencyIt) {
                 _queueLatencyUs.fetch_sub(latencyIt->second, std::memory_order_relaxed);
@@ -1120,7 +1361,7 @@ navi::ErrorCode AgentLatencyKernel::compute(navi::KernelComputeContext &ctx)
                 _agentBatchR->getAbnormalBatchFinishCount(),
                 AgentLatencyInputType::BATCH_ABORTED == input.type, input.eventTimeUs,
                 localBatch, agentPredictedExecutionLatencyMs, input.backendQueueLatencyMs,
-                _latencyValidationStats);
+                _latencyValidationStats, queuePrediction.model);
             if (reportSubscriberReady && reportCount == 0) {
                 NAVI_KERNEL_LOG(ERROR,
                                 "failed to report batch finished, batchId [%ld], "

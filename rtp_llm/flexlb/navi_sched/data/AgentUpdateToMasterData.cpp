@@ -27,24 +27,26 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
     TABLE_ADD_COLUMN_VALUE(table, "execution_busy_utilization", executionBusyUtilization);
     TABLE_ADD_COLUMN_VALUE(table, "deserialize_begin_mono_us", deserializeBeginMonoUs);
     TABLE_ADD_COLUMN_VALUE(table, "deserialize_end_mono_us", deserializeEndMonoUs);
+    TABLE_ADD_COLUMN_VALUE(table, "peer_cache_read_available", peerCacheReadAvailable);
+    TABLE_ADD_COLUMN_VALUE(table, "peer_cache_read_revision", peerCacheReadRevision);
+    TABLE_ADD_COLUMN_VALUE(table, "peer_cache_read_agent_start_time_us",
+                           peerCacheReadAgentStartTimeUs);
+    TABLE_ADD_COLUMN_VALUE(table, "full_attention_query_drop_tokens",
+                           fullAttentionQueryDropTokens);
     TABLE_ADD_COLUMN_VALUE(table, "has_control", control != nullptr);
     TABLE_ADD_COLUMN_VALUE(table, "has_request_event", requestEvent != nullptr);
     TABLE_ADD_COLUMN_VALUE(table, "has_cache", cache != nullptr);
     TABLE_ADD_COLUMN_VALUE(table, "has_pending_cache", pendingCache != nullptr);
     TABLE_ADD_COLUMN_VALUE(table, "has_latency", latency != nullptr);
     TABLE_ADD_COLUMN_VALUE(table, "has_workload", workload != nullptr);
-    TABLE_ADD_COLUMN_VALUE(table, "latency_model_fingerprint",
-                           latencyModelFingerprint);
-    TABLE_ADD_COLUMN_VALUE(table, "latency_model_trusted",
-                           latencyModelTrusted);
-    TABLE_ADD_COLUMN_VALUE(table, "latency_model_warm_started",
-                           latencyModelWarmStarted);
+    TABLE_ADD_COLUMN_VALUE(table, "latency_model_fingerprint", latencyModelFingerprint);
+    TABLE_ADD_COLUMN_VALUE(table, "latency_model_trusted", latencyModelTrusted);
+    TABLE_ADD_COLUMN_VALUE(table, "latency_model_warm_started", latencyModelWarmStarted);
     TABLE_ADD_COLUMN_VALUE(table, "scheduler_config_request_generation",
                            schedulerConfigRequestGeneration);
     TABLE_ADD_COLUMN_VALUE(table, "scheduler_config_generation",
                            schedulerConfigGeneration);
-    TABLE_ADD_COLUMN_VALUE(table, "scheduler_config_hash",
-                           schedulerConfigHash);
+    TABLE_ADD_COLUMN_VALUE(table, "scheduler_config_hash", schedulerConfigHash);
     TABLE_ADD_COLUMN_VALUE(table, "scheduler_config_json", schedulerConfigJson);
     TABLE_ADD_COLUMN_VALUE(table, "scheduler_config_error", schedulerConfigError);
     if (SummaryUtil::getSummaryLevel(query) < 1) {
@@ -57,9 +59,9 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
         auto section = builder.newTable("AgentControlToMasterData");
         TABLE_ADD_COLUMN_VALUE(section, "server_ip", control->serverInfo.ip);
         TABLE_ADD_COLUMN_VALUE(section, "server_port", control->serverInfo.port);
-        TABLE_ADD_COLUMN_VALUE(section, "agent_start_time_us",
-                               control->agentStartTimeUs);
+        TABLE_ADD_COLUMN_VALUE(section, "agent_start_time_us", control->agentStartTimeUs);
         TABLE_ADD_COLUMN_VALUE(section, "pd_separated", control->pdSeparated);
+        TABLE_ADD_COLUMN_VALUE(section, "peer_cache_enabled", control->peerCacheEnabled);
         TABLE_ADD_COLUMN_VALUE(section, "unified_latency_prediction",
                                control->unifiedLatencyPrediction);
     }
@@ -87,6 +89,8 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
     }
     if (cache) {
         auto section = builder.newTable("AgentCacheToMasterData");
+        TABLE_ADD_COLUMN_VALUE(section, "cache_key_type",
+                               static_cast<int32_t>(cache->cacheKeyType));
         TABLE_ADD_COLUMN_VALUE(section, "total_blocks", cache->totalBlocks);
         TABLE_ADD_COLUMN_VALUE(section, "full_snapshot", cache->fullSnapshot);
         TABLE_ADD_COLUMN_VALUE(section, "added_block_hash_count",
@@ -121,6 +125,8 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
     }
     if (pendingCache) {
         auto section = builder.newTable("AgentPendingCacheToMasterData");
+        TABLE_ADD_COLUMN_VALUE(section, "cache_key_type",
+                               static_cast<int32_t>(pendingCache->cacheKeyType));
         TABLE_ADD_COLUMN_VALUE(section, "full_snapshot", pendingCache->fullSnapshot);
         TABLE_ADD_COLUMN_VALUE(section, "added_batch_count",
                                pendingCache->addedReservations.size());
@@ -172,54 +178,44 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
                                workload->remainingPrefillTokenCount);
         TABLE_ADD_COLUMN_VALUE(section, "remaining_prefill_token_square_sum",
                                workload->remainingPrefillTokenSquareSum);
-        TABLE_ADD_COLUMN_VALUE(
-            section, "context_remaining_prefill_token_product_sum",
-            workload->contextRemainingPrefillTokenProductSum);
+        TABLE_ADD_COLUMN_VALUE(section, "context_remaining_prefill_token_product_sum",
+                               workload->contextRemainingPrefillTokenProductSum);
         TABLE_ADD_COLUMN_VALUE(section, "prefill_capacity_split",
                                workload->prefillCapacitySplit);
         TABLE_ADD_COLUMN_VALUE(section, "max_running_request_count",
                                workload->maxRunningRequestCount);
         TABLE_ADD_COLUMN_VALUE(section, "running_capacity_slot_count",
                                workload->runningCapacitySlotCount);
-        TABLE_ADD_COLUMN_VALUE(
-            section, "running_capacity_prefill_request_count",
-            workload->runningCapacityPrefillRequestCount);
-        TABLE_ADD_COLUMN_VALUE(
-            section, "running_capacity_prefill_context_tokens",
-            workload->runningCapacityPrefillContextTokenCount);
+        TABLE_ADD_COLUMN_VALUE(section, "running_capacity_prefill_request_count",
+                               workload->runningCapacityPrefillRequestCount);
+        TABLE_ADD_COLUMN_VALUE(section, "running_capacity_prefill_context_tokens",
+                               workload->runningCapacityPrefillContextTokenCount);
         TABLE_ADD_COLUMN_VALUE(section, "running_capacity_prefill_tokens",
                                workload->runningCapacityPrefillTokenCount);
-        TABLE_ADD_COLUMN_VALUE(
-            section, "running_capacity_prefill_token_square_sum",
-            workload->runningCapacityPrefillTokenSquareSum);
+        TABLE_ADD_COLUMN_VALUE(section, "running_capacity_prefill_token_square_sum",
+                               workload->runningCapacityPrefillTokenSquareSum);
         TABLE_ADD_COLUMN_VALUE(
             section, "running_capacity_prefill_product_sum",
-            workload
-                ->runningCapacityContextRemainingPrefillTokenProductSum);
-        TABLE_ADD_COLUMN_VALUE(
-            section, "waiting_capacity_prefill_request_count",
-            workload->waitingCapacityPrefillRequestCount);
-        TABLE_ADD_COLUMN_VALUE(
-            section, "waiting_capacity_prefill_context_tokens",
-            workload->waitingCapacityPrefillContextTokenCount);
+            workload->runningCapacityContextRemainingPrefillTokenProductSum);
+        TABLE_ADD_COLUMN_VALUE(section, "waiting_capacity_prefill_request_count",
+                               workload->waitingCapacityPrefillRequestCount);
+        TABLE_ADD_COLUMN_VALUE(section, "waiting_capacity_prefill_context_tokens",
+                               workload->waitingCapacityPrefillContextTokenCount);
         TABLE_ADD_COLUMN_VALUE(section, "waiting_capacity_prefill_tokens",
                                workload->waitingCapacityPrefillTokenCount);
-        TABLE_ADD_COLUMN_VALUE(
-            section, "waiting_capacity_prefill_token_square_sum",
-            workload->waitingCapacityPrefillTokenSquareSum);
+        TABLE_ADD_COLUMN_VALUE(section, "waiting_capacity_prefill_token_square_sum",
+                               workload->waitingCapacityPrefillTokenSquareSum);
         TABLE_ADD_COLUMN_VALUE(
             section, "waiting_capacity_prefill_product_sum",
-            workload
-                ->waitingCapacityContextRemainingPrefillTokenProductSum);
+            workload->waitingCapacityContextRemainingPrefillTokenProductSum);
         TABLE_ADD_COLUMN_VALUE(section, "remaining_total_context_tokens",
                                workload->remainingTotalContextTokenCount);
         TABLE_ADD_COLUMN_VALUE(section, "remaining_total_tokens",
                                workload->remainingTotalTokenCount);
         TABLE_ADD_COLUMN_VALUE(section, "remaining_total_token_square_sum",
                                workload->remainingTotalTokenSquareSum);
-        TABLE_ADD_COLUMN_VALUE(
-            section, "context_remaining_total_token_product_sum",
-            workload->contextRemainingTotalTokenProductSum);
+        TABLE_ADD_COLUMN_VALUE(section, "context_remaining_total_token_product_sum",
+                               workload->contextRemainingTotalTokenProductSum);
         TABLE_ADD_COLUMN_VALUE(section, "total_prompt_tokens",
                                workload->totalPromptTokenCount);
         TABLE_ADD_COLUMN_VALUE(section, "inflight_scheduled_tokens",
@@ -237,8 +233,7 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
 void AgentUpdateToMasterData::serialize(autil::DataBuffer &dataBuffer) const
 {
     dataBuffer.write(version);
-    if ((version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION ||
-         version == NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION)) {
+    if (version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION) {
         dataBuffer.write(static_cast<uint32_t>(updates.size()));
         for (const auto &update : updates) {
             dataBuffer.write(update->version);
@@ -248,6 +243,9 @@ void AgentUpdateToMasterData::serialize(autil::DataBuffer &dataBuffer) const
     }
     dataBuffer.write(event);
     dataBuffer.write(eventTimeUs);
+    dataBuffer.write(peerCacheReadAvailable);
+    dataBuffer.write(peerCacheReadRevision);
+    dataBuffer.write(peerCacheReadAgentStartTimeUs);
     dataBuffer.write(control);
     dataBuffer.write(requestEvent);
     dataBuffer.write(cache);
@@ -263,7 +261,11 @@ void AgentUpdateToMasterData::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(schedulerConfigJson);
     dataBuffer.write(schedulerConfigError);
     dataBuffer.write(executionUtilization);
-    if (version >= 14) dataBuffer.write(executionBusyUtilization);
+    dataBuffer.write(executionBusyUtilization);
+    dataBuffer.write(mambaReplayStopShift);
+    dataBuffer.write(mambaRetentionInterval);
+    dataBuffer.write(mambaAlign);
+    dataBuffer.write(fullAttentionQueryDropTokens);
 }
 
 void AgentUpdateToMasterData::deserialize(autil::DataBuffer &dataBuffer)
@@ -278,8 +280,7 @@ void AgentUpdateToMasterData::deserialize(autil::DataBuffer &dataBuffer)
         }
     });
     dataBuffer.read(version);
-    if ((version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION ||
-         version == NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION)) {
+    if (version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION) {
         uint32_t count = 0;
         dataBuffer.read(count);
         if (count < 2 || count > NAVI_SCHED_AGENT_UPDATE_MAX_BATCH_SIZE) {
@@ -290,8 +291,10 @@ void AgentUpdateToMasterData::deserialize(autil::DataBuffer &dataBuffer)
             auto update = std::make_shared<AgentUpdateToMasterData>();
             int32_t childVersion = 0;
             dataBuffer.read(childVersion);
-            const auto expectedChildVersion = version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION
-                ? NAVI_SCHED_AGENT_UPDATE_VERSION : NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION;
+            const auto expectedChildVersion =
+                version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION
+                    ? NAVI_SCHED_AGENT_UPDATE_VERSION
+                    : NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION;
             if (childVersion != expectedChildVersion) {
                 updates.clear();
                 return;
@@ -333,7 +336,7 @@ void AgentUpdateToMasterData::serializeCompactPayload(autil::DataBuffer &dataBuf
     if (!schedulerConfigJson.empty()) fields |= uint16_t(1) << 12;
     if (!schedulerConfigError.empty()) fields |= uint16_t(1) << 13;
     if (executionUtilization >= 0.0) fields |= uint16_t(1) << 14;
-    if (version >= 14 && executionBusyUtilization >= 0.0) fields |= uint16_t(1) << 15;
+    if (executionBusyUtilization >= 0.0) fields |= uint16_t(1) << 15;
     dataBuffer.write(fields);
     if (fields & (uint16_t(1) << 0)) dataBuffer.write(*control);
     if (fields & (uint16_t(1) << 1)) dataBuffer.write(*requestEvent);
@@ -349,6 +352,13 @@ void AgentUpdateToMasterData::serializeCompactPayload(autil::DataBuffer &dataBuf
     if (fields & (uint16_t(1) << 13)) dataBuffer.write(schedulerConfigError);
     if (fields & (uint16_t(1) << 14)) dataBuffer.write(executionUtilization);
     if (fields & (uint16_t(1) << 15)) dataBuffer.write(executionBusyUtilization);
+    dataBuffer.write(peerCacheReadAvailable);
+    dataBuffer.write(peerCacheReadRevision);
+    dataBuffer.write(peerCacheReadAgentStartTimeUs);
+    dataBuffer.write(mambaReplayStopShift);
+    dataBuffer.write(mambaRetentionInterval);
+    dataBuffer.write(mambaAlign);
+    dataBuffer.write(fullAttentionQueryDropTokens);
 }
 
 void AgentUpdateToMasterData::deserializeCompactPayload(autil::DataBuffer &dataBuffer)
@@ -395,12 +405,22 @@ void AgentUpdateToMasterData::deserializeCompactPayload(autil::DataBuffer &dataB
     if (fields & (uint16_t(1) << 13)) dataBuffer.read(schedulerConfigError);
     if (fields & (uint16_t(1) << 14)) dataBuffer.read(executionUtilization);
     if (fields & (uint16_t(1) << 15)) dataBuffer.read(executionBusyUtilization);
+    dataBuffer.read(peerCacheReadAvailable);
+    dataBuffer.read(peerCacheReadRevision);
+    dataBuffer.read(peerCacheReadAgentStartTimeUs);
+    dataBuffer.read(mambaReplayStopShift);
+    dataBuffer.read(mambaRetentionInterval);
+    dataBuffer.read(mambaAlign);
+    dataBuffer.read(fullAttentionQueryDropTokens);
 }
 
 void AgentUpdateToMasterData::deserializePayload(autil::DataBuffer &dataBuffer)
 {
     dataBuffer.read(event);
     dataBuffer.read(eventTimeUs);
+    dataBuffer.read(peerCacheReadAvailable);
+    dataBuffer.read(peerCacheReadRevision);
+    dataBuffer.read(peerCacheReadAgentStartTimeUs);
     dataBuffer.read(control);
     dataBuffer.read(requestEvent);
     dataBuffer.read(cache);
@@ -416,49 +436,69 @@ void AgentUpdateToMasterData::deserializePayload(autil::DataBuffer &dataBuffer)
     dataBuffer.read(schedulerConfigJson);
     dataBuffer.read(schedulerConfigError);
     dataBuffer.read(executionUtilization);
-    if (version >= 14) dataBuffer.read(executionBusyUtilization);
+    dataBuffer.read(executionBusyUtilization);
+    dataBuffer.read(mambaReplayStopShift);
+    dataBuffer.read(mambaRetentionInterval);
+    dataBuffer.read(mambaAlign);
+    dataBuffer.read(fullAttentionQueryDropTokens);
+
 }
 
 bool AgentUpdateToMasterData::validEnvelope() const
 {
-    return (version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION ||
-         version == NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION) &&
-           event == NaviSchedAgentEvent::UNKNOWN && !control && !requestEvent &&
-           !cache && !pendingCache && !latency && !workload && eventTimeUs == 0 &&
+    return version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION &&
+           event == NaviSchedAgentEvent::UNKNOWN && !control && !requestEvent && !cache &&
+           !pendingCache && !latency && !workload && eventTimeUs == 0 &&
            executionUtilization == -1.0 && executionBusyUtilization == -1.0 &&
-           latencyModelFingerprint.empty() && !latencyModelTrusted && !latencyModelWarmStarted &&
-           schedulerConfigRequestGeneration == 0 && schedulerConfigGeneration == 0 &&
-           schedulerConfigHash.empty() && schedulerConfigJson.empty() && schedulerConfigError.empty() &&
-           updates.size() >= 2 && updates.size() <= NAVI_SCHED_AGENT_UPDATE_MAX_BATCH_SIZE &&
+           !peerCacheReadAvailable && peerCacheReadRevision == 0 &&
+           peerCacheReadAgentStartTimeUs == 0 && !mambaReplayStopShift &&
+           mambaRetentionInterval == -1 && !mambaAlign && fullAttentionQueryDropTokens == 0 &&
+           latencyModelFingerprint.empty() && !latencyModelTrusted &&
+           !latencyModelWarmStarted && schedulerConfigRequestGeneration == 0 &&
+           schedulerConfigGeneration == 0 && schedulerConfigHash.empty() &&
+           schedulerConfigJson.empty() && schedulerConfigError.empty() &&
+           updates.size() >= 2 &&
+           updates.size() <= NAVI_SCHED_AGENT_UPDATE_MAX_BATCH_SIZE &&
            std::all_of(updates.begin(), updates.end(), [this](const auto &update) {
                const auto expected = version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION
-                   ? NAVI_SCHED_AGENT_UPDATE_VERSION : NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION;
+                                         ? NAVI_SCHED_AGENT_UPDATE_VERSION
+                                         : NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION;
                return update && update->version == expected && update->updates.empty();
            });
 }
 
 bool AgentUpdateToMasterData::valid() const
 {
-    if ((version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION ||
-         version == NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION)) {
-        return validEnvelope() && std::all_of(updates.begin(), updates.end(), [](const auto &update) {
-            return update->valid();
-        });
+    if (version == NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION) {
+        return validEnvelope() &&
+               std::all_of(updates.begin(), updates.end(),
+                           [](const auto &update) { return update->valid(); });
     }
     if (!std::isfinite(executionBusyUtilization) ||
-        (executionBusyUtilization != -1.0 && (executionBusyUtilization < 0.0 || executionBusyUtilization > 1.0)) ||
+        (executionBusyUtilization != -1.0 &&
+         (executionBusyUtilization < 0.0 || executionBusyUtilization > 1.0)) ||
         !updates.empty() || !std::isfinite(executionUtilization) ||
         (executionUtilization < 0.0 && executionUtilization != -1.0)) {
         return false;
     }
-    if (version < NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION ||
-        version > NAVI_SCHED_AGENT_UPDATE_VERSION ||
-        NaviSchedAgentEvent::UNKNOWN == event) {
+    if (version != NAVI_SCHED_AGENT_UPDATE_VERSION ||
+        NaviSchedAgentEvent::UNKNOWN == event ||
+        (control && control->projectedExecutionGeometryEnabled &&
+         !control->executionGeometryEnabled) ||
+        (control && control->executionGeometryEnabled &&
+         (!control->pdSeparated || control->unifiedLatencyPrediction ||
+          !TPUPrefillExecutionPolicy::validate(control->prefillExecutionPolicy))) ||
+        fullAttentionQueryDropTokens < 0 ||
+        (cache && !validCacheKeyType(cache->cacheKeyType)) ||
+        (pendingCache && !validCacheKeyType(pendingCache->cacheKeyType))) {
         return false;
     }
     const auto validInflightStats = [](const AgentRequestEventToMasterDataPtr &request) {
-        return request && request->inflightStatsRevision > 0 &&
-               request->inflightRequests >= 0 &&
+        return request &&
+               request->queueModel.valid(request->queueTotalPredictedLatencyMs) &&
+               std::isfinite(request->queueDecayHeadRemainingMs) &&
+               request->queueDecayHeadRemainingMs >= 0.0 &&
+               request->inflightStatsRevision > 0 && request->inflightRequests >= 0 &&
                std::isfinite(request->inflightPredictedLatencySumMs) &&
                request->inflightPredictedLatencySumMs >= 0.0 &&
                (request->inflightRequests != 0 ||
@@ -472,14 +512,13 @@ bool AgentUpdateToMasterData::valid() const
                    (!workload || workload->valid()) &&
                    schedulerConfigRequestGeneration == 0 &&
                    schedulerConfigError.empty() &&
-                   ((schedulerConfigGeneration == 0 &&
-                     schedulerConfigHash.empty() && schedulerConfigJson.empty()) ||
-                    (schedulerConfigGeneration > 0 &&
-                     !schedulerConfigHash.empty() &&
+                   ((schedulerConfigGeneration == 0 && schedulerConfigHash.empty() &&
+                     schedulerConfigJson.empty()) ||
+                    (schedulerConfigGeneration > 0 && !schedulerConfigHash.empty() &&
                      !schedulerConfigJson.empty()));
         case NaviSchedAgentEvent::AGENT_STOPPING:
-            return control && !requestEvent && !cache && !pendingCache &&
-                   !latency && !workload;
+            return control && !requestEvent && !cache && !pendingCache && !latency &&
+                   !workload;
         case NaviSchedAgentEvent::REQUEST_RECEIVED:
             return validInflightStats(requestEvent) && requestEvent->requestId > 0 &&
                    !control && !cache && !pendingCache && !latency &&
@@ -499,8 +538,6 @@ bool AgentUpdateToMasterData::valid() const
                    requestEvent->queueTotalPredictedLatencyMs >= 0.0 &&
                    std::isfinite(requestEvent->queueDecayHeadRemainingMs) &&
                    requestEvent->queueDecayHeadRemainingMs >= 0.0 &&
-                   requestEvent->queueDecayHeadRemainingMs <=
-                       requestEvent->queueTotalPredictedLatencyMs &&
                    requestEvent->localBatch.valid() &&
                    !requestEvent->localBatch.requestIds.empty() &&
                    requestEvent->localBatch.requestCount ==
@@ -508,10 +545,9 @@ bool AgentUpdateToMasterData::valid() const
                    !control && !cache && !pendingCache && !latency && !workload;
         case NaviSchedAgentEvent::SCHEDULER_CONFIG_UPDATED:
             return schedulerConfigRequestGeneration > 0 &&
-                   schedulerConfigGeneration > 0 &&
-                   !schedulerConfigHash.empty() && !schedulerConfigJson.empty() &&
-                   !control && !requestEvent && !cache && !pendingCache &&
-                   !latency && !workload;
+                   schedulerConfigGeneration > 0 && !schedulerConfigHash.empty() &&
+                   !schedulerConfigJson.empty() && !control && !requestEvent && !cache &&
+                   !pendingCache && !latency && !workload;
         case NaviSchedAgentEvent::CACHE_UPDATED:
             return cache && !control && !requestEvent && !pendingCache && !latency &&
                    !workload;
@@ -521,9 +557,13 @@ bool AgentUpdateToMasterData::valid() const
         case NaviSchedAgentEvent::LATENCY_MODEL_UPDATED:
             return latency && validInflightStats(requestEvent) && !control && !cache &&
                    !pendingCache && !workload;
+        case NaviSchedAgentEvent::PEER_CACHE_READ_UPDATED:
+            return peerCacheReadRevision > 0 && peerCacheReadAgentStartTimeUs > 0 &&
+                   !control && !requestEvent && !cache && !pendingCache && !latency &&
+                   !workload;
         case NaviSchedAgentEvent::WORKLOAD_UPDATED:
-            return workload && workload->valid() && !control && !requestEvent &&
-                   !cache && !pendingCache && !latency;
+            return workload && workload->valid() && !control && !requestEvent && !cache &&
+                   !pendingCache && !latency;
         case NaviSchedAgentEvent::BATCH_FINISHED:
             return validInflightStats(requestEvent) && !control && !latency &&
                    !pendingCache && !workload;
@@ -571,10 +611,11 @@ public:
         if (!update) {
             return navi::TEC_NULL_DATA;
         }
-        if (update->version != NAVI_SCHED_AGENT_UPDATE_VERSION &&
+        if ((update->version != NAVI_SCHED_AGENT_UPDATE_VERSION &&
             update->version != NAVI_SCHED_AGENT_UPDATE_MIN_SUPPORTED_VERSION &&
-            update->version != NAVI_SCHED_AGENT_UPDATE_LEGACY_BATCH_VERSION &&
-            update->version != NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION) {
+            update->version != NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION) ||
+            (update->cache && !validCacheKeyType(update->cache->cacheKeyType)) ||
+            (update->pendingCache && !validCacheKeyType(update->pendingCache->cacheKeyType))) {
             delete update;
             return navi::TEC_FAILED;
         }

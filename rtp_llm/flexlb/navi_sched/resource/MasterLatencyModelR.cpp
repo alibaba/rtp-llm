@@ -32,22 +32,21 @@ bool zeroPointsEqual(double left, double right)
 const char *MasterLatencyModelR::getRejectReasonName(RejectReason reason)
 {
     switch (reason) {
-    case RejectReason::NONE:
-        return "none";
-    case RejectReason::INVALID_MODEL:
-        return "invalid_model";
-    case RejectReason::SOURCE_MISMATCH:
-        return "source_mismatch";
-    case RejectReason::TRUSTED_REGRESSION:
-        return "trusted_regression";
-    case RejectReason::STALE_REVISION:
-        return "stale_revision";
+        case RejectReason::NONE:
+            return "none";
+        case RejectReason::INVALID_MODEL:
+            return "invalid_model";
+        case RejectReason::SOURCE_MISMATCH:
+            return "source_mismatch";
+        case RejectReason::TRUSTED_REGRESSION:
+            return "trusted_regression";
+        case RejectReason::STALE_REVISION:
+            return "stale_revision";
     }
     return "unknown";
 }
 
-const std::string MasterLatencyModelR::RESOURCE_ID =
-    "navi_sched.master_latency_model_r";
+const std::string MasterLatencyModelR::RESOURCE_ID = "navi_sched.master_latency_model_r";
 
 MasterLatencyModelR::~MasterLatencyModelR()
 {
@@ -68,8 +67,7 @@ bool MasterLatencyModelR::WarmupKey::operator<(const WarmupKey &other) const
            std::tie(other.fingerprint, other.formula, other.parameterCount);
 }
 
-bool MasterLatencyModelR::ModelSignature::operator<(
-    const ModelSignature &other) const
+bool MasterLatencyModelR::ModelSignature::operator<(const ModelSignature &other) const
 {
     return std::tie(formula, binaryVersion, parameterCount) <
            std::tie(other.formula, other.binaryVersion, other.parameterCount);
@@ -83,18 +81,14 @@ void MasterLatencyModelR::def(navi::ResourceDefBuilder &builder) const
 bool MasterLatencyModelR::config(navi::ResourceConfigContext &ctx)
 {
     NAVI_JSONIZE(ctx, "state_file", _stateFile, _stateFile);
-    NAVI_JSONIZE(ctx, "trust_min_revision", _trustMinRevision,
-                 _trustMinRevision);
-    NAVI_JSONIZE(ctx, "source_min_revision", _sourceMinRevision,
-                 _sourceMinRevision);
+    NAVI_JSONIZE(ctx, "trust_min_revision", _trustMinRevision, _trustMinRevision);
+    NAVI_JSONIZE(ctx, "source_min_revision", _sourceMinRevision, _sourceMinRevision);
     NAVI_JSONIZE(ctx, "max_candidates", _maxCandidates, _maxCandidates);
-    NAVI_JSONIZE(ctx, "persist_interval_ms", _persistIntervalMs,
-                 _persistIntervalMs);
+    NAVI_JSONIZE(ctx, "persist_interval_ms", _persistIntervalMs, _persistIntervalMs);
     NAVI_JSONIZE(ctx, "global_zero_point_refresh_interval_ms",
                  _globalZeroPointRefreshIntervalMs, _globalZeroPointRefreshIntervalMs);
-    return _trustMinRevision > 1 && _sourceMinRevision > 1 &&
-           _maxCandidates > 0 && _persistIntervalMs > 0 &&
-           _globalZeroPointRefreshIntervalMs > 0;
+    return _trustMinRevision > 1 && _sourceMinRevision > 1 && _maxCandidates > 0 &&
+           _persistIntervalMs > 0 && _globalZeroPointRefreshIntervalMs > 0;
 }
 
 navi::ErrorCode MasterLatencyModelR::init(navi::ResourceInitContext &)
@@ -102,9 +96,8 @@ navi::ErrorCode MasterLatencyModelR::init(navi::ResourceInitContext &)
     {
         autil::ScopedLock lock(_lock);
         _masterEpoch = std::max<int64_t>(1, autil::TimeUtility::currentTime());
-        std::atomic_store_explicit(
-            &_liveEntries, std::make_shared<const LiveEntryList>(),
-            std::memory_order_release);
+        std::atomic_store_explicit(&_liveEntries, std::make_shared<const LiveEntryList>(),
+                                   std::memory_order_release);
         std::atomic_store_explicit(&_globalZeroPoint,
                                    std::make_shared<const GlobalZeroPointMap>(),
                                    std::memory_order_release);
@@ -129,7 +122,7 @@ bool MasterLatencyModelR::validFingerprint(const std::string &fingerprint)
 }
 
 bool MasterLatencyModelR::activateAgent(const std::string &agentId,
-                                         const std::string &sourceId)
+                                        const std::string &sourceId)
 {
     if (agentId.empty() || sourceId.empty()) {
         return false;
@@ -143,10 +136,9 @@ bool MasterLatencyModelR::activateAgent(const std::string &agentId,
         }
         if (it != _liveModels.end()) {
             it->second->active.store(false, std::memory_order_release);
-            std::atomic_store_explicit(
-                &it->second->model,
-                std::shared_ptr<const LiveModel>(),
-                std::memory_order_release);
+            std::atomic_store_explicit(&it->second->model,
+                                       std::shared_ptr<const LiveModel>(),
+                                       std::memory_order_release);
             removeWarmupSubscriberLocked(it->second->sourceId);
             removeLiveCandidateLocked(agentId);
             replaced = true;
@@ -174,14 +166,13 @@ MasterLatencyModelR::LiveModelSlotPtr MasterLatencyModelR::getLiveModelSlot(
         (!sourceId.empty() && it->second->sourceId != sourceId)) {
         return nullptr;
     }
-    return LiveModelSlotPtr(it->second,
-                            static_cast<LiveModelSlot *>(it->second.get()));
+    return LiveModelSlotPtr(it->second, static_cast<LiveModelSlot *>(it->second.get()));
 }
 
 bool MasterLatencyModelR::updateWarmupSubscriber(
     const std::string &agentId, const std::string &sourceId,
-    const std::string &fingerprint, const AgentLatencyToMasterData &latency,
-    bool trusted, const navi::AsyncPipePtr &notificationPipe)
+    const std::string &fingerprint, const AgentLatencyToMasterData &latency, bool trusted,
+    const navi::AsyncPipePtr &notificationPipe)
 {
     if (sourceId.empty()) {
         return false;
@@ -193,10 +184,11 @@ bool MasterLatencyModelR::updateWarmupSubscriber(
     }
     if (agentId.empty() || !validFingerprint(fingerprint) || !notificationPipe ||
         latency.formula != NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL ||
-        latency.binaryVersion != NonLinearPrefillModelR::BINARY_VERSION ||
+        !NonLinearPrefillModelR::supportsBinaryVersion(latency.binaryVersion) ||
         latency.parameters.empty() ||
         latency.parameters.size() > std::numeric_limits<uint32_t>::max() ||
-        !NonLinearPrefillModelR::validateParameters(latency.parameters) ||
+        !NonLinearPrefillModelR::validateParametersForVersion(latency.parameters,
+                                                              latency.binaryVersion) ||
         !latency.optimizerState.valid(latency.parameters.size()) ||
         latency.residualVersion != LatencyResidualModel::VERSION ||
         !LatencyResidualModel::validateParameters(latency.residualParameters) ||
@@ -222,8 +214,7 @@ void MasterLatencyModelR::removeWarmupSubscriber(const std::string &sourceId)
     removeWarmupSubscriberLocked(sourceId);
 }
 
-void MasterLatencyModelR::removeWarmupSubscriberLocked(
-    const std::string &sourceId)
+void MasterLatencyModelR::removeWarmupSubscriberLocked(const std::string &sourceId)
 {
     auto keyIt = _warmupSubscriberKeys.find(sourceId);
     if (keyIt == _warmupSubscriberKeys.end()) {
@@ -239,8 +230,7 @@ void MasterLatencyModelR::removeWarmupSubscriberLocked(
     _warmupSubscriberKeys.erase(keyIt);
 }
 
-void MasterLatencyModelR::removeLiveCandidateLocked(
-    const std::string &agentId)
+void MasterLatencyModelR::removeLiveCandidateLocked(const std::string &agentId)
 {
     auto keyIt = _liveCandidateKeys.find(agentId);
     if (keyIt == _liveCandidateKeys.end()) {
@@ -256,17 +246,15 @@ void MasterLatencyModelR::removeLiveCandidateLocked(
     _liveCandidateKeys.erase(keyIt);
 }
 
-void MasterLatencyModelR::pruneLiveCandidatesLocked(
-    const ModelKey &key, CandidateMap &candidates)
+void MasterLatencyModelR::pruneLiveCandidatesLocked(const ModelKey &key,
+                                                    CandidateMap &candidates)
 {
     while (candidates.size() > _maxCandidates) {
         auto oldest = std::min_element(
-            candidates.begin(), candidates.end(), [](const auto &left,
-                                                      const auto &right) {
-                return std::tie(left.second.sourceRevision,
-                                left.second.eventTimeUs) <
-                       std::tie(right.second.sourceRevision,
-                                right.second.eventTimeUs);
+            candidates.begin(), candidates.end(),
+            [](const auto &left, const auto &right) {
+                return std::tie(left.second.sourceRevision, left.second.eventTimeUs) <
+                       std::tie(right.second.sourceRevision, right.second.eventTimeUs);
             });
         _liveCandidateKeys.erase(oldest->first);
         candidates.erase(oldest);
@@ -277,21 +265,20 @@ void MasterLatencyModelR::pruneLiveCandidatesLocked(
     }
 }
 
-void MasterLatencyModelR::markRejectedModelLocked(
-    const std::string &agentId, const std::shared_ptr<LiveEntry> &entry,
-    RejectReason reason,
-    RecordResult *recordResult)
+void MasterLatencyModelR::markRejectedModelLocked(const std::string &agentId,
+                                                  const std::shared_ptr<LiveEntry> &entry,
+                                                  RejectReason reason,
+                                                  RecordResult *recordResult)
 {
     if (!entry) {
         return;
     }
-    auto current = std::atomic_load_explicit(&entry->model,
-                                             std::memory_order_acquire);
+    auto current = std::atomic_load_explicit(&entry->model, std::memory_order_acquire);
     if (!current) {
         return;
     }
-    entry->consecutiveRejectedCount = std::min<uint32_t>(10,
-                                                          entry->consecutiveRejectedCount + 1);
+    entry->consecutiveRejectedCount =
+        std::min<uint32_t>(10, entry->consecutiveRejectedCount + 1);
     auto rejected = std::make_shared<LiveModel>(*current);
     rejected->consecutiveRejectedCount = entry->consecutiveRejectedCount;
     rejected->lastRejectReason = getRejectReasonName(reason);
@@ -299,24 +286,22 @@ void MasterLatencyModelR::markRejectedModelLocked(
         rejected->overloadPredictionTrusted = false;
         removeLiveCandidateLocked(agentId);
     }
-    const auto forcedUntrusted = current->overloadPredictionTrusted &&
-                                 !rejected->overloadPredictionTrusted;
-    std::atomic_store_explicit(
-        &entry->model, std::static_pointer_cast<const LiveModel>(rejected),
-        std::memory_order_release);
+    const auto forcedUntrusted =
+        current->overloadPredictionTrusted && !rejected->overloadPredictionTrusted;
+    std::atomic_store_explicit(&entry->model,
+                               std::static_pointer_cast<const LiveModel>(rejected),
+                               std::memory_order_release);
     if (recordResult) {
         recordResult->forcedUntrusted = forcedUntrusted;
-        recordResult->consecutiveRejectedCount =
-            rejected->consecutiveRejectedCount;
+        recordResult->consecutiveRejectedCount = rejected->consecutiveRejectedCount;
         recordResult->model = rejected;
     }
 }
 
 bool MasterLatencyModelR::record(const std::string &agentId,
                                  const std::string &fingerprint,
-                                 const AgentLatencyToMasterData &latency,
-                                 bool trusted, int64_t eventTimeUs,
-                                 const std::string &sourceId,
+                                 const AgentLatencyToMasterData &latency, bool trusted,
+                                 int64_t eventTimeUs, const std::string &sourceId,
                                  bool *liveUpdateAccepted, bool warmStarted,
                                  RecordResult *recordResult, bool rampFinished)
 {
@@ -331,14 +316,16 @@ bool MasterLatencyModelR::record(const std::string &agentId,
     const bool parametersValid =
         !agentId.empty() && latency.modelRevision > 0 &&
         latency.formula == NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL &&
-        latency.binaryVersion == NonLinearPrefillModelR::BINARY_VERSION &&
-        NonLinearPrefillModelR::validateParameters(latency.parameters) &&
+        NonLinearPrefillModelR::supportsBinaryVersion(latency.binaryVersion) &&
+        NonLinearPrefillModelR::validateParametersForVersion(latency.parameters,
+                                                             latency.binaryVersion) &&
         latency.optimizerState.valid(latency.parameters.size()) &&
         latency.residualVersion == LatencyResidualModel::VERSION &&
         LatencyResidualModel::validateParameters(latency.residualParameters) &&
         latency.residualLastUpdateTimeUs >= 0;
     const auto calculatedZeroPoint =
-        parametersValid ? NonLinearPrefillModelR::calculateZeroPoint(latency.parameters)
+        parametersValid ? NonLinearPrefillModelR::calculateZeroPoint(
+                              latency.parameters, nullptr, latency.binaryVersion)
                         : 0.0;
     const bool latencyValid = parametersValid && std::isfinite(latency.zeroPoint) &&
                               latency.zeroPoint >= 0.0 &&
@@ -356,14 +343,12 @@ bool MasterLatencyModelR::record(const std::string &agentId,
             if (liveIt != _liveModels.end() &&
                 (sourceId.empty() || liveIt->second->sourceId == sourceId)) {
                 markRejectedModelLocked(agentId, liveIt->second,
-                                         RejectReason::INVALID_MODEL,
-                                         recordResult);
+                                        RejectReason::INVALID_MODEL, recordResult);
             }
             return false;
         }
-        ModelSignature modelSignature{
-            latency.formula, latency.binaryVersion,
-            static_cast<uint32_t>(latency.parameters.size())};
+        ModelSignature modelSignature{latency.formula, latency.binaryVersion,
+                                      static_cast<uint32_t>(latency.parameters.size())};
         ModelKey modelKey{fingerprint, latency.formula, latency.binaryVersion,
                           static_cast<uint32_t>(latency.parameters.size())};
         WarmupKey warmupKey{fingerprint, latency.formula,
@@ -382,8 +367,8 @@ bool MasterLatencyModelR::record(const std::string &agentId,
         }
         auto current = liveIt == _liveModels.end()
                            ? std::shared_ptr<const LiveModel>()
-                           : std::atomic_load_explicit(
-                                 &liveIt->second->model, std::memory_order_acquire);
+                           : std::atomic_load_explicit(&liveIt->second->model,
+                                                       std::memory_order_acquire);
         if (current && current->overloadPredictionTrusted &&
             current->revision < _trustMinRevision) {
             auto downgraded = std::make_shared<LiveModel>(*current);
@@ -396,11 +381,10 @@ bool MasterLatencyModelR::record(const std::string &agentId,
             removeLiveCandidateLocked(agentId);
             current = std::move(downgraded);
         }
-        const auto sameKey = current && !(current->modelKey < modelKey) &&
-                             !(modelKey < current->modelKey);
+        const auto sameKey =
+            current && !(current->modelKey < modelKey) && !(modelKey < current->modelKey);
         const auto trustedRegression =
-            sameKey && current && current->overloadPredictionTrusted &&
-            !effectiveTrusted;
+            sameKey && current && current->overloadPredictionTrusted && !effectiveTrusted;
         const auto sameRevision =
             sameKey && current && current->revision == latency.modelRevision;
         const auto sameParameters =
@@ -421,19 +405,15 @@ bool MasterLatencyModelR::record(const std::string &agentId,
             !current || latency.modelRevision > current->revision ||
             latency.sessionSampleCount > current->sessionSampleCount ||
             latency.parameters != current->parameters ||
-            latency.optimizerState.adamMoment1 !=
-                current->optimizerState.adamMoment1 ||
-            latency.optimizerState.adamMoment2 !=
-                current->optimizerState.adamMoment2 ||
+            latency.optimizerState.adamMoment1 != current->optimizerState.adamMoment1 ||
+            latency.optimizerState.adamMoment2 != current->optimizerState.adamMoment2 ||
             latency.optimizerState.step != current->optimizerState.step ||
             latency.residualParameters != current->residualParameters ||
             latency.residualLastUpdateTimeUs != current->residualLastUpdateTimeUs;
-        const auto forcedUntrusted =
-            current && current->consecutiveRejectedCount >= 10;
+        const auto forcedUntrusted = current && current->consecutiveRejectedCount >= 10;
         const auto trustedPromotion =
             sameKey && current && !current->overloadPredictionTrusted &&
-            effectiveTrusted &&
-            (!forcedUntrusted || hasFreshModel);
+            effectiveTrusted && (!forcedUntrusted || hasFreshModel);
         if (duplicate) {
             liveIt->second->consecutiveRejectedCount = 0;
             auto acceptedModel = current;
@@ -458,10 +438,9 @@ bool MasterLatencyModelR::record(const std::string &agentId,
             ++_stats.acceptedUpdateCount;
             return false;
         }
-        const auto staleRevision =
-            sameKey && !trustedPromotion &&
-            (current->revision > latency.modelRevision ||
-             (sameRevision && !sessionProgress));
+        const auto staleRevision = sameKey && !trustedPromotion &&
+                                   (current->revision > latency.modelRevision ||
+                                    (sameRevision && !sessionProgress));
         const auto rampTrustDowngrade = trustedRegression && !rampFinished;
         if (rampTrustDowngrade && staleRevision) {
             auto downgraded = std::make_shared<LiveModel>(*current);
@@ -488,24 +467,23 @@ bool MasterLatencyModelR::record(const std::string &agentId,
         if (trustedRegression || staleRevision) {
             ++_stats.rejectedUpdateCount;
             auto &entry = liveIt->second;
-            const auto rejectReason = trustedRegression
-                                          ? RejectReason::TRUSTED_REGRESSION
-                                          : RejectReason::STALE_REVISION;
+            const auto rejectReason = trustedRegression ? RejectReason::TRUSTED_REGRESSION
+                                                        : RejectReason::STALE_REVISION;
             if (recordResult) {
                 recordResult->rejectReason = rejectReason;
             }
             markRejectedModelLocked(agentId, entry, rejectReason, recordResult);
             return false;
         }
-        const auto currentCandidateEligible =
-            sameKey && current && current->overloadPredictionTrusted &&
-            current->revision >= _sourceMinRevision;
+        const auto currentCandidateEligible = sameKey && current &&
+                                              current->overloadPredictionTrusted &&
+                                              current->revision >= _sourceMinRevision;
         const auto candidateEligible =
             effectiveTrusted && latency.modelRevision >= _sourceMinRevision;
         const auto becameCandidateEligible =
             candidateEligible && !currentCandidateEligible;
-        auto entry = liveIt == _liveModels.end() ? std::make_shared<LiveEntry>()
-                                                 : liveIt->second;
+        auto entry =
+            liveIt == _liveModels.end() ? std::make_shared<LiveEntry>() : liveIt->second;
         if (liveIt == _liveModels.end()) {
             entry->sourceId = sourceId;
             _liveModels[agentId] = entry;
@@ -528,9 +506,9 @@ bool MasterLatencyModelR::record(const std::string &agentId,
         model->residualVersion = latency.residualVersion;
         model->residualParameters = latency.residualParameters;
         model->residualLastUpdateTimeUs = latency.residualLastUpdateTimeUs;
-        std::atomic_store_explicit(
-            &entry->model, std::static_pointer_cast<const LiveModel>(model),
-            std::memory_order_release);
+        std::atomic_store_explicit(&entry->model,
+                                   std::static_pointer_cast<const LiveModel>(model),
+                                   std::memory_order_release);
         if (liveUpdateAccepted) {
             *liveUpdateAccepted = true;
         }
@@ -603,9 +581,8 @@ bool MasterLatencyModelR::record(const std::string &agentId,
             removeLiveCandidateLocked(agentId);
         }
 
-        const bool persistentValid =
-            validFingerprint(fingerprint) && effectiveTrusted &&
-            latency.modelRevision >= _sourceMinRevision;
+        const bool persistentValid = validFingerprint(fingerprint) && effectiveTrusted &&
+                                     latency.modelRevision >= _sourceMinRevision;
         if (!persistentValid) {
             ++_stats.acceptedUpdateCount;
             result = true;
@@ -625,8 +602,7 @@ bool MasterLatencyModelR::record(const std::string &agentId,
             _dirty = true;
             const auto currentTimeUs = autil::TimeUtility::currentTime();
             result = _stateFile.empty() ||
-                     currentTimeUs - _lastPersistTimeUs <
-                         _persistIntervalMs * 1000 ||
+                     currentTimeUs - _lastPersistTimeUs < _persistIntervalMs * 1000 ||
                      saveLocked();
         }
     }
@@ -651,10 +627,8 @@ void MasterLatencyModelR::removeAgent(const std::string &agentId,
         removeWarmupSubscriberLocked(it->second->sourceId);
         removeLiveCandidateLocked(agentId);
         it->second->active.store(false, std::memory_order_release);
-        std::atomic_store_explicit(
-            &it->second->model,
-            std::shared_ptr<const LiveModel>(),
-            std::memory_order_release);
+        std::atomic_store_explicit(&it->second->model, std::shared_ptr<const LiveModel>(),
+                                   std::memory_order_release);
         _liveModels.erase(it);
         publishLiveEntriesLocked();
         removed = true;
@@ -675,33 +649,30 @@ LatencyModelGlobalData MasterLatencyModelR::getGlobalZeroPoint(
     if (!targets) {
         return {};
     }
-    ModelSignature key{formula, binaryVersion,
-                       static_cast<uint32_t>(parameterCount)};
+    ModelSignature key{formula, binaryVersion, static_cast<uint32_t>(parameterCount)};
     auto it = targets->find(key);
     return it == targets->end() ? LatencyModelGlobalData() : it->second;
 }
 
 MasterLatencyModelR::GlobalZeroPointDiagnostics
-MasterLatencyModelR::getGlobalZeroPointDiagnostics(
-    int32_t formula, int64_t binaryVersion, size_t parameterCount) const
+MasterLatencyModelR::getGlobalZeroPointDiagnostics(int32_t formula, int64_t binaryVersion,
+                                                   size_t parameterCount) const
 {
     GlobalZeroPointDiagnostics diagnostics;
     if (parameterCount > std::numeric_limits<uint32_t>::max()) {
-        diagnostics.invalidReason =
-            GlobalZeroPointInvalidReason::PARAMETER_COUNT_INVALID;
+        diagnostics.invalidReason = GlobalZeroPointInvalidReason::PARAMETER_COUNT_INVALID;
         return diagnostics;
     }
     const ModelSignature key{formula, binaryVersion,
                              static_cast<uint32_t>(parameterCount)};
-    auto entries =
-        std::atomic_load_explicit(&_liveEntries, std::memory_order_acquire);
+    auto entries = std::atomic_load_explicit(&_liveEntries, std::memory_order_acquire);
     if (entries) {
         for (const auto &entry : *entries) {
             if (!entry || !entry->active.load(std::memory_order_acquire)) {
                 continue;
             }
-            auto model = std::atomic_load_explicit(
-                &entry->model, std::memory_order_acquire);
+            auto model =
+                std::atomic_load_explicit(&entry->model, std::memory_order_acquire);
             if (!model || !entry->active.load(std::memory_order_acquire) ||
                 model->signature < key || key < model->signature) {
                 continue;
@@ -719,31 +690,25 @@ MasterLatencyModelR::getGlobalZeroPointDiagnostics(
     }
     auto it = targets->find(key);
     if (it == targets->end()) {
-        diagnostics.invalidReason =
-            GlobalZeroPointInvalidReason::GROUP_NOT_FOUND;
+        diagnostics.invalidReason = GlobalZeroPointInvalidReason::GROUP_NOT_FOUND;
         return diagnostics;
     }
     diagnostics.data = it->second;
     const auto &data = diagnostics.data;
     if (data.masterEpoch <= 0) {
-        diagnostics.invalidReason =
-            GlobalZeroPointInvalidReason::MASTER_EPOCH_NOT_SET;
+        diagnostics.invalidReason = GlobalZeroPointInvalidReason::MASTER_EPOCH_NOT_SET;
     } else if (data.version == 0) {
         diagnostics.invalidReason = GlobalZeroPointInvalidReason::VERSION_NOT_SET;
     } else if (data.formula != formula) {
         diagnostics.invalidReason = GlobalZeroPointInvalidReason::FORMULA_MISMATCH;
     } else if (data.binaryVersion <= 0 || data.binaryVersion != binaryVersion) {
-        diagnostics.invalidReason =
-            GlobalZeroPointInvalidReason::BINARY_VERSION_INVALID;
+        diagnostics.invalidReason = GlobalZeroPointInvalidReason::BINARY_VERSION_INVALID;
     } else if (data.parameterCount == 0 || data.parameterCount != parameterCount) {
-        diagnostics.invalidReason =
-            GlobalZeroPointInvalidReason::PARAMETER_COUNT_INVALID;
+        diagnostics.invalidReason = GlobalZeroPointInvalidReason::PARAMETER_COUNT_INVALID;
     } else if (!std::isfinite(data.globalZeroPoint)) {
-        diagnostics.invalidReason =
-            GlobalZeroPointInvalidReason::ZERO_POINT_NON_FINITE;
+        diagnostics.invalidReason = GlobalZeroPointInvalidReason::ZERO_POINT_NON_FINITE;
     } else if (data.globalZeroPoint < 0.0) {
-        diagnostics.invalidReason =
-            GlobalZeroPointInvalidReason::ZERO_POINT_NEGATIVE;
+        diagnostics.invalidReason = GlobalZeroPointInvalidReason::ZERO_POINT_NEGATIVE;
     } else {
         diagnostics.invalidReason = GlobalZeroPointInvalidReason::NONE;
     }
@@ -772,15 +737,14 @@ void MasterLatencyModelR::refreshGlobalZeroPoint()
         double coldWeight = 0.0;
     };
     std::map<ModelSignature, Accumulator> accumulators;
-    auto entries =
-        std::atomic_load_explicit(&_liveEntries, std::memory_order_acquire);
+    auto entries = std::atomic_load_explicit(&_liveEntries, std::memory_order_acquire);
     if (entries) {
         for (const auto &entry : *entries) {
             if (!entry || !entry->active.load(std::memory_order_acquire)) {
                 continue;
             }
-            auto model = std::atomic_load_explicit(
-                &entry->model, std::memory_order_acquire);
+            auto model =
+                std::atomic_load_explicit(&entry->model, std::memory_order_acquire);
             if (!model || !entry->active.load(std::memory_order_acquire)) {
                 continue;
             }
@@ -790,9 +754,8 @@ void MasterLatencyModelR::refreshGlobalZeroPoint()
                 ++accumulator.stableCount;
                 continue;
             }
-            const auto weight = std::min(
-                1.0, static_cast<double>(model->revision) /
-                         _sourceMinRevision);
+            const auto weight =
+                std::min(1.0, static_cast<double>(model->revision) / _sourceMinRevision);
             accumulator.coldWeightedSum += weight * model->zeroPoint;
             accumulator.coldWeight += weight;
         }
@@ -837,12 +800,10 @@ void MasterLatencyModelR::pruneLocked(CandidateMap &candidates)
 {
     while (candidates.size() > _maxCandidates) {
         auto oldest = std::min_element(
-            candidates.begin(), candidates.end(), [](const auto &left,
-                                                      const auto &right) {
-                return std::tie(left.second.sourceRevision,
-                                left.second.eventTimeUs) <
-                       std::tie(right.second.sourceRevision,
-                                right.second.eventTimeUs);
+            candidates.begin(), candidates.end(),
+            [](const auto &left, const auto &right) {
+                return std::tie(left.second.sourceRevision, left.second.eventTimeUs) <
+                       std::tie(right.second.sourceRevision, right.second.eventTimeUs);
             });
         candidates.erase(oldest);
     }
@@ -854,43 +815,40 @@ MasterLatencyModelWarmupToAgentDataPtr MasterLatencyModelR::makeWarmup(
 {
     autil::ScopedLock lock(_lock);
     uint64_t candidateVersion = 0;
-    return makeWarmupLocked(fingerprint, formula, binaryVersion, parameterCount,
-                            0, candidateVersion);
+    return makeWarmupLocked(fingerprint, formula, binaryVersion, parameterCount, 0,
+                            candidateVersion);
 }
 
 MasterLatencyModelWarmupToAgentDataPtr MasterLatencyModelR::makeWarmupIfNew(
     const std::string &fingerprint, int32_t formula, int64_t binaryVersion,
-    size_t parameterCount, uint64_t lastCandidateVersion,
-    uint64_t &candidateVersion)
+    size_t parameterCount, uint64_t lastCandidateVersion, uint64_t &candidateVersion)
 {
     autil::ScopedLock lock(_lock);
     return makeWarmupLocked(fingerprint, formula, binaryVersion, parameterCount,
                             lastCandidateVersion, candidateVersion);
 }
 
-uint64_t MasterLatencyModelR::getWarmupCandidateVersion(
-    const std::string &fingerprint, int32_t formula,
-    size_t parameterCount) const
+uint64_t MasterLatencyModelR::getWarmupCandidateVersion(const std::string &fingerprint,
+                                                        int32_t formula,
+                                                        size_t parameterCount) const
 {
     if (!validFingerprint(fingerprint) ||
         parameterCount > std::numeric_limits<uint32_t>::max()) {
         return 0;
     }
     autil::ScopedLock lock(_lock);
-    const WarmupKey key{fingerprint, formula,
-                        static_cast<uint32_t>(parameterCount)};
+    const WarmupKey key{fingerprint, formula, static_cast<uint32_t>(parameterCount)};
     auto it = _warmupGroups.find(key);
     return it == _warmupGroups.end() ? 0 : it->second.version;
 }
 
 MasterLatencyModelWarmupToAgentDataPtr MasterLatencyModelR::makeWarmupLocked(
     const std::string &fingerprint, int32_t formula, int64_t binaryVersion,
-    size_t parameterCount, uint64_t lastCandidateVersion,
-    uint64_t &candidateVersion)
+    size_t parameterCount, uint64_t lastCandidateVersion, uint64_t &candidateVersion)
 {
     candidateVersion = 0;
     if (!validFingerprint(fingerprint) ||
-        binaryVersion != NonLinearPrefillModelR::BINARY_VERSION ||
+        !NonLinearPrefillModelR::supportsBinaryVersion(binaryVersion) ||
         parameterCount > std::numeric_limits<uint32_t>::max()) {
         return nullptr;
     }
@@ -926,12 +884,9 @@ MasterLatencyModelWarmupToAgentDataPtr MasterLatencyModelR::makeWarmupLocked(
     if (ordered.empty()) {
         return nullptr;
     }
-    std::sort(ordered.begin(), ordered.end(), [](const auto &left,
-                                                 const auto &right) {
-        return std::tie(left.candidate->sourceRevision,
-                        left.candidate->eventTimeUs) >
-               std::tie(right.candidate->sourceRevision,
-                        right.candidate->eventTimeUs);
+    std::sort(ordered.begin(), ordered.end(), [](const auto &left, const auto &right) {
+        return std::tie(left.candidate->sourceRevision, left.candidate->eventTimeUs) >
+               std::tie(right.candidate->sourceRevision, right.candidate->eventTimeUs);
     });
     auto warmup = std::make_shared<MasterLatencyModelWarmupToAgentData>();
     warmup->fingerprint = fingerprint;
@@ -947,12 +902,10 @@ MasterLatencyModelWarmupToAgentDataPtr MasterLatencyModelR::makeWarmupLocked(
                         })) {
             continue;
         }
-        warmup->candidates.push_back({candidate->sourceRevision,
-                                      candidate->parameters,
-                                      candidate->optimizerState,
-                                      candidate->residualVersion,
-                                      candidate->residualParameters,
-                                      candidate->residualLastUpdateTimeUs});
+        warmup->candidates.push_back(
+            {candidate->sourceRevision, candidate->parameters, candidate->optimizerState,
+             candidate->residualVersion, candidate->residualParameters,
+             candidate->residualLastUpdateTimeUs});
         if (warmup->candidates.size() >= _maxCandidates) {
             break;
         }
@@ -970,8 +923,7 @@ void MasterLatencyModelR::notifyWarmupSubscribers(
     uint64_t successCount = 0;
     uint64_t failureCount = 0;
     for (const auto &pipe : notificationPipes) {
-        if (pipe && navi::EC_NONE ==
-                        pipe->setDataOverride(nullptr, true, true)) {
+        if (pipe && navi::EC_NONE == pipe->setDataOverride(nullptr, true, true)) {
             ++successCount;
         } else {
             ++failureCount;
@@ -1015,10 +967,9 @@ bool MasterLatencyModelR::saveLocked()
             payloadBuffer.write(candidate.residualLastUpdateTimeUs);
         }
     }
-    const std::string payload(payloadBuffer.getData(),
-                              payloadBuffer.getDataLen());
-    const auto checksum = autil::CRC32C::Mask(
-        autil::CRC32C::Value(payload.data(), payload.size()));
+    const std::string payload(payloadBuffer.getData(), payloadBuffer.getDataLen());
+    const auto checksum =
+        autil::CRC32C::Mask(autil::CRC32C::Value(payload.data(), payload.size()));
     autil::DataBuffer buffer;
     buffer.write(STATE_MAGIC);
     buffer.write(STATE_VERSION);
@@ -1092,8 +1043,8 @@ bool MasterLatencyModelR::loadLocked()
         uint32_t expectedChecksum = 0;
         buffer.read(expectedChecksum);
         buffer.read(payload);
-        const auto actualChecksum = autil::CRC32C::Mask(
-            autil::CRC32C::Value(payload.data(), payload.size()));
+        const auto actualChecksum =
+            autil::CRC32C::Mask(autil::CRC32C::Value(payload.data(), payload.size()));
         if (buffer.getDataLen() != 0 || actualChecksum != expectedChecksum) {
             return false;
         }
@@ -1119,10 +1070,13 @@ bool MasterLatencyModelR::loadLocked()
             const auto supportedParameterCount =
                 key.parameterCount == NonLinearPrefillModelR::PARAMETER_COUNT ||
                 key.parameterCount ==
-                    NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT;
+                    NonLinearPrefillModelR::CAPACITY_SPLIT_PARAMETER_COUNT ||
+                (NonLinearPrefillModelR::usesCacheSourceForVersion(key.binaryVersion) &&
+                 key.parameterCount ==
+                     NonLinearPrefillModelR::CACHE_SOURCE_PARAMETER_COUNT);
             const auto currentModelKey =
                 key.formula == NAVI_SCHED_LATENCY_FORMULA_NONLINEAR_PREFILL &&
-                key.binaryVersion == NonLinearPrefillModelR::BINARY_VERSION &&
+                NonLinearPrefillModelR::supportsBinaryVersion(key.binaryVersion) &&
                 supportedParameterCount;
             if (!currentModelKey) {
                 return true;
@@ -1142,8 +1096,8 @@ bool MasterLatencyModelR::loadLocked()
                 if (candidate.agentId.empty() ||
                     candidate.sourceRevision < _sourceMinRevision ||
                     candidate.parameters.size() != key.parameterCount ||
-                    !NonLinearPrefillModelR::validateParameters(
-                        candidate.parameters) ||
+                    !NonLinearPrefillModelR::validateParametersForVersion(
+                        candidate.parameters, key.binaryVersion) ||
                     !candidate.optimizerState.valid(key.parameterCount)) {
                     return false;
                 }
@@ -1170,8 +1124,7 @@ bool MasterLatencyModelR::loadLocked()
             if (candidates.empty()) {
                 continue;
             }
-            WarmupKey warmupKey{key.fingerprint, key.formula,
-                                key.parameterCount};
+            WarmupKey warmupKey{key.fingerprint, key.formula, key.parameterCount};
             auto &group = _warmupGroups[warmupKey];
             if (group.version == 0) {
                 group.version = _nextWarmupVersion++;
@@ -1212,22 +1165,16 @@ navi::SummaryErrorCode MasterLatencyModelR::getSummary(
     auto table = builder.newTable("MasterLatencyModelOverview");
     TABLE_ADD_COLUMN_VALUE(table, "fingerprint_count", stats.fingerprintCount);
     TABLE_ADD_COLUMN_VALUE(table, "candidate_count", stats.candidateCount);
-    TABLE_ADD_COLUMN_VALUE(table, "accepted_update_count",
-                           stats.acceptedUpdateCount);
-    TABLE_ADD_COLUMN_VALUE(table, "rejected_update_count",
-                           stats.rejectedUpdateCount);
-    TABLE_ADD_COLUMN_VALUE(table, "warmup_response_count",
-                           stats.warmupResponseCount);
+    TABLE_ADD_COLUMN_VALUE(table, "accepted_update_count", stats.acceptedUpdateCount);
+    TABLE_ADD_COLUMN_VALUE(table, "rejected_update_count", stats.rejectedUpdateCount);
+    TABLE_ADD_COLUMN_VALUE(table, "warmup_response_count", stats.warmupResponseCount);
     TABLE_ADD_COLUMN_VALUE(table, "warmup_notification_count",
                            stats.warmupNotificationCount);
     TABLE_ADD_COLUMN_VALUE(table, "warmup_notification_failure_count",
                            stats.warmupNotificationFailureCount);
-    TABLE_ADD_COLUMN_VALUE(table, "warmup_subscriber_count",
-                           stats.warmupSubscriberCount);
-    TABLE_ADD_COLUMN_VALUE(table, "persist_success_count",
-                           stats.persistSuccessCount);
-    TABLE_ADD_COLUMN_VALUE(table, "persist_failure_count",
-                           stats.persistFailureCount);
+    TABLE_ADD_COLUMN_VALUE(table, "warmup_subscriber_count", stats.warmupSubscriberCount);
+    TABLE_ADD_COLUMN_VALUE(table, "persist_success_count", stats.persistSuccessCount);
+    TABLE_ADD_COLUMN_VALUE(table, "persist_failure_count", stats.persistFailureCount);
     TABLE_ADD_COLUMN_VALUE(table, "global_zero_point_live_node_count",
                            stats.globalZeroPointLiveNodeCount);
     TABLE_ADD_COLUMN_VALUE(table, "global_zero_point_group_count",
