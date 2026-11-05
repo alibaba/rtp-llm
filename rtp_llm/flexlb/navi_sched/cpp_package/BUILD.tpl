@@ -27,7 +27,7 @@ cc_library(
     name = "navi_sched_api",
     hdrs = glob(
         ["include/**/*.h"],
-        exclude = ["include/aios/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"],
+        exclude = ["include/rtp_llm/flexlb/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h"],
     ),
     includes = ["include"],
     deps = [
@@ -43,7 +43,7 @@ cc_library(
 cc_library(
     name = "navi_sched",
     hdrs = [
-        "include/aios/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h",
+        "include/rtp_llm/flexlb/navi_sched/adapters/rtp_llm/RtpLLMAdapter.h",
     ],
     includes = ["include"],
     deps = [
