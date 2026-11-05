@@ -10,6 +10,8 @@
 #include <unordered_set>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/cache/GdnPrefillMemory.h"
+#include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
@@ -162,11 +164,19 @@ PDFusionRatioScheduler::PDFusionRatioScheduler(const RuntimeConfig&             
                       model_specific_config,
                       cache_manager,
                       metrics_reporter),
+    gdn_prefill_memory_budget_(MemoryEvaluationHelper::hasGdnPrefill(model_config)),
     current_kv_admission_(currentKVAdmissionFromEnv()),
     trace_enabled_(runtime_config.fifo_scheduler_config.pdfusion_schedule_trace),
     decode_prefill_step_(parseDecodePrefillRatio(runtime_config.fifo_scheduler_config.decode_prefill_ratio)),
     decode_since_prefill_(0),
     prefill_since_decode_(0) {
+    if (gdn_prefill_memory_budget_ && runtime_config.fifo_scheduler_config.max_batch_tokens_size <= 0) {
+        throw std::invalid_argument("GDN PDFusion requires a positive MAX_BATCH_TOKENS_SIZE");
+    }
+    RTP_LLM_LOG_INFO("PDFUSION_GDN_PREFILL_BUDGET enabled=%d tokens=%zu sequences=%zu",
+                     gdn_prefill_memory_budget_,
+                     max_batch_tokens_size_,
+                     max_generate_batch_size_);
     RTP_LLM_LOG_INFO("PDFUSION_KV_ADMISSION mode=%s", current_kv_admission_ ? "current" : "lifetime");
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu]",
                      max_generate_batch_size_,
@@ -187,11 +197,68 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
     return evaluatePrefillMemory(streams, new_stream, false);
 }
 
+bool PDFusionRatioScheduler::evaluateGdnPrefillBudget(const list<GenerateStreamPtr>& streams,
+                                                      const GenerateStreamPtr&       new_stream) {
+    size_t used_tokens    = 0;
+    size_t used_sequences = 0;
+    auto   fits           = [&](const GenerateStreamPtr& stream) {
+        return GdnPrefillMemory::tryAdd(used_tokens,
+                                        used_sequences,
+                                        static_cast<size_t>(std::max(stream->contextLength(), 0)),
+                                        static_cast<size_t>(std::max(stream->currentBatchSize(), 1)),
+                                        max_batch_tokens_size_,
+                                        max_generate_batch_size_);
+    };
+    if (!fits(new_stream)) {
+        // No chunked prefill implementation exists on this path. Never bypass
+        // the workspace budget for a standalone request or leave it queued
+        // forever. This runs before CanRun/KV admission and model collectives.
+        new_stream->reportError(
+            ErrorCode::MALLOC_FAILED,
+            autil::StringUtil::formatString(
+                "GDN prefill request exceeds runtime memory budget: context=%d width=%d; "
+                "require packed tokens < MAX_BATCH_TOKENS_SIZE=%zu and sequences <= %zu. "
+                "Increase the budget together with runtime memory reserve; input was not truncated.",
+                new_stream->contextLength(),
+                new_stream->currentBatchSize(),
+                max_batch_tokens_size_,
+                max_generate_batch_size_));
+        if (trace_enabled_) {
+            ++observation_.rejected_tokens;
+        }
+        return false;
+    }
+    std::unordered_set<GenerateStream*> included{new_stream.get()};
+    auto add = [&](const GenerateStreamPtr& stream) { return !included.insert(stream.get()).second || fits(stream); };
+    bool within_budget = true;
+    for (const auto& stream : streams) {
+        if (stream->isContextStream() && !stream->hasError()) {
+            within_budget = within_budget && add(stream);
+        }
+    }
+    // Include already admitted asynchronous loads/ready reservations even in
+    // ratio mode. They may become executable together in a later round.
+    for (const auto* queue : {&loading_cache_streams_, &new_streams_, &waiting_streams_}) {
+        for (const auto& stream : *queue) {
+            if (stream->isContextStream() && !stream->hasError() && isAdmittedWaitingStream(stream)) {
+                within_budget = within_budget && add(stream);
+            }
+        }
+    }
+    if (!within_budget && trace_enabled_) {
+        ++observation_.rejected_tokens;
+    }
+    return within_budget;
+}
+
 bool PDFusionRatioScheduler::evaluatePrefillMemory(const list<GenerateStreamPtr>& streams,
                                                    const GenerateStreamPtr&       new_stream,
                                                    bool                           packed_tokens) {
     RTP_LLM_PROFILE_FUNCTION();
     if (!new_stream->isContextStream()) {
+        return false;
+    }
+    if (gdn_prefill_memory_budget_ && !evaluateGdnPrefillBudget(streams, new_stream)) {
         return false;
     }
     // The peak state is built once per prefill round and updated after every successful admission,
@@ -216,7 +283,7 @@ bool PDFusionRatioScheduler::evaluatePrefillMemory(const list<GenerateStreamPtr>
         // Already loaded/loading reservations are supplied by the coordinated scheduler.
         // Preserve the legacy exclusive boundary and standalone-request exception.
         size_t used = 0;
-        auto fits = [&](const GenerateStreamPtr& stream) {
+        auto   fits = [&](const GenerateStreamPtr& stream) {
             const auto tokens = static_cast<size_t>(std::max(stream->contextLength(), 0))
                                 * static_cast<size_t>(std::max(stream->currentBatchSize(), 1));
             if (used >= max_batch_tokens_size_ || tokens >= max_batch_tokens_size_ - used) {

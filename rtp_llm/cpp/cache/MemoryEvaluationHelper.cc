@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 
 #include <numeric>
+#include <stdexcept>
+#include "rtp_llm/cpp/cache/GdnPrefillMemory.h"
 
 #if USING_CUDA
 #include <cuda_runtime.h>
@@ -16,6 +18,38 @@
 #endif
 
 namespace rtp_llm {
+
+bool MemoryEvaluationHelper::hasGdnPrefill(const ModelConfig& model_config) {
+    const auto& linear = model_config.linear_attention_config;
+    return linear.linear_conv_kernel_dim > 1 && linear.linear_num_key_heads > 0 && linear.linear_num_value_heads > 0
+           && linear.linear_key_head_dim > 0 && linear.linear_value_head_dim > 0;
+}
+
+size_t MemoryEvaluationHelper::getGdnPrefillMemorySize(const RuntimeConfig&     runtime_config,
+                                                       const ParallelismConfig& parallelism_config,
+                                                       const ModelConfig&       model_config) {
+    if (!hasGdnPrefill(model_config)) {
+        return 0;
+    }
+    const auto& linear = model_config.linear_attention_config;
+    const auto  tp     = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
+    if (linear.linear_num_key_heads % tp || linear.linear_num_value_heads % tp) {
+        throw std::invalid_argument("GDN prefill heads must be divisible by attention TP");
+    }
+    const auto configured_tokens = runtime_config.fifo_scheduler_config.max_batch_tokens_size;
+    const auto tokens            = configured_tokens > 0 ? configured_tokens : model_config.max_seq_len;
+    if (tokens <= 0 || runtime_config.max_generate_batch_size <= 0) {
+        throw std::invalid_argument("GDN prefill requires positive token and sequence budgets");
+    }
+    return GdnPrefillMemory::estimate(static_cast<size_t>(tokens),
+                                      static_cast<size_t>(runtime_config.max_generate_batch_size),
+                                      linear.linear_num_key_heads / tp,
+                                      linear.linear_num_value_heads / tp,
+                                      linear.linear_key_head_dim,
+                                      linear.linear_value_head_dim,
+                                      std::max<int64_t>(0, model_config.hidden_size),
+                                      std::max<size_t>(2, getTypeSize(model_config.data_type)));
+}
 
 // Helper function to update memory size if below minimum requirement
 void MemoryEvaluationHelper::updateMemoryIfNeeded(size_t& current_size, size_t min_required, const char* scenario) {
@@ -76,6 +110,21 @@ size_t MemoryEvaluationHelper::getDefaultRuntimeMemorySize(const RuntimeConfig& 
         updateMemoryIfNeeded(reserve_runtime_mem_bytes, minimal_runtime_required, "speculative decoding");
     }
 
+    const auto gdn_prefill_bytes = getGdnPrefillMemorySize(runtime_config, parallelism_config, model_config);
+    if (gdn_prefill_bytes > 0) {
+        // GDN activations scale with the scheduled token budget, not KV dtype
+        // or request count. Keep the ordinary reserve for ViT, graph pools,
+        // other layers and allocator/workspace overhead as well.
+        updateMemoryIfNeeded(reserve_runtime_mem_bytes,
+                             GdnPrefillMemory::add(static_cast<size_t>(minimal_runtime_bytes), gdn_prefill_bytes),
+                             "GDN prefill plus ordinary runtime");
+        RTP_LLM_LOG_INFO("GDN prefill estimate=%zu MiB, token_budget=%ld, sequence_budget=%ld, attention_tp=%ld",
+                         gdn_prefill_bytes / 1024 / 1024,
+                         runtime_config.fifo_scheduler_config.max_batch_tokens_size,
+                         runtime_config.max_generate_batch_size,
+                         parallelism_config.get_attn_tp_size());
+    }
+
     return reserve_runtime_mem_bytes;
 }
 
@@ -88,7 +137,7 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
     size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
     size_t runtime_required_bytes       = 0;
 
-    if (kv_cache_config.kv_cache_mem_mb > 0) {
+    if (kv_cache_config.kv_cache_mem_mb > 0 && !hasGdnPrefill(model_config)) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",
                          kv_cache_config.kv_cache_mem_mb);
         return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
@@ -127,6 +176,21 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                      sample_need_mem / 1024 / 1024,
                      runtime_required_bytes / 1024 / 1024);
     runtime_required_bytes = std::max(sample_need_mem, runtime_required_bytes);
+
+    if (hasGdnPrefill(model_config)) {
+        const size_t explicit_kv_bytes =
+            kv_cache_config.kv_cache_mem_mb > 0 ?
+                GdnPrefillMemory::multiply(static_cast<size_t>(kv_cache_config.kv_cache_mem_mb), 1024 * 1024) :
+                0;
+        const auto bytes =
+            GdnPrefillMemory::kvCacheBytes(device_reserved_memory_bytes, runtime_required_bytes, explicit_kv_bytes);
+        RTP_LLM_LOG_INFO("GDN cache budget: available=%zu MiB runtime=%zu MiB KV=%zu MiB explicit=%d",
+                         device_reserved_memory_bytes / 1024 / 1024,
+                         runtime_required_bytes / 1024 / 1024,
+                         bytes / 1024 / 1024,
+                         explicit_kv_bytes != 0);
+        return bytes;
+    }
 
     RTP_LLM_CHECK_WITH_INFO(device_reserved_memory_bytes > runtime_required_bytes,
                             "device reserved memory %ld  MiB is less than runtime required memory %ld MiB",

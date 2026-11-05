@@ -45,24 +45,26 @@ protected:
     const char* schedulerName() const override {
         return "PDFusionRatioScheduler";
     }
-    bool      evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
-                                    const GenerateStreamPtr&            new_stream) override;
-    bool      evaluatePrefillMemory(const std::list<GenerateStreamPtr>& streams,
-                                    const GenerateStreamPtr&            new_stream,
-                                    bool                                packed_tokens);
-    bool      waitPredicate() override;
-    void      cancelExtraStreams() override;
-    bool      hasExtraStreams() const override;
-    int64_t   extraOnflightStreams() const override;
-    void      fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
-    size_t    reapErroredWaitingStreams();
-    size_t    reapFinished(std::list<GenerateStreamPtr>& streams);
-    size_t    promotePendingDecodeStreams();
+    bool    evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
+                                  const GenerateStreamPtr&            new_stream) override;
+    bool    evaluatePrefillMemory(const std::list<GenerateStreamPtr>& streams,
+                                  const GenerateStreamPtr&            new_stream,
+                                  bool                                packed_tokens);
+    bool    evaluateGdnPrefillBudget(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream);
+    bool    waitPredicate() override;
+    void    cancelExtraStreams() override;
+    bool    hasExtraStreams() const override;
+    int64_t extraOnflightStreams() const override;
+    void    fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
+    size_t  reapErroredWaitingStreams();
+    size_t  reapFinished(std::list<GenerateStreamPtr>& streams);
+    size_t  promotePendingDecodeStreams();
     RoundType chooseRound();
     bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);
 
     void                admitWaitingForCoordination(const std::list<GenerateStreamPtr>& ready_reservations = {});
     void                observeCommitted(const std::list<GenerateStreamPtr>& streams, bool prefill);
+    const bool          gdn_prefill_memory_budget_;
     const bool          current_kv_admission_;
     const bool          trace_enabled_;
     ScheduleObservation observation_;

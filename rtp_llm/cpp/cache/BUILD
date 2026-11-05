@@ -314,6 +314,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":gdn_prefill_memory",
         ":batch_kv_cache_resource",
         ":cache_types",
         ":kv_cache_allocator",
@@ -376,4 +377,10 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
+)
+
+cc_library(
+    name = "gdn_prefill_memory",
+    hdrs = ["GdnPrefillMemory.h"],
+    visibility = ["//visibility:public"],
 )

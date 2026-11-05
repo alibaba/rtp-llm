@@ -386,3 +386,14 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "gdn_prefill_memory_test",
+    srcs = ["GdnPrefillMemoryTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:gdn_prefill_memory",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

@@ -11,6 +11,10 @@ namespace rtp_llm {
 
 class MemoryEvaluationHelper {
 public:
+    static bool   hasGdnPrefill(const ModelConfig& model_config);
+    static size_t getGdnPrefillMemorySize(const RuntimeConfig&     runtime_config,
+                                          const ParallelismConfig& parallelism_config,
+                                          const ModelConfig&       model_config);
     static size_t
                   getDefaultRuntimeMemorySize(const RuntimeConfig&                             runtime_config,
                                               const ParallelismConfig&                         parallelism_config,

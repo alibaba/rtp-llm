@@ -27,7 +27,8 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help=(
             "最大 batch tokens 大小。adaptive cadence 累加 "
             "contextLength * currentBatchSize，包含已保留/加载中的 Prefill；"
-            "保留原有严格小于边界和单请求特例。legacy ratio 仍使用最长长度估算。"
+            "保持严格小于边界；GDN PDFusion 的单条请求也受运行显存预算限制，"
+            "超限返回资源不足，不截断输入。其他模型保留单请求特例。legacy ratio 仍使用最长长度估算。"
         ),
     )
     fifo_scheduler_group.add_argument(

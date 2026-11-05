@@ -74,3 +74,15 @@ cc_test(
     ],
     copts = copts(),
 )
+
+cc_test(
+    name = "gdn_prefill_scheduler_test",
+    srcs = ["GdnPrefillSchedulerTest.cc"],
+    copts = copts() + ["-fno-access-control"],
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    ],
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "A10"},
+)
