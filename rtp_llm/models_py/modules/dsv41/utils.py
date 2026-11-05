@@ -7,6 +7,9 @@ from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
+from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
+    SM90_DIRECT_SCALE_MAX_TOKENS,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
@@ -135,7 +138,7 @@ class V41MXFP8Linear(torch.nn.Module):
             adapter is not None
             and hasattr(adapter, "forward_bf16")
             and x.dtype == torch.bfloat16
-            and x.numel() // self.K <= 16
+            and x.numel() // self.K <= SM90_DIRECT_SCALE_MAX_TOKENS
         ):
             return adapter.forward_bf16(x, out=out)
         return self.forward_quantized(*self._quantize_input(x), out=out)

@@ -89,6 +89,19 @@ py_test(
 )
 
 py_test(
+    name = "test_sm90_decode_batch_optimizations",
+    srcs = ["test_sm90_decode_batch_optimizations.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_sm90_decode_batch_optimizations.py)"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", test_requirement("pytest")],
+    tags = ["manual", "dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({"@//:using_cuda13_x86": [], "//conditions:default": ["@platforms//:incompatible"]}),
+    legacy_create_init = 0,
+)
+
+py_test(
     name = "test_sm90_engram_registration_ranges",
     srcs = ["test_sm90_engram_registration_ranges.py", "//rtp_llm/test/pytest:pytest_main.py"],
     main = "//rtp_llm/test/pytest:pytest_main.py",

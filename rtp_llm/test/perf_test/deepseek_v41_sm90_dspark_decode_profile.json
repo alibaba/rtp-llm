@@ -1,0 +1,58 @@
+{
+  "model_type": "deepseek_v41",
+  "architecture": "SM90",
+  "batch_size_semantics": "requests per DP rank",
+  "gamma": [
+    3,
+    4,
+    5
+  ],
+  "batch_sizes": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16
+  ],
+  "baseline": {
+    "decode_capture_config": "1,2,3,4,6,8,16,24,32,64,128"
+  },
+  "optimized": {
+    "decode_capture_config": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,24,32,64,128"
+  },
+  "target_rows": "batch_size * (gamma + 1)",
+  "draft_rows": "batch_size * gamma",
+  "zero_batch": "idle rank participating alongside nonempty ranks; no per-token latency for all-idle",
+  "performance": {
+    "input_tokens": 8192,
+    "output_tokens": 512,
+    "warmup_output_tokens": 128,
+    "repeats": 3,
+    "force_sp_accept": true,
+    "synthetic_kv": true
+  },
+  "accuracy": {
+    "use_batch_decode_scheduler": 0,
+    "force_sp_accept": false,
+    "real_pd_transfer": true,
+    "offered_batch_sizes": "1..16 on rank 0; other ranks participate empty",
+    "max_output_tokens": 256,
+    "min_output_tokens": 0,
+    "prompt_count": 4,
+    "prompt_rendering": "canonical V4.1 chat recipe, thinking disabled",
+    "long_context": "one prompt uses the 8192-token performance prefix plus a question",
+    "comparison": "bitwise operator checks plus real-generation semantic smoke; quality benchmark is separate"
+  }
+}

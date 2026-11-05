@@ -202,7 +202,9 @@ def run(
         raise ValueError(
             f"vLLM SM90 two-kernel mHC requires 1..{MAX_TOKENS} tokens, got {tokens}"
         )
-    tile_n = 2 if tokens < 16 else 6
+    # Group independent projection outputs without changing the reduction
+    # order. Fewer repeated residual reads help the larger decode buckets.
+    tile_n = 2 if tokens < 16 else (6 if tokens < 32 else 12)
     residual_out = torch.empty_like(residual)
     partials = torch.empty(
         (SPLITS, tokens, MIX), dtype=torch.float32, device=x.device

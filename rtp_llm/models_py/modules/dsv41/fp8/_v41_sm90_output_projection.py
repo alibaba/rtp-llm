@@ -12,6 +12,9 @@ import logging
 import torch
 from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import fused_inv_rope_fp8_quant
 from rtp_llm.models_py.modules.dsv41.fp8._v41_output_projection import quantization_scale_min
+from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
+    SM90_DIRECT_SCALE_MAX_TOKENS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +263,7 @@ class Sm90GroupedOutputProjection(torch.nn.Module):
             raise RuntimeError(
                 "Eagerly warm each grouped WO_A token count before CUDA graph capture"
             )
-        if tokens <= 16:
+        if tokens <= SM90_DIRECT_SCALE_MAX_TOKENS:
             from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
                 quantize_wo_a_g32,
             )

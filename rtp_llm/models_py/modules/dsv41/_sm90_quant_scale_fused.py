@@ -82,10 +82,10 @@ def _quantize(values, V2: tl.constexpr, EPS: tl.constexpr = 1.1754943508222875e-
 @triton.jit(do_not_specialize=["rows", "input_stride"])
 def _dense_quant_kernel(
     x, q, scales, rows, input_stride, scale_row_stride, scale_column_stride,
-    K: tl.constexpr, V2: tl.constexpr
+    K: tl.constexpr, V2: tl.constexpr, GROUPS: tl.constexpr = 4
 ):
     row = tl.program_id(0).to(tl.int64)
-    group = tl.program_id(1) * 4 + tl.arange(0, 4)
+    group = tl.program_id(1) * GROUPS + tl.arange(0, GROUPS)
     columns = group[:, None] * 32 + tl.arange(0, 32)[None, :]
     values = tl.load(x + row * input_stride + columns, columns < K, other=0).to(
         tl.float32
@@ -262,7 +262,11 @@ def quantize_g32(x, *, out_q=None, out_scale=None, mn_major=False):
     else:
         scale = _output(out_scale, (rows, width // 32), torch.float32, x.device, (x, q))
     if rows:
-        _dense_quant_kernel[(rows, triton.cdiv(width, 128))](
+        # More groups per CTA amortize scheduling at verification-batch sizes.
+        # Each reduction still owns exactly one G32 group; the numerical
+        # policy and the TMA scale layout are independent of this tiling.
+        groups = 32 if 16 < rows <= 96 else 4
+        _dense_quant_kernel[(rows, triton.cdiv(width, groups * 32))](
             x,
             q,
             scale,
@@ -272,6 +276,7 @@ def quantize_g32(x, *, out_q=None, out_scale=None, mn_major=False):
             scale.stride(1),
             width,
             v2,
+            groups,
             num_warps=4,
             enable_fp_fusion=False,
         )
