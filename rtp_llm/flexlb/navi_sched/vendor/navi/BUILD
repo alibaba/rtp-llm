@@ -47,6 +47,7 @@ cc_library(
         "engine/NamedData.h",
         "engine/Navi.h",
         "engine/NaviError.h",
+        "engine/NaviRegisterMacro.h",
         "engine/NaviSnapshotStat.h",
         "engine/NaviConfigContext.h",
         "engine/NaviResult.h",
