@@ -228,11 +228,11 @@ protected:
 
     bool useAsyncPrepare() const;
 
-    // Default-on gate for the post-rejection draft-prefill prepare fork. The
+    // Opt-in gate for the post-rejection draft-prefill prepare fork. The
     // forked input is final (post-commit), so the hooks-mode restriction of
-    // useAsyncPrepare() does not apply. Keep a synchronous fallback for diagnosing
-    // prepare/communication ordering; read once at first use. Disable with
-    // RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION=0.
+    // useAsyncPrepare() does not apply. Keep synchronous preparation by default
+    // until the shared speculative path is qualified; read once at first use.
+    // Enable with RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION=1.
     bool useAsyncDraftPreparePostRejection() const;
 
     // Opt-in gate to skip the broad sync at decodeStep start.

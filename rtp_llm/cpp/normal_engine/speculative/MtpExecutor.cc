@@ -3283,7 +3283,7 @@ bool MtpExecutor::useAsyncDraftPreparePostRejection() const {
         return readEnvFlag("RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION",
                            "async-prepare",
                            "post_rejection_draft_prepare",
-                           /*default_enabled=*/true);
+                           /*default_enabled=*/false);
     }();
     return enabled;
 }
