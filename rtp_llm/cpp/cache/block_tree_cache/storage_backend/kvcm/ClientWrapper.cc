@@ -18,21 +18,27 @@ namespace {
 
 thread_local const ClientWrapper* transfer_deadline_owner = nullptr;
 thread_local std::optional<std::chrono::steady_clock::time_point> transfer_deadline;
+thread_local ClientWrapper::TransferCompletion* transfer_completion = nullptr;
 
 class TransferDeadlineScope {
 public:
-    TransferDeadlineScope(const ClientWrapper* owner, std::optional<std::chrono::steady_clock::time_point> deadline):
-        previous_owner_(transfer_deadline_owner), previous_deadline_(transfer_deadline) {
+    TransferDeadlineScope(const ClientWrapper* owner, std::optional<std::chrono::steady_clock::time_point> deadline,
+                          ClientWrapper::TransferCompletion* completion = nullptr):
+        previous_owner_(transfer_deadline_owner), previous_deadline_(transfer_deadline),
+        previous_completion_(transfer_completion) {
         transfer_deadline_owner = owner;
         transfer_deadline = deadline;
+        transfer_completion = completion;
     }
     ~TransferDeadlineScope() {
         transfer_deadline_owner = previous_owner_;
         transfer_deadline = previous_deadline_;
+        transfer_completion = previous_completion_;
     }
 private:
     const ClientWrapper* previous_owner_;
     std::optional<std::chrono::steady_clock::time_point> previous_deadline_;
+    ClientWrapper::TransferCompletion* previous_completion_;
 };
 
 class ReinitPolicy {
@@ -628,7 +634,11 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS;
     }
+    auto* completion = transfer_deadline_owner == this ? transfer_completion : nullptr;
+    if (completion) *completion = TransferCompletion::UNKNOWN;
     auto ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
+    if (completion && ec == kv_cache_manager::ClientErrorCode::ER_OK)
+        *completion = TransferCompletion::PAYLOAD_COMPLETE;
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
     }
@@ -662,7 +672,11 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, {}};
     }
+    auto* completion = transfer_deadline_owner == this ? transfer_completion : nullptr;
+    if (completion) *completion = TransferCompletion::UNKNOWN;
     auto [ec, result] = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
+    if (completion && ec == kv_cache_manager::ClientErrorCode::ER_OK)
+        *completion = TransferCompletion::PAYLOAD_COMPLETE;
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", ec);
     }
@@ -688,6 +702,28 @@ std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> Client
     std::optional<std::chrono::steady_clock::time_point> deadline) {
     if (deadline && std::chrono::steady_clock::now() >= *deadline) return {kv_cache_manager::ER_SDK_TIMEOUT, {}};
     TransferDeadlineScope scope(this, deadline);
+    return saveKvCachesForTagWithStatus(tag, uris, buffers, trace);
+}
+
+kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
+    const std::string& tag, const kv_cache_manager::UriStrVec& uris,
+    kv_cache_manager::BlockBuffers& buffers,
+    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+    TransferCompletion* completion, std::optional<std::chrono::steady_clock::time_point> deadline) {
+    if (completion) *completion = TransferCompletion::NOT_SUBMITTED;
+    if (deadline && std::chrono::steady_clock::now() >= *deadline) return kv_cache_manager::ER_SDK_TIMEOUT;
+    TransferDeadlineScope scope(this, deadline, completion);
+    return loadKvCachesForTagWithStatus(tag, uris, buffers, trace);
+}
+
+std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> ClientWrapper::saveKvCachesForTagWithStatus(
+    const std::string& tag, const kv_cache_manager::UriStrVec& uris,
+    const kv_cache_manager::BlockBuffers& buffers,
+    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+    TransferCompletion* completion, std::optional<std::chrono::steady_clock::time_point> deadline) {
+    if (completion) *completion = TransferCompletion::NOT_SUBMITTED;
+    if (deadline && std::chrono::steady_clock::now() >= *deadline) return {kv_cache_manager::ER_SDK_TIMEOUT, {}};
+    TransferDeadlineScope scope(this, deadline, completion);
     return saveKvCachesForTagWithStatus(tag, uris, buffers, trace);
 }
 }  // namespace kvcm

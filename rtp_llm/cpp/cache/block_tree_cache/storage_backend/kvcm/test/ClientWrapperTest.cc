@@ -260,6 +260,47 @@ TEST(ClientWrapperTest, TransferStatusPreservesSdkCodesAndLegacyWrappers) {
     EXPECT_TRUE(stopped.second.empty());
 }
 
+TEST(ClientWrapperTest, SubmissionTrackingDistinguishesSdkCallsFromLocalRejection) {
+    using Completion = ClientWrapper::TransferCompletion;
+    std::array<char, 32> data{};
+    kv_cache_manager::RegistSpan registration{data.data(), data.size()};
+    InitObservation observation;
+    kv_cache_manager::MockTransferClient* transfer = nullptr;
+    auto wrapper = initializeClient(false, "direct", registration, observation, std::make_shared<int>(0),
+                                    nullptr, nullptr, &transfer);
+    ASSERT_NE(wrapper, nullptr);
+    ASSERT_NE(transfer, nullptr);
+    const kv_cache_manager::UriStrVec uris{"requested_uri"};
+    kv_cache_manager::BlockBuffers buffers;
+    for (const auto code : {kv_cache_manager::ER_OK, kv_cache_manager::ER_INVALID_PARAMS,
+                            kv_cache_manager::ER_SDK_TIMEOUT}) {
+        SCOPED_TRACE(static_cast<int>(code));
+        const auto expected = code == kv_cache_manager::ER_OK ? Completion::PAYLOAD_COMPLETE : Completion::UNKNOWN;
+        EXPECT_CALL(*transfer, LoadKvCaches(uris, _, _)).WillOnce(Return(code));
+        EXPECT_CALL(*transfer, SaveKvCaches(uris, _, _)).WillOnce(Return(std::make_pair(code, uris)));
+        auto completion = Completion::NOT_SUBMITTED;
+        EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, std::nullopt), code);
+        EXPECT_EQ(completion, expected);
+        completion = Completion::NOT_SUBMITTED;
+        EXPECT_EQ(wrapper->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, std::nullopt).first,
+                  code);
+        EXPECT_EQ(completion, expected);
+    }
+    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*transfer, SaveKvCaches(_, _, _)).Times(0);
+    for (const bool expired : {false, true}) {
+        auto completion = Completion::UNKNOWN;
+        const auto deadline = expired ? std::make_optional(std::chrono::steady_clock::now()) : std::nullopt;
+        const auto expected = expired ? kv_cache_manager::ER_SDK_TIMEOUT : kv_cache_manager::ER_CLIENT_NOT_EXISTS;
+        EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion, deadline), expected);
+        EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+        completion = Completion::UNKNOWN;
+        EXPECT_EQ(wrapper->saveKvCachesForTagWithStatus("missing", uris, buffers, nullptr, &completion, deadline).first,
+                  expected);
+        EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+    }
+}
+
 TEST(ClientWrapperTest, RejectsInvalidConfigBeforeCreatingSubscriberOrClients) {
     auto                         valid      = makeConfig(false, "endpoint");
     auto                         serialized = autil::legacy::ToJsonString(valid);

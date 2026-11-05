@@ -24,6 +24,9 @@ class Subscriber;
 class ClientWrapper {
 public:
     using ConfigMap = std::map<std::string, KVCMConfigPtr>;
+    // Internal submission tracking; an ordinary SDK error does not prove that
+    // payload I/O has stopped accessing caller buffers.
+    enum class TransferCompletion { NOT_SUBMITTED, PAYLOAD_COMPLETE, UNKNOWN };
     explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory = std::make_unique<ClientFactory>());
     virtual ~ClientWrapper();
     virtual bool
@@ -93,6 +96,11 @@ public:
         kv_cache_manager::BlockBuffers& buffers,
         const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
         std::optional<std::chrono::steady_clock::time_point> deadline);
+    virtual kv_cache_manager::ClientErrorCode loadKvCachesForTagWithStatus(
+        const std::string& tag, const kv_cache_manager::UriStrVec& uris,
+        kv_cache_manager::BlockBuffers& buffers,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+        TransferCompletion* completion, std::optional<std::chrono::steady_clock::time_point> deadline);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
     saveKvCachesForTag(const std::string&                                          tag,
                        const kv_cache_manager::UriStrVec&                          uris,
@@ -108,6 +116,11 @@ public:
         const kv_cache_manager::BlockBuffers& buffers,
         const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
         std::optional<std::chrono::steady_clock::time_point> deadline);
+    virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> saveKvCachesForTagWithStatus(
+        const std::string& tag, const kv_cache_manager::UriStrVec& uris,
+        const kv_cache_manager::BlockBuffers& buffers,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+        TransferCompletion* completion, std::optional<std::chrono::steady_clock::time_point> deadline);
 
 private:
     bool initImpl(const ConfigMap&                     config_map,

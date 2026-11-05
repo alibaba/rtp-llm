@@ -1007,6 +1007,10 @@ message RemoteOperationResponsePB {
     RemoteTransferStatusPB transfer_status = 3;
     repeated RemoteBackendKeyLocationsPB backend_locations = 4;
     repeated RemoteHostCacheMatchPB hosts = 5;
+    // Absent means unknown, not SDK success. This is not a buffer-safety proof.
+    oneof sdk_result {
+        bool sdk_failed = 7;
+    }
 }
 
 message FunctionResponsePB {

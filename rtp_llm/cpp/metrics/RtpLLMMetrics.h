@@ -1349,6 +1349,7 @@ public:
 class RtpLLMRemoteCacheSDKMetricsCollector final {
 public:
     bool    remote_sdk_fail_qps     = true;
+    bool    report_details         = true;
     int64_t remote_sdk_block_num    = 0;
     int64_t remote_sdk_cost_time_us = 0;
 };
