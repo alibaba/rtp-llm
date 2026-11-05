@@ -318,7 +318,7 @@ cc_library(
         "//rtp_llm/flexlb/navi_sched/vendor/network/http_arpc",
         "//rtp_llm/flexlb/navi_sched/vendor/third_party/elfutils-libelf-0.168:elfutils-libelf",
         "//rtp_llm/flexlb/navi_sched/vendor/third_party/libev-4.33:libev",
-        "//rtp_llm/flexlb/navi_sched/vendor/third_party/tbb",
+        "//rtp_llm/flexlb/navi_sched/vendor/third_party/tbb-4.4:tbb",
     ],
     alwayslink = True,
 )
