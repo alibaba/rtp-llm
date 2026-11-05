@@ -26,8 +26,10 @@ def _state_snapshot(
     pool,
     slots,
     original,
-    WIDTH: tl.constexpr,
-    PAGES: tl.constexpr,
+    # WIDTH/PAGES track the per-request table geometry; constexpr keys here
+    # recompiled the kernel for every new request length.
+    WIDTH,
+    PAGES,
     PAGE: tl.constexpr,
 ):
     request, page = tl.program_id(0), tl.program_id(1)
@@ -53,8 +55,8 @@ def _kv_snapshot(
     pool,
     slots,
     original,
-    WIDTH: tl.constexpr,
-    GROUPS: tl.constexpr,
+    WIDTH,
+    GROUPS,
     PAGE: tl.constexpr,
 ):
     request, group = tl.program_id(0), tl.program_id(1)
@@ -75,7 +77,7 @@ def _state_write(
     cu,
     slots,
     pool,
-    PAGES: tl.constexpr,
+    PAGES,
     PAGE: tl.constexpr,
 ):
     request, page = tl.program_id(0), tl.program_id(1)
@@ -104,8 +106,8 @@ def _kv_write(
     slots,
     pool,
     dense_keys,
-    GROUPS: tl.constexpr,
-    MAX_LENGTH: tl.constexpr,
+    GROUPS,
+    MAX_LENGTH,
     EPS: tl.constexpr,
     EMIT_DENSE: tl.constexpr,
 ):
@@ -168,8 +170,8 @@ def _metadata(
     state_slots,
     kv_slots,
     completed,
-    STATE_WIDTH: tl.constexpr,
-    KV_WIDTH: tl.constexpr,
+    STATE_WIDTH,
+    KV_WIDTH,
     PAGE: tl.constexpr,
 ):
     request = tl.program_id(0)
@@ -521,7 +523,7 @@ def _prefix_reuse_state_snapshot(
     pool,
     slots,
     original,
-    WIDTH: tl.constexpr,
+    WIDTH,
     PAGES,
 ):
     request, page = tl.program_id(0), tl.program_id(1)
@@ -558,7 +560,7 @@ def _prefix_reuse_kv_snapshot(
     pool,
     slots,
     original,
-    WIDTH: tl.constexpr,
+    WIDTH,
     GROUPS,
 ):
     request, group = tl.program_id(0), tl.program_id(1)
@@ -590,7 +592,7 @@ def _prefix_reuse_q_prep(
     state_table,
     state_pool,
     padded,
-    STATE_WIDTH: tl.constexpr,
+    STATE_WIDTH,
     STATE_BLOCKS,
     MAX_ROWS,
     HEADS,
@@ -679,7 +681,7 @@ def _prefix_reuse_k_compress(
     gamma,
     kv_table,
     kv_pool,
-    KV_WIDTH: tl.constexpr,
+    KV_WIDTH,
     KV_BLOCKS,
     RAW_STRIDE,
     EPS: tl.constexpr,

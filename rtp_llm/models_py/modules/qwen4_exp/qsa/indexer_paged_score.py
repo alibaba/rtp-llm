@@ -187,7 +187,7 @@ def _qsa_paged_score_kernel(
     max_ctx_len,
     max_blocks,
     pool_blocks,
-    next_n: tl.constexpr,
+    next_n,
     H: tl.constexpr,
     D: tl.constexpr,
     block_size: tl.constexpr,
