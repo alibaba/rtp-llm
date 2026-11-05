@@ -334,6 +334,11 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(waiting_oldest_age_us_metric, "rtp_llm_scheduler_waiting_oldest_age_us");
     REGISTER_MUTABLE_METRIC_BASE(
         group_fallback_acc_metric, "rtp_llm_scheduler_group_fallback_acc", kmonitor::COUNTER, kmonitor::NORMAL);
+    REGISTER_GAUGE_MUTABLE_METRIC(cache_exposed_wait_us_metric, "rtp_llm_scheduler_cache_exposed_wait_us");
+    REGISTER_MUTABLE_METRIC_BASE(cache_exposed_wait_event_acc_metric,
+                                 "rtp_llm_scheduler_cache_exposed_wait_event_acc",
+                                 kmonitor::COUNTER,
+                                 kmonitor::NORMAL);
     return true;
 }
 
@@ -350,6 +355,12 @@ void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSch
     if (collector->group_fallback_count > 0) {
         REPORT_MUTABLE_METRIC(group_fallback_acc_metric, collector->group_fallback_count);
     }
+}
+
+void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags*               tags,
+                                    RtpLLMSchedulerCacheStallMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(cache_exposed_wait_us_metric, collector->cache_exposed_wait_us);
+    REPORT_MUTABLE_METRIC(cache_exposed_wait_event_acc_metric, 1);
 }
 
 bool RtpLLMEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -1076,7 +1087,7 @@ bool RtpLLMRemoteCacheControlMetrics::init(kmonitor::MetricsGroupManager* manage
     return true;
 }
 
-void RtpLLMRemoteCacheControlMetrics::report(const kmonitor::MetricsTags* tags,
+void RtpLLMRemoteCacheControlMetrics::report(const kmonitor::MetricsTags*              tags,
                                              RtpLLMRemoteCacheControlMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(enabled_metric, collector->enabled ? 1 : 0);
 }

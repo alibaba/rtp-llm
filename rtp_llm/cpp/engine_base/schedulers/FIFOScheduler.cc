@@ -61,6 +61,7 @@ void FIFOScheduler::cancelGroups(StreamGroupQueue& group_queue) {
 }
 
 void FIFOScheduler::cancelExtraStreams() {
+    cache_exposed_wait_start_.reset();
     cancelGroups(waiting_group_queue_);
     cancelGroups(loading_cache_group_queue_);
 }
@@ -755,9 +756,41 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
     new_streams_.clear();
 
+    updateCacheExposedWait();
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return running_streams_;
+}
+
+void FIFOScheduler::updateCacheExposedWait() {
+    // Measure scheduler-observed stalls between batches, after both lanes had
+    // a chance to provide runnable work. A group parked here may already be ready.
+    const bool waiting_for_cache =
+        running_streams_.empty()
+        && (!loading_cache_streams_.empty()
+            || (!loading_cache_group_queue_.empty()
+                && std::any_of(loading_cache_group_queue_.front().begin(),
+                               loading_cache_group_queue_.front().end(),
+                               [](const auto& stream) { return stream->getStatus() == StreamState::LOADING_CACHE; })));
+    if (waiting_for_cache) {
+        if (!cache_exposed_wait_start_) {
+            cache_exposed_wait_start_ = std::chrono::steady_clock::now();
+        }
+        return;
+    }
+    if (!cache_exposed_wait_start_) {
+        return;
+    }
+
+    RtpLLMSchedulerCacheStallMetricsCollector collector;
+    collector.cache_exposed_wait_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                          std::chrono::steady_clock::now() - *cache_exposed_wait_start_)
+                                          .count();
+    cache_exposed_wait_start_.reset();
+    if (metrics_reporter_) {
+        metrics_reporter_->report<RtpLLMSchedulerMetrics, RtpLLMSchedulerCacheStallMetricsCollector>(nullptr,
+                                                                                                     &collector);
+    }
 }
 
 int64_t FIFOScheduler::waitingStreamsSize() {

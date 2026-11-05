@@ -1,8 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <list>
+#include <optional>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -106,6 +108,7 @@ private:
     void moveGroupToAllocatingGroup(StreamGroup& group);
     void dispatchPreparedGroup(StreamGroup& group);
 
+    void    updateCacheExposedWait();
     void    cancelExtraStreams() override;
     bool    hasExtraStreams() const override;
     int64_t extraOnflightStreams() const override;
@@ -129,6 +132,8 @@ private:
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;
     AdmissionLane                active_admission_lane_        = AdmissionLane::NONE;
     bool                         prefer_group_next_            = false;
+
+    std::optional<std::chrono::steady_clock::time_point> cache_exposed_wait_start_;
 
     // TODO @wangyin support different beams run togather
 };

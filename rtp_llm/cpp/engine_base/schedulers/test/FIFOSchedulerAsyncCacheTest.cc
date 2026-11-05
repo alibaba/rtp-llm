@@ -213,6 +213,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning
     EXPECT_EQ(scheduler->loading_cache_streams_.size(), 0);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
     EXPECT_EQ(scheduler->runningStreamsSize(), 1);
+    EXPECT_FALSE(scheduler->cache_exposed_wait_start_.has_value());
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_WithAllocatorReadiness_EntersLoadingCache) {
@@ -243,6 +244,12 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorSuccess_Mo
     auto first = scheduler->schedule();
     ASSERT_TRUE(first.ok());
     ASSERT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_TRUE(scheduler->cache_exposed_wait_start_.has_value());
+    const auto wait_start = scheduler->cache_exposed_wait_start_;
+    auto       pending    = scheduler->schedule();
+    ASSERT_TRUE(pending.ok());
+    EXPECT_TRUE(pending.value().empty());
+    EXPECT_EQ(scheduler->cache_exposed_wait_start_, wait_start);
     EXPECT_TRUE(context->completeTransfers(1, true));
 
     auto second = scheduler->schedule();
@@ -255,6 +262,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorSuccess_Mo
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
     EXPECT_EQ(scheduler->runningStreamsSize(), 1);
     EXPECT_FALSE(stream->hasError());
+    EXPECT_FALSE(scheduler->cache_exposed_wait_start_.has_value());
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testEvaluateLoadingCache_AllocatorFailure_Evicted) {
@@ -550,6 +558,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupDoesNotBlockOrdinaryWaitingS
     auto group_result = scheduler->schedule();
     ASSERT_TRUE(group_result.ok());
     EXPECT_TRUE(group_result.value().empty());
+    EXPECT_TRUE(scheduler->cache_exposed_wait_start_.has_value());
     EXPECT_EQ(direct_stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
     ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
@@ -560,6 +569,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingGroupDoesNotBlockOrdinaryWaitingS
     ASSERT_TRUE(waiting_result.ok());
     ASSERT_EQ(waiting_result.value().size(), 1);
     EXPECT_EQ(waiting_stream->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(scheduler->cache_exposed_wait_start_.has_value());
     ASSERT_EQ(scheduler->loading_cache_group_queue_.size(), 1);
     EXPECT_EQ(scheduler->waitingStreamsSize(), 0);
 }

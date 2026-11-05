@@ -333,22 +333,30 @@ public:
     int64_t group_fallback_count        = 0;
 };
 
+class RtpLLMSchedulerCacheStallMetricsCollector final {
+public:
+    int64_t cache_exposed_wait_us = 0;
+};
+
 class RtpLLMSchedulerMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerCacheStallMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* wait_stream_size_metric            = nullptr;
-    kmonitor::MutableMetric* running_stream_size_metric         = nullptr;
-    kmonitor::MutableMetric* remote_running_stream_size_metric  = nullptr;
-    kmonitor::MutableMetric* loading_cache_stream_size_metric   = nullptr;
-    kmonitor::MutableMetric* pending_decode_stream_size_metric  = nullptr;
-    kmonitor::MutableMetric* decode_since_prefill_metric        = nullptr;
-    kmonitor::MutableMetric* admitted_context_batch_size_metric = nullptr;
-    kmonitor::MutableMetric* admitted_context_token_size_metric = nullptr;
-    kmonitor::MutableMetric* waiting_oldest_age_us_metric       = nullptr;
-    kmonitor::MutableMetric* group_fallback_acc_metric          = nullptr;
+    kmonitor::MutableMetric* wait_stream_size_metric             = nullptr;
+    kmonitor::MutableMetric* running_stream_size_metric          = nullptr;
+    kmonitor::MutableMetric* remote_running_stream_size_metric   = nullptr;
+    kmonitor::MutableMetric* loading_cache_stream_size_metric    = nullptr;
+    kmonitor::MutableMetric* pending_decode_stream_size_metric   = nullptr;
+    kmonitor::MutableMetric* decode_since_prefill_metric         = nullptr;
+    kmonitor::MutableMetric* admitted_context_batch_size_metric  = nullptr;
+    kmonitor::MutableMetric* admitted_context_token_size_metric  = nullptr;
+    kmonitor::MutableMetric* waiting_oldest_age_us_metric        = nullptr;
+    kmonitor::MutableMetric* group_fallback_acc_metric           = nullptr;
+    kmonitor::MutableMetric* cache_exposed_wait_us_metric        = nullptr;
+    kmonitor::MutableMetric* cache_exposed_wait_event_acc_metric = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1159,9 +1167,9 @@ public:
     std::string target_tier{"DEVICE"};
     std::string stage;
     std::string scope;
-    int64_t     rank       = -1;
+    int64_t     rank           = -1;
     double      latency_us     = 0;
-    bool        success    = true;
+    bool        success        = true;
     uint64_t    sample_count   = 1;
     uint64_t    latency_sum_us = 0;
     uint64_t    dropped_count  = 0;
@@ -1182,10 +1190,10 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheTransferStageMetricsCollector* collector);
 
 private:
-    kmonitor::MutableMetric* transfer_qps_metric                = nullptr;
-    kmonitor::MutableMetric* transfer_failed_qps_metric         = nullptr;
-    kmonitor::MutableMetric* host_cache_copy_error_qps_metric   = nullptr;
-    kmonitor::MutableMetric* descriptors_per_transfer_metric    = nullptr;
+    kmonitor::MutableMetric* transfer_qps_metric              = nullptr;
+    kmonitor::MutableMetric* transfer_failed_qps_metric       = nullptr;
+    kmonitor::MutableMetric* host_cache_copy_error_qps_metric = nullptr;
+    kmonitor::MutableMetric* descriptors_per_transfer_metric  = nullptr;
     // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
     kmonitor::MutableMetric* transfer_latency_us_metric                 = nullptr;
@@ -1467,7 +1475,7 @@ private:
 class RtpLLMRemoteCacheSDKMetricsCollector final {
 public:
     bool    remote_sdk_fail_qps     = true;
-    bool    report_details         = true;
+    bool    report_details          = true;
     int64_t remote_sdk_block_num    = 0;
     int64_t remote_sdk_cost_time_us = 0;
 };
@@ -1624,22 +1632,22 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSpeculativeEngineMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* step_latency_us_metric                = nullptr;
-    kmonitor::MutableMetric* propose_step_latency_us_metric        = nullptr;
-    kmonitor::MutableMetric* score_step_latency_us_metric          = nullptr;
-    kmonitor::MutableMetric* speculative_sampler_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* step_latency_us_metric                 = nullptr;
+    kmonitor::MutableMetric* propose_step_latency_us_metric         = nullptr;
+    kmonitor::MutableMetric* score_step_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* speculative_sampler_latency_us_metric  = nullptr;
     kmonitor::MutableMetric* main_thread_wait_bookkeeping_us_metric = nullptr;
     kmonitor::MutableMetric* main_thread_wait_spec_verify_us_metric = nullptr;
-    kmonitor::MutableMetric* total_propose_token_num_metric        = nullptr;
-    kmonitor::MutableMetric* total_accepted_token_num_metric       = nullptr;
-    kmonitor::MutableMetric* sp_avg_accept_token_num_metric        = nullptr;
-    kmonitor::MutableMetric* sp_avg_accept_rate_metric             = nullptr;
-    kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric         = nullptr;
-    kmonitor::MutableMetric* sp_estimate_tpot_us_metric            = nullptr;
-    kmonitor::MutableMetric* verify_budget_metric                  = nullptr;
-    kmonitor::MutableMetric* decided_draft_token_num_metric        = nullptr;
-    kmonitor::MutableMetric* total_verify_draft_token_num_metric   = nullptr;
-    kmonitor::MutableMetric* acceptance_metrics_dropped_metric     = nullptr;
+    kmonitor::MutableMetric* total_propose_token_num_metric         = nullptr;
+    kmonitor::MutableMetric* total_accepted_token_num_metric        = nullptr;
+    kmonitor::MutableMetric* sp_avg_accept_token_num_metric         = nullptr;
+    kmonitor::MutableMetric* sp_avg_accept_rate_metric              = nullptr;
+    kmonitor::MutableMetric* sp_avg_fix_accept_rate_metric          = nullptr;
+    kmonitor::MutableMetric* sp_estimate_tpot_us_metric             = nullptr;
+    kmonitor::MutableMetric* verify_budget_metric                   = nullptr;
+    kmonitor::MutableMetric* decided_draft_token_num_metric         = nullptr;
+    kmonitor::MutableMetric* total_verify_draft_token_num_metric    = nullptr;
+    kmonitor::MutableMetric* acceptance_metrics_dropped_metric      = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
