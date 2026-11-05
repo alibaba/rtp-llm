@@ -15,8 +15,8 @@ def _snapshot_decode(
     OS,
     KS,
     OK,
-    KTW: tl.constexpr,
-    STW: tl.constexpr,
+    KTW,
+    STW,
     KB: tl.constexpr,
     SB: tl.constexpr,
 ):

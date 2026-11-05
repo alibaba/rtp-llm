@@ -13,7 +13,7 @@ def _membership_words(
     ends,
     duplicates,
     T,
-    K: tl.constexpr,
+    K,
     BK: tl.constexpr,
     WORDS,
 ):

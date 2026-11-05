@@ -17,7 +17,7 @@ def _state_snapshot(
     pool,
     slots,
     original,
-    WIDTH: tl.constexpr,
+    WIDTH,
     PAGES,
     PAGE: tl.constexpr,
 ):
@@ -46,7 +46,7 @@ def _kv_snapshot(
     pool,
     slots,
     original,
-    WIDTH: tl.constexpr,
+    WIDTH,
     GROUPS,
     PAGE: tl.constexpr,
 ):
@@ -163,8 +163,8 @@ def _metadata(
     state_slots,
     kv_slots,
     completed,
-    STATE_WIDTH: tl.constexpr,
-    KV_WIDTH: tl.constexpr,
+    STATE_WIDTH,
+    KV_WIDTH,
     PAGE: tl.constexpr,
 ):
     request = tl.program_id(0).to(tl.int64)

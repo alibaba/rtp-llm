@@ -9,6 +9,18 @@ models_py_test(
     src = "target_reduce_test.py",
 )
 
+py_test(
+    name = "qsa_triton_recompile_regression_test",
+    srcs = [
+        "indexer_prefix_reuse_triton_test.py",
+        "qsa_triton_recompile_regression_test.py",
+    ],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 _REFERENCE_DEPS = [
     ":math_references",
     ":test_support",

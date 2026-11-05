@@ -351,7 +351,7 @@ def _prefix_reuse_state_snapshot(
     pool,
     slots,
     original,
-    WIDTH: tl.constexpr,
+    WIDTH,
     PAGES,
 ):
     request, page = tl.program_id(0), tl.program_id(1)
@@ -388,7 +388,7 @@ def _prefix_reuse_kv_snapshot(
     pool,
     slots,
     original,
-    WIDTH: tl.constexpr,
+    WIDTH,
     GROUPS,
 ):
     request, group = tl.program_id(0), tl.program_id(1)
@@ -420,7 +420,7 @@ def _prefix_reuse_q_prep(
     state_table,
     state_pool,
     padded,
-    STATE_WIDTH: tl.constexpr,
+    STATE_WIDTH,
     STATE_BLOCKS,
     MAX_ROWS,
     HEADS,
@@ -509,7 +509,7 @@ def _prefix_reuse_k_compress(
     gamma,
     kv_table,
     kv_pool,
-    KV_WIDTH: tl.constexpr,
+    KV_WIDTH,
     KV_BLOCKS,
     RAW_STRIDE,
     EPS: tl.constexpr,
