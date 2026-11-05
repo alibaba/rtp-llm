@@ -2627,6 +2627,218 @@ TEST(DSparkSamplingGraphTest, StochasticDraftGraphMatchesEagerBitForBit) {
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// DSpARK fused draft sample (softmax + top-p + CDF sampling in one kernel).
+//
+// The fused kernel must be a drop-in replacement for the three-kernel pipeline:
+//   * the top-p SUPPORT SET must be identical (that is what top-p *means*),
+//   * the renormalised probabilities may only differ by summation order (<= 1e-6),
+//   * with the same (seed, offset) the sampled token must match whenever the tiny
+//     probability delta does not move the CDF crossing, and must match ALWAYS on a
+//     fixture whose probability gaps dwarf that delta (RNG mapping unchanged).
+// ---------------------------------------------------------------------------
+
+TEST(DSparkFusedDraftSampleTest, MatchesReferencePipeline) {
+#if USING_CUDA
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 floats = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto                 ints   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 longs  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
+    const auto                 bools  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBool);
+    const auto stream = static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream()));
+    constexpr int64_t width = 1024;
+    torch::manual_seed(20261110);
+
+    int64_t compared = 0, total_mismatch = 0;
+    for (const int64_t batch : {int64_t{1}, int64_t{64}}) {
+        for (const float top_p : {0.5f, 0.9f, 0.95f, 0.99f, 1.0f}) {
+            SCOPED_TRACE("batch=" + std::to_string(batch) + " top_p=" + std::to_string(top_p));
+            // Temperature-folded logits, as markovScaledLogits produces them.
+            auto logits  = torch::randn({batch, width}, floats) * 1.5f;
+            auto top_p_t = torch::full({batch}, top_p, floats);
+
+            // ---- reference pipeline: softmax -> top-p renorm -> scalar-seed sample.
+            auto ref_probs = torch::softmax(logits, -1);
+            auto ref_q     = torch::empty_like(ref_probs);
+            top_p_renorm_probs(ref_probs, ref_q, top_p_t, 1.0, stream);
+
+            auto fused_q   = torch::empty_like(logits);
+            auto fused_tok = torch::empty({batch}, ints);
+            auto seed      = torch::tensor({int64_t{12345}}, longs);
+            auto offset    = torch::tensor({int64_t{777}}, longs);
+            rtp_llm::dspark_fused_draft_sample(logits, fused_q, fused_tok, top_p_t, -1.0, seed, offset, stream);
+
+            // 1) identical support set (elementwise).
+            EXPECT_TRUE(torch::equal(ref_q.gt(0), fused_q.gt(0))) << "fused top-p support differs from TopPRenormProb";
+            // 2) probability tolerance.
+            const float max_diff = (fused_q - ref_q).abs().max().item<float>();
+            EXPECT_LE(max_diff, 1e-6f) << "fused distribution deviates by " << max_diff;
+            // 3) sampling with the same RNG state.
+            auto ref_tok   = torch::empty({batch}, ints);
+            auto ref_valid = torch::empty({batch}, bools);
+            rtp_llm::sampling_from_probs_device_scalar_seed(
+                ref_q, ref_tok, ref_valid, std::nullopt, /*deterministic=*/true, seed, offset, stream);
+            // A difference is only legitimate when the <=1e-6 delta moved a CDF
+            // crossing; count them and require the aggregate to stay under 1%.
+            total_mismatch += ref_tok.ne(fused_tok).sum().item<int64_t>();
+            compared += batch;
+
+            // Non-vacuity: the nucleus must be a real subset for top_p < 1.
+            if (top_p < 1.0f) {
+                const auto support = fused_q.gt(0).sum(-1);
+                EXPECT_TRUE(torch::all(support.lt(width)).item<bool>()) << "top-p kept the whole row";
+                EXPECT_TRUE(torch::all(support.ge(1)).item<bool>()) << "top-p dropped every candidate";
+            }
+        }
+    }
+    // Marginal crossings are the only permitted difference; they must stay rare.
+    ASSERT_GT(compared, 0);
+    EXPECT_LE(static_cast<double>(total_mismatch) / static_cast<double>(compared), 0.01)
+        << "fused sampling diverged from the reference on " << total_mismatch << "/" << compared << " rows";
+#else
+    GTEST_SKIP() << "CUDA only";
+#endif
+}
+
+TEST(DSparkFusedDraftSampleTest, WideProbabilityGapKeepsTokensIdentical) {
+#if USING_CUDA
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 floats = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto                 ints   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 longs  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
+    const auto                 bools  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBool);
+    const auto stream = static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream()));
+    constexpr int64_t width = 1024, batch = 64;
+    torch::manual_seed(20261111);
+
+    // Exactly two live candidates per row with a (0.7, 0.3) split: every gap is
+    // ~0.4, four orders of magnitude above the <=1e-6 softmax-order delta, so the
+    // CDF crossing cannot move and the token must match bit for bit.
+    auto logits = torch::full({batch, width}, -50.0f, floats);
+    logits.index_put_({torch::indexing::Slice(), 0}, 0.847297860f);  // log(0.7/0.3) shifted
+    logits.index_put_({torch::indexing::Slice(), 1}, 0.0f);
+    auto top_p_t = torch::full({batch}, 0.95f, floats);
+
+    auto ref_probs = torch::softmax(logits, -1);
+    auto ref_q     = torch::empty_like(ref_probs);
+    top_p_renorm_probs(ref_probs, ref_q, top_p_t, 1.0, stream);
+
+    int seen_first = 0, seen_second = 0;
+    for (int64_t trial = 0; trial < 32; ++trial) {
+        SCOPED_TRACE("trial=" + std::to_string(trial));
+        auto seed      = torch::tensor({int64_t{1000 + trial}}, longs);
+        auto offset    = torch::tensor({int64_t{trial * 4}}, longs);
+        auto fused_q   = torch::empty_like(logits);
+        auto fused_tok = torch::empty({batch}, ints);
+        rtp_llm::dspark_fused_draft_sample(logits, fused_q, fused_tok, top_p_t, -1.0, seed, offset, stream);
+        auto ref_tok   = torch::empty({batch}, ints);
+        auto ref_valid = torch::empty({batch}, bools);
+        rtp_llm::sampling_from_probs_device_scalar_seed(
+            ref_q, ref_tok, ref_valid, std::nullopt, /*deterministic=*/true, seed, offset, stream);
+        // 1) support identical, probabilities within tolerance.
+        EXPECT_TRUE(torch::equal(ref_q.gt(0), fused_q.gt(0)));
+        EXPECT_LE((fused_q - ref_q).abs().max().item<float>(), 1e-6f);
+        // 2) tokens identical: the RNG mapping is unchanged.
+        EXPECT_TRUE(torch::equal(ref_tok, fused_tok))
+            << "wide-gap fixture must sample identical tokens; the RNG mapping changed";
+        seen_first += static_cast<int>(fused_tok.eq(0).sum().item<int64_t>());
+        seen_second += static_cast<int>(fused_tok.eq(1).sum().item<int64_t>());
+    }
+    // The fixture must actually exercise both branches, otherwise equality is vacuous.
+    EXPECT_GT(seen_first, 0) << "fixture never sampled the 0.7 candidate";
+    EXPECT_GT(seen_second, 0) << "fixture never sampled the 0.3 candidate";
+#else
+    GTEST_SKIP() << "CUDA only";
+#endif
+}
+
+TEST(DSparkFusedDraftSampleTest, SingleSurvivingCandidateIsDeterministic) {
+#if USING_CUDA
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 floats = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto                 ints   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 longs  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
+    const auto stream = static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream()));
+    constexpr int64_t width = 1024, batch = 8;
+    torch::manual_seed(20261112);
+
+    // One dominant candidate (p ~ 1) plus tiny tail: top_p = 0.5 leaves exactly one.
+    auto logits = torch::full({batch, width}, -30.0f, floats);
+    logits.index_put_({torch::indexing::Slice(), 5}, 0.0f);
+    auto top_p_t = torch::full({batch}, 0.5f, floats);
+
+    auto fused_q   = torch::empty_like(logits);
+    auto fused_tok = torch::empty({batch}, ints);
+    for (int64_t trial = 0; trial < 4; ++trial) {
+        auto seed   = torch::tensor({int64_t{9000 + trial}}, longs);
+        auto offset = torch::tensor({int64_t{trial}}, longs);
+        rtp_llm::dspark_fused_draft_sample(logits, fused_q, fused_tok, top_p_t, -1.0, seed, offset, stream);
+        // Degenerate nucleus: one candidate carrying the full mass, and the sample
+        // must be that candidate no matter the RNG state.
+        const auto support = fused_q.gt(0).sum(-1);
+        EXPECT_TRUE(torch::all(support.eq(1)).item<bool>()) << "top-p should keep exactly one candidate";
+        EXPECT_TRUE(torch::all(fused_q.select(1, 5).eq(1.0f)).item<bool>());
+        EXPECT_TRUE(torch::all(fused_tok.eq(5)).item<bool>()) << "single-candidate sample must be deterministic";
+    }
+#else
+    GTEST_SKIP() << "CUDA only";
+#endif
+}
+
+// Row-level diagnostics for the fused kernel: if a fused-vs-reference assertion
+// ever fails, this prints enough per-row state to tell a top-p threshold problem
+// from a sampling problem without another debugging round.
+TEST(DSparkFusedDraftSampleTest, RowLevelDiagnostics) {
+#if USING_CUDA
+    const c10::cuda::CUDAGuard guard(0);
+    const auto                 floats = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto                 ints   = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto                 longs  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
+    const auto                 bools  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kBool);
+    const auto stream = static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream()));
+    constexpr int64_t width = 1024, batch = 3;
+    torch::manual_seed(20261113);
+
+    auto logits  = torch::randn({batch, width}, floats) * 1.5f;
+    auto top_p_t = torch::tensor({0.5f, 0.9f, 0.99f}, floats);
+    auto seed    = torch::tensor({int64_t{4242}}, longs);
+    auto offset  = torch::tensor({int64_t{16}}, longs);
+
+    auto ref_probs = torch::softmax(logits, -1);
+    auto ref_q     = torch::empty_like(ref_probs);
+    top_p_renorm_probs(ref_probs, ref_q, top_p_t, 1.0, stream);
+    auto ref_tok   = torch::empty({batch}, ints);
+    auto ref_valid = torch::empty({batch}, bools);
+    rtp_llm::sampling_from_probs_device_scalar_seed(
+        ref_q, ref_tok, ref_valid, std::nullopt, /*deterministic=*/true, seed, offset, stream);
+
+    auto fused_q   = torch::empty_like(logits);
+    auto fused_tok = torch::empty({batch}, ints);
+    rtp_llm::dspark_fused_draft_sample(logits, fused_q, fused_tok, top_p_t, -1.0, seed, offset, stream);
+
+    const auto ref_support   = ref_q.gt(0).sum(-1);
+    const auto fused_support = fused_q.gt(0).sum(-1);
+    const auto ref_sum       = ref_q.sum(-1);
+    const auto fused_sum     = fused_q.sum(-1);
+    for (int64_t row = 0; row < batch; ++row) {
+        std::cout << "[fused-draft diag] row=" << row << " top_p=" << top_p_t[row].item<float>()
+                  << " support ref/fused=" << ref_support[row].item<int64_t>() << "/"
+                  << fused_support[row].item<int64_t>() << " sum ref/fused=" << ref_sum[row].item<float>() << "/"
+                  << fused_sum[row].item<float>()
+                  << " argmax ref/fused=" << std::get<1>(ref_probs[row].topk(1)).item<int64_t>() << "/"
+                  << std::get<1>(fused_q[row].topk(1)).item<int64_t>()
+                  << " sample ref/fused=" << ref_tok[row].item<int32_t>() << "/" << fused_tok[row].item<int32_t>()
+                  << std::endl;
+    }
+    // Invariants that must hold regardless of the sampling outcome.
+    EXPECT_TRUE(torch::equal(ref_q.gt(0), fused_q.gt(0))) << "top-p support differs";
+    EXPECT_LE((fused_q.sum(-1) - 1.0f).abs().max().item<float>(), 1e-5f) << "fused q must be normalised";
+    EXPECT_TRUE(torch::equal(ref_tok, fused_tok)) << "fused sampling differs from the reference";
+#else
+    GTEST_SKIP() << "CUDA only";
+#endif
+}
+
 }  // namespace
 }  // namespace speculative
 }  // namespace rtp_llm

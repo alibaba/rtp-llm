@@ -21,6 +21,253 @@
 namespace flashinfer {
 namespace sampling {
 
+// ---------------------------------------------------------------------------
+// DSpARK fused draft sample: softmax + top-p (nucleus) + CDF sampling in one
+// kernel, replacing softmax_warp_forward + TopPRenormProb + SamplingFromProb for
+// the compact draft path (rows = batch, width = candidate width = 1024).
+//
+// Semantics are pinned to the kernels it replaces:
+//   * softmax:        max-subtracted exp, normalised by the row sum (exact
+//                     division, like ATen); only the summation order differs.
+//   * top-p:          line-by-line port of flashinfer::sampling::TopPRenormProbKernel
+//                     (the K != 4096 path, which is what K=1024 uses): the same
+//                     ternary search on the threshold, the same `ieee_*` arithmetic,
+//                     the same stopping condition `min_gt_low != max_le_high`, and
+//                     the same support rule `prob > low`. The support set is
+//                     therefore identical, not just close.
+//   * sampling:       Philox state from `curand_init(seed, row, offset)` -- exactly
+//                     the mapping of SamplingFromProbDeviceScalarSeedKernel -- and
+//                     the first candidate whose inclusive CDF exceeds `u`, in
+//                     candidate order, with the same "last positive index" fallback.
+// ---------------------------------------------------------------------------
+template<uint32_t BLOCK_THREADS, uint32_t WIDTH>
+__global__ void DSparkFusedDraftSampleKernel(const float* __restrict__ scaled_logits,
+                                             float* __restrict__ q_out,
+                                             int32_t* __restrict__ token_out,
+                                             const float* __restrict__ top_p_arr,
+                                             float top_p_val,
+                                             const uint64_t* __restrict__ seed_scalar,
+                                             const uint64_t* __restrict__ offset_scalar) {
+    constexpr uint32_t ITEMS = WIDTH / BLOCK_THREADS;
+    static_assert(WIDTH % BLOCK_THREADS == 0, "width must be a multiple of the block size");
+    using FloatReduce = cub::BlockReduce<float, BLOCK_THREADS>;
+
+    constexpr uint32_t VEC_SIZE = 16 / sizeof(float);   // 4: whole row in one helper call
+    static_assert(WIDTH == BLOCK_THREADS * VEC_SIZE, "the row must fit one sampling helper call");
+    using SampleStorage = flashinfer::sampling::SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>;
+
+    __shared__ typename FloatReduce::TempStorage reduce_storage;
+    __shared__ float                             smem_broadcast;
+    __shared__ __align__(16) float               smem_probs[WIDTH];
+    __shared__ SampleStorage                     sample_storage;
+
+    const uint32_t row     = blockIdx.x, lane = threadIdx.x;
+    const float    top_p   = top_p_arr == nullptr ? top_p_val : top_p_arr[row];
+    const float*   logits  = scaled_logits + static_cast<size_t>(row) * WIDTH;
+    float*         q_row   = q_out + static_cast<size_t>(row) * WIDTH;
+
+    // ---- softmax -----------------------------------------------------------
+    float values[ITEMS];
+    float local_max = -cuda::std::numeric_limits<float>::infinity();
+#pragma unroll
+    for (uint32_t i = 0; i < ITEMS; ++i) {
+        values[i] = logits[i * BLOCK_THREADS + lane];
+        local_max = fmaxf(local_max, values[i]);
+    }
+    float row_max = FloatReduce(reduce_storage).Reduce(local_max, MaxReduceOp{});
+    if (lane == 0) {
+        smem_broadcast = row_max;
+    }
+    __syncthreads();
+    row_max = smem_broadcast;
+
+    float exp_values[ITEMS];
+    float local_sum = 0.0f;
+#pragma unroll
+    for (uint32_t i = 0; i < ITEMS; ++i) {
+        exp_values[i] = __expf(values[i] - row_max);
+        local_sum += exp_values[i];
+    }
+    float row_sum = FloatReduce(reduce_storage).Sum(local_sum);
+    if (lane == 0) {
+        smem_broadcast = row_sum;
+    }
+    __syncthreads();
+    row_sum = smem_broadcast;
+    if (!(row_sum > 0.0f) || !isfinite(row_sum)) {
+        // Degenerate row: emit zeros and token 0 rather than NaN.
+        if (lane == 0) {
+            token_out[row] = 0;
+        }
+        for (uint32_t i = 0; i < ITEMS; ++i) {
+            q_row[i * BLOCK_THREADS + lane] = 0.0f;
+        }
+        return;
+    }
+#pragma unroll
+    for (uint32_t i = 0; i < ITEMS; ++i) {
+        smem_probs[i * BLOCK_THREADS + lane] = exp_values[i] / row_sum;
+    }
+    __syncthreads();
+
+    // ---- top-p nucleus (port of TopPRenormProbKernel) ----------------------
+    // `low` ends up as the largest threshold whose surviving mass still reaches
+    // top_p, and the support is exactly {prob > low}.
+    float normalizer = 1.0f;
+    if (top_p >= 1.0f) {
+        // Reference fast path: renormalise the row by its own sum.
+        float thread_sum = 0.0f;
+#pragma unroll
+        for (uint32_t i = 0; i < ITEMS; ++i) {
+            thread_sum += smem_probs[i * BLOCK_THREADS + lane];
+        }
+        float renorm_sum = FloatReduce(reduce_storage).Sum(thread_sum);
+        if (lane == 0) {
+            smem_broadcast = renorm_sum;
+        }
+        __syncthreads();
+        renorm_sum     = smem_broadcast;
+        const float denom = (renorm_sum <= 1e-8f) ? 1.0f : renorm_sum;
+        normalizer        = math::ptx_rcp(denom);
+#pragma unroll
+        for (uint32_t i = 0; i < ITEMS; ++i) {
+            const uint32_t idx = i * BLOCK_THREADS + lane;
+            smem_probs[idx]    = smem_probs[idx] * normalizer;
+        }
+        __syncthreads();
+    } else {
+        float thread_max_prob = 0.0f;
+#pragma unroll
+        for (uint32_t i = 0; i < ITEMS; ++i) {
+            thread_max_prob = fmaxf(thread_max_prob, smem_probs[i * BLOCK_THREADS + lane]);
+        }
+        float max_prob = FloatReduce(reduce_storage).Reduce(thread_max_prob, MaxReduceOp{});
+        if (lane == 0) {
+            smem_broadcast = max_prob;
+        }
+        __syncthreads();
+        max_prob = smem_broadcast;
+
+        float low = 0.0f, high = max_prob;
+        float min_gt_low = 0.0f, max_le_high = 0.0f;
+        float sum_low = 1.0f;
+        do {
+            // Same pivots and the same IEEE-754 helpers as the reference so the
+            // search visits identical thresholds (fast-math cannot flush them).
+            const float pivot_0 = ieee_div(ieee_add(high, ieee_mul(2.f, low)), 3.f);
+            const float pivot_1 = ieee_div(ieee_add(ieee_mul(2.f, high), low), 3.f);
+            float       thread_gt_pivot_0 = 0.0f, thread_gt_pivot_1 = 0.0f;
+            float       thread_min_gt_low = high, thread_max_le_high = low;
+#pragma unroll
+            for (uint32_t i = 0; i < ITEMS; ++i) {
+                const float    v = smem_probs[i * BLOCK_THREADS + lane];
+                const uint32_t idx = i * BLOCK_THREADS + lane;
+                if (v > pivot_0) {
+                    thread_gt_pivot_0 += v;
+                }
+                if (v > pivot_1) {
+                    thread_gt_pivot_1 += v;
+                }
+                if (v > low && idx < WIDTH) {
+                    thread_min_gt_low = fminf(thread_min_gt_low, v);
+                }
+                if (v <= high && idx < WIDTH) {
+                    thread_max_le_high = fmaxf(thread_max_le_high, v);
+                }
+            }
+            float aggregate_gt_pivot_0 = FloatReduce(reduce_storage).Sum(thread_gt_pivot_0);
+            __syncthreads();
+            float aggregate_gt_pivot_1 = FloatReduce(reduce_storage).Sum(thread_gt_pivot_1);
+            __syncthreads();
+            float next_min_gt_low = FloatReduce(reduce_storage).Reduce(thread_min_gt_low, MinReduceOp{});
+            __syncthreads();
+            float next_max_le_high = FloatReduce(reduce_storage).Reduce(thread_max_le_high, MaxReduceOp{});
+            if (lane == 0) {
+                smem_broadcast = next_max_le_high;
+            }
+            __syncthreads();
+            next_max_le_high = smem_broadcast;
+            // The reference stores both reductions in shared memory and reloads them
+            // for all threads; reproduce that broadcast so every thread compares the
+            // same values.
+            if (lane == 0) {
+                smem_broadcast = aggregate_gt_pivot_0;
+            }
+            __syncthreads();
+            aggregate_gt_pivot_0 = smem_broadcast;
+            if (lane == 0) {
+                smem_broadcast = aggregate_gt_pivot_1;
+            }
+            __syncthreads();
+            aggregate_gt_pivot_1 = smem_broadcast;
+            if (lane == 0) {
+                smem_broadcast = next_min_gt_low;
+            }
+            __syncthreads();
+            next_min_gt_low = smem_broadcast;
+            min_gt_low      = next_min_gt_low;
+            max_le_high     = next_max_le_high;
+
+            if (aggregate_gt_pivot_1 >= top_p) {
+                low     = pivot_1;
+                sum_low = aggregate_gt_pivot_1;
+            } else if (aggregate_gt_pivot_0 >= top_p) {
+                low     = pivot_0;
+                high    = fminf(pivot_1, max_le_high);
+                sum_low = aggregate_gt_pivot_0;
+            } else {
+                high = fminf(pivot_0, max_le_high);
+            }
+            __syncthreads();
+        } while (min_gt_low != max_le_high);
+
+        normalizer = math::ptx_rcp(fmaxf(sum_low, 1e-8f));
+#pragma unroll
+        for (uint32_t i = 0; i < ITEMS; ++i) {
+            const uint32_t idx = i * BLOCK_THREADS + lane;
+            const float    v   = smem_probs[idx];
+            smem_probs[idx]    = (v > low) ? v * normalizer : 0.0f;
+        }
+        __syncthreads();
+    }
+
+    // ---- CDF sampling: the reference helper, not a re-implementation --------
+    // Same Philox state as SamplingFromProbDeviceScalarSeedKernel
+    // (curand_init(seed, row, offset)), same `DeviceSamplingFromProb` reduction and
+    // scan, and the whole row fits in one call (WIDTH == BLOCK_THREADS * VEC_SIZE),
+    // exactly like the production sampler's single iteration.
+    curandStatePhilox4_32_10_t state;
+    curand_init(*seed_scalar, static_cast<uint64_t>(row), *offset_scalar, &state);
+    sample_storage.sampled_id    = WIDTH;
+    sample_storage.last_valid_id = -1;
+    __syncthreads();
+    const float                         u = curand_uniform(&state);
+    vec_t<float, VEC_SIZE> probs_vec;
+    probs_vec.fill(0.0f);
+    probs_vec.cast_load(smem_probs + lane * VEC_SIZE);
+    float aggregate = 0.0f;
+    flashinfer::sampling::DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, /*DETERMINISTIC=*/true>(
+        0, WIDTH, [](float x) { return x > 0; }, u, probs_vec, aggregate, &sample_storage);
+    __syncthreads();
+    if (lane == 0) {
+        int sampled_id = sample_storage.sampled_id;
+        if (sampled_id == static_cast<int>(WIDTH)) {
+            // u landed past the row total through rounding: fall back to the last
+            // positive candidate, exactly like the reference kernel.
+            sampled_id = sample_storage.last_valid_id == -1 ? 0 : sample_storage.last_valid_id;
+        }
+        token_out[row] = sampled_id;
+    }
+    __syncthreads();
+
+    // ---- write the top-p renormalised distribution -------------------------
+#pragma unroll
+    for (uint32_t i = 0; i < ITEMS; ++i) {
+        q_row[i * BLOCK_THREADS + lane] = smem_probs[i * BLOCK_THREADS + lane];
+    }
+}
+
+
 template<uint32_t             BLOCK_THREADS,
          BlockScanAlgorithm   SCAN_ALGORITHM,
          BlockReduceAlgorithm REDUCE_ALGORITHM,
@@ -252,6 +499,59 @@ void get_sampling_seed_offsets(const std::vector<at::Generator>& generators,
     }
 }
 
+
+
+
+void dspark_fused_draft_sample(torch::Tensor                scaled_logits,
+                               torch::Tensor                q_out,
+                               torch::Tensor                token_out,
+                               std::optional<torch::Tensor> maybe_top_p_arr,
+                               double                       top_p_val,
+                               const torch::Tensor&         seed_scalar,
+                               const torch::Tensor&         offset_scalar,
+                               int64_t                      cuda_stream) {
+    constexpr int      width   = 1024;
+    constexpr uint32_t threads = 256;
+    TORCH_CHECK(scaled_logits.is_cuda() && scaled_logits.scalar_type() == torch::kFloat32
+                    && scaled_logits.dim() == 2 && scaled_logits.size(1) == width
+                    && scaled_logits.is_contiguous(),
+                "dspark fused draft sample expects contiguous CUDA FP32 [rows, 1024] scaled logits");
+    const auto rows = scaled_logits.size(0);
+    TORCH_CHECK(q_out.is_cuda() && q_out.scalar_type() == torch::kFloat32 && q_out.sizes() == scaled_logits.sizes()
+                    && q_out.is_contiguous(),
+                "q_out must be a contiguous FP32 tensor matching the scaled logits shape");
+    TORCH_CHECK(token_out.is_cuda() && token_out.scalar_type() == torch::kInt32 && token_out.dim() == 1
+                    && token_out.numel() == rows && token_out.is_contiguous(),
+                "token_out must be a contiguous CUDA int32 tensor with one entry per row");
+    const auto scalar_ok = [](const torch::Tensor& tensor, const char* name) {
+        TORCH_CHECK(tensor.defined() && tensor.is_cuda() && tensor.scalar_type() == at::kLong && tensor.numel() == 1
+                        && tensor.is_contiguous(),
+                    name,
+                    " must be a one-element contiguous CUDA int64 tensor");
+    };
+    scalar_ok(seed_scalar, "seed_scalar");
+    scalar_ok(offset_scalar, "offset_scalar");
+    TORCH_CHECK(seed_scalar.device() == scaled_logits.device() && offset_scalar.device() == scaled_logits.device(),
+                "seed_scalar/offset_scalar must live on the logits device");
+
+    at::cuda::CUDAGuard device_guard(scaled_logits.device());
+    auto               stream = resolve_stream(cuda_stream);
+    const auto         top_p  = prepare_optional_param(maybe_top_p_arr, rows, scaled_logits.device(), at::kFloat, "top_p");
+
+    const float*   logits_ptr = scaled_logits.data_ptr<float>();
+    float*         q_ptr      = q_out.data_ptr<float>();
+    int32_t*       token_ptr  = token_out.data_ptr<int32_t>();
+    const float*   top_p_ptr  = top_p.defined() ? top_p.data_ptr<float>() : nullptr;
+    float          top_p_v    = static_cast<float>(top_p_val);
+    const uint64_t* seed_ptr  = reinterpret_cast<const uint64_t*>(seed_scalar.data_ptr<int64_t>());
+    const uint64_t* offset_ptr = reinterpret_cast<const uint64_t*>(offset_scalar.data_ptr<int64_t>());
+
+    auto kernel = flashinfer::sampling::DSparkFusedDraftSampleKernel<threads, width>;
+    void* args[] = {&logits_ptr, &q_ptr, &token_ptr, &top_p_ptr, &top_p_v, &seed_ptr, &offset_ptr};
+    const cudaError_t status =
+        cudaLaunchKernel((void*)kernel, dim3(static_cast<uint32_t>(rows)), dim3(threads), args, 0, stream);
+    TORCH_CHECK(status == cudaSuccess, "dspark fused draft sample launch failed: ", cudaGetErrorString(status));
+}
 
 void sampling_from_probs_device_scalar_seed(torch::Tensor                probs,
                                             torch::Tensor                output,
