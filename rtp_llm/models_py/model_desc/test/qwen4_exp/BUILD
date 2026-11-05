@@ -113,6 +113,16 @@ qwen4_test(
 )
 
 qwen4_test(
+    name = "qsa_mtp_sm120_test",
+    src = "qsa_mtp_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = [
+        ":fixtures",
+        ":qsa_fixtures",
+    ],
+)
+
+qwen4_test(
     name = "qsa_wiring_test",
     src = "qsa_wiring_test.py",
     gpu = "L20_CU13",

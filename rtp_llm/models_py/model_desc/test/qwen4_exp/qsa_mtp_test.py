@@ -1,12 +1,19 @@
+import os
+from contextlib import nullcontext
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
 
 import torch
-
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime import qsa_prefill
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
     Qwen4ExpQSARuntimeContext,
 )
 from rtp_llm.models_py.model_desc.test.qwen4_exp.qsa_fixtures import QSARuntimeFixture
+from rtp_llm.models_py.modules.qwen4_exp.qsa import (
+    cub_topk,
+    indexer_paged_score,
+    indexer_tensorcore,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import build_qsa_rope
 
 
@@ -819,6 +826,249 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
                     ).select_decode_tokens(
                         q, raw, indexer=indexer, rope_config=self.rope_config
                     )
+
+    def _assert_identity_packing_bytes_equal(self, actual, expected):
+        self.assertEqual(actual.dtype, expected.dtype)
+        self.assertEqual(actual.shape, expected.shape)
+        self.assertTrue(
+            torch.equal(
+                actual.contiguous().view(torch.uint8),
+                expected.contiguous().view(torch.uint8),
+            )
+        )
+
+    def _identity_packing_fixture(self):
+        self.D = self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+        self.indexer.k_norm_gamma = torch.randn(
+            128, dtype=torch.bfloat16, device="cuda"
+        )
+        indexer = self._decode_indexer(heads=4)
+        indexer.token_budget = 2048
+        rope = self.rope_config
+        rope.dim = 64
+        rope.mrope_dim1, rope.mrope_dim2, rope.mrope_dim3 = 16, 8, 8
+        # Physical page zero remains reserved, as in the production side pool.
+        kv = torch.randn(129, 32 * 128, dtype=torch.bfloat16, device="cuda").view(
+            torch.uint8
+        )
+        state = torch.randn(129, 8 * 128, dtype=torch.float32, device="cuda")
+        q = torch.randn(8192, 4, 128, dtype=torch.bfloat16, device="cuda")
+        raw = torch.randn(8192, 128, dtype=torch.bfloat16, device="cuda")
+        return indexer, rope, kv, state, q, raw
+
+    def _run_identity_packing_route(
+        self,
+        fixture,
+        *,
+        enabled,
+        expect_identity,
+        ambient_capture=False,
+        device_prefix=False,
+    ):
+        indexer, rope, initial_kv, initial_state, q, raw = fixture
+        kv, state = initial_kv.clone(), initial_state.clone()
+        table = torch.arange(1, 129, dtype=torch.int32, device="cuda").view(1, -1)
+        context = self._draft_incremental_context(
+            kv,
+            state,
+            prefixes=[8192],
+            lengths=[8192],
+            kv_table=table,
+            state_table=table,
+            is_mtp_draft=False,
+        )
+        if not device_prefix:
+            prefix = torch.tensor([8192], dtype=torch.int32)
+            for inputs in (
+                context.main_inputs,
+                context.indexer_kv_inputs,
+                context.indexer_state_inputs,
+            ):
+                inputs.prefix_lengths = prefix
+        object.__setattr__(context, "metadata_cache", {})
+        observed = {}
+        real_rope = qsa_prefill.apply_partial_rope
+        real_score = indexer_paged_score.qsa_paged_indexer_score
+        real_cub = cub_topk.try_cub_qsa_tokens
+        real_full = torch.full
+
+        def observe_rope(*args, **kwargs):
+            result = real_rope(*args, **kwargs)
+            observed["rotated_q"] = result
+            return result
+
+        def observe_full(size, fill_value, **kwargs):
+            result = real_full(size, fill_value, **kwargs)
+            if tuple(size) == (8192, 4) and result.dtype == torch.float32:
+                self.assertNotIn("weights_owner", observed)
+                observed["weights_owner"] = result
+            return result
+
+        def observe_score(score_q, weights, *args, **kwargs):
+            observed["score_q"] = score_q
+            observed["score_weights"] = weights
+            observed["q_before"] = score_q.clone()
+            observed["weights_before"] = weights.clone()
+            result = real_score(score_q, weights, *args, **kwargs)
+            observed["logits"] = result
+            return result
+
+        def observe_cub(*args, **kwargs):
+            result = real_cub(*args, **kwargs)
+            self.assertIsNotNone(result, "real SM120 CUB provider must run")
+            self.assertNotIn("selected_owner", observed)
+            observed["selected_owner"] = result
+            return result
+
+        q_before, raw_before = q.clone(), raw.clone()
+        capture_guard = (
+            patch.object(torch.cuda, "is_current_stream_capturing", return_value=True)
+            if ambient_capture
+            else nullcontext()
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "RTP_QWEN4_PREFILL_IDENTITY_PACKING": str(enabled),
+                },
+            ),
+            patch.object(qsa_prefill, "apply_partial_rope", side_effect=observe_rope),
+            patch.object(torch, "full", side_effect=observe_full),
+            patch.object(
+                indexer_paged_score,
+                "qsa_paged_indexer_score",
+                side_effect=observe_score,
+            ),
+            patch.object(
+                indexer_tensorcore,
+                "paged_indexer_mma",
+                wraps=indexer_tensorcore.paged_indexer_mma,
+            ) as mma,
+            patch.object(
+                cub_topk, "try_cub_qsa_tokens", side_effect=observe_cub
+            ) as cub,
+            capture_guard,
+        ):
+            selected = context.select_prefix_reuse_prefill_tokens(
+                q, raw, indexer=indexer, rope_config=rope
+            )
+        self.assertEqual(mma.call_count, 1, "no vector/native scorer substitution")
+        self.assertEqual(cub.call_count, 1, "no native TopK substitution")
+        self.assertEqual(observed["logits"].shape, (8192, 4096))
+        self.assertEqual(selected.shape, (8192, 2051))
+        self.assertTrue(bool(torch.isneginf(observed["logits"][:, -1]).any()))
+        self._assert_identity_packing_bytes_equal(q, q_before)
+        self._assert_identity_packing_bytes_equal(raw, raw_before)
+        self._assert_identity_packing_bytes_equal(
+            observed["score_q"], observed["q_before"]
+        )
+        self._assert_identity_packing_bytes_equal(
+            observed["score_weights"], observed["weights_before"]
+        )
+        if expect_identity:
+            self.assertEqual(
+                observed["score_q"].data_ptr(), observed["rotated_q"].data_ptr()
+            )
+            self.assertIs(observed["score_weights"], observed["weights_owner"])
+            self.assertIs(selected, observed["selected_owner"])
+        else:
+            self.assertNotEqual(
+                observed["score_q"].data_ptr(), observed["rotated_q"].data_ptr()
+            )
+            self.assertIsNot(observed["score_weights"], observed["weights_owner"])
+            self.assertIsNot(selected, observed["selected_owner"])
+        self.assertIsNotNone(context._side_cache_undo)
+        written_kv, written_state = kv.clone(), state.clone()
+        context.rollback_side_cache()
+        self._assert_identity_packing_bytes_equal(kv, initial_kv)
+        self._assert_identity_packing_bytes_equal(state, initial_state)
+        context.rollback_side_cache()
+        return dict(
+            selected=selected,
+            logits=observed["logits"],
+            kv=written_kv,
+            state=written_state,
+        )
+
+    @skipUnless(
+        torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 0),
+        "real MMA+CUB identity packing qualification requires SM120",
+    )
+    def test_identity_prefill_packing_real_providers_are_bitexact_and_owned(self):
+        fixture = self._identity_packing_fixture()
+        baseline = self._run_identity_packing_route(
+            fixture, enabled=0, expect_identity=False
+        )
+        first = self._run_identity_packing_route(
+            fixture, enabled=1, expect_identity=True
+        )
+        for boundary in ("logits", "selected", "kv", "state"):
+            self._assert_identity_packing_bytes_equal(
+                first[boundary], baseline[boundary]
+            )
+
+        indexer, rope, kv, state, q, raw = fixture
+        changed = (indexer, rope, kv, state, -q, -raw)
+        second_baseline = self._run_identity_packing_route(
+            changed, enabled=0, expect_identity=False
+        )
+        second = self._run_identity_packing_route(
+            changed, enabled=1, expect_identity=True
+        )
+        for boundary in ("logits", "selected", "kv", "state"):
+            self._assert_identity_packing_bytes_equal(
+                second[boundary], second_baseline[boundary]
+            )
+            self._assert_identity_packing_bytes_equal(
+                first[boundary], baseline[boundary]
+            )
+        self.assertFalse(torch.equal(first["logits"], second["logits"]))
+        self.assertFalse(torch.equal(first["selected"], second["selected"]))
+        self.assertNotEqual(first["selected"].data_ptr(), second["selected"].data_ptr())
+        # Two live producer outputs must stay independent after another call.
+        second["selected"].fill_(-123)
+        self._assert_identity_packing_bytes_equal(
+            first["selected"], baseline["selected"]
+        )
+
+        # Query-only simulation checks the ambient-capture guard; it does not
+        # claim that this host-metadata prefill route supports actual capture.
+        for options in ({"ambient_capture": True}, {"device_prefix": True}):
+            with self.subTest(options=options):
+                fallback = self._run_identity_packing_route(
+                    fixture, enabled=1, expect_identity=False, **options
+                )
+                for boundary in ("logits", "selected", "kv", "state"):
+                    self._assert_identity_packing_bytes_equal(
+                        fallback[boundary], baseline[boundary]
+                    )
+        noncontiguous_q = q.transpose(0, 1).contiguous().transpose(0, 1)
+        self.assertFalse(noncontiguous_q.is_contiguous())
+        fallback = self._run_identity_packing_route(
+            (indexer, rope, kv, state, noncontiguous_q, raw),
+            enabled=1,
+            expect_identity=False,
+        )
+        for boundary in ("logits", "selected", "kv", "state"):
+            self._assert_identity_packing_bytes_equal(
+                fallback[boundary], baseline[boundary]
+            )
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for existing fallbacks")
+    def test_identity_prefill_packing_reuses_existing_fallbacks(self):
+        with patch.dict(os.environ, {"RTP_QWEN4_PREFILL_IDENTITY_PACKING": "1"}):
+            for existing in (
+                self.test_target_verify_uses_prefix_for_every_query_row,
+                self.test_target_prefix_reuse_accepts_mixed_cold_and_hot_rows,
+                self.test_mtp_draft_prefix_reuse_accepts_local_cu_kv_coordinates,
+                self.test_draft_incremental_prefill_is_ragged_and_visibility_bounded,
+            ):
+                with self.subTest(existing=existing.__name__):
+                    self.setUp()
+                    existing()
+            self.setUp()
+            self._check_draft_graph_replay(4)
 
 
 if __name__ == "__main__":
