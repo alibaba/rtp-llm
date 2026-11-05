@@ -5,13 +5,15 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Supplier;
 
-/** Exactly one reader consumes each instance's metric windows: HTTP pull or internal push. */
+/** Selects the event backend once; state and precomputed rate snapshots retain one periodic reader. */
 public final class MetricsOutput implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(MetricsOutput.class.getName());
     private static final class Provider {
         static final MetricReporter INSTANCE = discover(ServiceLoader.load(MetricReporter.class), System.getenv());
     }
     private final ScheduledExecutorService worker;
+
+    static MetricReporter eventReporter() { return Provider.INSTANCE; }
 
     static MetricReporter discover(Iterable<MetricReporter> providers, Map<String, String> environment) {
         var iterator = providers.iterator();

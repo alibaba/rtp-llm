@@ -84,7 +84,7 @@ class RtpSchedulerTest {
             base.cacheSequence(), false, false, 0, false);
     }
     private static String completeAndCheckTpot(RtpFifoScheduler scheduler, EngineScheduler.Work work, RtpConfig config,
-                                               long beforeSchedule, long afterSchedule, int accepted, int streams) throws Exception {
+                                               String beforeMetrics, long beforeSchedule, long afterSchedule, int accepted, int streams) throws Exception {
         // Leave a measurable execution interval so using truncated output or the wrong
         // stream population cannot accidentally satisfy the clock-bound assertions.
         Thread.sleep(20);
@@ -92,15 +92,23 @@ class RtpSchedulerTest {
         complete(scheduler, work, config);
         long afterComplete = System.nanoTime();
         var text = scheduler.metrics().scrape();
-        double tpot = RtpMetricsTest.sample(text, "rtp_llm_sp_estimate_tpot_us", "");
+        double tpot = eventMeanDelta(beforeMetrics, text, "rtp_llm_sp_estimate_tpot_us");
         assertTrue(tpot >= (beforeComplete - afterSchedule) / 1000.0 * streams / accepted, text);
         assertTrue(tpot <= (afterComplete - beforeSchedule) / 1000.0 * streams / accepted, text);
         assertFalse(text.contains("mock_decode_estimate_tpot_us"));
         assertFalse(text.contains("mock_forward_batch_prepare_us"));
-        double gather = RtpMetricsTest.sample(text, "rtp_llm_gather_model_input_us", "");
+        double gather = eventMeanDelta(beforeMetrics, text, "rtp_llm_gather_model_input_us");
         assertTrue(gather >= 0 && gather <= (afterSchedule - beforeSchedule) / 1000.0, text);
         drain(scheduler);
         return text;
+    }
+
+    private static double eventMeanDelta(String before, String after, String name) {
+        double oldCount = before.contains(name + "_count{") ? RtpMetricsTest.sample(before, name + "_count", "") : 0;
+        double oldSum = before.contains(name + "_sum{") ? RtpMetricsTest.sample(before, name + "_sum", "") : 0;
+        double count = RtpMetricsTest.sample(after, name + "_count", "") - oldCount;
+        assertEquals(1, count, name);
+        return (RtpMetricsTest.sample(after, name + "_sum", "") - oldSum) / count;
     }
 
     @ParameterizedTest
@@ -112,8 +120,9 @@ class RtpSchedulerTest {
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var request = scheduler.input(metricInput(1, maxNewTokens), listener);
             scheduler.maintain(); drain(scheduler); generate(scheduler, request);
+            var beforeMetrics = scheduler.metrics().scrape();
             long before = System.nanoTime(); var work = scheduler.schedule(); long after = System.nanoTime();
-            var text = completeAndCheckTpot(scheduler, work, config, before, after, 4, 1);
+            var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 4, 1);
             assertEquals(delivered, RtpMetricsTest.sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
             assertEquals(1 + delivered, request.snapshot().generated());
             assertNull(listener.terminal.get(1, TimeUnit.SECONDS));
@@ -128,13 +137,13 @@ class RtpSchedulerTest {
             scheduler.maintain(); drain(scheduler); generate(scheduler, first);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
             complete(scheduler, scheduler.schedule(), config); drain(scheduler);
-            scheduler.metrics().scrape(); // The next round has its own TPOT event window.
             var second = scheduler.input(metricInput(2, 20), listener);
             scheduler.maintain(); drain(scheduler); generate(scheduler, second);
+            var beforeMetrics = scheduler.metrics().scrape();
             long before = System.nanoTime(); var work = scheduler.schedule(); long after = System.nanoTime();
             scheduler.finish(second, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel during forward"));
             // First stream is in Decode round 2 (two tokens), second in round 0 (three).
-            var text = completeAndCheckTpot(scheduler, work, config, before, after, 5, 2);
+            var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 5, 2);
             assertEquals(9, first.snapshot().generated());
             assertEquals(1, second.snapshot().generated());
             assertEquals(8, RtpMetricsTest.sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
@@ -149,17 +158,18 @@ class RtpSchedulerTest {
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var request = scheduler.input(metricInput(1, 20), new Listener());
             scheduler.maintain(); drain(scheduler); generate(scheduler, request);
+            var beforeMetrics = scheduler.metrics().scrape();
             long before = System.nanoTime(); var work = scheduler.schedule(); long after = System.nanoTime();
             scheduler.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel all"));
             assertTrue(scheduler.cancelled(work));
             if (completed) {
-                var text = completeAndCheckTpot(scheduler, work, config, before, after, 4, 1);
+                var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 4, 1);
                 assertEquals(0, RtpMetricsTest.sample(text, "rtp_llm_forward_tokens_total", "kind=\"output\""));
             } else {
                 var sample = config.compute().plan(config.role(), config.id(), work.batch());
                 scheduler.computeCompleted(work, new SimulatedCompute.Outcome(SimulatedCompute.State.CANCELLED, sample, 0));
                 drain(scheduler);
-                assertFalse(scheduler.metrics().scrape().contains("rtp_llm_sp_estimate_tpot_us{"));
+                assertFalse(scheduler.metrics().scrape().contains("rtp_llm_sp_estimate_tpot_us_count{"));
             }
         }
     }
@@ -173,8 +183,8 @@ class RtpSchedulerTest {
             drain(scheduler);
             assertNull(scheduler.schedule());
             var text = scheduler.metrics().scrape();
-            assertFalse(text.contains("rtp_llm_sp_estimate_tpot_us{"));
-            assertFalse(text.contains("rtp_llm_gather_model_input_us{"));
+            assertFalse(text.contains("rtp_llm_sp_estimate_tpot_us_count{"));
+            assertFalse(text.contains("rtp_llm_gather_model_input_us_count{"));
         }
     }
 
@@ -211,8 +221,8 @@ class RtpSchedulerTest {
             complete(scheduler, batch, config); drain(scheduler);
             assertEquals(RequestFailure.Reason.CANCELLED, first.terminal.get(1, TimeUnit.SECONDS).reason());
             String observations = scheduler.metrics().scrape();
-            assertTrue(observations.lines().anyMatch(line -> line.startsWith("rtp_llm_generate_batch_size{") && line.endsWith(" 2.0")), observations);
-            assertTrue(observations.lines().anyMatch(line -> line.startsWith("rtp_llm_execute_token_size{") && line.endsWith(" 2.0")), observations);
+            assertEquals(2, RtpMetricsTest.mean(observations, "rtp_llm_generate_batch_size", ""));
+            assertEquals(2, RtpMetricsTest.mean(observations, "rtp_llm_execute_token_size", ""));
             assertEquals(1, a.snapshot().generated()); assertEquals(2, b.snapshot().generated());
             assertEquals(new QueueSnapshot(0, 1, 0, 0), scheduler.queues());
             assertTrue(scheduler.metrics().scrape().lines().anyMatch(line -> line.startsWith("rtp_llm_model_forward_seconds_count{")
@@ -224,7 +234,7 @@ class RtpSchedulerTest {
             String terminalMetrics = scheduler.metrics().scrape();
             for (String name : List.of("rtp_llm_latency_us", "rtp_llm_wait_latency_us", "rtp_llm_first_token_latency_us",
                     "rtp_llm_input_token_length", "rtp_llm_output_token_length", "rtp_llm_iterate_count", "rtp_llm_query_batch_size"))
-                assertTrue(terminalMetrics.contains(name + "{"), terminalMetrics);
+                assertTrue(terminalMetrics.contains(name + "_count{"), terminalMetrics);
         }
     }
 

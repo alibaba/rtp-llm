@@ -120,7 +120,8 @@ def test_local_legends_use_prometheus_labels_and_respect_aggregation():
     items = {p['id']: p for p in panels()}
     forward = items[100231]['targets'][0]
     assert forward['legendFormat'] == '{{${prefill_group}}}'
-    assert forward['expr'].startswith('avg by(${prefill_group})(')
+    assert 'sum by(${prefill_group})(rate(rtp_llm_model_forward_us_sum{' in forward['expr']
+    assert 'sum by(${prefill_group})(rate(rtp_llm_model_forward_us_count{' in forward['expr']
     decode_forward = items[600019]['targets'][0]
     assert decode_forward['legendFormat'].startswith('{{${decode_group}}}')
     assert decode_forward['expr'].startswith('avg by(${decode_group})(')
@@ -178,7 +179,8 @@ def test_real_engine_observations_return_to_rtp_panels_and_mock_rows_only_compar
     assert 'kind="output"' in items[210383]['targets'][0]['expr']
     for panel_id in (100160, 200160, 300452, 310351):
         assert '待埋点' not in items[panel_id]['title']
-    assert 'py_rtp_vit_preprocess_rt{' in items[300452]['targets'][2]['expr']
+    assert 'py_rtp_vit_preprocess_rt_sum{' in items[300452]['targets'][2]['expr']
+    assert 'py_rtp_vit_preprocess_rt_count{' in items[300452]['targets'][2]['expr']
     assert 'rtp_llm_sp_estimate_tpot_us_sum{' in items[210112]['targets'][0]['expr']
     assert any('mock_client_tpot_seconds' in t['expr'] for t in items[5]['targets'])
     assert all('rtp_llm_sp_' not in t['expr'] or 'rtp_llm_sp_estimate_tpot_us' in t['expr']
@@ -210,3 +212,27 @@ def test_custom_panels_follow_their_own_address_selection_without_losing_busines
     assert 'avg by(${master_group},area)(sum by(instance,application,area)' in items[56]['targets'][0]['expr']
     assert 'by(${master_group},area,id)' in items[190]['targets'][0]['expr']
     assert 'by(${master_group},state)' in items[59]['targets'][0]['expr']
+
+
+def test_event_metrics_use_counts_instead_of_averaging_instance_window_means():
+    from pathlib import Path
+    source = ROOT / 'java/engine/src/main/java/org/flexlb/mock/engine'
+    names = set()
+    for path in source.rglob('*.java'):
+        names.update(re.findall(r'(?:events\.observe|observePositive|positiveMicros)\("([^\"]+)"', path.read_text()))
+    names = {name for name in names if not name.endswith('_qps')}
+    names.update(('rtp_llm_rpc_worker_status_total_rt_us', 'rtp_llm_rpc_cache_status_total_rt_us'))
+    assert 'rtp_llm_input_token_length' in names
+    checked = 0
+    for panel in panels():
+        for target in panel['targets']:
+            expression = target['expr']
+            for name in names:
+                assert not re.search(r'\b' + re.escape(name) + r'\s*\{', expression), (panel['id'], name)
+                if name + '_sum{' in expression and name not in {
+                        'rtp_llm_kv_cache_reuse_length', 'rtp_llm_input_token_length',
+                        'rtp_llm_prefill_worker_recent_cache_key_hit_count',
+                        'rtp_llm_prefill_worker_recent_cache_key_total_count'}:
+                    assert name + '_count{' in expression, (panel['id'], name)
+                    checked += 1
+    assert checked >= 50
