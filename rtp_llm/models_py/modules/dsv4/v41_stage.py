@@ -12,6 +12,9 @@ from dataclasses import dataclass, replace
 import torch
 
 from rtp_llm.config.dsv41_config import V41Config
+from rtp_llm.models_py.modules.dsv4._v41_deferred_checks import (
+    flush_checks as _flush_deferred_checks,
+)
 from rtp_llm.models_py.modules.dsv4.v41_block import (
     V41Block,
     V41ResidualState,
@@ -328,6 +331,7 @@ class V41Stage:
         l20_plan = plans[20] if self.end == 21 else None
         if l20_plan is not None and cp_forward is not None:
             l20_plan = cp_forward.local_plan(l20_plan)
+        _flush_deferred_checks("stage")
         return V41StageResult(state, rows, selections, hidden, l20_plan)
 
     def run(self, state, rows, plans, *, windows=None, selections=None):

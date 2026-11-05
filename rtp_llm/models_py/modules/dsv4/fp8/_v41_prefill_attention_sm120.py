@@ -5,6 +5,8 @@ contraction, with BF16 workspace gathers in place of paged FP8/FP4 decoding.
 Fresh SWA values must not be requantized merely to select an SM120 backend.
 """
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -72,6 +74,16 @@ def _sparse_prefill(
 
 def sparse_prefill_attention(query, kv, indices, lengths, sinks):
     """Consume upstream BF16 [K,1,512] and bounded [Q,1,TopK] index plans."""
+    from ._v41_prefill_attention_v2 import (
+        sparse_prefill_attention_v2,
+        sparse_prefill_v2_mode,
+    )
+
+    _v2_mode = sparse_prefill_v2_mode()
+    if _v2_mode != "0":
+        return sparse_prefill_attention_v2(
+            query, kv, indices, lengths, sinks, _v2_mode
+        )
     if not (
         query.is_cuda
         and torch.cuda.get_device_capability(query.device) == (12, 0)

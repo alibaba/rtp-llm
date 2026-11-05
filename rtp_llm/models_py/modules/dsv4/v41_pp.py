@@ -6,6 +6,7 @@ top-k or candidate state is installed. Validation is synchronous prefill work.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Mapping, Sequence
 
@@ -17,6 +18,25 @@ if TYPE_CHECKING:
         V41L20ReplicaReceiver,
         V41L20Span,
     )
+
+_PP_MASKED_VALIDATE_FLAG = "DSV41_PP_MASKED_VALIDATE"
+
+
+def _pp_masked_validate_enabled() -> bool:
+    return os.environ.get(_PP_MASKED_VALIDATE_FLAG, "0") == "1"
+
+
+def _masked_all_finite(values: torch.Tensor, active_rows: torch.Tensor) -> torch.Tensor:
+    """True iff every active row of ``values`` is fully finite.
+
+    Equivalent to ``torch.isfinite(values[active_rows]).all()`` but computed
+    as a masked reduction: boolean-mask indexing runs an implicit nonzero()
+    that forces a device-to-host sync on every PP handoff. Inactive rows are
+    forced True before the final all(), so an empty selection stays True.
+    """
+    finite_rows = torch.isfinite(values).flatten(1).all(1)
+    return (finite_rows | ~active_rows).all()
+
 
 _HEADER = "v41_pp_header"
 _ROW_MAP = "v41_row_map"
@@ -196,14 +216,25 @@ def _validate_frame(
         spans,
     )
     active_rows = expected_rows[:, 2].bool().to(device)
-    torch._assert_async(
-        torch.isfinite(frame.hidden_states[active_rows]).all(),
-        "V4.1 PP active residual must be finite",
-    )
-    torch._assert_async(
-        torch.isfinite(frame.prev_pre_mix[active_rows]).all(),
-        "V4.1 PP active pre-mix must be finite",
-    )
+    if _pp_masked_validate_enabled():
+        # G1: identical predicate without the boolean-mask indexing sync.
+        torch._assert_async(
+            _masked_all_finite(frame.hidden_states, active_rows),
+            "V4.1 PP active residual must be finite",
+        )
+        torch._assert_async(
+            _masked_all_finite(frame.prev_pre_mix, active_rows),
+            "V4.1 PP active pre-mix must be finite",
+        )
+    else:
+        torch._assert_async(
+            torch.isfinite(frame.hidden_states[active_rows]).all(),
+            "V4.1 PP active residual must be finite",
+        )
+        torch._assert_async(
+            torch.isfinite(frame.prev_pre_mix[active_rows]).all(),
+            "V4.1 PP active pre-mix must be finite",
+        )
     active_map = expected_rows[expected_rows[:, 2] == 1, :2]
     if np.unique(active_map.numpy(), axis=0).shape[0] != active_map.shape[0]:
         raise ValueError("V4.1 PP CP row map repeats a query")

@@ -604,6 +604,14 @@ class V4Transformer(nn.Module):
         for layer in self.layers:
             if self.args.v41_config is not None:
                 layer.ffn.gate._v41_cp_ctx = cp_ctx
+                # Lockstep invariant: the ONLY writers of the gate's CP context
+                # are this method and prefill_meta.clear_prefill_meta_shared_fp8;
+                # both also write the EP strategy's, so the strategy context is
+                # exactly this forward's (or None) at every MoE call. The
+                # DSV4_MOE_UNIFORM_COUNTS_SKIP guard depends on this.
+                strategy = getattr(layer.ffn, "_strategy", None)
+                if strategy is not None:
+                    strategy._v41_cp_ctx = cp_ctx
             attn = getattr(layer, "attn", None)
             if attn is None:
                 continue

@@ -35,6 +35,13 @@ except Exception:  # pragma: no cover
     fused_sqrtsoftplus_gate = None
     _GATE_FUSED_OK = False
 
+from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
+    router_linear as _router_linear,
+    router_tc_mode as _router_tc_mode,
+    router_verify_enabled as _router_verify_enabled,
+    verify_router_parity as _verify_router_parity,
+)
+
 
 def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
     """Gate for the fused router-gate kernel.
@@ -206,7 +213,30 @@ class Gate(nn.Module):
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
         # then run in FP32 through softplus/sqrt/topk, same as before.
         if self.fp32_logits or os.environ.get("DSV4_GATE_FP32", "0") == "1":
-            scores = F.linear(x.float(), self.weight.float())
+            # R5-a: under DSV41_ROUTER_TENSORCORE=tf32 this FP32 GEMM runs on
+            # tensor cores (operands are BF16-derived, exactly representable
+            # in TF32; only accumulation order differs). Default off keeps
+            # the SIMT sgemm bit-for-bit.
+            x_fp32 = x.float()
+            w_fp32 = self.weight.float()
+            mode = _router_tc_mode()
+            scores = _router_linear(x_fp32, w_fp32, mode)
+            if (
+                mode != "0"
+                and _router_verify_enabled()
+                and not self.hash
+                and self.bias is not None
+                and self.score_func == "sqrtsoftplus"
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                _verify_router_parity(
+                    F.linear(x_fp32, w_fp32),
+                    scores,
+                    1.0,
+                    self.bias,
+                    self.topk,
+                    None,
+                )
         else:
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
             scores = F.linear(x_bf16, self._weight_bf16()).float()

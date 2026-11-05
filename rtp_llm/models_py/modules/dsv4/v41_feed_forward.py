@@ -6,6 +6,18 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
+    router_linear as _router_linear,
+)
+from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
+    router_tc_mode as _router_tc_mode,
+)
+from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
+    router_verify_enabled as _router_verify_enabled,
+)
+from rtp_llm.models_py.modules.dsv4._v41_router_tc import (
+    verify_router_parity as _verify_router_parity,
+)
 from rtp_llm.models_py.modules.dsv4.v41_collective import V41CollectiveMoE
 from rtp_llm.models_py.modules.dsv4.v41_expert import V41SharedExpert
 from rtp_llm.models_py.modules.dsv4.v41_moe import V41LocalMoE, _assert_values
@@ -103,7 +115,18 @@ class V41Router(nn.Module):
         _assert_values(
             torch.isfinite(clean).all(), "V4.1 live router inputs must be finite"
         )
-        scores = F.softplus(F.linear(clean, self.weight) / self.gate_temp).sqrt()
+        mode = _router_tc_mode()
+        logits = _router_linear(clean, self.weight, mode)
+        if mode != "0" and _router_verify_enabled() and clean.is_cuda:
+            _verify_router_parity(
+                F.linear(clean, self.weight),
+                logits,
+                self.gate_temp,
+                self.bias,
+                self.topk,
+                valid_rows,
+            )
+        scores = F.softplus(logits / self.gate_temp).sqrt()
         ranking = scores + self.bias
         _assert_values(
             torch.isfinite(ranking).all(), "V4.1 router scores must be finite"

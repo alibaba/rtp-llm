@@ -1359,6 +1359,51 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_pp_masked_validate_cpu",
+    srcs = ["test_v41_pp_masked_validate_cpu.py"],
+    main = "test_v41_pp_masked_validate_cpu.py",
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_v41_expected_lengths_cache_cpu",
+    srcs = ["test_v41_expected_lengths_cache_cpu.py"],
+    main = "test_v41_expected_lengths_cache_cpu.py",
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_v41_deferred_checks_cpu",
+    srcs = ["test_v41_deferred_checks_cpu.py"],
+    main = "test_v41_deferred_checks_cpu.py",
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_v41_router_tc_cpu",
+    srcs = ["test_v41_router_tc_cpu.py"],
+    main = "test_v41_router_tc_cpu.py",
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_v41_device_segments_cpu",
+    srcs = ["test_v41_device_segments_cpu.py"],
+    main = "test_v41_device_segments_cpu.py",
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
     name = "test_moe_final_out_cache_cuda",
     srcs = ["test_moe_final_out_cache_cuda.py", "moe_cache_test_support.py"],
     main = "test_moe_final_out_cache_cuda.py",

@@ -20,6 +20,13 @@ from rtp_llm.config.dsv41_config import (
     v41_sparse_attention_mode,
 )
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
+from rtp_llm.models_py.modules.dsv4._v41_deferred_checks import (
+    add_check as _add_deferred_check,
+    grouped_asserts_enabled as _grouped_asserts_enabled,
+)
+from rtp_llm.models_py.modules.dsv4._v41_expected_lengths import (
+    expected_chunk_lengths as _expected_chunk_lengths,
+)
 from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv4.bounded_replay import (
     enabled as bounded_replay_enabled,
@@ -597,6 +604,34 @@ def _prefill_sparse_plan(shared, key, candidates, visible, key_count, block_size
     return plan
 
 
+def _woa_fp8_project_or_bf16(grouped, wo_a_bf16, stk_w, stk_s):
+    """R6-2: flag-gated FP8 batched wo_a projection on the live prefill path.
+
+    DSV41_WOA_FP8_EINSUM=1 quantizes the inverse-rotated grouped activations
+    (per-128 UE8M0, decode-kernel convention) and runs one
+    deep_gemm.fp8_einsum("bhr,hdr->bhd", recipe (1,1,128)) against the
+    already-resident stacked FP8 weights (_wo_a_stk_w/_s, the same buffers
+    the SM100 output-projection path consumes). Default off: the released
+    reference contracts wo_a in BF16 without requantizing activations, so
+    the FP8 path is a tolerance-gated numerical change, not byte-exact.
+    """
+    from rtp_llm.models_py.modules.dsv4.fp8._v41_woa_fp8_prefill import (
+        woa_fp8_enabled,
+        woa_fp8_forward,
+    )
+
+    if (
+        woa_fp8_enabled()
+        and stk_w is not None
+        and stk_s is not None
+        and grouped.shape[0] > 0
+        and grouped.dtype == torch.bfloat16
+        and grouped.is_cuda
+    ):
+        return woa_fp8_forward(grouped, stk_w, stk_s)
+    return torch.einsum("tgd,grd->tgr", grouped, wo_a_bf16)
+
+
 class AttentionV41FP8(AttentionFP8):
     def __init__(self, *args, v41_config, shared_attention, **kwargs):
         from rtp_llm.models.dsv41_kv_cache import dsv41_page_layouts
@@ -787,7 +822,13 @@ class AttentionV41FP8(AttentionFP8):
 
     def _require_prefill_values(self, valid, message, error=ValueError):
         if self._async_prefill_checks and valid.is_cuda:
-            torch._assert_async(valid, message)
+            if (
+                _grouped_asserts_enabled()
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                _add_deferred_check(valid, message)
+            else:
+                torch._assert_async(valid, message)
         elif not bool(valid):
             raise error(message)
 
@@ -830,7 +871,12 @@ class AttentionV41FP8(AttentionFP8):
                 o[..., -self.rope_head_dim :].unsqueeze(0), freqs, inverse=True
             )
             grouped = o.reshape(o.shape[0], self.n_groups, -1)
-            projected = torch.einsum("tgd,grd->tgr", grouped, self._wo_a_bf16_v41)
+            projected = _woa_fp8_project_or_bf16(
+                grouped,
+                self._wo_a_bf16_v41,
+                getattr(self, "_wo_a_stk_w", None),
+                getattr(self, "_wo_a_stk_s", None),
+            )
             return self.wo_b(projected.flatten(1), out=out)
         if _v41_output_projection.is_supported(
             o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
@@ -2742,7 +2788,7 @@ class AttentionV41FP8(AttentionFP8):
             or len(cp.chunk_lengths_per_req) != input_lengths.numel()
         ):
             raise ValueError("V4.1 CP4 requires current per-request global metadata")
-        expected = input_lengths.new_tensor(cp.chunk_lengths_per_req)
+        expected = _expected_chunk_lengths(cp, input_lengths)
         self._require_prefill_values(
             (lengths > 0).all()
             & (lengths.sum() == cp.seq_len_full)

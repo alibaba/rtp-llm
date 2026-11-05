@@ -56,6 +56,14 @@ def _count_fuse_enabled() -> bool:
     return os.environ.get(_COUNT_FUSE_FLAG, "0") == "1"
 
 
+def _uniform_counts_skip_enabled() -> bool:
+    return os.environ.get("DSV4_MOE_UNIFORM_COUNTS_SKIP", "0") == "1"
+
+
+def _uniform_counts_verify_enabled() -> bool:
+    return os.environ.get("DSV4_MOE_UNIFORM_COUNTS_VERIFY", "0") == "1"
+
+
 def _prequant_input_enabled() -> bool:
     return os.environ.get(_PREQUANT_INPUT_FLAG, "0") == "1"
 
@@ -110,6 +118,10 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         # Single-use carrier set by ``synchronized_chunk_extent`` when the fuse
         # is armed: (local_rows, device, counts tuple). Never read twice.
         self._pending_counts: Optional[Tuple[int, torch.device, Tuple[int, ...]]] = None
+        # Bound by ``V4Transformer._propagate_cp_ctx`` for V4.1 CP forwards; the
+        # DSV4_MOE_UNIFORM_COUNTS_SKIP guard reads only this agreed geometry.
+        # Never set on DSv4F or non-CP paths, which always gather.
+        self._v41_cp_ctx = None
         # Per-layer graph objects.  Graph-private temporaries share one device
         # pool because layers replay serially on the same stream; each graph
         # keeps its own stable recv staging buffer outside that shared pool.
@@ -176,9 +188,16 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
             )
             return max(counts)
         if _count_fuse_enabled():
-            counts = self._gather_counts(local_tokens, group, world, device)
+            counts = self._uniform_counts(local_tokens, group, world, device)
+            if counts is None:
+                counts = self._gather_counts(local_tokens, group, world, device)
             self._pending_counts = (local_tokens, device, tuple(counts))
             return max(counts)
+        uniform = self._uniform_counts(local_tokens, group, world, device)
+        if uniform is not None:
+            # All ranks derive the same extent from the agreed CP geometry; the
+            # MAX all_reduce below would return the same value.
+            return max(uniform)
         if (
             self._chunk_extent_tensor is None
             or self._chunk_extent_tensor.device != device
@@ -285,6 +304,73 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
         )
         return [int(v) for v in self._count_tensor.view(-1).cpu().tolist()]
 
+    def _uniform_counts(self, n_local: int, group, world: int, device):
+        """Agreed-geometry uniform counts, or None when the gather must run.
+
+        The skip decision uses only metadata every rank agreed on before the
+        layer loop: the admitted V4.1 CP context geometry (bound per forward by
+        ``V4Transformer._propagate_cp_ctx``) and the static stage/EP roster
+        checked collectively at admission. ``chunk_length`` is a deterministic
+        function of the admission-agreed schedule, so ``n_local`` matching it
+        here implies the same match on every peer -- all ranks skip together or
+        all gather together. Anything unexpected falls back to the gather.
+
+        Rank-divergence is impossible by construction:
+        - every rank validates ``cp.chunk_length == ids.numel()`` in
+          ``prepare_native_pp_prefill_dispatch``'s "PP CP geometry disagrees"
+          guard, and the dispatch schedule is agreed across the STAGE group
+          via ``DeepSeekV41Model._agree_dp`` (its ``_dp_group`` is the
+          registered STAGE group; ``execute_native_pp_prefill`` places
+          ``current.schedule`` in the agreed phase tuple), so chunk_length and
+          the MoE row count are identical on all stage ranks;
+        - ``DSV4_MOE_UNIFORM_COUNTS_SKIP`` / ``DSV4_MOE_UNIFORM_COUNTS_VERIFY``
+          are part of the ``_agree_dp`` options digest, so a per-rank env
+          mismatch is rejected at admission instead of diverging mid-forward
+          into a hung collective;
+        - the bound context is exactly this forward's (or None): the only
+          writers are ``V4Transformer._propagate_cp_ctx`` and
+          ``clear_prefill_meta_shared_fp8``, both of which write the gate's
+          and this strategy's context in lockstep, and
+          ``execute_native_pp_prefill``'s finally clears via
+          ``_propagate_cp_ctx(None)`` after every native PP forward. Decode
+          therefore always sees None here and always gathers.
+        A sub-chunk remainder (n_local != chunk_length and != the static
+        sub-chunk width) also falls back to the gather on every rank, since
+        the remainder is a function of the same agreed schedule.
+        """
+        if not _uniform_counts_skip_enabled():
+            return None
+        cp = getattr(self, "_v41_cp_ctx", None)
+        ctx = self.cfg.stage_context
+        if cp is None or ctx is None:
+            return None
+        chunk = int(getattr(cp, "chunk_length", 0) or 0)
+        width = int(self.cfg.max_tokens_per_rank or 0)
+        extents = {chunk}
+        if 0 < width < chunk:
+            # The MoE sub-chunk extent when the layer loop subchunks a forward.
+            extents.add(width)
+        if (
+            chunk <= 0
+            or int(getattr(cp, "cp_size", 0)) != world
+            or int(ctx.group_size) != world
+            or int(self.cfg.ep_size) != world
+            or int(self.cfg.ep_rank) != int(getattr(cp, "cp_rank", -1))
+            or int(self.cfg.ep_rank) != int(ctx.group_rank)
+            or int(n_local) not in extents
+        ):
+            return None
+        if _uniform_counts_verify_enabled():
+            gathered = self._gather_counts(n_local, group, world, device)
+            if gathered != [int(n_local)] * world:
+                raise RuntimeError(
+                    "DSV4_MOE_UNIFORM_COUNTS_VERIFY: gathered counts %r disagree "
+                    "with the agreed uniform geometry (n_local=%d, world=%d)"
+                    % (gathered, int(n_local), world)
+                )
+            return gathered
+        return [int(n_local)] * world
+
     def _exchange_counts(self, n_local: int, group, world: int, device) -> list:
         """One stage-local all_gather of the local row count."""
         return self._gather_counts(n_local, group, world, device)
@@ -319,6 +405,9 @@ class NcclEpMxfp8Strategy(RoutedExpertsStrategy):
                 and len(set(rec_counts)) == 1
             ):
                 return list(rec_counts)
+        uniform = self._uniform_counts(n_local, group, world, device)
+        if uniform is not None:
+            return uniform
         return self._exchange_counts(n_local, group, world, device)
 
     def forward_subchunk_scope(self, start: int, width: int, local_full_rows: int):

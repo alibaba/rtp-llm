@@ -336,6 +336,12 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     "DSV4_MOE_CHUNK_TOKENS",
                     "DSV4_MOE_EXTENT_COUNT_FUSE",
                     "DSV4_MOE_FORWARD_COUNT_PLAN",
+                    # Both change the EP count-exchange collective sequence
+                    # (SKIP elides the stage all_gather; VERIFY forces it).
+                    # Agreeing them here turns a per-rank env mismatch into an
+                    # admission rejection instead of a hung collective.
+                    "DSV4_MOE_UNIFORM_COUNTS_SKIP",
+                    "DSV4_MOE_UNIFORM_COUNTS_VERIFY",
                 )
             }
             digest = hashlib.sha256(

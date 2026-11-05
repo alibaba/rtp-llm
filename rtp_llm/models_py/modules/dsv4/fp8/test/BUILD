@@ -1284,6 +1284,24 @@ py_test(
     ]
 ]
 
+py_test(
+    name = "test_v41_sparse_prefill_v2_cpu",
+    srcs = ["test_v41_sparse_prefill_v2_cpu.py"],
+    main = "test_v41_sparse_prefill_v2_cpu.py",
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_v41_woa_fp8_cpu",
+    srcs = ["test_v41_woa_fp8_cpu.py"],
+    main = "test_v41_woa_fp8_cpu.py",
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
 
 py_test(
     name = "test_sm120_prefill_split",

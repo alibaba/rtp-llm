@@ -257,7 +257,7 @@ class FakeCtx:
 class StratDouble(cand.NcclEpMxfp8Strategy):
     """Runs the ACTUAL count/guard methods; the tensor work is doubled."""
 
-    def __init__(self, group, hidden=32, topk=2):
+    def __init__(self, group, hidden=32, topk=2, max_tokens=16384):
         cfg = cand.MoeCfg(
             layer_id=22,
             dim=hidden,
@@ -270,7 +270,7 @@ class StratDouble(cand.NcclEpMxfp8Strategy):
             n_local_experts=64,
             local_expert_start=0,
             local_expert_end=64,
-            max_tokens_per_rank=16384,
+            max_tokens_per_rank=max_tokens,
             stage_context=FakeCtx(group),
         )
         super().__init__(cfg)
@@ -790,6 +790,219 @@ for label, capture, warmup in (("capture", True, False), ("warmup", False, True)
         required_queries == expected_queries,
         required_queries,
     )
+
+# ---------------- 10. agreed-geometry uniform-counts skip --------------------
+# DSV4_MOE_UNIFORM_COUNTS_SKIP: the skip decision must come only from metadata
+# all ranks agreed on (bound CP context geometry + static stage/EP roster), so
+# every rank skips or every rank gathers -- never a mix.
+SKIP_FLAG = "DSV4_MOE_UNIFORM_COUNTS_SKIP"
+VERIFY_FLAG = "DSV4_MOE_UNIFORM_COUNTS_VERIFY"
+
+
+class FakeCP:
+    def __init__(self, cp_rank, chunk_length, cp_size=4):
+        self.cp_size = cp_size
+        self.cp_rank = cp_rank
+        self.chunk_length = chunk_length
+
+
+def run_guarded(
+    rows, group_counts, cp_chunk, local_rank=0, verify=False, bind_cp=True, fused=True
+):
+    os.environ[SKIP_FLAG] = "1"
+    os.environ[VERIFY_FLAG] = "1" if verify else "0"
+    os.environ[FUSE_FLAG] = "1" if fused else "0"
+    os.environ["DSV4_MOE_CHUNK_PREFILL"] = "1"
+    os.environ.pop("DSV4_CHUNK_TOKENS", None)
+    group = SimGroup([0, 1, 2, 3], local_rank, group_counts)
+    strat = StratDouble(group)
+    if bind_cp:
+        strat._v41_cp_ctx = FakeCP(local_rank, cp_chunk)
+    moe = FakeMoE(strat, 4096)
+    x = torch.randn(rows, moe.dim)
+    ids = torch.zeros(rows, dtype=torch.int64)
+    fresh()
+    err = None
+    try:
+        y = moe(x, ids).clone()
+    except Exception as e:  # noqa: BLE001
+        err = e
+        y = None
+    return {
+        "ops": list(ops()),
+        "trace": list(TRACE),
+        "y": y,
+        "err": err,
+        "strat": strat,
+    }
+
+
+# flag default OFF: agreed geometry alone must not skip the gather
+os.environ.pop(SKIP_FLAG, None)
+os.environ.pop(VERIFY_FLAG, None)
+r = run_caller(4096, [4096] * 4, fused=True)
+ck("guard_default_off_gathers", r["ops"] == ["ag"], str(r["ops"]))
+
+# flag ON but no CP context bound (DSv4F / non-CP path): every rank gathers
+unbound = [
+    run_guarded(4096, [4096] * 4, 4096, local_rank=lr, bind_cp=False) for lr in range(4)
+]
+ck(
+    "guard_no_cp_ctx_gathers_on_all_ranks",
+    all(r["ops"] == ["ag"] and r["err"] is None for r in unbound),
+    str([r["ops"] for r in unbound]),
+)
+
+# flag ON + agreed uniform geometry: all ranks skip the gather together
+skip = [run_guarded(4096, [4096] * 4, 4096, local_rank=lr) for lr in range(4)]
+ck(
+    "guard_skip_no_collective_on_any_rank",
+    all(r["ops"] == [] and r["err"] is None for r in skip),
+    str([r["ops"] for r in skip]),
+)
+ck(
+    "guard_skip_counts_uniform_everywhere",
+    all(
+        [t["counts"] for t in r["trace"] if t["ev"] == "counts"] == [[4096] * 4]
+        for r in skip
+    ),
+    str([[t for t in r["trace"] if t["ev"] == "counts"] for r in skip]),
+)
+ck(
+    "guard_skip_pending_record_synthetic_uniform",
+    all(r["strat"]._pending_counts is None for r in skip),
+    "forward must consume the pending record exactly once",
+)
+
+# guard inputs disagree with the call: n_local != chunk_length -> gather
+mismatch = [run_guarded(4096, [4096] * 4, 2048, local_rank=lr) for lr in range(4)]
+ck(
+    "guard_geometry_mismatch_gathers_on_all_ranks",
+    all(r["ops"] == ["ag"] and r["err"] is None for r in mismatch),
+    str([r["ops"] for r in mismatch]),
+)
+
+# VERIFY=1 + truly uniform peers: gathers to check, then proceeds
+vok = [
+    run_guarded(4096, [4096] * 4, 4096, local_rank=lr, verify=True) for lr in range(4)
+]
+ck(
+    "guard_verify_uniform_gathers_and_passes",
+    all(r["ops"] == ["ag"] and r["err"] is None for r in vok),
+    str([r["ops"] for r in vok]),
+)
+
+# VERIFY=1 + uneven or changed peer counts: must raise on EVERY rank
+vbad = [
+    run_guarded(4096, [4096, 2048, 4096, 4096], 4096, local_rank=lr, verify=True)
+    for lr in range(4)
+]
+ck(
+    "guard_verify_uneven_raises_on_all_ranks",
+    all(
+        r["err"] is not None and "UNIFORM_COUNTS_VERIFY" in str(r["err"]) for r in vbad
+    ),
+    str([repr(r["err"]) for r in vbad]),
+)
+
+# geometry re-bound between rounds: the guard re-evaluates, no stale skip
+os.environ[SKIP_FLAG] = "1"
+os.environ[VERIFY_FLAG] = "0"
+os.environ[FUSE_FLAG] = "1"
+os.environ["DSV4_MOE_CHUNK_PREFILL"] = "1"
+group = SimGroup([0, 1, 2, 3], 0, [4096] * 4)
+strat = StratDouble(group)
+moe = FakeMoE(strat, 4096)
+strat._v41_cp_ctx = FakeCP(0, 4096)
+fresh()
+moe(torch.randn(4096, moe.dim), torch.zeros(4096, dtype=torch.int64))
+ck("guard_rebind_round1_skips", ops() == [], str(ops()))
+group.counts = [4096, 2048, 4096, 4096]  # peers changed under a new chunk
+strat._v41_cp_ctx = FakeCP(0, 2048)  # new chunk geometry disagrees with rows
+fresh()
+moe(torch.randn(4096, moe.dim), torch.zeros(4096, dtype=torch.int64))
+ck(
+    "guard_rebind_round2_gathers_current",
+    ops() == ["ag", "ag"]
+    and [t["counts"] for t in TRACE if t["ev"] == "counts"]
+    == [[4096, 2048, 4096, 4096]],
+    "extent gathers, the uneven pending record is rejected, forward re-gathers "
+    "the CURRENT counts: ops=%r trace=%r" % (ops(), TRACE),
+)
+
+# ---------------- 11. decision surface: mixed geometry + sub-chunk remainder --
+# DECISION-SURFACE DOCUMENTATION, NOT A SAFETY PROOF. These SimGroup runs
+# simulate each rank's decision in isolation. In a real collective, one rank
+# skipping the count all_gather while a peer gathers would HANG -- so the
+# "divergent rank gathers" outcome below is NOT a safe state; it is the
+# failure mode the admission invariant must make unreachable. That invariant:
+# prepare_native_pp_prefill_dispatch validates cp.chunk_length == ids.numel()
+# on every rank, the dispatch schedule is agreed across the STAGE group via
+# DeepSeekV41Model._agree_dp (execute_native_pp_prefill places current.schedule
+# in the phase tuple), and DSV4_MOE_UNIFORM_COUNTS_SKIP/_VERIFY are part of the
+# _agree_dp options digest -- so ranks cannot present different geometry or
+# different flag state to this guard. What this test documents is only that
+# the decision is a pure function of (chunk_length, n_local, world, ep/cp
+# rank): identical inputs decide identically, and a sub-chunk remainder falls
+# back to the gather.
+mixed = []
+for lr, (rows, chunk) in enumerate(
+    [(4096, 4096), (4096, 2048), (4096, 4096), (4096, 4096)]
+):
+    r = run_guarded(rows, [rows] * 4, chunk, local_rank=lr)
+    mixed.append((lr, r["ops"], r["err"]))
+ck(
+    "guard_mixed_geometry_decision_surface",
+    mixed[1][1] == ["ag"] and all(m[1] == [] for m in (mixed[0], mixed[2], mixed[3])),
+    "decision surface only; divergence itself is prevented by admission: %s" % (mixed,),
+)
+ck(
+    "guard_mixed_geometry_no_errors",
+    all(m[2] is None for m in mixed),
+    str([m[2] for m in mixed]),
+)
+# Under the invariant (all ranks rows == chunk), every rank skips together.
+uniform_all = [run_guarded(4096, [4096] * 4, 4096, local_rank=lr) for lr in range(4)]
+ck(
+    "guard_invariant_geometry_all_ranks_skip",
+    all(r["ops"] == [] and r["err"] is None for r in uniform_all),
+    str([r["ops"] for r in uniform_all]),
+)
+
+# Last sub-chunk remainder: full sub-chunks skip via the static width branch,
+# the remainder (rows % width) falls back to the gather on every rank because
+# the remainder is a function of the same agreed schedule.
+os.environ[SKIP_FLAG] = "1"
+os.environ[VERIFY_FLAG] = "0"
+os.environ[FUSE_FLAG] = "1"
+os.environ["DSV4_MOE_CHUNK_PREFILL"] = "1"
+os.environ.pop("DSV4_CHUNK_TOKENS", None)
+group = SimGroup([0, 1, 2, 3], 0, [4090] * 4)
+strat = StratDouble(group, max_tokens=1024)
+strat._v41_cp_ctx = FakeCP(0, 4096)
+moe = FakeMoE(strat, 1024)
+fresh()
+y = moe(torch.randn(4090, moe.dim), torch.zeros(4090, dtype=torch.int64))
+counts_events = [t["counts"] for t in TRACE if t["ev"] == "counts"]
+ck(
+    "guard_remainder_extent_gathers",
+    ops()[0] == "ag",
+    "extent(4090) is not an agreed extent -> gather: ops=%r" % (ops(),),
+)
+ck(
+    "guard_remainder_full_subchunks_skip",
+    len(ops()) == 2,
+    "3 full 1024-row sub-chunks skip; only extent + remainder gather: ops=%r"
+    % (ops(),),
+)
+ck(
+    "guard_remainder_counts_correct",
+    counts_events == [[1024] * 4, [1024] * 4, [1024] * 4, [4090] * 4],
+    "last sub-chunk used the gathered (sim-static) counts: %r" % (counts_events,),
+)
+
+os.environ.pop(SKIP_FLAG, None)
+os.environ.pop(VERIFY_FLAG, None)
 
 os.environ.pop("DSV4_MOE_PREQUANT_INPUT", None)
 os.environ.pop("DSV4_MOE_PREQUANT_INPUT_REQUIRED", None)

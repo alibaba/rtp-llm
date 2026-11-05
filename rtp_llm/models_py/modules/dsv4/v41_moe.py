@@ -3,6 +3,15 @@
 import torch
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv4._v41_deferred_checks import (
+    add_check as _add_deferred_check,
+    grouped_asserts_enabled as _grouped_asserts_enabled,
+)
+from rtp_llm.models_py.modules.dsv4._v41_device_segments import (
+    capacity_for as _ds_capacity_for,
+    device_segment_plan as _ds_plan,
+    device_segments_enabled as _ds_enabled,
+)
 from rtp_llm.models_py.modules.dsv4.v41_dispatch import V41DispatchLayout
 from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
 from rtp_llm.models_py.modules.dsv4.v41_routed import (
@@ -17,7 +26,13 @@ def _assert_values(condition, message):
         if not bool(condition):
             raise ValueError(message)
     else:
-        torch._assert_async(condition, message)
+        if (
+            _grouped_asserts_enabled()
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            _add_deferred_check(condition, message)
+        else:
+            torch._assert_async(condition, message)
 
 
 class V41LocalMoE(nn.Module):
@@ -121,11 +136,19 @@ class V41LocalMoE(nn.Module):
         if layout == "masked" and rows > self.masked_token_limit:
             raise ValueError("V4.1 masked routing exceeds the admitted token bound")
         if x.is_cuda and layout == "contiguous":
-            with torch.cuda.device(x.device):
-                if torch.cuda.is_current_stream_capturing():
-                    raise RuntimeError(
-                        "V4.1 contiguous routing uses eager host counts; capture requires masked routing"
-                    )
+            # G5: the device-segment plan keeps every count on the GPU, so the
+            # fixed-capacity contiguous path is capture-safe.
+            device_segments = (
+                _ds_enabled() and self.experts.backend == "deepgemm"
+            )
+            if not device_segments:
+                with torch.cuda.device(x.device):
+                    if torch.cuda.is_current_stream_capturing():
+                        raise RuntimeError(
+                            "V4.1 contiguous routing uses eager host counts; capture requires masked routing"
+                        )
+        else:
+            device_segments = False
         if (
             weights.ndim != 2
             or weights.shape[0] != rows
@@ -184,7 +207,64 @@ class V41LocalMoE(nn.Module):
         )
         sorted_active = sorted_experts < experts
         route_map = torch.full((route_count,), -1, device=x.device, dtype=torch.int64)
-        if layout == "contiguous":
+        if layout == "contiguous" and device_segments:
+            # G5: fixed-capacity device segments — no host count readback, no
+            # data-dependent shapes. Live rows keep their exact host-path
+            # placement (same stable order, same 128-aligned segment starts);
+            # inactive routes share a never-read sink row in the always -1
+            # final block.
+            capacity = _ds_capacity_for(route_count, experts, GROUPED_ALIGNMENT)
+            sink = capacity - GROUPED_ALIGNMENT
+            destinations, expert_layout, sorted_active = _ds_plan(
+                counts,
+                sorted_experts,
+                offsets,
+                experts,
+                GROUPED_ALIGNMENT,
+                capacity,
+                sink,
+            )
+            routed_x = torch.zeros(
+                (capacity, dim), device=x.device, dtype=source.dtype
+            )
+            routed_x.index_copy_(
+                0, destinations, source.index_select(0, order // topk)
+            )
+            routed_scales = None
+            if input_scales is not None:
+                routed_scales = torch.zeros(
+                    (capacity, dim // 32), device=x.device, dtype=torch.uint8
+                )
+                routed_scales.index_copy_(
+                    0, destinations, input_scales.index_select(0, order // topk)
+                )
+            routed_weights = torch.zeros(
+                capacity, device=x.device, dtype=torch.float32
+            )
+            routed_weights.index_copy_(
+                0, destinations, weights.flatten().index_select(0, order)
+            )
+            valid = torch.zeros(capacity, device=x.device, dtype=torch.bool)
+            valid.scatter_(0, destinations, sorted_active)
+            route_map.index_copy_(
+                0,
+                order,
+                torch.where(
+                    sorted_active, destinations, destinations.new_full((), -1)
+                ),
+            )
+            down = self.experts.forward_contiguous_device(
+                routed_x.view(x.dtype),
+                expert_layout,
+                valid,
+                routed_weights,
+                input_scales=routed_scales,
+                _owned_padding=(
+                    routed_scales is not None and self.experts.prefill_mask_skip
+                ),
+            )
+            allocated = capacity
+        elif layout == "contiguous":
             actual_counts = tuple(counts[:experts].cpu().tolist())
             segments = tuple(
                 (n + GROUPED_ALIGNMENT - 1) // GROUPED_ALIGNMENT * GROUPED_ALIGNMENT

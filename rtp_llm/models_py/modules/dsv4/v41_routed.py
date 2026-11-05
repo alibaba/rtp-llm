@@ -463,3 +463,74 @@ class V41RoutedExperts(nn.Module):
             _mask_result=not owned_padding,
             _owned_padding=owned_padding,
         )
+
+    def forward_contiguous_device(
+        self,
+        x,
+        expert_layout,
+        valid_rows,
+        route_weights,
+        *,
+        out=None,
+        input_scales=None,
+        _owned_padding=False,
+    ):
+        """Contiguous grouped GEMM over a fixed-capacity buffer (G5).
+
+        ``expert_layout`` is the device-side per-row expert id tensor
+        (int32 [rows], -1 on tail/sink rows that DeepGEMM skips). Row
+        segments are 128-aligned exactly as in ``forward_contiguous``, so
+        live-row results are bitwise identical; only the (never gathered)
+        tail differs. Requires the deepgemm backend.
+        """
+        if type(_owned_padding) is not bool or (
+            _owned_padding
+            and (self.backend != "deepgemm" or out is not None or input_scales is None)
+        ):
+            raise ValueError("V4.1 padding elision requires owned received rows")
+        if self.backend != "deepgemm":
+            raise ValueError("V4.1 device segments require the deepgemm backend")
+        if x.ndim != 2:
+            raise ValueError("V4.1 device segments require flat rows")
+        rows = x.shape[0]
+        if (
+            rows == 0
+            or rows % GROUPED_ALIGNMENT
+            or expert_layout.shape != (rows,)
+            or expert_layout.dtype != torch.int32
+            or expert_layout.device != self.device
+            or not expert_layout.is_contiguous()
+        ):
+            raise ValueError(
+                "V4.1 device segments require an aligned int32 per-row layout"
+            )
+        self._validate_input(x, (rows,), route_weights, out, valid_rows, input_scales)
+        _check_rows((rows,), self.device, valid_rows, route_weights)
+        owned_padding = _owned_padding and self.prefill_mask_skip
+
+        def gemm(values, scales, weight, raw_scales, packed_scales):
+            result = torch.empty(
+                (rows, weight.shape[1]), device=self.device, dtype=torch.bfloat16
+            )
+            self._contiguous(
+                (values, pack_group32_scales(scales, column_major=True)),
+                (weight.view(torch.int8), packed_scales),
+                result,
+                expert_layout,
+                recipe_a=(1, 32),
+                recipe_b=(1, 32),
+                disable_ue8m0_cast=False,
+            )
+            return result
+
+        return self._run(
+            x,
+            valid_rows,
+            route_weights,
+            ("contiguous_device", rows),
+            gemm,
+            out=out,
+            input_scales=input_scales,
+            _mask_result=not owned_padding,
+            _owned_padding=owned_padding,
+        )

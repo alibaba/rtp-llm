@@ -120,3 +120,10 @@ def clear_prefill_meta_shared_fp8(v4: "V4Transformer") -> None:
         attn._set_prefill_meta_shared(None)
         if getattr(getattr(v4, "args", None), "v41_config", None) is not None:
             layer.ffn.gate._v41_cp_ctx = None
+            # Lockstep with transformer._propagate_cp_ctx: every writer of the
+            # gate's CP context also writes the EP strategy's, so a decode or
+            # post-clear forward can never see a stale strategy context (the
+            # DSV4_MOE_UNIFORM_COUNTS_SKIP guard reads it).
+            strategy = getattr(layer.ffn, "_strategy", None)
+            if strategy is not None:
+                strategy._v41_cp_ctx = None

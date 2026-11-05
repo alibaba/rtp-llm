@@ -10,6 +10,9 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv4._v41_deferred_checks import (
+    flush_checks as _flush_deferred_checks,
+)
 from rtp_llm.models_py.modules.dsv4.hc.delayed_reference import (
     DelayedHCMixes,
     DelayedHCUnit,
@@ -232,6 +235,7 @@ class V41Block(nn.Module):
         )
         residual = self.ffn_hc.post(output, residual, mixes)
         valid = frame.query.valid_rows
+        _flush_deferred_checks("layer")
         return V41ResidualState(
             torch.where(valid[:, None, None], residual, 0),
             torch.where(valid[:, None], mixes.next_pre_mix, 0),
