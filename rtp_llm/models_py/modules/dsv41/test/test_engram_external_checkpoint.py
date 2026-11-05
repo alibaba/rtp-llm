@@ -42,6 +42,19 @@ class Storage:
         try: yield
         finally: self.uses-=1
 
+    def require_model_layout(self, layer_ids, num_embeddings, head_dim):
+        if not self.uses:
+            raise AssertionError('layout validation must use storage admission')
+        expected = {
+            f'layers.{layer}.engram.embed.{role}': (rows, width)
+            for layer, rows in zip(layer_ids, num_embeddings)
+            for role, width in [('weight', head_dim), ('scale', head_dim // 32)]
+        }
+        manifest = self.validated.manifest
+        actual = {tensor.name: tuple(tensor.shape) for tensor in manifest.tensors}
+        if manifest.backend != 'fabric_egm' or actual != expected:
+            raise ValueError('external generation does not match the complete model Engram layout')
+
 
 class Embedding:
     def __init__(self): self.releases=0
@@ -154,9 +167,8 @@ class ExternalCheckpointTests(unittest.TestCase):
 
     def external_embedding(self):
         embedding=e.HostEngramEmbedding.__new__(e.HostEngramEmbedding)
-        embedding._uses_external_storage=True
+        embedding._initialize_lookup_state(storage=object())
         embedding.weight=embedding.scales=None
-        embedding._pinned=None
         return embedding
 
     def lookup_model(self, embedding):
@@ -172,9 +184,10 @@ class ExternalCheckpointTests(unittest.TestCase):
         local=e.HostEngramEmbedding(torch.zeros(3,32,dtype=torch.uint8),torch.ones(3,1,dtype=torch.uint8))
         external=self.external_embedding()
         self.assertTrue(local.supports_cpu_lookup)
-        self.assertTrue(local.supports_async_prefetch)
+        self.assertTrue(local.supports_generic_prefetch)
         self.assertFalse(external.supports_cpu_lookup)
-        self.assertFalse(external.supports_async_prefetch)
+        self.assertFalse(external.supports_generic_prefetch)
+        self.assertFalse(external.supports_decode_prefetch)
 
     def test_local_default_cpu_lookup_still_prepares_once(self):
         local=e.HostEngramEmbedding(torch.zeros(3,32,dtype=torch.uint8),torch.ones(3,1,dtype=torch.uint8))

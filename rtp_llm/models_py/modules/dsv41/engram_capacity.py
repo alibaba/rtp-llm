@@ -5,7 +5,9 @@ The ceilings are hard safety bounds on a machine that actually serves Engram,
 so they default to them: a real shard is tens of GiB and asking every
 deployment to restate two byte counts just invited wrong values. A manifest or
 launch bundle must never supply these limits; only the local launcher may, and
-only to lower them on a small machine. Budget counts unique padded backing, not
+only to lower them on a small machine. These are publisher per-host limits;
+consumer mappings include remote hosts and have separate hard bounds. Budget
+counts unique padded backing, not
 RSS, file cache, other model weights or driver mapping overhead.
 """
 from __future__ import annotations
@@ -57,7 +59,7 @@ def capacity_from_environ(environ=None):
 
 
 def checked_allocation_bytes(logical_bytes, granularity, max_allocation_bytes):
-    """Round without overflow; callers apply total-generation budget separately."""
+    """Round without overflow; publishers apply their per-host total separately."""
     if (type(logical_bytes) is not int or not 0 < logical_bytes <= _MAX_INTEGER
             or type(granularity) is not int or not 0 < granularity <= HARD_MAX_ALLOCATION_BYTES
             or type(max_allocation_bytes) is not int

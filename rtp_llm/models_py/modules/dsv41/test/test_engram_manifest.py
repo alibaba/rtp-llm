@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 from uuid import UUID
 
 _PATH = Path(__file__).resolve().parents[1] / "engram_manifest.py"
@@ -109,6 +110,23 @@ class ManifestTest(unittest.TestCase):
         self.assertEqual(verified.allocation_count, 2)
         self.assertEqual(verified.physical_bytes, 8192)
         self.assertTrue(any(t.shards[0].byte_offset % 4096 for t in parsed.tensors))
+
+    def test_raw_attach_validates_once_and_keeps_public_dataclass_guards(self):
+        d = fixture()
+        with mock.patch.object(m, "_metadata", wraps=m._metadata) as metadata:
+            validated = m.parse_for_attach(encode(d), expected(), d["dataset_id"], d["generation"])
+        metadata.assert_called_once()
+        self.assertEqual(validated.layout, expected())
+        self.assertEqual(validated.physical_bytes, 8192)
+        # A manually made dataclass never gets the trusted parse shortcut.
+        altered = dataclasses.replace(validated.manifest, dataset_id="sha256:" + "0" * 64)
+        self.assert_error("DATASET_MISMATCH", m.validate_for_attach, altered,
+                          expected(), altered.dataset_id, d["generation"])
+        self.assert_error("TOTAL_ALLOCATION_LIMIT", m.parse_for_attach, encode(d),
+                          expected(), d["dataset_id"], d["generation"],
+                          m.Limits(max_total_allocation_bytes=8191))
+        self.assert_error("GENERATION_MISMATCH", m.parse_for_attach, encode(d),
+                          expected(), d["dataset_id"], uid(99))
 
     def test_frozen_objects_detach_from_input(self):
         d = fixture()

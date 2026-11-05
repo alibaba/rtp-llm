@@ -340,6 +340,15 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# External scale adapters use CPU Torch doubles for the allocation boundary.
+py_library(
+    name = "engram_scale_source_cpu",
+    testonly = True,
+    srcs = ["modules/dsv41/_engram_scale_shards.py"],
+    deps = [":engram_model_cpu"],
+    visibility = ["//visibility:public"],
+)
+
 # Model binding control flow is stdlib-only under injected CPU test factories.
 # Its real, lazy model/bootstrap defaults are supplied by :modules in serving.
 py_library(
@@ -388,6 +397,7 @@ py_library(
     testonly = True,
     srcs = [
         "modules/dsv41/engram_exchange.py",
+        "modules/dsv41/engram_ganginfo.py",
         "modules/dsv41/engram_startup.py",
     ],
     deps = [

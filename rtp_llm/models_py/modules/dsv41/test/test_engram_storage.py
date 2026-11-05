@@ -8,6 +8,7 @@ import sys
 import threading
 import types
 import unittest
+from unittest import mock
 from uuid import UUID
 import weakref
 from rtp_llm.models_py.modules.dsv41 import engram_bootstrap as b
@@ -19,6 +20,7 @@ sys.modules[PACKAGE] = package
 m = importlib.import_module(PACKAGE + ".engram_manifest")
 s = importlib.import_module(PACKAGE + ".engram_storage")
 a = importlib.import_module(PACKAGE + ".engram_model_attach")
+shards = importlib.import_module(PACKAGE + ".engram_shard_storage")
 
 
 def uid(n):
@@ -164,6 +166,16 @@ class Mapping:
 
 
 class StorageTest(unittest.TestCase):
+    def attach_sharded(self, ops=None, document=None):
+        original, layout = sharded_fixture()
+        d = original if document is None else document
+        handles = {part["allocation_id"]: b"handle-" + part["allocation_id"].encode()
+                   for tensor in d["tensors"] for part in tensor["shards"]}
+        return s.FabricEngramStorage.attach(
+            json.dumps(d).encode(), expected_layout=layout, dataset_id=d["dataset_id"],
+            generation=d["generation"], handles=handles, device=0, native=Native(),
+            shard_ops=ops or FakeShardOps())
+
     def attach(self, native=None, verify=True, **changes):
         d, layout = fixture()
         arguments = dict(expected_layout=layout, dataset_id=d["dataset_id"], generation=d["generation"],
@@ -186,6 +198,12 @@ class StorageTest(unittest.TestCase):
             generation=d["generation"], handles=handles, device=0, native=Native(),
             shard_ops=ops)
         self.assertEqual(storage.info()["allocation_count"], 8)
+        self.assertEqual(storage.info()["mapping_count"], 2)
+        self.assertEqual(set(storage.info()["allocations"]),
+                         {"layers.1.engram.embed", "layers.2.engram.embed"})
+        for info in storage.info()["allocations"].values():
+            self.assertEqual(info["state"], "MAPPED")
+            self.assertEqual(info["mapped_ranges"], 4)
         reserves = [c for c in ops.calls if c[0] == "reserve"]
         maps = [c for c in ops.calls if c[0] == "map"]
         self.assertEqual(len(reserves), 4)  # two layers, weight + scale spans
@@ -200,6 +218,114 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(storage.info()["state"], "CLOSED")
         self.assertEqual(len([c for c in ops.calls if c[0] == "unmap"]), 8)
         self.assertEqual(len([c for c in ops.calls if c[0] == "free"]), 4)
+
+    def test_sharded_geometry_is_checked_for_every_layer_before_mapping(self):
+        d, _ = sharded_fixture()
+        # The last layer has valid metadata but cannot use the stitched plan.
+        for tensor in d["tensors"][-2:]:
+            for part in tensor["shards"]:
+                part["allocation_bytes"] += 4096 * tensor["row_bytes"]
+        d["dataset_id"] = m.compute_dataset_id(d)
+        ops = FakeShardOps()
+        with self.assertRaisesRegex(ValueError, "shard geometry"):
+            self.attach_sharded(ops, d)
+        self.assertEqual(ops.calls, [])
+
+    def test_sharded_alias_lease_blocks_all_unmaps_and_graph_pin_blocks_drain(self):
+        class LeaseOps(FakeShardOps):
+            def view(self, va, shape, owner):
+                return types.SimpleNamespace(lease=shards.ArrayViewLease(va, shape, owner))
+
+        ops = LeaseOps()
+        storage = self.attach_sharded(ops)
+        storage.verify(lambda *_: True)
+        weight, scale = storage.table_views(1)
+        # A derived exporter retains the allocation lease after its original
+        # view is gone. The real Torch alias case runs in the GPU integration.
+        alias = types.SimpleNamespace(base=weight.lease)
+        del weight, scale
+        storage._pin_graph()
+        before = storage.info()
+        with self.assertRaises(s.StorageBusyError):
+            storage.close()
+        self.assertEqual(storage.info(), before)
+        storage._unpin_graph()
+        with self.assertRaises(s.StorageBusyError):
+            storage.close()
+        self.assertFalse(any(c[0] == "unmap" for c in ops.calls))
+        self.assertEqual(sum(v["active_views"] for v in storage.info()["allocations"].values()), 1)
+        del alias
+        storage.close()
+        self.assertEqual(storage.info()["state"], "CLOSED")
+        self.assertEqual(sum(c[0] == "unmap" for c in ops.calls), 8)
+
+    def test_sharded_failed_event_keeps_mappings_and_fence_for_retry(self):
+        ops = FakeShardOps()
+        storage = self.attach_sharded(ops)
+        storage.verify(lambda *_: True)
+        event = mock.Mock()
+        event.synchronize.side_effect = RuntimeError("event failed")
+        storage.register_lookup_event(event)
+        with self.assertRaisesRegex(RuntimeError, "event failed"):
+            storage.close()
+        self.assertEqual(storage.info()["mapping_count"], 2)
+        self.assertFalse(any(c[0] == "unmap" for c in ops.calls))
+        event.synchronize.side_effect = None
+        storage.close()
+        self.assertEqual(event.synchronize.call_count, 2)
+
+    def test_sharded_failed_rollback_retains_all_layers_for_retry(self):
+        class FailureOps(FakeShardOps):
+            fail_cleanup = True
+
+            def map(self, *args):
+                if sum(c[0] == "map" for c in self.calls) == 4:
+                    raise RuntimeError("second layer map failed")
+                super().map(*args)
+
+            def unmap(self, *args):
+                if self.fail_cleanup:
+                    raise RuntimeError("unmap failed")
+                super().unmap(*args)
+
+        ops = FailureOps()
+        with self.assertRaises(s.CleanupPendingError) as failure:
+            self.attach_sharded(ops)
+        storage = failure.exception.resource
+        self.assertEqual(storage.info()["state"], "FAILED")
+        self.assertEqual(storage.info()["mapping_count"], 2)
+        self.assertEqual(sum(v["mapped_ranges"] for v in storage.info()["allocations"].values()), 4)
+        ops.fail_cleanup = False
+        storage.close()
+        self.assertEqual(sum(c[0] == "unmap" for c in ops.calls), 4)
+        self.assertEqual(storage.info()["state"], "CLOSED")
+
+    def test_model_contract_requires_the_complete_validated_layout(self):
+        storage = self.attach()
+        storage.require_model_layout((2, 1), (3, 3), 32)
+        for args in (((1,), (3,), 32), ((1, 2), (3, 4), 32), ((1, 2), (3, 3), 64),
+                     ((1, 2), (3, 3, 3), 32)):
+            with self.assertRaisesRegex(ValueError, "complete model Engram layout"):
+                storage.require_model_layout(*args)
+        storage.close()
+
+    def test_mapping_budget_counts_all_hosts_without_reusing_local_publisher_budget(self):
+        d, layout = sharded_fixture()
+        local_bytes = sum(t["shards"][0]["allocation_bytes"] for t in d["tensors"])
+        env = {"RTP_ENGRAM_MAX_ALLOCATION_BYTES": str(128 << 10),
+               "RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES": str(local_bytes)}
+        validated = m.parse_for_attach(json.dumps(d).encode(), layout, d["dataset_id"],
+                                       d["generation"], b._configured_limits(env))
+        self.assertEqual(local_bytes, 264 << 10)
+        self.assertEqual(validated.physical_bytes, 2 * local_bytes)
+        b._validate_mapping_capacity(validated, 2)
+        # Scale the hard ceiling down to the fixture: use the actual two hosts,
+        # not MAX_SHARDS, when checking the generation's total mapping bytes.
+        with mock.patch.object(b, "HARD_MAX_TOTAL_ALLOCATION_BYTES", local_bytes):
+            b._validate_mapping_capacity(validated, 2)
+        with mock.patch.object(b, "HARD_MAX_TOTAL_ALLOCATION_BYTES", local_bytes - 1):
+            with self.assertRaisesRegex(ValueError, "TOTAL_ALLOCATION_LIMIT"):
+                b._validate_mapping_capacity(validated, 2)
 
     def test_deduplicated_imports_and_close_are_idempotent(self):
         native = Native()

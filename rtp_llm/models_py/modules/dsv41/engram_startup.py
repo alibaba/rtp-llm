@@ -23,7 +23,7 @@ from datetime import timedelta
 
 from .engram_exchange import (Cohort, ExchangeError, ExchangeServer, decode, digest, encode,
                               remote_exchange, tls_context, validate_group)
-from .engram_bootstrap import _json, _private_read, stage_package
+from .engram_bootstrap import stage_package
 from .engram_descriptors import build_manifest
 from .engram_ganginfo import (ANNOTATION_ENV, DEFAULT_ANNOTATION, GangInfoError,
                               family, read_parts)
@@ -126,28 +126,6 @@ def to_memory_package(group, package):
                       for aid, value in package['capabilities'].items()},
         samples=package['samples'],
     )
-
-
-def offline_group(documents):
-    """Synthetic single-rank cohort for offline probes over published shards."""
-    ordered = sorted(documents, key=lambda item: item['shard'])
-    return dict(
-        generation=ordered[0]['generation'],
-        model_revision=ordered[0]['model_revision'],
-        members=[dict(instance_id=f'i{item["shard"]}', world_size=1,
-                      shards=[dict(index=item['shard'], host_id=item['host_id'],
-                                   publisher_rank=0)])
-                 for item in ordered],
-    )
-
-
-def package_from_descriptors(paths, checkpoint, samples=checkpoint_samples):
-    """Build an in-memory package from published shard descriptors (no bundle)."""
-    documents = [_json(_private_read(Path(path), 1 << 20)) for path in paths]
-    group = offline_group(documents)
-    validate_group(group)
-    package = assemble_package(group, documents, checkpoint, samples=samples)
-    return to_memory_package(group, package)
 
 
 def _wait(store, keys, deadline):

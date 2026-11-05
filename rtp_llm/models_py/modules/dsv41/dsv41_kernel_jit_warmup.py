@@ -374,7 +374,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     lookup_capabilities = tuple(
         (
             bool(getattr(layer.embed_tokens, "supports_cpu_lookup", True)),
-            bool(getattr(layer.embed_tokens, "supports_async_prefetch", True)),
+            bool(getattr(layer.embed_tokens, "supports_generic_prefetch", True)),
         )
         for layer in layers
     )

@@ -39,10 +39,7 @@ class _LookupStream:
         # Host-table unregister must wait for actual reads, not capture time.
         self.done = torch.cuda.Event(external=True)
         self.done.record(torch.cuda.current_stream(device))
-        if self.pinned is not None:
-            self.pinned._lookup_events.append(self.done)
-        else:
-            self.storage.register_lookup_event(self.done)
+        embedding.register_lookup_event(self.done)
 
     def matches(self, embedding):
         return (

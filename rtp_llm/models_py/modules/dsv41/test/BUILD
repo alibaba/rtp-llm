@@ -265,6 +265,7 @@ py_test(
         ("test_engram_checkpoint", "engram_checkpoint_cpu"),
         ("test_engram_external_checkpoint", "engram_model_cpu"),
         ("test_engram_external_warmup", "engram_warmup_cpu"),
+        ("test_engram_external_scale_source", "engram_scale_source_cpu"),
     ]
 ]
 

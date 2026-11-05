@@ -20,6 +20,7 @@ import torch
 from rtp_llm.models_py.modules.dsv41 import _engram_decode_prefetch as prefetch
 from rtp_llm.models_py.modules.dsv41 import _engram_decode_schedule as schedule
 from rtp_llm.models_py.modules.dsv41 import _engram_quantized_triton as direct
+from rtp_llm.models_py.modules.dsv41.engram import HostEngramEmbedding
 
 ENV = {"DSV41_DECODE_ENGRAM_PREFETCH": "1", "DSV41_ENGRAM_DEVICE_SCALES": "1"}
 
@@ -74,14 +75,13 @@ def cpu_model(tokens):
     device = torch.device("cuda:0")
     for index, target in enumerate((1, 14)):
         lease = object()
-        embedding = SimpleNamespace(
-            _quantized_lookup_supported=True,
-            _uva=(object(), object()),
-            _pinned=object(),
-            _device_scale_lease=lease,
-            _num_sms=148,
-            _device_scale_resources=lambda lease=lease: lease,
-        )
+        embedding = HostEngramEmbedding.__new__(HostEngramEmbedding)
+        embedding._initialize_lookup_state(pinned=SimpleNamespace(_lookup_events=[]))
+        embedding._quantized_lookup_supported = True
+        embedding._uva = (object(), object())
+        embedding._device_scale_lease = lease
+        embedding._num_sms = 148
+        embedding._device_scale_resources = lambda lease=lease: lease
         module = SimpleNamespace(
             embed_tokens=embedding,
             _direct_fp8_lookup=True,
@@ -118,6 +118,7 @@ class DecodeScheduleCPU(unittest.TestCase):
             for target in (1, 14):
                 embedding = model.layers[target].engram.embed_tokens
                 embedding._pinned = None
+                embedding._uses_external_storage = True
                 embedding._external_storage = SimpleNamespace(
                     use=lambda: nullcontext(), register_lookup_event=Mock()
                 )
@@ -140,6 +141,23 @@ class DecodeScheduleCPU(unittest.TestCase):
                 self.assertEqual(slices.call_count, 6)
             finally:
                 plan.close()
+
+    def test_decode_capability_is_independent_of_generic_prefetch_and_live_owner(self):
+        model = cpu_model(1)
+        module = model.layers[1].engram
+        embedding = module.embed_tokens
+        embedding._pinned = None
+        embedding._uses_external_storage = True
+        embedding._external_storage = SimpleNamespace(use=lambda: nullcontext())
+        self.assertFalse(embedding.supports_generic_prefetch)
+        self.assertTrue(embedding.supports_decode_prefetch)
+        self.assertTrue(schedule._eligible(module))
+        embedding._external_storage = None
+        self.assertFalse(embedding.supports_decode_prefetch)
+        self.assertFalse(schedule._eligible(module))
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            with embedding.lookup_guard():
+                self.fail("closed external table admitted")
 
     def mock_cuda(self, stack):
         main = Mock(name="main")

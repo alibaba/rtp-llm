@@ -16,6 +16,7 @@ from unittest import mock
 import torch
 
 from rtp_llm.models_py.modules.dsv41 import dsv41_kernel_jit_warmup as warmup
+from rtp_llm.models_py.modules.dsv41 import _engram_decode_prefetch as decode_prefetch
 from rtp_llm.models_py.modules.dsv41 import engram
 
 
@@ -26,10 +27,9 @@ class ExternalEmbeddingForWarmup(engram.HostEngramEmbedding):
         # Match from_storage's public/metadata state without a CUDA allocation.
         # There is deliberately no full host tensor, even for these huge shapes.
         self.weight = self.scales = None
-        self._uses_external_storage = True
+        self._initialize_lookup_state(storage=object())
         self._table_shape = table_shape
         self._num_sms = 2
-        self._pinned = None
         self.lookups = []
 
     def __call__(self, indices, device):
@@ -77,6 +77,12 @@ class ExternalEngramWarmupTest(unittest.TestCase):
             side_effect=lambda label, description, launch, **kwargs: launch(),
         ))
         self.gate = self.stack.enter_context(mock.patch.object(engram, "gated_engram_residual"))
+        # Native decode scheduling is another GPU kernel boundary, exercised by
+        # test_engram_decode_schedule. Keep this CPU orchestration regression
+        # independent of Triton while checking that warmup reaches that boundary.
+        self.decode_prepare = self.stack.enter_context(mock.patch.object(
+            decode_prefetch, "prepare", return_value=None,
+        ))
         self.cpu_runtime = self.stack.enter_context(mock.patch.object(
             engram, "EngramCPULookupRuntime",
             side_effect=AssertionError("CPU runtime must not use external host views"),
@@ -151,6 +157,8 @@ class ExternalEngramWarmupTest(unittest.TestCase):
         self.assertLess(max(self.allocation_numels), 65536)
         self.assertEqual(len(warmup._ENGRAM_WARMED), 1)
         self.cpu_runtime.assert_not_called()
+        self.assertEqual(self.decode_prepare.call_args_list,
+                         [mock.call(layer.engram) for layer in self.active_layers])
         for layer in self.active_layers:
             layer.engram.prepare_lookup_prefetch.assert_not_called()
 

@@ -121,6 +121,7 @@ class ValidatedManifest:
     physical_bytes: int
     allocation_count: int
     manifest_digest: str
+    layout: ExpectedLayout
 
 
 def _integer(value, path, minimum=1, maximum=_MAX_INTEGER):
@@ -327,7 +328,7 @@ def compute_dataset_id(document: Mapping, limits: Limits = Limits()) -> str:
     return _content_digest(metadata)
 
 
-def parse_manifest(data: bytes, limits: Limits = Limits()) -> Manifest:
+def _parse_manifest(data: bytes, limits: Limits):
     if not isinstance(data, bytes) or len(data) > limits.max_manifest_bytes:
         raise ManifestError("INPUT_LIMIT", "manifest")
 
@@ -348,10 +349,26 @@ def parse_manifest(data: bytes, limits: Limits = Limits()) -> Manifest:
         if isinstance(exc, ManifestError):
             raise
         raise ManifestError("INVALID_JSON", "manifest") from None
-    manifest, _, _ = _metadata(document, limits)
+    manifest, total, count = _metadata(document, limits)
     if _content_digest(manifest) != manifest.dataset_id:
         raise ManifestError("DATASET_DIGEST_MISMATCH", "dataset_id")
-    return manifest
+    return manifest, total, count
+
+
+def parse_manifest(data: bytes, limits: Limits = Limits()) -> Manifest:
+    return _parse_manifest(data, limits)[0]
+
+
+def parse_for_attach(data: bytes, expected_layout: ExpectedLayout,
+                     expected_dataset_id: str, expected_generation: str,
+                     limits: Limits = Limits()) -> ValidatedManifest:
+    """Validate raw input once and bind it to the trusted complete model contract.
+
+    Internal attach execution consumes this immutable result. Public callers
+    holding a manually constructed Manifest must use validate_for_attach.
+    """
+    return _validate_contract(*_parse_manifest(data, limits), expected_layout,
+                              expected_dataset_id, expected_generation)
 
 
 def manifest_digest(manifest: Manifest) -> str:
@@ -362,8 +379,6 @@ def manifest_digest(manifest: Manifest) -> str:
 def validate_for_attach(manifest: Manifest, expected_layout: ExpectedLayout,
                         expected_dataset_id: str, expected_generation: str,
                         limits: Limits = Limits()) -> ValidatedManifest:
-    _digest(expected_dataset_id, "expected_dataset_id")
-    _uuid(expected_generation, "expected_generation")
     # Revalidate even manually constructed dataclasses; caller-supplied limits
     # may also be tighter than the parser's limits.
     if not isinstance(manifest, Manifest) or not isinstance(expected_layout, ExpectedLayout):
@@ -376,7 +391,19 @@ def validate_for_attach(manifest: Manifest, expected_layout: ExpectedLayout,
         raise ManifestError("INPUT_LIMIT", "manifest")
     document = json.loads(serialized)
     manifest, total, count = _metadata(document, limits)
-    if _content_digest(manifest) != manifest.dataset_id or manifest.dataset_id != expected_dataset_id:
+    if _content_digest(manifest) != manifest.dataset_id:
+        raise ManifestError("DATASET_MISMATCH", "dataset_id")
+    return _validate_contract(manifest, total, count, expected_layout,
+                              expected_dataset_id, expected_generation)
+
+
+def _validate_contract(manifest, total, count, expected_layout,
+                       expected_dataset_id, expected_generation):
+    _digest(expected_dataset_id, "expected_dataset_id")
+    _uuid(expected_generation, "expected_generation")
+    if not isinstance(expected_layout, ExpectedLayout):
+        raise ManifestError("INVALID_FIELDS", "attach")
+    if manifest.dataset_id != expected_dataset_id:
         raise ManifestError("DATASET_MISMATCH", "dataset_id")
     if manifest.generation != expected_generation:
         raise ManifestError("GENERATION_MISMATCH", "generation")
@@ -393,4 +420,4 @@ def validate_for_attach(manifest: Manifest, expected_layout: ExpectedLayout,
             expected[f"layers.{layer}.engram.embed.{role}"] = (rows, columns)
     if {t.name: t.shape for t in manifest.tensors} != expected:
         raise ManifestError("INCOMPLETE_GENERATION", "tensors")
-    return ValidatedManifest(manifest, total, count, manifest_digest(manifest))
+    return ValidatedManifest(manifest, total, count, manifest_digest(manifest), expected_layout)

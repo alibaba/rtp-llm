@@ -30,7 +30,7 @@ import threading
 import time
 import weakref
 from concurrent.futures import CancelledError, ThreadPoolExecutor, TimeoutError
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -741,15 +741,7 @@ class HostEngramEmbedding:
         # CPU index_select does not implement Float8; select its unchanged bytes.
         self.scales = scales.view(torch.uint8) if scales.element_size() == 1 else scales
         self.block_size = block_size
-        self._pinned = pinned
-        self._external_storage = None
-        self._uses_external_storage = False
-        self._external_closed = False
-        self._uva = None
-        self._device_scale_lease = None
-        self._quantized_lookup_supported = False
-        self._scale_shard_count = 1
-        self._legacy_scale_uva = None
+        self._initialize_lookup_state(pinned=pinned)
         if pinned is not None:
             if os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1":
                 if torch.cuda.is_current_stream_capturing():
@@ -793,6 +785,40 @@ class HostEngramEmbedding:
                 and block_size == 32
             )
 
+    def _initialize_lookup_state(self, *, pinned=None, storage=None):
+        """Common reader state for both checkpoint and external constructors."""
+        self._pinned = pinned
+        self._external_storage = storage
+        self._uses_external_storage = storage is not None
+        self._uva = None
+        self._device_scale_lease = None
+        self._quantized_lookup_supported = False
+        self._scale_shard_count = 1
+        self._legacy_scale_uva = None
+
+    @contextmanager
+    def lookup_guard(self):
+        """Fence external submissions against drain; local leases own host data."""
+        storage = self._external_storage
+        if self._uses_external_storage and storage is None:
+            raise RuntimeError("external Engram embedding is closed")
+        with storage.use() if storage is not None else nullcontext():
+            # release_external_views takes the same storage lock. Recheck after
+            # admission in case release won the race while entering the guard.
+            if self._uses_external_storage and self._external_storage is not storage:
+                raise RuntimeError("external Engram embedding is closed")
+            yield
+
+    def register_lookup_event(self, event):
+        """Register a stream's completion event with its table owner once."""
+        with self.lookup_guard():
+            if self._external_storage is not None:
+                self._external_storage.register_lookup_event(event)
+            elif self._pinned is not None:
+                self._pinned._lookup_events.append(event)
+            else:
+                raise RuntimeError("Engram asynchronous lookup requires a table owner")
+
     def lookup_quantized(self, indices: torch.Tensor, device, *, prepare=False):
         """Gather native FP8 and packed GPU scales in a single lookup kernel."""
         from rtp_llm.models_py.modules.dsv41 import _engram_quantized_triton
@@ -803,10 +829,7 @@ class HostEngramEmbedding:
             raise ValueError(
                 "Native Engram lookup requires supported Blackwell GPU tables"
             )
-        storage = self._external_storage
-        if self._uses_external_storage and storage is None:
-            raise RuntimeError("external Engram embedding is closed")
-        with storage.use() if storage is not None else nullcontext():
+        with self.lookup_guard():
             lease = self._device_scale_resources()
             if lease is not None and torch.cuda.is_current_stream_capturing():
                 _DeviceScaleCapturePermit.require(self, lease)
@@ -835,7 +858,7 @@ class HostEngramEmbedding:
 
     def warmup_prefetch(self, indices: torch.Tensor, device):
         """Compile and configure the asynchronous lookup during model startup."""
-        if not self.supports_async_prefetch:
+        if not self.supports_generic_prefetch:
             return
         from rtp_llm.models_py.modules.dsv41._engram_triton import (
             warmup_lookup_prefetch_rows,
@@ -883,14 +906,7 @@ class HostEngramEmbedding:
             result = cls.__new__(cls)
             result.weight = result.scales = None  # No private host table/reference copy.
             result.block_size = 32
-            result._pinned = None
-            result._external_storage = storage
-            result._uses_external_storage = True
-            result._external_closed = False
-            result._scale_shard_count = 1
-            result._device_scale_lease = None
-            result._legacy_scale_uva = None
-            result._quantized_lookup_supported = False
+            result._initialize_lookup_state(storage=storage)
             properties = torch.cuda.get_device_properties(weight.device)
             quantized_target = (
                 (properties.major, properties.minor) in ((10, 0), (10, 3))
@@ -906,17 +922,18 @@ class HostEngramEmbedding:
                     create_sharded_scales,
                 )
 
-                # Startup-only: the fabric view is remote, so take one local copy
-                # and let the shard group own the GPU-resident generation.
+                # Startup-only: copy this rank's slice from the remote view
+                # after cache agreement, without a full-table CPU staging copy.
                 # A generation may contain equal-sized tables on different layers.
                 gpu_scales = (
                     create_sharded_scales(
-                        scales.cpu(),
+                        scales,
                         scale_group,
                         weight.device,
                         (scale_identity, f"layers.{layer_id}.engram.embed.scale")
                         if scale_identity
                         else None,
+                        external_source=True,
                     )
                     if scale_group is not None
                     else scales.clone()
@@ -950,9 +967,19 @@ class HostEngramEmbedding:
         return not self._uses_external_storage
 
     @property
-    def supports_async_prefetch(self):
-        """External side-stream reader ownership has not been qualified yet."""
+    def supports_generic_prefetch(self):
+        """The generic host-table prefetch kernel requires pinned host storage."""
         return not self._uses_external_storage
+
+    @property
+    def supports_decode_prefetch(self):
+        """Scheduled native decode supports either live table owner."""
+        return (
+            self._quantized_lookup_supported
+            and self._uva is not None
+            and self._device_scale_lease is not None
+            and (self._pinned is not None or self._external_storage is not None)
+        )
 
     def release_external_views(self):
         """Drop this embedding's views after the caller has stopped requests."""
@@ -963,22 +990,17 @@ class HostEngramEmbedding:
                 self._legacy_scale_uva = None
                 self._device_scale_lease = None
                 self._external_storage = None
-                self._external_closed = True
 
     def __call__(
         self, indices: torch.Tensor, device, *, prefetch=False
     ) -> torch.Tensor:
-        if prefetch and not self.supports_async_prefetch:
+        if prefetch and not self.supports_generic_prefetch:
             raise RuntimeError("external Engram asynchronous prefetch is not supported")
         if self._uses_external_storage:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
-            storage = self._external_storage
-            if storage is None:
-                raise RuntimeError("external Engram embedding is closed")
-            with storage.use():
-                if self._external_closed:
-                    raise RuntimeError("external Engram embedding is closed")
+            with self.lookup_guard():
+                storage = self._external_storage
                 target = torch.device(device)
                 if (not indices.is_cuda or indices.device != self._uva[0].device
                         or target.type != "cuda"
@@ -987,18 +1009,24 @@ class HostEngramEmbedding:
                 if indices.ndim != 2 or indices.dtype not in (torch.int32, torch.int64):
                     raise ValueError("external Engram lookup requires a 2D int32/int64 index tensor")
                 with torch.cuda.device(storage.device):
-                    if self._quantized_lookup_supported:
-                        return self.lookup_quantized(indices, device)
-                    # SM89 and other non-quantized targets keep the plain kernel,
-                    # which needs a flat scale tensor rather than the descriptor.
+                    lease = self._device_scale_resources()
+                    if lease is not None and torch.cuda.is_current_stream_capturing():
+                        _DeviceScaleCapturePermit.require(self, lease)
+                    uva = self._uva
+                    # __call__ always returns BF16 rows, including on Blackwell.
+                    # The projection/schedule owns explicit quantized dispatch.
                     lookup_scales = (
                         self._legacy_scale_uva
                         if self._legacy_scale_uva is not None
-                        else self._uva[1]
+                        else uva[1]
                     )
-                    return _engram_triton.lookup_host_rows(
-                        self._uva[0], lookup_scales, indices, self._num_sms
-                    )
+                    try:
+                        return _engram_triton.lookup_host_rows(
+                            uva[0], lookup_scales, indices, self._num_sms
+                        )
+                    finally:
+                        if lease is not None:
+                            uva[1].record_stream(torch.cuda.current_stream(indices.device))
         if indices.is_cuda:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
@@ -1888,7 +1916,7 @@ class Engram(nn.Module):
     def prepare_lookup_prefetch(self):
         """Called after lookup JIT warmup, never from a request or capture."""
         if (
-            not getattr(self.embed_tokens, "supports_async_prefetch", True)
+            not getattr(self.embed_tokens, "supports_generic_prefetch", True)
             or not engram_lookup_prefetch_enabled()
             or not self.q_weight.is_cuda
             or self.embed_tokens._uva is None
@@ -1905,12 +1933,12 @@ class Engram(nn.Module):
         torch.cuda.current_stream(device).wait_event(done)
         # Register the event once, not once per request. Its latest recording
         # covers all earlier reads on this stream when the table is destroyed.
-        self.embed_tokens._pinned._lookup_events.append(done)
+        self.embed_tokens.register_lookup_event(done)
         self._lookup_stream, self._lookup_done = stream, done
 
     def prefetch_lookup(self, hash_ids):
         if (
-            not getattr(self.embed_tokens, "supports_async_prefetch", True)
+            not getattr(self.embed_tokens, "supports_generic_prefetch", True)
             or self._lookup_stream is None
             or self._lookup_work is not None
             or not hash_ids.is_cuda
@@ -1978,14 +2006,9 @@ class Engram(nn.Module):
             # Check every configured layer, not just the layer being constructed.
             # Revision/hash/dataset identities are pinned by the prior attach.
             with external_storage.use():
-                manifest = external_storage.validated.manifest
-                expected = {}
-                for lid, count in zip(layout.layer_ids, layout.num_embeddings):
-                    expected[f"layers.{lid}.engram.embed.weight"] = (count, layout.head_dim)
-                    expected[f"layers.{lid}.engram.embed.scale"] = (count, layout.head_dim // 32)
-                actual = {tensor.name: tuple(tensor.shape) for tensor in manifest.tensors}
-                if manifest.backend != "fabric_egm" or actual != expected:
-                    raise ValueError("external generation does not match the complete model Engram layout")
+                external_storage.require_model_layout(
+                    layout.layer_ids, layout.num_embeddings, layout.head_dim
+                )
 
         root = Path(checkpoint_path)
         with (root / "model.safetensors.index.json").open() as file:
