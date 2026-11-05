@@ -4,6 +4,11 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["test_main.py"])
 
+_REFERENCE_DEPS = [
+    ":math_references",
+    ":test_support",
+]
+
 qwen4_test(
     name = "state_cache_inputs_test",
     src = "state_cache_inputs_test.py",
@@ -56,50 +61,35 @@ qwen4_test(
     name = "ple_test",
     src = "ple/ple_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "ple_gather_triton_test",
     src = "ple/ple_gather_triton_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "ple_prefetch_test",
     src = "ple/ple_prefetch_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "ple_inline_uva_graph_test",
     src = "ple/ple_inline_uva_graph_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "ple_decode_test",
     src = "ple/ple_decode_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
@@ -127,50 +117,35 @@ qwen4_test(
 qwen4_test(
     name = "indexer_compressor_test",
     src = "qsa/indexer_compressor_test.py",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "indexer_decode_triton_test",
     src = "qsa/indexer_decode_triton_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "indexer_prefill_triton_test",
     src = "qsa/indexer_prefill_triton_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "moe_align_triton_test",
     src = "moe/moe_align_triton_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "moe_topk_triton_test",
     src = "moe/moe_topk_triton_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
@@ -194,10 +169,7 @@ qwen4_test(
         "MarlinNvfp4Test.test_repack_reuses_original_storage_and_executor_contract",
     ],
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
@@ -205,30 +177,21 @@ qwen4_test(
     src = "moe/marlin_nvfp4_test.py",
     args = ["MarlinNvfp4Test.test_explicit_strategy_uses_prepared_weights"],
     gpu = "H20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "target_writer_fusion_test",
     src = "qsa/target_writer_fusion_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "target_metadata_test",
     src = "qsa/target_metadata_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
@@ -246,40 +209,28 @@ qwen4_test(
     name = "qsa_topk_triton_test",
     src = "qsa/qsa_topk_triton_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "qsa_decode_graph_test",
     src = "qsa/qsa_decode_graph_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "indexer_paged_score_test",
     src = "qsa/indexer_paged_score_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "sparse_fmha_test",
     src = "qsa/sparse_fmha_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
@@ -292,110 +243,77 @@ qwen4_test(
     name = "sparse_gqa_impl_test",
     src = "qsa/sparse_gqa_impl_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "sparse_paged_fmha_test",
     src = "qsa/sparse_paged_fmha_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "draft_prefill_graph_test",
     src = "qsa/draft_prefill_graph_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "draft_metadata_test",
     src = "qsa/draft_metadata_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "prefill_silu_quant_test",
     src = "qsa/prefill_silu_quant_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "sparse_prefill_bitmap_test",
     src = "qsa/sparse_prefill_bitmap_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "indexer_prefill_score_test",
     src = "qsa/indexer_prefill_score_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "small_moe_gemv_test",
     src = "moe/small_moe_gemv_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "pd_cache_store_test",
     src = "qsa/pd_cache_store_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "gdn_composition_test",
     src = "gdn/gdn_composition_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "fp8_kv_test",
     src = "qsa/fp8_kv_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
@@ -492,229 +410,160 @@ qwen4_test(
     name = "ple_outer_residual_test",
     src = "ple/ple_outer_residual_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "ple_commit_metadata_test",
     src = "ple/ple_commit_metadata_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "ple_commit_prepare_test",
     src = "ple/ple_commit_prepare_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "ple_commit_test",
     src = "ple/ple_commit_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "ple_hash_triton_test",
     src = "ple/ple_hash_triton_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "gdn_prefill_norm_test",
     src = "gdn/gdn_prefill_norm_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "ple_gate_test",
     src = "ple/ple_gate_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "gdn_prefill_adapter_test",
     src = "gdn/gdn_prefill_adapter_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "indexer_norm_rope_test",
     src = "qsa/indexer_norm_rope_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "qsa_packed_count_test",
     src = "qsa/qsa_packed_count_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "ple_read_blocks_test",
     src = "ple/ple_read_blocks_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "main_qk_norm_rope_test",
     src = "qsa/main_qk_norm_rope_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "qsa_projection_pair_test",
     src = "qsa/qsa_projection_pair_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "mtp_embedding_norm_test",
     src = "qsa/mtp_embedding_norm_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "qsa_cub_topk_test",
     src = "qsa/qsa_cub_topk_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "qsa_target_prepare_test",
     src = "qsa/qsa_target_prepare_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "tp_registered_input_test",
     src = "distributed/tp_registered_input_test.py",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "prefetch_order_test",
     src = "qsa/prefetch_order_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "decode_snapshot_test",
     src = "qsa/decode_snapshot_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "main_qk_cache_test",
     src = "qsa/main_qk_cache_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "qsa_main_metadata_test",
     src = "qsa/qsa_main_metadata_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "decode_rope_stride_test",
     src = "qsa/decode_rope_stride_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "rope_cache_policy_test",
     src = "qsa/rope_cache_policy_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 
@@ -723,20 +572,14 @@ qwen4_test(
     name = "gdn_norm_quant_test",
     src = "gdn/gdn_norm_quant_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "shared_expert_overlap_test",
     src = "moe/shared_expert_overlap_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 
@@ -745,50 +588,35 @@ qwen4_test(
     name = "draft_qsa_fused_test",
     src = "qsa/draft_qsa_fused_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "draft_qsa_layout_test",
     src = "qsa/draft_qsa_layout_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "draft_paged_fmha_test",
     src = "qsa/draft_paged_fmha_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "draft_qsa_metadata_test",
     src = "qsa/draft_qsa_metadata_test.py",
     gpu = "RTX_5000_PRO_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "cpu_target_status_test",
     src = "distributed/cpu_target_status_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
@@ -799,20 +627,14 @@ qwen4_test(
 qwen4_test(
     name = "indexer_cpu_contract_test",
     src = "qsa/indexer_cpu_contract_test.py",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 qwen4_test(
     name = "indexer_cuda_contract_test",
     src = "qsa/indexer_cuda_contract_test.py",
     gpu = "L20_CU13",
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 # Preserve the existing CI entrypoint while sharing component parity coverage.
@@ -948,10 +770,7 @@ qwen4_test(
     src = "moe/shared_expert_tp2_integration_test.py",
     gpu = "RTX_5000_PRO_CU13",
     gpus = 2,
-    deps = [
-        ":math_references",
-        ":test_support",
-    ],
+    deps = _REFERENCE_DEPS,
 )
 
 

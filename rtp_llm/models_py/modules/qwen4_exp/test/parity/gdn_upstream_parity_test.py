@@ -14,6 +14,8 @@ files that import them instead of defining them -- note the vendored 5.2.0
 chunk rule assumes K == V heads and cannot run this test's GQA config.
 """
 
+import __future__
+
 import ast
 import math
 import os
@@ -119,45 +121,6 @@ def _fla_helpers():
     return {}
 
 
-def _annotation_only_names(body) -> set:
-    """Names referenced solely by annotations, which exec evaluates eagerly."""
-    import builtins
-
-    names = set()
-    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
-        annotations = []
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            annotations.append(node.returns)
-            arguments = node.args
-            annotations += [a.annotation for a in arguments.args]
-            annotations += [a.annotation for a in arguments.kwonlyargs]
-            annotations += [a.annotation for a in arguments.posonlyargs]
-            if arguments.vararg is not None:
-                annotations.append(arguments.vararg.annotation)
-            if arguments.kwarg is not None:
-                annotations.append(arguments.kwarg.annotation)
-        elif isinstance(node, ast.AnnAssign):
-            annotations.append(node.annotation)
-        for annotation in annotations:
-            if annotation is None:
-                continue
-            for sub in ast.walk(annotation):
-                if isinstance(sub, ast.Name):
-                    names.add(sub.id)
-    return {
-        name
-        for name in names
-        if name not in ("torch", "nn", "F", "math") and not hasattr(builtins, name)
-    }
-
-
-class _AnnotationPlaceholder:
-    """Stand-in for upstream annotation-only types; supports ``X[...]``."""
-
-    def __class_getitem__(cls, item):
-        return cls
-
-
 def _is_torchdynamo_exporting() -> bool:
     """Upstream helper absent from the vendored release; never exporting here."""
     try:
@@ -193,19 +156,13 @@ def _exec_upstream_gdn():
     ), f"upstream file lacks classes: {set(_UPSTREAM_CLASSES) - found}"
     missing = [name for name in _UPSTREAM_FUNCS if name not in found]
     namespace = {
-        name: type(name, (_AnnotationPlaceholder,), {})
-        for name in _annotation_only_names(body)
+        "torch": torch,
+        "nn": nn,
+        "F": F,
+        "math": math,
+        "ACT2FN": _upstream_activation_fn(),
+        "is_torchdynamo_exporting": _is_torchdynamo_exporting,
     }
-    namespace.update(
-        {
-            "torch": torch,
-            "nn": nn,
-            "F": F,
-            "math": math,
-            "ACT2FN": _upstream_activation_fn(),
-            "is_torchdynamo_exporting": _is_torchdynamo_exporting,
-        }
-    )
     if missing:
         fallback = _fla_helpers()
         for name in missing:
@@ -219,7 +176,14 @@ def _exec_upstream_gdn():
     for node in ast.walk(module):
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             node.decorator_list = []
-    exec(compile(module, "<upstream>", "exec"), namespace)
+    code = compile(
+        module,
+        "<upstream>",
+        "exec",
+        flags=__future__.annotations.compiler_flag,
+        dont_inherit=True,
+    )
+    exec(code, namespace)
     return namespace
 
 
