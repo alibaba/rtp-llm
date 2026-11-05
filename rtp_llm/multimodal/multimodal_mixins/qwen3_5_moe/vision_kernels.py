@@ -292,6 +292,8 @@ def _nv12_rgb_kernel(
     count: tl.constexpr,
     height: tl.constexpr,
     width: tl.constexpr,
+    cy: tl.constexpr,
+    y_off: tl.constexpr,
     cr: tl.constexpr,
     cu: tl.constexpr,
     cgu: tl.constexpr,
@@ -305,11 +307,11 @@ def _nv12_rgb_kernel(
     y = pixel // width
     x = pixel % width
     base = frame * (height * 3 // 2) * width
-    luma = tl.load(video + base + pixel, mask, other=16).to(tl.int32)
+    luma = tl.load(video + base + pixel, mask, other=y_off).to(tl.int32)
     chroma = base + height * width + (y // 2) * width + (x // 2) * 2
     u = tl.load(video + chroma, mask, other=128).to(tl.int32) - 128
     v = tl.load(video + chroma + 1, mask, other=128).to(tl.int32) - 128
-    luma = ((luma - 16) * 9539) >> 13
+    luma = ((luma - y_off) * cy) >> 13
     r = tl.minimum(255, tl.maximum(0, luma + ((v * cr) >> 13)))
     g = tl.minimum(255, tl.maximum(0, luma + ((u * cgu) >> 13) + ((v * cgv) >> 13)))
     b = tl.minimum(255, tl.maximum(0, luma + ((u * cu) >> 13)))
@@ -319,17 +321,15 @@ def _nv12_rgb_kernel(
     tl.store(output + dst + 2 * height * width, b, mask)
 
 
-def nv12_rgb(video, height, color_space):
+def nv12_rgb(video, height, color_space, full_range=False):
     count, _, width = video.shape
     output = torch.empty(
         (count, 3, height, width), device=video.device, dtype=torch.uint8
     )
     if output.numel():
-        coefficients = (
-            (14686, 17305, -1747, -4366)
-            if color_space == 1
-            else (13075, 16525, -3209, -6660)
-        )
+        from .gpu_video import nv12_coefficients
+
+        cy, y_off, cr, cu, cgu, cgv = nv12_coefficients(color_space, full_range)
         with torch.cuda.device(video.device):
             _nv12_rgb_kernel[(triton.cdiv(count * height * width, 256),)](
                 video,
@@ -337,7 +337,12 @@ def nv12_rgb(video, height, color_space):
                 count,
                 height,
                 width,
-                *coefficients,
+                cy,
+                y_off,
+                cr,
+                cu,
+                cgu,
+                cgv,
                 BLOCK=256,
             )
     return output

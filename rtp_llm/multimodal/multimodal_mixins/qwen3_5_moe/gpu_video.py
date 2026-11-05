@@ -211,6 +211,8 @@ class GpuVideoInput:
     temporal_patch_size: int
     color_space: int = 2
     source_fps: float = 0.0
+    full_range: bool = False
+    bit_depth: int = 8
 
     @property
     def shape(self):
@@ -277,13 +279,23 @@ def prepare_gpu_video(
         height, width = stream.height, stream.width
         context = stream.codec_context
         color_space = int(context.colorspace)
+        color_range = int(context.color_range)
+        # 2 == JPEG/full range; 0/1 are unspecified/limited.
+        full_range = color_range == 2
+        fmt = context.format.name
+        bit_depth = int(context.bits_per_raw_sample or 8)
+        if bit_depth <= 0:
+            bit_depth = 10 if fmt in ("yuv420p10le", "p010le") else 8
+        # NVDEC outputs NV12 (8-bit) or P016 (10-bit); both are YUV420. Accept
+        # full-range and BT.2020 too: the RGB conversion below selects the
+        # matching range/matrix coefficients instead of rejecting the input.
         if (
-            context.format.name != "yuv420p"
-            or int(context.color_range) not in (0, 1)
-            or color_space not in (1, 2, 5, 6)
+            fmt not in ("yuv420p", "yuvj420p", "yuv420p10le", "p010le")
+            or bit_depth not in (8, 10)
+            or color_space not in (1, 2, 5, 6, 9, 10)
         ):
             raise ValueError(
-                "NVDEC video preprocessing supports limited-range 8-bit YUV420 with BT.601/709 color; use the cpu backend for this input"
+                "NVDEC video preprocessing supports 8/10-bit YUV420 with BT.601/709/2020 color; use the cpu backend for this input"
             )
     if total_frames <= 0 or not math.isfinite(fps) or fps <= 0:
         raise ValueError(
@@ -314,6 +326,8 @@ def prepare_gpu_video(
         processor.temporal_patch_size,
         color_space,
         fps,
+        full_range,
+        bit_depth,
     )
     grid = torch.tensor(
         [
@@ -348,21 +362,40 @@ def _load_nvcodec():
         _imp.release_lock()
 
 
-def nv12_to_rgb(video, height, color_space):
-    """Match Decord/x86 swscale's limited-range fixed-point RGB conversion."""
+def nv12_coefficients(color_space, full_range=False):
+    """Fixed-point YUV->RGB coefficients (scale 8192) for the input matrix.
+
+    color_space: 1=BT.709, 5/6=BT.601, 9/10=BT.2020, 2=unspecified (BT.601).
+    Limited range scales luma by 255/219 and chroma by 255/224 with a 16/128
+    offset; full range keeps luma as-is and only centers chroma at 128.
+    """
+    if color_space in (9, 10):
+        cr, cu, cgu, cgv = (
+            (12080, 15413, -1348, -4680) if full_range else (13756, 17545, -1534, -5327)
+        )
+    elif color_space == 1:
+        cr, cu, cgu, cgv = (
+            (12901, 15201, -1534, -3835) if full_range else (14686, 17305, -1747, -4366)
+        )
+    else:
+        cr, cu, cgu, cgv = (
+            (11485, 14516, -2818, -5850) if full_range else (13075, 16525, -3209, -6660)
+        )
+    cy, y_off = (8192, 0) if full_range else (9539, 16)
+    return cy, y_off, cr, cu, cgu, cgv
+
+
+def nv12_to_rgb(video, height, color_space, full_range=False):
+    """Match Decord/x86 swscale's fixed-point RGB conversion."""
     if video.is_cuda and video.is_contiguous():
         from .vision_kernels import nv12_rgb
 
-        return nv12_rgb(video, height, color_space)
-    # BT.709 and BT.601 coefficients scaled by 8192. Each contribution is
-    # truncated before addition, matching the CPU's signed high-word multiply.
-    cy, cr, cu, cgu, cgv = (
-        (9539, 14686, 17305, -1747, -4366)
-        if color_space == 1
-        else (9539, 13075, 16525, -3209, -6660)
-    )
+        return nv12_rgb(video, height, color_space, full_range)
+    # Each contribution is truncated before addition, matching the CPU's
+    # signed high-word multiply.
+    cy, y_off, cr, cu, cgu, cgv = nv12_coefficients(color_space, full_range)
     n, _, width = video.shape
-    y = ((video[:, :height].to(torch.int32) - 16) * cy) >> 13
+    y = ((video[:, :height].to(torch.int32) - y_off) * cy) >> 13
     chroma = video[:, height:].reshape(n, height // 2, width // 2, 2)
     chroma = chroma.permute(0, 3, 1, 2).to(torch.int32) - 128
     chroma = chroma.repeat_interleave(2, 2).repeat_interleave(2, 3)
@@ -464,10 +497,11 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
     selected = set()
     # Copy sampled surfaces straight into their final ordered buffer. The
     # decoder owns/recycles its surfaces, so the copy and lifetime wait remain.
+    sample_dtype = torch.uint16 if data.bit_depth > 8 else torch.uint8
     sampled = torch.empty(
         (len(data.frame_indices), data.height * 3 // 2, data.width),
         device=device,
-        dtype=torch.uint8,
+        dtype=sample_dtype,
     )
     count = 0
     try:
@@ -481,7 +515,7 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
                     tensor = torch.from_dlpack(frame)
                     if (
                         tensor.device != device
-                        or tensor.dtype != torch.uint8
+                        or tensor.dtype != sample_dtype
                         or tuple(tensor.shape) != (data.height * 3 // 2, data.width)
                     ):
                         raise ValueError(
@@ -505,6 +539,15 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
         consumer_stream.wait_stream(stream)
         with torch.cuda.stream(consumer_stream):
             sampled.record_stream(consumer_stream)
+            if data.bit_depth > 8:
+                # P016 stores 10-bit samples in 16-bit words. NVIDIA surfaces are
+                # left-aligned (>> 8); some builds right-align (>> depth-8). Pick
+                # the shift from the observed sample range so both are correct.
+                max_sample = int(sampled.max())
+                shift = (
+                    8 if max_sample > (1 << data.bit_depth) - 1 else data.bit_depth - 8
+                )
+                sampled = (sampled >> shift).to(torch.uint8)
             with _cuda_video_timer(
                 GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC,
                 "decode",
@@ -512,7 +555,9 @@ def _decode_on_stream(data, device, nvc, stream, consumer_stream):
                 base_us=decode_wall_us,
                 sampled_frames=len(data.frame_indices),
             ):
-                return nv12_to_rgb(sampled, data.height, data.color_space)
+                return nv12_to_rgb(
+                    sampled, data.height, data.color_space, data.full_range
+                )
     except Exception:
         # A failed/incompletely drained session must not reach the next request.
         _decode_state.decoder = None
