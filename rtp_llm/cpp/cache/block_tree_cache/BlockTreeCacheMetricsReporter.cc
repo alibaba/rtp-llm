@@ -189,6 +189,44 @@ void BlockTreeCacheMetricsReporter::reportEvictableCandidateCount(
     }
 }
 
+void BlockTreeCacheMetricsReporter::reportVictimSelectionMetrics(const VictimSelectionMetrics& snapshot) const {
+    if (!enabled()) {
+        return;
+    }
+    for (const auto trigger : {VictimSelectionTrigger::WATERMARK, VictimSelectionTrigger::ON_DEMAND}) {
+        for (const auto tier : kMetricTiers) {
+            for (const auto group_type : kMetricGroupTypes) {
+                for (const bool drop : {false, true}) {
+                    const auto& counters = snapshot.at(trigger, tier, group_type, drop);
+                    if (!counters.observed) {
+                        continue;
+                    }
+                    kmonitor::MetricsTags tags(
+                        "trigger_type", trigger == VictimSelectionTrigger::WATERMARK ? "watermark" : "on_demand");
+                    tags.AddTag("tier", tierName(tier));
+                    tags.AddTag("group_type", metricCacheGroupTypeName(group_type));
+                    tags.AddTag("mode", drop ? "drop" : "demote");
+                    RtpLLMCacheVictimSelectionMetricsCollector collector;
+                    collector.calls              = counters.calls;
+                    collector.selected           = counters.selected;
+                    collector.latency_sum_us     = static_cast<double>(counters.latency_sum_ns) / 1000.0;
+                    collector.scanned_candidates = counters.scanned_candidates;
+                    metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheVictimSelectionMetricsCollector>(
+                        &tags, &collector);
+                    // Zero deltas keep previously active reason series current during idle periods.
+                    for (size_t i = 0; i < counters.skipped.size(); ++i) {
+                        collector.skip_reason = kVictimSkipReasonNames[i];
+                        collector.skipped     = counters.skipped[i];
+                        metrics_reporter_
+                            ->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheVictimSelectionMetricsCollector>(
+                                &tags, &collector);
+                    }
+                }
+            }
+        }
+    }
+}
+
 void BlockTreeCacheMetricsReporter::reportEvictionTriggered(Tier           source_tier,
                                                             CacheGroupType group_type,
                                                             bool           force_drop) const {

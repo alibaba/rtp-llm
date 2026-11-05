@@ -113,6 +113,7 @@ cc_library(
         "CacheStageMetrics.h",
         "group_set/GroupSetResource.h",
         "evict/BlockTreeEvictor.h",
+        "evict/VictimSelectionMetrics.h",
         "evict/EvictionTaskRunner.h",
         "load/BlockTreeLoader.h",
         "load/LoadJoinRegistry.h",

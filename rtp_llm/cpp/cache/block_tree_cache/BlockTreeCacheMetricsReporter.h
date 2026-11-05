@@ -94,6 +94,9 @@ public:
                                            bool                                       enable_stage_metrics = true,
                                            std::chrono::milliseconds stage_interval = std::chrono::seconds(1));
     ~BlockTreeCacheMetricsReporter();
+    bool enabled() const noexcept {
+        return metrics_reporter_ != nullptr;
+    }
     bool stageMetricsEnabled() const noexcept {
         return stage_metrics_ != nullptr;
     }
@@ -121,6 +124,7 @@ public:
     std::vector<BlockTreeEvictableMetricsSnapshot>
     collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets, const BlockTreeEvictor& evictor) const;
     void reportEvictableCandidateCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
+    void reportVictimSelectionMetrics(const VictimSelectionMetrics& snapshot) const;
     void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) const;
     void reportEvictionFinished(const EvictionTransferTask& task, const std::vector<GroupSetPtr>& group_sets) const;
     void reportEvictionFinished(const EvictionDropTask&         task,

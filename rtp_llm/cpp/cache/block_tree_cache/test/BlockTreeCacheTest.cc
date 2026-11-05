@@ -1779,6 +1779,126 @@ TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, scheduled_tags), 2);
 }
 
+TEST(BlockTreeCacheMetricsTest, VictimSelectionMetricsPreserveDimensionsAndWeightedDeltas) {
+    const kmonitor::MetricsTags   common_tags("dp_rank", "7");
+    auto                          metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", common_tags);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter, /*enable_stage_metrics=*/false);
+    auto*                         metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    for (auto* metric : {metrics->choose_victim_qps_metric,
+                         metrics->choose_victim_latency_sum_us_metric,
+                         metrics->choose_victim_scanned_candidates_qps_metric,
+                         metrics->choose_victim_skip_qps_metric}) {
+        EXPECT_EQ(metric->GetMetricType(), kmonitor::QPS);
+    }
+    VictimSelectionMetrics pending;
+    reporter.reportVictimSelectionMetrics(pending);
+    EXPECT_EQ(metricSeriesCount(metrics->choose_victim_qps_metric), 0u);
+    for (size_t i = 0; i < pending.buckets.size(); ++i) {
+        auto& counters              = pending.buckets[i];
+        counters.observed           = true;
+        counters.calls              = i + 3;
+        counters.selected           = i + 1;
+        counters.latency_sum_ns     = (i + 1) * 11250;
+        counters.scanned_candidates = counters.selected;
+        for (size_t reason = 0; reason < counters.skipped.size(); ++reason) {
+            counters.skipped[reason] = (i + 1) * (reason + 1);
+            counters.scanned_candidates += counters.skipped[reason];
+        }
+    }
+    // More than one reporting interval must accumulate counts and total work, not means.
+    reporter.reportVictimSelectionMetrics(pending);
+    reporter.reportVictimSelectionMetrics(pending.take());
+    EXPECT_EQ(metricSeriesCount(metrics->choose_victim_qps_metric), 72u);
+    EXPECT_EQ(metricSeriesCount(metrics->choose_victim_latency_sum_us_metric), 36u);
+    EXPECT_EQ(metricSeriesCount(metrics->choose_victim_scanned_candidates_qps_metric), 36u);
+    EXPECT_EQ(metricSeriesCount(metrics->choose_victim_skip_qps_metric), 216u);
+    for (const auto trigger : {VictimSelectionTrigger::WATERMARK, VictimSelectionTrigger::ON_DEMAND}) {
+        for (const auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+            for (const auto type : {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR}) {
+                for (const bool drop : {false, true}) {
+                    const size_t i    = VictimSelectionMetrics::index(trigger, tier, type, drop);
+                    auto         tags = common_tags;
+                    tags.AddTag("trigger_type",
+                                trigger == VictimSelectionTrigger::WATERMARK ? "watermark" : "on_demand");
+                    tags.AddTag("tier", tierName(tier));
+                    tags.AddTag("group_type", metricCacheGroupTypeName(type));
+                    tags.AddTag("mode", drop ? "drop" : "demote");
+                    auto selected_tags = tags;
+                    selected_tags.AddTag("selected", "true");
+                    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_qps_metric, selected_tags), 2 * (i + 1));
+                    auto not_selected_tags = tags;
+                    not_selected_tags.AddTag("selected", "false");
+                    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_qps_metric, not_selected_tags), 4);
+                    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_latency_sum_us_metric, tags),
+                                     2 * (i + 1) * 11.25);
+                    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_scanned_candidates_qps_metric, tags),
+                                     2 * (i + 1) * 22);
+                    for (size_t reason = 0; reason < kVictimSkipReasonNames.size(); ++reason) {
+                        auto reason_tags = tags;
+                        reason_tags.AddTag("reason", kVictimSkipReasonNames[reason]);
+                        EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_skip_qps_metric, reason_tags),
+                                         2 * (i + 1) * (reason + 1));
+                    }
+                }
+            }
+        }
+    }
+    reporter.reportVictimSelectionMetrics(pending.take());
+    for (const auto& counters : pending.buckets) {
+        EXPECT_TRUE(counters.observed);
+        EXPECT_EQ(counters.calls, 0u);
+        EXPECT_EQ(counters.latency_sum_ns, 0u);
+        EXPECT_EQ(counters.scanned_candidates, 0u);
+        for (const auto count : counters.skipped) {
+            EXPECT_EQ(count, 0u);
+        }
+    }
+    EXPECT_TRUE(metrics_reporter->getTags().FindTag("selected").empty());
+    EXPECT_TRUE(metrics_reporter->getTags().FindTag("reason").empty());
+    BlockTreeCacheMetricsReporter disabled(nullptr);
+    disabled.reportVictimSelectionMetrics(pending);
+}
+
+TEST_F(BlockTreeCacheTest, VictimSelectionMetricsAreReportedPeriodicallyAndNotReplayed) {
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    resetCache(metrics_reporter);
+    GroupSetResource resource;
+    resource.device_blocks = {42};
+    cache_->insert({100}, {{resource}}, Tier::DEVICE);
+    auto matched = cache_->match({100});
+    ASSERT_EQ(matched.matched_device_blocks, 1u);
+    EXPECT_EQ(cache_->evictForGroup("group0", 1), 0);
+    releaseRequestRefsForTest(*cache_, matched.matched_device_resources);
+    EXPECT_EQ(cache_->evictForGroup("group0", 1), 1);
+    auto* metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    EXPECT_EQ(metricSeriesCount(metrics->choose_victim_qps_metric), 0u);
+    cache_->reportMetrics();
+    kmonitor::MetricsTags tags("trigger_type", "on_demand");
+    tags.AddTag("tier", "DEVICE");
+    tags.AddTag("group_type", "full");
+    tags.AddTag("mode", "drop");
+    auto selected_tags = tags;
+    selected_tags.AddTag("selected", "true");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_qps_metric, selected_tags), 1);
+    auto not_selected_tags = tags;
+    not_selected_tags.AddTag("selected", "false");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_qps_metric, not_selected_tags), 1);
+    EXPECT_GE(snapshotQps(metrics->choose_victim_latency_sum_us_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_scanned_candidates_qps_metric, tags), 2);
+    auto reason_tags = tags;
+    reason_tags.AddTag("reason", "not_reclaimable");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_skip_qps_metric, reason_tags), 1);
+    // No work since the previous interval: report zeros rather than replaying its deltas.
+    cache_->reportMetrics();
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_qps_metric, not_selected_tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_qps_metric, selected_tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_latency_sum_us_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_scanned_candidates_qps_metric, tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_skip_qps_metric, reason_tags), 0);
+}
+
 TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
@@ -1841,6 +1961,13 @@ TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound
     lifetime_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
     EXPECT_EQ(metricSeriesCount(eviction_metrics->evicted_block_lifetime_ms_metric), 1u);
     expectCountSamples(eviction_metrics->evicted_block_lifetime_ms_metric, lifetime_tags, 2);
+    EXPECT_EQ(metricSeriesCount(eviction_metrics->choose_victim_qps_metric), 0u);
+    cache_->reportMetrics();
+    auto selection_tags = watermark_tags;
+    selection_tags.AddTag("mode", "drop");
+    selection_tags.AddTag("selected", "true");
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->choose_victim_qps_metric, selection_tags), 2);
+    EXPECT_EQ(metricSeriesCount(eviction_metrics->choose_victim_qps_metric), 2u);
 }
 
 TEST_F(BlockTreeCacheTest, KeySnapshotTracksKeyVersionAndReturnsAllKeys) {
