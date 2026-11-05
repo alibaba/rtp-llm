@@ -283,9 +283,9 @@ def prepare_gpu_video(
         # 2 == JPEG/full range; 0/1 are unspecified/limited.
         full_range = color_range == 2
         fmt = context.format.name
-        bit_depth = int(context.bits_per_raw_sample or 8)
-        if bit_depth <= 0:
-            bit_depth = 10 if fmt in ("yuv420p10le", "p010le") else 8
+        # av >= 16 removed VideoCodecContext.bits_per_raw_sample; the accepted
+        # pixel-format whitelist below already determines the bit depth.
+        bit_depth = 10 if fmt in ("yuv420p10le", "p010le") else 8
         # NVDEC outputs NV12 (8-bit) or P016 (10-bit); both are YUV420. Accept
         # full-range and BT.2020 too: the RGB conversion below selects the
         # matching range/matrix coefficients instead of rejecting the input.
