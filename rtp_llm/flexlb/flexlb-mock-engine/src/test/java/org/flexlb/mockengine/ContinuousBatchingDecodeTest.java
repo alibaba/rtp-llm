@@ -424,8 +424,11 @@ class ContinuousBatchingDecodeTest {
             throws Exception {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
+            // Terminal counters are released under decodeQueueLock; the block lease
+            // is released afterward by the completion publisher outside that lock.
             if (service.getInflightCount() == 0 && service.getRunningCount() == 0
-                    && getActiveDecodeRequests(service) == 0) {
+                    && getActiveDecodeRequests(service) == 0
+                    && MockEngineTestSupport.getActiveKvTokens(service) == 0) {
                 return;
             }
             Thread.sleep(10);
