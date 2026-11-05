@@ -18,7 +18,28 @@ public final class KvCache implements AutoCloseable {
 
     public sealed interface Preparation permits Ready, Loading, Failed {}
     public record Ready(Lease lease, long matchNanos, int remoteReusedTokens) implements Preparation {}
-    public record Failed(Failure failure, long generation) implements Preparation {}
+    public final class Failed implements Preparation {
+        private final Failure failure;
+        private final long generation, requiredTokens;
+        private final List<Long> keys;
+
+        private Failed(Failure failure, long requiredTokens, List<Long> keys) {
+            this.failure = failure;
+            this.requiredTokens = requiredTokens;
+            this.keys = List.copyOf(keys);
+            generation = allocationGeneration();
+        }
+
+        public Failure failure() { return failure; }
+
+        /** Retry only when capacity or the reusable index has changed. */
+        public Preparation retry() {
+            synchronized (KvCache.this) {
+                if (failure == Failure.PERMANENT || generation == allocationGeneration()) return this;
+                return prepare(requiredTokens, keys);
+            }
+        }
+    }
 
     public final class Loading implements Preparation, AutoCloseable {
         private final Ready local;
@@ -63,7 +84,7 @@ public final class KvCache implements AutoCloseable {
         }
     }
 
-    public record Admission(Lease lease, Failure failure, long generation, long matchNanos) {}
+    public record Admission(Lease lease, Failure failure, long matchNanos) {}
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
                            int referencedBlocks, long version, Set<Long> keys) {}
     private final BlockPool device;
@@ -108,12 +129,12 @@ public final class KvCache implements AutoCloseable {
     /** Maximum size of one request, independent of current leases and evictable cache entries. */
     public synchronized long maxRequestTokens() { return (long) (device.snapshot().total() - reserve) * blockSize; }
 
-    public synchronized Preparation prepare(long requiredTokens, List<Long> keys, boolean allowRemote) {
+    public synchronized Preparation prepare(long requiredTokens, List<Long> keys) {
         var admission = acquire(requiredTokens, keys);
-        if (admission.failure() != null) return new Failed(admission.failure(), admission.generation());
+        if (admission.failure() != null) return new Failed(admission.failure(), requiredTokens, keys);
         var ready = new Ready(admission.lease(), admission.matchNanos(), 0);
         int localBlocks = ready.lease().reused;
-        if (!allowRemote || remote == null || localBlocks >= keys.size()) return ready;
+        if (remote == null || localBlocks >= keys.size()) return ready;
 
         var suffix = List.copyOf(keys.subList(localBlocks, keys.size()));
         CompletableFuture<Integer> restore;
@@ -151,7 +172,7 @@ public final class KvCache implements AutoCloseable {
         for (var ref : Objects.requireNonNull(device.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
         var lease = new Lease(slots, matched.size());
         active.add(lease);
-        return new Admission(lease, null, allocationGeneration(), matchNanos);
+        return new Admission(lease, null, matchNanos);
     }
 
     /** Snapshot and subscription share the cache monitor. Observers must only enqueue, never block. */
@@ -165,9 +186,9 @@ public final class KvCache implements AutoCloseable {
             if (metadataObserver == observer) { metadataObserver = null; tree.observe(change -> {}); }
         } };
     }
-    private Admission rejected(Failure failure) { return new Admission(null, failure, allocationGeneration(), 0); }
+    private Admission rejected(Failure failure) { return new Admission(null, failure, 0); }
     /** Both freed capacity and newly reusable prefixes can make a rejected request admissible. */
-    public synchronized long allocationGeneration() { return device.generation() + tree.version(); }
+    private long allocationGeneration() { return device.generation() + tree.version(); }
     public synchronized Snapshot snapshot(long latestVersion, boolean needKeys) {
         var state = device.snapshot();
         int indexed = device.cachedActiveBlocks();

@@ -36,7 +36,8 @@ public final class RtpNode implements AutoCloseable {
     private RtpNode(RtpConfig config, EngineScheduler.Factory schedulers, KvCache.RemotePrefixLoader remote) {
         this.config = Objects.requireNonNull(config);
         Objects.requireNonNull(schedulers);
-        cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.deviceCache(), remote);
+        cache = new KvCache(config.blockSize(), config.deviceBlocks(), config.reserveBlocks(), config.deviceCache(),
+            config.role() == org.flexlb.mock.protocol.Role.prefill ? remote : null);
         var lock = new Object();
         var finished = new TaskHistory();
         try {

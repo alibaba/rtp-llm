@@ -54,7 +54,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         final RequestState state;
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
         KvCache.Lease lease;
-        KvCache.Loading preparation;
+        KvCache.Preparation preparation;
         long preparationStarted;
         boolean cacheMatchRequested;
 
@@ -63,7 +63,6 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         final long begun = System.nanoTime();
         long enqueuedAt = begun, waitNanos, firstToken;
         long timingStarted, canRun, firstRunning;
-        long attemptedGeneration = Long.MIN_VALUE;
         Phase phase = QUEUED;
         ReportedPhase finalPhase;
         boolean loaded, generating, outputPending, delivering, transferBegun;
@@ -148,8 +147,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     @Override public void maintain() {
         for (var entry : List.copyOf(active.values())) {
             if (!live(entry)) continue;
-            if (entry.preparation != null) {
-                var result = entry.preparation.poll();
+            if (entry.preparation instanceof KvCache.Loading loading) {
+                var result = loading.poll();
                 if (result instanceof KvCache.Loading) continue;
                 entry.preparation = null;
                 entry.phase = prefill() ? QUEUED : Phase.CAPACITY;
@@ -213,11 +212,11 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         long uncached = 0;
         var admitted = new ArrayList<Entry>();
         for (var entry : List.copyOf(queue)) {
-            if (!live(entry) || entry.preparation != null) continue;
+            if (!live(entry) || entry.preparation instanceof KvCache.Loading) continue;
             if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
             if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
             if (entry.lease == null && config.maxInitedKvStreams() > 0
-                    && active.values().stream().filter(e -> e.lease != null || e.preparation != null).count() >= config.maxInitedKvStreams()) continue;
+                    && active.values().stream().filter(e -> e.lease != null || e.preparation instanceof KvCache.Loading).count() >= config.maxInitedKvStreams()) continue;
             if (workTokens(entry) <= 0 || !fitsPrefill(admitted, entry)) continue;
             if (!reserve(entry)) continue;
             admitted.add(entry);
@@ -377,10 +376,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             entry.waitNanos = Math.max(0, now - entry.timingStarted);
         removeWaiting(entry);
         running.remove(entry);
-        if (entry.preparation != null) {
-            entry.preparation.close();
-            entry.preparation = null;
-        }
+        if (entry.preparation instanceof KvCache.Loading loading) loading.close();
+        entry.preparation = null;
         entry.state.finish(failure);
     }
     private void terminal(Entry entry, RequestFailure failure) {
@@ -457,16 +454,17 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
 
     private boolean prepare(Entry entry) {
         if (entry.lease != null) return true;
-        if (entry.attemptedGeneration == cache.allocationGeneration()) return false;
+        entry.preparationStarted = System.nanoTime();
+        if (entry.preparation instanceof KvCache.Failed failed)
+            return completePreparation(entry, failed.retry());
         boolean reuse = canReuseLocalKv(entry);
         var keys = entry.input.keys();
-        if (prefill() && entry.attemptedGeneration == Long.MIN_VALUE)
+        if (prefill())
             metrics.recordPrefillCacheKeys(keys, entry.input.tokens(), config.blockSize());
         int matched = Math.min(keys.size(), (entry.input.tokens() - 1) / config.blockSize());
-        entry.preparationStarted = System.nanoTime();
         entry.cacheMatchRequested = reuse && matched > 0;
         return completePreparation(entry,
-            cache.prepare(entry.input.tokens(), reuse ? keys.subList(0, matched) : List.of(), prefill()));
+            cache.prepare(entry.input.tokens(), reuse ? keys.subList(0, matched) : List.of()));
     }
 
     private boolean completePreparation(Entry entry, KvCache.Preparation result) {
@@ -477,11 +475,12 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             return false;
         }
         if (result instanceof KvCache.Failed failed) {
-            entry.attemptedGeneration = failed.generation();
+            entry.preparation = failed;
             if (failed.failure() == KvCache.Failure.PERMANENT)
                 finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "KV allocation exceeds capacity"));
             return false;
         }
+        entry.preparation = null;
         var ready = (KvCache.Ready) result;
         entry.waitNanos = Math.max(0, System.nanoTime() - entry.timingStarted);
         entry.lease = ready.lease();
