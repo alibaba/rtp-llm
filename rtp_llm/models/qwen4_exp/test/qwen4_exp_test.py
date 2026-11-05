@@ -385,6 +385,46 @@ class Qwen4ExpTest(unittest.TestCase):
                 self.config.quantization = json.dumps(dict(base, **changes))
                 Qwen4Exp._configure_precision_recipe(self.config)
 
+    def test_quantized_checkpoint_keeps_string_fallback_compatibility(self):
+        for quantization in ("not_a_preset", "FP8"):
+            config = ModelConfig()
+            config.model_type = "qwen3_moe"
+            config.quantization = quantization
+            quant = Fp8BlockWiseQuantConfig()
+            with mock.patch(
+                "rtp_llm.config.model_config.QuantizationConfig.load_from_ckpt",
+                return_value=quant,
+            ):
+                config.init_precision_config(None, "BF16")
+            self.assertIs(config.quant_config, quant)
+
+    def test_recipe_disables_conflicting_fp32_head_for_both_storage_modes(self):
+        for storage in ("fp8", "source_bf16"):
+            config = ModelConfig()
+            config._qwen4_fp8_source = True
+            config.enable_fp32_lm_head = True
+            config.quantization = json.dumps(
+                dict(
+                    method="modelopt_fp4",
+                    bits=4,
+                    group_size=16,
+                    is_quanted=False,
+                    model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+                    source_fp8_block_size=128,
+                    dense_storage=storage,
+                )
+            )
+            with self.assertLogs(level="WARNING"):
+                Qwen4Exp._configure_precision_recipe(config)
+            self.assertFalse(config.enable_fp32_lm_head)
+            self.assertEqual(config._qwen4_dense_storage, storage)
+
+    def test_invalid_checkpoint_gate_activation_fails_before_loading(self):
+        with self.assertRaisesRegex(ValueError, "output gate activation"):
+            Qwen4Exp._parse_extra_text_config(
+                dict(hc_count=4, output_gate_type="gelu"), ModelConfig()
+            )
+
     def test_qwen4_recipe_rejected_for_other_models(self):
         config = ModelConfig()
         config.model_type = "qwen3_moe"

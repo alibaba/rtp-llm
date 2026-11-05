@@ -16,13 +16,26 @@ from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 class PreparedWeightDict(dict):
     """Compute weights whose copied projections require a model restart to update."""
 
+    def __init__(self, owner=None):
+        super().__init__(owner or {})
+        self._storage_owner = owner if owner is not None else {}
+
+    def __setitem__(self, name, value):
+        original = self._storage_owner.get(name)
+        if original is not None and original is not value:
+            # WeightManager retains the owner dictionary. Rebinding a compute
+            # entry must also prevent updates to its now detached source.
+            original._rtp_requires_restart_for_update = True
+            value._rtp_requires_restart_for_update = True
+        super().__setitem__(name, value)
+
 
 def prepare_compute_weights(weights):
     view = copy.copy(weights)
     view._fp8_storage_owner = weights
 
     def convert(items):
-        result = PreparedWeightDict()
+        result = PreparedWeightDict(items)
         for name, value in items.items():
             scale = items.get(name + FP8_STORAGE_SCALE_SUFFIX)
             compute = (

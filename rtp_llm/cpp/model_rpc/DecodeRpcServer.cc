@@ -1117,7 +1117,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             const auto v_bytes = index == 0 ? spec->v_block_size_bytes() : spec->v_scale_block_size_bytes();
             requireTypedTp(parts[index].is_cuda && parts[index].size_bytes == k_bytes + v_bytes,
                            "typed TP destination is not a matching CUDA packed payload");
-            auto plan = layout.plan(k_bytes, v_bytes, group.localKvHeadNum(), transfer_topology, peer_idx);
+            auto plan = layout.plan(
+                k_bytes, v_bytes, group.localKvHeadNum(), transfer_topology, peer_idx, group.kernelBlocksPerKvBlock());
             plan.validateSlices();
             requireTypedTp(plan.destination_bytes == parts[index].size_bytes, "typed TP destination bytes changed");
             const size_t source_bytes = plan.source_bytes;

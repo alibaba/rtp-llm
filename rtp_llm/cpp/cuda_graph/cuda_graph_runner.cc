@@ -957,12 +957,15 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                                          inputs.attention_inputs.input_lengths;
                     auto*       input_lengths      = input_lengths_host.data_ptr<int32_t>();
                     auto*       padding_offset = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
+                    auto*       cu_seqlens     = py_model_inputs_.attention_inputs.cu_seqlens.data_ptr<int32_t>();
+                    cu_seqlens[0]              = 0;
                     int         cumulative_padding = 0;
                     int         token_idx          = 0;
                     for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
                         const int input_length = input_lengths[batch_idx];
                         std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
                         token_idx += input_length;
+                        cu_seqlens[batch_idx + 1] = token_idx;
                         cumulative_padding += state.current_real_graph_seq_len - input_length;
                     }
                 } else {

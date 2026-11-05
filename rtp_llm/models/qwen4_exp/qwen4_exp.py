@@ -88,6 +88,14 @@ class Qwen4Exp(Qwen35Moe):
             config.quant_config, "dense_storage", "fp8"
         )
         if config.quant_config is not None:
+            if config.enable_fp32_lm_head:
+                import logging
+
+                logging.warning(
+                    "QWEN4_FP8_NVFP4 uses its configured vocabulary storage; "
+                    "disabling enable_fp32_lm_head"
+                )
+                config.enable_fp32_lm_head = False
             config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
             apply_quant_scope_to_pricing(config, config.quant_config)
             config.dense_weight_dtype = (
@@ -107,6 +115,8 @@ class Qwen4Exp(Qwen35Moe):
         config.linear_attn_norm_activation = config_json.get(
             "output_gate_type"
         ) or config_json.get("hidden_act", "silu")
+        if config.linear_attn_norm_activation not in ("silu", "sigmoid"):
+            raise ValueError("qwen4_exp output gate activation must be silu or sigmoid")
         config._qwen4_ple_layer_ids = list(config_json.get("ple_layer_ids", []))
         config._qwen4_ngram_size = int(config_json.get("ngram_size", 0))
         config._qwen4_ple_conv_kernel_size = int(

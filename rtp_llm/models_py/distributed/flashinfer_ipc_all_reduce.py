@@ -156,17 +156,31 @@ class FlashInferIpcAllReduce:
         return output
 
     def finish_graph_capture(self):
+        error = None
+        handle, offsets = None, []
+        try:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "IPC pointer registration requires completed capture"
+                )
+            if self.capture_calls:
+                handle, offsets = self.ops.get_graph_buffer_ipc_meta(self.handle)
+                if len(offsets) != self.capture_calls:
+                    raise RuntimeError("IPC capture pointer count changed")
+        except Exception as exc:
+            error = str(exc)
+        # Even a rank with zero calls or invalid local metadata must exchange
+        # its verdict before returning, so peers cannot wait alone.
+        peers = [None] * dist.get_world_size(self.group)
+        dist.all_gather_object(
+            peers, (error, self.capture_calls, handle, offsets), group=self.group
+        )
+        if any(p[0] is not None or p[1] != self.capture_calls for p in peers):
+            raise RuntimeError("IPC capture metadata differs across TP ranks")
         if not self.capture_calls:
             return
-        if torch.cuda.is_current_stream_capturing():
-            raise RuntimeError("IPC pointer registration requires completed capture")
-        handle, offsets = self.ops.get_graph_buffer_ipc_meta(self.handle)
-        if len(offsets) != self.capture_calls:
-            raise RuntimeError("IPC capture pointer count changed")
-        peers = [None] * dist.get_world_size(self.group)
-        dist.all_gather_object(peers, (handle, offsets), group=self.group)
         self.ops.register_graph_buffers(
-            self.handle, [p[0] for p in peers], [p[1] for p in peers]
+            self.handle, [p[2] for p in peers], [p[3] for p in peers]
         )
         self.capture_calls = 0
 

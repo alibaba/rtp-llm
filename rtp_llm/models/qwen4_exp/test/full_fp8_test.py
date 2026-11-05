@@ -51,6 +51,42 @@ class FullFp8StorageTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "untied word embeddings"):
             validate_qwen4_runtime(config, SimpleNamespace())
 
+    def test_recipe_rejects_expert_parallelism_beyond_attention_tp_before_loading(self):
+        from rtp_llm.config.qwen4_exp_config import validate_qwen4_runtime
+        from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
+
+        config = SimpleNamespace(
+            enable_qwen4_qsa=True,
+            enable_qwen4_ple=True,
+            is_mtp=False,
+            _qwen4_full_fp8_nvfp4=True,
+            tie_word_embeddings=False,
+            quant_config=ModelOptFp4Config(
+                bits=4,
+                group_size=16,
+                is_quanted=False,
+                source_fp8_block_size=128,
+                model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "before PLE weight loading"):
+            validate_qwen4_runtime(
+                config, SimpleNamespace(ep_size=2, get_attn_tp_size=lambda: 1)
+            )
+
+    def test_ffn_disaggregation_rejected_before_empty_alignment_batches(self):
+        from rtp_llm.config.qwen4_exp_config import validate_qwen4_runtime
+
+        config = SimpleNamespace(
+            enable_qwen4_qsa=True,
+            enable_qwen4_ple=True,
+            is_mtp=False,
+        )
+        with self.assertRaisesRegex(RuntimeError, "FFN disaggregation"):
+            validate_qwen4_runtime(
+                config, SimpleNamespace(enable_ffn_disaggregate=True)
+            )
+
     def test_original_descriptor_split_runs_before_quantization(self):
         source = AtomicWeight(W.embedding, [CkptWeightInfo("weight")])
         source.split_func = lambda t, **kwargs: t[:, :4]
@@ -137,6 +173,19 @@ class FullFp8StorageTest(unittest.TestCase):
                         * weights.weights[0][name + FP8_STORAGE_SCALE_SUFFIX]
                     ).to(torch.bfloat16),
                 )
+
+    def test_source_bf16_rebinding_rejects_updates_to_detached_owner(self):
+        weights = ModelWeights(1, "cpu", torch.bfloat16)
+        for name in (W.qwen4_hc_attn_mix_down, W.linear_attn_qkvz_w):
+            original = torch.randn(4, 8, dtype=torch.bfloat16)
+            weights.weights[0][name] = original
+        prepared = compute_weight_view(weights)
+        for name, original in weights.weights[0].items():
+            prepared.weights[0][name] = original.clone()
+            self.assertTrue(original._rtp_requires_restart_for_update)
+            self.assertTrue(prepared.weights[0][name]._rtp_requires_restart_for_update)
+            with self.assertRaisesRegex(PermissionError, "restart"):
+                weights.update_layer_weight(0, name, torch.zeros_like(original))
 
     def test_compute_view_preserves_fp8_owners_and_matrices(self):
         weights = ModelWeights(1, "cpu", torch.bfloat16)

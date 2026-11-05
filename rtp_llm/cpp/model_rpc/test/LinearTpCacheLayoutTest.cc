@@ -183,6 +183,45 @@ TEST(MhaTpCacheLayoutTest, ReassemblesTwoHeadsForDataAndFp8Scales) {
     }
 }
 
+TEST(MhaTpCacheLayoutTest, PreservesEveryKernelPageWithinPhysicalBlocks) {
+    for (size_t pages : {1u, 2u, 4u}) {
+        for (size_t k_size : {128u, 256u}) {
+            for (size_t v_size : {128u, 512u}) {
+                std::vector<uint8_t> expected;
+                std::vector<uint8_t> sources[2];
+                for (size_t page = 0; page < pages; ++page) {
+                    for (size_t kind = 0; kind < 2; ++kind) {
+                        for (size_t head = 0; head < 2; ++head) {
+                            const auto value = static_cast<uint8_t>(1 + page * 4 + kind * 2 + head);
+                            const auto size  = kind == 0 ? k_size : v_size;
+                            expected.insert(expected.end(), size, value);
+                            sources[head].insert(sources[head].end(), size, value);
+                        }
+                    }
+                }
+                std::vector<uint8_t>             actual(expected.size() + 16, 0xfe);
+                std::vector<TpCacheTransferPlan> plans;
+                for (size_t head = 0; head < 2; ++head) {
+                    auto plan = TpCacheTransferPlan::mha(2 * k_size * pages, 2 * v_size * pages, 2, head, pages);
+                    for (const auto& slice : plan.slices) {
+                        ASSERT_LE(slice.source_offset + slice.bytes, sources[head].size());
+                        std::memcpy(actual.data() + slice.destination_offset,
+                                    sources[head].data() + slice.source_offset,
+                                    slice.bytes);
+                    }
+                    plans.push_back(plan);
+                }
+                EXPECT_NO_THROW(validateCompleteTransfer(plans));
+                EXPECT_TRUE(std::equal(expected.begin(), expected.end(), actual.begin()));
+                EXPECT_TRUE(std::all_of(
+                    actual.begin() + expected.size(), actual.end(), [](uint8_t value) { return value == 0xfe; }));
+            }
+        }
+    }
+    EXPECT_THROW(mhaTpCacheSlices(64, 64, 2, 0, 0), std::invalid_argument);
+    EXPECT_THROW(mhaTpCacheSlices(64, 64, 2, 0, 3), std::invalid_argument);
+}
+
 TEST(MhaTpCacheLayoutTest, RejectsInvalidGeometryAndOverflow) {
     EXPECT_THROW(mhaTpCacheSlices(64, 64, 0, 0), std::invalid_argument);
     EXPECT_THROW(mhaTpCacheSlices(65, 64, 2, 0), std::invalid_argument);

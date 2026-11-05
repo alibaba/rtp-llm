@@ -5,17 +5,17 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["T", "WORDS"])
 def _membership_words(
     ids,
     mask,
     byte_mask,
     ends,
     duplicates,
-    T: tl.constexpr,
+    T,
     K: tl.constexpr,
     BK: tl.constexpr,
-    WORDS: tl.constexpr,
+    WORDS,
 ):
     row = tl.program_id(0).to(tl.int64)
     slots = tl.arange(0, BK)
@@ -32,7 +32,7 @@ def _membership_words(
     tl.store(ends + row, tl.max(tl.where(valid, idx, -1)) + 1)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["S", "T"])
 def _bitmap_gqa(
     q,
     k,
@@ -40,8 +40,8 @@ def _bitmap_gqa(
     m,
     ends,
     o,
-    S: tl.constexpr,
-    T: tl.constexpr,
+    S,
+    T,
     HQ: tl.constexpr,
     HK: tl.constexpr,
     D: tl.constexpr,

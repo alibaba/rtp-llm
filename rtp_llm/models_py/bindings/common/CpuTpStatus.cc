@@ -12,6 +12,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <time.h>
 #include <new>
 #include <linux/futex.h>
 #include <sys/syscall.h>

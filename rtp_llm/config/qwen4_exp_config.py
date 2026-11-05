@@ -205,6 +205,8 @@ def validate_qwen4_runtime(config, parallelism):
         or (not config.is_mtp and not config.enable_qwen4_ple)
     ):
         raise RuntimeError("qwen4_exp requires complete checkpoint PLE/QSA geometry")
+    if bool(getattr(parallelism, "enable_ffn_disaggregate", False)):
+        raise RuntimeError("qwen4_exp PLE/QSA does not support FFN disaggregation")
     full_fp8 = bool(getattr(config, "_qwen4_full_fp8_nvfp4", False))
     quant = getattr(config, "quant_config", None)
     if full_fp8 and getattr(config, "tie_word_embeddings", False):
@@ -218,6 +220,13 @@ def validate_qwen4_runtime(config, parallelism):
         or quant.source_fp8_block_size != 128
     ):
         raise RuntimeError("qwen4_exp requires the complete FP8/NVFP4 precision recipe")
+    if full_fp8 and int(getattr(parallelism, "ep_size", 1)) > int(
+        parallelism.get_attn_tp_size()
+    ):
+        raise RuntimeError(
+            "qwen4_exp FP8/NVFP4 requires ep_size <= attention TP; "
+            "rejecting before PLE weight loading"
+        )
     if not full_fp8 and quant is not None:
         raise RuntimeError(
             "qwen4_exp BF16 execution requires an unquantized checkpoint"

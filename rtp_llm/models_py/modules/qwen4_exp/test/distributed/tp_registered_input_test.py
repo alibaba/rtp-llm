@@ -23,6 +23,50 @@ class TpRegisteredInputTest(unittest.TestCase):
         workspace.ops = MagicMock()
         return workspace
 
+    def test_capture_registration_exchanges_local_failures_and_zero_call_ranks(self):
+        for local_calls, peer_calls, local_error, peer_error in (
+            (0, 1, False, False),
+            (1, 0, False, False),
+            (1, 1, True, False),
+            (1, 1, False, True),
+        ):
+            with self.subTest(
+                local_calls=local_calls,
+                peer_calls=peer_calls,
+                local_error=local_error,
+                peer_error=peer_error,
+            ):
+                workspace = self.workspace(True)
+                workspace.group = object()
+                workspace.capture_calls = local_calls
+                workspace.ops.get_graph_buffer_ipc_meta.return_value = (
+                    b"local",
+                    [] if local_error else [0],
+                )
+
+                def exchange(peers, value, group):
+                    peers[:] = [
+                        value,
+                        (
+                            "peer error" if peer_error else None,
+                            peer_calls,
+                            b"peer",
+                            [0],
+                        ),
+                    ]
+
+                with (
+                    patch("torch.cuda.is_current_stream_capturing", return_value=False),
+                    patch("torch.distributed.get_world_size", return_value=2),
+                    patch(
+                        "torch.distributed.all_gather_object", side_effect=exchange
+                    ) as gather,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "across TP ranks"):
+                        workspace.finish_graph_capture()
+                gather.assert_called_once()
+                workspace.ops.register_graph_buffers.assert_not_called()
+
     def test_large_prefill_requires_opt_in_exact_domain_and_eager_execution(self):
         workspace = self.workspace(False)
         workspace.max_bytes = 128 * 1024 * 1024
