@@ -10,16 +10,15 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
-import os
-from pathlib import Path
 import re
-import stat
 import threading
 from uuid import UUID
 
-from .engram_manifest import ExpectedLayout, Limits, parse_manifest, validate_for_attach
+from .engram_manifest import ExpectedLayout, Limits, ManifestError, parse_for_attach
 from .engram_storage import CleanupPendingError, FabricEngramStorage
-from .engram_capacity import CapacityError, capacity_from_environ
+from .engram_capacity import (CapacityError, HARD_MAX_ALLOCATION_BYTES,
+                              HARD_MAX_TOTAL_ALLOCATION_BYTES, capacity_from_environ)
+from .engram_shard_config import MAX_SHARDS, ShardConfig
 
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -62,12 +61,29 @@ class BootstrapError(ValueError):
 
 
 def _configured_limits(environ=None):
+    # These settings budget the local publisher's physical backing. A consumer
+    # maps every host, without allocating that remote backing on this machine.
     try:
-        allocation, total = capacity_from_environ(environ)
+        capacity_from_environ(environ)
     except CapacityError as error:
         raise BootstrapError(error.code) from None
+    # Bound raw parsing first; the actual host count tightens this below.
     return Limits(max_manifest_bytes=1 << 20, max_tensors=1024,
-                  max_allocation_bytes=allocation, max_total_allocation_bytes=total)
+                  max_allocation_bytes=HARD_MAX_ALLOCATION_BYTES,
+                  max_total_allocation_bytes=HARD_MAX_TOTAL_ALLOCATION_BYTES * MAX_SHARDS)
+
+
+def _validate_mapping_capacity(validated, shard_count):
+    if validated.physical_bytes > HARD_MAX_TOTAL_ALLOCATION_BYTES * shard_count:
+        raise ManifestError("TOTAL_ALLOCATION_LIMIT", "tensors")
+    allocations = {part.allocation_id: part
+                   for tensor in validated.manifest.tensors for part in tensor.shards}
+    owners = {}
+    for part in allocations.values():
+        owner = (part.owner_id, part.owner_incarnation)
+        owners[owner] = owners.get(owner, 0) + part.allocation_bytes
+    if any(total > HARD_MAX_TOTAL_ALLOCATION_BYTES for total in owners.values()):
+        raise ManifestError("OWNER_ALLOCATION_LIMIT", "tensors")
 
 
 def retain_for_process(storage):
@@ -97,25 +113,6 @@ def _json(raw):
         return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid)
     except (ValueError, UnicodeError, RecursionError):
         raise BootstrapError("INVALID_JSON") from None
-
-
-def _private_read(path, limit):
-    """Open a regular, current-UID private file without following its symlink."""
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                    or stat.S_IMODE(info.st_mode) & 0o077):
-                raise BootstrapError("UNSAFE_BOOTSTRAP_FILE")
-            if info.st_size > limit:
-                raise BootstrapError("BOOTSTRAP_TOO_LARGE")
-            data = stream.read(limit + 1)
-            if len(data) > limit:
-                raise BootstrapError("BOOTSTRAP_TOO_LARGE")
-            return data
-    except OSError:
-        raise BootstrapError("BOOTSTRAP_FILE_UNAVAILABLE") from None
 
 
 def _digest(raw):
@@ -173,29 +170,12 @@ def _verify_samples(views, validated, samples, device):
     return True
 
 
-def _attach_validated(raw, dataset_id, generation, model_revision, handles, samples,
-                      *, layout, hash_state, device, environ=None):
-    """Shared attach tail: validate, map once and verify before READY."""
+def _attach_validated(validated, handles, samples, target):
+    """Map the validated contract once; GPU sample verification gates READY."""
     import torch
 
-    target = torch.device(device)
-    if target.type != "cuda":
-        raise BootstrapError("CUDA_DEVICE_REQUIRED")
-    limits = _configured_limits(environ)
-    actual_hash_abi = hash_state_digest(hash_state)
-    expected = ExpectedLayout(
-        layers=tuple(zip(layout.layer_ids, layout.num_embeddings)),
-        head_dim=layout.head_dim, model_revision=model_revision,
-        hash_abi=actual_hash_abi)
     ordinal = target.index if target.index is not None else torch.cuda.current_device()
-    # Reject an older/smaller bridge before importing even the first allocation.
-    parsed = parse_manifest(raw, limits)
-    if parsed.hash_abi != actual_hash_abi:
-        raise BootstrapError("HASH_ABI_MISMATCH")
-    validated = validate_for_attach(parsed, expected, dataset_id, generation, limits)
     manifest = validated.manifest
-    from .engram_shard_config import ShardConfig
-    ShardConfig.from_environ(environ, inferred_count=len(manifest.tensors[0].shards)).validate_manifest(manifest)
     native = _load_native()
     native_limit = getattr(native, "max_allocation_bytes", None)
     if (type(native_limit) is not int or native_limit <= 0
@@ -203,10 +183,8 @@ def _attach_validated(raw, dataset_id, generation, model_revision, handles, samp
                    for t in manifest.tensors for shard in t.shards)):
         raise BootstrapError("NATIVE_ALLOCATION_LIMIT")
     try:
-        storage = FabricEngramStorage.attach(
-            raw, expected_layout=expected, dataset_id=dataset_id,
-            generation=generation, handles=handles, device=ordinal,
-            native=native, limits=limits)
+        storage = FabricEngramStorage._attach_validated(
+            validated, handles=handles, device=ordinal, native=native)
     except CleanupPendingError as error:
         retain_for_process(error.resource)
         raise
@@ -245,8 +223,21 @@ def attach_from_package(package, *, layout, hash_state, device, environ=None):
             raise ValueError()
     except (ValueError, TypeError, AttributeError):
         raise BootstrapError("INVALID_GENERATION") from None
-    limits = _configured_limits(environ)
-    manifest = parse_manifest(raw, limits)
+    import torch
+
+    target = torch.device(device)
+    if target.type != "cuda":
+        raise BootstrapError("CUDA_DEVICE_REQUIRED")
+    expected = ExpectedLayout(
+        layers=tuple(zip(layout.layer_ids, layout.num_embeddings)),
+        head_dim=layout.head_dim, model_revision=package["model_revision"],
+        hash_abi=hash_state_digest(hash_state))
+    validated = parse_for_attach(raw, expected, package["dataset_id"],
+                                 package["generation"], _configured_limits(environ))
+    manifest = validated.manifest
+    config = ShardConfig.from_environ(environ, inferred_count=len(manifest.tensors[0].shards))
+    config.validate_manifest(manifest)
+    _validate_mapping_capacity(validated, config.shard_count)
     names = {tensor.name for tensor in manifest.tensors}
     samples = package["samples"]
     if type(samples) is not dict or samples.keys() != names:
@@ -268,7 +259,4 @@ def attach_from_package(package, *, layout, hash_state, device, environ=None):
     for value in capabilities.values():
         if type(value) is not bytes or not 0 < len(value) <= 1024:
             raise BootstrapError("INVALID_CAPABILITY_ENCODING")
-    return _attach_validated(
-        raw, package["dataset_id"], package["generation"], package["model_revision"],
-        capabilities, samples,
-        layout=layout, hash_state=hash_state, device=device, environ=environ)
+    return _attach_validated(validated, capabilities, samples, target)

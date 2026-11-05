@@ -233,20 +233,20 @@ class EmbeddingContractTest(unittest.TestCase):
 
     def test_external_scale_shards_preserve_dispatch_and_flat_fallback(self):
         storage = FakeStorage(head_dim=256)
-        cpu_scales, group, lease = object(), object(), object()
+        group, lease = object(), object()
         shards = ModuleType("rtp_llm.models_py.modules.dsv41._engram_scale_shards")
         shards.create_sharded_scales = Mock(return_value=SimpleNamespace(group_size=4))
         with fake_triton(Mock()), patch.dict(sys.modules, {shards.__name__: shards}), \
                 patch.dict(os.environ, {"DSV41_ENGRAM_DIRECT_FP8": "1", "DSV41_ENGRAM_DEVICE_SCALES": "1"}), \
                 patch.object(TORCH.cuda, "get_device_properties", return_value=SimpleNamespace(major=10, minor=0, multi_processor_count=148)), \
-                patch.object(storage.scales, "cpu", return_value=cpu_scales), \
                 patch.object(ENGRAM, "_DeviceScaleLease", return_value=lease) as make_lease:
             embedding = ENGRAM.HostEngramEmbedding.from_storage(
                 storage, 1, scale_group=group, scale_identity="generation-1"
             )
         shards.create_sharded_scales.assert_called_once_with(
-            cpu_scales, group, storage.weight.device,
+            storage.scales, group, storage.weight.device,
             ("generation-1", "layers.1.engram.embed.scale"),
+            external_source=True,
         )
         self.assertTrue(embedding._quantized_lookup_supported)
         self.assertEqual(embedding._scale_shard_count, 4)
@@ -254,25 +254,97 @@ class EmbeddingContractTest(unittest.TestCase):
         self.assertIs(embedding._uva[1], shards.create_sharded_scales.return_value)
         self.assertIs(embedding._device_scale_lease, lease)
         make_lease.assert_called_once_with(embedding._uva, None, storage=storage)
+        self.assert_no_copies(storage)
 
     def test_same_shape_layers_cannot_share_scale_generation(self):
         storage = FakeStorage(head_dim=256)
         shards = ModuleType("rtp_llm.models_py.modules.dsv41._engram_scale_shards")
         group = object()
         generations = {}
-        def create(scales, group, device, identity):
+        def create(scales, group, device, identity, *, external_source):
+            self.assertTrue(external_source)
+            self.assertIs(scales, storage.scales)
             return generations.setdefault(identity, SimpleNamespace(group_size=4))
         shards.create_sharded_scales = create
         with fake_triton(Mock()), patch.dict(sys.modules, {shards.__name__: shards}), \
                 patch.dict(os.environ, {"DSV41_ENGRAM_DIRECT_FP8": "1", "DSV41_ENGRAM_DEVICE_SCALES": "1"}), \
                 patch.object(TORCH.cuda, "get_device_properties", return_value=SimpleNamespace(major=10, minor=0, multi_processor_count=148)), \
-                patch.object(storage.scales, "cpu", return_value=object()), \
                 patch.object(ENGRAM, "_DeviceScaleLease"):
             embeddings = [ENGRAM.HostEngramEmbedding.from_storage(
                 storage, layer, scale_group=group, scale_identity="same-checkpoint"
             ) for layer in (1, 14, 1)]
         self.assertIsNot(embeddings[0]._uva[1], embeddings[1]._uva[1])
         self.assertIs(embeddings[0]._uva[1], embeddings[2]._uva[1])
+        self.assert_no_copies(storage)
+
+    @contextmanager
+    def blackwell_embedding(self):
+        storage = FakeStorage(head_dim=256)
+        shards = ModuleType("rtp_llm.models_py.modules.dsv41._engram_scale_shards")
+        shards.create_sharded_scales = Mock(return_value=SimpleNamespace(
+            group_size=4, record_stream=Mock()
+        ))
+        with patch.dict(sys.modules, {shards.__name__: shards}), \
+                patch.dict(os.environ, {"DSV41_ENGRAM_DIRECT_FP8": "1", "DSV41_ENGRAM_DEVICE_SCALES": "1"}), \
+                patch.object(TORCH.cuda, "get_device_properties", return_value=SimpleNamespace(major=10, minor=0, multi_processor_count=148)), \
+                patch.object(TORCH.cuda, "is_current_stream_capturing", return_value=False), \
+                patch.object(TORCH.cuda, "current_stream", return_value=object()) as stream, \
+                patch.object(ENGRAM, "_DeviceScaleLease", side_effect=lambda uva, pinned, **kw: SimpleNamespace(uva=uva, pinned=pinned)):
+            embedding = ENGRAM.HostEngramEmbedding.from_storage(
+                storage, 1, scale_group=object(), scale_identity="generation"
+            )
+            try:
+                yield embedding, storage, stream.return_value
+            finally:
+                embedding.release_external_views()
+
+    def test_blackwell_plain_api_and_projection_fallback_always_return_bf16(self):
+        # Even supported hardware must respect int32 / non-native column counts
+        # and a projection that deliberately declines direct FP8 dispatch.
+        result = TORCH.zeros((2, 1, 256), dtype=TORCH.bfloat16)
+        lookup = Mock(return_value=result)
+        with fake_triton(lookup), self.blackwell_embedding() as (embedding, storage, stream), \
+                patch.object(embedding, "lookup_quantized", side_effect=AssertionError("ordinary lookup selected native tuple")):
+            for dtype, columns in ((TORCH.int32, 1), (TORCH.int64, 7), (TORCH.int64, 24)):
+                indices = FakeTensor((2, columns), dtype=dtype)
+                with self.subTest(dtype=dtype, columns=columns):
+                    self.assertIs(embedding(indices, "cuda:0"), result)
+                    module = SimpleNamespace(_direct_fp8_lookup=False, embed_tokens=embedding)
+                    self.assertIs(ENGRAM._lookup_for_projection(module, indices, "cuda:0"), result)
+                    lookup.assert_called_with(storage.weight, storage.scales, indices, 148)
+            self.assertEqual(embedding._uva[1].record_stream.call_count, 6)
+            embedding._uva[1].record_stream.assert_called_with(stream)
+            self.assertFalse(embedding.supports_generic_prefetch)
+            self.assertTrue(embedding.supports_decode_prefetch)
+            self.assert_no_copies(storage)
+
+    def test_explicit_quantized_entry_preserves_tuple_and_lifetime(self):
+        direct = ModuleType("rtp_llm.models_py.modules.dsv41._engram_quantized_triton")
+        pair = (object(), object())
+        direct.lookup_host_rows = Mock(return_value=pair)
+        with fake_triton(Mock(side_effect=AssertionError("native lookup fell back"))), \
+                patch.dict(sys.modules, {direct.__name__: direct}), \
+                self.blackwell_embedding() as (embedding, storage, stream):
+            indices = FakeTensor((2, 24), dtype=TORCH.int64)
+            self.assertIs(embedding.lookup_quantized(indices, "cuda:0", prepare=True), pair)
+            direct.lookup_host_rows.assert_called_once_with(
+                *embedding._uva, indices, 148, prepare=True
+            )
+            embedding._uva[1].record_stream.assert_called_once_with(stream)
+            self.assertEqual(storage.active_uses, 0)
+
+    def test_plain_device_scale_lookup_retains_capture_guard_and_failed_enqueue_fence(self):
+        lookup = Mock(side_effect=RuntimeError("enqueue failed"))
+        with fake_triton(lookup), self.blackwell_embedding() as (embedding, storage, stream):
+            indices = FakeTensor((2, 1), dtype=TORCH.int32)
+            with patch.object(TORCH.cuda, "is_current_stream_capturing", return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "active decode metadata"):
+                    embedding(indices, "cuda:0")
+            lookup.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError, "enqueue failed"):
+                embedding(indices, "cuda:0")
+            embedding._uva[1].record_stream.assert_called_once_with(stream)
+            self.assertEqual(storage.active_uses, 0)
 
     def test_rejects_mismatched_or_unspecified_device(self):
         cases = (
@@ -333,7 +405,6 @@ class EmbeddingContractTest(unittest.TestCase):
                     self.assertEqual(embedding.block_size, 32)
                     self.assertEqual(embedding._num_sms, 80)
                     self.assertTrue(embedding._uses_external_storage)
-                    self.assertFalse(embedding._external_closed)
                     self.assertEqual(storage.requested_layers, [7])
                     self.assertEqual((storage.use_entries, storage.use_exits, storage.active_uses), (1, 1, 0))
                     self.assertEqual(storage.close_calls, 0)
@@ -443,7 +514,6 @@ class EmbeddingContractTest(unittest.TestCase):
         embedding.release_external_views()
         self.assertIsNone(embedding._uva)
         self.assertIsNone(embedding._external_storage)
-        self.assertTrue(embedding._external_closed)
         self.assertTrue(embedding._uses_external_storage)
         self.assertIsNone(embedding.weight)
         self.assertIsNone(embedding.scales)
@@ -456,6 +526,24 @@ class EmbeddingContractTest(unittest.TestCase):
         lookup.assert_not_called()
         self.assertEqual((storage.use_entries, storage.use_exits, storage.active_uses), (1, 1, 0))
         self.assert_no_copies(storage)
+
+    def test_release_while_waiting_for_storage_admission_never_submits(self):
+        storage = FakeStorage()
+        embedding = self.create(storage)
+        original_use = storage.use
+
+        @contextmanager
+        def release_on_admission():
+            with original_use():
+                embedding.release_external_views()
+                yield
+
+        lookup = Mock(side_effect=AssertionError("released table reached Triton"))
+        with fake_triton(lookup), patch.object(storage, "use", release_on_admission):
+            with self.assertRaisesRegex(RuntimeError, "external Engram embedding is closed"):
+                embedding(FakeTensor((1, 1), dtype=TORCH.int32), "cuda:0")
+        lookup.assert_not_called()
+        self.assertEqual(storage.active_uses, 0)
 
     def test_storage_admission_failure_does_not_query_cuda_or_copy(self):
         storage = FakeStorage()

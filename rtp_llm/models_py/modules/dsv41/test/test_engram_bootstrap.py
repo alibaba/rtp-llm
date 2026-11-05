@@ -1,20 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""File/bootstrap CPU tests; native mapping is mocked, never model forward.
+"""In-memory bootstrap CPU tests; native mapping is mocked, never model forward.
 
 Hash tests instantiate the real EngramLayout/NgramHashState with an explicit
-token map. They need CPU PyTorch, but no CUDA device. File checks run without it.
+token map. They need CPU PyTorch, but no CUDA device.
 Actual GPU reads and cross-host imports belong to the integration harness.
 """
-import base64
-import copy
 import hashlib
 import importlib
 import importlib.util
 import json
-import os
 from pathlib import Path
 import sys
-import tempfile
 import types
 import unittest
 from unittest import mock
@@ -53,12 +49,8 @@ def real_hash_state():
     return e.NgramHashState(e.EngramLayout(config), token_map=list(range(8)))
 
 
-class BundleFiles:
+class PackageFixture:
     def prepare_bundle(self, layout=None, hash_abi=None, shards=1):
-        self.temporary = tempfile.TemporaryDirectory(prefix="engram-bootstrap-ut-")
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name).resolve()
-        self.path = self.root / "launch.json"
         self.layout = layout or types.SimpleNamespace(
             layer_ids=(1, 14), num_embeddings=(3, 5), head_dim=32
         )
@@ -145,7 +137,7 @@ class HashSemanticTest(unittest.TestCase):
 
 
 @unittest.skipIf(torch is None, "CPU PyTorch required; native/GPU calls are mocked")
-class AttachFailureTest(BundleFiles, unittest.TestCase):
+class AttachFailureTest(PackageFixture, unittest.TestCase):
     def setUp(self):
         self.hash_state = real_hash_state()
         self.prepare_bundle(self.hash_state.layout, b.hash_state_digest(self.hash_state), shards=2)
@@ -155,7 +147,7 @@ class AttachFailureTest(BundleFiles, unittest.TestCase):
         self.native = types.SimpleNamespace(max_allocation_bytes=128 << 30)
         self.retained = []
         self.native_patch = mock.patch.object(b, "_load_native", return_value=self.native)
-        self.storage_patch = mock.patch.object(b.FabricEngramStorage, "attach", return_value=self.storage)
+        self.storage_patch = mock.patch.object(b.FabricEngramStorage, "_attach_validated", return_value=self.storage)
         self.retain_patch = mock.patch.object(b, "retain_for_process", side_effect=self.retained.append)
         self.native_mock = self.native_patch.start()
         self.attach_mock = self.storage_patch.start()
@@ -189,13 +181,16 @@ class AttachFailureTest(BundleFiles, unittest.TestCase):
                 self.do_attach()
             self.attach_mock.assert_not_called()
 
-    def test_explicit_policy_is_forwarded_as_one_immutable_limits_object(self):
-        env = {"RTP_ENGRAM_MAX_ALLOCATION_BYTES": str(128 << 30),
-               "RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES": str(256 << 30)}
-        self.do_attach(environ=env)
-        limits = self.attach_mock.call_args.kwargs["limits"]
-        self.assertEqual(limits.max_allocation_bytes, 128 << 30)
-        self.assertEqual(limits.max_total_allocation_bytes, 256 << 30)
+    def test_local_policy_does_not_limit_remote_mapping_and_metadata_is_parsed_once(self):
+        env = {"RTP_ENGRAM_MAX_ALLOCATION_BYTES": "8192",
+               "RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES": "8448"}
+        with mock.patch.object(m, "_metadata", wraps=m._metadata) as metadata:
+            self.do_attach(environ=env)
+        metadata.assert_called_once()
+        validated = self.attach_mock.call_args.args[0]
+        self.assertIsInstance(validated, m.ValidatedManifest)
+        self.assertGreater(validated.physical_bytes, int(env["RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES"]))
+        self.assertEqual(validated.layout.layers, tuple(zip(self.layout.layer_ids, self.layout.num_embeddings)))
 
     def test_bad_policy_fails_before_native_load(self):
         with self.assertRaisesRegex(b.BootstrapError, "INVALID_CAPACITY_LIMIT"):
@@ -220,7 +215,7 @@ class AttachFailureTest(BundleFiles, unittest.TestCase):
 
     def test_hash_mismatch_rejected_before_native_import(self):
         self.hash_state.token_map[-1] -= 1
-        with self.assertRaisesRegex(b.BootstrapError, "HASH_ABI_MISMATCH"):
+        with self.assertRaisesRegex(m.ManifestError, "MODEL_CONTRACT_MISMATCH"):
             self.do_attach()
         self.native_mock.assert_not_called()
         self.attach_mock.assert_not_called()

@@ -1,6 +1,6 @@
 # 分布式 Engram：启用、拓扑与启动交换
 
-更新时间：2026-11-05。每个存储 host 的 RTP worker 持有一片 Engram，GPU 在线直接读映射后的内存。没有独立 sidecar/holder，没有在线查表 RPC，也不分发 bundle 文件。
+更新时间：2026-11-06。每个存储 host 的 RTP worker 持有一片 Engram，GPU 在线直接读映射后的内存。没有独立 sidecar/holder，没有在线查表 RPC，也不分发 bundle 文件。
 
 ## 最小配置
 
@@ -35,7 +35,11 @@ RTP_ENGRAM_COHORT=10.0.0.1,10.0.0.2,10.0.0.3,10.0.0.4
 旧 `RTP_ENGRAM_LOCAL_DESCRIPTORS` 文件启动模式已移除，显式报错防止误用。
 
 保留的高级诊断选项：`RTP_ENGRAM_INSTANCE_INDEX`、`RTP_ENGRAM_RANKS_PER_INSTANCE` 只作覆盖/一致性校验，正常部署不用。
-内存上限默认单 allocation 128 GiB、总预算 256 GiB；可以下调，不必每次重复填写。
+`RTP_ENGRAM_MAX_ALLOCATION_BYTES`（默认及硬上限 128 GiB）与
+`RTP_ENGRAM_MAX_TOTAL_ALLOCATION_BYTES`（默认及硬上限 256 GiB）只限制 publisher 本机 backing，均可下调。
+consumer 导入各 host 的映射不重复使用本机预算；初始解析保留全组 16 TiB 绝对上限，
+验证拓扑后收紧为 256 GiB × 实际 host 数 P，并独立校验每 owner backing 不超过 256 GiB、
+每 allocation 不超过 128 GiB，同时检查 allocation 数量和分片几何。
 这些上限不代表机器有足够可分配 NUMA 内存，也不能代替容器资源检查。
 
 ## 拓扑直接复用 RTP
