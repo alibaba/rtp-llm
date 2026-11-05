@@ -36,6 +36,8 @@ class Qwen35FP32SSMCacheTest(TestCase):
     def test_qwen35_family_defaults_and_geometry(self):
         for model_type in (
             "qwen35_moe",
+            "qwen35_moe_text",
+            "qwen36_moe_text",
             "qwen35_dense",
             "qwen35_moe_mtp",
             "qwen35_dense_mtp",

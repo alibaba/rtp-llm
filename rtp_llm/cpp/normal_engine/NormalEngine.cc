@@ -114,9 +114,13 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     if (rl_enabled_) {
         const char* run_id = std::getenv("RTP_LLM_RL_RUN_ID");
         RTP_LLM_CHECK_WITH_INFO(run_id && std::strlen(run_id) > 0, "RL mode requires an incarnation ID");
-        RTP_LLM_CHECK_WITH_INFO(model_config_.model_type == "qwen_3" && model_config_.data_type == DataType::TYPE_BF16
-                                    && !model_config_.quant_algo.isQuant() && !model_config_.moe_style,
-                                "RL mode currently supports unquantized Qwen3 dense BF16 only");
+        const bool rl_model_supported =
+            (model_config_.model_type == "qwen_3" && !model_config_.moe_style)
+            || ((model_config_.model_type == "qwen35_moe_text" || model_config_.model_type == "qwen36_moe_text")
+                && model_config_.moe_style == 2);
+        RTP_LLM_CHECK_WITH_INFO(rl_model_supported && model_config_.data_type == DataType::TYPE_BF16
+                                    && !model_config_.quant_algo.isQuant(),
+                                "RL mode requires unquantized Qwen3 dense or Qwen3.5 text MoE BF16");
         RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size == 1 && parallelism_config.ep_size == 1
                                     && parallelism_config.pp_size == 1
                                     && parallelism_config.world_size == parallelism_config.tp_size,
@@ -126,7 +130,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                 && pd_sep_config.role_type == RoleType::PDFUSION && !runtime_config.use_batch_decode_scheduler
                 && (runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode.empty()
                     || runtime_config.fifo_scheduler_config.pdfusion_scheduler_mode == "ratio"),
-            "RL mode requires the normal dense engine with FIFO or PDFusion ratio scheduling");
+            "RL mode requires the normal engine with FIFO or PDFusion ratio scheduling");
         RTP_LLM_CHECK_WITH_INFO(!params.hw_kernel_config.enable_native_cuda_graph,
                                 "RL supports eager or decode CUDA Graph execution only");
         // Decode graphs may retain KV pointers. Keep that allocation resident

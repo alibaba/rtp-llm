@@ -78,6 +78,27 @@ class LazyRegistryTest(unittest.TestCase):
             ),
         )
 
+    def test_text_moe_aliases_keep_default_multimodal_architecture_inference(self):
+        from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
+            _tokenizer_type_to_module,
+        )
+
+        for alias in ("qwen35_moe_text", "qwen36_moe_text"):
+            with self.subTest(alias=alias):
+                self.assertEqual(
+                    _model_type_to_module[alias], "rtp_llm.models.qwen3_next.qwen3_next"
+                )
+                self.assertEqual(
+                    _tokenizer_type_to_module[alias],
+                    "rtp_llm.frontend.tokenizer_factory.tokenizers.qwen_tokenizer",
+                )
+        self.assertEqual(
+            ModelDict.get_ft_model_type_by_config(
+                {"architectures": ["Qwen3_5MoeForConditionalGeneration"]}
+            ),
+            "qwen35_moe",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

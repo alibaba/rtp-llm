@@ -272,6 +272,20 @@ class Qwen35Moe(Qwen3NextBase):
         return self.py_model
 
 
+class Qwen35MoeText(Qwen35Moe):
+    """Explicit text-only policy using the Qwen3.5 MoE checkpoint descriptors.
+
+    Keep the inherited MRoPE configuration: ordinary text supplies equal axis
+    positions. The separate alias prevents RL from loading an unused vision
+    tower, while ordinary qwen35_moe multimodal inference remains unchanged.
+    """
+
+    @classmethod
+    def _parse_mm_config(cls, config_json: dict, config: ModelConfig):
+        config.mm_model_config.is_multimodal = False
+        config.mm_model_config.mm_sep_tokens = []
+
+
 class Qwen35Dense(Qwen35Moe):
     @staticmethod
     def get_weight_cls():
@@ -284,4 +298,7 @@ class Qwen35Dense(Qwen35Moe):
 
 register_model("qwen3_next", Qwen3Next, ["Qwen3NextForCausalLM"])
 register_model("qwen35_moe", Qwen35Moe, ["Qwen3_5MoeForConditionalGeneration"])
+register_model("qwen35_moe_text", Qwen35MoeText)
+# Compatibility with the original 35B/122B/397B deployment adapters.
+register_model("qwen36_moe_text", Qwen35MoeText)
 register_model("qwen35_dense", Qwen35Dense, ["Qwen3_5ForConditionalGeneration"])

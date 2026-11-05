@@ -447,6 +447,8 @@ def _configure_qwen35_fp32_ssm_cache(py_env_configs: PyEnvConfigs) -> None:
     """Select the Qwen3.5 FP32 cache preset before engine/model construction."""
     if py_env_configs.model_args.model_type not in (
         "qwen35_moe",
+        "qwen35_moe_text",
+        "qwen36_moe_text",
         "qwen35_dense",
         "qwen35_moe_mtp",
         "qwen35_dense_mtp",

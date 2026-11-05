@@ -149,6 +149,8 @@ def _register_builtin_lazy_tokenizers() -> None:
             "qwen_3_tool",
             "qwen35_dense",
             "qwen35_moe",
+            "qwen35_moe_text",
+            "qwen36_moe_text",
             "qwen35_moe_mtp",
         ],
         "rtp_llm.frontend.tokenizer_factory.tokenizers.qwen_tokenizer",

@@ -234,6 +234,8 @@ register_tokenizer(
         "qwen35_dense",
         "qwen35_dense_mtp",
         "qwen35_moe",
+        "qwen35_moe_text",
+        "qwen36_moe_text",
         "qwen35_moe_mtp",
     ],
     QWenV2Tokenizer,
