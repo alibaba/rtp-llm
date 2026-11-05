@@ -319,8 +319,6 @@ cc_library(
         "//rtp_llm/flexlb/navi_sched/vendor/third_party/elfutils-libelf",
         "//rtp_llm/flexlb/navi_sched/vendor/third_party/libev",
         "//rtp_llm/flexlb/navi_sched/vendor/third_party/tbb",
-        "@local_config_python//:python_headers",
-        "@local_config_python//:python_lib",
     ],
     alwayslink = True,
 )
