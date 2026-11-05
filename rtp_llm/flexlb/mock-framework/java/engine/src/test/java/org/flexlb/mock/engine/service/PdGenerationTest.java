@@ -796,8 +796,7 @@ class PdGenerationTest {
 
     @Test void unlimitedRequestIsOwnedByItsPCallAndCanCompleteNormally() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var call = new Call(p, input(d, 1, 3, 4, 0, true))) {
-            for (int i = 1; i <= 4; i++) call.output(i, i == 4, 1);
-            assertEquals("completed", call.next());
+            call.completeOutput(4);
         }
     }
 
