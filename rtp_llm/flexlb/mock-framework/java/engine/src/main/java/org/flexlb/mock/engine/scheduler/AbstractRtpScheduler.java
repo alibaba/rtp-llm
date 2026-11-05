@@ -390,7 +390,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             entry.canRun == 0 ? 0 : Math.max(0, entry.canRun - entry.enqueuedAt),
             entry.canRun == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.canRun),
             entry.firstToken == 0 ? -1 : entry.firstToken - entry.begun,
-            entry.input.tokens(), progress.generated(), progress.iterations(), entry.reused));
+            entry.input.tokens(), progress.generated(), progress.iterations(), entry.reused),
+            prefill() || canReuseLocalKv(entry));
         active.remove(entry.input.identity(), entry);
         enqueue(entry, () -> {
             try { entry.listener.terminal(entry, failure); }
@@ -441,13 +442,19 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         return entry;
     }
     protected final boolean prefill() { return config.role() == Role.prefill; }
+    private boolean canReuseLocalKv(Entry entry) {
+        return config.reuseCache() && config.deviceCache() && entry.input.reuse()
+            && (prefill() || !config.disableDecodeFirstReuse());
+    }
+
     private KvCache.Failure acquire(Entry entry) {
         if (entry.lease != null) return null;
         long generation = cache.allocationGeneration();
         if (entry.attemptedGeneration == generation) return KvCache.Failure.RETRYABLE;
-        boolean reuse = config.reuseCache() && config.deviceCache() && entry.input.reuse()
-            && (prefill() || !config.disableDecodeFirstReuse());
+        boolean reuse = canReuseLocalKv(entry);
         var keys = entry.input.keys();
+        if (prefill() && entry.attemptedGeneration == Long.MIN_VALUE)
+            metrics.recordPrefillCacheKeys(keys, entry.input.tokens(), config.blockSize());
         int matched = Math.min(keys.size(), (entry.input.tokens() - 1) / config.blockSize());
         long started = System.nanoTime();
         var admission = cache.acquire(entry.input.tokens(), reuse ? keys.subList(0, matched) : List.of());

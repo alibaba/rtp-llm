@@ -5,6 +5,7 @@ import org.flexlb.mock.metrics.WindowMetrics;
 
 import io.prometheus.client.*;
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.function.LongSupplier;
 
@@ -45,7 +46,9 @@ final class RtpMetrics {
 
     private final Object observations = new Object();
     private final LongSupplier clock;
+    private static final long RECENT_CACHE_WINDOW_NANOS = TimeUnit.MINUTES.toNanos(30);
     private final boolean prefill;
+    private final LinkedHashMap<Long, Long> recentCacheKeys = new LinkedHashMap<>();
     private long windowStarted, windowInput, windowComputed, windowTpsTokens, windowTpsNanos, windowComputeNanos, windowInputNanos;
     private double lastFinished, lastErrors, lastCancelled;
 
@@ -163,7 +166,7 @@ final class RtpMetrics {
     }
     public void started() { started.inc(); }
 
-    void requestFinished(Outcome outcome, RequestStats stats) {
+    void requestFinished(Outcome outcome, RequestStats stats, boolean reportCacheReuse) {
         // Real emits stream timings for success, cancellation and timeout, not arbitrary internal errors.
         if (outcome != Outcome.error) {
             events.observe("rtp_llm_latency_us", stats.elapsedNanos() / 1000.0);
@@ -172,6 +175,7 @@ final class RtpMetrics {
             positiveMicros("rtp_llm_stream_canrun_to_running_us", stats.canRunToRunningNanos());
             if (stats.firstTokenNanos() >= 0) events.observe("rtp_llm_first_token_latency_us", stats.firstTokenNanos() / 1000.0);
             events.observe("rtp_llm_input_token_length", stats.inputTokens());
+            if (reportCacheReuse) events.observe("rtp_llm_kv_cache_reuse_length", stats.reusedTokens());
             events.observe("rtp_llm_output_token_length", stats.outputTokens());
             events.observe("rtp_llm_iterate_count", stats.iterations());
             events.observe("rtp_llm_reuse_length", stats.reusedTokens());
@@ -187,9 +191,24 @@ final class RtpMetrics {
         if (input < 0 || reused < 0 || reused > input) throw new IllegalArgumentException("Invalid cache observation");
         cacheInputs.inc(input); cacheHits.inc(reused);
     }
+    void recordPrefillCacheKeys(List<Long> keys, int inputTokens, int blockSize) {
+        long now = clock.getAsLong();
+        while (!recentCacheKeys.isEmpty()
+                && now - recentCacheKeys.firstEntry().getValue() >= RECENT_CACHE_WINDOW_NANOS) {
+            recentCacheKeys.pollFirstEntry();
+        }
+        long hitTokens = 0;
+        for (long key : keys) {
+            if (recentCacheKeys.containsKey(key)) hitTokens += blockSize;
+        }
+        // Count against prior requests before refreshing the last occurrence of each key.
+        for (long key : keys) recentCacheKeys.putLast(key, now);
+        events.observe("rtp_llm_prefill_worker_recent_cache_key_hit_count", Math.min(hitTokens, inputTokens));
+        events.observe("rtp_llm_prefill_worker_recent_cache_key_total_count", inputTokens);
+    }
+
     void prepared(long deviceInputTokens, long reused, long elapsedNanos) {
         events.observe("rtp_llm_device_input_length", deviceInputTokens);
-        events.observe("rtp_llm_kv_cache_reuse_length", reused);
         events.observe("rtp_llm_stream_cache_device_reuse_length", reused);
         events.observe("rtp_llm_kv_cache_match_to_ready_latency_us", elapsedNanos / 1000.0,
             Map.of("load_attempted", "false"));
