@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest.mock import patch
 
@@ -50,13 +49,12 @@ class ChunkPagedGqaTest(unittest.TestCase):
             if scale is not None:
                 decoded = decoded * scale[..., None]
             expected = _reference(q, decoded, table, lengths, selected)
-            with patch.dict(os.environ, RTP_QWEN4_PAGED_CHUNK_IMPL="grouped"):
-                actual = self.run_attention(args)
+            actual = self.run_attention(args)
             # Independent FP64 probes give the same relative L2 error as the
             # online path (~0.00166); the rounded BF16 results can differ by
             # one ULP. Keep a BF16-relative bound plus an absolute zero floor.
             torch.testing.assert_close(actual, expected, rtol=8e-3, atol=2e-3)
-            with patch.dict(os.environ, RTP_QWEN4_PAGED_CHUNK_IMPL="online"):
+            with patch("torch.cuda.get_device_capability", return_value=(9, 0)):
                 legacy = self.run_attention(args)
             torch.testing.assert_close(actual, legacy, rtol=8e-3, atol=2e-3)
             torch.testing.assert_close(
@@ -70,24 +68,23 @@ class ChunkPagedGqaTest(unittest.TestCase):
         args[4] = torch.cat([selected, counts], dim=-1)
         gate = torch.randn(2, 17, 3, 256, device="cuda", dtype=torch.bfloat16)
         options = dict(selected_has_count=True, output_gate=gate)
-        with patch.dict(os.environ, RTP_QWEN4_PAGED_CHUNK_IMPL="grouped"):
-            for _ in range(3):
-                self.run_attention(args, **options)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                actual = self.run_attention(args, graph_capture=True, **options)
-            for gain in (0.25, 1.0, 2.0):
-                q.normal_().mul_(gain)
-                scale.uniform_(0.2, 1.0)
-                graph.replay()
-                with patch.dict(os.environ, RTP_QWEN4_PAGED_CHUNK_IMPL="online"):
-                    expected = self.run_attention(args, **options)
-                torch.testing.assert_close(actual, expected, rtol=8e-3, atol=2e-3)
-            args[4][..., :-1].fill_(-1)
-            args[4][..., -1].zero_()
-            lengths.zero_()
+        for _ in range(3):
+            self.run_attention(args, **options)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = self.run_attention(args, graph_capture=True, **options)
+        for gain in (0.25, 1.0, 2.0):
+            q.normal_().mul_(gain)
+            scale.uniform_(0.2, 1.0)
             graph.replay()
-            torch.testing.assert_close(actual, torch.zeros_like(actual), rtol=0, atol=0)
+            with patch("torch.cuda.get_device_capability", return_value=(9, 0)):
+                expected = self.run_attention(args, **options)
+            torch.testing.assert_close(actual, expected, rtol=8e-3, atol=2e-3)
+        args[4][..., :-1].fill_(-1)
+        args[4][..., -1].zero_()
+        lengths.zero_()
+        graph.replay()
+        torch.testing.assert_close(actual, torch.zeros_like(actual), rtol=0, atol=0)
         graph.reset()
 
     def test_trusted_path_skips_redundant_value_scan_and_keeps_shape_checks(self):

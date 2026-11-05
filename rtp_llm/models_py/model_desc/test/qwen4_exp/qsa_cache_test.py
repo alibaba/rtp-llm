@@ -148,25 +148,23 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
             rope_config=self.rope_config,
             draft=False,
         )
-        with patch.dict("os.environ", RTP_QWEN4_PREFILL_META_IMPL="legacy"):
-            expected = context._draft_incremental_prefill_geometry(**options)
-        with patch.dict("os.environ", RTP_QWEN4_PREFILL_META_IMPL="batched"):
-            actual = context._draft_incremental_prefill_geometry(**options)
-            for name in (
-                "visible_lengths",
-                "compressed_lengths",
-                "current_cos",
-                "current_sin",
-            ):
-                torch.testing.assert_close(
-                    getattr(actual, name), getattr(expected, name), rtol=0, atol=0
-                )
-            context.indexer_state_inputs.kv_cache_block_id_device[0, 2] = 0
-            kv_before, state_before = self.kv_base.clone(), self.state_base.clone()
-            with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
-                context._draft_incremental_prefill_geometry(**options)
-            torch.testing.assert_close(self.kv_base, kv_before, rtol=0, atol=0)
-            torch.testing.assert_close(self.state_base, state_before, rtol=0, atol=0)
+        expected = context._draft_incremental_prefill_geometry(**options)
+        actual = context._draft_incremental_prefill_geometry(**options)
+        for name in (
+            "visible_lengths",
+            "compressed_lengths",
+            "current_cos",
+            "current_sin",
+        ):
+            torch.testing.assert_close(
+                getattr(actual, name), getattr(expected, name), rtol=0, atol=0
+            )
+        context.indexer_state_inputs.kv_cache_block_id_device[0, 2] = 0
+        kv_before, state_before = self.kv_base.clone(), self.state_base.clone()
+        with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
+            context._draft_incremental_prefill_geometry(**options)
+        torch.testing.assert_close(self.kv_base, kv_before, rtol=0, atol=0)
+        torch.testing.assert_close(self.state_base, state_before, rtol=0, atol=0)
 
     def test_metadata_alias_fast_path_preserves_distinct_tensor_validation(self):
         values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
@@ -239,7 +237,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
     def test_fused_required_block_validation_handles_strides_and_fallback(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_validation_triton import (
             is_supported,
-            required_blocks_are_valid,
+            required_block_flags,
         )
 
         table = torch.tensor([[1, 2, 3], [1, 2, 3]], dtype=torch.int32, device="cuda").T
@@ -247,10 +245,13 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
             ::2
         ]
         self.assertTrue(is_supported(table, required))
-        self.assertTrue(required_blocks_are_valid(table, required, pool_blocks=4))
+        self.assertEqual(required_block_flags(table, required, pool_blocks=4).item(), 0)
         _validate_required_blocks(table, required, pool_blocks=4, tag=INDEXER_KV_TAG)
         table[1, 1] = 4
-        self.assertFalse(required_blocks_are_valid(table, required, pool_blocks=4))
+        self.assertEqual(
+            required_block_flags(table, required, pool_blocks=4).item(),
+            (1 << 2) | (1 << 3),
+        )
         with self.assertRaisesRegex(RuntimeError, "out-of-range"):
             _validate_required_blocks(
                 table, required, pool_blocks=4, tag=INDEXER_KV_TAG

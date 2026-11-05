@@ -1,7 +1,5 @@
 """Fuse QSA selection bookkeeping while preserving native TopK tie ordering."""
 
-import os
-
 import torch
 import triton
 import triton.language as tl
@@ -153,13 +151,7 @@ def try_select_qsa_tokens(
         and scores.dtype == torch.float32
         and scores.ndim == 2
         and 0 < scores.shape[0] <= 32768
-        and 0
-        < scores.shape[1]
-        <= (
-            16384
-            if os.getenv("RTP_QWEN4_PREFILL_TOPK_IMPL", "native") in ("cub", "radix")
-            else 8192
-        )
+        and 0 < scores.shape[1] <= 16384
         and scores.stride(0) > 0
         and scores.stride(1) > 0
         and lengths.shape == (scores.shape[0],)
@@ -176,12 +168,11 @@ def try_select_qsa_tokens(
     # causal Prefill scores are unmasked; requiring a premasked producer here
     # silently left that real-model path on Torch TopK despite opting in.
     if not packed_count:
-        if os.getenv("RTP_QWEN4_PREFILL_TOPK_IMPL", "native") == "radix":
-            from .histogram_topk import try_histogram_qsa_tokens
+        from .histogram_topk import try_histogram_qsa_tokens
 
-            output = try_histogram_qsa_tokens(scores, lengths, finite_only=finite_only)
-            if output is not None:
-                return output
+        output = try_histogram_qsa_tokens(scores, lengths, finite_only=finite_only)
+        if output is not None:
+            return output
         from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import try_cub_qsa_tokens
 
         output = try_cub_qsa_tokens(scores, lengths, finite_only=finite_only)

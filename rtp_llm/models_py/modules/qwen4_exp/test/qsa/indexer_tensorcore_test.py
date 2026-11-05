@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest.mock import patch
 
@@ -34,12 +33,11 @@ class IndexerTensorCoreTest(unittest.TestCase):
         reference = torch.einsum("bshd,bnd->bshn", q.double(), keys).relu()
         reference = (reference * weights.view(b, s, h, 1).double()).sum(2)
         reference.masked_fill_(columns[None, None] >= lens[..., None], -float("inf"))
-        with patch.dict(os.environ, RTP_QWEN4_PAGED_INDEXER_IMPL="mma"):
-            output = qsa_paged_indexer_score(*args, block_size=page, max_ctx_len=n)
+        output = qsa_paged_indexer_score(*args, block_size=page, max_ctx_len=n)
         torch.testing.assert_close(
             output.double(), reference.view(b * s, n), rtol=2e-5, atol=2e-6
         )
-        with patch.dict(os.environ, RTP_QWEN4_PAGED_INDEXER_IMPL="vector"):
+        with patch("torch.cuda.get_device_capability", return_value=(9, 0)):
             legacy = qsa_paged_indexer_score(*args, block_size=page, max_ctx_len=n)
         torch.testing.assert_close(output, legacy, rtol=2e-5, atol=2e-6)
         # Only compare rows with a fully populated top-k boundary.
@@ -59,19 +57,18 @@ class IndexerTensorCoreTest(unittest.TestCase):
         table = torch.ones(2, 1, device="cuda", dtype=torch.int32)
         lengths = torch.full((2, 17), 32, device="cuda", dtype=torch.int32)
         options = dict(block_size=32, max_ctx_len=37, validate_block_table=False)
-        with patch.dict(os.environ, RTP_QWEN4_PAGED_INDEXER_IMPL="mma"):
-            for _ in range(3):
-                qsa_paged_indexer_score(q, weights, pool, table, lengths, **options)
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                actual = qsa_paged_indexer_score(
-                    q, weights, pool, table, lengths, **options
-                )
-            weights[:, 0] = -0.5
-            table[0, 0] = 2
-            table[1, 0] = 99
-            lengths.fill_(7)
-            graph.replay()
+        for _ in range(3):
+            qsa_paged_indexer_score(q, weights, pool, table, lengths, **options)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = qsa_paged_indexer_score(
+                q, weights, pool, table, lengths, **options
+            )
+        weights[:, 0] = -0.5
+        table[0, 0] = 2
+        table[1, 0] = 99
+        lengths.fill_(7)
+        graph.replay()
         expected = torch.full_like(actual, -float("inf"))
         expected[:17, :7] = 128 * 2 * 2.5
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)

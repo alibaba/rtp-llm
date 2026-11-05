@@ -119,10 +119,10 @@ class Qwen4ExpMTP(Qwen4Exp):
         # This hook also runs during post-build precision finalization. Keep
         # the draft choice there, rather than letting the target recipe reset
         # it after _create_config has returned.
-        mode = os.getenv("RTP_QWEN4_MTP_DENSE_STORAGE", "inherit")
+        mode = getattr(config.quant_config, "mtp_dense_storage", "inherit")
         if mode not in ("inherit", "source_bf16", "source_bf16_shared_vocab"):
             raise ValueError(
-                "RTP_QWEN4_MTP_DENSE_STORAGE must be inherit, source_bf16 or source_bf16_shared_vocab"
+                "Qwen4 mtp_dense_storage must be inherit, source_bf16 or source_bf16_shared_vocab"
             )
         config._qwen4_mtp_dense_storage_mode = mode
         if mode == "inherit":

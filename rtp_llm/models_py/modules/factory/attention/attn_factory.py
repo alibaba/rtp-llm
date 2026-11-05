@@ -311,9 +311,7 @@ def get_fmha_impl(
     raise Exception("can not find mha type")
 
 
-def _select_attention_impl_key(
-    attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
-) -> str:
+def _select_attention_impl_key(attn_configs: AttentionConfigs) -> str:
     """Route to the attention implementation family.
 
     * ``mla`` -- MLA models (DSv4, GLM5.3, ...).
@@ -407,7 +405,7 @@ class AttnImplFactory(object):
                         # Preserve shared-prefix execution with FP32 states.
                         use_fp32_partials=model_config.quant_config is not None,
                     )
-        key_str = _select_attention_impl_key(attn_configs, attn_inputs)
+        key_str = _select_attention_impl_key(attn_configs)
         fmha_impl_method = cls.get_fmha_impl_method(key_str)
         instance = fmha_impl_method(
             attn_configs,

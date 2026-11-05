@@ -6,7 +6,6 @@ only scoped receipts for that forward. Side-cache and selected-token checks
 keep their existing mutation boundaries. No receipt survives a call.
 """
 
-import os
 from contextlib import contextmanager, nullcontext
 
 import torch
@@ -104,10 +103,9 @@ def main_geometry_preflight(entries):
 
 def prefill_geometry_scope(model, inputs, fmha_impl):
     if (
-        os.getenv("RTP_QWEN4_PREFILL_GEOMETRY_IMPL", "legacy") != "batched"
-        or getattr(model.config, "is_mtp", False)
-        or model.kv_cache is None
+        model.kv_cache is None
         or fmha_impl is None
+        or getattr(model.config, "is_mtp", False)
         or torch.version.hip is not None
         or not inputs.input_ids.is_cuda
         or torch.cuda.get_device_capability(inputs.input_ids.device) != (12, 0)

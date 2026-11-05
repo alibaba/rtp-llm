@@ -10,7 +10,6 @@ SPDX-License-Identifier: Apache-2.0
 
 import hashlib
 import logging
-import os
 import re
 import threading
 
@@ -22,7 +21,6 @@ _MODULE = None
 _BUILD_FAILED = False
 _BUILD_LOCK = threading.Lock()
 _INITIALIZED_DEVICES = set()
-_VERIFIED = set()
 
 _HISTOGRAM_SOURCE = r"""
 #include <cuda_fp16.h>
@@ -179,8 +177,7 @@ void qsa_radix_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor o
 
 def is_supported(scores, lengths):
     return (
-        os.getenv("RTP_QWEN4_PREFILL_TOPK_IMPL", "native") == "radix"
-        and scores.is_cuda
+        scores.is_cuda
         and torch.version.hip is None
         and torch.version.git_version == _TORCH_GIT
         and scores.dtype == torch.float32
@@ -258,54 +255,6 @@ def _load_module(device):
             return _MODULE
 
 
-def _verify_first_shape(scores, lengths, output, fallback, finite_only):
-    if os.getenv("RTP_QWEN4_PREFILL_TOPK_VERIFY", "0") != "1":
-        return
-    key = (scores.device.index, *scores.shape, finite_only)
-    if key in _VERIFIED:
-        return
-    if torch.cuda.is_current_stream_capturing():
-        return
-    import triton
-
-    from .qsa_topk_triton import _expand_tokens, _mask_scores
-
-    rows, columns = scores.shape
-    masked = torch.empty_like(scores)
-    _mask_scores[(rows,)](
-        scores,
-        lengths,
-        masked,
-        N=columns,
-        ROW_STRIDE=columns,
-        COL_STRIDE=1,
-        LENGTH_STRIDE=1,
-        BN=triton.next_power_of_2(columns),
-        num_warps=4,
-    )
-    values, blocks = torch.topk(masked, 512, dim=-1)
-    expected = torch.empty_like(output)
-    _expand_tokens[(rows,)](
-        values,
-        blocks,
-        lengths,
-        expected,
-        K=512,
-        LENGTH_STRIDE=1,
-        FINITE_ONLY=finite_only,
-        num_warps=4,
-    )
-    if not torch.equal(output, expected):
-        raise RuntimeError("Qwen4 histogram TopK differs from pinned Torch selection")
-    logging.info(
-        "Qwen4 histogram TopK exact validation rows=%s columns=%s fallback_rows=%s",
-        rows,
-        columns,
-        int(fallback.sum().item()),
-    )
-    _VERIFIED.add(key)
-
-
 def try_histogram_qsa_tokens(scores, lengths, *, finite_only=True):
     if not is_supported(scores, lengths):
         return None
@@ -317,5 +266,4 @@ def try_histogram_qsa_tokens(scores, lengths, *, finite_only=True):
     )
     fallback = torch.empty(scores.shape[0], device=scores.device, dtype=torch.bool)
     module.qsa_radix_topk(scores, lengths, output, fallback, finite_only)
-    _verify_first_shape(scores, lengths, output, fallback, finite_only)
     return output

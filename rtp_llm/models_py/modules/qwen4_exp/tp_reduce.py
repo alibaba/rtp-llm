@@ -134,11 +134,6 @@ def prepare_prefill_reduce(config, parallelism):
         and communicator.cpp_small_enabled
     ):
         return None
-    enabled = os.getenv("RTP_QWEN4_PREFILL_REDUCE", "legacy") == "ipc"
-    peers = [None] * 2
-    dist.all_gather_object(peers, enabled, group=communicator.group)
-    if not all(peers):
-        return None
     return Qwen4PrefillReduce(communicator)
 
 

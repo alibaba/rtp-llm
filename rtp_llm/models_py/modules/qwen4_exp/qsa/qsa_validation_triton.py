@@ -84,9 +84,3 @@ def required_block_flags(
         N=triton.next_power_of_2(batch * width),
     )
     return result
-
-
-def required_blocks_are_valid(
-    table: torch.Tensor, required_columns: torch.Tensor, pool_blocks: int
-) -> bool:
-    return not bool(required_block_flags(table, required_columns, pool_blocks).item())

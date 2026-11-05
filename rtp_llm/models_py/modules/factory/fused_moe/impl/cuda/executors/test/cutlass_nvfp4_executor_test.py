@@ -22,38 +22,14 @@ from rtp_llm.utils.model_weight import W
 
 
 class CutlassNvfp4ExecutorTest(unittest.TestCase):
-    def test_prefill_library_keeps_path_and_checksum_from_one_source(self):
+    def test_prefill_library_keeps_configured_path_and_checksum_together(self):
         config = SimpleNamespace(
             prefill_library="config.so", prefill_library_sha256="config-sha"
         )
-        for environ, expected in (
-            ({}, ("config.so", "config-sha")),
-            (
-                {
-                    "RTP_LLM_NVFP4_SM120_LIBRARY": "env.so",
-                    "RTP_LLM_NVFP4_SM120_LIBRARY_SHA256": "env-sha",
-                },
-                ("env.so", "env-sha"),
-            ),
-            ({"RTP_LLM_NVFP4_SM120_LIBRARY": "env.so"}, ("env.so", None)),
-            (
-                {"RTP_LLM_NVFP4_SM120_LIBRARY_SHA256": "env-sha"},
-                ("config.so", "config-sha"),
-            ),
-            (
-                {
-                    "QWEN4_MOE_SM120_LIBRARY": "old.so",
-                    "QWEN4_MOE_SM120_LIBRARY_SHA256": "old-sha",
-                },
-                ("config.so", "config-sha"),
-            ),
-        ):
-            with self.subTest(environ=environ), patch.dict(
-                "os.environ", environ, clear=True
-            ):
-                self.assertEqual(_prefill_library(config), expected)
-        with patch.dict("os.environ", {}, clear=True):
-            self.assertEqual(_prefill_library(None), (None, None))
+        self.assertEqual(_prefill_library(config), ("config.so", "config-sha"))
+        self.assertEqual(_prefill_library(None), (None, None))
+        config.prefill_library_sha256 = None
+        self.assertEqual(_prefill_library(config), ("config.so", None))
 
     def test_marlin_layout_requires_matching_strategy_before_loading(self):
         import sys
@@ -63,8 +39,9 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
         def initialize(device):
             device.py_env_configs = SimpleNamespace(moe_config=moe)
 
-        with patch.object(GpuImpl, "__init__", initialize), patch.dict(
-            sys.modules, {"pynvml": SimpleNamespace(nvmlInit=lambda: None)}
+        with (
+            patch.object(GpuImpl, "__init__", initialize),
+            patch.dict(sys.modules, {"pynvml": SimpleNamespace(nvmlInit=lambda: None)}),
         ):
             for strategy in (
                 "auto",
@@ -74,8 +51,12 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
                 "nvfp4_cutlass",
             ):
                 moe = SimpleNamespace(moe_strategy=strategy, fp4_moe_op="marlin")
-                with self.subTest(strategy=strategy), self.assertRaisesRegex(
-                    ValueError, "FP4_MOE_OP=marlin requires MOE_STRATEGY=nvfp4_marlin"
+                with (
+                    self.subTest(strategy=strategy),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "FP4_MOE_OP=marlin requires MOE_STRATEGY=nvfp4_marlin",
+                    ),
                 ):
                     CudaImpl()
             for backend in ("auto", "marlin"):

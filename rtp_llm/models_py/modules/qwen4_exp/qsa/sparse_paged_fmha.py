@@ -460,8 +460,7 @@ def sparse_paged_gqa_attn(
             output = output * torch.sigmoid(output_gate.transpose(1, 2))
         return output
     if (
-        os.environ.get("RTP_QWEN4_PAGED_CHUNK_IMPL", "grouped") == "grouped"
-        and query_len >= 16
+        query_len >= 16
         and head_dim == 256
         and kv_heads in (1, 2)
         and q_heads % kv_heads == 0
@@ -518,8 +517,6 @@ def sparse_paged_gqa_attn(
         block_k=block_k,
         scale=scale_view,
         selected_has_count=selected_has_count,
-        allow_large_decode=os.environ.get("RTP_QWEN4_PAGED_DECODE_IMPL", "online")
-        == "grouped",
     )
     if grouped:
         grouped_sparse_paged_split(

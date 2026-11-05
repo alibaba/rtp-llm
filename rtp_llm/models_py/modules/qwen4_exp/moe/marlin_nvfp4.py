@@ -442,9 +442,9 @@ def make_decode_marlin_executor(native, role, max_generate_batch_size):
     capacities retain the factory-selected executor.
     """
     mode = os.getenv("RTP_QWEN4_DECODE_MOE_IMPL", "auto")
-    if mode not in ("auto", "cutlass", "marlin64"):
-        raise ValueError("RTP_QWEN4_DECODE_MOE_IMPL must be auto, cutlass or marlin64")
-    capacity = 64 if mode == "marlin64" else 8
+    if mode not in ("auto", "cutlass"):
+        raise ValueError("RTP_QWEN4_DECODE_MOE_IMPL must be auto or cutlass")
+    capacity = 8
     if (
         mode == "cutlass"
         or str(role).upper().rsplit(".", 1)[-1] != "DECODE"
@@ -483,15 +483,9 @@ def make_decode_marlin_executor(native, role, max_generate_batch_size):
     if not _library_available():
         return native
     executor = Qwen4DecodeMarlinExecutor(native)
-    if mode == "marlin64":
-        # PD transports prompt caches; draft commits and target verification
-        # contain at most four rows per request for MTP3. Other deployments
-        # retain the default factory contract and are not opted in here.
-        executor.qualified_max_rows = 256
     logging.getLogger(__name__).info(
-        "Qwen4 DECODE MoE executor=Marlin NVFP4 W4A16; capacity=%s max_rows=%s",
+        "Qwen4 DECODE MoE executor=Marlin NVFP4 W4A16; capacity=%s",
         max_generate_batch_size,
-        getattr(executor, "qualified_max_rows", None),
     )
     return executor
 
@@ -604,9 +598,6 @@ class Qwen4DecodeMarlinExecutor(FusedMoeExpertExecutor):
                 "Marlin NVFP4 requires global IDs and output router weighting"
             )
         x = payload.expert_x
-        maximum = getattr(self, "qualified_max_rows", None)
-        if maximum is not None and x.shape[0] > maximum:
-            raise ValueError("Qwen4 Marlin64 requires PD Decode/commit rows <=256")
         if x.numel() == 0:
             output = torch.empty_like(x)
         else:

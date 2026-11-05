@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -81,14 +80,19 @@ class Qwen4Exp(Qwen35Moe):
 
     @staticmethod
     def _configure_precision_recipe(config: ModelConfig) -> None:
-        config._qwen4_dense_storage = os.getenv("RTP_QWEN4_DENSE_STORAGE", "fp8")
         config._qwen4_full_fp8_nvfp4 = bool(getattr(config, "_qwen4_fp8_source", False))
         config.quant_config = build_qwen4_quant_config(
             config.quantization, config._qwen4_full_fp8_nvfp4
         )
+        config._qwen4_dense_storage = getattr(
+            config.quant_config, "dense_storage", "fp8"
+        )
         if config.quant_config is not None:
             config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
             apply_quant_scope_to_pricing(config, config.quant_config)
+            config.dense_weight_dtype = (
+                "bf16" if config._qwen4_dense_storage == "source_bf16" else "fp8"
+            )
 
     @classmethod
     def _parse_extra_text_config(cls, config_json: dict, config: ModelConfig) -> None:

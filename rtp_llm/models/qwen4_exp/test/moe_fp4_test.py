@@ -1,6 +1,4 @@
-import os
 import unittest
-from unittest.mock import patch
 
 from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE, ModelOptFp4Config
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
@@ -14,7 +12,7 @@ from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
 class Qwen4MoeFp4Test(unittest.TestCase):
 
-    def test_explicit_dense_storage_is_independent_of_ambient_environment(self):
+    def test_explicit_storage_overrides_recipe_without_changing_other_descriptors(self):
         from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
 
         dense = AtomicWeight(W.qwen4_hc_attn_mix_down, [CkptWeightInfo("hc")])
@@ -28,10 +26,8 @@ class Qwen4MoeFp4Test(unittest.TestCase):
         )
         target = Qwen4MoeFp4WeightInfo([head], [[dense]], dense_storage="fp8")
         draft = Qwen4MoeFp4WeightInfo([head], [[dense]], dense_storage="source_bf16")
-        with patch.dict(os.environ, RTP_QWEN4_DENSE_STORAGE="source_bf16"):
-            converted_target = target.to_quant_weight_info(recipe)
-        with patch.dict(os.environ, RTP_QWEN4_DENSE_STORAGE="fp8"):
-            converted_draft = draft.to_quant_weight_info(recipe)
+        converted_target = target.to_quant_weight_info(recipe)
+        converted_draft = draft.to_quant_weight_info(recipe)
         self.assertIsInstance(converted_target.weights[0], Fp8StorageWeight)
         self.assertIsInstance(converted_target.layer_weights[0][0], Fp8StorageWeight)
         self.assertIs(converted_draft.weights[0], head)
@@ -90,16 +86,16 @@ class Qwen4MoeFp4Test(unittest.TestCase):
         dense = [AtomicWeight(n, [CkptWeightInfo(n)]) for n in names]
         embedding = AtomicWeight(W.embedding, [CkptWeightInfo("embedding")])
         info = Qwen4MoeFp4WeightInfo([embedding], [[routed, *dense]])
-        with patch.dict(os.environ, RTP_QWEN4_DENSE_STORAGE="source_bf16"):
-            converted = info.to_quant_weight_info(
-                ModelOptFp4Config(
-                    bits=4,
-                    group_size=16,
-                    is_quanted=False,
-                    model_recipe=QWEN4_FP8_NVFP4_RECIPE,
-                    source_fp8_block_size=128,
-                )
+        converted = info.to_quant_weight_info(
+            ModelOptFp4Config(
+                bits=4,
+                group_size=16,
+                is_quanted=False,
+                model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+                source_fp8_block_size=128,
+                dense_storage="source_bf16",
             )
+        )
         self.assertIs(converted.weights[0], embedding)
         for original, actual in zip(dense, converted.layer_weights[0][1:]):
             self.assertIs(actual, original)

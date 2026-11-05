@@ -134,10 +134,8 @@ class SparseGqaRoutingTest(unittest.TestCase):
                 torch.testing.assert_close(captured, refreshed)
 
     def test_sparse_qwen4_prefill_routes_to_sparse_gqa(self):
-        attn_configs, attn_inputs = _configs()
-        self.assertEqual(
-            _select_attention_impl_key(attn_configs, attn_inputs), "sparse_gqa"
-        )
+        attn_configs, _ = _configs()
+        self.assertEqual(_select_attention_impl_key(attn_configs), "sparse_gqa")
 
     def test_unwired_model_keeps_the_dense_fallback(self):
         """Indexer on but the sparse impl not opted in -> dense (mha).
@@ -145,22 +143,20 @@ class SparseGqaRoutingTest(unittest.TestCase):
         This is the state until the attention module runs the indexer and
         hands over its selection.
         """
-        attn_configs, attn_inputs = _configs(opt_in=False)
-        self.assertEqual(_select_attention_impl_key(attn_configs, attn_inputs), "mha")
+        attn_configs, _ = _configs(opt_in=False)
+        self.assertEqual(_select_attention_impl_key(attn_configs), "mha")
 
     def test_decode_routes_to_sparse_gqa(self):
-        attn_configs, attn_inputs = _configs(is_prefill=False)
-        self.assertEqual(
-            _select_attention_impl_key(attn_configs, attn_inputs), "sparse_gqa"
-        )
+        attn_configs, _ = _configs(is_prefill=False)
+        self.assertEqual(_select_attention_impl_key(attn_configs), "sparse_gqa")
 
     def test_dense_model_routes_to_mha(self):
-        attn_configs, attn_inputs = _configs(is_sparse=False)
-        self.assertEqual(_select_attention_impl_key(attn_configs, attn_inputs), "mha")
+        attn_configs, _ = _configs(is_sparse=False)
+        self.assertEqual(_select_attention_impl_key(attn_configs), "mha")
 
     def test_mla_takes_priority(self):
-        attn_configs, attn_inputs = _configs(use_mla=True)
-        self.assertEqual(_select_attention_impl_key(attn_configs, attn_inputs), "mla")
+        attn_configs, _ = _configs(use_mla=True)
+        self.assertEqual(_select_attention_impl_key(attn_configs), "mla")
 
     def test_impl_support_matches_the_key_logic(self):
         attn_configs, attn_inputs = _configs()

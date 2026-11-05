@@ -86,8 +86,7 @@ class HcPrefillMixTest(unittest.TestCase):
             hc_mult=4, norm_eps=1e-6, weight_scales=(sd, su, si), role="PREFILL"
         )
         baseline = GatedResidual(*weights, **kwargs)
-        with patch.dict("os.environ", RTP_QWEN4_PREFILL_HC_IMPL="upmix"):
-            candidate = Qwen4GatedResidual(*weights, **kwargs)
+        candidate = Qwen4GatedResidual(*weights, **kwargs)
         x = self.random(8192, 10240)
         expected = baseline(x)
         with patch(
@@ -98,43 +97,32 @@ class HcPrefillMixTest(unittest.TestCase):
             self.assertEqual(fused.call_count, 1)
         for a, b in zip(actual, expected):
             torch.testing.assert_close(a, b, rtol=0, atol=0)
-        with patch.dict("os.environ", RTP_QWEN4_PREFILL_HC_IMPL="upmix"):
-            candidate = Qwen4GatedResidual(*weights, **dict(kwargs, role="DECODE"))
+        candidate = Qwen4GatedResidual(*weights, **dict(kwargs, role="DECODE"))
         with patch(
             "rtp_llm.models_py.modules.qwen4_exp.hc_prefill_mix.hc_up_mix",
             side_effect=AssertionError("Prefill HC used by Decode"),
         ):
             candidate(self.random(7, 10240))
 
-    def test_bf16_upmix_retains_independent_down_and_injection_projections(self):
-        # The rejected source20 merged-down option changed cuBLAS rounding.
-        # This path keeps both original projections; no merged-down mode exists.
-        for seed in (2035, 1779):
-            torch.manual_seed(seed)
-            weights = (
-                self.random(10240),
-                self.random(320, 10240),
-                self.random(10240, 320),
-                self.random(4, 10240),
-            )
-            kwargs = dict(hc_mult=4, norm_eps=1e-6, role="PREFILL")
-            baseline = GatedResidual(*weights, **kwargs)
-            with patch.dict("os.environ", RTP_QWEN4_PREFILL_HC_IMPL="upmix"):
-                candidate = Qwen4GatedResidual(*weights, **kwargs)
-            for rows in (4093, 8192, 16384):
-                x = self.random(rows, 10240)
-                expected = baseline(x)
-                with patch(
-                    "rtp_llm.models_py.modules.qwen4_exp.hc_prefill_mix.hc_up_mix",
-                    wraps=hc_up_mix,
-                ) as fused:
-                    actual = candidate(x)
-                    self.assertEqual(fused.call_count, 1)
-                for a, b in zip(actual, expected):
-                    torch.testing.assert_close(a, b, rtol=0, atol=0)
-            with patch.dict("os.environ", RTP_QWEN4_PREFILL_HC_IMPL="upmix_merged"):
-                with self.assertRaises(ValueError):
-                    Qwen4GatedResidual(*weights, **kwargs)
+    def test_bf16_prefill_keeps_native_projection(self):
+        weights = (
+            self.random(10240),
+            self.random(320, 10240),
+            self.random(10240, 320),
+            self.random(4, 10240),
+        )
+        kwargs = dict(hc_mult=4, norm_eps=1e-6, role="PREFILL")
+        baseline = GatedResidual(*weights, **kwargs)
+        candidate = Qwen4GatedResidual(*weights, **kwargs)
+        x = self.random(8192, 10240)
+        expected = baseline(x)
+        with patch(
+            "rtp_llm.models_py.modules.qwen4_exp.hc_prefill_mix.hc_up_mix",
+            side_effect=AssertionError("BF16 Prefill must retain native projection"),
+        ):
+            actual = candidate(x)
+        for a, b in zip(actual, expected):
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

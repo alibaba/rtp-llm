@@ -20,7 +20,6 @@ Per row::
     slot(row, t) = block_table[batch(row), t // block_size] * block_size + t % block_size
 """
 
-import os
 from typing import Optional
 
 import torch
@@ -199,8 +198,7 @@ def qsa_paged_indexer_score(
     if M == 0 or max_ctx_len == 0:
         return logits
     if (
-        os.getenv("RTP_QWEN4_PAGED_INDEXER_IMPL", "vector") == "mma"
-        and next_n >= 16
+        next_n >= 16
         and H == 4
         and D == 128
         and block_n == _BLOCK_N

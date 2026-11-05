@@ -1,7 +1,5 @@
 """Complete official-FP8 to dense-FP8/routed-NVFP4 weight recipe."""
 
-import os
-
 from rtp_llm.config.quant_config import (
     QWEN4_FP8_NVFP4_RECIPE,
     Fp8BlockWiseQuantConfig,
@@ -41,7 +39,7 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
         storage = (
             self._dense_storage
             if self._dense_storage is not None
-            else os.getenv("RTP_QWEN4_DENSE_STORAGE", "fp8")
+            else getattr(quant_config, "dense_storage", "fp8")
         )
         if storage not in ("fp8", "source_bf16"):
             raise ValueError("Qwen4 dense storage must be fp8 or source_bf16")

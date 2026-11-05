@@ -306,8 +306,7 @@ def is_supported(scores, lengths):
         and scores.shape[1] == 2048
     )
     large_prefill = (
-        os.getenv("RTP_QWEN4_PREFILL_TOPK_IMPL", "native") in ("cub", "radix")
-        and scores.ndim == 2
+        scores.ndim == 2
         and 2144 < scores.shape[1] <= 16384
         and 1 <= scores.shape[0] <= 8192
     )

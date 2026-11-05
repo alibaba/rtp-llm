@@ -20,13 +20,6 @@ class HistogramTopKTest(unittest.TestCase):
 
     def setUp(self):
         torch.manual_seed(2052)
-        self.env = patch.dict(
-            "os.environ",
-            RTP_QWEN4_PREFILL_TOPK_IMPL="radix",
-            RTP_QWEN4_PREFILL_TOPK_VERIFY="0",
-        )
-        self.env.start()
-        self.addCleanup(self.env.stop)
 
     @staticmethod
     def reference(scores, lengths, finite=True):
@@ -78,8 +71,7 @@ class HistogramTopKTest(unittest.TestCase):
                         output, self.reference(scores, lengths, finite), rtol=0, atol=0
                     )
 
-    def test_real_8192_rows_and_optional_runtime_validation(self):
-        histogram_topk._VERIFIED.clear()
+    def test_real_8192_rows_match_independent_torch_reference(self):
         for cols in (6144, 8192, 12288, 16384):
             scores = torch.randn(8192, cols, device="cuda")
             if cols == 8192:
@@ -91,13 +83,9 @@ class HistogramTopKTest(unittest.TestCase):
                 + cols * 4
                 - 8192
             )
-            with patch.dict("os.environ", RTP_QWEN4_PREFILL_TOPK_VERIFY="1"):
-                output = histogram_topk.try_histogram_qsa_tokens(scores, lengths)
+            output = histogram_topk.try_histogram_qsa_tokens(scores, lengths)
             torch.testing.assert_close(
                 output, self.reference(scores, lengths), rtol=0, atol=0
-            )
-            self.assertIn(
-                (scores.device.index, 8192, cols, True), histogram_topk._VERIFIED
             )
 
     def test_graph_refreshes_fallback_and_input_scores(self):

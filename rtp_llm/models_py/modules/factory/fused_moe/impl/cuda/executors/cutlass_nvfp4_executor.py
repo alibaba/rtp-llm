@@ -1,7 +1,5 @@
 """SM120 CUTLASS NVFP4 MoE with BF16 input and fused activation quantization."""
 
-import os
-
 import torch
 from flashinfer import ActivationType
 from flashinfer.fused_moe import cutlass_fused_moe
@@ -21,11 +19,6 @@ from rtp_llm.utils.model_weight import W
 
 
 def _prefill_library(config):
-    # An environment override supplies the whole pinned artifact; never combine
-    # its path with a checksum from a different configuration source.
-    library = os.getenv("RTP_LLM_NVFP4_SM120_LIBRARY")
-    if library:
-        return library, os.getenv("RTP_LLM_NVFP4_SM120_LIBRARY_SHA256")
     return (
         getattr(config, "prefill_library", None),
         getattr(config, "prefill_library_sha256", None),

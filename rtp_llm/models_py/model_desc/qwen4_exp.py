@@ -1,4 +1,3 @@
-import os
 import weakref
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
@@ -761,28 +760,8 @@ class Qwen4ExpModel(Qwen35Model):
         from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 
         config = model_config
-        draft_bf16 = (
-            bool(getattr(config, "is_mtp", False))
-            and os.getenv("RTP_QWEN4_MTP_DENSE_IMPL", "fp8") == "bf16"
-        )
-        target_dense_bf16 = (
-            not bool(getattr(config, "is_mtp", False))
-            and str(getattr(parallelism_config, "role_type", "")).rsplit(".", 1)[-1]
-            in ("DECODE", "PDFUSION")
-            and os.getenv("RTP_QWEN4_TARGET_DENSE_IMPL", "fp8") == "bf16"
-        )
-        dense_bf16 = draft_bf16 or target_dense_bf16
-        target_head_bf16 = (
-            not bool(getattr(config, "is_mtp", False))
-            and str(getattr(parallelism_config, "role_type", "")).rsplit(".", 1)[-1]
-            in ("DECODE", "PDFUSION")
-            and (
-                target_dense_bf16
-                or os.getenv("RTP_QWEN4_TARGET_HEAD_IMPL", "fp8") == "bf16"
-            )
-        )
         compute_weights = (
-            prepare_compute_weights(weights, dense_bf16=dense_bf16)
+            prepare_compute_weights(weights)
             if getattr(config, "_qwen4_full_fp8_nvfp4", False)
             else weights
         )
@@ -797,17 +776,8 @@ class Qwen4ExpModel(Qwen35Model):
             device_resource_config,
         )
         if getattr(config, "_qwen4_full_fp8_nvfp4", False):
-            if (
-                dense_bf16
-                or target_head_bf16
-                or compute_weights.global_weights[W.lm_head].dtype == torch.bfloat16
-            ):
+            if compute_weights.global_weights[W.lm_head].dtype == torch.bfloat16:
                 head = compute_weights.global_weights[W.lm_head]
-                if head.dtype == torch.float8_e4m3fn:
-                    head = (
-                        head.float()
-                        * weights.global_weights[W.lm_head + FP8_STORAGE_SCALE_SUFFIX]
-                    ).to(torch.bfloat16)
                 self._fp8_lm_head = nn.Linear(
                     head.shape[1], head.shape[0], bias=False, device="meta"
                 )
@@ -820,7 +790,6 @@ class Qwen4ExpModel(Qwen35Model):
                 )
         fp8_embedding = (
             getattr(self.config, "_qwen4_full_fp8_nvfp4", False)
-            and not dense_bf16
             and self.embed_tokens.weight.dtype == torch.float8_e4m3fn
         )
         if fp8_embedding:

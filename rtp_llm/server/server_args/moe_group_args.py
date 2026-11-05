@@ -210,7 +210,11 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         type=str,
         choices=["auto", "trtllm", "cutedsl", "cutlass", "marlin"],
         default="auto",
-        help="指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), cutedsl (使用 CuTe DSL)。",
+        help=(
+            "指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), "
+            "cutedsl (使用 CuTe DSL), cutlass (使用 CUTLASS), "
+            "marlin (使用 Marlin，要求 MOE_STRATEGY=nvfp4_marlin)。"
+        ),
     )
 
     # Out-of-tree backends ship MoE strategies the public parser must not

@@ -57,6 +57,28 @@ class RuntimeSnapshotTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "configuration changed"):
             freeze_runtime_config(config, SimpleNamespace(get_attn_tp_size=lambda: 4))
 
+    def test_target_and_draft_precision_survives_spawn_and_cannot_change_after_freeze(
+        self,
+    ):
+        parallelism = SimpleNamespace(get_attn_tp_size=lambda: 2)
+        for field, value in (
+            ("_qwen4_dense_storage", "source_bf16"),
+            ("_qwen4_vocab_storage", "source_bf16"),
+            ("_qwen4_mtp_dense_storage_mode", "source_bf16_shared_vocab"),
+        ):
+            with self.subTest(field=field):
+                config = self.config()
+                setattr(config, field, value)
+                snapshot = freeze_runtime_config(config, parallelism)
+                self.assertEqual(snapshot, pickle.loads(pickle.dumps(snapshot)))
+                setattr(
+                    config,
+                    field,
+                    "fp8" if field != "_qwen4_mtp_dense_storage_mode" else "inherit",
+                )
+                with self.assertRaisesRegex(RuntimeError, "configuration changed"):
+                    freeze_runtime_config(config, parallelism)
+
     def test_noninteger_and_nonpositive_resource_overrides_are_rejected(self):
         for value in (True, 0, -1, 1.5, "256"):
             with self.subTest(value=value):

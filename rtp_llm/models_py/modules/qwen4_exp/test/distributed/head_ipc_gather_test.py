@@ -101,7 +101,7 @@ class HeadIpcGatherTest(unittest.TestCase):
             x[:, :320],
             x.t(),
             x.unsqueeze(0),
-            torch.empty(33, 124160, device=workspace.device, dtype=torch.bfloat16),
+            torch.empty(257, 124160, device=workspace.device, dtype=torch.bfloat16),
         ]
         for tensor in invalid:
             self.assertIsNone(workspace.try_gather(tensor))
@@ -144,10 +144,7 @@ def _gather_worker():
     rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", timeout=datetime.timedelta(seconds=90))
-    tiled = os.environ.get("RTP_TEST_HEAD_TILED") == "1"
-    workspace = Qwen4HeadIpcGather(
-        dist.group.WORLD, torch.device("cuda", rank), max_rows=256 if tiled else 32
-    )
+    workspace = Qwen4HeadIpcGather(dist.group.WORLD, torch.device("cuda", rank))
     if os.environ.get("RTP_TEST_HEAD_ASYMMETRIC_CLOSE") == "1":
         store = dist.distributed_c10d._get_default_store()
         if rank == 0:
@@ -163,7 +160,7 @@ def _gather_worker():
         return
     try:
         streams = (torch.cuda.Stream(), torch.cuda.Stream())
-        sizes = (1, 64, 33, 256, 4, 32) if tiled else (1, 4, 32, 4)
+        sizes = (1, 64, 33, 256, 4, 32)
         for iteration, rows in enumerate(sizes):
             with torch.cuda.stream(streams[iteration % 2]):
                 base = torch.arange(rows * 124160, device="cuda").reshape(rows, 124160)
@@ -183,8 +180,10 @@ def _gather_worker():
 
 
 class HeadIpcGatherIntegrationTest(unittest.TestCase):
-    def test_tiled_target256_rows_and_alternating_streams(self):
+    def test_rank_order_tiled_target256_rows_stream_handoff_and_close(self):
         self.assertEqual(torch.cuda.device_count(), 2)
+        self.assertEqual(torch.cuda.get_device_capability(0), (12, 0))
+        self.assertTrue(torch.cuda.can_device_access_peer(0, 1))
         subprocess.run(
             [
                 sys.executable,
@@ -194,7 +193,6 @@ class HeadIpcGatherIntegrationTest(unittest.TestCase):
                 "--nproc-per-node=2",
                 __file__,
             ],
-            env=dict(os.environ, RTP_TEST_HEAD_TILED="1"),
             check=True,
             timeout=240,
         )
@@ -213,23 +211,6 @@ class HeadIpcGatherIntegrationTest(unittest.TestCase):
             env=env,
             check=True,
             timeout=90,
-        )
-
-    def test_rank_order_live_inputs_stream_handoff_and_close(self):
-        self.assertEqual(torch.cuda.device_count(), 2)
-        self.assertEqual(torch.cuda.get_device_capability(0), (12, 0))
-        self.assertTrue(torch.cuda.can_device_access_peer(0, 1))
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "torch.distributed.run",
-                "--standalone",
-                "--nproc-per-node=2",
-                __file__,
-            ],
-            check=True,
-            timeout=240,
         )
 
 

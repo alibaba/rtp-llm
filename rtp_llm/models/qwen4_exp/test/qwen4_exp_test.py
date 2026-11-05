@@ -334,6 +334,28 @@ class Qwen4ExpTest(unittest.TestCase):
         self.assertEqual(cfg.activation_amax, 32.0)
         self.assertTrue(cfg.require_contiguous_experts)
 
+    def test_storage_precision_survives_recipe_finalization_and_pricing(self):
+        self.config._qwen4_fp8_source = True
+        self.config.quantization = json.dumps(
+            dict(
+                method="modelopt_fp4",
+                bits=4,
+                group_size=16,
+                is_quanted=False,
+                model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+                dense_storage="source_bf16",
+                mtp_dense_storage="source_bf16_shared_vocab",
+            )
+        )
+        for _ in range(2):
+            Qwen4Exp._configure_precision_recipe(self.config)
+            self.assertEqual(self.config._qwen4_dense_storage, "source_bf16")
+            self.assertEqual(self.config.dense_weight_dtype, "bf16")
+            self.assertEqual(self.config.expert_weight_dtype, "fp4")
+            self.assertEqual(
+                self.config.quant_config.mtp_dense_storage, "source_bf16_shared_vocab"
+            )
+
     def tearDown(self):
         self._temp_dir.cleanup()
 
@@ -356,6 +378,8 @@ class Qwen4ExpTest(unittest.TestCase):
             dict(activation_amax=16),
             dict(require_contiguous_experts=False),
             dict(mixed_attention=True),
+            dict(dense_storage="bf16_from_fp8"),
+            dict(mtp_dense_storage="bf16_from_fp8"),
         ):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.config.quantization = json.dumps(dict(base, **changes))

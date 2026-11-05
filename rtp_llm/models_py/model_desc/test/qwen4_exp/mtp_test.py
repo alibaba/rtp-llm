@@ -305,10 +305,15 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
         )(embedding, hidden)
         expected = hidden / torch.sqrt(hidden.square().mean(-1, keepdim=True) + eps)
         torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-7)
-        legacy = Qwen4ExpMTPInputProjection(
-            *args, hidden_size=hidden_size, norm_eps=eps, global_hidden_norm=False
-        )(embedding, hidden)
-        self.assertGreater(float((actual - legacy).abs().max()), 0.4)
+        branch_local = hidden / torch.sqrt(
+            hidden.unflatten(-1, (branches, hidden_size))
+            .square()
+            .mean(-1, keepdim=True)
+            .expand(-1, -1, hidden_size)
+            .flatten(-2)
+            + eps
+        )
+        self.assertGreater(float((actual - branch_local).abs().max()), 0.4)
 
     def test_rejects_non_packed_or_mismatched_target_hidden_input(self):
         component = Qwen4ExpMTPInputProjection(

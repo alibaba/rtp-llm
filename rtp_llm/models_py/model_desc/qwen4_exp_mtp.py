@@ -1,6 +1,5 @@
 """Python model descriptor for the Qwen4-Exp MTP draft."""
 
-import os
 from collections.abc import Mapping
 from typing import Optional
 
@@ -21,7 +20,6 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_head_graph import (
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
-from rtp_llm.models_py.modules.hybrid.gated_residual import grouped_rms_norm
 from rtp_llm.models_py.modules.qwen4_exp.weight_views import (
     Qwen4LinearFactory as LinearFactory,
 )
@@ -104,7 +102,6 @@ class Qwen4ExpMTPInputProjection(nn.Module):
         fc_hidden: nn.Module,
         hidden_size: int,
         norm_eps: float,
-        global_hidden_norm: bool = True,
     ) -> None:
         super().__init__()
         self.embedding_gamma = embedding_gamma
@@ -119,7 +116,6 @@ class Qwen4ExpMTPInputProjection(nn.Module):
         self.hc_mult = int(hidden_gamma.numel()) // self.hidden_size
         self.hc_hidden_size = self.hc_mult * self.hidden_size
         self.norm_eps = float(norm_eps)
-        self.global_hidden_norm = bool(global_hidden_norm)
 
     def forward(
         self, inputs_embeds: torch.Tensor, input_hiddens: torch.Tensor
@@ -163,16 +159,8 @@ class Qwen4ExpMTPInputProjection(nn.Module):
             )
         # The MTP pre-FC norm spans the entire HC stream, before the branch
         # reshape (SGLang Qwen4ExpForCausalLMMTP._fuse_residual_linear_shared).
-        # Main-model HC norms remain branch-local. The legacy mode is retained
-        # for controlled numerical/performance A/B qualification.
-        if self.global_hidden_norm:
-            hidden = exact_head_rms_norm(
-                input_hiddens, self.hidden_gamma, self.norm_eps
-            )
-        else:
-            hidden = grouped_rms_norm(
-                input_hiddens, self.hidden_gamma, self.hidden_size, self.norm_eps
-            )
+        # Main-model HC norms remain branch-local.
+        hidden = exact_head_rms_norm(input_hiddens, self.hidden_gamma, self.norm_eps)
         hidden = hidden.unflatten(-1, (self.hc_mult, self.hidden_size))
 
         # fc_embedding/fc_hidden are hidden_size-wide matrices.  Apply them to
@@ -309,8 +297,6 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             ),
             hidden_size=model_config.hidden_size,
             norm_eps=model_config.layernorm_eps,
-            global_hidden_norm=os.environ.get("RTP_QWEN4_MTP_HIDDEN_NORM", "global")
-            == "global",
         )
         self._draft_head_graph = DraftHeadGraph(enabled=hasattr(self, "_fp8_lm_head"))
 

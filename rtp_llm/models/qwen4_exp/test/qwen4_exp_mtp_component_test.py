@@ -276,13 +276,8 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
 
     def test_draft_original_precision_does_not_change_target_config(self):
         for mode in ("source_bf16", "source_bf16_shared_vocab"):
-            with mock.patch.dict(
-                "os.environ",
-                RTP_QWEN4_DENSE_STORAGE="fp8",
-                RTP_QWEN4_MTP_DENSE_STORAGE=mode,
-            ):
-                target = Qwen4Exp.create_config(self._temp_dir.name)
-                draft = Qwen4ExpMTP.create_config(self._temp_dir.name)
+            target = self._precision_config(Qwen4Exp, mode)
+            draft = self._precision_config(Qwen4ExpMTP, mode)
             self.assertEqual(target._qwen4_dense_storage, "fp8")
             self.assertEqual(draft._qwen4_dense_storage, "source_bf16")
             self.assertEqual(draft._qwen4_mtp_dense_storage_mode, mode)
@@ -297,12 +292,7 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
         from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
 
         for mode in ("source_bf16", "source_bf16_shared_vocab"):
-            with mock.patch.dict(
-                "os.environ",
-                RTP_QWEN4_DENSE_STORAGE="fp8",
-                RTP_QWEN4_MTP_DENSE_STORAGE=mode,
-            ):
-                draft = Qwen4ExpMTP.create_config(self._temp_dir.name)
+            draft = self._precision_config(Qwen4ExpMTP, mode)
             draft._qwen4_full_fp8_nvfp4 = True
             target = Qwen4Exp.__new__(Qwen4Exp)
             target.model_config = SimpleNamespace(
@@ -341,11 +331,24 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
                 Qwen4ExpMTP.speculative_weight_alias_names(target, draft)
 
     def test_invalid_draft_storage_mode_is_rejected(self):
-        with mock.patch.dict(
-            "os.environ", RTP_QWEN4_MTP_DENSE_STORAGE="dequantized_fp8"
-        ):
-            with self.assertRaisesRegex(ValueError, "RTP_QWEN4_MTP_DENSE_STORAGE"):
-                Qwen4ExpMTP.create_config(self._temp_dir.name)
+        with self.assertRaisesRegex(ValueError, "mtp_dense_storage"):
+            self._precision_config(Qwen4ExpMTP, "dequantized_fp8")
+
+    def _precision_config(self, model, mode):
+        config = model.create_config(self._temp_dir.name)
+        config._qwen4_fp8_source = True
+        config.quantization = json.dumps(
+            dict(
+                method="modelopt_fp4",
+                bits=4,
+                group_size=16,
+                is_quanted=False,
+                model_recipe="qwen4_fp8_nvfp4",
+                mtp_dense_storage=mode,
+            )
+        )
+        model._configure_precision_recipe(config)
+        return config
 
     @staticmethod
     def _config():

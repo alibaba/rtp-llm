@@ -101,6 +101,9 @@ class Qwen4RuntimeSnapshot:
     role: str
     target_verify_width: int
     kv_precision: str
+    dense_storage: str
+    vocab_storage: str
+    mtp_dense_storage: str
 
 
 def freeze_runtime_config(config, parallelism):
@@ -127,6 +130,13 @@ def freeze_runtime_config(config, parallelism):
                 KvCacheDataType.BASE,
             )
         ),
+        getattr(config, "_qwen4_dense_storage", "fp8"),
+        getattr(
+            config,
+            "_qwen4_vocab_storage",
+            getattr(config, "_qwen4_dense_storage", "fp8"),
+        ),
+        getattr(config, "_qwen4_mtp_dense_storage_mode", "inherit"),
     )
     previous = getattr(config, "_qwen4_runtime_snapshot", None)
     if previous is not None and previous != snapshot:
@@ -154,7 +164,21 @@ def build_qwen4_quant_config(quantization, source_fp8):
     ):
         raise ValueError("qwen4_exp supports BF16 source or the QWEN4_FP8_NVFP4 recipe")
     if full_fp8:
+        dense_storage = getattr(requested, "dense_storage", "fp8")
+        mtp_dense_storage = getattr(requested, "mtp_dense_storage", "inherit")
+        if dense_storage not in ("fp8", "source_bf16"):
+            raise ValueError("Qwen4 dense_storage must be fp8 or source_bf16")
+        if mtp_dense_storage not in (
+            "inherit",
+            "source_bf16",
+            "source_bf16_shared_vocab",
+        ):
+            raise ValueError(
+                "Qwen4 mtp_dense_storage must be inherit, source_bf16 or source_bf16_shared_vocab"
+            )
         return ModelOptFp4Config(
+            dense_storage=dense_storage,
+            mtp_dense_storage=mtp_dense_storage,
             bits=4,
             group_size=16,
             is_quanted=False,
