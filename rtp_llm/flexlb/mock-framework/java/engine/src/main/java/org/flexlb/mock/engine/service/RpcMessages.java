@@ -69,18 +69,20 @@ final class RpcMessages {
         return last >= 0 ? last : 42;
     }
     static GenerateOutputsPB token(GenerateInputPB input, int tokenId, int generated, int stepTokens, int reused, int remoteReused, long elapsedNanos, boolean finished, boolean pd) {
-        // Native Engine RPC always emits newly produced tokens. Frontend owns
-        // cumulative responses and applies return_incremental at its boundary.
-        int width = stepTokens;
-        var tokens = ByteBuffer.allocate(Math.multiplyExact(4, width)).order(ByteOrder.LITTLE_ENDIAN);
-        for (int i = 0; i < width; i++) tokens.putInt(tokenId);
         var aux = AuxInfoPB.newBuilder().setInputLen(input.getTokenIdsCount()).setOutputLen(generated).setStepOutputLen(stepTokens)
             .setIterCount(generated).setPrefixLen(reused).setTotalReuseLen(reused).setLocalReuseLen(reused - remoteReused).setRemoteReuseLen(remoteReused).setPdSep(pd)
             .setCostTimeUs((int) Math.min(Integer.MAX_VALUE, elapsedNanos / 1000))
             .setFirstTokenCostTimeUs((int) Math.min(Integer.MAX_VALUE, elapsedNanos / 1000));
+        return token(input.getRequestId(), tokenId, generated, stepTokens, aux.build(), finished);
+    }
+
+    static GenerateOutputsPB token(long requestId, int tokenId, int generated, int stepTokens, AuxInfoPB metadata, boolean finished) {
+        var tokens = ByteBuffer.allocate(Math.multiplyExact(4, stepTokens)).order(ByteOrder.LITTLE_ENDIAN);
+        for (int i = 0; i < stepTokens; i++) tokens.putInt(tokenId);
+        var aux = metadata.toBuilder().setOutputLen(generated).setStepOutputLen(stepTokens);
         var output = FlattenOutputPB.newBuilder().addFinished(finished).addAuxInfo(aux).setOutputIds(TensorPB.newBuilder()
-            .setDataType(TensorPB.DataType.INT32).addShape(1).addShape(1).addShape(width)
+            .setDataType(TensorPB.DataType.INT32).addShape(1).addShape(1).addShape(stepTokens)
             .setInt32Data(ByteString.copyFrom(tokens.array())));
-        return GenerateOutputsPB.newBuilder().setRequestId(input.getRequestId()).setFlattenOutput(output).build();
+        return GenerateOutputsPB.newBuilder().setRequestId(requestId).setFlattenOutput(output).build();
     }
 }

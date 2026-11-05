@@ -406,3 +406,11 @@ real 的依据为 `cpp/engine_base/stream/GenerateStream.cc`、`GenerateStateMac
 延迟/长度事件沿用上述 EventMetrics 规则；Prometheus 的累计 sum/count 保留事件权重，KMonitor 接收原始样本。没有真实 SDK、StartWrite/FinishWrite 分段或 payload 时，不导出对应 SDK、写会话分段、字节或带宽数据。指标回调失败不改变 I/O 结果。
 
 请求类零值规则对齐 Real 的 REPORT_GAUGE：等待/首 token 耗时、输出长度、迭代次数和 reuse_length 为零时不产生样本。KV 复用类使用直接 Report，kv_cache_reuse_length 等仍包含零命中样本；不能统一过滤零值。
+
+### 输出交付边界
+
+Scheduler 只发布累计进度，删除逐轮输出等待标记、网络可写性筛选及 OUTPUT 调度阶段。`Listener.progressed(request)` 是可合并的锁外变化通知；RPC 读取不可变的 `request.progress()`，计算不依赖通知完成。正常结束和 KV 释放发生在计算侧，最后一个进度通知排在终态通知之前。
+
+`GeneratedOutput` 替代消息缓冲队列，输出积压状态为 O(1)，按 generated/sent 游标即时生成固定合成 token，单帧最多 4096 token。D 不提前构造每轮响应。P 转发 D 的帧时只保留累计长度与最新元信息；传输 Inbox 的两帧受控拉取仍有固定上限。积压进度允许合并，不能用收到的帧数推断 Forward 次数。终态错误优先于尚未发送的数据，成功必须先补齐数据再结束。
+
+GENERATE 后 D 不因 P 输出流断连或取消而停止；初始 ALLOCATE/LOAD、D 自身超时、显式调度取消和节点关闭保持其原有约束。该假设只用于合成 Mock，不模拟链路故障导致的生产行为。

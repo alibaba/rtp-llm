@@ -42,13 +42,11 @@ class RtpSchedulerTest {
     }
     private static class Listener implements EngineScheduler.Listener {
         final CompletableFuture<EngineScheduler.Request> allocated = new CompletableFuture<>();
-        final CompletableFuture<EngineScheduler.Output> output = new CompletableFuture<>();
+        final CompletableFuture<EngineScheduler.Progress> output = new CompletableFuture<>();
         final CompletableFuture<RequestFailure> terminal = new CompletableFuture<>();
-        volatile boolean writable = true, cancelled;
-        public boolean writable() { return writable; }
-        public boolean cancelled() { return cancelled; }
         public void allocated(EngineScheduler.Request request) { allocated.complete(request); }
-        public void output(EngineScheduler.Request request, EngineScheduler.Output output) { this.output.complete(output); }
+        public void progressed(EngineScheduler.Request request) {
+            var output = request.progress(); this.output.complete(output); }
         public void terminal(EngineScheduler.Request request, RequestFailure failure) { terminal.complete(failure); }
     }
     private static void drain(EngineScheduler scheduler) {
@@ -296,11 +294,12 @@ class RtpSchedulerTest {
         Object lock = new Object(); var blocked = new CountDownLatch(1); var release = new CountDownLatch(1);
         var config = config("prefill", "2", 2); var next = new Listener();
         var slow = new Listener() {
-            @Override public void output(EngineScheduler.Request request, EngineScheduler.Output output) {
+            @Override public void progressed(EngineScheduler.Request request) {
+            var output = request.progress();
                 assertFalse(Thread.holdsLock(lock)); blocked.countDown();
                 try { assertTrue(release.await(3, TimeUnit.SECONDS)); }
                 catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new RuntimeException(error); }
-                super.output(request, output);
+                super.progressed(request);
             }
         };
         try (var cache = new KvCache(config.blockSize(), 12, 0);
@@ -315,7 +314,8 @@ class RtpSchedulerTest {
 
     @Test void outputFailureIsTerminalWithoutLeakingKv() throws Exception {
         var config = config("decode", "1", 1); var listener = new Listener() {
-            @Override public void output(EngineScheduler.Request request, EngineScheduler.Output output) { throw new IllegalStateException("closed"); }
+            @Override public void progressed(EngineScheduler.Request request) {
+            throw new IllegalStateException("closed"); }
         };
         try (var cache = new KvCache(config.blockSize(), 8, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
@@ -348,29 +348,96 @@ class RtpSchedulerTest {
         }
     }
 
-    @Test void cancelledOutputFailureDoesNotFailTheEngine() throws Exception {
+    private static void generate(RtpEngineLoop engine, EngineScheduler.Request request) throws Exception {
+        try (var use = engine.beginTransfer(request)) { engine.transferCompleted(request, new RtpTransferResult(false, null)); }
+        engine.control(request, new RtpControl.Generate(42));
+    }
+
+    @Test void staggeredDecodeCohortsParticipateTogetherInEverySubsequentForward() throws Exception {
+        Object lock = new Object(); var config = config("decode", "200", 32);
+        var batches = new CopyOnWriteArrayList<List<String>>(); var first = new CountDownLatch(1);
+        try (var cache = new KvCache(config.blockSize(), 4096, 0)) {
+            var scheduler = new RtpFifoScheduler(lock, config, cache);
+            var traced = (EngineScheduler) java.lang.reflect.Proxy.newProxyInstance(EngineScheduler.class.getClassLoader(),
+                new Class<?>[]{EngineScheduler.class}, (proxy, method, args) -> {
+                    try {
+                        var result = method.invoke(scheduler, args);
+                        if (method.getName().equals("schedule") && result instanceof EngineScheduler.Work work) {
+                            batches.add(work.batch().dps().stream().flatMap(dp -> dp.requests().stream()).map(item -> item.id()).toList());
+                            first.countDown();
+                        }
+                        return result;
+                    } catch (java.lang.reflect.InvocationTargetException error) { throw error.getCause(); }
+                });
+            try (var engine = new RtpEngineLoop(lock, traced, new TaskHistory(), cache, config.compute(), config.role(), config.id())) {
+                for (int group = 0; group < 2; group++) {
+                    var listeners = new ArrayList<Listener>(); var requests = new ArrayList<EngineScheduler.Request>();
+                    synchronized (lock) {
+                        for (int n = 0; n < 12; n++) {
+                            var listener = new Listener(); listeners.add(listener);
+                            requests.add(engine.input(metricInput(group * 12 + n + 1, 100), listener));
+                        }
+                    }
+                    for (var listener : listeners) listener.allocated.get(2, TimeUnit.SECONDS);
+                    synchronized (lock) { for (var request : requests) generate(engine, request); }
+                    if (group == 0) assertTrue(first.await(2, TimeUnit.SECONDS));
+                }
+                int before = batches.size(); long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+                while (batches.size() < before + 4) { assertTrue(System.nanoTime() < until); Thread.sleep(2); }
+                for (var batch : batches.subList(before, before + 4)) assertEquals(24, batch.size(), batch.toString());
+                engine.checkHealthy();
+            }
+        }
+    }
+
+    @Test void blockedProgressConsumerDoesNotPauseTheSameDecodeRequestOrRetainKv() throws Exception {
         Object lock = new Object(); var blocked = new CountDownLatch(1); var release = new CountDownLatch(1);
-        var config = config("prefill", "1", 2);
+        var config = config("decode", "5", 2);
         var listener = new Listener() {
-            @Override public void output(EngineScheduler.Request request, EngineScheduler.Output output) {
+            @Override public void progressed(EngineScheduler.Request request) {
+                blocked.countDown();
+                try { assertTrue(release.await(3, TimeUnit.SECONDS)); }
+                catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new RuntimeException(error); }
+                super.progressed(request);
+            }
+        };
+        try (var cache = new KvCache(config.blockSize(), 64, 0);
+             var engine = new RtpEngineLoop(lock, AbstractRtpScheduler.factory(config), new TaskHistory(), cache, config.compute(), config.role(), config.id())) {
+            var request = engine.input(metricInput(1, 20), listener);
+            listener.allocated.get(2, TimeUnit.SECONDS); generate(engine, request);
+            assertTrue(blocked.await(2, TimeUnit.SECONDS));
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (!request.snapshot().terminating()) { assertTrue(System.nanoTime() < until); Thread.sleep(2); }
+            assertEquals(20, request.snapshot().generated()); assertFalse(listener.terminal.isDone());
+            assertEquals(0, engine.status(0).running()); assertEquals(64, cache.snapshot(0, false).availableBlocks());
+            engine.checkHealthy(); release.countDown(); assertNull(listener.terminal.get(2, TimeUnit.SECONDS));
+        } finally { release.countDown(); }
+    }
+
+    @Test void cancelledProgressConsumerFailureDoesNotFailTheEngine() throws Exception {
+        Object lock = new Object(); var blocked = new CountDownLatch(1); var release = new CountDownLatch(1);
+        var config = config("decode", "10", 2);
+        var listener = new Listener() {
+            @Override public void progressed(EngineScheduler.Request request) {
                 blocked.countDown();
                 try { assertTrue(release.await(3, TimeUnit.SECONDS)); }
                 catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new RuntimeException(error); }
                 throw new IllegalStateException("Transport closed while sending");
             }
         };
-        try (var cache = new KvCache(config.blockSize(), 12, 0);
-             var engine = new RtpEngineLoop(lock, AbstractRtpScheduler.factory(config), new org.flexlb.mock.engine.scheduler.TaskHistory(), cache, config.compute(), config.role(), config.id())) {
-            var request = engine.input(input(1, false), listener);
+        try (var cache = new KvCache(config.blockSize(), 64, 0);
+             var engine = new RtpEngineLoop(lock, AbstractRtpScheduler.factory(config), new TaskHistory(), cache, config.compute(), config.role(), config.id())) {
+            var request = engine.input(metricInput(1, 100), listener);
+            listener.allocated.get(2, TimeUnit.SECONDS); generate(engine, request);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
-            engine.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel"));
-            release.countDown();
+            engine.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel")); release.countDown();
             assertEquals(RequestFailure.Reason.CANCELLED, listener.terminal.get(2, TimeUnit.SECONDS).reason());
-            var next = new Listener(); engine.input(input(2, false), next);
-            assertNull(next.terminal.get(2, TimeUnit.SECONDS));
-            assertEquals(12, cache.snapshot(0, false).availableBlocks());
+            var next = new Listener(); var following = engine.input(metricInput(2, 2), next);
+            next.allocated.get(2, TimeUnit.SECONDS); generate(engine, following);
+            assertNull(next.terminal.get(2, TimeUnit.SECONDS)); assertEquals(64, cache.snapshot(0, false).availableBlocks());
         } finally { release.countDown(); }
     }
+
     @Test void terminalStatusIsCommittedBeforeTheExternalTerminalCallbackReturns() throws Exception {
         var config = config("prefill", "0", 1);
         var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
@@ -809,7 +876,7 @@ class RtpSchedulerTest {
             scheduler.maintain(); drain(scheduler); generate(scheduler, request); drain(scheduler);
             assertNull(scheduler.schedule()); assertNull(listener.terminal.get(1, TimeUnit.SECONDS));
             assertEquals(1, request.snapshot().generated()); assertEquals(0, request.snapshot().iterations());
-            assertTrue(listener.output.get().finished()); assertEquals(0, listener.output.get().committed());
+            assertTrue(listener.output.get().finished()); assertEquals(1, listener.output.get().generated());
             assertEquals(16, cache.snapshot(0, false).freeBlocks());
         }
     }

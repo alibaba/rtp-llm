@@ -76,6 +76,31 @@ class PdGenerationTest {
             assertEquals(width * 4, flat.getOutputIds().getInt32Data().size()); assertTrue(flat.getAuxInfo(0).getPdSep());
             return output;
         }
+        void completeOutput(int expected) throws Exception {
+            int length = 0;
+            while (true) {
+                var value = next(); assertInstanceOf(GenerateOutputsPB.class, value);
+                var flat = ((GenerateOutputsPB) value).getFlattenOutput();
+                int width = Math.toIntExact(flat.getOutputIds().getShape(2)); length += width;
+                assertEquals(length, flat.getAuxInfo(0).getOutputLen());
+                assertEquals(width * 4, flat.getOutputIds().getInt32Data().size());
+                assertTrue(width <= GeneratedOutput.MAX_FRAME_TOKENS);
+                if (flat.getFinished(0)) break;
+            }
+            assertEquals(expected, length); assertEquals("completed", next());
+        }
+        Throwable errorAfterProgress(Status.Code expected, int maximum) throws Exception {
+            int length = 0;
+            while (true) {
+                var value = next();
+                if (value instanceof Throwable error) { assertEquals(expected, Status.fromThrowable(error).getCode()); return error; }
+                assertInstanceOf(GenerateOutputsPB.class, value);
+                var flat = ((GenerateOutputsPB) value).getFlattenOutput();
+                length += flat.getOutputIds().getShape(2);
+                assertEquals(length, flat.getAuxInfo(0).getOutputLen());
+                assertTrue(length <= maximum); assertFalse(flat.getFinished(0));
+            }
+        }
         Throwable error(Status.Code expected) throws Exception { var value = next(); assertInstanceOf(Throwable.class, value);
             assertEquals(expected, Status.fromThrowable((Throwable) value).getCode()); return (Throwable) value; }
         @Override public void close() { context.cancel(null); }
@@ -387,8 +412,7 @@ class PdGenerationTest {
             assertTrue(d.status().getFinishedTaskListList().stream().anyMatch(t -> t.getRequestId() == 101));
             assertEquals(16, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
             try (var fetch = new Call(p, request, true)) {
-                for (int n = 1; n <= 4; n++) fetch.output(n, n == 4, 1);
-                assertEquals("completed", fetch.next());
+                fetch.completeOutput(4);
             }
             await(() -> d.status().getRunningTaskInfoCount() == 0 && p.status().getRunningTaskInfoCount() == 0);
             assertEquals(CancelStatusPB.CANCEL_STATUS_NOT_FOUND, cancel(p, 101));
@@ -402,8 +426,7 @@ class PdGenerationTest {
             context.call(() -> enqueue(p, 1500, request)); context.cancel(null);
             Thread.sleep(60);
             try (var fetch = new Call(p, request, true)) {
-                fetch.output(1, false, 1); fetch.output(2, false, 1); fetch.output(3, true, 1);
-                assertEquals("completed", fetch.next());
+                fetch.completeOutput(3);
             }
         }
     }
@@ -673,11 +696,11 @@ class PdGenerationTest {
         }
     }
 
-    @Test void cancellationDuringDComputeDoesNotProduceLateTokens() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1000); var call = new Call(p, input(d, 1, 5, 4, 3000, true))) {
+    @Test void upstreamOutputDisconnectDoesNotCancelDCompute() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 50); var call = new Call(p, input(d, 1, 5, 4, 3000, true))) {
             call.output(1, false, 1); await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
             call.close(); await(() -> d.status().getAvailableKvCache() == 16);
-            assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
+            assertEquals(3, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertEquals(16, p.status().getAvailableKvCache());
         }
     }
@@ -698,8 +721,7 @@ class PdGenerationTest {
     @Test void growthPressureFailsLikeRtpAndCannotResumeAfterRelease() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 4, 10); var holder = d.node.cache().acquire(4, List.of()).lease();
                 var call = new Call(p, input(d, 1, 3, 6, 2500, true))) {
-            call.output(1, false, 1); call.output(2, false, 1);
-            assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
+            assertEquals(602, code(call.errorAfterProgress(Status.Code.RESOURCE_EXHAUSTED, 2)));
             assertEquals(4, d.status().getAvailableKvCache()); holder.close();
             assertNull(call.outputs.poll(150, TimeUnit.MILLISECONDS));
             assertEquals(8, d.status().getAvailableKvCache());
@@ -710,8 +732,7 @@ class PdGenerationTest {
 
     @Test void growthBeyondPhysicalCapacityFailsWith602AndDoesNotPublishDCache() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 3, 1); var call = new Call(p, input(d, 1, 3, 6, 2000, true))) {
-            for (int i = 1; i <= 4; i++) call.output(i, false, 1);
-            assertEquals(602, code(call.error(Status.Code.RESOURCE_EXHAUSTED)));
+            assertEquals(602, code(call.errorAfterProgress(Status.Code.RESOURCE_EXHAUSTED, 4)));
             assertEquals(6, d.status().getAvailableKvCache()); assertEquals(0, d.node.cache().snapshot(-1, true).keys().length);
         }
     }
