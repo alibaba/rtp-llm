@@ -12,6 +12,7 @@ cc_library(
     hdrs = [
         "KVCacheEvent.h",
         "KVCacheEventPublisher.h",
+        "KVCacheEventState.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -36,13 +37,27 @@ cc_library(
 )
 
 cc_library(
+    name = "kvcm_event_report",
+    srcs = ["KVCMEventReport.cc"],
+    hdrs = [
+        "KVCMEventReport.h",
+        "KVCacheEventPublisherConfig.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":kv_cache_event",
+        "@rapidjson//:rapidjson",
+    ],
+)
+
+cc_library(
     name = "kv_cache_event_publisher",
     srcs = [
         "KVCMPublisher.cc",
     ],
     hdrs = [
         "KVCMPublisher.h",
-        "KVCacheEventPublisherConfig.h",
         "KVCacheEventReporter.h",
         "KVCMPublisherUtils.h",
     ],
@@ -51,6 +66,7 @@ cc_library(
     deps = [
         ":kv_cache_event",
         ":kv_cache_event_queue",
+        ":kvcm_event_report",
         ":kvcm_discovery_proto",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:subscriber",
         "//rtp_llm/cpp/utils:core_utils",

@@ -13,6 +13,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
+#include "rtp_llm/cpp/cache/events/KVCacheEventState.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
@@ -103,8 +104,10 @@ public:
                                                   const std::function<void(const TreeNode&)>& visitor) const;
 
     // All publication operations require the owning BlockTreeCache mutex.
-    // Complete, matchable DEVICE components are advertised independently.
-    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
+    // Complete, steady components are advertised independently in each enabled tier.
+    void            setEventPublisher(KVCacheEventPublisherPtr               publisher,
+                                      const std::vector<std::string>&        required_group_tags,
+                                      const std::vector<KVCacheEventMedium>& mediums = {KVCacheEventMedium::HBM});
     KVCacheSnapshot logicalCacheSnapshot() const;
     void            refreshPublishedState(const TreeNode* node);
 
@@ -112,8 +115,8 @@ private:
     void                               removePublishedKey(CacheKeyType key);
     KVCacheEventPublisherPtr           event_publisher_;
     std::vector<ReusableGroupLocation> publication_groups_;
-    std::unordered_map<CacheKeyType, std::vector<size_t>> published_groups_;
-    int64_t                            publication_version_{-1};
+    std::vector<KVCacheEventMedium>    publication_mediums_;
+    KVCacheEventState                  publication_state_;
 
     friend class BlockTreeEvictor;
 

@@ -273,6 +273,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                 } else {
                     group_set->referenceBlocks(source_resource, BlockTreeRefType::LOAD);
                     resource.transfer_state = GroupSetTransferState::LOAD_PENDING;
+                    tree_->refreshPublishedState(path[i]);
                     evictor_.suspendCandidate(path[i], group_set_id, source_tier);
                 }
             }

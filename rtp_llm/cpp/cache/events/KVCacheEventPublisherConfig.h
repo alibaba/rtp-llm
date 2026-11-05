@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "rtp_llm/cpp/cache/events/KVCacheEvent.h"
 
 namespace rtp_llm {
 
@@ -40,6 +41,7 @@ struct KVCacheEventPublisherContext {
     std::string dtype;
     // Same order as BlockTree::setEventPublisher publication group tags.
     std::vector<KVCacheEventSpec> specs;
+    std::vector<KVCacheEventMedium> enabled_mediums{KVCacheEventMedium::HBM};
 
     int32_t block_size_tokens = 0;
     int32_t tp_size           = 1;

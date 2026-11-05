@@ -838,12 +838,22 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
 #endif
         bool publish_cache_events = publisher_type == "kvcm";
         if (!publisher_type.empty() && publisher_type != "none" && !publish_cache_events) {
-            RTP_LLM_LOG_WARNING("unknown HBM event publisher type=%s; cache events disabled", publisher_type.c_str());
+            RTP_LLM_LOG_WARNING("unknown cache event publisher type=%s; cache events disabled", publisher_type.c_str());
         }
         if (!publish_cache_events && !control_context) {
             return;
         }
-        if (!kv_cache_config_.reuse_cache || !kv_cache_config_.enable_device_cache) {
+        std::vector<KVCacheEventMedium> event_mediums;
+        if (kv_cache_config_.enable_device_cache) {
+            event_mediums.push_back(KVCacheEventMedium::HBM);
+        }
+        if (kv_cache_config_.enable_memory_cache) {
+            event_mediums.push_back(KVCacheEventMedium::HOST);
+        }
+        if (kv_cache_config_.enable_disk_cache) {
+            event_mediums.push_back(KVCacheEventMedium::DISK);
+        }
+        if (!kv_cache_config_.reuse_cache || event_mediums.empty()) {
             publish_cache_events = false;
         }
         std::vector<std::string> reuse_group_tags;
@@ -893,6 +903,7 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
         }
 
         KVCacheEventPublisherContext publisher_context;
+        publisher_context.enabled_mediums = std::move(event_mediums);
         publisher_context.instance_group = resolveKVCacheEventInstanceGroup(
             kv_cache_config_.kv_cache_event_instance_group,
             control_context ? control_context->instance_group : kv_cache_config_.kvcm_instance_group);
@@ -929,7 +940,7 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
                 return;
             }
             if (publisher_type == "kvcm") {
-                RTP_LLM_LOG_WARNING("HBM event publishing unavailable; retaining KVCM control heartbeats");
+                RTP_LLM_LOG_WARNING("cache event publishing unavailable; retaining KVCM control heartbeats");
             }
             publisher_context = std::move(*control_context);
             publisher_context.host_ip_port = kv_cache_config_.kv_cache_event_host_ip_port;
@@ -968,7 +979,8 @@ void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporte
             publisher_config, publisher_context, std::move(snapshot_provider), std::move(reporter),
             std::move(remote_cache_control));
         if (publish_cache_events) {
-            block_tree_cache_->setEventPublisher(cache_event_publisher_, reuse_group_tags);
+            block_tree_cache_->setEventPublisher(
+                cache_event_publisher_, reuse_group_tags, publisher_context.enabled_mediums);
         } else {
             block_tree_cache_->setEventPublisher(nullptr, {});
         }

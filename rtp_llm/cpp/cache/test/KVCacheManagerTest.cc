@@ -491,6 +491,55 @@ TEST_F(KVCacheManagerTest, EventControlUpdatesRemoteBackendThroughRegistrationAn
     manager.stopCacheEventPublisher();
 }
 
+TEST_F(KVCacheManagerTest, EventPublisherRegistersEnabledLocalTiersIncludingWithoutDeviceCache) {
+    for (int mask = 0; mask < 8; ++mask) {
+        SCOPED_TRACE(mask);
+        auto config                   = makeSimpleMhaCacheConfig(4, 128, 1, DataType::TYPE_FP16);
+        auto kv_config                = makeEventPublicationRuntimeConfig();
+        kv_config.enable_device_cache = mask & 1;
+        kv_config.enable_memory_cache = mask & 2;
+        kv_config.enable_disk_cache   = mask & 4;
+        RuntimeConfig runtime;
+        runtime.model_name = "event_wiring_model";
+        KVCacheManager manager(config, false, nullptr, kv_config, {}, runtime);
+        auto           full = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        full->initialize(0, config.topologyPtr(), {"default"});
+        manager.block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
+        auto reporter             = std::make_shared<EventPublicationReporter>();
+        manager.initCacheEventPublisher(reporter);
+        if (mask == 0) {
+            EXPECT_EQ(manager.cache_event_publisher_, nullptr);
+            EXPECT_EQ(manager.block_tree_cache_->tree()->event_publisher_, nullptr);
+            continue;
+        }
+        ASSERT_NE(manager.cache_event_publisher_, nullptr);
+        ASSERT_TRUE(waitForEventPublisherReady(*manager.cache_event_publisher_));
+        std::vector<std::string> expected;
+        if (mask & 1) {
+            expected.emplace_back("hbm");
+        }
+        if (mask & 2) {
+            expected.emplace_back("mem");
+        }
+        if (mask & 4) {
+            expected.emplace_back("disk");
+        }
+        rapidjson::Document node_register;
+        node_register.Parse(reporter->waitForRequest("EVENT_NODE_REGISTER").c_str());
+        ASSERT_FALSE(node_register.HasParseError());
+        const auto& mediums = node_register["events"][0]["node_register"]["mediums"];
+        ASSERT_EQ(mediums.Size(), expected.size());
+        const auto& selected = manager.block_tree_cache_->tree()->publication_mediums_;
+        ASSERT_EQ(selected.size(), expected.size());
+        for (size_t i = 0; i < expected.size(); ++i) {
+            EXPECT_EQ(mediums[static_cast<rapidjson::SizeType>(i)].GetString(), expected[i]);
+            EXPECT_EQ(cacheEventMediumName(selected[i]), expected[i]);
+        }
+        manager.stopCacheEventPublisher();
+    }
+}
+
 TEST_F(KVCacheManagerTest, EventPublisherWiresEligibleGroupsInTopologyOrder) {
     // Do not send the reserved loopback endpoint through a developer's proxy.
     ScopedEnvVar no_proxy("no_proxy", "*");

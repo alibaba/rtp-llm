@@ -1,17 +1,23 @@
 # KV cache event publisher
 
-RTP-LLM can publish reusable HBM prefix-cache keys directly to KVCM. It is disabled by default: `none` creates no
-queue, worker, or connection; `kvcm` enables publishing.
+RTP-LLM can publish reusable local HBM, HOST (L2), and DISK (L3) prefix-cache keys directly to KVCM.
+Cache event publishing is disabled by default: `none` disables cache events; `kvcm` enables them.
+A configured KVCM storage backend may still use control-only registration and heartbeats when cache events are disabled.
 
 ## Semantics
 
 Events describe logical cache keys, not physical block indices. Reusable components are normally reported independently;
 `csa_state`, `swa_kv`, and reuse-disabled groups are excluded, without filtering by cache group type.
-Each component requires a complete, IDLE, non-detached DEVICE GroupSet.
-Deleting a component preserves the others. Duplicate puts and LRU touches do not produce events.
+Each component requires a complete, IDLE, non-detached GroupSet at the reported tier. DEVICE requires all member
+blocks; HOST and DISK each hold one packed block for the GroupSet. An allocated transfer target is not reported
+until its copy commits. Starting a load or demotion withdraws the source; successful completion publishes the
+destination, and failure/cancellation restores an attached source. Detached resources remain excluded.
+Components are identified by `(block key, medium, spec name)`: deleting one preserves other components and media
+for the same key. Duplicate puts and LRU touches do not produce events.
 
 For DeepSeek V4.1, `hca_kv`, `csa_kv`, and `indexer_kv` share one HBM spec `F` only when all three are eligible
-for publication and belong to the same FULL GroupSet. `hca_kv` represents that GroupSet for registration, ADD/DELETE,
+for publication and belong to the same FULL GroupSet. The same spec is used across local tiers.
+`hca_kv` represents that GroupSet for registration, ADD/DELETE,
 and snapshots; BTC still checks every member, so an incomplete or evicted GroupSet withdraws `F`. Otherwise these tags
 retain their individual `F0`/`F1`/`F2` specs. The legacy `global_kv_1`/`global_kv_2` pool tags remain supported with the
 same mapping. Other components keep their existing publication behavior.
@@ -25,13 +31,16 @@ Only `tp_rank=0` publishes when `pp_size=1`. CP-sharded Prefill reports canonica
 host state. When the value is empty, RTP-LLM derives a per-rank endpoint as
 `server_ip:(start_port + rank_id * worker_info_port_num)`.
 
-Publishing supports reusable DEVICE caches, including sparse tails. HOST/HOST_PINNED groups are skipped.
+Publishing supports reusable groups whose primary memory placement is DEVICE, including sparse tails and their
+local HOST/DISK copies. Groups whose primary placement is HOST/HOST_PINNED remain excluded; those topology groups
+are distinct from DEVICE groups offloaded to the local HOST tier.
 
 ## KVCM lifecycle
 
 The publisher registers the instance in prefix mode and registers the node, then sends `EVENT_BLOCK_SNAPSHOT` reports
 independently of batched `EVENT_BLOCK_ADD`/`EVENT_BLOCK_DELETE` changes and `EVENT_HEARTBEAT` requests. It sends best-effort
-`EVENT_HOST_DOWN` during engine shutdown. Snapshots replace all medium state for that host identity;
+`EVENT_HOST_DOWN` during engine shutdown. Each snapshot contains HBM, HOST and DISK together in one event and
+replaces all medium state for that host identity. Empty snapshots clear all three tiers;
 failed or rate-limited snapshot rounds are logged and discarded. Failed incremental batches are dropped and counted,
 without an additional send delay. Reporting is best effort; KVCM's same-reporter snapshot/delta write
 barrier still applies. The endpoint must support snapshot fencing and crash-safe commit semantics.
@@ -41,10 +50,28 @@ than ACK. Successful heartbeat or incremental responses with `snapshot_required=
 pending signals coalesce. Snapshot failures and `retry_after_ms` do not block incremental sending.
 Registration is preserved during throttling; missing instances/nodes and leader errors trigger re-registration.
 
-Events use `ST_EVENT_REPORT_L1P5`, medium `hbm`, and `event_report://host/hbm` URIs without size parameters; HBM spec
-registrations omit `size`. Spec names are `F` for the shared DeepSeek V4.1 FULL GroupSet, `F0`/`F1`/`F2` for its
+All local-tier events use `ST_EVENT_REPORT_L1P5`. This identifies the KVCM event-report storage backend, independently
+of the local cache tier. The medium and URI distinguish local tiers:
+
+| Local tier | KVCM `medium` | Location URI | Enable setting |
+|---|---|---|---|
+| DEVICE / HBM | `hbm` | `event_report://host/hbm` | `enable_device_cache` |
+| HOST / L2 | `mem` | `event_report://host/mem` | `enable_memory_cache` |
+| DISK / L3 | `disk` | `event_report://host/disk` | `enable_disk_cache` |
+
+`host` above is the reporter's `host_ip_port`. Node registration declares the enabled tiers; HOST-only and DISK-only
+publication are supported when device caching is disabled. With `reuse_cache` and the `kvcm` publisher enabled,
+the existing tier settings select the reported media; no additional per-tier publisher setting is required.
+Disabling all local tiers disables cache events. Reports contain keys and locations, not KV payloads or physical
+addresses. A client querying only `hbm` will not see `mem`/`disk`; its medium filter must include the required tiers.
+
+URIs have no size parameters, and spec registrations omit `size`.
+Spec names are `F` for the shared DeepSeek V4.1 FULL GroupSet, `F0`/`F1`/`F2` for its
 unmerged tags, and `rtp_llm_hbm_<block_tokens>_<tag>` for other eligible groups. Configure the L1P5 event storage on the
-server and add it to the Instance Group's `event_report_storage_candidates`.
+server and add it to the Instance Group's `event_report_storage_candidates`. Each media namespace reuses the same
+registered spec names, including the historical `rtp_llm_hbm_` prefix. Adding HOST/DISK does not itself change the
+instance's registered spec schema. The server must support multi-medium reports and all-medium authoritative
+snapshots as defined by the [KVCM ReportEvent API](https://github.com/alibaba/tair-kvcache/blob/533be48be62b9bbc3a407d8558b084ab09cd3809/docs/api/report_event.md).
 
 Instance registrations must match the published schema and token stride. The `F0`/`F1`/`F2` to `F` change is a schema
 change: rollout requires a new HBM Instance ID or an explicit migration of the existing registration and metadata.
