@@ -17,6 +17,7 @@ public final class DispatcherConfig {
     }
 
     private Type type = Type.NON_BATCH;
+    /** Hard local admission ceiling, including reservations; low Engine waiting never bypasses it. */
     private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
     /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
     private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;

@@ -197,7 +197,7 @@ public class CostBasedPrefillStrategy {
                 rescue = true;
                 for (var entry : discovery.cacheCandidates()) {
                     long hit = calculateCacheMatch(entry.endpoint(), entry.address(), cacheMatchResults, request).effectiveHitTokens();
-                    if (hit == fleetMaxHit && !entry.endpoint().engineQueueCongested()
+                    if (hit == fleetMaxHit && !entry.endpoint().engineQueueAdmissionBlocked()
                             && (entry.endpoint().engineQueueAllowsAdmission() || entry.endpoint().ownership.tokenWorkload()
                             .pendingTokens() < tokenBalance.getMaxPendingComputeTokens())) {
                         rescue = false;
@@ -445,7 +445,7 @@ public class CostBasedPrefillStrategy {
             for (var entry : endpointRegistry.prefillRoutingSnapshot(role)) {
                 var endpoint = entry.endpoint();
                 var work = endpoint.ownership.tokenWorkload();
-                if (!endpoint.engineQueueCongested()
+                if (!endpoint.engineQueueAdmissionBlocked()
                         && work.pendingTokens() + work.plannedTokens() <= tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) {
                     domains.add(new org.flexlb.balance.scheduler.PlacementKey(role, endpoint.getStatus().topologySnapshot().group(), null));
                     domains.add(org.flexlb.balance.scheduler.PlacementKey.anyGroup(role));
@@ -465,7 +465,7 @@ public class CostBasedPrefillStrategy {
         var idleGroups = new java.util.HashSet<String>();
         for (var entry : fleet) {
             var work = entry.endpoint().ownership.tokenWorkload();
-            if (!entry.endpoint().engineQueueCongested()
+            if (!entry.endpoint().engineQueueAdmissionBlocked()
                     && work.pendingTokens() + work.plannedTokens() <= rescue.getMaxIdlePendingTokens()) {
                 idleGroups.add(entry.endpoint().getStatus().topologySnapshot().group());
             }
@@ -517,7 +517,7 @@ public class CostBasedPrefillStrategy {
         boolean cacheFirst = PrefillTokenBalance.cacheFirst(maxHit, request.getSeqLen(), tokenBalance.getMinPrefixHitPercent());
         for (int i = 0; i < pool.size(); i++) {
             var endpoint = pool.get(i).endpoint();
-            if (endpoint == source || endpoint.isGenerationRetiringOrRetired() || endpoint.engineQueueCongested()
+            if (endpoint == source || endpoint.isGenerationRetiringOrRetired() || endpoint.engineQueueAdmissionBlocked()
                     || !PrefillTokenBalance.eligible(hits[i], maxHit, cacheFirst)) { continue; }
             var work = endpoint.ownership.tokenWorkload();
             if (work.pendingTokens() + work.plannedTokens() <= tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) {
@@ -558,7 +558,7 @@ public class CostBasedPrefillStrategy {
             if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload();
             // Preserve a busy cache leader by parking globally, where existing HIT_RATE shedding applies.
-            if (candidates.endpoint(i).engineQueueCongested()
+            if (candidates.endpoint(i).engineQueueAdmissionBlocked()
                     || !PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
                     && !candidates.endpoint(i).engineQueueAllowsAdmission()) { continue; }
             scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen);
@@ -584,7 +584,7 @@ public class CostBasedPrefillStrategy {
         for (var entry : endpointRegistry.prefillRoutingSnapshot(role)) {
             if (group != null && !group.equals(entry.endpoint().getStatus().topologySnapshot().group())) { continue; }
             workers++;
-            if (entry.endpoint().engineQueueAllowsAdmission()) { accepting++; }
+            if (entry.endpoint().engineQueueAllowsAdmission() && hasInflightCapacity(entry.endpoint())) { accepting++; }
         }
         return enoughAcceptingWorkers(accepting, workers);
     }
@@ -602,7 +602,7 @@ public class CostBasedPrefillStrategy {
         for (var entry : fleet) {
             long hit = calculateCacheMatch(entry.endpoint(), entry.address(), matches, request).effectiveHitTokens();
             maxHit = Math.max(maxHit, hit);
-            if (entry.endpoint().engineQueueAllowsAdmission()) { maxAcceptingHit = Math.max(maxAcceptingHit, hit); }
+            if (entry.endpoint().engineQueueAllowsAdmission() && hasInflightCapacity(entry.endpoint())) { maxAcceptingHit = Math.max(maxAcceptingHit, hit); }
         }
         return PrefillTokenBalance.cacheFirst(maxHit, request.getSeqLen(), tokenBalance.getMinPrefixHitPercent())
                 && maxAcceptingHit == maxHit;
@@ -798,6 +798,11 @@ public class CostBasedPrefillStrategy {
         return null;
     }
 
+    private boolean hasInflightCapacity(PrefillEndpoint endpoint) {
+        return !endpoint.engineQueueAdmissionBlocked() && (endpoint.requestLimit == 0L || endpoint.ownership.progress().outstandingRequests() < endpoint.requestLimit)
+                && (maxInflightBatches == 0 || endpoint.ownership.batchCapacityAvailable(maxInflightBatches));
+    }
+
     private EndpointDiscovery discoverAvailableEndpoints(
             Request request,
             SchedulingMetadata metadata,
@@ -816,8 +821,7 @@ public class CostBasedPrefillStrategy {
             registered++;
             // Capacity can remove dispatch candidates, but must not redefine cache eligibility.
             if (tokenBalance != null) { cacheCandidates.add(entry); }
-            if (endpoint.engineQueueCongested()) { continue; }
-            if (endpoint.engineQueueAllowsAdmission()) { matching.add(entry); continue; }
+            if (endpoint.engineQueueAdmissionBlocked()) { continue; }
             if (tokenBalance != null && maxInflightBatches > 0
                     && !endpoint.ownership.batchCapacityAvailable(maxInflightBatches)) { continue; }
             if ((endpoint.requestLimit == 0L || endpoint.ownership.progress().outstandingRequests() < endpoint.requestLimit)

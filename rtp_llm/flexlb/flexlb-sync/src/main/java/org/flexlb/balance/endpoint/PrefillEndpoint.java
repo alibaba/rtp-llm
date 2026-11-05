@@ -113,15 +113,31 @@ public class PrefillEndpoint extends WorkerEndpoint {
         if (engineQueueAdmission != null) {
             observeEngineQueue();
             ownership.configureEngineQueueAdmission(this::engineQueueAdmissionState);
+            ownership.configureEngineQueueDispatchBlocked(engineQueueAdmission::dispatchBlocked);
+            if (dispatcherType == DispatcherConfig.Type.NON_BATCH) {
+                ownership.configureUnobservedAdmission(engineQueueAdmission::dispatchBlocked);
+            }
         }
         if (balance != null) { ownership.enableTokenWorkload(balance.getMaxPendingComputeTokens(), this::engineQueueAllowsAdmission,
                 balance.isEnableWindow() ? balance.getWindowMs() : 0L); }
 
     }
 
-    /** Only committed Engine waiting-query telemetry counts. Unknown status is not an empty queue. */
+    /** Engine waiting plus unobserved NON_BATCH admissions; unknown status is not an empty queue. */
     public boolean engineQueueAllowsAdmission() {
-        return engineQueueAdmissionState() == EngineQueueAdmission.State.AVAILABLE;
+        return engineQueueAdmissionState() == EngineQueueAdmission.State.AVAILABLE && !ownership.engineQueueAdmissionBlocked();
+    }
+
+    public boolean engineQueueAdmissionBlocked() {
+        return engineQueueCongested() || ownership.engineQueueAdmissionBlocked();
+    }
+
+    public boolean engineQueueDispatchBlocked() {
+        return engineQueueCongested() || ownership.engineQueueDispatchBlocked();
+    }
+
+    public boolean engineQueueAllowsDispatch() {
+        return engineQueueAdmissionState() == EngineQueueAdmission.State.AVAILABLE && !ownership.engineQueueDispatchBlocked();
     }
 
     public boolean engineQueueCongested() {
@@ -352,7 +368,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** The ledger supplies facts; generation cleanup and notifications run after unlocking. */
     public boolean release(PrefillState.Reservation preparation, RequestRoute exact) {
-        var released = ownership.release(preparation, exact);
+        boolean unconfirmed = false;
+        if (preparation == null && exact != null && exact.ctx() != null) {
+            var snapshot = exact.ctx().snapshot();
+            var delivery = snapshot.delivery();
+            unconfirmed = delivery != null && delivery.identity().kind() == org.flexlb.balance.scheduler.DeliveryClaimKind.ROUTE_DECISION
+                    && (delivery.send() == ContextResult.SendState.DELIVERED || delivery.send() == ContextResult.SendState.UNKNOWN)
+                    && !delivery.prefillProof() && !snapshot.engine().prefillObserved();
+        }
+        boolean released = release(preparation, exact, unconfirmed);
+        if (released && unconfirmed) { dispatcher.cancelUnobservedRoute(this, exact.requestId()); }
+        return released;
+    }
+
+    private boolean release(PrefillState.Reservation preparation, RequestRoute exact, boolean retainUnconfirmed) {
+        var released = ownership.release(preparation, exact, retainUnconfirmed);
         if (!released.released()) { return false; }
         try {
             if (released.generationHandoff() != null) {
@@ -361,6 +391,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
             if (released.queued()) { signal(Signal.INPUT); }
         } finally { signal(Signal.CAPACITY); }
         return true;
+    }
+
+    public void confirmUnobservedDispatchStopped(long requestId, long batchId) {
+        if (ownership.confirmUnobservedDispatchStopped(requestId, batchId)) { signal(Signal.CAPACITY); }
     }
 
     @Override
@@ -407,6 +441,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         reduction = current;
                     }
                     if (reduction.predictionInputs().isEmpty() || !predictions.isEmpty()) {
+                        boolean blockedBefore = ownership.engineQueueAdmissionBlocked();
+                        boolean dispatchBlockedBefore = ownership.engineQueueDispatchBlocked();
                         result = ownership.commitStatusLocked(reduction, predictions);
                         checkState(result != null, "Locked Prefill reduction changed during commit");
                         if (prepared != null && !observation.alive()) { beginRetirement(); }
@@ -423,8 +459,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
                         boolean queueWasAvailable = queueBefore == EngineQueueAdmission.State.AVAILABLE;
                         if (prepared != null) { ws.publishPreparedStatus(prepared); }
                         observeEngineQueue();
-                        if (queueBefore != engineQueueAdmissionState()) { inputsChanged = true; }
-                        if (!queueWasAvailable && engineQueueAllowsAdmission()) {
+                        if (queueBefore != engineQueueAdmissionState() || blockedBefore != ownership.engineQueueAdmissionBlocked()
+                                || dispatchBlockedBefore != ownership.engineQueueDispatchBlocked()) { inputsChanged = true; }
+                        if ((!queueWasAvailable && engineQueueAllowsAdmission()) || (blockedBefore && !ownership.engineQueueAdmissionBlocked())
+                                || (dispatchBlockedBefore && !ownership.engineQueueDispatchBlocked())) {
                             inputsChanged = true;
                             result = new PrefillState.StatusReconciliation(result.requestStatuses(), result.batchCompletions(),
                                     true, true);
@@ -481,14 +519,18 @@ public class PrefillEndpoint extends WorkerEndpoint {
         PrefillState.StatusReconciliation reconciliation;
         ownership.lock.lock();
         try {
+            boolean blockedBefore = ownership.engineQueueAdmissionBlocked();
+            boolean dispatchBlockedBefore = ownership.engineQueueDispatchBlocked();
             reconciliation = ownership.commitStatusLocked(PrefillObservation.prepareLocked(ownership, observation, false), Map.of());
             var queueBefore = engineQueueAdmissionState();
             if (engineQueueAdmission != null) {
                 engineQueueAdmission.observe(observation.engine().waitingQueryLen(), System.nanoTime() / 1_000_000L);
             }
-            if (queueBefore != engineQueueAdmissionState()) {
+            if (queueBefore != engineQueueAdmissionState() || blockedBefore != ownership.engineQueueAdmissionBlocked()
+                    || dispatchBlockedBefore != ownership.engineQueueDispatchBlocked()) {
                 reconciliation = new PrefillState.StatusReconciliation(reconciliation.requestStatuses(),
-                        reconciliation.batchCompletions(), true, engineQueueAllowsAdmission() || reconciliation.capacityReleased());
+                        reconciliation.batchCompletions(), true, (blockedBefore && !ownership.engineQueueAdmissionBlocked())
+                                || (dispatchBlockedBefore && !ownership.engineQueueDispatchBlocked()) || engineQueueAllowsAdmission() || reconciliation.capacityReleased());
             }
             if (reconciliation.schedulingInputsChanged()) { ownership.schedulingInputsChangedLocked(); }
         } finally { ownership.lock.unlock(); }
@@ -497,6 +539,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     @Override
     public void publishStatus(StatusChange change) {
+        Long unconfirmed = ownership.nextUnconfirmedCancellation();
+        if (unconfirmed != null) { dispatcher.cancelUnobservedRoute(this, unconfirmed); }
         if (change instanceof StatusChange.None) { return; }
         var reconciliation = ((StatusChange.Prefill) change).reconciliation();
         Throwable reporting = reportBatchCompletions(reconciliation.batchCompletions(), null);

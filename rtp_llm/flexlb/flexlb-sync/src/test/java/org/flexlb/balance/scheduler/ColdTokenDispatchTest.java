@@ -37,6 +37,254 @@ import static org.mockito.Mockito.*;
 
 class ColdTokenDispatchTest {
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(longs = {-1L, 0L})
+    void asynchronousNonBatchReportsCannotBiasColdRouting(long wireBatchId) throws Exception {
+        try (var f = new Fixture(false, false, false, true, config -> {
+            config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+            config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(256L);
+            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+            balance.setEnableWindow(false);
+            balance.setMaxPendingComputeTokens(2_000_000L);
+        })) {
+            var workers = List.of(f.a, f.b, (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.3"),
+                    (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.4"));
+            var tasks = new java.util.ArrayList<java.util.List<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>>();
+            for (int w = 0; w < 4; w++) { tasks.add(new java.util.ArrayList<>()); }
+            int[] deliveries = new int[4];
+            for (int i = 0; i < 256; i++) {
+                var ctx = f.context(5_000_000L + i);
+                ctx.data().setRequest(ctx.data().getRequest().toBuilder().seqLen(50_000L).build());
+                assertTrue(f.scheduler.submit(ctx).get(2, TimeUnit.SECONDS).isSuccess());
+                int w = workers.indexOf(ctx.snapshot().route().prefillEp());
+                deliveries[w]++;
+                tasks.get(w).add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                        .setRequestId(ctx.data().getRequestId()).setBatchId(wireBatchId).setInputLength(50_000L)
+                        .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build());
+            }
+            assertArrayEquals(new int[]{64, 64, 64, 64}, deliveries);
+            // C++ emits -1 for ordinary requests; older payloads may omit the field (0).
+            // Only two polls have arrived when the next burst starts. Service/load is identical.
+            for (int round = 0; round < 6; round++) {
+                int firstPoll = (round % 2) * 2;
+                f.observeTaskSnapshot(workers.get(firstPoll), tasks.get(firstPoll), List.of());
+                f.observeTaskSnapshot(workers.get(firstPoll + 1), tasks.get(firstPoll + 1), List.of());
+                for (int i = 0; i < 128; i++) {
+                    var ctx = f.context(5_100_000L + round * 128L + i);
+                    ctx.data().setRequest(ctx.data().getRequest().toBuilder().seqLen(50_000L).build());
+                    assertTrue(f.scheduler.submit(ctx).get(2, TimeUnit.SECONDS).isSuccess());
+                    int w = workers.indexOf(ctx.snapshot().route().prefillEp());
+                    deliveries[w]++;
+                    tasks.get(w).add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                            .setRequestId(ctx.data().getRequestId()).setBatchId(wireBatchId).setInputLength(50_000L)
+                            .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build());
+                }
+                int expected = 96 + round * 32;
+                assertArrayEquals(new int[]{expected, expected, expected, expected}, deliveries,
+                        "poll order must not manufacture load: " + java.util.Arrays.toString(deliveries));
+                for (var worker : workers) {
+                    assertEquals(expected, worker.ownership.progress().outstandingRequests());
+                    assertEquals(expected * 50_000L, worker.ownership.tokenWorkload().pendingTokens());
+                }
+            }
+            var extra = f.context(5_200_000L);
+            var response = f.scheduler.submit(extra);
+            awaitCondition(() -> f.scheduler.getLatestQueueWaitSnapshot().containsKey("role"));
+            assertFalse(response.isDone(), "all four configured 256-request limits are full");
+            var workerTasks = tasks.getFirst();
+            f.observeTaskSnapshot(workers.getFirst(), workerTasks.subList(1, workerTasks.size()),
+                    List.of(workerTasks.getFirst()));
+            assertTrue(response.get(2, TimeUnit.SECONDS).isSuccess());
+            assertSame(workers.getFirst(), extra.snapshot().route().prefillEp());
+            for (var worker : workers) { assertEquals(256, worker.ownership.progress().outstandingRequests()); }
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {0, 6, 10})
+    void lowActualWaitingCanFeedRepeatedSixtyFourRequestPrefillBatches(int waiting) throws Exception {
+        try (var f = new Fixture(false, false, false, true, config -> {
+            config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+            config.getRouter().getRoles().getPrefill().getTokenBalance().setMaxPendingComputeTokens(2_000_000L);
+        })) {
+            when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 9));
+            var background = new java.util.ArrayList<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>();
+            for (int i = 0; i < waiting; i++) {
+                background.add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                        .setBatchId(-1L).setRequestId(4_000_000L + i).setInputLength(50_000L).setIsWaiting(true)
+                        .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED).build());
+            }
+            f.observeTaskSnapshot(f.a, background, List.of());
+            for (int round = 0; round < 4; round++) {
+                var responses = new java.util.ArrayList<java.util.concurrent.CompletableFuture<org.flexlb.dao.loadbalance.Response>>();
+                var running = new java.util.ArrayList<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>();
+                for (int i = 0; i < 64; i++) {
+                    long id = 4_100_000L + round * 64 + i;
+                    var ctx = f.context(id);
+                    ctx.data().setRequest(ctx.data().getRequest().toBuilder().seqLen(50_000L).cacheKeyBlockSize(5000L).build());
+                    responses.add(f.scheduler.submit(ctx));
+                    running.add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                            .setBatchId(-1L).setRequestId(id).setInputLength(50_000L)
+                            .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build());
+                }
+                // Known running requests release speculative waiting credit on each status round.
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+                while (responses.stream().anyMatch(response -> !response.isDone()) && System.nanoTime() < deadline) {
+                    Thread.sleep(20L);
+                    var feedback = new java.util.ArrayList<>(background);
+                    for (int i = 0; i < responses.size(); i++) {
+                        if (responses.get(i).isDone()) { feedback.add(running.get(i)); }
+                    }
+                    f.observeTaskSnapshot(f.a, feedback, List.of());
+                }
+                java.util.concurrent.CompletableFuture.allOf(responses.toArray(java.util.concurrent.CompletableFuture[]::new))
+                        .get(1, TimeUnit.SECONDS);
+                assertTrue(responses.stream().allMatch(r -> r.join().isSuccess()));
+                assertEquals(64 + waiting, f.a.ownership.progress().outstandingRequests());
+                assertEquals(0, f.b.ownership.progress().outstandingRequests(), "hot work keeps its cache leader");
+                var observed = new java.util.ArrayList<>(running);
+                observed.addAll(background);
+                f.observeTaskSnapshot(f.a, observed, List.of());
+                f.observeTaskSnapshot(f.a, background, running);
+                assertEquals(waiting, f.a.ownership.progress().outstandingRequests());
+            }
+        }
+    }
+
+    @Test
+    void decodeAllocationIsNotProofThatAnUnobservedPrefillRequestHasFinished() throws Exception {
+        try (var f = new Fixture(false, true, false, true)) {
+            var proof = new java.util.concurrent.CompletableFuture<org.flexlb.engine.grpc.EngineGrpcClient.CancelReply>();
+            when(f.grpc.cancelAsync(anyString(), anyInt(), any(), anyLong())).thenReturn(proof);
+            var ctx = f.context(870_000L);
+            assertTrue(f.scheduler.submit(ctx).get(2, TimeUnit.SECONDS).isSuccess());
+            var route = ctx.snapshot().route();
+            ctx.recordEngineEvidence(new ContextResult.EngineEvidence(route, route.decodeReservation(), RoleType.DECODE,
+                    ContextResult.EngineKind.ALLOCATED, 0L, null, System.currentTimeMillis()));
+            assertTrue(ctx.snapshot().engine().decodeAccepted());
+            f.scheduler.cancel(ctx, 0L, CancelReason.CLIENT_CANCELLED);
+            awaitCondition(() -> route.prefillEp().ownership.stats().locallyOwnedRequests() == 0);
+            assertEquals(1, route.prefillEp().ownership.progress().outstandingRequests());
+            proof.complete(org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            awaitCondition(() -> route.prefillEp().ownership.progress().outstandingRequests() == 0);
+        }
+    }
+
+    @Test
+    void localCancellationBeforeFirstEngineReportCannotRecycleInflightSlots() throws Exception {
+        try (var f = new Fixture(false, false, false, true,
+                config -> config.getDispatcher().setMaxInflightPerPrefillWorker(2))) {
+            when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 9));
+            var proof = new java.util.concurrent.CompletableFuture<org.flexlb.engine.grpc.EngineGrpcClient.CancelReply>();
+            when(f.grpc.cancelAsync(anyString(), anyInt(), any(), anyLong())).thenReturn(proof);
+            for (long id = 880_000L; id < 880_002L; id++) {
+                var ctx = f.context(id);
+                assertTrue(f.scheduler.submit(ctx).get(2, TimeUnit.SECONDS).isSuccess());
+                f.scheduler.cancel(ctx, 0L, CancelReason.CLIENT_CANCELLED);
+                awaitCondition(() -> f.a.ownership.stats().locallyOwnedRequests() == 0);
+            }
+            assertEquals(2, f.a.ownership.progress().outstandingRequests());
+            var next = f.context(880_002L);
+            var response = f.scheduler.submit(next);
+            awaitCondition(() -> f.scheduler.getLatestQueueWaitSnapshot().containsKey("role"));
+            assertFalse(response.isDone());
+            assertEquals(0, f.b.ownership.progress().outstandingRequests(), "cache first must not fall back to an idle peer");
+            proof.complete(org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.REQUEST_FENCED);
+            assertTrue(response.get(2, TimeUnit.SECONDS).isSuccess());
+            assertSame(f.a, next.snapshot().route().prefillEp());
+            assertEquals(1, f.a.ownership.progress().outstandingRequests());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"5000,1,10", "5000,4,10", "0,4,10"})
+    @org.junit.jupiter.api.Timeout(60)
+    void sustainedColdOverloadKeepsEveryWorkerServingWithinHardLimit(long duration, int pollTicks, long threshold) throws Exception {
+        try (var f = new Fixture(false, false, false, true, config -> {
+            config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+            balance.setMinPrefixHitPercent(5);
+            balance.setEnableWindow(false);
+            balance.setMaxPendingComputeTokens(2_000_000L);
+            balance.setEngineQueueOverloadDurationMs(duration);
+            balance.setEngineQueueAdmissionThreshold(threshold);
+        })) {
+            var workers = List.of(f.a, f.b, (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.3"),
+                    (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.4"));
+            var admitted = new java.util.concurrent.ConcurrentLinkedQueue<RequestContext>();
+            var responses = new java.util.ArrayList<java.util.concurrent.CompletableFuture<org.flexlb.dao.loadbalance.Response>>();
+            var active = new java.util.ArrayList<java.util.ArrayDeque<RequestContext>>();
+            var finished = new java.util.ArrayList<java.util.List<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>>();
+            for (int w = 0; w < 4; w++) { active.add(new java.util.ArrayDeque<>()); finished.add(new java.util.ArrayList<>()); }
+            int[] deliveries = new int[4], completions = new int[4], peaks = new int[4];
+            long id = 1_000_000L;
+            int tick = 0;
+            for (; tick < 1200; tick++) {
+                // Eight arrivals versus four completions per tick: twice fleet service capacity.
+                if (tick < 300) {
+                    for (int n = 0; n < 8; n++) {
+                        var ctx = f.context(id++);
+                        ctx.data().setRequest(ctx.data().getRequest().toBuilder().seqLen(50_000L).build());
+                        var response = f.scheduler.submit(ctx);
+                        response.thenAccept(value -> { if (value.isSuccess()) { admitted.add(ctx); } });
+                        responses.add(response);
+                    }
+                }
+                RequestContext next;
+                while ((next = admitted.poll()) != null) {
+                    int w = workers.indexOf(next.snapshot().route().prefillEp());
+                    assertTrue(next.snapshot().route().coldTokenBalance());
+                    active.get(w).add(next); deliveries[w]++;
+                }
+                for (int w = 0; w < 4; w++) {
+                    peaks[w] = Math.max(peaks[w], active.get(w).size());
+                    var done = active.get(w).poll();
+                    if (done != null) {
+                        completions[w]++;
+                        finished.get(w).add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                                .setBatchId(-1L).setRequestId(done.data().getRequestId()).setInputLength(50_000L)
+                                .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build());
+                    }
+                    // Two fast polls and two slower, offset polls; completions remain deltas until observed.
+                    if (w < 2 || tick % pollTicks == ((w - 2) * 2) % pollTicks) {
+                        var tasks = new java.util.ArrayList<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>();
+                        int position = 0;
+                        for (var ctx : active.get(w)) {
+                            boolean waiting = position++ > 0;
+                            tasks.add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                                    .setBatchId(-1L).setRequestId(ctx.data().getRequestId()).setInputLength(50_000L)
+                                    .setIsWaiting(waiting).setPhase(waiting
+                                            ? org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED
+                                            : org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build());
+                        }
+                        f.observeTaskSnapshot(workers.get(w), tasks, finished.get(w));
+                        finished.get(w).clear();
+                    }
+                    assertTrue(workers.get(w).ownership.progress().outstandingRequests() <= 256);
+                }
+                if (tick >= 25 && tick < 300 && tick % 25 == 24) {
+                    // Compare actual service while traffic is above capacity. Final assignment
+                    // totals include unequal tails already sent before traffic stops.
+                    for (int w = 0; w < 4; w++) {
+                        assertTrue(completions[w] >= tick - 4,
+                                "idle worker during sustained pressure at tick " + tick + ": " + java.util.Arrays.toString(completions));
+                    }
+                    assertTrue(java.util.Arrays.stream(completions).max().orElseThrow()
+                            - java.util.Arrays.stream(completions).min().orElseThrow() <= 4,
+                            "unbalanced service during pressure: " + java.util.Arrays.toString(completions));
+                }
+                if (tick >= 300 && java.util.Arrays.stream(completions).sum() == 2400) { break; }
+                Thread.sleep(25L);
+            }
+            assertEquals(2400, java.util.Arrays.stream(completions).sum());
+            assertTrue(responses.stream().allMatch(r -> r.isDone() && r.join().isSuccess()));
+            assertTrue(java.util.Arrays.stream(peaks).allMatch(peak -> peak <= 256),
+                    "reported and unobserved work must share the configured hard limit: " + java.util.Arrays.toString(peaks));
+            assertTrue(tick <= 600 + 256 + pollTicks,
+                    "drain must stay within fleet service time plus one bounded in-flight tail: " + tick);
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void coldRequestDoesNotWaitForWorkerCollectionWindow(boolean batch) throws Exception {
         try (var f = new Fixture(batch)) {
@@ -241,15 +489,15 @@ class ColdTokenDispatchTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({"false,false", "false,true", "true,false", "true,true"})
-    void lowEngineQueueDeliversColdAndCacheFirstHotRequestsDespiteLegacyLimits(boolean batch, boolean hot) throws Exception {
+    void lowEngineQueueDeliversColdAndCacheFirstHotRequestsDespiteTokenWaterline(boolean batch, boolean hot) throws Exception {
         try (var f = new Fixture(batch, false, false, true)) {
-            f.updateWaiting(f.a, 10L, 0L);
-            f.updateWaiting(f.b, 10L, 0L);
             var a = f.occupy(f.a, 90);
             var b = f.occupy(f.b, 91);
+            f.updateWaiting(f.a, 5L, 0L);
+            f.updateWaiting(f.b, 5L, 0L);
             if (hot) { when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 9)); }
             try {
-                // Three deliveries exceed the one-slot limit on at least one of the two workers.
+                // Both waiting credit and the hard inflight limit have room; tokens and KV cannot block these requests.
                 for (long id = 92; id <= 94; id++) {
                     var context = f.context(id);
                     var response = f.scheduler.submit(context).get(2, TimeUnit.SECONDS);
@@ -299,11 +547,13 @@ class ColdTokenDispatchTest {
             "true,0", "true,1", "true,2", "true,3", "true,4"})
     void fourWorkerConcurrentBurstPreservesColdBalanceAndCacheFirst(boolean batch, int cacheMode) throws Exception {
         try (var f = new Fixture(batch, false, false, true, config -> {
+            // This case isolates cache eligibility and token-score balancing, not feedback headroom.
+            config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(1000L);
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
             balance.setMinPrefixHitPercent(5);
             balance.setEnableWindow(false);
             balance.setMaxPendingComputeTokens(2_000_000L);
-            config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+            config.getDispatcher().setMaxInflightPerPrefillWorker(512);
         })) {
             var c = (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.3");
             var d = (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.4");
@@ -359,12 +609,63 @@ class ColdTokenDispatchTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void burstHonorsHardInflightLimitAndCompletionWakesExactlyOneRequest(boolean batch, boolean hot) throws Exception {
+        try (var f = new Fixture(batch, false, false, true,
+                config -> {
+                    config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+                    config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(256L);
+                })) {
+            var workers = List.of(f.a, f.b, (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.3"),
+                    (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.4"));
+            if (hot) { when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 9)); }
+            var requests = new java.util.ArrayList<RequestContext>();
+            var responses = new java.util.ArrayList<java.util.concurrent.CompletableFuture<org.flexlb.dao.loadbalance.Response>>();
+            for (int i = 0; i < 1280; i++) {
+                var request = f.context(900_000L + i);
+                requests.add(request);
+                responses.add(f.scheduler.submit(request));
+            }
+            int admitted = hot ? 256 : 1024;
+            awaitCondition(() -> responses.stream().filter(java.util.concurrent.CompletableFuture::isDone).count() >= admitted);
+            awaitCondition(() -> f.scheduler.getLatestQueueWaitSnapshot().containsKey("role"));
+            assertEquals(admitted, responses.stream().filter(java.util.concurrent.CompletableFuture::isDone).count());
+            for (var worker : workers) {
+                long expected = hot && worker != f.a ? 0 : 256;
+                assertEquals(expected, batch ? worker.ownership.progress().batchSlots() : worker.ownership.progress().outstandingRequests());
+            }
+            RequestContext completed = null;
+            for (int i = 0; i < requests.size(); i++) {
+                if (!responses.get(i).isDone()) {
+                    assertNull(requests.get(i).snapshot().delivery(), "waiting work must not own a delivery slot");
+                    continue;
+                }
+                assertTrue(responses.get(i).join().isSuccess());
+                if (hot) { assertSame(f.a, requests.get(i).snapshot().route().prefillEp()); }
+                completed = requests.get(i);
+            }
+            assertNotNull(completed);
+            var route = completed.snapshot().route();
+            var terminal = org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                    .setRequestId(route.requestId()).setInputLength(1000L)
+                    .setBatchId(completed.snapshot().delivery().identity().batchId())
+                    .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build();
+            f.observeTaskSnapshot(route.prefillEp(), List.of(), List.of(terminal));
+            awaitCondition(() -> responses.stream().filter(java.util.concurrent.CompletableFuture::isDone).count() >= admitted + 1);
+            assertEquals(admitted + 1, responses.stream().filter(java.util.concurrent.CompletableFuture::isDone).count());
+            assertEquals(256, batch ? route.prefillEp().ownership.progress().batchSlots()
+                    : route.prefillEp().ownership.progress().outstandingRequests());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({"false,false,false", "true,false,false", "false,true,false", "true,true,false",
             "false,false,true", "true,false,true"})
     void engineBacklogWithoutLocalOwnersMustNotAttractTheColdBurst(boolean batch, boolean fullyOwned, boolean migrating) throws Exception {
         try (var f = new Fixture(batch, false, false, true, config -> {
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
             balance.setMinPrefixHitPercent(5);
+            balance.setEngineQueueAdmissionThreshold(32L); // Equal token scores with room for another burst.
             balance.setMaxPendingComputeTokens(2_000_000L);
             var rescue = new RoutingConfig.HotspotRescueConfig();
             rescue.setMaxIdlePendingTokens(64768);
@@ -518,18 +819,114 @@ class ColdTokenDispatchTest {
             var policy = ReflectionTestUtils.getField(f.a, "engineQueueAdmission");
             ReflectionTestUtils.setField(policy, "aboveSinceMs", System.nanoTime() / 1_000_000L - 5001L);
             f.updateWaitingTasks(f.a, 1000, false);
-            for (var worker : workers.subList(1, 4)) { f.updateWaitingTasks(worker, 50, false); }
+            for (var worker : workers.subList(1, 4)) { f.updateWaitingTasks(worker, 0, false); }
             assertTrue(f.a.engineQueueCongested());
+            var running = new java.util.HashMap<PrefillEndpoint, java.util.List<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>>();
             int[] counts = new int[4];
             for (int i = 0; i < 100; i++) {
                 var ctx = f.context(800_000L + i);
                 assertTrue(f.scheduler.submit(ctx).get(2, TimeUnit.SECONDS).isSuccess());
-                counts[workers.indexOf(ctx.snapshot().route().prefillEp())]++;
+                var worker = ctx.snapshot().route().prefillEp();
+                counts[workers.indexOf(worker)]++;
+                var tasks = running.computeIfAbsent(worker, ignored -> new java.util.ArrayList<>());
+                tasks.add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder().setRequestId(ctx.data().getRequestId())
+                        .setInputLength(1000L).setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build());
+                f.observeTaskSnapshot(worker, tasks, List.of());
             }
             assertEquals(0, counts[0]);
             assertTrue(java.util.Arrays.stream(counts, 1, 4).max().orElseThrow()
                     - java.util.Arrays.stream(counts, 1, 4).min().orElseThrow() <= 1);
         }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(longs = {0L, 95_000L})
+    void delayedEngineFeedbackCannotAdmitAnEntireHotBacklogAgainstTheSameQueueSnapshot(long reportedPrefix) throws Exception {
+        try (var f = new Fixture(false, false, false, true, config -> {
+            config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+            config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(30L);
+            config.queueScheduler().setQueueTimeoutMs(120_000L);
+            config.getRequestLifecycle().getRequest().setTimeoutMs(100_000L);
+            config.getRouter().getRoles().getPrefill().getTokenBalance().setMaxPendingComputeTokens(200_000L);
+        })) {
+            when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 19));
+            f.updateWaitingTasks(f.a, 0, false);
+            var contexts = new java.util.ArrayList<RequestContext>();
+            var responses = new java.util.ArrayList<java.util.concurrent.CompletableFuture<org.flexlb.dao.loadbalance.Response>>();
+            for (int i = 0; i < 80; i++) {
+                var ctx = f.context(7_500_000L + i);
+                setCachedRequest(ctx, 100L);
+                contexts.add(ctx);
+                responses.add(f.scheduler.submit(ctx));
+            }
+            verify(f.router, timeout(1000).atLeastOnce()).select(same(contexts.getLast()), nullable(String.class));
+            awaitCondition(() -> responses.stream().filter(java.util.concurrent.CompletableFuture::isDone).count() >= 31);
+            Thread.sleep(20L); // One transport-delay window with no new Engine evidence.
+            assertEquals(31L, responses.stream().filter(java.util.concurrent.CompletableFuture::isDone).count(),
+                    "waiting=0 must not be reused by all 80 hot requests before the next status");
+            var observed = new java.util.ArrayList<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>();
+            while (responses.stream().anyMatch(response -> !response.isDone())) {
+                int previouslyObserved = observed.size();
+                observed.clear();
+                for (int i = 0; i < responses.size(); i++) {
+                    if (!responses.get(i).isDone()) { continue; }
+                    assertTrue(responses.get(i).get().isSuccess());
+                    observed.add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                            .setRequestId(contexts.get(i).data().getRequestId()).setBatchId(-1L)
+                            .setInputLength(100_000L).setPrefixLength(reportedPrefix)
+                            .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build());
+                }
+                assertTrue(observed.size() > previouslyObserved);
+                int count = observed.size();
+                f.observeTaskSnapshot(f.a, observed, List.of());
+                // Completion can race the snapshot scan and finish the entire backlog.
+                if (count < responses.size()) {
+                    awaitCondition(() -> responses.stream().filter(java.util.concurrent.CompletableFuture::isDone).count() > count);
+                }
+            }
+            assertEquals(80, f.a.ownership.progress().outstandingRequests(),
+                    "observed running work must not become a 31-request concurrency cap");
+        }
+    }
+
+    @Test
+    void engineWaitingRecoveryWakesReservedWorkEvenWhenNewAdmissionCreditIsFull() throws Exception {
+        try (var f = new Fixture(false, false, false, true, config -> {
+            config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+            balance.setMaxPendingComputeTokens(200_000L);
+            balance.setEngineQueueAdmissionThreshold(30L);
+        })) {
+            var reservations = new java.util.ArrayList<PrefillState.RouteReservation>();
+            try {
+                for (int i = 0; i < 31; i++) {
+                    var ctx = f.context(7_600_000L + i);
+                    var route = SchedulingTestConfig.createRoute(ctx, null, null, null, f.a, null, null,
+                            System.currentTimeMillis());
+                    var result = f.a.ownership.reserveUnqueuedRoute(route, 1L, 256L);
+                    assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
+                    reservations.add(result.reservation());
+                }
+                f.updateWaitingTasks(f.a, 31, false);
+                assertTrue(f.a.engineQueueDispatchBlocked());
+                var running = new java.util.ArrayList<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>();
+                for (int i = 0; i < 31; i++) {
+                    running.add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                            .setRequestId(1000L + i).setInputLength(1000L)
+                            .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build());
+                }
+                var change = (org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange.Prefill)
+                        f.observeTaskSnapshot(f.a, running, List.of());
+                assertTrue(f.a.engineQueueAdmissionBlocked(), "new requests still have no unobserved credit");
+                assertFalse(f.a.engineQueueDispatchBlocked(), "already reserved work may dispatch");
+                assertTrue(change.reconciliation().capacityReleased(), "dispatch recovery must still notify the worker");
+            } finally { for (var reservation : reservations) { f.a.release(reservation, null); } }
+        }
+    }
+
+    private static void setCachedRequest(RequestContext ctx, long keyBase) {
+        ctx.data().setRequest(ctx.data().getRequest().toBuilder().seqLen(100_000L).cacheKeyBlockSize(5000L)
+                .blockCacheKeys(java.util.stream.LongStream.range(keyBase, keyBase + 20).boxed().toList()).build());
     }
 
     private static final class Fixture implements AutoCloseable {
@@ -543,6 +940,7 @@ class ColdTokenDispatchTest {
         final QueuedRequestScheduler scheduler;
         final SchedulerRuntime runtime;
         final CacheAwareService cache = mock(CacheAwareService.class);
+        final org.flexlb.engine.grpc.EngineGrpcClient grpc = mock(org.flexlb.engine.grpc.EngineGrpcClient.class);
 
         Fixture() { this(false); }
 
@@ -565,6 +963,7 @@ class ColdTokenDispatchTest {
             config.queueScheduler().getDecision().setMaxCollectionWaitMs(60_000L);
             config.getRouter().getRoles().getPrefill().setTokenBalance(new RoutingConfig.TokenBalanceConfig());
             if (engineAdmissionTest) {
+                config.getDispatcher().setMaxInflightPerPrefillWorker(128);
                 config.queueScheduler().getDecision().setType(org.flexlb.config.DecisionPolicyConfig.Type.SINGLE);
                 config.getRouter().getRoles().getPrefill().getTokenBalance().setMaxPendingComputeTokens(1L);
             } else {
@@ -574,7 +973,6 @@ class ColdTokenDispatchTest {
             customize.accept(config);
             var service = SchedulingTestConfig.configService(config);
             var reporter = mock(DeliveryMetricsReporter.class);
-            var grpc = mock(org.flexlb.engine.grpc.EngineGrpcClient.class);
             when(grpc.batchEnqueueAsync(anyString(), anyInt(), any())).thenAnswer(call ->
                     java.util.concurrent.CompletableFuture.completedFuture(LinearDeliveryFixture.ack(call.getArgument(2))));
             when(grpc.cancelAsync(anyString(), anyInt(), any(), anyLong())).thenReturn(
@@ -639,7 +1037,7 @@ class ColdTokenDispatchTest {
             } finally { worker.lock.unlock(); }
         }
 
-        void observeTaskSnapshot(PrefillEndpoint endpoint,
+        org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange observeTaskSnapshot(PrefillEndpoint endpoint,
                 List<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB> running,
                 List<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB> finished) throws Exception {
             var worker = endpoint.getStatus();
@@ -655,6 +1053,7 @@ class ColdTokenDispatchTest {
             try { change = endpoint.applyPreparedStatus(worker, worker.prepareNewStatus(observation)); }
             finally { worker.lock.unlock(); }
             endpoint.publishStatus(change);
+            return change;
         }
 
         void updateWaitingTasks(PrefillEndpoint endpoint, int waiting, boolean heartbeat) throws Exception {
