@@ -9,11 +9,14 @@ Tests:
 
 import argparse
 import asyncio
+import base64
 import os
 import sys
 import time
 import unittest
 from unittest.mock import MagicMock, patch
+
+import requests
 
 from rtp_llm.test.perf_test.batch_decode_test import _run_decode, _run_prefill
 from rtp_llm.test.perf_test.batch_perf_impl import (
@@ -71,10 +74,10 @@ class TestPrepareConfig(unittest.TestCase):
     def test_token_stream_keeps_all_samples_and_lowercase_done(self):
         response = MagicMock()
         response.iter_lines.return_value = [
-            'data:{"finished":false,"aux_info":{"output_len":1,"cost_time":10,"first_token_cost_time":10}}',
-            'data:{"finished":false,"aux_info":{"output_len":2,"cost_time":14,"first_token_cost_time":10}}',
-            'data:{"finished":true,"aux_info":{"output_len":3,"cost_time":23,"first_token_cost_time":10}}',
-            "data:[done]",
+            b'data:{"finished":false,"aux_info":{"output_len":1,"cost_time":10,"first_token_cost_time":10}}',
+            b'data:{"finished":false,"aux_info":{"output_len":2,"cost_time":14,"first_token_cost_time":10}}',
+            b'data:{"finished":true,"aux_info":{"output_len":3,"cost_time":23,"first_token_cost_time":10}}',
+            b"data:[done]",
         ]
         result = _read_token_stream(response, 3)
         self.assertTrue(result.success)
@@ -87,17 +90,17 @@ class TestPrepareConfig(unittest.TestCase):
     def test_token_stream_missing_tokens_fails(self):
         response = MagicMock()
         response.iter_lines.return_value = [
-            'data:{"finished":true,"aux_info":{"output_len":2}}',
-            "data:[done]",
+            b'data:{"finished":true,"aux_info":{"output_len":2}}',
+            b"data:[done]",
         ]
         self.assertFalse(_read_token_stream(response, 3).success)
 
     def test_cpp_http_aux_list_preserves_wire_and_excludes_first_token(self):
         response = MagicMock()
         response.iter_lines.return_value = [
-            'data:{"finished":false,"aux_info":[{"output_len":1,"cost_time":1000}]}',
-            'data:{"finished":true,"aux_info":[{"output_len":2,"cost_time":1009}]}',
-            "data:[done]",
+            b'data:{"finished":false,"aux_info":[{"output_len":1,"cost_time":1000}]}',
+            b'data:{"finished":true,"aux_info":[{"output_len":2,"cost_time":1009}]}',
+            b"data:[done]",
         ]
         result = _read_token_stream(response, 2)
         self.assertTrue(result.success)
@@ -111,9 +114,9 @@ class TestPrepareConfig(unittest.TestCase):
         response = MagicMock()
         response.status_code = 200
         response.iter_lines.return_value = [
-            'data:{"finished":false,"aux_info":[{"output_len":1,"cost_time":10}]}',
-            'data:{"finished":true,"aux_info":[{"output_len":2,"cost_time":20}]}',
-            "data:[done]",
+            b'data:{"finished":false,"aux_info":[{"output_len":1,"cost_time":10}]}',
+            b'data:{"finished":true,"aux_info":[{"output_len":2,"cost_time":20}]}',
+            b"data:[done]",
         ]
         with patch.dict(os.environ, {"PERF_DETAILED_LATENCIES": "1"}):
             with patch("requests.post", return_value=response) as post:
@@ -125,6 +128,35 @@ class TestPrepareConfig(unittest.TestCase):
             post.call_args.args[0], "http://127.0.0.1:20014/inference_internal"
         )
         self.assertEqual(result.raw_measurement["owner_rank"], 1)
+
+    def test_sse_byte_framing_keeps_unicode_line_separators_in_json(self):
+        response = requests.Response()
+        wire = (
+            'data:{"finished":false,"response":"a\u0085b\u2028c",'
+            '"aux_info":[{"output_len":1,"cost_time":10}]}\n\n'
+            'data:{"finished":true,"aux_info":[{"output_len":2,"cost_time":20}]}\n\n'
+            'data:[done]\n\n'
+        ).encode("utf-8")
+        # Exercise requests' actual iter_lines, including byte-wise chunks.
+        response.iter_content = MagicMock(return_value=(bytes([b]) for b in wire))
+        result = _read_token_stream(response, 2)
+        self.assertTrue(result.success)
+        self.assertEqual(len(result.raw_measurement["events"]), 2)
+
+    def test_invalid_sse_retains_exact_bad_line_and_previous_token(self):
+        response = MagicMock()
+        bad = b'data:{"response":"bad\x01text","finished":true}'
+        response.iter_lines.return_value = [
+            b'data:{"finished":false,"aux_info":[{"output_len":1,"cost_time":10}]}',
+            bad,
+            b"data:[done]",
+        ]
+        result = _read_token_stream(response, 2)
+        self.assertFalse(result.success)
+        self.assertEqual(len(result.raw_measurement["events"]), 1)
+        error = result.raw_measurement["parse_error"]
+        self.assertEqual(error["type"], "JSONDecodeError")
+        self.assertEqual(base64.b64decode(error["line_base64"]), bad)
 
     def test_grid_mode_explicit_bs(self):
         with patch.object(sys, "argv", ["prog", "--batch_size", "1,4,8"]):

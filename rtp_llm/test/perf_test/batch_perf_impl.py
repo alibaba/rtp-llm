@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import os
@@ -20,14 +21,29 @@ def _read_token_stream(response, expected_tokens: int) -> ResponseInfo:
     """Keep engine cumulative times and client arrival times without trimming."""
     events = []
     final = {}
-    response.encoding = "utf-8"
-    for line in response.iter_lines(chunk_size=1, decode_unicode=True):
-        if not line or not line.startswith("data:"):
+    parse_error = None
+    # SSE framing is LF-delimited bytes. Unicode splitlines also treats valid
+    # characters inside generated JSON strings (for example U+0085) as lines.
+    for line in response.iter_lines(
+        chunk_size=1, decode_unicode=False, delimiter=b"\n"
+    ):
+        if not line or not line.startswith(b"data:"):
             continue
+        arrival_ns = time.monotonic_ns()
         payload = line[5:].strip()
-        if payload.lower() == "[done]":
+        if payload.lower() == b"[done]":
             break
-        final = json.loads(payload)
+        try:
+            final = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            parse_error = {
+                "type": type(error).__name__,
+                "message": str(error),
+                "arrival_ns": arrival_ns,
+                "line_base64": base64.b64encode(line).decode("ascii"),
+            }
+            logging.warning("[PERF_STREAM_PARSE_ERROR] %s", str(error))
+            break
         aux = final.get("aux_info", {})
         if isinstance(aux, list):
             if len(aux) != 1:
@@ -58,7 +74,8 @@ def _read_token_stream(response, expected_tokens: int) -> ResponseInfo:
             first_boundary_known = False
         final["aux_info"] = aux
     ok = (
-        bool(final.get("finished"))
+        parse_error is None
+        and bool(final.get("finished"))
         and int(final.get("aux_info", {}).get("output_len", 0)) == expected_tokens
         and first_boundary_known
     )
@@ -69,6 +86,7 @@ def _read_token_stream(response, expected_tokens: int) -> ResponseInfo:
         "metric_response": final,
         "success": ok,
         "first_boundary_known": first_boundary_known,
+        "parse_error": parse_error,
     }
     return result
 
