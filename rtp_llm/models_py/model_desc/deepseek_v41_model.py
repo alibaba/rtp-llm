@@ -402,9 +402,9 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 lean_twin = collective_torch.get_cpu_twin(self._dp_group)
             try:
                 if lean_twin is not None:
-                    signature = torch.tensor(
-                        [status, *digest], dtype=torch.uint8
-                    ).view(1, 33)
+                    signature = torch.tensor([status, *digest], dtype=torch.uint8).view(
+                        1, 33
+                    )
                     peers = torch.empty((group_size, 33), dtype=torch.uint8)
                     work = torch.distributed.all_gather_into_tensor(
                         peers, signature, group=lean_twin, async_op=True
@@ -460,7 +460,9 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 if rejected or not same_schedule:
                     if error is not None:
                         raise error
-                    raise RuntimeError("V4.1 DP peer rejected request or model schedule")
+                    raise RuntimeError(
+                        "V4.1 DP peer rejected request or model schedule"
+                    )
             if error is not None:
                 if native_dispatch:
                     if recoverable:
@@ -559,7 +561,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     args.dp_size,
                     args.ep_size,
                     args.world_size,
-                ) == (1, 1, 8, 8, 8)
+                )
+                == (1, 1, 8, 8, 8)
                 and self._gen_num_per_cycle == 0
             )
             if (
@@ -699,6 +702,13 @@ class DeepSeekV41Model(DeepSeekV4Model):
         for layer, index in self._engram_layers:
             layer.engram_hashes = hashes[:, index].contiguous()
             layer.engram_token_mask = token_mask
+        # R43/A: issue the host-table gathers now (chunk prep) on the side
+        # stream so the ~1ms PCIe reads overlap this chunk's earlier layers.
+        from rtp_llm.models_py.modules.dsv4.engram import engram_prefetch_enabled
+
+        if engram_prefetch_enabled():
+            for layer, _ in self._engram_layers:
+                layer.engram.prefetch_rows(layer.engram_hashes, self._weight_device())
 
     def _clear_forward_state(self):
         if self.v4 is None:
@@ -706,6 +716,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
         for layer in self.v4.layers:
             layer.engram_hashes = None
             layer.engram_token_mask = None
+            if getattr(layer, "engram", None) is not None:
+                layer.engram._prefetched_rows = None
             layer.attn_hc.pre_mix_out = None
             layer.ffn_hc.pre_mix_out = None
         clear_prefill_meta_shared_fp8(self.v4)

@@ -55,10 +55,13 @@ _SPV2_VERIFY_STATE = {
 
 
 def sparse_prefill_v2_mode() -> str:
-    # R24 adoption: absent env selects "qt64" (1-ULP flip class, median
-    # −52.7 ms 3/3 in R23); "s2" (R21 byte-exact) and "0" (legacy) are the
-    # escape hatches; unrecognized values fail safe to "0".
-    mode = os.environ.get(SPARSE_PREFILL_V2_FLAG, "qt64")
+    # R24 adoption: "qt64" (1-ULP flip class, median −52.7 ms 3/3 in R23).
+    # R44 adoption: absent env selects "h32" (TILE=32/HB=32/w8, 2 CTAs/SM —
+    # R41: −52.8 ms median, 3/3 pairs, 64/64 tokens identical, op-level rel_l2
+    # ~1.2e-5 vs the legacy kernel, closer than qt64's own qualification).
+    # Escapes: "qt64" (the R24 default) and "s2"/"0" (legacy); unrecognized
+    # values fail safe to "0".
+    mode = os.environ.get(SPARSE_PREFILL_V2_FLAG, "h32")
     return mode if mode in _MODES else "0"
 
 

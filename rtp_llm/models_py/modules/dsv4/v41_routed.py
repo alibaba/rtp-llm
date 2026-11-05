@@ -50,6 +50,14 @@ def _fp4_bytes(weight):
     raise ValueError("V4.1 FP4 weights require packed E2M1 bytes")
 
 
+def _f2_capture_hook(values, scales, valid, route_weights):
+    """R32/F2 capture boundary for the fused gate/up epilogue. The MoE capture
+    probe (capture_moe.py) monkey-patches this symbol during --variant fused
+    warmup to record routed_values/routed_scales (the fused path has no
+    separate gate/up tensor). No-op in production."""
+    return None
+
+
 def _fp8_fp4_eager(values, scales, weight, weight_scales):
     """CPU grouped-equation oracle, bounded to 32x128 output tiles."""
     rows, dim = values.shape
@@ -134,6 +142,8 @@ class V41RoutedExperts(nn.Module):
         self._silu_table = None
         self._warmed = set()
         self._packed_s13 = self._packed_s2 = None
+        self._f2_fused_fn = None
+        self._epi_v2 = False
         if backend == "eager":
             if self.device.type != "cpu":
                 raise ValueError("V4.1 eager routed experts are CPU diagnostics only")
@@ -157,6 +167,58 @@ class V41RoutedExperts(nn.Module):
 
             self._contiguous = m_grouped_fp8_fp4_gemm_nt_contiguous
             self._masked = m_grouped_fp8_fp4_gemm_nt_masked
+            from rtp_llm.models_py.modules.dsv4._v41_f2_gateup import (
+                f2_gateup_epilogue_enabled,
+                routed_gateup_epi_v2_enabled,
+            )
+
+            # R32/F2 + R39: the fused gate/up+SwiGLU+quant entry requires the
+            # rebuilt deep_gemm _C dispatcher; interleave ONLY when it is
+            # present (the unfused path expects the gate|up half layout).
+            self._f2_fused_fn = None
+            self._epi_v2 = routed_gateup_epi_v2_enabled()
+            if f2_gateup_epilogue_enabled() or self._epi_v2:
+                import deep_gemm
+
+                self._f2_fused_fn = getattr(
+                    deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous_swiglu_quant", None
+                )
+                if self._f2_fused_fn is None:
+                    print(
+                        "[F2GATEUP] fused entry missing from deep_gemm — "
+                        "keeping the unfused path (interleave skipped)",
+                        flush=True,
+                    )
+            if self._f2_fused_fn is not None and self._epi_v2:
+                # R39: the layout-build constants are created LAZILY on first
+                # use (init can run under a meta/fake-tensor mode; buffers
+                # created there would stay meta). Ring of 4 pinned+device
+                # slots with per-slot events: a slot's pinned buffer is
+                # overwritten only after its H2D event completed (query-guard).
+                self._v2_ring = None
+                self._v2_ring_idx = 0
+            if self._f2_fused_fn is not None:
+                # Interleave gate/up output channels so the fused epilogue
+                # sees (gate_j, up_j) pairs adjacent. Byte-exact: each output
+                # channel's value is identical, just reordered.
+                gate_w, up_w = (
+                    self.w13[:, : self.inter_dim],
+                    self.w13[:, self.inter_dim :],
+                )
+                self.w13 = (
+                    torch.stack([gate_w, up_w], dim=2)
+                    .reshape(self.experts, 2 * self.inter_dim, self.w13.shape[-1])
+                    .contiguous()
+                )
+                gate_s, up_s = (
+                    self.s13[:, : self.inter_dim],
+                    self.s13[:, self.inter_dim :],
+                )
+                self.s13 = (
+                    torch.stack([gate_s, up_s], dim=2)
+                    .reshape(self.experts, 2 * self.inter_dim, self.s13.shape[-1])
+                    .contiguous()
+                )
             self._packed_s13 = pack_group32_scales(self.s13, column_major=True)
             self._packed_s2 = pack_group32_scales(self.s2, column_major=True)
             if self.routed_lut_enabled and self.swiglu_limit <= 1000000.0:
@@ -257,18 +319,96 @@ class V41RoutedExperts(nn.Module):
                 scales = input_scales
             if not _owned_padding:
                 scales = torch.where(active[..., None], scales, 0)
-            gate_up = gemm(values, scales, self.w13, self.s13, self._packed_s13)
-            gate, up = gate_up.chunk(2, dim=-1)
-            values, scales = quantize_swiglu(
-                gate,
-                up,
-                valid,
-                route_weights=route_weights,
-                clamp_limit=self.swiglu_limit,
-                backend=quant_backend,
-                allow_contiguous=self.prefill_swiglu_fuse,
-                silu_table=self._silu_table,
-            )
+            if self._f2_fused_fn is not None and input_scales is not None:
+                # R32/F2: fused gate/up GEMM epilogue produces the quantized
+                # down-GEMM input directly (no BF16 roundtrip, no separate
+                # quantize pass). w13 was interleaved at init so (gate_j,up_j)
+                # are adjacent GEMM output channels.
+                #
+                # The layout mirrors the unfused contiguous path: per-row
+                # expert id from rows_per_expert (the same schedule).
+                mode, rows_per_expert = key[0], key[1] if len(key) > 1 else None
+                if mode != "contiguous" or rows_per_expert is None:
+                    raise ValueError("R32/F2 fused path requires the contiguous layout")
+                rows = x.shape[0]
+                if self._epi_v2:
+                    # R39: cached arange + pinned-ring async H2D (no pageable
+                    # sync). Created lazily on first use (init can run under a
+                    # meta/fake-tensor mode). A slot is reused only after its
+                    # H2D event completed (query-guard).
+                    if self._v2_ring is None:
+                        self._v2_arange = torch.arange(
+                            self.experts, dtype=torch.int32, device=self.device
+                        )
+                        self._v2_ring = [
+                            (
+                                torch.empty(
+                                    self.experts, dtype=torch.int64, pin_memory=True
+                                ),
+                                torch.empty(
+                                    self.experts, dtype=torch.int64, device=self.device
+                                ),
+                                torch.cuda.Event(),
+                            )
+                            for _ in range(4)
+                        ]
+                    pin, dev_buf, ev = self._v2_ring[self._v2_ring_idx]
+                    if not ev.query():
+                        ev.synchronize()
+                    pin.copy_(torch.tensor(rows_per_expert, dtype=torch.int64))
+                    dev_buf.copy_(pin, non_blocking=True)
+                    ev.record()
+                    self._v2_ring_idx = (self._v2_ring_idx + 1) % len(self._v2_ring)
+                    expert_layout = torch.repeat_interleave(
+                        self._v2_arange, dev_buf, output_size=rows
+                    )
+                else:
+                    expert_layout = torch.repeat_interleave(
+                        torch.arange(
+                            self.experts, dtype=torch.int32, device=self.device
+                        ),
+                        torch.tensor(
+                            rows_per_expert, dtype=torch.int64, device=self.device
+                        ),
+                        output_size=rows,
+                    )
+                out_fp8 = torch.empty(
+                    (rows, self.inter_dim),
+                    dtype=torch.float8_e4m3fn,
+                    device=self.device,
+                )
+                out_sf = torch.empty(
+                    (rows, self.inter_dim // 32), dtype=torch.uint8, device=self.device
+                )
+                self._f2_fused_fn(
+                    (values, pack_group32_scales(scales, column_major=True)),
+                    (self.w13.view(torch.int8), self._packed_s13),
+                    valid,
+                    route_weights,
+                    self._silu_table.values,
+                    out_fp8,
+                    out_sf,
+                    expert_layout,
+                    "nk",
+                    self.swiglu_limit,
+                )
+                values, scales = out_fp8, out_sf
+                # Let the MoE capture probe (capture_moe) record the fused
+                # boundaries (routed_values/routed_scales); no-op in production.
+                _f2_capture_hook(out_fp8, out_sf, valid, route_weights)
+            else:
+                gate_up = gemm(values, scales, self.w13, self.s13, self._packed_s13)
+                gate, up = gate_up.chunk(2, dim=-1)
+                values, scales = quantize_swiglu(
+                    gate,
+                    up,
+                    valid,
+                    route_weights=route_weights,
+                    clamp_limit=self.swiglu_limit,
+                    backend=quant_backend,
+                    allow_contiguous=self.prefill_swiglu_fuse,
+                    silu_table=self._silu_table,
+                )
             scales = scales.reshape(*valid.shape, self.inter_dim // 32)
             result = gemm(values, scales, self.w2, self.s2, self._packed_s2)
             if _mask_result:

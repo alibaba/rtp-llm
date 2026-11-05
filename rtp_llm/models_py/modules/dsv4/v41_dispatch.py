@@ -1,12 +1,14 @@
 """Recipe-bound V4.1 EP payloads: E4M3, packed UE8M0, FP32 weights and IDs."""
 
-from dataclasses import dataclass
 import os
+import sys
+from dataclasses import dataclass
 
 import torch
 
 _E3_FLAG = "DSV41_E3_DISPATCH_LEAN"
 _E3_ANNOUNCED = False
+_UNPACK_FUSE_ANNOUNCED = False
 
 
 def e3_dispatch_lean_enabled() -> bool:
@@ -17,6 +19,15 @@ def e3_dispatch_lean_enabled() -> bool:
     return os.environ.get(_E3_FLAG, "0") == "1"
 
 
+def _unpack_fuse_enabled() -> bool:
+    """R34: fused payload unpack (one launch replacing four .contiguous()
+    copies). Byte-exact (pure data movement). R34 adopted default 1 (5/6 clean
+    interleaved pairs, median delta -27.4 ms; the win is the host-side torch
+    dispatch overhead of 4 calls -> 1). ``=0`` is the escape hatch. The kernel
+    module is imported lazily so the Triton import stays off the escape path."""
+    return os.environ.get("DSV41_DISPATCH_UNPACK_FUSE", "1") == "1"
+
+
 def _announce_e3(where: str) -> None:
     global _E3_ANNOUNCED
     if not _E3_ANNOUNCED:
@@ -24,6 +35,7 @@ def _announce_e3(where: str) -> None:
         import sys
 
         print(f"[E3LEAN] dispatch-lean engaged ({where})", file=sys.stderr, flush=True)
+
 
 from rtp_llm.models_py.modules.dsv4.v41_expert import (
     V41_EXPERT_RECIPE,
@@ -130,6 +142,32 @@ class V41DispatchLayout:
         through stream completion. Peer layout admission precedes this method;
         row geometry alone cannot establish the sender's numerical recipe.
         """
+        # R34: fused unpack — one launch replacing the four .contiguous() D2D
+        # copies below. Byte-exact (pure data movement). Default off.
+        if (
+            _unpack_fuse_enabled()
+            and payload.device.type == "cuda"
+            and payload.ndim == 2
+            and payload.shape[1] == self.payload_bytes
+            and payload.dtype == torch.uint8
+            and payload.is_contiguous()
+        ):
+            from ._v41_dispatch_unpack_triton import fused_unpack
+
+            values, packed, weights, indices = fused_unpack(payload, self)
+            global _UNPACK_FUSE_ANNOUNCED
+            if not _UNPACK_FUSE_ANNOUNCED:
+                _UNPACK_FUSE_ANNOUNCED = True
+                print(
+                    "[DISPATCHUNPACKFUSE] engaged (DSV41_DISPATCH_UNPACK_FUSE=1)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            valid_rows = torch.ones(
+                payload.shape[0], dtype=torch.bool, device=payload.device
+            )
+            _validate_routes(weights, indices, valid_rows, self.experts)
+            return values, packed, weights, indices
         values, packed, weights, indices = self.views(payload)
         valid_rows = torch.ones(
             payload.shape[0], dtype=torch.bool, device=payload.device
@@ -143,7 +181,9 @@ class V41DispatchLayout:
             _announce_e3("unpack")
             return (
                 values,
-                packed.contiguous().view(torch.uint8)[:, : self.hidden // 32].contiguous(),
+                packed.contiguous()
+                .view(torch.uint8)[:, : self.hidden // 32]
+                .contiguous(),
                 weights.contiguous(),
                 indices.contiguous(),
             )

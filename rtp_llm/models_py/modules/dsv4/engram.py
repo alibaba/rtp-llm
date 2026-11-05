@@ -25,6 +25,7 @@ import math
 import mmap
 import os
 import shutil
+import sys
 import uuid
 import weakref
 from pathlib import Path
@@ -34,6 +35,39 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+# R43 item A: DSV41_ENGRAM_PREFETCH (default "0"). Issue the host-table
+# embed_tokens gather on a side stream at chunk-prep time (the per-chunk
+# hashes are computed there), so the ~1ms PCIe gather overlaps the chunk's
+# earlier layers instead of stalling the engram layer's critical path. The
+# gather is a pure function of (hashes, static table) => byte-identical
+# values; only WHEN it runs changes. Engagement marker [ENGRAMPREFETCH].
+ENGRAM_PREFETCH_FLAG = "DSV41_ENGRAM_PREFETCH"
+_ENGRAM_PREFETCH_ANNOUNCED = [False]
+_ENGRAM_PREFETCH_STREAM = {}
+
+
+def engram_prefetch_enabled() -> bool:
+    if os.environ.get(ENGRAM_PREFETCH_FLAG, "0") == "1":
+        if not _ENGRAM_PREFETCH_ANNOUNCED[0]:
+            _ENGRAM_PREFETCH_ANNOUNCED[0] = True
+            print(
+                f"[ENGRAMPREFETCH] engaged ({ENGRAM_PREFETCH_FLAG}=1): host-table "
+                "gather issued on a side stream at chunk prep",
+                file=sys.stderr,
+                flush=True,
+            )
+        return True
+    return False
+
+
+def _engram_prefetch_stream(device):
+    stream = _ENGRAM_PREFETCH_STREAM.get(device)
+    if stream is None:
+        stream = torch.cuda.Stream(device)
+        _ENGRAM_PREFETCH_STREAM[device] = stream
+    return stream
+
 
 logger = logging.getLogger(__name__)
 DEAD_ID = -1
@@ -793,11 +827,45 @@ class Engram(nn.Module):
         )
 
     def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None):
-        rows = self.embed_tokens(hash_ids, hidden.device).flatten(-2)
+        rows = self._rows_for(hidden, hash_ids).flatten(-2)
         kv = self.wkv(rows)
         return gated_engram_residual(
             hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out
         )
+
+    def _rows_for(self, hidden, hash_ids):
+        """R43/A: use the chunk-prep prefetched gather when present (identical
+        values — pure function of the hashes + the static table); else gather
+        inline. The prefetched buffer is consumed once and dropped."""
+        pre = getattr(self, "_prefetched_rows", None)
+        if pre is not None:
+            self._prefetched_rows = None
+            rows, event = pre
+            if rows.shape[0] == hash_ids.shape[0]:
+                current = torch.cuda.current_stream(hidden.device)
+                current.wait_event(event)
+                rows.record_stream(current)
+                return rows
+        return self.embed_tokens(hash_ids, hidden.device)
+
+    def prefetch_rows(self, hash_ids, device):
+        """R43/A: issue the host-table gather on the side stream. Called at
+        chunk prep (hashes already on device); the event orders the gather
+        after the hash computation and before the layer's use."""
+        if not engram_prefetch_enabled():
+            return
+        if getattr(self, "_prefetched_rows", None) is not None:
+            return
+        if not hash_ids.is_cuda or torch.cuda.is_current_stream_capturing():
+            return
+        stream = _engram_prefetch_stream(device)
+        current = torch.cuda.current_stream(device)
+        stream.wait_stream(current)
+        with torch.cuda.stream(stream):
+            rows = self.embed_tokens(hash_ids, device)
+            event = torch.cuda.Event()
+            event.record(stream)
+        self._prefetched_rows = (rows, event)
 
 
 class _ReferenceWKV(nn.Module):

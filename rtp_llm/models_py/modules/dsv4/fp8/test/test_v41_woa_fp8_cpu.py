@@ -28,19 +28,18 @@ for suffix in [
     module.__path__ = [str(ROOT.joinpath(*name.split(".")))]
     sys.modules.setdefault(name, module)
 
-woa = importlib.import_module(
-    "rtp_llm.models_py.modules.dsv4.fp8._v41_woa_fp8_prefill"
-)
+woa = importlib.import_module("rtp_llm.models_py.modules.dsv4.fp8._v41_woa_fp8_prefill")
 
 
 class WoaFlagTest(unittest.TestCase):
-    def test_default_off(self):
+    def test_default_on(self):
+        # R45 adoption: default ON; =0 is the BF16 escape hatch.
         env = dict(os.environ)
         env.pop("DSV41_WOA_FP8_EINSUM", None)
         with mock.patch.dict(os.environ, env, clear=True):
-            self.assertFalse(woa.woa_fp8_enabled())
-        with mock.patch.dict(os.environ, {"DSV41_WOA_FP8_EINSUM": "1"}):
             self.assertTrue(woa.woa_fp8_enabled())
+        with mock.patch.dict(os.environ, {"DSV41_WOA_FP8_EINSUM": "0"}):
+            self.assertFalse(woa.woa_fp8_enabled())
 
     def test_supported_rejects_cpu(self):
         w = torch.zeros(8, 1024, 4096, dtype=torch.bfloat16)
@@ -51,10 +50,10 @@ class WoaWeightQuantTest(unittest.TestCase):
     def test_scale_bytes_and_packing(self):
         # H=1, N=4, K=512 -> 16 blocks of 32 -> P=4 int32 words per (h,n).
         w = torch.zeros(1, 4, 512, dtype=torch.bfloat16)
-        w[:, :, 0:128] = 1.0        # amax=1      -> 2^-8  -> 0x77
-        w[:, :, 128:256] = 0.0      # clamped eps -> 2^-42 -> 0x55
-        w[:, :, 256:384] = 448.0    # amax=448    -> 2^0   -> 0x7F
-        w[:, :, 384:512] = 0.001    #             -> 2^-18 -> 0x6D
+        w[:, :, 0:128] = 1.0  # amax=1      -> 2^-8  -> 0x77
+        w[:, :, 128:256] = 0.0  # clamped eps -> 2^-42 -> 0x55
+        w[:, :, 256:384] = 448.0  # amax=448    -> 2^0   -> 0x7F
+        w[:, :, 384:512] = 0.001  #             -> 2^-18 -> 0x6D
         wq, scale = woa.quantize_woa_weight(w)
         self.assertEqual(wq.dtype, torch.float8_e4m3fn)
         self.assertEqual(tuple(wq.shape), (1, 4, 512))
@@ -65,7 +64,9 @@ class WoaWeightQuantTest(unittest.TestCase):
         for n in range(4):
             for p in range(4):
                 got = int(scale[0, n, p]) & 0xFFFFFFFF
-                self.assertEqual(got, expect[p], f"n={n} p={p}: {got:#x} != {expect[p]:#x}")
+                self.assertEqual(
+                    got, expect[p], f"n={n} p={p}: {got:#x} != {expect[p]:#x}"
+                )
         # dequantized values: block0 keeps 1.0 exactly (scale 2^-8, 256 exact)
         deq0 = wq[0, 0, 0:128].float() * float(2**-8)
         self.assertTrue(torch.allclose(deq0, torch.full_like(deq0, 1.0), atol=1e-3))

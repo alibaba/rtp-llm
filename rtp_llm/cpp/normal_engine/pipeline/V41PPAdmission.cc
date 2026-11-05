@@ -173,12 +173,19 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
     if (failed_) {
         throw std::runtime_error("V4.1 global PP admission session failed; drain and replace it");
     }
+    // R46b: timing-only instrumentation (env-gated RTP_LLM_V41_CADENCE_TIMING).
+    // Splits the per-round admission into retained-wait / local-prepare /
+    // worldRejected rendezvous. No behavior change (byte-exact).
+    static const bool cadence_timing = autil::EnvUtil::getEnv("RTP_LLM_V41_CADENCE_TIMING", false);
+    const bool        ct             = cadence_timing && (round_ >= 0);
+    const int64_t     ct_t0          = ct ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
     if (async_overlap_) {
         // Asynchronous contract: a retained dispatch must have completed locally
         // before the next chunk prepares, so two chunks never write the same
         // tagged pages. Synchronous admission keeps its single-pending guard.
         local_.requireRetainedLocallyComplete();
     }
+    const int64_t      ct_t1    = ct ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
     GptModelInputs     prepared = inputs;
     V41PPCacheBatchPtr batch;
     auto               packet = torch::full({kV41AdmissionPacketSize}, -1, torch::kInt64);
@@ -216,6 +223,7 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
         values[0] = 2;
         error     = exception.what();
     }
+    const int64_t ct_t2 = ct ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
     try {
         const bool rejected = worldRejected(packet, error, agreementMode(), agreementPeers());
         ++round_;
@@ -235,6 +243,7 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
         }
         throw;
     }
+    const int64_t ct_t3 = ct ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
     if (preflight) {
         auto  ready  = torch::full({3}, 1, torch::kInt64);
         auto* status = ready.data_ptr<int64_t>();
@@ -283,6 +292,17 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
     }
     batch->worker_ready_ = preflight != nullptr;
     inputs               = std::move(prepared);
+    if (ct) {
+        const int64_t ct_t4 = autil::TimeUtility::currentTimeInMicroSeconds();
+        RTP_LLM_LOG_INFO("[V41CADENCE] round=%lld retained_wait=%lldus local_prepare=%lldus "
+                         "rendezvous_global=%lldus worker_phase=%lldus total=%lldus",
+                         static_cast<long long>(round_ - 1),
+                         static_cast<long long>(ct_t1 - ct_t0),
+                         static_cast<long long>(ct_t2 - ct_t1),
+                         static_cast<long long>(ct_t3 - ct_t2),
+                         static_cast<long long>(ct_t4 - ct_t3),
+                         static_cast<long long>(ct_t4 - ct_t0));
+    }
     return batch;
 }
 

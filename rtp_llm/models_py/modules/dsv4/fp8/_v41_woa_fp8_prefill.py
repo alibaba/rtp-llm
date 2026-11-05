@@ -32,7 +32,11 @@ _EPS = 1e-10
 
 
 def woa_fp8_enabled() -> bool:
-    return os.environ.get(WOA_FP8_FLAG, "0") == "1"
+    # R45 adoption: default ON (qualified on the h32 stack: -30.6ms median,
+    # 2/3 pairs, 64/64 tokens, argmax all, logits rel_l2 0.290 <= 0.34,
+    # deterministic sha 3e7001beb7742dda). Escape: =0 restores the BF16
+    # einsum (reference sha ac4da65061991a9e).
+    return os.environ.get(WOA_FP8_FLAG, "1") == "1"
 
 
 def woa_fp8_supported(weight: torch.Tensor) -> bool:
@@ -49,10 +53,7 @@ def woa_fp8_supported(weight: torch.Tensor) -> bool:
 
 def quantize_woa_weight(w: torch.Tensor):
     """[H,N,K] BF16 -> (fp8 [H,N,K], scale view [H,N,K/512] int32, TMA layout)."""
-    if (
-        torch.cuda.is_available()
-        and torch.cuda.is_current_stream_capturing()
-    ):
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
         raise RuntimeError("wo_a FP8 weight preparation must precede capture")
     H, N, K = w.shape
     P = K // 128
@@ -74,7 +75,9 @@ def quantize_woa_weight(w: torch.Tensor):
         | (sbytes[..., 1] << 8)
         | (sbytes[..., 2] << 16)
         | (sbytes[..., 3] << 24)
-    ).to(torch.int32)  # [H,N,P]
+    ).to(
+        torch.int32
+    )  # [H,N,P]
     buf = torch.zeros(H * P * tma_n, dtype=torch.int32, device=w.device)
     view = buf.as_strided((H, N, P), (P * tma_n, 1, tma_n))
     view.copy_(packed)
@@ -136,5 +139,7 @@ def woa_fp8_forward(unrotated: torch.Tensor, w_fp8, w_scale, out=None):
     a, a_scale = quantize_activation(unrotated)
     if out is None:
         out = torch.empty(M, H, N, dtype=torch.bfloat16, device=unrotated.device)
-    deep_gemm.fp8_einsum("bhr,hdr->bhd", (a, a_scale), (w_fp8, w_scale), out, recipe=(1, 1, 32))
+    deep_gemm.fp8_einsum(
+        "bhr,hdr->bhd", (a, a_scale), (w_fp8, w_scale), out, recipe=(1, 1, 32)
+    )
     return out
