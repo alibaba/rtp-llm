@@ -93,6 +93,8 @@ shared_lib = "libtbb.so"
 
 cc_library(
     name = "tbb",
+    hdrs = hdrs,
+    includes = ["."],
     linkopts = ["-ltbb"],
     visibility = ["//visibility:public"],
 )
