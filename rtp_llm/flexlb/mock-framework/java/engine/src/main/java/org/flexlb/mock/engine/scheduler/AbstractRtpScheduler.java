@@ -133,7 +133,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
                 finish(entry, null);
             }
             case TRANSFER_ACKNOWLEDGED -> {
-                if (!prefill() || !entry.input.retained() || !entry.transferBegun || entry.phase != TRANSFERRED)
+                if (!prefill() || !entry.input.retained() || !entry.transferBegun || entry.phase != TRANSFERRING)
                     throw new RequestFailure(INVALID, "Transfer acknowledgement without a readable Prefill source");
                 finish(entry, null);
             }
@@ -359,12 +359,10 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         if (transferred.failure() != null) { finish(entry, transferred.failure()); return; }
         if (!entry.transferBegun || entry.phase != TRANSFERRING)
             throw new RequestFailure(INVALID, "Stale or duplicate transfer completion");
-        if (!prefill()) {
-            if (entry.lease == null || entry.loaded || entry.generating)
-                throw new RequestFailure(INVALID, "Unexpected KV load completion");
-            entry.loaded = true;
-            entry.prefillFinished = transferred.prefillFinished();
-        }
+        if (prefill() || entry.lease == null || entry.loaded || entry.generating)
+            throw new RequestFailure(INVALID, "Unexpected Decode KV load completion");
+        entry.loaded = true;
+        entry.prefillFinished = transferred.prefillFinished();
         entry.phase = TRANSFERRED;
     }
     @Override public void finish(Request request, RequestFailure failure) {

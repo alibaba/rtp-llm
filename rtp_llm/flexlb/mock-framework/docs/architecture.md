@@ -351,7 +351,7 @@ protocol 供 Client、P 接入层和 ViT 共用媒体输入与 RPC；图片几�
 ViT 的终态分三步：VitScheduler 只完成已准备图片的计算阶段 Future，不依赖 VitCache；VitPreparation.Task 等待阶段结果，统一调用 VitCache.publish 发布成功/失败，随后移除任务、释放准入额度。VitCache 保留同 key 的共享结果条目、等待者和驻留淘汰，不再从 pending 数量推导执行额度。mm_inflight_inputs 来源于 Preparation 的在途任务数，包含发布尚未返回的任务。排队取消通过阶段 Future 返回给任务所有者；已经选入 Forward 的工作保留到实际完成。关闭同样由 Preparation 收口任务终态，Cache.close 仅关闭缓存驻留。
 
 
-KvTransfer 是接入层使用的零耗时异步 PD 传输执行器，放在 admission 包内，不作为公共调度接口。传输开始与完成仍通过 EngineLoop 交给 EngineScheduler 处理；移动执行器不改变资源使用权和 LOAD ACK 顺序。KvCache/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 EngineScheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
+SimulatedKvLoad 位于 service 包，负责 Decode 端零耗时的异步 KV 加载。Decode 通过 EngineLoop 提交加载结果后回复 LOAD ACK。Prefill 收到 ACK 后通过一次调度操作结束源请求，再释放源 KV 引用。 KvCache/BlockTree 目前固定为 RTP Full-KV，保留已有模块，不声明仅替换 EngineScheduler 就能兼容任意后端，也不增加缓存抽象或新模块。
 
 共享指代码复用，不是不同实例共享资源。RtpRpcService 负责协议路由和查询结果编码。PrefillRpcServer 管理 P 的本地单 token、P/D 和显式组接入，DecodeRpcServer 管理 D 的协议会话。两者保留原生校验、输入准备、协议顺序和响应投递，通过 EngineScheduler.Request 句柄与 EngineLoop 交互。RpcMessages 转换完整输入和观测快照，RpcErrors 转换原生错误码；KV、队列、计算和本地完成条件由后端 EngineScheduler 管理。`AbstractRtpScheduler` 中的 RTP 控制事件定义生成许可和交接结果；共享 EngineScheduler 只提供扩展点，不定义所有后端必须经历的状态推进序列。RtpFifoScheduler 负责普通 FIFO 准入，RtpPrefillGroupScheduler 单独负责显式组调度；两者共用基类，无 gRPC/protobuf/执行器依赖。
 
