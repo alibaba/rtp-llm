@@ -60,11 +60,12 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
                                                   const std::function<bool(size_t)>& valid_prefix,
                                                   const ContentMatchContext*     partial_tail) {
     std::optional<BlockTreeMatchResult> local;
+    std::optional<PrefixCachePlanPoint> farthest_fork;
     std::vector<BlockTreeContentRange>  ranges;
     if (partial_tail != nullptr && partial_tail->tokens != nullptr && partial_tail->endpoint_key
         && partial_tail->valid_endpoint) {
         ranges                            = tree_->contentMatchRanges(
-            *partial_tail->tokens, partial_tail->endpoint_key, partial_tail->source_identity);
+            *partial_tail->tokens, partial_tail->endpoint_key, partial_tail->source_identity, &farthest_fork);
         const auto endpoints = matchPreciseEndpoints(*partial_tail, ranges);
         local                = resolvePreciseReuseLocked(*partial_tail, ranges, endpoints);
         if (local.has_value() && storage_backend_ && !local->short_leaf
@@ -78,15 +79,19 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
         }
         if (local.has_value()
             && (!storage_backend_ || local->matched_device_endpoint >= partial_tail->remote_ceiling)) {
+            local->farthest_fork = farthest_fork;
             return std::move(*local);
         }
     }
     if (cache_keys.empty()) {
         if (local.has_value()) {
+            local->farthest_fork = farthest_fork;
             return std::move(*local);
         }
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
-        return {};
+        BlockTreeMatchResult result;
+        result.farthest_fork = farthest_fork;
+        return result;
     }
 
     // A farther complete-key backend candidate competes with the pinned local
@@ -118,6 +123,7 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
             for (const auto& resource : result.matched_device_resources) {
                 tree_->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
             }
+            local->farthest_fork = farthest_fork;
             return std::move(*local);
         } else {
             for (const auto& resource : local->matched_device_resources) {
@@ -129,6 +135,7 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
                       result.matched_device_blocks,
                       cache_keys.size(),
                       tree_->size());
+    result.farthest_fork = farthest_fork;
     return result;
 }
 
@@ -191,50 +198,23 @@ BlockTreeLoader::resolvePreciseReuseLocked(const ContentMatchContext&           
         std::vector<std::pair<TreeNode*, size_t>> matched_nodes;
         bool                                      ready = true;
         for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
-            const auto& group = tree_->groupSets()[group_id];
-            if (group->hasZeroStateDemand(endpoint)) {
-                continue;
-            }
-            bool found = false;
-            for (size_t source_index = 0; source_index < ranges.size(); ++source_index) {
-                const auto& range = ranges[source_index];
-                if (endpoint > range.matched_end || endpoint <= range.node->parent->token_end
-                    || (group->requiresExactStateEndpoint() && endpoint != range.node->token_end)) {
-                    continue;
-                }
-                // Build only sources that can actually cover this G. Keeping
-                // every range's ancestor path would use quadratic memory for
-                // a long, fully cached prefix.
-                std::vector<TreeNode*> path;
-                for (auto* cursor = range.node; cursor->parent != nullptr; cursor = cursor->parent) {
-                    path.push_back(cursor);
-                }
-                std::reverse(path.begin(), path.end());
-                const auto required = group->requiredPathIndices(path, endpoint);
-                const bool usable   = group->hasDeviceCoverage(path, endpoint);
-                if (!usable) {
-                    continue;
-                }
-                if (!required.empty()) {
-                    MultiNodeResource   pinned{group_id, Tier::DEVICE};
-                    std::vector<size_t> source_endpoints;
-                    for (const size_t index : required) {
-                        auto* source = path[index];
-                        pinned.node_blocks.emplace_back(nullptr,
-                                                        source->group_set_resources[group_id].getBlocks(Tier::DEVICE));
-                        source_endpoints.push_back(source->token_end);
-                        matched_nodes.emplace_back(source, group_id);
-                    }
-                    result.matched_device_resources.push_back(std::move(pinned));
-                    result.precise_resource_endpoints.push_back(std::move(source_endpoints));
-                }
-                found = true;
-                break;
-            }
-            if (!found) {
+            const auto sources = tree_->coveredDeviceGroupPath(ranges, endpoint, group_id);
+            if (!sources) {
                 ready = false;
                 break;
             }
+            if (sources->empty()) {
+                continue;
+            }
+            MultiNodeResource   pinned{group_id, Tier::DEVICE};
+            std::vector<size_t> source_endpoints;
+            for (auto* source : *sources) {
+                pinned.node_blocks.emplace_back(nullptr, source->group_set_resources[group_id].getBlocks(Tier::DEVICE));
+                source_endpoints.push_back(source->token_end);
+                matched_nodes.emplace_back(source, group_id);
+            }
+            result.matched_device_resources.push_back(std::move(pinned));
+            result.precise_resource_endpoints.push_back(std::move(source_endpoints));
         }
         if (!ready) {
             continue;

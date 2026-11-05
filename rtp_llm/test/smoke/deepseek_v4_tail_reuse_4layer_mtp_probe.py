@@ -121,13 +121,19 @@ def after_forward_layers(ctx):
                 )
                 + "\n"
             )
+        private_fork_reference = os.environ.get("T10_PRIVATE_FORK_REFERENCE")
         try:
             if pending_input is not None:
                 _restore_runtime(v4, _pending.draft_prefill_runtime)
                 flat[:rows].copy_(pre_input)
+            os.environ["T10_PRIVATE_FORK_REFERENCE"] = "0"
             target_probe.after_forward_layers(ctx)
             _draft_sequence = target_probe._sequence
         finally:
+            if private_fork_reference is None:
+                os.environ.pop("T10_PRIVATE_FORK_REFERENCE", None)
+            else:
+                os.environ["T10_PRIVATE_FORK_REFERENCE"] = private_fork_reference
             _restore_runtime(v4, saved)
             if pending_input is not None:
                 flat[:rows].copy_(post_input)

@@ -223,6 +223,17 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         initial_states = _private_conv_initial_states(
             conv_states, attn_inputs, seq_size_per_block
         )
+        save_positions, save_block_ids = _sparse_save_inputs(attn_inputs)
+        selected_initial = (
+            gather_conv_initial_states(
+                conv_states,
+                attn_inputs.prefix_lengths_device,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                seq_size_per_block,
+            )
+            if conv_states is not None and save_positions is not None
+            else None
+        )
         out = causal_conv1d_fn(
             x=mixed_qkv.transpose(0, 1),
             weight=self.conv_weights,
@@ -235,6 +246,18 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             metadata=metadata,
             initial_states=initial_states,
         ).transpose(0, 1)
+        if selected_initial is not None:
+            store_selected_conv_states_to_block_map(
+                conv_states,
+                attn_inputs.prefix_lengths_device,
+                cu_seqlen_without_padding,
+                save_positions,
+                save_block_ids,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                seq_size_per_block,
+                raw_inputs=mixed_qkv,
+                initial_states=selected_initial,
+            )
         return out
 
     def _fla(
@@ -339,16 +362,6 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         )
         h_from_chunk = h
 
-        if selected_states is not None:
-            store_selected_conv_states_to_block_map(
-                self._get_conv_states(kv_cache_tensor).transpose(1, 2),
-                attn_inputs.prefix_lengths_device,
-                cu_seqlens_without_padding,
-                save_positions,
-                save_block_ids,
-                attn_inputs.kv_cache_kernel_block_id_device,
-                seq_size_per_block,
-            )
         if ssm_states is not None and final_state is not None:
             _target_dtype = ssm_states.dtype
             h_for_store = (

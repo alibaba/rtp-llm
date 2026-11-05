@@ -12,6 +12,29 @@ from rtp_llm.models_py.modules.dsv4.fp8.sparse_save import (
 
 
 class SparseSaveSlotsTest(unittest.TestCase):
+    def test_f_last_and_n_keep_distinct_state_destinations_in_one_slot(self) -> None:
+        positions = torch.arange(1300, 1340, dtype=torch.int64)
+        targets = SparseSaveTargets(
+            torch.tensor([[1340, 1320]], dtype=torch.int64),
+            torch.tensor([[18, 17]], dtype=torch.int32),
+        )
+        mapped = list(
+            iter_sparse_save_slots(
+                targets,
+                positions,
+                torch.zeros_like(positions),
+                entries_per_block=128,
+                tokens_per_block=256,
+            )
+        )
+        self.assertEqual([end for end, _ in mapped], [1340, 1320])
+        n_slots, f_slots = mapped[0][1], mapped[1][1]
+        self.assertEqual(int((n_slots >= 0).sum()), 40)
+        self.assertEqual(int((f_slots >= 0).sum()), 20)
+        self.assertEqual(int(n_slots[0]), 18 * 128 + 1300 % 128)
+        self.assertEqual(int(f_slots[0]), 17 * 128 + 1300 % 128)
+        self.assertTrue(torch.all(f_slots[20:] == -1))
+
     def test_state_short_suffix_keeps_runtime_independent(self) -> None:
         positions = torch.arange(1300, 1320, dtype=torch.int64)
         req = torch.zeros_like(positions)

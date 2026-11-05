@@ -476,6 +476,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
         .def_readwrite("enable_prefill_partial_tail_reuse", &KVCacheConfig::enable_prefill_partial_tail_reuse)
+        .def_readwrite("enable_prefill_common_prefix_recovery", &KVCacheConfig::enable_prefill_common_prefix_recovery)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("enable_crc", &KVCacheConfig::enable_crc)
@@ -577,7 +578,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      10,
+                                      11,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -647,23 +648,43 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_host_ip_port,
                                       self.enable_crc,
                                       self.enable_prefill_partial_tail_reuse,
+                                      self.enable_prefill_common_prefix_recovery,
                                       self.linear_pool_blocks,
                                       self.swa_pool_blocks);
             },
             [](py::tuple t) {
                 const py::tuple tail_state = t;
-                // v10 appends enable_prefill_partial_tail_reuse (size 71 without,
-                // size 73 with the upstream proportional pool blocks); the
-                // upstream v9 tail carries only the pool blocks. Both unwind to v8.
+                // v11 appends enable_prefill_common_prefix_recovery after the
+                // partial-tail flag (size 72 in this branch's pushed layout,
+                // size 74 with the upstream proportional pool blocks); v10
+                // carries the partial-tail flag (size 71 without, size 73 with
+                // the pool blocks); the upstream v9 tail (size 72) carries only
+                // the pool blocks. A size-71 v9 tuple is this branch's legacy
+                // recovery layout. All tail generations unwind to v8.
+                const bool has_recovery_field =
+                    (t.size() == 72 || t.size() == 74) && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                const bool has_legacy_recovery_fields =
+                    t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
+                const bool enable_prefill_common_prefix_recovery = has_recovery_field ? t[71].cast<bool>() :
+                                                                   has_legacy_recovery_fields ?
+                                                                                        t[t.size() - 1].cast<bool>() :
+                                                                                        false;
                 const bool has_partial_tail_field =
                     (t.size() == 71 || t.size() == 73) && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
-                const bool enable_prefill_partial_tail_reuse =
-                    has_partial_tail_field ? t[70].cast<bool>() : false;
-                const bool has_tail_fields = has_partial_tail_field
+                const bool enable_prefill_partial_tail_reuse = has_recovery_field         ? t[70].cast<bool>() :
+                                                               has_partial_tail_field     ? t[70].cast<bool>() :
+                                                               has_legacy_recovery_fields ? t[69].cast<bool>() :
+                                                                                            false;
+                const bool has_tail_fields =
+                    has_recovery_field || has_partial_tail_field
                     || (t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9);
                 if (has_tail_fields) {
                     t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
                     t[1] = py::int_(8);
+                }
+                if (has_legacy_recovery_fields) {
+                    t    = t[py::slice(0, 69, 1)].cast<py::tuple>();
+                    t[1] = py::int_(7);
                 }
                 const py::tuple crc_state = t;
                 const bool has_crc_field  = t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
@@ -716,12 +737,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory_cache_sync_timeout_ms = value(7).cast<int64_t>();
                 if (has_tail_fields) {
                     c.reuse_cache_tail_blocks = tail_state[10].cast<int>();
-                    if (tail_state.size() == 72) {
+                    const int tail_version    = tail_state[1].cast<int>();
+                    if (tail_state.size() == 72 && tail_version == 9) {
                         c.linear_pool_blocks = tail_state[70].cast<uint32_t>();
                         c.swa_pool_blocks    = tail_state[71].cast<uint32_t>();
-                    } else if (tail_state.size() == 73) {
+                    } else if (tail_state.size() == 73 && tail_version == 10) {
                         c.linear_pool_blocks = tail_state[71].cast<uint32_t>();
                         c.swa_pool_blocks    = tail_state[72].cast<uint32_t>();
+                    } else if (tail_state.size() == 74 && tail_version == 11) {
+                        c.linear_pool_blocks = tail_state[72].cast<uint32_t>();
+                        c.swa_pool_blocks    = tail_state[73].cast<uint32_t>();
                     }
                     if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
                         || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
@@ -795,7 +820,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (has_crc_field) {
                     c.enable_crc = crc_state[69].cast<bool>();
                 }
-                c.enable_prefill_partial_tail_reuse = enable_prefill_partial_tail_reuse;
+                c.enable_prefill_partial_tail_reuse     = enable_prefill_partial_tail_reuse;
+                c.enable_prefill_common_prefix_recovery = enable_prefill_common_prefix_recovery;
                 return c;
             }));
 
@@ -1876,7 +1902,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_prefix_reuse", &CacheReusePolicyDesc::enable_prefix_reuse)
         .def_readwrite("local_only_state", &CacheReusePolicyDesc::local_only_state)
         .def(py::pickle(
-            [](const CacheReusePolicyDesc& self) { return py::make_tuple(self.enable_prefix_reuse, self.local_only_state); },
+            [](const CacheReusePolicyDesc& self) {
+                return py::make_tuple(self.enable_prefix_reuse, self.local_only_state);
+            },
             [](py::tuple t) {
                 CacheReusePolicyDesc c;
                 if (t.size() != 2)

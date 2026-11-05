@@ -4,6 +4,7 @@ import torch
 
 from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextMetadata
 from rtp_llm.models_py.model_desc.test._linear_sparse_save_common import (
+    _exercise_internal_f_last_same_slot,
     _exercise_mixed_prefix_batch,
     _exercise_sparse_save_restore,
     _exercise_tail_boundaries,
@@ -27,6 +28,14 @@ class LinearSparseSaveGdnTest(unittest.TestCase):
         )
 
         _exercise_sparse_save_restore(
+            module,
+            _gdn_forward,
+            lambda conv_metadata: Qwen3NextMetadata(prefill_conv1d_meta=conv_metadata),
+            full_tokens,
+            aux,
+            device,
+        )
+        _exercise_internal_f_last_same_slot(
             module,
             _gdn_forward,
             lambda conv_metadata: Qwen3NextMetadata(prefill_conv1d_meta=conv_metadata),

@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <array>
+
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -730,6 +733,158 @@ TEST(BlockTreeTest, InsertBackfillsTokenSegmentsOnAdoptedNode) {
     ASSERT_EQ(result.adopted_nodes.size(), 1u);
     EXPECT_EQ(result.adopted_nodes[0].first, node);
     EXPECT_EQ(node->token_ids, (std::vector<int>{1, 2}));
+}
+
+TEST(BlockTreeTest, AuthenticatedRangesReportOnlyFarthestStrictInteriorFork) {
+    BlockTree                           tree(makeGroupSets(1), 256);
+    const std::vector<std::vector<int>> segments{
+        std::vector<int>(256, 1), std::vector<int>(256, 2), std::vector<int>(256, 3)};
+    const std::vector<size_t> ends{256, 512, 768};
+    tree.insertNode({256, 512, 768}, makeEmpty2DResources(3), false, false, &segments, &ends);
+    const auto key             = [](size_t end) { return static_cast<CacheKeyType>(end); };
+    const auto source_identity = [](size_t begin, const std::vector<int>& source, CacheKeyType source_key) {
+        return source_key == static_cast<CacheKeyType>(begin + source.size());
+    };
+    std::optional<PrefixCachePlanPoint> fork;
+
+    std::vector<int> request(900, 1);
+    std::fill(request.begin() + 256, request.begin() + 512, 2);
+    std::fill(request.begin() + 512, request.begin() + 650, 3);
+    std::fill(request.begin() + 650, request.end(), 9);
+    const auto ranges = tree.contentMatchRanges(request, key, source_identity, &fork);
+    ASSERT_TRUE(fork.has_value());
+    EXPECT_EQ(fork->pos, 650u);
+    EXPECT_EQ(fork->key, 650);
+    EXPECT_EQ(fork->index, 2u);
+    ASSERT_EQ(ranges.size(), 3u);
+    EXPECT_EQ(ranges.front().matched_end, 650u);
+
+    std::fill(request.begin() + 256, request.end(), 9);
+    tree.contentMatchRanges(request, key, source_identity, &fork);
+    ASSERT_TRUE(fork.has_value());
+    EXPECT_EQ(fork->pos, 256u);  // Mismatch at the first token of an authenticated child.
+    EXPECT_EQ(fork->index, 0u);
+
+    tree.contentMatchRanges(std::vector<int>(256, 1), key, source_identity, &fork);
+    EXPECT_FALSE(fork.has_value());  // The request ends; there is no strict divergence.
+    std::vector<int> source_ended(900, 1);
+    std::fill(source_ended.begin() + 256, source_ended.begin() + 512, 2);
+    std::fill(source_ended.begin() + 512, source_ended.begin() + 768, 3);
+    tree.contentMatchRanges(source_ended, key, source_identity, &fork);
+    EXPECT_FALSE(fork.has_value());  // The retained source ends at 768.
+
+    std::fill(request.begin() + 256, request.begin() + 512, 2);
+    std::fill(request.begin() + 512, request.begin() + 650, 3);
+    tree.contentMatchRanges(request, key, [](size_t, const std::vector<int>&, CacheKeyType) { return false; }, &fork);
+    EXPECT_FALSE(fork.has_value());  // Token equality cannot replace source identity.
+}
+
+TEST(BlockTreeTest, CompetingAuthenticatedBranchesKeepOnlyTheFarthestFork) {
+    BlockTree                     tree(makeGroupSets(1), 256);
+    std::vector<std::vector<int>> near(4, std::vector<int>(256, 1));
+    std::fill(near.back().begin() + 32, near.back().end(), 9);
+    const std::vector<size_t> near_ends{256, 512, 768, 1024};
+    tree.insertNode({256, 512, 768, 9000}, makeEmpty2DResources(4), false, false, &near, &near_ends);
+
+    std::vector<std::vector<int>> far(6, std::vector<int>(256, 1));
+    std::fill(far.back().begin() + 20, far.back().end(), 9);
+    const std::vector<size_t> far_ends{256, 512, 768, 1024, 1280, 1536};
+    tree.insertNode({256, 512, 768, 1024, 1280, 9001}, makeEmpty2DResources(6), false, false, &far, &far_ends);
+
+    const std::vector<int> request(1600, 1);
+    const auto             key      = [](size_t end) { return static_cast<CacheKeyType>(end); };
+    const auto             identity = [](size_t begin, const std::vector<int>& source, CacheKeyType source_key) {
+        return source_key == 9000 ? begin == 768 && source.size() == 256 && source[32] == 9 :
+                           source_key == 9001 ? begin == 1280 && source.size() == 256 && source[20] == 9 :
+                                                source_key == static_cast<CacheKeyType>(begin + source.size());
+    };
+    std::optional<PrefixCachePlanPoint> fork;
+    tree.contentMatchRanges(request, key, identity, &fork);
+    ASSERT_TRUE(fork.has_value());
+    EXPECT_EQ(fork->pos, 1300u);
+    EXPECT_EQ(fork->key, 1300);
+}
+
+TEST(BlockTreeTest, CpForkKeepsExactBoundaryAndRejectsDifferentImageIdentity) {
+    BlockTree                           tree(makeGroupSets(1), 512);
+    const std::vector<std::vector<int>> segments{std::vector<int>(512, 1), std::vector<int>(512, 2)};
+    const std::vector<size_t>           ends{512, 1024};
+    ASSERT_EQ(
+        tree.insertNode({512, 1024}, makeEmpty2DResources(2), false, false, &segments, &ends).inserted_nodes.size(),
+        2u);
+    const auto endpoint_key    = [](size_t end) { return static_cast<CacheKeyType>(end); };
+    const auto source_identity = [](size_t begin, const std::vector<int>& source, CacheKeyType key) {
+        return key == static_cast<CacheKeyType>(begin + source.size());
+    };
+    std::optional<PrefixCachePlanPoint> fork;
+
+    std::vector<int> request(1200, 1);
+    request[1] = 9;
+    tree.contentMatchRanges(request, endpoint_key, source_identity, &fork);
+    ASSERT_TRUE(fork.has_value());
+    EXPECT_EQ(fork->pos, 1u);  // The first physical CP block may contain a strict fork.
+    EXPECT_EQ(fork->index, 0u);
+
+    request[1] = 1;
+    std::fill(request.begin() + 512, request.end(), 9);
+    tree.contentMatchRanges(request, endpoint_key, source_identity, &fork);
+    ASSERT_TRUE(fork.has_value());
+    EXPECT_EQ(fork->pos, 512u);  // A canonical CP boundary is the fork, not its preceding token.
+    EXPECT_EQ(fork->index, 0u);
+
+    std::fill(request.begin() + 512, request.begin() + 600, 2);
+    const auto different_image_key = [](size_t end) { return static_cast<CacheKeyType>(end == 512 ? 1512 : end); };
+    const auto ranges              = tree.contentMatchRanges(request, different_image_key, source_identity, &fork);
+    EXPECT_TRUE(ranges.empty());
+    EXPECT_FALSE(fork.has_value());  // The unauthenticated parent cannot yield F600 or a nearby aligned substitute.
+}
+
+TEST(BlockTreeTest, LargeCpBlocksKeepExactContentAndForkOffsets) {
+    constexpr size_t                    unit = 1024 * 8;  // Base block 1024 with CP8.
+    BlockTree                           tree(makeGroupSets(1), unit);
+    const std::vector<std::vector<int>> segments{std::vector<int>(unit, 11), std::vector<int>(unit, 22)};
+    const std::vector<size_t>           ends{unit, 2 * unit};
+    tree.insertNode({unit, 2 * unit}, makeEmpty2DResources(2), false, false, &segments, &ends);
+
+    const auto key      = [](size_t end) { return static_cast<CacheKeyType>(end); };
+    const auto identity = [](size_t begin, const std::vector<int>& source, CacheKeyType source_key) {
+        return source_key == static_cast<CacheKeyType>(begin + source.size());
+    };
+    std::vector<int> request(2 * unit + 17, 33);
+    std::copy(segments[0].begin(), segments[0].end(), request.begin());
+    std::copy(segments[1].begin(), segments[1].end(), request.begin() + unit);
+    std::optional<PrefixCachePlanPoint> fork;
+
+    constexpr std::array<size_t, 14> mismatches{
+        0, 1, 3, 4, 35, 36, 67, 68, unit - 1, unit, unit + 1, unit + 35, unit + 36, 2 * unit - 1};
+    for (const size_t mismatch : mismatches) {
+        const int original = request[mismatch];
+        request[mismatch]  = 99;
+        const auto ranges  = tree.contentMatchRanges(request, key, identity, &fork);
+        SCOPED_TRACE(mismatch);
+        if (mismatch == 0) {
+            EXPECT_TRUE(ranges.empty());
+            EXPECT_FALSE(fork.has_value());
+        } else {
+            ASSERT_FALSE(ranges.empty());
+            EXPECT_EQ(ranges.front().matched_end, mismatch);
+            ASSERT_TRUE(fork.has_value());
+            EXPECT_EQ(fork->pos, mismatch);
+            EXPECT_EQ(fork->key, key(mismatch));
+            EXPECT_EQ(fork->index, (mismatch - 1) / unit);
+        }
+        request[mismatch] = original;
+    }
+
+    tree.contentMatchRanges(request, key, identity, &fork);
+    EXPECT_FALSE(fork.has_value());  // The source ends before B's extra 17 tokens.
+    const std::vector<int> truncated(request.begin(), request.begin() + unit + 37);
+    tree.contentMatchRanges(truncated, key, identity, &fork);
+    EXPECT_FALSE(fork.has_value());  // B ends inside a source segment, without a next token to differ.
+
+    request[unit + 64] = 99;
+    tree.contentMatchRanges(request, key, [](size_t, const std::vector<int>&, CacheKeyType) { return false; }, &fork);
+    EXPECT_FALSE(fork.has_value());  // A fast token comparison cannot bypass source authentication.
 }
 
 TEST(BlockTreeTest, ShortLeavesRemainTerminalWhileCompleteSiblingContinues) {

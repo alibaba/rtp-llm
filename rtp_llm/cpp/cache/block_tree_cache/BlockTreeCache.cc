@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <map>
 #include <set>
+#include <unordered_map>
 
 #include <utility>
 
@@ -168,11 +169,64 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                               Tier                                              target_tier,
                               bool                                              is_resident,
                               const std::vector<std::vector<int>>*              token_segments,
-                              const std::vector<size_t>*                         token_ends) {
+                              const std::vector<size_t>*                         token_ends,
+                              bool internal_fork,
+                              bool* ready_after_insert) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
+    if (ready_after_insert != nullptr) {
+        *ready_after_insert = false;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (internal_fork) {
+            // Recheck the proposed branch under the same mutation lock as the
+            // existing storer. A short endpoint cannot become visible with
+            // only a subset of the required group histories.
+            if (target_tier != Tier::DEVICE || token_ends == nullptr || token_segments == nullptr
+                || cache_keys.empty() || cache_keys.size() != resources.size()
+                || cache_keys.size() != token_ends->size() || cache_keys.size() != token_segments->size()) {
+                return 0;
+            }
+            const auto existing = tree_->findNode(cache_keys);
+            const size_t ancestor_count = cache_keys.size() - 1;
+            if (existing.size() < ancestor_count || (ancestor_count > 0 && tree_->isShortLeaf(existing[ancestor_count - 1]))) {
+                return 0;
+            }
+            for (size_t index = 0; index < ancestor_count; ++index) {
+                if (existing[index]->token_end != (*token_ends)[index]
+                    || existing[index]->token_ids != (*token_segments)[index]) {
+                    return 0;
+                }
+            }
+            TreeNode projected_root;
+            projected_root.token_end = 0;
+            TreeNode projected;
+            projected.parent = ancestor_count > 0 ? existing[ancestor_count - 1] : &projected_root;
+            projected.token_end = token_ends->back();
+            projected.group_set_resources.resize(tree_->groupSets().size());
+            const TreeNode* present = existing.size() == cache_keys.size() ? existing.back() : nullptr;
+            if (present != nullptr && (present->token_end != projected.token_end
+                                       || present->token_ids != token_segments->back())) {
+                return 0;
+            }
+            if (resources.back().size() != tree_->groupSets().size()) {
+                return 0;
+            }
+            for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
+                const auto& incoming = resources.back()[group_id];
+                const auto& retained = present != nullptr ? present->group_set_resources[group_id] : incoming;
+                projected.group_set_resources[group_id] =
+                    present != nullptr && !retained.is_empty() ? retained : incoming;
+            }
+            std::vector<TreeNode*> projected_path(existing.begin(), existing.begin() + ancestor_count);
+            projected_path.push_back(&projected);
+            for (const auto& group : tree_->groupSets()) {
+                if (!group->hasDeviceCoverage(projected_path, projected.token_end)) {
+                    return 0;
+                }
+            }
+        }
         storage_write =
             storer_.storeLocked(cache_keys,
                                 resources,
@@ -180,7 +234,9 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                                is_resident,
                                resident_prefix_length,
                                token_segments,
-                               token_ends);
+                               token_ends,
+                                internal_fork,
+                                ready_after_insert);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
@@ -191,18 +247,42 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
 CachedPrefixResources BlockTreeCache::pinRegisteredGroups(const std::vector<int>& tokens,
                                                            const CacheKeysType& base_keys,
                                                            size_t base_tokens,
-                                                           const std::vector<size_t>& endpoints) {
+                                                           const std::vector<size_t>& endpoints,
+                                                           const std::vector<PrefixCachePlanPoint>* exact_points,
+                                                           const std::function<bool(size_t, const std::vector<int>&,
+                                                                                    CacheKeyType)>& source_identity) {
     CachedPrefixResources result;
     result.groups.resize(endpoints.size(), std::vector<CachedPrefixResources::Group>(tree_->groupSets().size()));
     if (endpoints.empty() || base_tokens == 0
         || base_keys.size() < (tokens.size() + base_tokens - 1) / base_tokens) {
         return result;
     }
+    std::unordered_map<size_t, CacheKeyType> point_keys;
+    if (exact_points != nullptr) {
+        point_keys.reserve(exact_points->size());
+        for (const auto& point : *exact_points) {
+            point_keys.emplace(point.pos, point.key);
+        }
+    }
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto candidates = tree_->contentMatchCandidates(tokens, [&](size_t pos) {
+    const auto endpoint_key = [&](size_t pos) {
+        if (const auto point = point_keys.find(pos); point != point_keys.end()) {
+            return point->second;
+        }
         return base_keys[(pos - 1) / base_tokens];
-    });
-    std::map<std::pair<size_t, size_t>, size_t> path_indices;
+    };
+    std::vector<BlockTreeContentRange> ranges;
+    if (source_identity) {
+        ranges = tree_->contentMatchRanges(tokens, endpoint_key, source_identity);
+    } else {
+        for (auto* node : tree_->contentMatchCandidates(tokens, endpoint_key)) {
+            ranges.push_back({node, node->token_end});
+        }
+        std::sort(ranges.begin(), ranges.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.matched_end > rhs.matched_end;
+        });
+    }
+    std::map<std::pair<size_t, const TreeNode*>, size_t> path_indices;
     std::set<std::pair<std::string, BlockIdxType>> unique_pins;
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> acquisitions;
     size_t acquired = 0;
@@ -211,33 +291,23 @@ CachedPrefixResources BlockTreeCache::pinRegisteredGroups(const std::vector<int>
         // groups contribute no partial pins; complete groups may be retained.
         for (size_t row = 0; row < endpoints.size(); ++row) {
             const size_t endpoint = endpoints[row];
-            const auto it = std::lower_bound(candidates.begin(), candidates.end(), endpoint,
-                                             [](const auto* node, size_t pos) { return node->token_end < pos; });
-            if (it == candidates.end() || (*it)->token_end != endpoint) {
-                continue;
-            }
-            std::vector<TreeNode*> path;
-            for (auto* node = *it; node->parent != nullptr; node = node->parent) {
-                path.push_back(node);
-            }
-            std::reverse(path.begin(), path.end());
             for (size_t id = 0; id < tree_->groupSets().size(); ++id) {
                 auto& output = result.groups[row][id];
                 const auto& group = tree_->groupSets()[id];
-                const auto required = group->requiredPathIndices(path, endpoint);
-                output.ready         = group->hasDeviceCoverage(path, endpoint);
-                if (!output.ready) {
+                const auto sources = tree_->coveredDeviceGroupPath(ranges, endpoint, id);
+                if (!sources) {
                     continue;
                 }
-                for (size_t index : required) {
-                    const auto& value = path[index]->group_set_resources[id];
-                    const auto key = std::make_pair(id, path[index]->token_end);
+                output.ready = true;
+                for (auto* source : *sources) {
+                    const auto& value = source->group_set_resources[id];
+                    const auto key = std::make_pair(id, static_cast<const TreeNode*>(source));
                     auto existing = path_indices.find(key);
                     if (existing == path_indices.end()) {
                         const size_t entry = result.path_resources.size();
                         GroupSetResource device_only;
                         device_only.device_blocks = value.device_blocks;
-                        result.path_resources.push_back({id, path[index]->token_end, std::move(device_only)});
+                        result.path_resources.push_back({id, source->token_end, std::move(device_only)});
                         existing = path_indices.emplace(key, entry).first;
                     }
                     output.path_indices.push_back(existing->second);
@@ -250,8 +320,10 @@ CachedPrefixResources BlockTreeCache::pinRegisteredGroups(const std::vector<int>
                         }
                     }
                 }
-                // An aligned local-only HCA group has no history to protect.
-                if (!required.empty() && path[required.back()]->token_end == endpoint) {
+                // A later immutable dense source can alias the same physical
+                // prefix at F. Exact-state groups only resolve a node at F.
+                if (!sources->empty() && (!group->requiresExactStateEndpoint()
+                                          || sources->back()->token_end == endpoint)) {
                     output.endpoint_resource = result.path_resources[output.path_indices.back()].resource;
                 }
             }

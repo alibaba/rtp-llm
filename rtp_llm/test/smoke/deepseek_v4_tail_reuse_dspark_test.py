@@ -98,6 +98,7 @@ class _FlashDSparkTailReuseTest(unittest.TestCase):
             "MODEL_SERVICE_CONFIG": route.model_dump_json(),
             "T07_CACHE_PROBE_CP_SIZE": str(self.cp_size),
         }
+        internal_fork = self._testMethodName.startswith("test_internal_")
         common_args = (
             " --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256"
             " --kernel_seq_size_per_block 128 --max_seq_len 2048"
@@ -110,6 +111,16 @@ class _FlashDSparkTailReuseTest(unittest.TestCase):
             f" --sp_type dspark --sp_model_type deepseek_v4_dspark --sp_checkpoint_path {self.model_path}"
             " --sp_act_type BF16 --gen_num_per_cycle 3"
         )
+        if internal_fork:
+            # The three short-lived F branches need much less cache than the
+            # legacy full-model capacity setting. Leave room for all 45
+            # target checkpoint shards on a shared GPU.
+            common_args = common_args.replace(
+                "--kv_cache_mem_mb 16384", "--kv_cache_mem_mb 4096"
+            )
+            common_args = common_args.replace(
+                "--reserver_runtime_mem_mb 24576", "--reserver_runtime_mem_mb 8192"
+            )
         cp_args = (
             " --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2"
             if self.cp_size == 2
@@ -156,6 +167,7 @@ class _FlashDSparkTailReuseTest(unittest.TestCase):
             + " --role_type PREFILL --enable_cuda_graph 0"
             + (" --cp_rotate_method ALL_GATHER" if self.cp_size == 2 else "")
             + " --enable_prefill_partial_tail_reuse 1"
+            + (" --enable_prefill_common_prefix_recovery 1" if internal_fork else "")
         )
         decode_args = (
             "--tp_size 1 --ep_size 1 --dp_size 1 --world_size 1"
@@ -184,6 +196,7 @@ class _FlashDSparkTailReuseTest(unittest.TestCase):
                 "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "prefill",
+                "T10_PRIVATE_FORK_REFERENCE": "1" if internal_fork else "0",
             },
             device_ids=cards[: self.cp_size],
             port=prefill_port,
@@ -234,7 +247,7 @@ class _FlashDSparkTailReuseTest(unittest.TestCase):
         self.assertEqual(current, length)
         return prompt
 
-    def _request(self, label, prompt):
+    def _request(self, label, prompt, reuse=True):
         target_pattern = "prefill_rank*_*.pt" if self.cp_size == 2 else "prefill_*.pt"
         trace_case = "dspark_target_cp2" if self.cp_size == 2 else "dspark_target"
         before_target = set(self.probe_dir.glob(target_pattern))
@@ -252,7 +265,7 @@ class _FlashDSparkTailReuseTest(unittest.TestCase):
                 "top_k": 1,
                 "top_p": 1.0,
                 "random_seed": 7,
-                "reuse_cache": True,
+                "reuse_cache": reuse,
                 "enable_device_cache": True,
                 "enable_memory_cache": False,
                 "enable_disk_cache": False,
@@ -431,8 +444,29 @@ class _FlashDSparkTailReuseTest(unittest.TestCase):
                 self.assertEqual(
                     saved_end.numel(), 1, f"rank{rank} {key}: new short point"
                 )
-                self.assertGreater(int(save[0]), 0)
-                self.assertGreater(int(saved_end[0]), 0)
+                physical = int(old["seq_size_per_block"])
+                pages = physical // int(old["kernel_seq_size_per_block"])
+                slot = (source_end - 1) // physical
+                if key[1] in DSV4_KERNEL_ROW_TAGS:
+                    slot //= self.cp_size
+                    # FULL rows publish the stable runtime alias. They have no
+                    # redundant sparse destination at either endpoint.
+                    self.assertEqual(int(save[0]), -1)
+                    self.assertEqual(int(saved_end[0]), -1)
+                    source_ids = old["runtime_table"].reshape(-1)[
+                        slot * pages : (slot + 1) * pages
+                    ]
+                    self.assertEqual(source_ids.numel(), pages)
+                    self.assertTrue(bool((source_ids > 0).all()))
+                    self.assertTrue(
+                        set(source_ids.tolist()) <= set(old["source_ids"].tolist())
+                    )
+                    source_id = int(source_ids[0]) // pages
+                    self.assertTrue(bool((source_ids // pages == source_id).all()))
+                else:
+                    self.assertGreater(int(save[0]), 0)
+                    self.assertGreater(int(saved_end[0]), 0)
+                    source_id = int(save[0])
                 for suffix in ("ids", "values", "scales"):
                     name = f"source_{suffix}"
                     if name in old:
@@ -440,16 +474,9 @@ class _FlashDSparkTailReuseTest(unittest.TestCase):
                             torch.equal(old[name], current[name]),
                             f"rank{rank} {key}: source",
                         )
-                physical = int(old["seq_size_per_block"])
-                pages = physical // int(old["kernel_seq_size_per_block"])
-                slot = (source_end - 1) // physical
-                if key[1] in DSV4_KERNEL_ROW_TAGS:
-                    slot //= self.cp_size
                 write_id = int(current["runtime_table"][0, slot * pages]) // pages
                 if write_id > 0:
-                    self.assertNotEqual(
-                        write_id, int(save[0]), f"rank{rank} {key}: alias"
-                    )
+                    self.assertNotEqual(write_id, source_id, f"rank{rank} {key}: alias")
                     copy_map.setdefault(str(key), {})[rank] = write_id
             direct_path = self.probe_dir / (
                 f"direct_reference_rank{rank}_{end_position}_g{source_end}.pt"
@@ -603,6 +630,165 @@ class _FlashDSparkTailReuseTest(unittest.TestCase):
         self._assert_target_pair(label, source_end, end_position, source, after)
         self._assert_draft_pair(label, source_end, end_position, source, after)
 
+    def _run_internal_f800_to_2000(self):
+        label = (
+            "dspark_cp2_internal_f800" if self.cp_size == 2 else "dspark_internal_f800"
+        )
+        base = f"Full Flash-DSpARK {label} branch:"
+        prefix = self._extend_prompt(base, 800)
+        prompt_a = self._extend_prompt(prefix, 1300)
+        source_ids = self.tokenizer.encode(prompt_a)
+        branches = []
+        for suffix in (" branch", " amber", " violet", " silver", " orange"):
+            candidate = self.tokenizer.encode(prefix + suffix)
+            if (
+                len(candidate) > 800
+                and candidate[:800] == source_ids[:800]
+                and candidate[800] != source_ids[800]
+                and all(candidate[800] != token for token, _ in branches)
+            ):
+                branches.append(
+                    (candidate[800], self._extend_prompt(prefix + suffix, 2000))
+                )
+            if len(branches) == 2:
+                break
+        self.assertEqual(len(branches), 2, "two strict full-DSpARK F800 branches")
+
+        source = self._request(f"{label}_source_1300", prompt_a)
+        self.assertEqual(source[0]["aux_info"].get("prefill_total_reuse_len"), 0)
+        reused_b = self._request(f"{label}_b_2000", branches[0][1])
+        expected_g = 512 if self.cp_size == 2 else 768
+        self.assertEqual(
+            reused_b[0]["aux_info"].get("prefill_total_reuse_len"), expected_g
+        )
+        selected_ids = {}
+        for rank in range(self.cp_size):
+            row_b = reused_b[1][rank]
+            self.assertEqual(row_b["end_position"], 2000)
+            private_name = (
+                f"private_f800_runtime_rank{rank}.pt"
+                if self.cp_size == 2
+                else "private_f800_runtime.pt"
+            )
+            private_f = torch.load(self.probe_dir / private_name, weights_only=False)
+            self.assertEqual(private_f["production_cache_bytes_copied"], 0)
+            for key, row in row_b["rows"].items():
+                old = source[1][rank]["rows"][key]
+                for suffix in ("ids", "values", "scales"):
+                    name = f"source_{suffix}"
+                    if name in old:
+                        self.assertTrue(
+                            torch.equal(old[name], row[name]),
+                            f"rank{rank} {key}: A source changed after B",
+                        )
+                positions = row["current_save_positions"].reshape(-1)
+                blocks = row["current_save_block_ids"].reshape(-1)
+                if key[1] in DSV4_KERNEL_ROW_TAGS:
+                    self.assertFalse(
+                        (blocks >= 0).any(), f"rank{rank} {key}: FULL save"
+                    )
+                    continue
+                for endpoint in (800, 2000):
+                    selected = blocks[positions == endpoint]
+                    self.assertEqual(selected.numel(), 1, f"rank{rank} {key}: F/N")
+                    self.assertGreater(int(selected[0]), 0)
+                    identity = (key, endpoint)
+                    if identity in selected_ids:
+                        self.assertEqual(int(selected[0]), selected_ids[identity])
+                    selected_ids[identity] = int(selected[0])
+                self.assertNotEqual(
+                    int(blocks[positions == 800][0]), int(blocks[positions == 2000][0])
+                )
+                for field in ("values", "scales"):
+                    if field in private_f["rows"][key]:
+                        self.assertTrue(
+                            torch.equal(
+                                row[f"selected_f800_{field}"],
+                                private_f["rows"][key][field],
+                            ),
+                            f"rank{rank} {key}: private F {field} differs",
+                        )
+
+        reused_c = self._request(f"{label}_c_2000", branches[1][1])
+        self.assertEqual(reused_c[0]["aux_info"].get("prefill_total_reuse_len"), 800)
+        compared = {}
+        owners = []
+        for rank in range(self.cp_size):
+            direct_name = (
+                f"direct_reference_rank{rank}_2000_g800.pt"
+                if self.cp_size == 2
+                else "direct_reference_2000_g800.pt"
+            )
+            direct = torch.load(self.probe_dir / direct_name, weights_only=False)
+            self.assertEqual(direct["production_cache_bytes_copied"], 0)
+            self.assertEqual(direct["selected_save_slots"], 0)
+            trace = reused_c[2][rank]
+            if self.cp_size == 2:
+                self.assertEqual(int(trace["extra"]["prefix_length"]), 800)
+                self.assertEqual(int(trace["extra"]["seq_len_total"]), 2000)
+            pairs = [
+                (
+                    f"layer{layer:02d}_{'tail128' if self.cp_size == 2 else 'last'}",
+                    direct["layers"][layer],
+                )
+                for layer in _CAPTURE_LAYERS
+            ]
+            pairs.extend(
+                (
+                    ("lm_last_hidden", direct["final_last"]),
+                    ("lm_logits_last", direct["logits_last"]),
+                )
+            )
+            if direct["final_last"].numel():
+                owners.append(rank)
+            for name, expected in pairs:
+                observed = trace["tensors"][name].float()
+                expected = expected.float()
+                self.assertEqual(observed.shape, expected.shape, f"rank{rank} {name}")
+                diff = (observed - expected).abs()
+                compared[f"rank{rank}_{name}"] = (
+                    float(diff.max()) if diff.numel() else 0.0
+                )
+                with self.subTest(rank=rank, tensor=name):
+                    torch.testing.assert_close(
+                        observed, expected, rtol=0.002, atol=0.002
+                    )
+            aux = torch.load(
+                self.probe_dir / f"dspark_aux_rank{rank}.pt", weights_only=False
+            )
+            self.assertEqual(tuple(aux["capture_layers"]), (40, 41, 42))
+            self.assertLessEqual(aux["maxabs"], 0.002)
+            for request in (reused_b, reused_c):
+                self.assertIs(request[0]["aux_info"]["pd_sep"], True)
+                commit = request[3][rank]
+                for field in (
+                    "physical_equal",
+                    "source_immutable",
+                    "restored_copy_equal",
+                ):
+                    self.assertTrue(commit[field], f"rank{rank}: empty {field}")
+                    self.assertTrue(all(commit[field].values()), f"rank{rank}: {field}")
+                self.assertLessEqual(commit["hidden_maxabs"], 0.002)
+            for key, row in reused_c[1][rank]["rows"].items():
+                old = source[1][rank]["rows"][key]
+                for field in ("source_ids", "source_values", "source_scales"):
+                    if field in old:
+                        self.assertTrue(
+                            torch.equal(old[field], row[field]),
+                            f"rank{rank} {key}: A source changed after C",
+                        )
+        self.assertEqual(len(owners), 1, "one rank owns final target token")
+        (self.output_dir / f"{label}_numeric_diffs.json").write_text(
+            json.dumps(compared, indent=2) + "\n"
+        )
+        for name, reused, prompt in (
+            ("b", reused_b, branches[0][1]),
+            ("c", reused_c, branches[1][1]),
+        ):
+            cold = self._request(f"{label}_{name}_cold", prompt, reuse=False)
+            self.assertEqual(cold[0]["aux_info"].get("prefill_total_reuse_len"), 0)
+            self.assertEqual(reused[0]["output_ids"], cold[0]["output_ids"])
+
 
 class FlashDSparkNonCPTest(_FlashDSparkTailReuseTest):
     def test_g1300_to_1320(self):
@@ -611,9 +797,15 @@ class FlashDSparkNonCPTest(_FlashDSparkTailReuseTest):
     def test_g1300_to_2000(self):
         self._run_case("dspark_noncp_1300_2000", 1300, 2000)
 
+    def test_internal_f800_to_2000(self):
+        self._run_internal_f800_to_2000()
+
 
 class FlashDSparkCP2Test(_FlashDSparkTailReuseTest):
     cp_size = 2
+
+    def test_internal_f800_to_2000(self):
+        self._run_internal_f800_to_2000()
 
     def test_g1300_to_2000(self):
         self._run_case("dspark_cp2_1300_2000", 1300, 2000)
