@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -72,6 +73,28 @@ void expectCountSamples(kmonitor::MutableMetric* metric, const kmonitor::Metrics
         EXPECT_EQ(gauge->calculator_.Count(), count);
     }
     EXPECT_TRUE(metric->UndeclareMetric(series));
+}
+
+void expectVictimSelectionCounters(const VictimSelectionCounters&                               counters,
+                                   uint64_t                                                     calls,
+                                   uint64_t                                                     selected,
+                                   uint64_t                                                     scanned,
+                                   std::initializer_list<std::pair<VictimSkipReason, uint64_t>> skipped = {}) {
+    EXPECT_TRUE(counters.observed);
+    EXPECT_EQ(counters.calls, calls);
+    EXPECT_EQ(counters.selected, selected);
+    EXPECT_EQ(counters.scanned_candidates, scanned);
+    std::array<uint64_t, static_cast<size_t>(VictimSkipReason::COUNT)> expected{};
+    for (const auto& [reason, count] : skipped) {
+        expected[static_cast<size_t>(reason)] = count;
+    }
+    uint64_t total_skipped = 0;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(counters.skipped[i], expected[i]) << kVictimSkipReasonNames[i];
+        total_skipped += counters.skipped[i];
+    }
+    // Every visit either returns the selected victim or has exactly one rejection reason.
+    EXPECT_EQ(counters.scanned_candidates, counters.selected + total_skipped);
 }
 
 static_assert(!noexcept(std::declval<BlockTreeEvictor&>().runDropTask(std::declval<TransferDescriptor>())));
@@ -1590,6 +1613,11 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkCapsBatchByRemainingRequiredCoun
     EXPECT_EQ(device_pool_->usedBlocksNum(), 7u);
     EXPECT_EQ(host_pool->usedBlocksNum(), 1u);
 
+    const auto selection = evictor_->takeVictimSelectionMetrics();
+    expectVictimSelectionCounters(
+        selection.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 1, 1, 1);
+    EXPECT_FALSE(selection.at(VictimSelectionTrigger::ON_DEMAND, Tier::DEVICE, CacheGroupType::FULL, false).observed);
+
     evictor_->settled_ = [](bool) {};
     while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DEVICE, /*notify_settled=*/false)) {}
     while (evictor_->dropLocked(/*group_set_id=*/0, Tier::HOST, /*notify_settled=*/false)) {}
@@ -2560,6 +2588,116 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimRejectsUnsupportedTier) {
     EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::NONE).has_value());
 }
 
+TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsCountEmptyCallsAndDrainIntervalDeltas) {
+    EXPECT_FALSE(evictor_->chooseVictim(0, Tier::DEVICE).has_value());
+    const auto first = evictor_->takeVictimSelectionMetrics();
+    expectVictimSelectionCounters(
+        first.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 1, 0, 0);
+    EXPECT_FALSE(first.at(VictimSelectionTrigger::ON_DEMAND, Tier::DEVICE, CacheGroupType::FULL, false).observed);
+    const auto idle = evictor_->takeVictimSelectionMetrics();
+    expectVictimSelectionCounters(
+        idle.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 0, 0, 0);
+    EXPECT_EQ(idle.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false).latency_sum_ns, 0u);
+    EXPECT_FALSE(evictor_->chooseVictim(0, Tier::DEVICE).has_value());
+    const auto next = evictor_->takeVictimSelectionMetrics();
+    expectVictimSelectionCounters(
+        next.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false), 1, 0, 0);
+}
+
+TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsDisabledReporterPreservesSelection) {
+    const auto blocks = device_pool_->malloc(1);
+    ASSERT_TRUE(blocks.has_value());
+    const auto                    result = insert({100}, {{makeResource(Tier::DEVICE, blocks->front())}});
+    BlockTreeCacheMetricsReporter reporter(nullptr);
+    std::mutex                    mutex;
+    BlockTreeEvictor              disabled(
+        tree_.get(),
+        EvictionPolicy::LRU,
+        EvictionPolicy::LRU,
+        EvictionPolicy::FIFO,
+        nullptr,
+        nullptr,
+        reporter,
+        mutex,
+        1000,
+        1000,
+        8,
+        [](Tier) { return true; },
+        [](bool) {});
+    disabled.onInserted(result);
+    const auto expected = evictor_->chooseVictim(0, Tier::DEVICE);
+    const auto actual   = disabled.chooseVictim(0, Tier::DEVICE);
+    ASSERT_TRUE(expected.has_value());
+    ASSERT_TRUE(actual.has_value());
+    EXPECT_EQ(actual->node, expected->node);
+    EXPECT_EQ(actual->source_blocks, expected->source_blocks);
+    EXPECT_EQ(actual->target_tier, expected->target_tier);
+    for (const auto& counters : disabled.takeVictimSelectionMetrics().buckets) {
+        EXPECT_FALSE(counters.observed);
+        EXPECT_EQ(counters.calls, 0u);
+        EXPECT_EQ(counters.latency_sum_ns, 0u);
+        EXPECT_EQ(counters.scanned_candidates, 0u);
+    }
+}
+
+TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsSeparateWatermarkDropFromOnDemand) {
+    const auto blocks = device_pool_->malloc(3);
+    ASSERT_TRUE(blocks.has_value());
+    for (size_t i = 0; i < blocks->size(); ++i) {
+        insert({static_cast<CacheKeyType>(100 + i)}, {{makeResource(Tier::DEVICE, (*blocks)[i])}});
+    }
+    evictor_->is_tier_enabled_ = [](Tier) { return false; };
+    EXPECT_TRUE(evictor_->batchEvictLocked(0, Tier::DEVICE, 1).direct_progress);
+    EXPECT_EQ(evictor_->reclaimDeviceBlocksLocked(0, 0, 1), 1u);
+    EXPECT_EQ(tree_->size(), 1u);
+    const auto selection = evictor_->takeVictimSelectionMetrics();
+    for (const auto trigger : {VictimSelectionTrigger::WATERMARK, VictimSelectionTrigger::ON_DEMAND}) {
+        expectVictimSelectionCounters(selection.at(trigger, Tier::DEVICE, CacheGroupType::FULL, true), 1, 1, 1);
+        EXPECT_FALSE(selection.at(trigger, Tier::DEVICE, CacheGroupType::FULL, false).observed);
+    }
+}
+
+TEST_F(BlockTreeEvictorTest, ChooseVictimMetricsFrozenSourcesAndFirstRejectionReason) {
+    for (const auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(tier));
+        resetGroup(makePinnedHostPool(1), makeTestDiskPool(1, "selection_metrics_frozen"));
+        BlockIdxType source = NULL_BLOCK_IDX;
+        if (tier == Tier::DEVICE) {
+            const auto blocks = device_pool_->malloc(1);
+            ASSERT_TRUE(blocks.has_value());
+            source = blocks->front();
+        } else {
+            source = group_->allocateSingleBlock(tier, BlockTreeRefType::CACHE);
+        }
+        ASSERT_FALSE(isNullBlockIdx(source));
+        insert({100}, {{makeResource(tier, source)}});
+        IBlockPool* pool = tier == Tier::DEVICE ? static_cast<IBlockPool*>(device_pool_.get()) :
+                           tier == Tier::HOST   ? static_cast<IBlockPool*>(group_->hostPool().get()) :
+                                                  static_cast<IBlockPool*>(group_->diskPool().get());
+        pool->freezeBlock(source);
+        if (tier == Tier::DEVICE) {
+            device_pool_->incRef(source);
+            EXPECT_FALSE(evictor_->chooseVictim(0, tier).has_value());
+            const auto held = evictor_->takeVictimSelectionMetrics();
+            expectVictimSelectionCounters(held.at(VictimSelectionTrigger::WATERMARK, tier, CacheGroupType::FULL, false),
+                                          1,
+                                          0,
+                                          1,
+                                          {{VictimSkipReason::REQUEST_REF, 1}});
+            device_pool_->decRef(source);
+        }
+        EXPECT_FALSE(evictor_->chooseVictim(0, tier).has_value());
+        const auto frozen = evictor_->takeVictimSelectionMetrics();
+        expectVictimSelectionCounters(frozen.at(VictimSelectionTrigger::WATERMARK, tier, CacheGroupType::FULL, false),
+                                      1,
+                                      0,
+                                      1,
+                                      {{VictimSkipReason::FROZEN, 1}});
+        pool->decTreeRef(source, BlockTreeRefType::FROZEN);
+        EXPECT_TRUE(evictor_->dropLocked(0, tier, false));
+    }
+}
+
 TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsInvalidHeapEntry) {
     MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 2, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_blocks.size(), 2u);
@@ -2578,6 +2716,14 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsInvalidHeapEntry) {
     ASSERT_TRUE(victim.has_value());
     EXPECT_EQ(victim->node, second_node);
     EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
+
+    const auto selection = evictor_->takeVictimSelectionMetrics();
+    expectVictimSelectionCounters(
+        selection.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false),
+        1,
+        1,
+        2,
+        {{VictimSkipReason::INVALID_CANDIDATE, 1}});
 
     first_node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
     first_node->group_set_resources[0].evictFromTier(Tier::DEVICE);
@@ -2722,9 +2868,21 @@ TEST_F(BlockTreeEvictorTest, SelectionCacheDefersReleasedCandidateUntilNextPass)
         evictor_->reserveSource({*second});
         EXPECT_FALSE(evictor_->chooseVictim(0, Tier::DEVICE, force_drop, &selection_cache).has_value());
 
+        const auto selection = evictor_->takeVictimSelectionMetrics();
+        expectVictimSelectionCounters(
+            selection.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, force_drop),
+            3,
+            2,
+            5,
+            {{force_drop ? VictimSkipReason::NOT_RECLAIMABLE : VictimSkipReason::REQUEST_REF, 1},
+             {VictimSkipReason::CACHED_REJECTION, 2}});
+
         const auto next_pass = evictor_->chooseVictim(0, Tier::DEVICE, force_drop);
         ASSERT_TRUE(next_pass.has_value());
         EXPECT_EQ(next_pass->node, nodes[0]);
+        const auto retried = evictor_->takeVictimSelectionMetrics();
+        expectVictimSelectionCounters(
+            retried.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, force_drop), 1, 1, 1);
         EXPECT_TRUE(evictor_->restoreSource({*first, *second}).empty());
         for (size_t i = 0; i < blocks.size(); ++i) {
             EXPECT_TRUE(evictor_->dropLocked(0, Tier::DEVICE, false));
@@ -2920,6 +3078,15 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsDeviceParentOfLoadingChildUnlessFo
     const auto victim = evictor_->chooseVictim(/*group_set_id=*/0, Tier::DEVICE, /*force_drop=*/false);
     ASSERT_TRUE(victim.has_value());
     EXPECT_EQ(victim->node, parent);
+    const auto selection = evictor_->takeVictimSelectionMetrics();
+    expectVictimSelectionCounters(
+        selection.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, false),
+        3,
+        3,
+        5,
+        {{VictimSkipReason::CHILD_LOADING, 2}});
+    expectVictimSelectionCounters(
+        selection.at(VictimSelectionTrigger::WATERMARK, Tier::DEVICE, CacheGroupType::FULL, true), 2, 2, 2);
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimReturnsEmptyWhenAllDeviceCandidatesAreSkipped) {
