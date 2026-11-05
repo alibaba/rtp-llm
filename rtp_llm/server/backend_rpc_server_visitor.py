@@ -725,7 +725,7 @@ class BackendRPCServerVisitor:
                     # response or retry behavior.
                     logging.exception("failed to observe raw backend frontend metrics")
 
-            first_exc: Optional[BaseException] = None
+            first_exc: Optional[Exception] = None
             while True:
                 pending_stop_prefix: dict[int, List[int]] = {}
                 yielded_output = False
@@ -757,7 +757,10 @@ class BackendRPCServerVisitor:
                         for output in buffered_outputs:
                             yield output
                     return
-                except BaseException as e:
+                except Exception as e:
+                    # GeneratorExit and CancelledError close the current
+                    # attempt. They must never resurrect an earlier failure
+                    # after a successful route retry.
                     set_aux_info(e)
                     if first_exc is None:
                         first_exc = e
@@ -766,14 +769,10 @@ class BackendRPCServerVisitor:
                         or attempt >= self.pd_route_retry_on_unavailable
                         or not self._is_retryable_route_rpc_error(e)
                     ):
-                        # After retries, re-raise the ORIGINAL exception to
-                        # preserve its error category (e.g. CAPACITY->429 from
-                        # the first route failure).  A later attempt may have
-                        # hit a different error (e.g. a model-RPC
-                        # INTERNAL->500) whose category does not reflect the
-                        # root cause; the caller should see the original
-                        # exception so that servicer/frontend maps it to the
-                        # correct HTTP status code.
+                        # Before any output, preserve the first failed route's
+                        # category. Once a retry has emitted output, its own
+                        # failure is authoritative: the earlier route failure
+                        # has already recovered.
                         # A later terminal admission decision is authoritative;
                         # do not hide it behind an earlier retryable transport
                         # or legacy capacity failure.
@@ -784,6 +783,7 @@ class BackendRPCServerVisitor:
                         if (
                             first_exc is not None
                             and first_exc is not e
+                            and not yielded_output
                             and not is_terminal_route_decision
                         ):
                             raise first_exc

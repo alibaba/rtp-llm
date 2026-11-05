@@ -782,6 +782,88 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outputs, ["partial-output-from-failed-attempt"])
         self.assertEqual(client.attempts, 1)
 
+    async def test_close_recovered_stream_does_not_raise_first_attempt_error(self):
+        class Client:
+            attempts = 0
+
+            async def enqueue(self, _input):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise FtRuntimeException(
+                        ExceptionType.CONNECTION_RESET_BY_PEER, "Socket closed"
+                    )
+                yield "successful-output"
+                yield "second-output"
+
+        for is_streaming in (True, False):
+            with self.subTest(is_streaming=is_streaming):
+                client = Client()
+                visitor = self._visitor(client)
+                visitor.set_request_id_factory(lambda: 456)
+                stream = await visitor.enqueue(_FakeInput(is_streaming=is_streaming))
+
+                self.assertEqual(await anext(stream), "successful-output")
+                await stream.aclose()
+
+                self.assertEqual(client.attempts, 2)
+
+    async def test_cancel_recovered_attempt_preserves_cancellation(self):
+        class Client:
+            attempts = 0
+
+            async def enqueue(self, _input):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "connection refused"
+                    )
+                recovered.set()
+                await asyncio.Event().wait()
+                yield "unreachable"
+
+        recovered = asyncio.Event()
+        client = Client()
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+        pending = asyncio.create_task(anext(stream))
+        try:
+            await asyncio.wait_for(recovered.wait(), timeout=2)
+            pending.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await pending
+        finally:
+            pending.cancel()
+            await stream.aclose()
+        self.assertEqual(client.attempts, 2)
+
+    async def test_current_stream_error_after_retry_output_is_preserved(self):
+        current_error = ValueError("invalid output on recovered stream")
+
+        class Client:
+            attempts = 0
+
+            async def enqueue(self, _input):
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise FtRuntimeException(
+                        ExceptionType.CONNECT_FAILED, "connection refused"
+                    )
+                yield "successful-output"
+                raise current_error
+
+        client = Client()
+        visitor = self._visitor(client)
+        visitor.set_request_id_factory(lambda: 456)
+        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+
+        self.assertEqual(await anext(stream), "successful-output")
+        with self.assertRaises(ValueError) as caught:
+            await anext(stream)
+
+        self.assertIs(caught.exception, current_error)
+        self.assertEqual(client.attempts, 2)
+
     async def test_retry_preserves_original_capacity_exception(self):
         """When a retryable CAPACITY error (e.g. MASTER_NO_AVAILABLE_WORKER)
         triggers a retry and the next attempt hits a different, non-retryable
