@@ -1,6 +1,6 @@
 #pragma once
 
-#include "python3.10/Python.h"
+#include "Python.h"
 #include <string>
 
 namespace navi {

@@ -307,6 +307,8 @@ cc_library(
         ":navi_common",
         ":navi_headers",
         ":navi_proto_inner_cc",
+        "@local_config_python//:python_headers",
+        "@local_config_python//:python_lib",
         "//rtp_llm/flexlb/navi_sched/vendor/autil:compression",
         "//rtp_llm/flexlb/navi_sched/vendor/autil:const_string_util",
         "//rtp_llm/flexlb/navi_sched/vendor/autil:diagnostic",
