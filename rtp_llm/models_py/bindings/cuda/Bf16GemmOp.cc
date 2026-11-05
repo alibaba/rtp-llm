@@ -9,33 +9,39 @@
 namespace torch_ext {
 
 at::Tensor cublas_gemm_bf16_bf16_fp32(const at::Tensor& input, const at::Tensor& weight) {
-    return cublas_gemm_bf16_bf16_fp32_out(input, weight, {});
+    return cublas_gemm_bf16_bf16_out(input, weight, {}, at::kFloat);
 }
 
-at::Tensor cublas_gemm_bf16_bf16_fp32_out(const at::Tensor& input, const at::Tensor& weight, const at::Tensor& output) {
-    TORCH_CHECK(input.is_cuda(), "cublas_gemm_bf16_bf16_fp32: input must be a CUDA tensor");
-    TORCH_CHECK(weight.is_cuda(), "cublas_gemm_bf16_bf16_fp32: weight must be a CUDA tensor");
-    TORCH_CHECK(input.scalar_type() == at::kBFloat16, "cublas_gemm_bf16_bf16_fp32: input must be bfloat16");
-    TORCH_CHECK(weight.scalar_type() == at::kBFloat16, "cublas_gemm_bf16_bf16_fp32: weight must be bfloat16");
-    TORCH_CHECK(input.dim() == 2 && weight.dim() == 2, "cublas_gemm_bf16_bf16_fp32: input and weight must be 2-D");
+at::Tensor cublas_gemm_bf16_bf16_out(const at::Tensor& input,
+                                     const at::Tensor& weight,
+                                     const at::Tensor& output,
+                                     at::ScalarType    output_dtype) {
+    TORCH_CHECK(input.is_cuda(), "cublas_gemm_bf16_bf16: input must be a CUDA tensor");
+    TORCH_CHECK(weight.is_cuda(), "cublas_gemm_bf16_bf16: weight must be a CUDA tensor");
+    TORCH_CHECK(input.scalar_type() == at::kBFloat16, "cublas_gemm_bf16_bf16: input must be bfloat16");
+    TORCH_CHECK(weight.scalar_type() == at::kBFloat16, "cublas_gemm_bf16_bf16: weight must be bfloat16");
+    TORCH_CHECK(input.dim() == 2 && weight.dim() == 2, "cublas_gemm_bf16_bf16: input and weight must be 2-D");
     TORCH_CHECK(input.get_device() == weight.get_device(),
-                "cublas_gemm_bf16_bf16_fp32: input and weight must be on the same CUDA device");
-    TORCH_CHECK(input.size(1) == weight.size(1), "cublas_gemm_bf16_bf16_fp32: inner dimensions must match");
+                "cublas_gemm_bf16_bf16: input and weight must be on the same CUDA device");
+    TORCH_CHECK(input.size(1) == weight.size(1), "cublas_gemm_bf16_bf16: inner dimensions must match");
+
+    TORCH_CHECK(output_dtype == at::kFloat || output_dtype == at::kBFloat16,
+                "cublas_gemm_bf16_bf16: output dtype must be FP32 or BF16");
 
     const int64_t M       = input.size(0);
     const int64_t N       = weight.size(0);
     const int64_t K       = input.size(1);
     const int64_t int_max = static_cast<int64_t>(std::numeric_limits<int>::max());
     TORCH_CHECK(M <= int_max && N <= int_max && K <= int_max,
-                "cublas_gemm_bf16_bf16_fp32: dimensions exceed cuBLAS int32 limit");
+                "cublas_gemm_bf16_bf16: dimensions exceed cuBLAS int32 limit");
 
     const c10::cuda::CUDAGuard device_guard(input.device());
     auto                       input_contig  = input.contiguous();
     auto                       weight_contig = weight.contiguous();
-    auto                       out = output.defined() ? output : at::empty({M, N}, input.options().dtype(at::kFloat));
-    TORCH_CHECK(out.device() == input.device() && out.scalar_type() == at::kFloat && out.is_contiguous()
+    auto                       out = output.defined() ? output : at::empty({M, N}, input.options().dtype(output_dtype));
+    TORCH_CHECK(out.device() == input.device() && out.scalar_type() == output_dtype && out.is_contiguous()
                     && out.dim() == 2 && out.size(0) == M && out.size(1) == N,
-                "cublas_gemm_bf16_bf16_fp32_out: expected contiguous CUDA FP32 [M,N] output");
+                "cublas_gemm_bf16_bf16_out: expected contiguous CUDA [M,N] output with requested dtype");
     if (out.numel() == 0) {
         return out;
     }
@@ -66,7 +72,7 @@ at::Tensor cublas_gemm_bf16_bf16_fp32_out(const at::Tensor& input, const at::Ten
                                       static_cast<int>(K),
                                       &beta,
                                       out.data_ptr(),
-                                      CUDA_R_32F,
+                                      output_dtype == at::kFloat ? CUDA_R_32F : CUDA_R_16BF,
                                       static_cast<int>(N),
                                       CUBLAS_COMPUTE_32F,
                                       CUBLAS_GEMM_DEFAULT));

@@ -17,7 +17,8 @@ template<typename ValueT_,
          uint32_t cluster_size_         = 1,
          bool     canonicalize_nan_     = false,
          bool     filter_finite_        = false,
-         bool     pin_last_index_       = false>
+         bool     pin_last_index_       = false,
+         bool     exclude_padding_      = pin_last_index_>
 struct TopkSelectConfig {
     using ValueT                                    = ValueT_;
     using OutIdxT                                   = OutIdxT_;
@@ -38,4 +39,6 @@ struct TopkSelectConfig {
     // Complete decode candidates: replace the greatest selected ID with the
     // last visible block, after index ordering. Token selectors leave this off.
     static constexpr bool pin_last_index = pin_last_index_;
+    // Exclude padded -INF entries from tie quotas without pinning a token.
+    static constexpr bool exclude_padding = exclude_padding_;
 };

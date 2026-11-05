@@ -1666,8 +1666,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                             && last_hidden.size(0) <= proposal_logits_buffer_.size(0) ?
                                         proposal_logits_buffer_.narrow(0, 0, last_hidden.size(0)) :
                                         torch::Tensor();
-                logits            = torch_ext::cublas_gemm_bf16_bf16_fp32_out(
-                    last_hidden.to(torch::kBFloat16), lm_head->kernel, output);
+                logits            = torch_ext::cublas_gemm_bf16_bf16_out(
+                    last_hidden.to(torch::kBFloat16), lm_head->kernel, output, torch::kFloat32);
             } else
 #endif
             {

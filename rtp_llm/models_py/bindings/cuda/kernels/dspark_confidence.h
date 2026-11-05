@@ -6,7 +6,7 @@
 namespace rtp_llm {
 
 // Commit one sampled draft step without changing sampling or RNG. Resolves
-// compact candidate IDs and optional vocabulary mapping, writes the final
+// int32/int64 compact candidate IDs and optional vocabulary mapping, writes the final
 // strided token/probability columns, and optionally gathers the next Markov
 // embedding. Copies embedding bits exactly. Unsupported layouts return false
 // before launching, allowing the caller to keep the existing Torch path.

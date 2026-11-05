@@ -16,6 +16,7 @@
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dspark_confidence.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -811,8 +812,11 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
 
     torch::Tensor markov_embedding;
 #if USING_CUDA
-    // Each step consumes this FP32 bias before the next same-stream GEMM
-    // overwrites it. Keep the Markov weights in their loaded BF16 dtype.
+    const bool bf16_draft_topk =
+        batch_size >= 16 && compact_width > 0 && markov_w1.scalar_type() == torch::kBFloat16
+        && markov_w2.scalar_type() == torch::kBFloat16
+        && torch_ext::draft_markov_topk_bf16_supported(proposal_logits.select(1, 0), compact_width);
+    // Reuse the bias buffer after selection on the same stream.
     torch::Tensor markov_bias_buffer;
 #endif
     for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
@@ -823,9 +827,8 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
 #if USING_CUDA
         if (markov_embedding.is_cuda() && markov_w2.is_cuda() && markov_embedding.scalar_type() == torch::kBFloat16
             && markov_w2.scalar_type() == torch::kBFloat16) {
-            // Match the FP32 proposal-logit accumulator: a BF16 intermediate
-            // rounds away Markov terms before softmax, filtering, or argmax.
-            markov_bias = torch_ext::cublas_gemm_bf16_bf16_fp32_out(markov_embedding, markov_w2, markov_bias_buffer);
+            markov_bias = torch_ext::cublas_gemm_bf16_bf16_out(
+                markov_embedding, markov_w2, markov_bias_buffer, bf16_draft_topk ? torch::kBFloat16 : torch::kFloat32);
             markov_bias_buffer = markov_bias;
         } else
 #endif
@@ -860,7 +863,10 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
 #if USING_CUDA
             if (compact_width > 0) {
                 auto step_logits = proposal_logits.select(1, step);
-                auto selected   = torch_ext::draft_markov_topk(step_logits, markov_bias, temperature, compact_width);
+                auto selected =
+                    bf16_draft_topk ?
+                        torch_ext::draft_markov_topk_bf16(step_logits, markov_bias, temperature, compact_width) :
+                        torch_ext::draft_markov_topk(step_logits, markov_bias, temperature, compact_width);
                 compact_indices = std::get<1>(selected);
                 // The fused sampler consumes scaled logits and writes the filtered distribution.
                 draft_q = fuse_draft_sampling ? std::get<0>(selected) : torch::softmax(std::get<0>(selected), -1);
