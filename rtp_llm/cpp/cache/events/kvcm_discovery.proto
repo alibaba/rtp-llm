@@ -21,6 +21,7 @@ message ResponseHeader {
 message MetaNodeEndpoint {
     string node_id = 1;
     string host = 2;
+    int32 meta_rpc_port = 3;
     int32 meta_http_port = 4;
 }
 
