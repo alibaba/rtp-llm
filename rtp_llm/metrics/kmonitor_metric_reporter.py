@@ -88,6 +88,12 @@ class AccMetrics(Enum):
     VIT_EMBEDDING_CACHE_INFLIGHT_QPS_METRIC = "py_rtp_vit_embedding_cache_inflight_qps"
     VIT_EMBEDDING_CACHE_EVICTION_QPS_METRIC = "py_rtp_vit_embedding_cache_eviction_qps"
 
+    # Multimodal download proxy: download attempts routed through the region
+    # egress proxy, and connect-failure fallbacks to direct. Both carry the
+    # request region tag.
+    MM_DOWNLOAD_PROXY_QPS_METRIC = "py_rtp_mm_download_proxy_qps"
+    MM_DOWNLOAD_PROXY_FALLBACK_QPS_METRIC = "py_rtp_mm_download_proxy_fallback_qps"
+
     # DashScope TPM recheck after the early first packet.
     DASH_SC_TPM_RECHECK_QPS_METRIC = "py_rtp_dash_sc_tpm_recheck_qps"
     DASH_SC_TPM_RECHECK_LIMIT_QPS_METRIC = "py_rtp_dash_sc_tpm_recheck_limit_qps"
