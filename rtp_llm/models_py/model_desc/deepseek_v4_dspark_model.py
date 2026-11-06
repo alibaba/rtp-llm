@@ -432,6 +432,15 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 )
             yield attn, entries_per_block, pool
 
+    def _project_committed_kv(self, attn, main_x, context_freqs):
+        return fused_rmsnorm_rope(
+            attn._lin(attn.wkv, main_x).contiguous(),
+            attn.kv_norm,
+            context_freqs,
+            int(attn.rope_head_dim),
+            eps=float(attn.eps),
+        )
+
     def _commit_layer_features(
         self,
         layer_idx: int,
@@ -466,13 +475,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             context_freqs = attn.freqs_cis.index_select(
                 0, safe_context_pos
             ).contiguous()
-            context_kv = fused_rmsnorm_rope(
-                attn._lin(attn.wkv, main_x).contiguous(),
-                attn.kv_norm,
-                context_freqs,
-                int(attn.rope_head_dim),
-                eps=float(attn.eps),
-            )
+            context_kv = self._project_committed_kv(attn, main_x, context_freqs)
             if gathered_positions is not None:
                 from rtp_llm.models_py.distributed.collective_torch import (
                     Group,
@@ -736,7 +739,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         tokens_per_block: int,
         graph_metadata: Any,
     ) -> torch.Tensor:
-        hidden = self.v4.embed(query_ids)
+        hidden = self._embed_query_tokens(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
 
         # The hyper-connection choreography lives in Block.forward_decode;
@@ -807,7 +810,13 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         dim = int(self._v4_args.dim)
 
         head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
-        return self.v4.norm(head_hidden)
+        return self._normalize_draft_hidden(head_hidden)
+
+    def _embed_query_tokens(self, query_ids):
+        return self.v4.embed(query_ids)
+
+    def _normalize_draft_hidden(self, hidden):
+        return self.v4.norm(hidden)
 
     def _forward_device(self) -> torch.device:
         if self.v4 is None:

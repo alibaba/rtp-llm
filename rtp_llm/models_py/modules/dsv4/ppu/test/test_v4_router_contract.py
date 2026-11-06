@@ -76,6 +76,7 @@ def _gate_from_logits(
     gate = Gate.__new__(Gate)
     nn.Module.__init__(gate)
     gate._fp32_gemm = False
+    gate._fp32_rowwise = False
     gate._fused_gate = True
     gate._stable_topk = False
     gate._bf16_fp32_linear = lambda x, w: torch.nn.functional.linear(x, w).float()

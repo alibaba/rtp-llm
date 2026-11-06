@@ -35,6 +35,7 @@ _PPU_CONTRACT_TESTS = [
 ) for name in [
     "isolated_metadata", "rich_contract", "chunk_options", "platform_provider",
     "prefill_communication", "tp_prefill_workspace_dims", "prefill_warmup",
+    "dspark_contract",
 ]]
 
 

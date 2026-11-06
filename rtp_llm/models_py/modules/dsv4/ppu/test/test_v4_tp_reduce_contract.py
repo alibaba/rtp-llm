@@ -17,6 +17,7 @@ class PpuTPReduceContractTest(unittest.TestCase):
         model.dim = 2
         model.max_tokens_per_rank = capacity
         model.route_scale = 1.5
+        model._a8_experts = False
         model._fused_gather_shared = False
         model._shared_phases = None
         events = []

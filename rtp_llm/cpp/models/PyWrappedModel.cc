@@ -1418,27 +1418,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             } else
 #endif
             {
-                auto activations = last_hidden.to(lm_head->kernel.dtype());
-                auto weight      = lm_head->kernel.t();
-#if USE_PPU
-                static const bool rowwise_decode_lm_head = [] {
-                    const char* value = std::getenv("DSV4_PPU_DECODE_LM_HEAD_ROWWISE");
-                    return value && std::strcmp(value, "1") == 0;
-                }();
-                if (rowwise_decode_lm_head && !has_context_request && !inputs.warmup
-                    && activations.scalar_type() == torch::kFloat32 && activations.size(0) > 1) {
-                    // M890P FP32 mm can round differently when the decode batch shape changes.
-                    std::vector<torch::Tensor> rows;
-                    rows.reserve(activations.size(0));
-                    for (const auto& row : activations.split(1, 0)) {
-                        rows.push_back(torch::mm(row, weight));
-                    }
-                    logits = torch::cat(rows, 0);
-                } else
-#endif
-                {
-                    logits = torch::mm(activations, weight).to(torch::kFloat32);
-                }
+                logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
             }
         }
 
