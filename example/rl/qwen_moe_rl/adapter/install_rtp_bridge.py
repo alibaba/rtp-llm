@@ -70,10 +70,17 @@ def _after_import(name, module):
         from qwen36_trace_enrichment import install as install_trace_linkage
         install_trace_linkage(module)
     elif name == "verl.workers.rollout.base":
-        module._ROLLOUT_REGISTRY[("rtp", "async")] = "rtp_verl_backend.RTPServerAdapter"
+        module._ROLLOUT_REGISTRY[("rtp", "async")] = (
+            "qwen38_verl_backend.World72ServerAdapter"
+            if os.environ.get("RTP_LLM_RL_WORLD72") == "1" else "rtp_verl_backend.RTPServerAdapter"
+        )
     elif name == "verl.workers.rollout.replica":
         module.RolloutReplicaRegistry.register(
-            "rtp", lambda: importlib.import_module("rtp_verl_backend").RTPReplica,
+            "rtp", lambda: (
+                importlib.import_module("qwen38_verl_backend").World72Replica
+                if os.environ.get("RTP_LLM_RL_WORLD72") == "1"
+                else importlib.import_module("rtp_verl_backend").RTPReplica
+            ),
         )
     elif name == "rllm.trainer.verl.verl_backend":
         original_init = module.VerlBackend.__init__
@@ -166,7 +173,7 @@ def _install_driver():
             self._start_tunnel()
 
     GatewayManager.start = gateway_start
-    for prefix in ("RTP_", "RLLM_RTP_", "RLLM_QWEN36_", "QWEN36_"):
+    for prefix in ("RTP_", "RLLM_RTP_", "RLLM_QWEN36_", "QWEN36_", "Q38_"):
         if prefix not in ray_runtime_env.FORWARD_PREFIXES:
             ray_runtime_env.FORWARD_PREFIXES.append(prefix)
     original_env = ray_runtime_env.get_ppo_ray_runtime_env
