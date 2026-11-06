@@ -85,6 +85,21 @@ cc_test(
 )
 
 cc_test(
+    name = "stream_groups_reuse_metrics_test",
+    srcs = [
+        "StreamGroupsReuseMetricsTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "generate_stream_state_test",
     srcs = [
         "GenerateStreamStateTest.cc",

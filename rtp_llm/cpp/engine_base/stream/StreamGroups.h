@@ -79,7 +79,10 @@ public:
                 auto reuse_length = stream->reuseLength();
                 context_execute_token_size_ += execute_token_size;
                 context_execute_token_size_with_cache_ += execute_token_size;
-                if (reuse_length > 0) {
+                // The reused prefix belongs to the REQUEST, not to each chunked
+                // step: count it exactly once so the with-cache wall TPS stays
+                // comparable with the client-side context-token rate.
+                if (reuse_length > 0 && stream->consumeReuseForWallMetrics()) {
                     context_execute_token_size_with_cache_ += static_cast<size_t>(reuse_length) * cur_batch_size;
                 }
             }
@@ -158,7 +161,9 @@ public:
             counts.context += execute_token_size;
             counts.context_with_cache += execute_token_size;
             counts.total += execute_token_size;
-            if (stream->reuseLength() > 0) {
+            // Same once-per-request rule as the aggregate path; a separate
+            // guard keeps this priority accounting independent.
+            if (stream->reuseLength() > 0 && stream->consumeReuseForPriorityMetrics()) {
                 counts.context_with_cache += static_cast<int64_t>(stream->reuseLength()) * stream->currentBatchSize();
             }
         }

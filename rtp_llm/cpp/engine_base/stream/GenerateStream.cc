@@ -554,6 +554,27 @@ int GenerateStream::diskReuseLength() const {
     return disk_reuse_length_;
 }
 
+bool GenerateStream::consumeReuseForWallMetrics() {
+    if (reuse_counted_wall_metrics_) {
+        return false;
+    }
+    reuse_counted_wall_metrics_ = true;
+    return true;
+}
+
+bool GenerateStream::consumeReuseForPriorityMetrics() {
+    if (reuse_counted_priority_metrics_) {
+        return false;
+    }
+    reuse_counted_priority_metrics_ = true;
+    return true;
+}
+
+void GenerateStream::resetReuseMetricsGuards() {
+    reuse_counted_wall_metrics_     = false;
+    reuse_counted_priority_metrics_ = false;
+}
+
 void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     // NOTE: no upper-bound check against seqLength() here. Under CP sharding the
     // connector reuse lengths are accounted in canonical block tokens

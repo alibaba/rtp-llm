@@ -285,6 +285,15 @@ public:
     int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
     void    incLastOutputPos();
+    // Metrics-only reuse accounting guards: the KV-reused prefix must be
+    // counted exactly once per request in with-cache token accounting, even
+    // when chunked context execution spans multiple executor steps. Two
+    // independent guards are required because the executor feeds both the
+    // aggregate wall-TPS path and the per-priority path from the same step;
+    // a single guard would let the first path starve the second.
+    bool    consumeReuseForWallMetrics();
+    bool    consumeReuseForPriorityMetrics();
+    void    resetReuseMetricsGuards();
     void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory);
     int64_t prefillTotalReuseLen() const;
     int64_t prefillLocalReuseLen() const;
@@ -1000,6 +1009,9 @@ protected:
     int                                remote_reuse_length_               = 0;
     int                                host_reuse_length_                 = 0;
     int                                disk_reuse_length_                 = 0;
+    // Metrics-only reuse accounting guards (see consumeReuseForWallMetrics).
+    bool                               reuse_counted_wall_metrics_        = false;
+    bool                               reuse_counted_priority_metrics_    = false;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

@@ -259,6 +259,9 @@ void StreamCacheResource::clearCacheReuseState() {
     stream_->setDiskReuseLength(0);
     stream_->setLocalReuseLength(0);
     stream_->setRemoteReuseLength(0);
+    // The retry re-publishes reuse and re-serves the prefix; re-arm the
+    // once-per-request reuse metrics guards so both sides stay aligned.
+    stream_->resetReuseMetricsGuards();
 }
 
 void StreamCacheResource::adoptDecodeReuse(DecodeReuseSourcesPtr sources, int64_t adopted_end) {
