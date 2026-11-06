@@ -28,6 +28,10 @@ from rtp_llm.multimodal.multimodal_mixins.minimax_m31_vl.minimax_m31_vl_vit impo
 
 
 class MiniMaxM31VLTest(unittest.TestCase):
+    def test_mixin_rejects_non_bf16_before_visual_initialization(self):
+        with self.assertRaisesRegex(ValueError, "ACT_TYPE=bf16"):
+            MiniMaxM31VLMixin(torch.float16)
+
     def test_transformers_fast_image_processor_import_contract(self):
         from transformers.image_processing_utils_fast import (
             BaseImageProcessorFast,

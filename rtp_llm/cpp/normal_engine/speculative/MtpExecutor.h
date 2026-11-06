@@ -88,6 +88,7 @@ public:
                                                        const ResourceContext& resource_context,
                                                        int                    vocab_size,
                                                        bool                   is_dspark = false);
+    static bool              isMtpStreamAdmitted(const GenerateStreamPtr& stream);
     static bool              mustWaitBeforeStreamPreparation(bool stream_async,
                                                              bool drop_broad_sync,
                                                              bool linear_attention,

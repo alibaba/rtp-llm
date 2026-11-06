@@ -1191,6 +1191,13 @@ class MiniMaxM31VLDeployWeightInfo(BaseMultiModalDeployWeightInfo):
 
 
 class MiniMaxM31VLMixin(BaseMultiModalMixin):
+    def __init__(self, compute_dtype: torch.dtype, *args, **kwargs) -> None:
+        if compute_dtype != torch.bfloat16:
+            raise ValueError(
+                "MiniMax-M3.1 VL requires BF16 activations; set ACT_TYPE=bf16"
+            )
+        super().__init__(compute_dtype, *args, **kwargs)
+
     def _init_multimodal(self) -> None:
         self.mm_part = MiniMaxM31VLImageEmbedding(self.mm_related_params)
 

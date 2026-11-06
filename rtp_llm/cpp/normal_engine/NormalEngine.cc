@@ -1131,6 +1131,9 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 bool has_prefill = false;
                 bool has_decode  = false;
                 for (auto& stream : streams) {
+                    if (!MtpExecutor::isMtpStreamAdmitted(stream)) {
+                        continue;
+                    }
                     if (stream->isContextStream()) {
                         has_prefill = true;
                     } else {

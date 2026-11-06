@@ -269,6 +269,10 @@ void applySpecLogitsAcceptLenCap(const SpecLogitsVerifyRunner::LaunchResult& ver
 
 }  // namespace
 
+bool MtpExecutor::isMtpStreamAdmitted(const GenerateStreamPtr& stream) {
+    return isPrefillOnly(stream) || !validateMtpCompatibility(stream->getAllLogitsProcessorPtr()).has_value();
+}
+
 torch::Tensor MtpExecutor::snapshotMutableHostInputToCuda(const torch::Tensor& tensor, TensorHolder& holder) {
     if (!tensor.defined() || tensor.is_cuda()) {
         return tensor;
@@ -1135,7 +1139,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         // Real prefill on any DP rank still needs every rank's MoE collectives.
         auto all_fake = torch::tensor({model_input.is_fake_stream ? int32_t{1} : int32_t{0}},
                                       torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-        all_fake      = execAllReduce({all_fake, ReduceOp::Min, false, ParallelMode::DP_AND_TP}).buffer;
+        all_fake      = execAllReduce({all_fake, ReduceOp::Min, ParallelMode::DP_AND_TP}).buffer;
         if (all_fake.item<int32_t>() == 1) {
             releaseAllModelBuffers();
             return absl::OkStatus();

@@ -3052,6 +3052,19 @@ public:
     }
 };
 
+TEST_F(MtpExecutorTest, testFakeStreamAdmissionIgnoresRejectedMtpStreams) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto stream =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1}, 1);
+
+    EXPECT_TRUE(MtpExecutor::isMtpStreamAdmitted(stream));
+    stream->logits_processor_list_.push_back(std::make_shared<IncompatibleMtpProcessor>());
+    EXPECT_FALSE(MtpExecutor::isMtpStreamAdmitted(stream));
+
+    stream->generateConfig()->max_new_tokens = 0;
+    EXPECT_TRUE(MtpExecutor::isMtpStreamAdmitted(stream));
+}
+
 TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
     size_t propose_step = 1;
     size_t vocab_size   = 4;
