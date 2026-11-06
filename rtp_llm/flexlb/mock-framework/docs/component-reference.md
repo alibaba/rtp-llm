@@ -461,3 +461,8 @@ LLM Mock Engine 的装配类统一命名为 `execution/LLMMockEngine`，缓存�
 `rtp_llm_rpc_worker_status_total_rt_us` 计到缓存容量和任务状态采集完成；同样排除后续 protobuf 构建和响应提交，对照 real `GetWorkerStatus` 的 `request_after_ws_time_us`。这两个指标均不是客户端观察的完整 RPC 延迟；计时边界修正不代表消息构建、序列化的实际成本消失。
 
 对应 QPS 保持每次状态查询计一次。对比部署时先区分每实例和集群总量，再核对 Master 数量、轮询周期及重试机制，不通过调整 QPS 补偿不同轮询负载。
+
+
+`rtp_llm_rpc_onflight_request` 对照 real `GenerateContext::collectBasicMetrics`：生成请求结束时，采样当前实例尚未退出的生成请求数，包含正在结束的本次请求，然后释放该请求的计数。P 覆盖本地生成以及等待 D 的整个 P/D 请求，批量 Enqueue 按每个子请求计，不按批 RPC 次数；Fetch 不另加一次。D 从 RemoteGenerate 打开计数，RPC 取消/断连时释放；已接受 GENERATE 的计算仍按既有规则独立继续，后续计算结束不能重复释放。成功、失败、取消都只释放一次；health、WorkerStatus、CacheStatus 不计入。
+
+这是 real 的终态事件 Gauge：SDK 收到原始样本，Prometheus 导出 sum/count，本地 View 先合并原始权重再求均值。它不是 Scheduler running 数，也不是定时采集的瞬时 RPC 并发；例如单个串行请求在结束时采样为 1，空闲时没有新样本，不应期待它自然上报 0。Mock 的输出交付已经解耦，逻辑请求终态与异步输出排空的边界不同，该指标不衡量待交付数据量或网络压力。

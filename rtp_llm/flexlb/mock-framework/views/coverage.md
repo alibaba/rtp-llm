@@ -349,3 +349,6 @@ TPS 以当前分支 Real 的 `RtpLLMMetrics.h/.cc` 和 `MtpExecutor.cc` 为合�
 
 
 ViT 的“已上报”表示按 [ViT 指标口径](../docs/component-reference.md#vit-指标口径) 上报：工作 QPS 带 `source=mm_embedding`，请求耗时带 `source=get_embedding_result,status=success/error`；二者不共用计数单位。缓存量是形状计费的逻辑驻留量。预处理只测量 Mock 实际执行的下载、读尺寸和规划，不代表真实像素处理成本；CUDA Graph、GreenNet 和进程 IPC 未模拟，保留无数据。
+
+
+`rtp_llm_rpc_onflight_request` 已接入 P/D：在生成请求终态采样，包含当前请求，状态 RPC 不计。Prometheus 保留原始 sum/count，View 按事件权重求均值；未产生终态事件时无数据，不补零。

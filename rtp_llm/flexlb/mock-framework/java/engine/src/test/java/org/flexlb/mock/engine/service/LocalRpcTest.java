@@ -64,6 +64,8 @@ class LocalRpcTest {
                 }
                 assertEquals(2, sample(text, "rtp_llm_kv_cache_item_num", "role=\"prefill\""));
                 assertEquals(2, sample(text, "rtp_llm_framework_requests_total", "outcome=\"success\""));
+                assertEquals(2,sample(text,"rtp_llm_rpc_onflight_request_count",""));
+                assertEquals(2,sample(text,"rtp_llm_rpc_onflight_request_sum",""));
                 assertEquals(10, sample(text, "rtp_llm_cache_lookup_tokens_total", ""));
                 assertEquals(4, sample(text, "rtp_llm_cache_hit_tokens_total", ""));
                 assertEquals(6, sample(text, "rtp_llm_forward_tokens_total", "kind=\"compute\""));
@@ -138,6 +140,12 @@ class LocalRpcTest {
                     @Override public void onCompleted() { done.countDown(); }
                 }));
                 await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
+                // A rejected second request samples both itself and the still-running first request.
+                var rejected=PrefillAdmissionTest.input(2,0,true).toBuilder();
+                rejected.getGenerateConfigBuilder().setReturnSoftmaxProbs(true);
+                assertThrows(StatusRuntimeException.class,()->read.generateStreamCall(rejected.build()).hasNext());
+                assertEquals(1,sample(metrics(node),"rtp_llm_rpc_onflight_request_count",""));
+                assertEquals(2,sample(metrics(node),"rtp_llm_rpc_onflight_request_sum",""));
                 var nativeStatus = read.getWorkerStatus(StatusVersionPB.getDefaultInstance());
                 assertEquals(0, nativeStatus.getWaitingQueryLen());
                 assertEquals(0, nativeStatus.getRunningQueryLen());
@@ -153,8 +161,16 @@ class LocalRpcTest {
                 assertEquals(0, read.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build()).getCacheKeysCount());
                 var text = metrics(node);
                 assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"cancelled\""));
+                assertEquals(2,sample(text,"rtp_llm_rpc_onflight_request_count",""));
+                assertEquals(3,sample(text,"rtp_llm_rpc_onflight_request_sum",""));
                 assertEquals(0, sample(text, "rtp_llm_model_forward_seconds_count", ""));
                 assertEquals(16, sample(text, "rtp_llm_kv_tokens", "state=\"available\""));
+                var next=read.generateStreamCall(PrefillAdmissionTest.input(3,0,true));
+                while(next.hasNext()) next.next();
+                String after=metrics(node);
+                assertEquals(3,sample(after,"rtp_llm_rpc_onflight_request_count",""));
+                assertEquals(4,sample(after,"rtp_llm_rpc_onflight_request_sum",""));
+
             } finally { context.cancel(null); channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
         }
     }
