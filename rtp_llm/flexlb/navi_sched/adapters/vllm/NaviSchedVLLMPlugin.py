@@ -5,6 +5,25 @@ def _intercept_frontend_request(unused_request, unused_raw_request) -> bool:
     return True
 
 
+
+def _agent_rank_selected(environ) -> bool:
+    selected = environ.get("NAVI_SCHED_RANK_LISTEN")
+    if selected is None:
+        return True
+    if not selected.isdecimal():
+        raise ValueError("NAVI_SCHED_RANK_LISTEN must be a nonnegative rank")
+    rank = environ.get("RANK_ID", "")
+    if not rank.isdecimal():
+        raise ValueError("RANK_ID is required when NAVI_SCHED_RANK_LISTEN is set")
+    size = environ.get("RANK_SIZE")
+    if size is not None and (
+        not size.isdecimal() or int(size) <= 0
+        or int(rank) >= int(size) or int(selected) >= int(size)
+    ):
+        raise ValueError("NaviSched rank selection is outside RANK_SIZE")
+    return int(rank) == int(selected)
+
+
 def register_enabled_vllm_plugin() -> None:
     hash_seed = os.environ.setdefault("PYTHONHASHSEED", "0")
     if hash_seed != "0":
@@ -16,17 +35,23 @@ def register_enabled_vllm_plugin() -> None:
         register_engine_transport_factory,
     )
 
+    # Every compute rank retains worker timing. Only the selected host owns
+    # the scheduler Agent and request-facing NaviSched integration.
+    selected = _agent_rank_selected(os.environ)
+    register_worker = getattr(plugins, "register_worker_observer_factory", None)
+    if register_worker is not None:
+        from .VLLMWorkerObserver import create_vllm_worker_observer
+
+        register_worker(create_vllm_worker_observer)
+    if not selected:
+        return
+
     from .VLLMDeferredRenderer import create_deferred_renderer
     from .VLLMEngineObserver import create_vllm_engine_observer
     from .VLLMEngineTransport import create_vllm_engine_transport
     from .VLLMNativePreparation import configure_native_preparation
 
     register_engine_observer_factory(create_vllm_engine_observer)
-    register_worker = getattr(plugins, "register_worker_observer_factory", None)
-    if register_worker is not None:
-        from .VLLMWorkerObserver import create_vllm_worker_observer
-
-        register_worker(create_vllm_worker_observer)
     # DashLLM keeps its existing PULL transport by default. An explicit
     # EngineCore redirect opt-in allows the AsyncLLM frontend to route the
     # already-constructed vLLM request without changing DashServing's wire
