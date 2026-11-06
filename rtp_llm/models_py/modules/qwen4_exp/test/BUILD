@@ -626,6 +626,9 @@ qwen4_test(
 qwen4_test(
     name = "cpu_target_status_test",
     src = "distributed/cpu_target_status_test.py",
+    # Native CPU bindings share a CUDA-linked library; no CUDA device is needed.
+    gpu = "L20_CU13",
+    gpus = 0,
     deps = _REFERENCE_DEPS,
 )
 
