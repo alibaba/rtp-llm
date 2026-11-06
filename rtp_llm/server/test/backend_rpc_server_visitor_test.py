@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -169,6 +169,59 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 
         self.assertEqual(get_role_names(role_addrs), {"PREFILL", "DECODE"})
 
+    def test_v41_upload_precedes_schedule_even_with_stale_batch_capability(self):
+        async def run(required):
+            visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+            visitor.seq_size_per_block = 16
+            visitor.cache_key_seed = 0
+            visitor.remote_vit = True
+            visitor.host_service = Mock()
+            visitor.host_service.requires_generate_input.return_value = required
+            visitor._route_cache_keys = lambda keys: keys
+            visitor._report_recent_cache_key_metrics = lambda keys: None
+            visitor._page_rr_route_cache_keys = False
+            visitor._page_rr_cp_size = 1
+            request = _FakeRouteInput()
+            request.v41_inputs = SimpleNamespace(images=[object()])
+            request.v41_payload_id = ""
+            request.generate_config.ttft_timeout_ms = 10000
+            request.generate_config.timeout_ms = 10000
+            vit = RoleAddr(role=RoleType.VIT, ip="127.0.0.1", http_port=1, grpc_port=2)
+            selected = FlexlbResponse.ok([vit])
+            selected.result = {"server_status": [{"server_ip": vit.ip}]}
+            calls = []
+
+            async def schedule(**kwargs):
+                calls.append("select" if kwargs.get("vit_only") else "schedule")
+                return (
+                    selected
+                    if kwargs.get("vit_only")
+                    else FlexlbResponse.ok([vit], enqueued_by_master=True)
+                )
+
+            async def upload(input, address, timeout):
+                self.assertIs(input, request)
+                self.assertEqual(address, vit)
+                calls.append("upload")
+                input.v41_payload_id = "uploaded"
+
+            visitor.master_client = SimpleNamespace(get_backend_role_addrs=schedule)
+            visitor.model_rpc_client = SimpleNamespace(upload_v41_inputs=upload)
+            with patch(
+                "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+                return_value=[],
+            ), patch(
+                "rtp_llm.server.backend_rpc_server_visitor.trans_master_input",
+                return_value=_FakeInputPB(),
+            ), patch(
+                "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
+            ):
+                self.assertIsNone(await visitor.get_master_route_addrs(request))
+            self.assertEqual(calls, ["select", "upload", "schedule"])
+
+        for required in (False, True):
+            asyncio.run(run(required))
+
     def test_route_cache_keys_passthrough_when_page_rr_disabled(self):
         self.assertEqual(
             route_cache_keys_for_page_rr([10, 11, 12, 13], False, 4),
@@ -218,7 +271,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
                 "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
                 return_value=[11, 22],
             ), patch(
-                "rtp_llm.server.backend_rpc_server_visitor.trans_input",
+                "rtp_llm.server.backend_rpc_server_visitor.trans_master_input",
                 return_value=_FakeInputPB(),
             ) as build, patch(
                 "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
@@ -582,6 +635,40 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         visitor._prefill_cp_active = True
 
         visitor.check_prefill_cp_supported(_FakeInput(return_hidden_states=True))
+
+    async def test_v41_upload_is_released_on_success_failure_and_cancellation(self):
+        for error in (None, RuntimeError("terminal error"), asyncio.CancelledError()):
+            client = (
+                _SuccessfulModelRpcClient(["output"])
+                if error is None
+                else _AlwaysFailingModelRpcClient(error)
+            )
+            client.release_v41_inputs = AsyncMock()
+            visitor = self._visitor(client)
+            visitor.pd_route_retry_on_unavailable = 0
+            request = _FakeInput()
+            request.v41_payload_id = "uploaded"
+            stream = await visitor.enqueue(request)
+            try:
+                if error is None:
+                    self.assertEqual([value async for value in stream], ["output"])
+                else:
+                    with self.assertRaises(type(error)):
+                        _ = [value async for value in stream]
+            finally:
+                await stream.aclose()
+            client.release_v41_inputs.assert_awaited_once_with(request)
+
+    async def test_v41_upload_is_released_when_stream_is_closed_early(self):
+        client = _SuccessfulModelRpcClient(["first", "second"])
+        client.release_v41_inputs = AsyncMock()
+        visitor = self._visitor(client)
+        request = _FakeInput(_FakeGenerateConfig(is_streaming=True))
+        request.v41_payload_id = "uploaded"
+        stream = await visitor.enqueue(request)
+        self.assertEqual(await stream.__anext__(), "first")
+        await stream.aclose()
+        client.release_v41_inputs.assert_awaited_once_with(request)
 
     async def test_non_streaming_discards_partial_attempt_before_retry(self):
         client = _RetryingModelRpcClient()

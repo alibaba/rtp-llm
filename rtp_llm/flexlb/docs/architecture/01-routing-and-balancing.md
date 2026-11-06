@@ -174,3 +174,16 @@ prefixLength`），不影响选谁。
 - worker 是否可选由 `PrefillResourceMeasure` / `DecodeResourceMeasure` 基于活性、
   待处理请求、KV 使用率和可选并发上限判定（见
   [03-resource-management](03-resource-management.md)）。
+
+### V4.1 图像数据直传
+
+Remote ViT 的 batch 请求先由 Frontend 选择 ViT，再通过 `UploadV41Inputs` 将 patches
+直传到该 ViT 入口。发送给 Master 的 `GenerateInputPB.v41_inputs` 只保留图像元数据和
+`payload_id`；本地 ViT 模式不能使用此直传 batch 路径。Master 校验 `selected_vit`，
+`DefaultBatchDispatcher` 将该地址随 P/D 地址一起传给 Prefill，不复制 patches。
+Prefill 按引用调用选定 ViT；ViT 代理在选择子进程之前解析引用，因此子进程切换不影响读取。
+引用与 request_id 和全部图像元数据绑定；不匹配、过期或已释放时返回错误。
+Batch ACK 已证明 Prefill 完成图像处理，Frontend 建立 Fetch 后即释放引用；普通路由在首个结果后释放。
+失败、取消和请求结束也会尝试释放，ViT 通过 TTL（最长 10 分钟）兜底回收。
+每个 ViT 入口限制 128 个上传、512 MiB protobuf 数据，满额拒绝新上传，不淘汰有效引用。
+Frontend、Master、Prefill、ViT 需要部署支持该协议的版本；上传失败不会退回经过 Master 的 tensor 传输。

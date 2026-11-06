@@ -118,3 +118,13 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["manual"],
 )
+
+py_test(
+    name = "v41_input_transfer_test",
+    srcs = ["v41_input_transfer_test.py"],
+    deps = [
+        "//rtp_llm:grpcio",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/server:server",
+    ],
+)
