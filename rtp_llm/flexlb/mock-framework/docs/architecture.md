@@ -57,7 +57,7 @@ Step 统一为一次接口调用，包含 id、describe、interface、args、wit
 
 普通数值查询直接返回数值，单位声明在接口上；地址集合返回列表，动作返回明确回执，逐 Master 状态保留映射。断言按结构和运算符判断，不按 MetricValue、PerMasterEngines 等业务类型名称偷偷聚合。接口文档和清单可以由 Python 定义导出，用于保存实验现场，不再依赖 Java 构建才能编译 Case。
 
-Runner 管理声明了 background 的 Step 任务。任务属于当前 Phase，Phase 结束前会等待或回收这些任务。后台 Step 的结果不能作为 Case 引用。client/start 返回表示 Java 已确认开始回放，回放仍由 ClientRole 和 Java client0 管理，使用 client/stop 停止并收齐结果。
+Runner 管理声明了 background 的 Step 任务。任务属于当前 Phase，Phase 结束前会等待或回收这些任务。后台 Step 的结果不能作为 Case 引用。client/start 返回表示 Java 已确认开始回放，回放仍由 ClientManager 和 Java client0 管理，使用 client/stop 停止并收齐结果。
 
 本轮重构按职责变化整体重写 Registry、Step 模型、编译和执行主链，联动 CLI、启动配方、夹具和构建入口；复用严格 YAML 解析、进程回收、采集与记录等仍成立的机制。Java 内部端点保留明确的请求/响应协议，但不再声明整套 Case API；配置类型留在所属组件，不能随旧接口目录误删。保留引用重校验、固定时间窗口、错误结果和取消清理的验收，不保留另一套旧 Case 执行入口作为兼容分支。
 
@@ -278,7 +278,7 @@ write_inputs("traffic.binpb.zst", (
   args: {outcome: error, limit: 20}
 ```
 
-Case 的 start、stop、requests 各有一个 Step 文件。ClientRole 管理回放，`execution/evidence/client.py` 直接解析 JSONL 并校验请求和封口。镜像终验直接复用读取函数。不提供独立请求查询 CLI，也不增加 Java 查询服务、parser 类或存储抽象。
+Case 的 start、stop、requests 各有一个 Step 文件。ClientManager 管理回放，`execution/evidence/client.py` 直接解析 JSONL 并校验请求和封口。镜像终验直接复用读取函数。不提供独立请求查询 CLI，也不增加 Java 查询服务、parser 类或存储抽象。
 
 ### Python 指标查询与公共指标
 
@@ -332,7 +332,7 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 | `execution/roles/master.py` | MasterRole 管独立 JVM、选举配置、发现发布和原地址重启。 |
 | `execution/roles/engine.py` | EngineRole 管理每个 P/D/V 实例的 JVM。 |
 | `execution/roles/zookeeper.py` | ZooKeeperRole 管选举服务的启停和就绪。 |
-| `execution/roles/client.py` | ClientRole 管 Client JVM 和回放收尾。Java client0 负责分片、控速与汇总。 |
+| `execution/roles/client.py` | ClientManager 管 Client JVM 和回放收尾。Java client0 负责分片、控速与汇总。 |
 | `execution/roles/prometheus.py` | Prometheus 进程、目标、采集基线和末次抓取。 |
 | `execution/launch.py` | 启动配方的结构校验与规范化。 |
 | `execution/transport.py` | 共用 HTTP /invoke 请求和响应封装。 |
