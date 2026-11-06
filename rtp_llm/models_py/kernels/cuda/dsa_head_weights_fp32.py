@@ -11,11 +11,13 @@ import triton.language as tl
 MAX_K = 8192
 
 @triton.jit
-def _fused_logits_head_gate_kernel(x_ptr, w_ptr, qs_ptr, out_ptr, scale_const, T, K: tl.constexpr, N: tl.constexpr, stride_x_t, stride_w_n, stride_w_k, stride_qs_t, stride_o_t, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_N: tl.constexpr, W_IS_TRANSPOSED: tl.constexpr):
+def _fused_logits_head_gate_kernel(x_ptr, w_ptr, qs_ptr, out_ptr, scale_const, T, K: tl.constexpr, N: tl.constexpr, stride_x_t, stride_w_n, stride_w_k, stride_qs_t, stride_o_t, BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr, BLOCK_N: tl.constexpr, W_IS_TRANSPOSED: tl.constexpr, TILE_HEADS: tl.constexpr = False):
     pid_m = tl.program_id(0).to(tl.int64)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M).to(tl.int64)
     mask_m = offs_m < T
     offs_n = tl.arange(0, BLOCK_N)
+    if TILE_HEADS:
+        offs_n += tl.program_id(1) * BLOCK_N
     mask_n = offs_n < N
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k0 in range(0, K, BLOCK_K):
@@ -54,7 +56,7 @@ def _baseline_logits_head_gate(x: torch.Tensor, q_scale: torch.Tensor, weights_p
         q_scale_b = q_scale
     return w.unsqueeze(-1) * q_scale_b * scale_const
 
-def fused_logits_head_gate(x: torch.Tensor, q_scale: torch.Tensor, weight: torch.Tensor, scale_const: float, fallback_proj: Optional[torch.nn.Module]=None, *, original_rows: Optional[int]=None) -> torch.Tensor:
+def fused_logits_head_gate(x: torch.Tensor, q_scale: torch.Tensor, weight: torch.Tensor, scale_const: float, fallback_proj: Optional[torch.nn.Module]=None, *, original_rows: Optional[int]=None, tile_decode_output: bool=False) -> torch.Tensor:
     assert x.dim() == 2
     assert weight.dim() == 2
     (T, K) = x.shape
@@ -85,10 +87,17 @@ def fused_logits_head_gate(x: torch.Tensor, q_scale: torch.Tensor, weight: torch
         num_warps = 4 if K >= 4096 else 2
         _fused_logits_head_gate_small_t_kernel[T, N](x, weight, qs_2d, out_2d, float(scale_const), K, x.stride(0), weight.stride(0), weight.stride(1), qs_2d.stride(0), out_2d.stride(0), BLOCK_K=BLOCK_K, num_warps=num_warps)
     else:
-        BLOCK_M = 32
+        # A small Decode batch benefits from more CTAs over independent outputs.
+        # Keep the same IEEE dot products and 128-wide K reduction per output.
+        tile_heads = (tile_decode_output and policy_rows <= 128 and K == 7168 and N == 32
+                      and x.dtype == torch.bfloat16 and weight.dtype == torch.float32
+                      and w_is_transposed)
+        BLOCK_M = 16 if tile_heads else 32
         BLOCK_K = 128
-        BLOCK_N = triton.next_power_of_2(max(N, 16))
+        BLOCK_N = 16 if tile_heads else triton.next_power_of_2(max(N, 16))
         grid = (triton.cdiv(T, BLOCK_M),)
+        if tile_heads:
+            grid += (triton.cdiv(N, BLOCK_N),)
         num_warps = 4 if N <= 128 else 8
-        _fused_logits_head_gate_kernel[grid](x, weight, qs_2d, out_2d, float(scale_const), T, K, N, x.stride(0), weight.stride(0), weight.stride(1), qs_2d.stride(0), out_2d.stride(0), BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, BLOCK_N=BLOCK_N, W_IS_TRANSPOSED=w_is_transposed, num_warps=num_warps, num_stages=3)
+        _fused_logits_head_gate_kernel[grid](x, weight, qs_2d, out_2d, float(scale_const), T, K, N, x.stride(0), weight.stride(0), weight.stride(1), qs_2d.stride(0), out_2d.stride(0), BLOCK_M=BLOCK_M, BLOCK_K=BLOCK_K, BLOCK_N=BLOCK_N, W_IS_TRANSPOSED=w_is_transposed, TILE_HEADS=tile_heads, num_warps=num_warps, num_stages=3)
     return out_2d.unsqueeze(-1)

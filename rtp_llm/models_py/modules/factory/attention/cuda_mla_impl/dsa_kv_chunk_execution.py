@@ -4,7 +4,10 @@ from dataclasses import dataclass
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.indexer_topk import native_candidate_selection_supported
+from rtp_llm.models_py.modules.dsv4.indexer_topk import (
+    native_candidate_selection_supported,
+    native_page_rr_selection_supported,
+)
 
 from ..mla_prefill_plan import prefill_kv_workspace_budget_bytes
 from .dsa_kv_chunk_plan import (
@@ -105,6 +108,7 @@ class DsaKVExecution:
         owner = params.workspace_owner
         self.owner, self.name = owner, name
         self.fp8_indexer = name == "indexer" and owner.indexer_use_fp8
+        self.direct_native_page_size = None
         self.fp8_sfa = name == "sfa" and owner.sfa_use_fp8
         self.prefill = params.is_prefill
         kv_budget = prefill_kv_workspace_budget_bytes() if self.prefill else None
@@ -174,9 +178,11 @@ class DsaKVExecution:
                     if owner.indexer_score is None:
                         owner.indexer_score = NativeFp8IndexerScore()
                     self.num_sms = torch.cuda.get_device_properties(owner.device).multi_processor_count
+                    if owner.indexer_score.supports_direct_pages(params.kernel_page_size, owner.device):
+                        self.direct_native_page_size = params.kernel_page_size
                     probe = owner.indexer_score.prepare_paged_metadata(
                         torch.zeros(capacity_batch, capacity_queries, device=owner.device, dtype=torch.int32),
-                        num_sms=self.num_sms,
+                        num_sms=self.num_sms, page_size=self.direct_native_page_size or 64,
                     )
                     self.native_schedule_bytes = probe.numel() * probe.element_size()
         else:
@@ -239,11 +245,15 @@ class DsaKVExecution:
                     padded = q * self.shards
                     for n in ("wire", "received"):
                         add(n, (padded, width), torch.float32)
-                    add("complete", (q, select_width), torch.float32)
-                    if self.fp8_indexer and owner.native_exact_topk:
-                        add("decode.ends", (q,), torch.int32)
-                        if self.graph:
-                            add("decode.positions." + str(block.starts[0]), (select_width,), torch.int32)
+                    page_rr = self.fp8_indexer and owner.native_exact_topk and native_page_rr_selection_supported(
+                        width, k, shards=self.shards, page=params.page_size, start=block.starts[0],
+                    )
+                    if not page_rr:
+                        add("complete", (q, select_width), torch.float32)
+                        if self.fp8_indexer and owner.native_exact_topk:
+                            add("decode.ends", (q,), torch.int32)
+                            if self.graph:
+                                add("decode.positions." + str(block.starts[0]), (select_width,), torch.int32)
                     add("gathered_indices", (padded, k), torch.int32)
                 for prefix, columns in (("block", select_width), ("merge", 2 * k)):
                     s.update(indexer_candidate_workspace_shapes(
@@ -315,9 +325,7 @@ class DsaKVExecution:
                 )
                 for prefix, width in (("block", columns), ("merge", 2 * owner.topk))
             )
-            # Charge MQA's padded output allocation. Prefill selects directly
-            # from it; Decode retains the separate score arena above for its
-            # existing owner-local DCP path.
+            # Charge MQA's padded output allocation in both phases.
             native = 0
             if self.fp8_indexer:
                 if kv_budget is None:
@@ -415,6 +423,12 @@ class DsaKVExecution:
                 if required <= budget:
                     break
                 planning_budget -= required - budget
+        # Keep the original chunk geometry and graph phase budget.
+        planning_reserve = 0
+        if self.fp8_indexer and not self.prefill and "score" in shapes:
+            planning_reserve += _bytes(*shapes.pop("score"))
+        if self.direct_native_page_size is not None and "cache.native64" in shapes:
+            planning_reserve += _bytes(*shapes.pop("cache.native64"))
         self.plan, self.shapes, self.required_bytes = plan, shapes, required
         self.stages = stages if staged_sfa else None
         if frozen is not None and plan.page_capacity != frozen["pages"]:
@@ -431,7 +445,7 @@ class DsaKVExecution:
                     "pages": plan.page_capacity,
                 }
             self.workspace.metadata_budget_bytes = max(
-                self.workspace.metadata_budget_bytes, metadata_bytes(plan)
+                self.workspace.metadata_budget_bytes, metadata_bytes(plan) + planning_reserve
             )
         self.block_ids = None
         if not self.prefill:
@@ -497,7 +511,10 @@ class DsaKVExecution:
                 prepared = DsaPreparedKVBlock(
                     None, start, width, positions, dcp_positions=gathered_positions
                 )
-                if self.fp8_indexer and owner.native_exact_topk:
+                if (self.fp8_indexer and owner.native_exact_topk
+                        and not native_page_rr_selection_supported(
+                            width, owner.topk, shards=self.shards, page=params.page_size, start=start,
+                        )):
                     if start % params.page_size or width % params.page_size:
                         raise ValueError("Bounded Indexer Decode chunks must contain whole owner pages")
                     key = ("decode.positions", start, width, geometry)
@@ -545,14 +562,27 @@ class DsaKVExecution:
                     if params.forbid_realloc:
                         raise ValueError("FP8 Indexer native metadata must exist before Graph replay")
                     block.native_context = context
-                    block.native_table = torch.arange(
-                        1, 1 + self.batch * (block.width // 64), device=self.owner.device,
-                        dtype=torch.int32,
-                    ).view(self.batch, -1)
+                    if self.direct_native_page_size is None:
+                        block.native_table = torch.arange(
+                            1, 1 + self.batch * (block.width // 64), device=self.owner.device,
+                            dtype=torch.int32,
+                        ).view(self.batch, -1)
+                    else:
+                        block.native_table = torch.empty(
+                            (self.batch, block.width // self.direct_native_page_size),
+                            device=self.owner.device, dtype=torch.int32,
+                        )
                 else:
                     block.native_context.copy_(context)
+                if self.direct_native_page_size is not None:
+                    page = self.direct_native_page_size
+                    if block.start % page or block.width % page:
+                        raise ValueError("Direct Indexer chunks require whole physical pages")
+                    first = block.start // page
+                    block.native_table.copy_(params.block_table[:, first:first + block.width // page])
                 schedule = self.owner.indexer_score.prepare_paged_metadata(
                     block.native_context, num_sms=self.num_sms,
+                    page_size=self.direct_native_page_size or 64,
                 )
                 if block.native_schedule is None:
                     block.native_schedule = schedule

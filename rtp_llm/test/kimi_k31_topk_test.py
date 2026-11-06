@@ -1,12 +1,36 @@
 """Constructed-score checks; these do not assert real-model accuracy."""
 
+import os
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import torch
 
 from rtp_llm.models_py.modules.base.cuda.bf16_indexer_op import Bf16DraftIndexerOp
-from rtp_llm.models_py.modules.dsv4.indexer_topk import TorchIndexerTopKBackend
+from rtp_llm.models_py.modules.dsv4.indexer_topk import (
+    TorchIndexerTopKBackend,
+    native_page_rr_selection_supported,
+    page_rr_unordered_topk_enabled,
+)
+
+
+class KimiK31PageRRTopKPolicyTest(unittest.TestCase):
+    def setUp(self):
+        page_rr_unordered_topk_enabled.cache_clear()
+        self.addCleanup(page_rr_unordered_topk_enabled.cache_clear)
+
+    def test_default_preserves_dense_order_when_a_chunk_can_exceed_k(self):
+        with patch.dict(os.environ):
+            os.environ.pop("DSA_PAGE_RR_TOPK_ALLOW_UNORDERED", None)
+            geometry = dict(shards=4, page=128, start=1024)
+            self.assertTrue(native_page_rr_selection_supported(512, 2048, **geometry))
+            self.assertFalse(native_page_rr_selection_supported(640, 2048, **geometry))
+
+    def test_opt_in_allows_long_selection_on_supported_geometry(self):
+        with patch.dict(os.environ, {"DSA_PAGE_RR_TOPK_ALLOW_UNORDERED": "1"}):
+            self.assertTrue(native_page_rr_selection_supported(262144, 2048, shards=4, page=1024, start=0))
+            self.assertFalse(native_page_rr_selection_supported(262145, 2048, shards=4, page=1024, start=0))
 
 
 class KimiK31TopKTest(unittest.TestCase):

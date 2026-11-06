@@ -3,7 +3,7 @@
 import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_indexer_cache import (
-    canonical_indexer_views, pack_indexer_pages64,
+    canonical_indexer_views, pack_indexer_pages64, prepare_direct_indexer_cache,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.base.cuda.indexer_kv_op import IndexerKVOp
@@ -15,7 +15,7 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 class Fp8IndexerOp(IndexerKVOp):
     # Prefill consumes the adapter's owned, sanitized output directly.
-    # Decode retains its existing score arena and DCP buffer contract.
+    # Decode writes sanitized scores directly to the DCP input.
     scores_are_sanitized = True
 
     def __init__(self, config, *, device="cuda"):
@@ -78,13 +78,17 @@ class Fp8IndexerOp(IndexerKVOp):
         )
 
     def _score_decode(self, query, gates, q_positions, keys, params,
-                      execution, block, workspace, score):
-        native = workspace("cache.native64",
-                           (1 + execution.batch * (block.width // 64), 64, 1, 132),
-                           torch.uint8)
-        pack_indexer_pages64(keys, params.block_table, block.start, native)
+                      execution, block, workspace, wire):
+        if execution.direct_native_page_size is not None:
+            prepare_direct_indexer_cache(keys, block.native_table, block.native_context)
+            native = keys.unsqueeze(2)
+        else:
+            native = workspace("cache.native64",
+                               (1 + execution.batch * (block.width // 64), 64, 1, 132),
+                               torch.uint8)
+            pack_indexer_pages64(keys, params.block_table, block.start, native)
         return self.native_score.paged(
             query, native, gates.reshape(execution.rows, 32), block.native_context,
             block.native_table, block.native_schedule, block.width,
-            block.key_positions, out=score,
+            block.key_positions, wire=wire,
         )

@@ -47,6 +47,43 @@ def _pack_native64(Cache, Table, Output, START,
     tl.store(Output + (page + 1) * 64 * 132 + byte, value, mask=in_page)
 
 
+@triton.jit
+def _prepare_direct_indexer_cache(
+    Cache, Table, Context, CACHE_BLOCKS, PAGES, CHECK_TILES, CHECK_CTAS,
+    QUERIES: tl.constexpr, PAGE: tl.constexpr, QUERY_BLOCK: tl.constexpr,
+    BLOCK: tl.constexpr, ZERO_BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    if pid < CHECK_CTAS:
+        request = pid // CHECK_TILES
+        page = pid % CHECK_TILES * BLOCK + tl.arange(0, BLOCK)
+        query = tl.arange(0, QUERY_BLOCK)
+        length = tl.max(tl.load(Context + request * QUERIES + query, query < QUERIES, other=0), axis=0)
+        valid = (page < PAGES) & (page < tl.cdiv(length, PAGE))
+        block = tl.load(Table + request * PAGES + page, valid, other=0)
+        tl.device_assert((~valid) | ((block >= 0) & (block < CACHE_BLOCKS)),
+                         "FP8 Indexer owner table has an invalid physical block")
+    else:
+        # The native reader uses physical page zero for null blocks and short tiles.
+        byte = (pid - CHECK_CTAS) * ZERO_BLOCK + tl.arange(0, ZERO_BLOCK)
+        tl.store(Cache + byte, 0, byte < PAGE * 132)
+
+
+def prepare_direct_indexer_cache(cache, table, context):
+    """Keep native page zero zeroed and check the visible physical page IDs."""
+    batch, pages = table.shape
+    queries = context.size(1)
+    page = cache.size(1)
+    block, zero_block = 256, 1024
+    check_tiles = triton.cdiv(pages, block)
+    check_ctas = batch * check_tiles
+    _prepare_direct_indexer_cache[(check_ctas + triton.cdiv(page * 132, zero_block),)](
+        cache, table, context, cache.size(0), pages, check_tiles, check_ctas,
+        queries, page, triton.next_power_of_2(queries), block, zero_block,
+        num_warps=4, debug=True,
+    )
+
+
 def pack_indexer_pages64(cache, block_table, start, output):
     """Copy one planned owner-KV block into explicit native paged storage.
 

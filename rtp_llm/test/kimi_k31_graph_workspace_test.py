@@ -29,8 +29,11 @@ def run():
             owner.graph_max_requests = 64
             owner.graph_max_queries = 4
             owner.graph_cache_groups = 2
-            owner.indexer_score = NS(prepare_paged_metadata=lambda *a, **kw:
-                torch.empty((148, 4), dtype=torch.int32, device="meta"))
+            owner.indexer_score = NS(
+                supports_direct_pages=lambda page_size, device: False,
+                prepare_paged_metadata=lambda *a, **kw:
+                    torch.empty((148, 4), dtype=torch.int32, device="meta"),
+            )
             records = []
             pointers = {}
             for queries, batches in ((1, (64, 32, 16, 8)),

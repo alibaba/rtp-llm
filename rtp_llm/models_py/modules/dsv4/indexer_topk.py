@@ -36,6 +36,28 @@ def native_candidate_selection_supported(columns, topk, *, prefix="block"):
     return topk in (512, 1024, 2048) and columns >= 0
 
 
+@lru_cache(None)
+def page_rr_unordered_topk_enabled():
+    value = os.environ.get("DSA_PAGE_RR_TOPK_ALLOW_UNORDERED", "0").strip()
+    if value not in ("0", "1"):
+        raise ValueError("DSA_PAGE_RR_TOPK_ALLOW_UNORDERED must be 0 or 1")
+    return value == "1"
+
+
+def native_page_rr_selection_supported(owner_width, topk, *, shards, page, start):
+    """Use one static policy for Decode preparation and CUDA Graph replay."""
+    columns = owner_width * shards
+    # At most K visible columns use the same ordered copy in both selectors.
+    # For longer spans, radix selection preserves exact members but its emission
+    # order can change floating-point accumulation in FP8 sparse attention.
+    return (0 < shards <= 256 and (shards & (shards - 1)) == 0
+            and page >= 4 and (page & (page - 1)) == 0
+            and owner_width > 0 and start >= 0 and owner_width % page == start % page == 0
+            and (start + owner_width) * shards < 2**31
+            and native_candidate_selection_supported(columns, topk)
+            and (columns <= topk or page_rr_unordered_topk_enabled()))
+
+
 def _backend_name() -> str:
     return os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower()
 
@@ -361,6 +383,22 @@ class NativeExactIndexerTopKBackend(TorchIndexerTopKBackend):
             score, positions, starts, ends, selected_scores, selected_positions, topk
         )
         return selected_scores, selected_positions
+
+
+    def select_page_rr_candidates(self, received, query_positions, topk, *, workspace,
+                                  out, shard_rank, shards, page, start):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        shape = (received.size(0) // shards, topk)
+        scores, positions = out if out is not None else (
+            workspace("block.native.scores", shape, torch.float32),
+            workspace("block.native.positions", shape, torch.int32),
+        )
+        rtp_llm_ops.dsa_select_page_rr_candidates(
+            received, query_positions, scores, positions, topk,
+            shards, shard_rank, page, start,
+        )
+        return scores, positions
 
 
 class FastIndexerTopKBackend(IndexerTopKBackend):

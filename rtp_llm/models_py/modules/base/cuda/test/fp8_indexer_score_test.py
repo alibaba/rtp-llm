@@ -1,4 +1,4 @@
-"""CPU interface tests; native FP8 math/Graph requires the separate GPU gate."""
+"""Native FP8 score contracts and CUDA wire byte preservation."""
 
 from types import SimpleNamespace
 import unittest
@@ -92,13 +92,61 @@ class NativeFp8IndexerScoreContractTest(unittest.TestCase):
     def test_original_128_token_page_cannot_be_reinterpreted_as_native64(self):
         score, native = self.backend()
         with patch.object(score, '_query', return_value=2):
-            with self.assertRaisesRegex(ValueError, 'explicit64-token'):
+            with self.assertRaisesRegex(ValueError, 'supported block-planar page size'):
                 score.paged(torch.zeros(2, 1, 32, 128, dtype=torch.float8_e4m3fn),
                             torch.zeros(2, 128, 1, 132, dtype=torch.uint8),
                             torch.zeros(2, 32), torch.zeros(2, dtype=torch.int32),
                             torch.ones(2, 1, dtype=torch.int32), None, 128,
                             torch.arange(128, dtype=torch.int32))
         native.fp8_paged_mqa_logits.assert_not_called()
+
+    def test_sm100_native_backend_consumes_physical128_cache_directly(self):
+        _, native = self.backend()
+        native.__name__ = "deep_gemm_mqa"
+        native.__native_globals_isolated__ = True
+        native.fp8_paged_mqa_logits.return_value = torch.zeros((1, 128))
+        score = score_module.NativeFp8IndexerScore(native)
+        cache = torch.zeros((2, 128, 1, 132), dtype=torch.uint8)
+        context = torch.tensor([[128]], dtype=torch.int32)
+        table = torch.ones((1, 1), dtype=torch.int32)
+        with patch.object(score, '_query', return_value=1), patch.object(
+                torch.cuda, 'get_device_capability', return_value=(10, 3)), patch.object(
+                score_module, 'sanitize_indexer_scores'):
+            score.paged(torch.empty((1, 1, 32, 128), dtype=torch.float8_e4m3fn),
+                        cache, torch.ones((1, 32)), context, table, None, 128,
+                        torch.arange(128, dtype=torch.int32))
+        self.assertIs(native.fp8_paged_mqa_logits.call_args.args[1], cache)
+        self.assertIs(native.fp8_paged_mqa_logits.call_args.args[4], table)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_paged_scores_write_sanitized_padded_wire_bitwise(self):
+        score, native = self.backend()
+        device = "cuda"
+        raw = torch.empty((2, 16), device=device, dtype=torch.float32)[:, :8]
+        raw.copy_(torch.tensor([
+            [-0.0, 0.0, 1.401298464324817e-45, float("nan"), float("inf"), 2.0, -3.0, 4.0],
+            [9.0, -0.0, 5.0, 3.0, -float("inf"), 7.0, 6.0, 0.0],
+        ], device=device))
+        raw_bits = raw.view(torch.int32).clone()
+        positions = torch.arange(8, dtype=torch.int32, device=device)
+        positions[5] = -1
+        lengths = torch.tensor([[7, 5]], dtype=torch.int32, device=device)
+        wire = torch.full((4, 8), float("nan"), device=device)
+        expected = torch.full_like(wire, -float("inf"))
+        expected[:2].copy_(raw)
+        score_module.sanitize_indexer_scores(expected[:2], positions, ends=lengths.view(-1))
+        native.fp8_paged_mqa_logits.return_value = raw
+
+        output = score.paged(
+            torch.empty((1, 2, 32, 128), dtype=torch.float8_e4m3fn, device=device),
+            torch.empty((1, 64, 1, 132), dtype=torch.uint8, device=device),
+            torch.empty((2, 32), dtype=torch.float32, device=device), lengths,
+            torch.zeros((1, 1), dtype=torch.int32, device=device), None, 8, positions,
+            wire=wire,
+        )
+        self.assertIs(output, wire)
+        self.assertTrue(torch.equal(wire.view(torch.int32), expected.view(torch.int32)))
+        self.assertTrue(torch.equal(raw.view(torch.int32), raw_bits))
 
     def test_nonzero_request_starts_use_absolute_native_output_columns(self):
         score, native = self.backend()

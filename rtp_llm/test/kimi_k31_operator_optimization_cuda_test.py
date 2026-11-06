@@ -67,6 +67,68 @@ class KimiK31OperatorOptimizationTest(unittest.TestCase):
         old.merge_candidates(reference_running, second)
         self.assert_candidate_sets_equal(running, reference_running)
 
+    def test_page_rr_topk_matches_dense_bounds_ties_and_graph(self):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        torch.manual_seed(712)
+        device = "cuda"
+        k, rows = 512, 8
+        for shards, page, width in ((1, 128, 1024), (4, 128, 2048),
+                                    (8, 1024, 2048), (4, 1024, 262144)):
+            with self.subTest(shards=shards, page=page, width=width):
+                rank, start, capacity = shards - 1, page * 3, shards * width
+                first = start * shards
+                dense = torch.randn((rows, capacity), device=device).round_()
+                dense[:, :4] = torch.tensor(
+                    [torch.nan, torch.inf, -torch.inf, -0.0], device=device
+                )
+                # The logical columns alternate owners one page at a time.
+                received = (dense.view(rows, width // page, shards, page)
+                            .permute(2, 0, 1, 3).contiguous().view(rows * shards, width))
+                positions = torch.arange(first, first + capacity, dtype=torch.int32, device=device)
+                query = torch.full((rows * shards - 1,), -1, dtype=torch.int32, device=device)
+                visible = query[rank * rows:]
+                lengths = torch.tensor([0, 1, k - 1, k, k + 1, capacity - 1, capacity],
+                                       dtype=torch.int32, device=device)
+                visible.copy_(first + lengths - 1)
+                old_scores = torch.empty((rows, k), device=device)
+                old_pos = torch.empty((rows, k), dtype=torch.int32, device=device)
+                new_scores, new_pos = torch.empty_like(old_scores), torch.empty_like(old_pos)
+
+                def select_direct():
+                    rtp_llm_ops.dsa_select_page_rr_candidates(
+                        received, query, new_scores, new_pos, k, shards, rank, page, start
+                    )
+
+                def compare():
+                    ends = torch.cat((lengths, lengths.new_zeros(1)))
+                    rtp_llm_ops.dsa_select_topk_candidates(
+                        dense, positions, None, ends, old_scores, old_pos, k
+                    )
+                    short = ends <= k
+                    self.assertTrue(torch.equal(old_pos[short], new_pos[short]))
+                    self.assertTrue(torch.equal(old_scores.view(torch.int32)[short],
+                                                new_scores.view(torch.int32)[short]))
+                    for values, output in ((old_scores, old_pos), (new_scores, new_pos)):
+                        order = output.argsort(dim=1)
+                        pairs = (output.gather(1, order), values.view(torch.int32).gather(1, order))
+                        if output is old_pos:
+                            expected = pairs
+                        else:
+                            self.assertTrue(all(torch.equal(a, b) for a, b in zip(expected, pairs)))
+
+                select_direct()
+                compare()
+                if shards == 8:
+                    torch.cuda.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        select_direct()
+                    lengths.copy_(lengths.roll(1))
+                    visible.copy_(first + lengths - 1)
+                    graph.replay()
+                    compare()
+
     def test_grouped_norm_strides_padding_and_graph(self):
         torch.manual_seed(3101)
         qw = torch.rand((1536,), device="cuda", dtype=torch.bfloat16) + 0.5

@@ -17,33 +17,61 @@ namespace base = device::topk;
 
 // The GLM radix algorithm consumes this request-local span. Input holes and
 // non-finite scores are canonicalized in registers, never in the score matrix.
-struct TopKProblem {
-    const float* in;
+struct DenseScoreInput {
+    const float* scores;
+    SGL_DEVICE const float* pointer(uint32_t index) const { return scores + index; }
+    SGL_DEVICE int32_t position(const int32_t* positions, uint32_t index) const { return positions[index]; }
+};
+
+struct PageRRScoreInput {
+    const float* scores;
+    uint64_t owner_stride;
+    uint32_t page_shift, owner_shift, page_mask, owner_mask;
+    int32_t first_position;
+
+    // Visit logical columns in the same order as the dense selector.
+    SGL_DEVICE const float* pointer(uint32_t index) const {
+        const uint32_t page = index >> page_shift;
+        const uint32_t owner = page & owner_mask;
+        const uint32_t column = ((page >> owner_shift) << page_shift) | (index & page_mask);
+        return scores + owner * owner_stride + column;
+    }
+    SGL_DEVICE int32_t position(const int32_t*, uint32_t index) const { return first_position + index; }
+};
+
+template <typename Input>
+struct TopKProblemWithInput {
+    Input input;
     const int32_t* positions;
     float* output_scores;
     int32_t* out;
     uint32_t topk;
     uint32_t seq_len;
+    SGL_DEVICE const float* score_ptr(uint32_t index) const { return input.pointer(index); }
+    SGL_DEVICE int32_t position(uint32_t index) const { return input.position(positions, index); }
     SGL_DEVICE float normalize(float value, uint32_t idx) const {
         const bool valid = (__float_as_uint(value) & 0x7fffffffu) < 0x7f800000u
-                           && positions[idx] >= 0;
+                           && position(idx) >= 0;
         return valid ? (value == 0.0f ? 0.0f : value) : -CUDART_INF_F;
     }
-    SGL_DEVICE float load(uint32_t idx) const { return normalize(in[idx], idx); }
+    SGL_DEVICE float load(uint32_t idx) const { return normalize(*score_ptr(idx), idx); }
     SGL_DEVICE uint32_t tie_position(uint32_t idx) const {
-        const float value = in[idx];
+        const float value = *score_ptr(idx);
         return ((__float_as_uint(value) & 0x7fffffffu) < 0x7f800000u
-                && positions[idx] >= 0) ? static_cast<uint32_t>(positions[idx]) : idx;
+                && position(idx) >= 0) ? static_cast<uint32_t>(position(idx)) : idx;
     }
     SGL_DEVICE void emit(uint32_t slot, uint32_t idx) const {
         if (slot >= topk) return;
-        const float value = in[idx];
+        const float value = *score_ptr(idx);
         const bool valid = (__float_as_uint(value) & 0x7fffffffu) < 0x7f800000u
-                           && positions[idx] >= 0;
-        out[slot] = valid ? positions[idx] : -1;
+                           && position(idx) >= 0;
+        out[slot] = valid ? position(idx) : -1;
         output_scores[slot] = valid ? value : -CUDART_INF_F;
     }
 };
+
+using TopKProblem = TopKProblemWithInput<DenseScoreInput>;
+using PageRRTopKProblem = TopKProblemWithInput<PageRRScoreInput>;
 
 using base::TieValue;
 
@@ -61,8 +89,8 @@ SGL_DEVICE uint32_t stable_score_key(float value) {
     return (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
 }
 
-template <typename Predicate, typename KeyFn>
-SGL_DEVICE uint32_t radix_select_problem(const TopKProblem&                       problem,
+template <typename Predicate, typename KeyFn, typename Problem>
+SGL_DEVICE uint32_t radix_select_problem(const Problem&                       problem,
                                          uint32_t                                 rank,
                                          typename base::TopKConfig::TieHandleSmem* smem,
                                          Predicate                                predicate,
@@ -127,9 +155,9 @@ SGL_DEVICE uint32_t radix_select_problem(const TopKProblem&                     
     return prefix;
 }
 
-template <uint32_t kItems>
+template <uint32_t kItems, typename Problem>
 SGL_DEVICE void stable_handle_tie_impl(const TieValue*                           tie_buffer,
-                                       const TopKProblem&                        problem,
+                                       const Problem&                        problem,
                                        uint32_t                                  base_out,
                                        uint32_t                                  num_ties,
                                        uint32_t                                  remaining_topk,
@@ -328,8 +356,9 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
 // threshold are all selected. If only part of the exact-threshold group fits,
 // select its smallest relative indices using a second four-round radix pass on
 // index_key = UINT32_MAX - idx.
+template <typename Problem>
 SGL_DEVICE void stable_handle_tie(const TieValue*                           tie_buffer,
-                                  const TopKProblem&                        problem,
+                                  const Problem&                        problem,
                                   uint32_t                                  base_out,
                                   uint32_t                                  num_ties,
                                   uint32_t                                  remaining_topk,
@@ -397,9 +426,9 @@ SGL_DEVICE bool needs_exact_coarse_classification(uint32_t threshold_bin) {
 // Candidate-buffer overflow fallback. It performs the same stable score then
 // index radix selection while rescanning the coarse threshold interval, or the
 // whole row for the non-monotonic canonical NaN bin.
-template <uint32_t kHistBits>
+template <uint32_t kHistBits, typename Problem>
 SGL_DEVICE void stable_exact_boundary_scan_topk(
-    const TopKProblem&                        problem,
+    const Problem&                        problem,
     typename base::TopKConfig::TieHandleSmem* smem,
     uint32_t                                  threshold_bin,
     uint32_t                                  output_base) {
@@ -511,8 +540,8 @@ struct TopKRegister : base::TopKRadixBase<12> {
     using Smem = Base::Smem;
     using vec_t = typename Base::vec_t;
 
-    template <bool kAlignedInput>
-    SGL_DEVICE static void forward(const TopKProblem problem, void* raw_smem) {
+    template <bool kAlignedInput, typename Problem>
+    SGL_DEVICE static void forward(const Problem problem, void* raw_smem) {
         const uint32_t tx = threadIdx.x;
         auto* smem = static_cast<Smem*>(raw_smem);
         typename Smem::kHistVec hist_vec;
@@ -539,9 +568,9 @@ struct TopKRegister : base::TopKRadixBase<12> {
                 break;
             }
             if constexpr (kAlignedInput) {
-                local_vecs[i].load(problem.in, vi);
+                local_vecs[i].load(problem.score_ptr(vi * kVecSize), 0);
             } else {
-                local_vecs[i].load_unaligned(problem.in, vi);
+                local_vecs[i].load_unaligned(problem.score_ptr(vi * kVecSize), 0);
             }
             #pragma unroll
             for (uint32_t j = 0; j < kVecSize; ++j) {
@@ -653,8 +682,9 @@ struct TopKRegister : base::TopKRadixBase<12> {
 struct TopKStreaming : TopKRegister<2> {
     static constexpr uint32_t kMaxSeqLen = std::numeric_limits<uint32_t>::max();
 
-    template <bool kAlignedInput>
-    SGL_DEVICE static void forward(const TopKProblem problem, void* raw_smem) {
+    template <bool kAlignedInput, typename Problem>
+    SGL_DEVICE static void forward(const Problem problem, void* raw_smem) {
+        const auto address = [&](uint32_t index) { return problem.score_ptr(index); };
         const uint32_t tx = threadIdx.x;
         auto* smem = static_cast<Smem*>(raw_smem);
         typename Smem::kHistVec hist_vec;
@@ -666,7 +696,7 @@ struct TopKStreaming : TopKRegister<2> {
         }
         __syncthreads();
 
-        Base::template for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float value, uint32_t idx) {
+        Base::template for_each_input_address<kAlignedInput>(address, problem.seq_len, [&](float value, uint32_t idx) {
             value = problem.normalize(value, idx);
             atomicAdd(&smem->histogram[base::extract_coarse_bin<Base::kHistBits>(value)], 1u);
         });
@@ -693,7 +723,7 @@ struct TopKStreaming : TopKRegister<2> {
             }
         };
         if (__builtin_expect(exact_coarse_classification, false)) {
-            Base::template for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float value, uint32_t idx) {
+            Base::template for_each_input_address<kAlignedInput>(address, problem.seq_len, [&](float value, uint32_t idx) {
             value = problem.normalize(value, idx);
                 const uint32_t bin = base::extract_coarse_bin<Base::kHistBits>(value);
                 if (bin > threshold_bin) {
@@ -703,7 +733,7 @@ struct TopKStreaming : TopKRegister<2> {
                 }
             });
         } else {
-            Base::template for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float value, uint32_t idx) {
+            Base::template for_each_input_address<kAlignedInput>(address, problem.seq_len, [&](float value, uint32_t idx) {
             value = problem.normalize(value, idx);
                 if (value >= v_hi) {
                     collect_above(idx);
