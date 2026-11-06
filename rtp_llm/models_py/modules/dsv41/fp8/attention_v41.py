@@ -83,8 +83,8 @@ from rtp_llm.models_py.utils.memory import dispose_tensor
 _CP_SOURCE_RECEIVE_BYTES = 320 * 1024**2
 
 
-def _prefill_x_cohort_plan(cp_ctx):
-    """Group whole zigzag requests into bounded, global-order cohorts."""
+def _prefill_x_cohort_plan(cp_ctx, projected_row_bytes):
+    """Group zigzag rows by AG receive budget, independent of compressor tiles."""
     lengths = cp_ctx.input_lengths_global_host
     chunks = cp_ctx.chunk_lengths_per_req
     cp_size = cp_ctx.cp_size
@@ -108,7 +108,11 @@ def _prefill_x_cohort_plan(cp_ctx):
         )
     ):
         raise ValueError("CP source cohorts require the full zigzag layout")
-    limit = _PRODUCE_GLOBAL_TILE_ROWS // cp_size
+    if projected_row_bytes <= 0:
+        raise ValueError("CP source projection row width must be positive")
+    limit = _CP_SOURCE_RECEIVE_BYTES // (cp_size * projected_row_bytes)
+    if limit == 0:
+        raise ValueError("CP source projection exceeds the AG receive budget")
     cohorts = []
     local = global_row = first_local = first_global = 0
     for length, chunk in zip(lengths, chunks):
@@ -162,8 +166,15 @@ def _prefill_x_cohort_plan(cp_ctx):
     return tuple(cohorts)
 
 
-def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights):
-    """Gather bounded adjacent cohorts, then restore the original compressor tiles."""
+def _prefill_source_tile_ranges(cohorts):
+    """Split communication cohorts only when the compressor consumes them."""
+    for _, _, begin, end in cohorts:
+        for start in range(begin, end, _PRODUCE_GLOBAL_TILE_ROWS):
+            yield start, min(start + _PRODUCE_GLOBAL_TILE_ROWS, end)
+
+
+def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights, *, direct_map=False):
+    """Gather bounded cohorts for the compressor's global-row mapping."""
     from rtp_llm.ops.compute_ops import rtp_llm_ops
 
     from ._v41_cp_async import launch
@@ -246,19 +257,31 @@ def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights):
             first, stop = group
             local_start = cohorts[first][0]
             local_rows = cohorts[stop - 1][1] - local_start
-            for cohort in cohorts[first:stop]:
-                global_start, global_end = cohort[2:]
-                restored = restore_projected_cohort(
-                    gathered,
-                    cp_ctx.unpad_restore,
-                    global_start,
-                    local_start,
-                    cp_ctx.chunk_length,
-                    local_rows,
-                    global_end - global_start,
-                )
-                yield global_start, restored
-                del restored
+            for global_start, global_end in _prefill_source_tile_ranges(
+                cohorts[first:stop]
+            ):
+                rows = global_end - global_start
+                if direct_map:
+                    source_map = (
+                        cp_ctx.unpad_restore,
+                        global_start,
+                        local_start,
+                        cp_ctx.chunk_length,
+                        local_rows,
+                    )
+                    yield global_start, gathered, rows, source_map
+                else:
+                    restored = restore_projected_cohort(
+                        gathered,
+                        cp_ctx.unpad_restore,
+                        global_start,
+                        local_start,
+                        cp_ctx.chunk_length,
+                        local_rows,
+                        rows,
+                    )
+                    yield global_start, restored, rows, None
+                    del restored
             del gathered
 
     return tiles(initial)
@@ -1299,7 +1322,7 @@ class AttentionV41FP8(AttentionFP8):
                     cp.cp_rank,
                     layouts[0].owner_tokens_per_block,
                     ranges=(
-                        ((cohort[2], cohort[3]) for cohort in source_cohorts)
+                        _prefill_source_tile_ranges(source_cohorts)
                         if source_cohorts is not None
                         else None
                     ),
@@ -1340,7 +1363,7 @@ class AttentionV41FP8(AttentionFP8):
                     regions,
                     tile_rows=tile_rows,
                     ranges=(
-                        ((cohort[2], cohort[3]) for cohort in source_cohorts)
+                        _prefill_source_tile_ranges(source_cohorts)
                         if source_cohorts is not None
                         else None
                     ),
@@ -1371,14 +1394,16 @@ class AttentionV41FP8(AttentionFP8):
         # them right after quantization.
         warm_keys = [] if main_pool is None else None
         carry = None
+        carry_storage = None
+        carry_generation = 0
         tiles = projected_tiles
         if tiles is None:
             tiles = (
-                (t0, x_full[t0 : t0 + tile_rows])
+                (t0, x_full[t0 : t0 + tile_rows], min(tile_rows, rows - t0), None)
                 for t0 in range(0, max(rows, 1), tile_rows)
             )
-        for t0, x_tile in tiles:
-            t1 = t0 + x_tile.shape[0]
+        for t0, x_tile, tile_length, source_map in tiles:
+            t1 = t0 + tile_length
             if tile_metadata:
                 tile = next(tile_plan)
                 assert tile[:2] == (t0, t1)
@@ -1469,8 +1494,19 @@ class AttentionV41FP8(AttentionFP8):
                     if index_pool is not None
                     else None
                 )
-            latent = (
-                prefill_global.compress_main(
+            next_carry = None
+            if ratio == 2 and source_map is not None:
+                if carry_storage is None:
+                    # Compression reads the preceding tile while state CTAs
+                    # publish the next carry in the same launch.
+                    carry_storage = torch.empty(
+                        (2, 2, self.head_dim),
+                        device=values.device,
+                        dtype=torch.float32,
+                    )
+                next_carry = carry_storage[carry_generation % carry_storage.shape[0]]
+            if tile_metadata and ratio == 2:
+                latent = prefill_global.compress_main_and_store_states(
                     values,
                     scores,
                     owner.global_norm,
@@ -1483,12 +1519,36 @@ class AttentionV41FP8(AttentionFP8):
                     self.freqs_cis,
                     main_pool,
                     main_slots,
-                    ratio,
                     carry,
+                    state_slots,
+                    self._source_pool(CSA_STATE),
+                    next_carry,
+                    source_map,
                 )
-                if prefill and main_pool is not None
-                else None
-            )
+            else:
+                latent = (
+                    prefill_global.compress_main(
+                        values,
+                        scores,
+                        owner.global_norm,
+                        self.eps,
+                        pos_tile,
+                        req_tile,
+                        starts,
+                        previous,
+                        boundary_idx,
+                        self.freqs_cis,
+                        main_pool,
+                        main_slots,
+                        ratio,
+                        carry,
+                        source_map=source_map,
+                    )
+                    if prefill and main_pool is not None
+                    else None
+                )
+            if source_map is not None and latent is None:
+                raise RuntimeError("mapped CP compressor rejected its validated layout")
             main_stored = latent is not None
             if latent is None:
                 if ratio == 2:
@@ -1523,9 +1583,9 @@ class AttentionV41FP8(AttentionFP8):
                         torch.bfloat16
                     )
             if ratio == 2:
-                # The immutable predecessor snapshot and old carry are consumed
-                # before any ring writes or publication of the next tile carry.
-                if producer_meta is None and not tile_metadata:
+                # The state kernel may write concurrently with compression.
+                # Predecessor state is snapshotted and tile carry is double-buffered.
+                if not tile_metadata and producer_meta is None:
                     self._write_states(
                         values,
                         scores,
@@ -1533,7 +1593,7 @@ class AttentionV41FP8(AttentionFP8):
                         req_tile,
                         starts + lengths,
                     )
-                else:
+                elif not tile_metadata:
                     self._write_states(
                         values,
                         scores,
@@ -1542,7 +1602,12 @@ class AttentionV41FP8(AttentionFP8):
                         producer_seq_ends,
                         slots=state_slots,
                     )
-                carry = (values[-1:].clone(), scores[-1:].clone())
+                carry = (
+                    (next_carry[:1], next_carry[1:])
+                    if source_map is not None
+                    else (values[-1:].clone(), scores[-1:].clone())
+                )
+                carry_generation += 1
             projected_index = F.linear(latent, owner.index_wk)
             index_stored = (
                 prefill
@@ -2345,6 +2410,14 @@ class AttentionV41FP8(AttentionFP8):
         previous_state = None
         projected_tiles = None
         source_cohorts = None
+        stream_metadata = (
+            common.cp_on
+            and common.cp_ctx.kv_cache_sharded
+            and prefill_global._enabled(x)
+            and self._source_pool(self._global_region()) is not None
+            and self._source_pool(INDEXER_KV) is not None
+            and (self.compress_ratio == 1 or self._source_pool(CSA_STATE) is not None)
+        )
         if common.cp_on:
             owner = self._owner()
             weights = (
@@ -2352,9 +2425,18 @@ class AttentionV41FP8(AttentionFP8):
                 if self.compress_ratio == 2
                 else (owner.global_wkv,)
             )
-            source_cohorts = _prefill_x_cohort_plan(common.cp_ctx)
+            projected_row_bytes = (
+                weights[0].shape[0] * len(weights) * (2 if len(weights) == 1 else 4)
+            )
+            source_cohorts = _prefill_x_cohort_plan(
+                common.cp_ctx, projected_row_bytes=projected_row_bytes
+            )
             projected_tiles = _prefill_projected_x_cohorts(
-                x, common.cp_ctx, source_cohorts, weights
+                x,
+                common.cp_ctx,
+                source_cohorts,
+                weights,
+                direct_map=stream_metadata,
             )
         if (
             x.is_cuda
@@ -2414,14 +2496,6 @@ class AttentionV41FP8(AttentionFP8):
         starts = starts.long()
         rows = common.cp_ctx.seq_len_full if common.cp_on else x.shape[0]
         x_full = x
-        stream_metadata = (
-            common.cp_on
-            and common.cp_ctx.kv_cache_sharded
-            and x.is_cuda
-            and self._source_pool(self._global_region()) is not None
-            and self._source_pool(INDEXER_KV) is not None
-            and (self.compress_ratio == 1 or self._source_pool(CSA_STATE) is not None)
-        )
         if stream_metadata:
             pos_full = ids_full = None
         else:

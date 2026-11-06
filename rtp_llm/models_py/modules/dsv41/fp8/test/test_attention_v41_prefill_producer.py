@@ -77,7 +77,9 @@ class PrefillProducerIntegrationCPU(unittest.TestCase):
                 _slots=lambda *args, **kwargs: slots, _source_pool=lambda region: pool
             )
 
-            def store(v, s, mapped, target):
+            def store(v, s, mapped, target, *, source_map=None, carry_out=None):
+                self.assertIsNone(source_map)
+                self.assertIsNone(carry_out)
                 self.assertIs(target, pool)
                 self.assertIs(mapped, slots)
                 if fast:
@@ -173,7 +175,10 @@ class PrefillProducerIntegrationCPU(unittest.TestCase):
             mapping,
             actual_ratio,
             carry,
+            *,
+            source_map=None,
         ):
+            self.assertIsNone(source_map)
             calls.append("main")
             self.assertEqual(actual_ratio, ratio)
             if ratio == 2:
@@ -226,7 +231,7 @@ class PrefillProducerIntegrationCPU(unittest.TestCase):
                 count = min(tile_rows, rows - t0)
                 buffer.fill_(-991)
                 buffer[:count].copy_(raw[t0 : t0 + count])
-                yield t0, buffer[:count]
+                yield t0, buffer[:count], count, None
 
         shared = {"prefill_chunk_meta": object()}
         attn = SimpleNamespace(

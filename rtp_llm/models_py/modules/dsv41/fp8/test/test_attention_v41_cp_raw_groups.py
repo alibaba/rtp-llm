@@ -60,14 +60,14 @@ class CPSourceCohortPlanCPU(unittest.TestCase):
                 seq_len_full=sum(lengths),
                 chunk_length=sum(chunks),
             )
-            plan = STREAM._prefill_x_cohort_plan(cp)
+            plan = STREAM._prefill_x_cohort_plan(cp, projected_row_bytes=4096)
             self.assertEqual(plan[0][2], 0)
             self.assertEqual(plan[-1][3], sum(lengths))
             self.assertTrue(all(a[3] == b[2] for a, b in zip(plan, plan[1:])))
             self.assertTrue(
                 all(
-                    cp_size * (local_end - local_start)
-                    <= STREAM._PRODUCE_GLOBAL_TILE_ROWS
+                    cp_size * (local_end - local_start) * 4096
+                    <= STREAM._CP_SOURCE_RECEIVE_BYTES
                     for local_start, local_end, _, _ in plan
                 )
             )
@@ -110,7 +110,7 @@ class CPSourceCohortPlanCPU(unittest.TestCase):
                     global_cursor += length
                     local_cursor += chunk
                     global_ends.append(global_cursor)
-                plan = STREAM._prefill_x_cohort_plan(cp)
+                plan = STREAM._prefill_x_cohort_plan(cp, projected_row_bytes=4096)
                 self.assertTrue(plan)
                 self.assertEqual(plan[0][2], 0)
                 self.assertEqual(plan[-1][3], cp.seq_len_full)
@@ -123,12 +123,8 @@ class CPSourceCohortPlanCPU(unittest.TestCase):
                     self.assertGreater(local_end, local_start)
                     self.assertGreater(global_end, global_start)
                     self.assertLessEqual(
-                        cp.cp_size * (local_end - local_start),
-                        STREAM._PRODUCE_GLOBAL_TILE_ROWS,
-                    )
-                    self.assertLessEqual(
-                        global_end - global_start,
-                        STREAM._PRODUCE_GLOBAL_TILE_ROWS,
+                        cp.cp_size * (local_end - local_start) * 4096,
+                        STREAM._CP_SOURCE_RECEIVE_BYTES,
                     )
                     if index:
                         self.assertEqual(global_start, plan[index - 1][3])
@@ -160,34 +156,55 @@ class CPSourceCohortPlanCPU(unittest.TestCase):
                 seq_len_full=length,
                 chunk_length=chunk,
             )
-            plan = STREAM._prefill_x_cohort_plan(cp)
-            self.assertEqual(plan[0][2], 0)
-            self.assertEqual(plan[-1][3], length)
-            self.assertTrue(all(a[3] == b[2] for a, b in zip(plan, plan[1:])))
-            self.assertTrue(all(4 * (b - a) <= 65536 for a, b, _, _ in plan))
-            for ratio in (1, 2):
-                for rank in range(4):
-                    tiles = list(
-                        raw_tile_plan(
-                            (length,),
-                            (31744,),
-                            ratio,
-                            4,
-                            rank,
-                            256,
-                            ranges=((g0, g1) for _, _, g0, g1 in plan),
+            for ratio, row_bytes in ((1, 1024), (2, 4096)):
+                with self.subTest(length=length, ratio=ratio):
+                    plan = STREAM._prefill_x_cohort_plan(
+                        cp, projected_row_bytes=row_bytes
+                    )
+                    self.assertEqual(plan[0][2], 0)
+                    self.assertEqual(plan[-1][3], length)
+                    self.assertTrue(all(a[3] == b[2] for a, b in zip(plan, plan[1:])))
+                    for local_begin, local_end, global_begin, global_end in plan:
+                        self.assertLessEqual(
+                            4 * (local_end - local_begin) * row_bytes,
+                            STREAM._CP_SOURCE_RECEIVE_BYTES,
+                        )
+                    if length == 1048576:
+                        self.assertEqual(len(plan), 16 if ratio == 1 else 56)
+                    source_ranges = list(STREAM._prefill_source_tile_ranges(plan))
+                    self.assertTrue(
+                        all(0 < end - start <= 65536 for start, end in source_ranges)
+                    )
+                    self.assertEqual(source_ranges[0][0], 0)
+                    self.assertEqual(source_ranges[-1][1], length)
+                    self.assertTrue(
+                        all(
+                            a[1] == b[0]
+                            for a, b in zip(source_ranges, source_ranges[1:])
                         )
                     )
-                    self.assertEqual(
-                        [(a, b) for a, b, _ in tiles],
-                        [(g0, g1) for _, _, g0, g1 in plan],
-                    )
+                    for rank in range(4):
+                        tiles = list(
+                            raw_tile_plan(
+                                (length,),
+                                (31744,),
+                                ratio,
+                                4,
+                                rank,
+                                256,
+                                ranges=iter(source_ranges),
+                            )
+                        )
+                        self.assertEqual(
+                            [(a, b) for a, b, _ in tiles],
+                            source_ranges,
+                        )
 
     def test_replay_layout_is_rejected_before_collective(self):
         cp, _, _ = _case((129, 1024))
         cp.swa_replay_start = 1
         with self.assertRaisesRegex(ValueError, "full zigzag"):
-            STREAM._prefill_x_cohort_plan(cp)
+            STREAM._prefill_x_cohort_plan(cp, projected_row_bytes=4096)
 
 
 if __name__ == "__main__":

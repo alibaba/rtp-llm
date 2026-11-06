@@ -86,9 +86,12 @@ def _worker(rank, rendezvous, output_dir, cases):
                         ).float() * (1 if column == 0 else 0.5)
                     output = torch.empty_like(expected)
 
-                    def execute(destination):
+                    def execute(destination, *, direct_map=False):
                         seen = []
-                        cohorts = CONTRACTS.STREAM._prefill_x_cohort_plan(cp)
+                        row_bytes = 1024 if ratio == 1 else 4096
+                        cohorts = CONTRACTS.STREAM._prefill_x_cohort_plan(
+                            cp, projected_row_bytes=row_bytes
+                        )
                         gather_count = 0
                         original_gather = CONTRACTS.STREAM._gather_prefill_x_cohort
 
@@ -101,19 +104,41 @@ def _worker(rank, rendezvous, output_dir, cases):
                             CONTRACTS.STREAM, "_gather_prefill_x_cohort", count_gather
                         ):
                             tiles = CONTRACTS.STREAM._prefill_projected_x_cohorts(
-                                x, cp, cohorts, tuple(weights)
+                                x, cp, cohorts, tuple(weights), direct_map=direct_map
                             )
                             try:
-                                for start, tile in tiles:
-                                    seen.append((start, len(tile)))
-                                    destination[start : start + len(tile)].copy_(tile)
+                                for start, tile, rows, source_map in tiles:
+                                    seen.append((start, rows))
+                                    if source_map is None:
+                                        destination[start : start + rows].copy_(tile)
+                                    else:
+                                        (
+                                            restore,
+                                            global_start,
+                                            local_start,
+                                            full_rows,
+                                            local_rows,
+                                        ) = source_map
+                                        assert global_start == start
+                                        indices = restore[start : start + rows]
+                                        source = (
+                                            (indices // full_rows) * local_rows
+                                            + indices % full_rows
+                                            - local_start
+                                        ).long()
+                                        destination[start : start + rows].copy_(
+                                            tile.index_select(0, source)
+                                        )
                                     del tile
                             finally:
                                 tiles.close()
                             if lengths == ONLINE_B8:
                                 assert gather_count == (4 if ratio == 2 else 1)
                         assert seen == [
-                            (cohort[2], cohort[3] - cohort[2]) for cohort in cohorts
+                            (start, end - start)
+                            for start, end in CONTRACTS.STREAM._prefill_source_tile_ranges(
+                                cohorts
+                            )
                         ]
                         return destination
 
@@ -132,6 +157,9 @@ def _worker(rank, rendezvous, output_dir, cases):
                             max_peak.item(),
                         )
                         torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                        if lengths in (ONLINE_B8, ONE_MILLION):
+                            execute(output, direct_map=True)
+                            torch.testing.assert_close(output, expected, rtol=0, atol=0)
                         # Different data and compute stream expose stale send,
                         # receive, or producer-slab reuse across tile boundaries.
                         compute = torch.cuda.Stream()
