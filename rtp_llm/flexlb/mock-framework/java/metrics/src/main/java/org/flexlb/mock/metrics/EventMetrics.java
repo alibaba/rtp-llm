@@ -65,24 +65,26 @@ public final class EventMetrics extends Collector {
 
     public void increment(String name) { observe(name, 1); }
 
-    @Override public synchronized List<MetricFamilySamples> collect() {
+    @Override public List<MetricFamilySamples> collect() {
         if (reporter != null) return List.of();
+        Map<Series, Double> counts;
+        long elapsed;
+        synchronized (this) {
+            long now = clock.getAsLong(); elapsed = now - started;
+            counts = elapsed > 0 ? new LinkedHashMap<>(qps) : Map.of();
+            if (elapsed > 0) { qps.replaceAll((key, value) -> 0.0); started = now; }
+        }
         var result = new ArrayList<MetricFamilySamples>();
         registry.metricFamilySamples().asIterator().forEachRemaining(result::add);
-        long now = clock.getAsLong(), elapsed = now - started;
-        if (elapsed > 0) {
-            var rates = new LinkedHashMap<String, GaugeMetricFamily>();
-            for (var entry : qps.entrySet()) {
-                var tags = new TreeMap<>(entry.getKey().tags());
-                var names = new ArrayList<>(List.of("role")); names.addAll(tags.keySet());
-                var labels = new ArrayList<>(List.of(role)); labels.addAll(tags.values());
-                rates.computeIfAbsent(entry.getKey().name(), name -> new GaugeMetricFamily(name,
-                    "Events per wall second.", names)).addMetric(labels, entry.getValue() * 1e9 / elapsed);
-                entry.setValue(0.0);
-            }
-            result.addAll(rates.values());
-            started = now;
+        var rates = new LinkedHashMap<String, GaugeMetricFamily>();
+        for (var entry : counts.entrySet()) {
+            var tags = new TreeMap<>(entry.getKey().tags());
+            var names = new ArrayList<>(List.of("role")); names.addAll(tags.keySet());
+            var labels = new ArrayList<>(List.of(role)); labels.addAll(tags.values());
+            rates.computeIfAbsent(entry.getKey().name(), name -> new GaugeMetricFamily(name,
+                "Events per wall second.", names)).addMetric(labels, entry.getValue() * 1e9 / elapsed);
         }
+        result.addAll(rates.values());
         return result;
     }
 }

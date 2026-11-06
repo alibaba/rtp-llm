@@ -445,3 +445,11 @@ RPC GeneratedOutput 每请求只保存生成长度、发送游标、合成 token
 P/D 输出链路假定健康，不用链路拥塞或发送失败模拟 D 性能。ALLOCATE/LOAD 未完成时仍必须满足协议与 KV 就绪；GENERATE 接受后，P 断连或取消该输出流不撤销 D 的计算，D 继续到 EOS、长度上限、自身 deadline 或节点关闭。输出不可达可能丢响应；不新增重传、落盘或故障恢复流程。Scheduler 的显式 finish/cancel 仍可终止请求。
 
 计算结束后，RPC 为剩余输出保留固定十分钟交付期限（独立于 Fetch 接入期限）。到期移除输出注册记录，并通过串行发送路径以 DEADLINE_EXCEEDED 结束连接；不调用计算取消。正常交付或连接取消时撤销计时器。若底层 onNext 尚未返回，注册清理仍执行，错误通知等该调用返回后发送，不并发调用 observer。
+
+### 健康检查、指标与计时边界
+
+P/D/V 健康检查只读取已安全发布的关闭/致命失败状态与 RPC 服务状态，不获取调度或缓存锁。健康检查不以 Reporter 响应或当前请求的推进速度为条件。
+
+业务路径记录原始指标样本；安装 SDK 后，MetricsOutput 的单个发送线程按入队顺序调用 Reporter，事件与周期快照共用这个发送方。队列上限 65536 项，不在业务线程调用 SDK，也不把事件求均值后发送。发送失败或队列溢出会锁定“指标流不完整”错误，周期采集明确报错，关闭时排空并检查错误；不能把这种运行当作指标验收通过。此错误不反向暂停计算或把业务 health 标为失败。异步发送可能推迟 SDK 接收样本的时刻，原始值和样本权重不变。未安装 SDK 时，Prometheus 仍直接使用原始 Summary 的 sum/count。
+
+周期采集只在取得 Scheduler/KV 数值时使用各自短锁，指标对象和 exposition 在锁外生成。WorkerStatus RT 截止状态读取完成，不包含 protobuf 构造；CacheStatus RT 包含响应构造。两者均不包含 onNext/onCompleted 或指标上报。模拟 Forward elapsed 在定时完成/取消时固定，不包含后续通知执行器排队；端到端请求时间仍包含实际等待。

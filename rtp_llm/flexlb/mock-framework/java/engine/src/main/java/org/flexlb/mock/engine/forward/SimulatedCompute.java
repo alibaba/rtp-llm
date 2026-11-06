@@ -8,12 +8,15 @@ public final class SimulatedCompute implements AutoCloseable {
     public enum State { COMPLETED, CANCELLED }
     public record Outcome(State state, NoiseModel.Sample sample, long elapsedNanos) {}
     private final ScheduledThreadPoolExecutor timer;
-    private final ExecutorService notifications = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService notifications;
     private final Set<Execution> active = ConcurrentHashMap.newKeySet();
     private final Object lifecycle = new Object();
     private boolean closed;
 
-    public SimulatedCompute() {
+    public SimulatedCompute() { this(Executors.newVirtualThreadPerTaskExecutor()); }
+
+    SimulatedCompute(ExecutorService notifications) {
+        this.notifications = Objects.requireNonNull(notifications);
         timer = new ScheduledThreadPoolExecutor(1, Thread.ofPlatform().daemon().name("mock-compute-timer").factory());
         timer.setRemoveOnCancelPolicy(true);
         timer.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
@@ -35,8 +38,8 @@ public final class SimulatedCompute implements AutoCloseable {
                 if (scheduled != null) scheduled.cancel(false);
                 // Never invoke business callbacks on the timer or close caller thread.
                 active.remove(this);
-                notifications.execute(() -> completion.complete(
-                    new Outcome(terminal, sample, Math.max(0, System.nanoTime() - started))));
+                var outcome = new Outcome(terminal, sample, Math.max(0, System.nanoTime() - started));
+                notifications.execute(() -> completion.complete(outcome));
                 if (closed && active.isEmpty()) notifications.shutdown();
                 return true;
             }
