@@ -68,8 +68,23 @@ def build_restore_indices(cp_chunk_lengths: List[int], cp_size: int) -> torch.Te
     return torch.tensor(restore, dtype=torch.int32)
 
 
-def build_padding_mask(cp_chunk_lengths: List[int], cp_size: int) -> torch.Tensor:
-    return torch.ones(sum(cp_chunk_lengths) * cp_size, dtype=torch.int32)
+def build_padding_mask(
+    cp_chunk_lengths: List[int],
+    cp_size: int,
+    actual_lengths: List[int] | None = None,
+) -> torch.Tensor:
+    if actual_lengths is None:
+        actual_lengths = [chunk * cp_size for chunk in cp_chunk_lengths]
+    parts = []
+    for actual, chunk in zip(actual_lengths, cp_chunk_lengths):
+        padded = chunk * cp_size
+        if actual > padded:
+            raise ValueError(
+                f"actual length {actual} exceeds padded CP length {padded}"
+            )
+        parts.append(torch.ones(actual, dtype=torch.int32))
+        parts.append(torch.zeros(padded - actual, dtype=torch.int32))
+    return torch.cat(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -207,9 +222,9 @@ def build_cp_attn_inputs(
     cp_info = PyContextParallelParams()
     cp_info.prefill_cp_chunk_lengths = torch.tensor(cp_chunk_lengths, dtype=torch.int32)
     cp_info.prefill_cp_padding_lengths = torch.zeros(batch_size, dtype=torch.int32)
-    cp_info.prefill_qkv_padding_mask = build_padding_mask(cp_chunk_lengths, cp_size).to(
-        device
-    )
+    cp_info.prefill_qkv_padding_mask = build_padding_mask(
+        cp_chunk_lengths, cp_size, actual_lengths=new_lengths
+    ).to(device)
     cp_info.prefill_qkv_restore_indice = build_restore_indices(
         cp_chunk_lengths, cp_size
     ).to(device)
@@ -319,8 +334,12 @@ def compute_rank_positions(lengths: List[int], cp_size: int) -> List[List[int]]:
 
 
 class CPAttnTestBase(unittest.TestCase):
-    """Base class with the correctness drivers.  Subclasses set ``OP_CLASS``
-    and ``AG_MODULE`` (the module path where ``all_gather`` is imported)."""
+    """Correctness drivers for context-parallel attention implementations.
+
+    Subclasses provide ``OP_CLASS`` and may override ``_patch_all_gather``.
+    ``AG_MODULE`` is only used by the default hook for implementations that call
+    ``collective_torch.all_gather``.
+    """
 
     OP_CLASS = None  # override in subclass
     AG_MODULE: str = ""  # override in subclass
@@ -336,6 +355,23 @@ class CPAttnTestBase(unittest.TestCase):
 
     def _extra_patches(self, stack: contextlib.ExitStack):
         """Override to add extra mock patches (e.g. user-buffers)."""
+
+    def _patch_all_gather(
+        self,
+        stack: contextlib.ExitStack,
+        all_local_k: List[torch.Tensor],
+        all_local_v: List[torch.Tensor],
+        cp_rank: int,
+    ):
+        """Mock the two legacy K/V all-gathers on one GPU."""
+        call_idx = [0]
+
+        def mock_ag(tensor, group=None):
+            data = all_local_k if call_idx[0] % 2 == 0 else all_local_v
+            call_idx[0] += 1
+            return torch.cat(data, dim=0)
+
+        stack.enter_context(patch(f"{self.AG_MODULE}.all_gather", side_effect=mock_ag))
 
     def _assert_close(
         self,
@@ -445,17 +481,8 @@ class CPAttnTestBase(unittest.TestCase):
             total_blocks, kv_head_num, tokens_per_block, head_dim, device=self.device
         )
 
-        call_idx = [0]
-
-        def mock_ag(tensor, group=None):
-            data = all_local_k if call_idx[0] % 2 == 0 else all_local_v
-            call_idx[0] += 1
-            return torch.cat(data, dim=0)
-
         with contextlib.ExitStack() as stack:
-            stack.enter_context(
-                patch(f"{self.AG_MODULE}.all_gather", side_effect=mock_ag)
-            )
+            self._patch_all_gather(stack, all_local_k, all_local_v, cp_rank)
             self._extra_patches(stack)
 
             op = self.OP_CLASS(attn_cfg, attn_inputs, par_cfg)
@@ -598,17 +625,8 @@ class CPAttnTestBase(unittest.TestCase):
             tokens_per_block,
         )
 
-        call_idx = [0]
-
-        def mock_ag(tensor, group=None):
-            data = all_local_k if call_idx[0] % 2 == 0 else all_local_v
-            call_idx[0] += 1
-            return torch.cat(data, dim=0)
-
         with contextlib.ExitStack() as stack:
-            stack.enter_context(
-                patch(f"{self.AG_MODULE}.all_gather", side_effect=mock_ag)
-            )
+            self._patch_all_gather(stack, all_local_k, all_local_v, cp_rank)
             self._extra_patches(stack)
 
             op = self.OP_CLASS(attn_cfg, attn_inputs, par_cfg)

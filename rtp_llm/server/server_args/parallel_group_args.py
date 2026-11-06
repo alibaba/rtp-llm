@@ -1,5 +1,9 @@
-from rtp_llm.ops import CPRotateMethod
-from rtp_llm.server.server_args.util import str2_cp_rotate_method, str2bool
+from rtp_llm.ops import CPAllGatherImpl, CPRotateMethod
+from rtp_llm.server.server_args.util import (
+    str2_cp_all_gather_impl,
+    str2_cp_rotate_method,
+    str2bool,
+)
 
 
 def init_parallel_group_args(
@@ -83,6 +87,14 @@ def init_parallel_group_args(
         type=str2_cp_rotate_method,
         default=CPRotateMethod.DISABLED,
         help="指定用于上下文并行通信方法。可选值: ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL",
+    )
+    parallel_group.add_argument(
+        "--cp_all_gather_impl",
+        env_name="RTP_CP_IMPL",
+        bind_to=(prefill_cp_config, "all_gather_impl"),
+        type=str2_cp_all_gather_impl,
+        default=CPAllGatherImpl.LEGACY,
+        help="Select the ALL_GATHER context-parallel implementation: LEGACY or FUSED.",
     )
     parallel_group.add_argument(
         "--comm_buffer_size",
