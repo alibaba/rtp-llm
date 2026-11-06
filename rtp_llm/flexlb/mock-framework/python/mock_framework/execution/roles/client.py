@@ -25,7 +25,7 @@ class ClientResult:
     errors: list[str]
 
 
-class ClientRole:
+class ClientManager:
     def __init__(self, *, component, recipe, supervisor, topology, records, monitoring, environment=None):
         self.component, self.recipe = component, recipe
         self._configuration = environment

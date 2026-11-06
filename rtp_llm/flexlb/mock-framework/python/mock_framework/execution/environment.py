@@ -1,5 +1,5 @@
 """Assemble run-scoped services and preserve their explicit startup/cleanup order."""
-from .roles.client import ClientRole
+from .roles.client import ClientManager
 from .roles.engine import EngineRole
 from .roles.master import MasterRole
 from .roles.prometheus import Prometheus
@@ -65,7 +65,7 @@ class RunEnvironment:
         self.topology.add_publisher(self.masters.publish_discovery)
         self.engines = EngineRole(supervisor=self.supervisor, topology=self.topology, records=records,
             environment=case.environment, recipes=launch['components'], monitoring=self.monitoring)
-        self.clients = ClientRole(environment=case.environment, component=case.environment.get('client'), recipe=launch['components'].get('client'),
+        self.clients = ClientManager(environment=case.environment, component=case.environment.get('client'), recipe=launch['components'].get('client'),
             supervisor=self.supervisor, topology=self.topology, records=records, monitoring=self.monitoring)
 
     async def start(self):

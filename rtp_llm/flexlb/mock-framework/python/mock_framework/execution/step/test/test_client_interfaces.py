@@ -10,7 +10,7 @@ from mock_framework.config import ConfigError
 from mock_framework.execution.step import _metrics as metrics
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.roles import client as client_runtime
-from mock_framework.execution.roles.client import ClientRole
+from mock_framework.execution.roles.client import ClientManager
 from mock_framework.execution.test.helpers.input import read_inputs, write_inputs, pb
 
 
@@ -22,7 +22,7 @@ def context():
         {'id': 'client-1', 'role': 'client', 'rpc': 'c:2', 'control': 'http://c:2'}]
     topology = SimpleNamespace(active=lambda role=None: [item for item in nodes if role is None or item['role'] == role])
     records = SimpleNamespace(emit=lambda **v: events.append(v))
-    clients = ClientRole(component=None, recipe=None, supervisor=None,
+    clients = ClientManager(component=None, recipe=None, supervisor=None,
         topology=topology, records=records, monitoring=None)
     return SimpleNamespace(runtime=SimpleNamespace(topology=topology, clients=clients, case=SimpleNamespace(directory=FRAMEWORK)), nodes=nodes,
         query_time='2026-10-28T00:00:00Z', timeout=20, records=records, events=events)
