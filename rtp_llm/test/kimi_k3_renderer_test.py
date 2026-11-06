@@ -416,16 +416,28 @@ class KimiK3RendererTest(unittest.TestCase):
             [12, 13],
         )
 
-    def test_stream_options_include_usage_is_explicit(self) -> None:
+    def test_stream_usage_defaults_to_enabled_and_can_be_disabled(self) -> None:
         default_request = self.request(enable_thinking=False)
         enabled_request = ChatCompletionRequest(
             messages=[ChatMessage(role="user", content="question")],
             stream=True,
             stream_options={"include_usage": True},
         )
+        default_options_request = ChatCompletionRequest(
+            messages=[ChatMessage(role="user", content="question")],
+            stream=True,
+            stream_options={},
+        )
+        disabled_request = ChatCompletionRequest(
+            messages=[ChatMessage(role="user", content="question")],
+            stream=True,
+            stream_options={"include_usage": False},
+        )
 
-        self.assertFalse(KimiK3Renderer._stream_includes_usage(default_request))
+        self.assertTrue(KimiK3Renderer._stream_includes_usage(default_request))
         self.assertTrue(KimiK3Renderer._stream_includes_usage(enabled_request))
+        self.assertTrue(KimiK3Renderer._stream_includes_usage(default_options_request))
+        self.assertFalse(KimiK3Renderer._stream_includes_usage(disabled_request))
 
     def test_usage_summary_is_only_emitted_when_requested(self) -> None:
         usage = UsageInfo(prompt_tokens=10, completion_tokens=2, total_tokens=12)
