@@ -68,40 +68,44 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def stage_configs(base, stages=STAGES):
+def stage_config(base, stage):
+    """Common model topology for the traditional and Bazel stage runners."""
     require(
         base.get("target_only", False) is False, "default smoke requires native MTP"
     )
+    require(stage in STAGES, "unsupported K3.1 smoke stage")
+    config = copy.deepcopy(base)
+    config.update(
+        run_id=f"{base['run_id']}-{stage}",
+        k31_smoke_stage=stage,
+        decode_dp=base.get("decode_dp", 2) if stage == "regular" else 1,
+        target_only=False,
+    )
+    config["prefill"]["test_block_num"] = 96 if stage == "regular" else 140
+    if stage == "long":
+        config["decode"].update(
+            test_block_num=140,
+            request_capacity=1,
+            decode_capture_batches="1",
+        )
+        for role in launcher.ROLES:
+            limit = config[role].get("max_seq_len", 2_097_152)
+            require(
+                limit >= LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
+                f"{role} max_seq_len must admit the exact 1M continuation and generation reserve",
+            )
+    return config
+
+
+def stage_configs(base, stages=STAGES):
     configs = []
-    for stage, decode_dp, block_count in (("regular", 2, 96), ("long", 1, 140)):
+    for stage in STAGES:
         if stage not in stages:
             continue
-        if stage == "regular":
-            decode_dp = base.get("decode_dp", decode_dp)
-        config = copy.deepcopy(base)
-        # The public cache-store implementation uses TCP. An internally
-        # linked RDMA implementation can still be selected explicitly.
+        config = stage_config(base, stage)
+        # Transport defaults belong to this launcher; CI owns its worker network.
         config.setdefault("cache_store_rdma_mode", False)
         config.setdefault("prefill_kv_workspace_budget_gib", launcher.DEFAULT_KV_WORKSPACE_GIB)
-        config.update(
-            run_id=f"{base['run_id']}-{stage}",
-            k31_smoke_stage=stage,
-            decode_dp=decode_dp,
-            target_only=False,
-        )
-        config["prefill"]["test_block_num"] = block_count
-        if stage == "long":
-            config["decode"].update(
-                test_block_num=block_count,
-                request_capacity=1,
-                decode_capture_batches="1",
-            )
-            for role in launcher.ROLES:
-                limit = config[role].get("max_seq_len", 2_097_152)
-                require(
-                    limit >= LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
-                    f"{role} max_seq_len must admit the exact 1M continuation and generation reserve",
-                )
         control = launcher.run_dir(config, "prefill") / "control.json"
         config["request_argv"] = [
             "python3",
@@ -363,12 +367,22 @@ def audit_startup(config, output):
 
 def audit_long_native_route(proof, prefill_logs, decode_logs):
     if __package__:
-        from .audit_k31_full_smoke import group_evidence, read_events, request_events
+        from .audit_k31_full_smoke import read_events
     else:
-        from audit_k31_full_smoke import group_evidence, read_events, request_events
+        from audit_k31_full_smoke import read_events
 
     prefill = read_events(prefill_logs, prefill_logs / "engine.log")
     decode = read_events(decode_logs, decode_logs / "engine.log")
+    return audit_long_events(proof, prefill, decode)
+
+
+def audit_long_events(proof, prefill, decode):
+    """Same native route proof for files or authenticated CI event snapshots."""
+    if __package__:
+        from .audit_k31_full_smoke import group_evidence, request_events
+    else:
+        from audit_k31_full_smoke import group_evidence, request_events
+
     groups = {}
     for event in prefill[0]:
         if event.get("event") != "mtp_target_prefill_forward" or event.get("fake"):

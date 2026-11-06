@@ -588,7 +588,7 @@ def require_gpu_capacity(
         )
 
 
-def main():
+def main(argv=None, *, configure=None, extend_parser=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--role", required=True, choices=["PREFILL", "DECODE"])
     parser.add_argument("--tp-size", type=int, help="Defaults to 8 / DP")
@@ -704,13 +704,15 @@ def main():
                         help="Explicit bounded cache-pool size for reproducible tier-pressure smoke")
     parser.add_argument("--prefill-token-capacity", type=int,
                         help="K3.1 fixture-only page-aligned token/workspace capacity;default65536 unchanged")
-    args = parser.parse_args()
+    if extend_parser is not None:
+        extend_parser(parser)
+    args = parser.parse_args(argv)
     if not args.target_only and not args.draft_checkpoint:
         parser.error("MTP requires --draft-checkpoint; synthetic fallback is disabled")
     if args.expected_draft_shards is not None and args.expected_draft_shards < 1:
         parser.error("--expected-draft-shards requires a positive count")
     args.tp_size, args.dp_size, args.ep_size = smoke_topology(args)
-    environment, command = launch_config(args)
+    environment, command = (configure or launch_config)(args)
     if args.print_config:
         print(json.dumps({"environment": environment, "command": command}, indent=2))
         return
