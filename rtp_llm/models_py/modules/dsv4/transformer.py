@@ -135,13 +135,22 @@ def _block_kwargs(
     args: V4Args,
     layer_weights: Optional[Dict[str, torch.Tensor]],
     commit_only: bool = False,
+    *,
+    include_moe_runtime: bool = True,
 ) -> Dict:
     """Kwargs common to Block construction.
 
     ``compress_ratios`` is sized ``n_layers + n_mtp_layers`` (44 for
     V4-Flash default) so ``compress_ratios[layer_id]`` works directly.
+
+    ``include_moe_runtime=False`` drops the four fused-MoE runtime kwargs
+    (``model_type`` / ``parallelism_config`` / ``moe_config`` /
+    ``enable_cuda_graph``) consumed only by the CUDA ``Block``'s
+    ``ChunkedFp8Fp4MoeLayer``. The PPU ``Block`` builds its own packaged
+    MegaMoE and its explicit signature rejects them, so the PPU builder must
+    pass this flag.
     """
-    return dict(
+    kwargs = dict(
         layer_id=layer_id,
         dim=args.dim,
         n_heads=args.n_heads,
@@ -169,7 +178,6 @@ def _block_kwargs(
         n_activated_experts=args.n_activated_experts,
         n_shared_experts=args.n_shared_experts,
         moe_strategy=args.moe_strategy,
-        model_type=args.model_type,
         score_func=args.score_func,
         route_scale=args.route_scale,
         swiglu_limit=args.swiglu_limit,
@@ -186,14 +194,19 @@ def _block_kwargs(
         ep_rank=args.ep_rank,
         world_size=args.world_size,
         world_rank=args.world_rank,
-        parallelism_config=args.parallelism_config,
-        moe_config=args.moe_config,
-        enable_cuda_graph=args.enable_cuda_graph,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         fp8_kv_cache=args.fp8_kv_cache,
         commit_only=commit_only,
     )
+    if include_moe_runtime:
+        kwargs.update(
+            model_type=args.model_type,
+            parallelism_config=args.parallelism_config,
+            moe_config=args.moe_config,
+            enable_cuda_graph=args.enable_cuda_graph,
+        )
+    return kwargs
 
 
 def _build_block(
