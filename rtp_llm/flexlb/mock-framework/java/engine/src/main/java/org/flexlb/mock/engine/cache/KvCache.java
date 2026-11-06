@@ -1,0 +1,303 @@
+package org.flexlb.mock.engine.cache;
+
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CancellationException;
+import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
+
+/** One logical KV pool with synchronous LRU and a separate device residency bound. */
+public final class KvCache implements AutoCloseable {
+    public enum Failure { PERMANENT, RETRYABLE }
+    /** A Mock restore source reports the number of consecutive suffix blocks read successfully.
+     * The future must be returned without blocking and never owns local block references. */
+    @FunctionalInterface
+    public interface RemotePrefixLoader {
+        CompletableFuture<Integer> load(List<Long> suffixKeys);
+    }
+
+    public sealed interface Preparation permits Ready, Loading, Failed {}
+    public record Ready(Lease lease, long matchNanos, int remoteReusedTokens) implements Preparation {}
+    public final class Failed implements Preparation {
+        private final Failure failure;
+        private final long generation, requiredTokens;
+        private final List<Long> keys;
+
+        private Failed(Failure failure, long requiredTokens, List<Long> keys) {
+            this.failure = failure;
+            this.requiredTokens = requiredTokens;
+            this.keys = List.copyOf(keys);
+            generation = allocationGeneration();
+        }
+
+        public Failure failure() { return failure; }
+
+        /** Retry only when capacity or the reusable index has changed. */
+        public Preparation retry() {
+            synchronized (KvCache.this) {
+                if (failure == Failure.PERMANENT || generation == allocationGeneration()) return this;
+                return prepare(requiredTokens, keys);
+            }
+        }
+    }
+
+    public final class Loading implements Preparation, AutoCloseable {
+        private final Ready local;
+        private final CompletableFuture<Integer> restore;
+        private final int suffixSize;
+        private boolean settled;
+
+        private Loading(Ready local, CompletableFuture<Integer> restore, int suffixSize) {
+            this.local = local;
+            this.restore = restore;
+            this.suffixSize = suffixSize;
+        }
+
+        /** Returns this handle while pending, or transfers ownership of the ready lease once. */
+        public Preparation poll() {
+            synchronized (KvCache.this) {
+                if (settled) throw new IllegalStateException("KV preparation already settled");
+                if (!restore.isDone()) return this;
+                settled = true;
+                pending.remove(this);
+                try {
+                    Integer restored = restore.join();
+                    if (restored != null && restored > 0 && restored <= suffixSize) {
+                        local.lease().reused += restored;
+                        return new Ready(local.lease(), local.matchNanos(), restored * blockSize);
+                    }
+                } catch (CompletionException | CancellationException failure) {
+                    // The original allocation still holds a valid local prefix and writable suffix.
+                }
+                return local;
+            }
+        }
+
+        @Override public void close() {
+            synchronized (KvCache.this) {
+                if (settled) return;
+                settled = true;
+                pending.remove(this);
+                local.lease().close();
+                restore.cancel(false);
+            }
+        }
+    }
+
+    private static final long[] EMPTY_KEYS = new long[0];
+
+    public record Admission(Lease lease, Failure failure, long matchNanos) {}
+    /** Keys are a detached copy, safe to encode after releasing the cache monitor. */
+    public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
+                           int referencedBlocks, long version, long[] keys) {}
+    private final BlockPool pool;
+    private final BlockTree tree = new BlockTree();
+    private final int blockSize, deviceBlocks, reserve;
+    private final boolean deviceCache;
+    private final RemotePrefixLoader remote;
+    private final Set<Loading> pending = new HashSet<>();
+    private final Set<Lease> active = Collections.newSetFromMap(new IdentityHashMap<>());
+    private boolean closed;
+    private java.util.function.Consumer<CacheMetadata.Change> metadataObserver;
+    private java.util.function.LongConsumer evictionLifetime = nanos -> {};
+    private Runnable changed = () -> {};
+
+    /** The observer must only signal; it must never acquire an Engine scheduling lock. */
+    public synchronized void onChange(Runnable observer) { changed = Objects.requireNonNull(observer); }
+
+    public synchronized void onEvictionLifetime(java.util.function.LongConsumer observer) {
+        evictionLifetime = Objects.requireNonNull(observer);
+    }
+
+    public synchronized int itemCount() { return tree.size(); }
+
+    public KvCache(int blockSize, int blocks, int reserve) {
+        this(blockSize, blocks, reserve, true);
+    }
+
+    public KvCache(int blockSize, int blocks, int reserve, boolean deviceCache) {
+        this(blockSize, blocks, reserve, deviceCache, null);
+    }
+
+    public KvCache(int blockSize, int blocks, int reserve, boolean deviceCache, RemotePrefixLoader remote) {
+        this(blockSize, blocks, blocks, reserve, deviceCache, remote);
+    }
+
+    public KvCache(int blockSize, int deviceBlocks, int totalBlocks, int reserve,
+                   boolean deviceCache, RemotePrefixLoader remote) {
+        if (blockSize < 1 || deviceBlocks <= 0 || totalBlocks < deviceBlocks || reserve < 0 || reserve > deviceBlocks)
+            throw new IllegalArgumentException("Invalid device/total block capacity or reserve");
+        pool = new BlockPool(totalBlocks);
+        this.deviceBlocks = deviceBlocks;
+        this.blockSize = blockSize;
+        this.reserve = reserve;
+        this.deviceCache = deviceCache;
+        this.remote = remote;
+    }
+
+    /** Maximum size of one request, independent of current leases and evictable cache entries. */
+    public synchronized long maxRequestTokens() { return (long) (deviceBlocks - reserve) * blockSize; }
+
+    public synchronized Preparation prepare(long requiredTokens, List<Long> keys) {
+        var admission = acquire(requiredTokens, keys);
+        if (admission.failure() != null) return new Failed(admission.failure(), requiredTokens, keys);
+        var ready = new Ready(admission.lease(), admission.matchNanos(), 0);
+        int localBlocks = ready.lease().reused;
+        if (remote == null || localBlocks >= keys.size()) return ready;
+
+        var suffix = List.copyOf(keys.subList(localBlocks, keys.size()));
+        CompletableFuture<Integer> restore;
+        try {
+            restore = Objects.requireNonNull(remote.load(suffix));
+        } catch (RuntimeException failure) {
+            return ready;
+        }
+        var loading = new Loading(ready, restore, suffix.size());
+        pending.add(loading);
+        Runnable wake = changed;
+        restore.whenComplete((blocks, failure) -> wake.run());
+        return loading.poll();
+    }
+
+    public synchronized Admission acquire(long requiredTokens, List<Long> keys) {
+        if (closed) throw new IllegalStateException("Cache is closed");
+        validate(keys);
+        long blockDemand = blocksFor(requiredTokens);
+        if (keys.size() > requiredTokens / blockSize) throw new IllegalArgumentException("Keys exceed complete input blocks");
+        tree.validatePath(keys);
+        if (requiredTokens > maxRequestTokens()) return rejected(Failure.PERMANENT);
+        int demand = (int) blockDemand;
+        long matchStarted = System.nanoTime();
+        // Real refreshes LRU at lookup. A later allocation rejection only releases request references.
+        var matched = tree.match(keys);
+        long matchNanos = System.nanoTime() - matchStarted;
+        var slots = new ArrayList<Slot>();
+        for (var node : matched) slots.add(new Slot(pool.retain(node.cache, REQUEST), node));
+        int need = demand - matched.size();
+        // Active references are exactly device-resident blocks, including shared cached prefixes.
+        // Retaining a cached match pins it before checking the device bound; failure rolls it back.
+        if ((long) need + reserve > deviceAvailable() || !makePoolFree(need)) {
+            for (var slot : slots) slot.reference.close();
+            return rejected(Failure.RETRYABLE);
+        }
+        for (var ref : Objects.requireNonNull(pool.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
+        var lease = new Lease(slots, matched.size());
+        active.add(lease);
+        return new Admission(lease, null, matchNanos);
+    }
+
+    /** Snapshot and subscription share the cache monitor. Observers must only enqueue, never block. */
+    public synchronized CacheMetadata.SnapshotKeys metadataKeys() { return tree.metadataKeys(); }
+    public synchronized AutoCloseable observeMetadata(java.util.function.Consumer<CacheMetadata.Change> observer) {
+        if (closed) throw new IllegalStateException("Cache is closed");
+        if (metadataObserver != null) throw new IllegalStateException("Cache metadata already has a reporter");
+        metadataObserver = Objects.requireNonNull(observer);
+        tree.observe(observer);
+        return () -> { synchronized (KvCache.this) {
+            if (metadataObserver == observer) { metadataObserver = null; tree.observe(change -> {}); }
+        } };
+    }
+    private Admission rejected(Failure failure) { return new Admission(null, failure, 0); }
+    /** Both freed capacity and newly reusable prefixes can make a rejected request admissible. */
+    private long allocationGeneration() { return pool.generation() + tree.version(); }
+    public synchronized Snapshot snapshot(long latestVersion, boolean needKeys) {
+        var state = pool.snapshot();
+        int indexed = pool.cachedActiveBlocks();
+        // Idle cached blocks may occupy otherwise unused device slots, but never reduce available capacity.
+        int free = Math.max(0, deviceBlocks - (state.total() - state.free()));
+        return new Snapshot(deviceBlocks, deviceAvailable(), free, state.active() - indexed, indexed,
+            needKeys ? tree.version() : latestVersion, needKeys && latestVersion != tree.version() ? tree.keys() : EMPTY_KEYS);
+    }
+
+    public final class Lease implements AutoCloseable {
+        private final List<Slot> slots;
+        private int reused;
+        private boolean terminal;
+        private Lease(List<Slot> slots, int reused) {
+            this.slots = slots; this.reused = reused;
+        }
+        public long reusedTokens() { synchronized (KvCache.this) { return terminal ? 0 : (long) reused * blockSize; } }
+        public Failure ensureCapacity(long requiredTokens) {
+            synchronized (KvCache.this) {
+                requireOpen();
+                long target = blocksFor(requiredTokens);
+                if (target <= slots.size()) return null;
+                if (target > deviceBlocks) return Failure.PERMANENT;
+                int need = (int) target - slots.size();
+                if (need > deviceAvailable() || !makePoolFree(need)) return Failure.RETRYABLE;
+                for (var ref : Objects.requireNonNull(pool.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
+                return null;
+            }
+        }
+        /** Publication does not release request ownership. Only complete immutable blocks are accepted. */
+        public boolean publish(List<Long> keys, long validTokens) {
+            synchronized (KvCache.this) {
+                if (terminal) return false;
+                validate(keys); tree.validatePath(keys);
+                if (validTokens < 0 || validTokens > (long) slots.size() * blockSize || keys.size() > validTokens / blockSize)
+                    throw new IllegalArgumentException("Published prefix exceeds valid KV or allocated capacity");
+                for (int i = 0; i < keys.size(); i++) {
+                    var slot = slots.get(i);
+                    if (slot.key != null && !slot.key.equals(keys.get(i)))
+                        throw new IllegalArgumentException("Computed prefix differs from reused blocks");
+                }
+                if (!deviceCache) return false;
+                BlockTree.Node parent = null;
+                for (int i = 0; i < keys.size(); i++) {
+                    var slot = slots.get(i);
+                    var node = tree.find(keys.get(i));
+                    if (node == null) {
+                        node = tree.insert(keys.get(i), parent, pool.retain(slot.reference, CACHE));
+                        slot.key = node.key;
+                    }
+                    parent = node;
+                }
+                return true;
+            }
+        }
+
+        @Override public void close() {
+            synchronized (KvCache.this) {
+                if (terminal) return;
+                int available = pool.snapshot().available();
+                for (var slot : slots) {
+                    slot.reference.close();
+                }
+                slots.clear(); terminal = true; active.remove(this);
+                if (pool.snapshot().available() > available) changed.run();
+            }
+        }
+        private void requireOpen() { if (terminal) throw new IllegalStateException("Lease is closed"); }
+    }
+    @Override public void close() {
+        synchronized (this) {
+            if (closed) return;
+            closed = true;
+            for (var load : List.copyOf(pending)) load.close();
+            for (var lease : List.copyOf(active)) lease.close();
+            tree.clear();
+        }
+    }
+    private int deviceAvailable() { return deviceBlocks - pool.snapshot().active(); }
+    private boolean makePoolFree(int count) {
+        while (pool.snapshot().free() < count) {
+            var evicted = tree.evict();
+            if (evicted == null) return false;
+            evictionLifetime.accept(System.nanoTime() - evicted.insertedNanos);
+        }
+        return true;
+    }
+    private long blocksFor(long tokens) {
+        if (tokens < 0) throw new IllegalArgumentException("Negative Token capacity");
+        return tokens / blockSize + (tokens % blockSize == 0 ? 0 : 1);
+    }
+    private static final class Slot {
+        final BlockPool.Reference reference;
+        Long key;
+        Slot(BlockPool.Reference reference, BlockTree.Node node) { this.reference = reference; key = node == null ? null : node.key; }
+    }
+    private static void validate(List<Long> keys) {
+        if (keys == null || keys.stream().anyMatch(Objects::isNull) || new HashSet<>(keys).size() != keys.size())
+            throw new IllegalArgumentException("Cache keys must be distinct, non-null prefix identities");
+    }
+}
