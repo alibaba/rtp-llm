@@ -180,28 +180,34 @@ struct KVCacheConfig {
     std::string                             disk_cache_paths                                = "";
     int64_t                                 disk_cache_size_mb                              = 0;
     bool                                    disk_cache_buffered_io                          = true;
+    int64_t                                 disk_cache_read_thread_count                    = 16;
+    int64_t                                 disk_cache_write_thread_count                   = 16;
     int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
     int64_t                                 disk_cache_staging_block_count                  = 128;
     int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
-    int64_t                                 block_tree_transfer_worker_count                = 4;
-    int64_t                                 block_tree_business_queue_max_size              = 10000;
-    int64_t                                 block_tree_transfer_queue_max_size              = 10000;
-    double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
-    double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
-    double block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
-    double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
-    double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
-    double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    // Prefer WorkLoop for supported final layouts; legal legacy layouts fall back at creation.
+    bool btc_transfer_engine_async = true;
+    // Slots per device in each WorkLoop's private async CRC service.
+    int64_t btc_crc_slot_count                           = 8;
+    int64_t block_tree_transfer_worker_count             = 1;
+    int64_t block_tree_business_queue_max_size           = 10000;
+    int64_t block_tree_transfer_queue_max_size           = 10000;
+    double  block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
+    double  block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
+    double  block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
+    double  block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
+    double  block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
+    double  block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
     // FULL-only per-tier overrides: -1/-1 inherits the shared watermarks.
     double   block_tree_full_device_evict_low_watermark_ratio  = -1.0;
     double   block_tree_full_device_evict_high_watermark_ratio = -1.0;
     double   block_tree_full_memory_evict_low_watermark_ratio  = -1.0;
     double   block_tree_full_memory_evict_high_watermark_ratio = -1.0;
     double   block_tree_full_disk_evict_low_watermark_ratio    = -1.0;
-    double block_tree_full_disk_evict_high_watermark_ratio   = -1.0;
-    int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
-    uint32_t linear_pool_blocks                           = 0;
-    uint32_t swa_pool_blocks                              = 0;
+    double   block_tree_full_disk_evict_high_watermark_ratio   = -1.0;
+    int      reuse_cache_tail_blocks                           = std::numeric_limits<int>::max();
+    uint32_t linear_pool_blocks                                = 0;
+    uint32_t swa_pool_blocks                                   = 0;
     // Fields merged from PyKvCacheConfig
     int fp8_kv_cache = 0;
     // "auto" preserves a model-declared recurrent-state dtype. Models
@@ -276,9 +282,9 @@ struct KVCacheConfig {
     size_t      kvcm_asyncwrapper_thread_num         = 4;
     size_t      kvcm_asyncwrapper_queue_size         = 10000;
     // Retained for parsing compatibility; BTC remote broadcasts inherit the task deadline.
-    int         kvcm_get_broadcast_timeout           = 15000;
-    int         kvcm_put_broadcast_timeout           = 15000;
-    std::string kvcm_client_config                   = "";
+    int         kvcm_get_broadcast_timeout = 15000;
+    int         kvcm_put_broadcast_timeout = 15000;
+    std::string kvcm_client_config         = "";
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -429,18 +435,18 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool    cache_store_rdma_mode         = false;
-    int     wrr_available_ratio           = 80;
-    int     rank_factor                   = 0;
-    int     thread_count                  = 32;
-    int     rdma_connect_timeout_ms       = 250;
-    int     rdma_qp_count_per_connection  = 2;
-    int     rdma_io_thread_count          = 4;
-    int     rdma_worker_thread_count      = 2;
-    int     messager_io_thread_count      = 2;
-    int     messager_worker_thread_count  = 32;
-    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
-    int rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
+    bool    cache_store_rdma_mode               = false;
+    int     wrr_available_ratio                 = 80;
+    int     rank_factor                         = 0;
+    int     thread_count                        = 32;
+    int     rdma_connect_timeout_ms             = 250;
+    int     rdma_qp_count_per_connection        = 2;
+    int     rdma_io_thread_count                = 4;
+    int     rdma_worker_thread_count            = 2;
+    int     messager_io_thread_count            = 2;
+    int     messager_worker_thread_count        = 32;
+    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_read_steal_before_deadline_ms =
         250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
     int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
@@ -705,7 +711,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -714,7 +720,7 @@ struct GrpcConfig: GrpcMapsConfig {
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
     int max_server_workers = 4;
-    DashScGrpcConfig(){};
+    DashScGrpcConfig() {};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);

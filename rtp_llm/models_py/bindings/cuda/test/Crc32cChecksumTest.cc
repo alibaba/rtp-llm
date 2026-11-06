@@ -236,7 +236,7 @@ protected:
         SCOPED_TRACE(::testing::Message() << "pattern=" << patternName(pattern) << " seed=" << seed);
         MessageFixture fixture(lengths, pattern, seed);
         const auto     nvcomp = fixture.nvcompChecksums();
-        ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyStatus::OK);
+        ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyState::OK);
         for (size_t index = 0; index < lengths.size(); ++index) {
             const auto& message = *fixture.messages[index];
             SCOPED_TRACE(::testing::Message() << "length=" << message.length << " index=" << index);
@@ -312,7 +312,7 @@ TEST_F(Crc32cChecksumTest, KnownVectors) {
         MessageFixture fixture({vector.length}, Pattern::Xorshift, 7);
         std::memcpy(fixture.messages[0]->host.pointer, vector.bytes, vector.length);
         cudaCheck(cudaMemcpy(fixture.messages[0]->device.pointer, vector.bytes, vector.length, cudaMemcpyHostToDevice));
-        ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyStatus::OK);
+        ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyState::OK);
         EXPECT_EQ(fixture.messages[0]->sealedFooter(), vector.expected);
         const auto nvcomp = fixture.nvcompChecksums();
         EXPECT_EQ(nvcomp[0], vector.expected);
@@ -355,7 +355,7 @@ TEST_F(Crc32cChecksumTest, Rfc3720ThirtyTwoByteVectors) {
                              lengths[index],
                              cudaMemcpyHostToDevice));
     }
-    ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyStatus::OK);
+    ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyState::OK);
     const auto nvcomp = fixture.nvcompChecksums();
     for (size_t index = 0; index < vectors.size(); ++index) {
         SCOPED_TRACE(index);
@@ -372,30 +372,30 @@ TEST_F(Crc32cChecksumTest, SingleBitAndByteFlipsAreDetectedOnLoad) {
     {
         MessageFixture fixture({97}, Pattern::Xorshift, 11);
         auto&          message = *fixture.messages[0];
-        ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyStatus::OK);
+        ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyState::OK);
         for (size_t byte = 0; byte < message.length; ++byte) {
             for (int bit = 0; bit < 8; ++bit) {
                 const uint8_t mask = uint8_t(1u << bit);
                 message.host.pointer[byte] ^= mask;
-                EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyStatus::CRC_MISMATCH)
+                EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyState::CRC_MISMATCH)
                     << "bit flip at byte " << byte << " bit " << bit << " was not detected";
                 message.host.pointer[byte] ^= mask;
             }
         }
-        EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyStatus::OK);
+        EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyState::OK);
     }
     {
         MessageFixture fixture({16395}, Pattern::Xorshift, 12);
         auto&          message = *fixture.messages[0];
-        ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyStatus::OK);
+        ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyState::OK);
         for (size_t byte = 0; byte < message.length; ++byte) {
             const uint8_t mask = uint8_t(1u << (byte & 7u));
             message.host.pointer[byte] ^= mask;
-            EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyStatus::CRC_MISMATCH)
+            EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyState::CRC_MISMATCH)
                 << "flip at byte " << byte << " was not detected";
             message.host.pointer[byte] ^= mask;
         }
-        EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyStatus::OK);
+        EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyState::OK);
     }
 }
 
@@ -406,7 +406,7 @@ TEST_F(Crc32cChecksumTest, BoundaryByteFlipsAreDetected) {
     const size_t   length = 510912;
     MessageFixture fixture({length}, Pattern::Xorshift, 13);
     auto&          message = *fixture.messages[0];
-    ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyStatus::OK);
+    ASSERT_EQ(copy_->store(fixture.items, failures_), CrcCopyState::OK);
     for (size_t byte : {
              size_t(0),      size_t(1),      size_t(7),      size_t(8),      size_t(15),     size_t(16),
              size_t(17),     size_t(31),     size_t(4095),   size_t(4096),   size_t(4097),   size_t(16383),
@@ -415,10 +415,10 @@ TEST_F(Crc32cChecksumTest, BoundaryByteFlipsAreDetected) {
          }) {
         SCOPED_TRACE(::testing::Message() << "byte=" << byte);
         message.host.pointer[byte] ^= 0x5A;
-        EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyStatus::CRC_MISMATCH);
+        EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyState::CRC_MISMATCH);
         message.host.pointer[byte] ^= 0x5A;
     }
-    EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyStatus::OK);
+    EXPECT_EQ(copy_->load(fixture.items, failures_), CrcCopyState::OK);
 }
 
 }  // namespace

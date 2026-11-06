@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -25,8 +26,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostCopyStrategy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
@@ -194,8 +195,9 @@ static GroupSetPtr makeDeviceHostGroup(size_t                                  g
 }
 
 static std::shared_ptr<PerRankBlockTransferEngine>
-makeEngine(std::vector<GroupSetPtr> groups, DeviceHostCopyOptions options = {}, bool enable_disk_cache = false) {
-    return std::make_shared<PerRankBlockTransferEngine>(std::move(groups), enable_disk_cache, std::move(options));
+makeEngine(std::vector<GroupSetPtr> groups, DeviceHostCopyOptions options = {}, bool enable_disk_cache = true) {
+    return std::make_shared<PerRankBlockTransferEngine>(
+        std::move(groups), enable_disk_cache, std::move(options), 128, 8, 4, 10000, nullptr, 0, 4, true);
 }
 
 struct StrategyCounters {
@@ -390,6 +392,9 @@ TEST(DeviceHostTransferExecutorConfigTest, PromotesOnlyExistingSelectedStrategyA
 
 class PerRankBlockTransferEngineTest: public ::testing::Test {
 protected:
+    virtual bool useWorkLoop() const {
+        return true;
+    }
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
 
@@ -397,7 +402,7 @@ protected:
         host_block_size_ = 300;
 
         // Create host pool — 10 usable blocks
-        host_pool_ = makeHostPool(host_block_size_, 10);
+        host_pool_ = makeHostPool(host_block_size_, 10, useWorkLoop());
 
         device_pool_  = makeDevicePool({{100, 0}, {100, 0}, {100, 0}}, 10, "per_rank_transfer_engine_device");
         device_block_ = poolMalloc(*device_pool_);
@@ -405,8 +410,15 @@ protected:
         device_blocks_ = {device_block_};
 
         group_set_ = makeDeviceHostGroup(0, {device_pool_}, host_pool_, {makeGroupBase({0, 1, 2}, 100)});
+        if (useWorkLoop()) {
+            group_set_->initialize(0,
+                                   group_set_->topologyPtr(),
+                                   group_set_->groupTags(),
+                                   block_transfer_engine_test::makeTestBackingLayout(host_block_size_, true));
+        }
         ASSERT_EQ(group_set_->payloadBytes(), host_block_size_);
         per_rank_transfer_engine_ = makeEngine({group_set_});
+        ASSERT_EQ(per_rank_transfer_engine_->asyncEnabled(), useWorkLoop());
     }
 
     std::vector<size_t>                         layer_bytes_;
@@ -419,13 +431,21 @@ protected:
     GroupSetPtr                                 group_set_;
 };
 
+// These cases exercise the real compatibility executors and their worker/strategy contracts.
+class LegacyPerRankBlockTransferEngineTest: public PerRankBlockTransferEngineTest {
+protected:
+    bool useWorkLoop() const override {
+        return false;
+    }
+};
+
 // Restore the process-wide assertion policy even if a test assertion fails.
-class CopyBoundsTest: public PerRankBlockTransferEngineTest {
+class CopyBoundsTest: public LegacyPerRankBlockTransferEngineTest {
 protected:
     void SetUp() override {
         previous_                                    = StaticConfig::user_ft_core_dump_on_exception;
         StaticConfig::user_ft_core_dump_on_exception = false;
-        PerRankBlockTransferEngineTest::SetUp();
+        LegacyPerRankBlockTransferEngineTest::SetUp();
     }
     void TearDown() override {
         StaticConfig::user_ft_core_dump_on_exception = previous_;
@@ -510,17 +530,17 @@ TEST_F(CopyBoundsTest, InvalidStagedParametersAllowFallbackBeforeCudaAccess) {
     EXPECT_FALSE(execStagedMemoryCopy(params));
 }
 
-TEST_F(PerRankBlockTransferEngineTest, DirectionStreamsAreDistinctAndSharedBetweenExecutors) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, DirectionStreamsAreDistinctAndSharedBetweenExecutors) {
     auto second_engine = makeEngine({group_set_});
-    EXPECT_EQ(per_rank_transfer_engine_->device_host_executor_->copy_streams_, nullptr);
-    EXPECT_EQ(second_engine->device_host_executor_->copy_streams_, nullptr);
+    EXPECT_EQ(per_rank_transfer_engine_->legacy_->device_host_executor_->copy_streams_, nullptr);
+    EXPECT_EQ(second_engine->legacy_->device_host_executor_->copy_streams_, nullptr);
     const BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     const auto descriptor = makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, host_block);
     ASSERT_TRUE(executeSucceeded(per_rank_transfer_engine_, descriptor));
     ASSERT_TRUE(executeSucceeded(second_engine, descriptor));
-    auto first  = per_rank_transfer_engine_->device_host_executor_->copy_streams_;
-    auto second = second_engine->device_host_executor_->copy_streams_;
+    auto first  = per_rank_transfer_engine_->legacy_->device_host_executor_->copy_streams_;
+    auto second = second_engine->legacy_->device_host_executor_->copy_streams_;
     ASSERT_NE(first, nullptr);
     ASSERT_EQ(first.get(), second.get());
     ASSERT_NE(first->h2d_stream, 0u);
@@ -532,7 +552,7 @@ TEST_F(PerRankBlockTransferEngineTest, DirectionStreamsAreDistinctAndSharedBetwe
     ASSERT_EQ(cudaStreamGetFlags(reinterpret_cast<cudaStream_t>(first->d2h_stream), &flags), cudaSuccess);
     EXPECT_EQ(flags & cudaStreamNonBlocking, cudaStreamNonBlocking);
     second_engine.reset();
-    EXPECT_EQ(per_rank_transfer_engine_->device_host_executor_->copy_streams_.get(), first.get());
+    EXPECT_EQ(per_rank_transfer_engine_->legacy_->device_host_executor_->copy_streams_.get(), first.get());
     releasePoolBlock(*host_pool_, host_block);
 }
 
@@ -577,7 +597,7 @@ private:
     bool                    released_{false};
 };
 
-TEST_F(PerRankBlockTransferEngineTest, BatchAndGenericSubmitToSelectedDirectionStreams) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, BatchAndGenericSubmitToSelectedDirectionStreams) {
     const int          device        = device_pool_->deviceIndex();
     auto               pair          = acquireDeviceHostCopyStreams(device);
     const auto         device_buffer = device_pool_->convertIndexToBuffer(0, device_block_)[0];
@@ -624,7 +644,7 @@ TEST_F(PerRankBlockTransferEngineTest, BatchAndGenericSubmitToSelectedDirectionS
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, ThreeDBatchSubmitsToSelectedDirectionStreams) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, ThreeDBatchSubmitsToSelectedDirectionStreams) {
     Cuda3DBatchDeviceHostCopyStrategy strategy({group_set_});
     if (strategy.templates_.empty()) {
         GTEST_SKIP() << "Installed CUDA runtime/driver does not support 3D batch";
@@ -657,7 +677,7 @@ TEST_F(PerRankBlockTransferEngineTest, ThreeDBatchSubmitsToSelectedDirectionStre
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, ConcurrentSameDirectionBatchesPreserveIndependentPayloads) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, ConcurrentSameDirectionBatchesPreserveIndependentPayloads) {
     constexpr size_t               count  = 4;
     constexpr size_t               bytes  = 256;
     const int                      device = device_pool_->deviceIndex();
@@ -757,7 +777,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout)
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTargetTier) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTargetTier) {
     BlockTreeTaskPool          task_pool(1, 8, "DeviceHostExecutorDirectionTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
     fillDeviceLayer(device_pool_, 0, device_block_, {0xA5});
@@ -785,7 +805,7 @@ TEST_F(PerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTar
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, ExecutorAcquiresStreamsOnFirstCopy) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, ExecutorAcquiresStreamsOnFirstCopy) {
     BlockTreeTaskPool          task_pool(1, 8, "LazyCopyStreamsTest");
     DeviceHostTransferExecutor executor(task_pool, 8);
     EXPECT_EQ(executor.copy_streams_, nullptr);
@@ -804,7 +824,7 @@ TEST_F(PerRankBlockTransferEngineTest, ExecutorAcquiresStreamsOnFirstCopy) {
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, DeviceHostExecutorReportsTaskPoolSubmissionRejection) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, DeviceHostExecutorReportsTaskPoolSubmissionRejection) {
     BlockTreeTaskPool task_pool(1, 8, "DeviceHostExecutorTest");
     ASSERT_TRUE(task_pool.start());
     task_pool.stopAdmission();
@@ -828,7 +848,7 @@ TEST_F(PerRankBlockTransferEngineTest, DeviceHostExecutorReportsTaskPoolSubmissi
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
     auto shared_pool = makeDevicePool({{32, 0}, {32, 0}}, 4, "per_rank_transfer_engine_shared_pool");
     auto host_pool   = makeHostPool(128, 4);
     auto group       = makeDeviceHostGroup(
@@ -884,7 +904,7 @@ TEST_F(PerRankBlockTransferEngineTest, SharedDevicePoolGroupsIsolateByBlockId) {
     shared_pool->decRef(block_b);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedHostBlock) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedHostBlock) {
     constexpr BlockIdxType unallocated_host_block = 1;
     expectStatus(per_rank_transfer_engine_,
                  makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, unallocated_host_block),
@@ -894,7 +914,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedHostBlock) {
                  TransferStatus::OK);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedDeviceBlock) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedDeviceBlock) {
     // Worker transfers may use a valid logical block ID without local allocator ownership.
     BlockIdxType freed_device_block = poolMalloc(*device_pool_);
     ASSERT_NE(freed_device_block, NULL_BLOCK_IDX);
@@ -915,7 +935,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitAcceptsValidUnallocatedDeviceBlock)
     releasePoolBlock(*host_pool_, host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SubmitReportsFinalStatusAfterWait) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, SubmitReportsFinalStatusAfterWait) {
     fillDeviceLayer(device_pool_, 0, device_block_, {0xAA});
     fillDeviceLayer(device_pool_, 1, device_block_, {0xBB});
     fillDeviceLayer(device_pool_, 2, device_block_, {0xCC});
@@ -930,7 +950,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitReportsFinalStatusAfterWait) {
     EXPECT_TRUE(context->success());
     EXPECT_TRUE(context->errorInfo().ok());
 
-    auto& strategies = per_rank_transfer_engine_->device_host_executor_->strategies_;
+    auto& strategies = per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_;
     strategies.clear();
     strategies.push_back(std::make_unique<FailingStrategy>());
     auto failed_context = per_rank_transfer_engine_->execute(makeTransferTask({desc}));
@@ -960,6 +980,8 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitHostToDeviceIndependentDescriptors)
     std::memset(host_data_2 + layer_bytes_[0], 0x78, layer_bytes_[1]);
     std::memset(host_data_2 + layer_bytes_[0] + layer_bytes_[1], 0xBC, layer_bytes_[2]);
 
+    block_transfer_engine_test::encodeTestRecord(host_data_1, host_block_size_);
+    block_transfer_engine_test::encodeTestRecord(host_data_2, host_block_size_);
     auto context = per_rank_transfer_engine_->execute(
         makeTransferTask({makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block_1),
                           makeDescriptor(Tier::HOST, Tier::DEVICE, second_device_blocks, host_block_2)}));
@@ -987,7 +1009,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitHostToDeviceIndependentDescriptors)
     device_pool_->decRef(second_device_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksMayUseSharedWorkers) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksMayUseSharedWorkers) {
     const BlockIdxType second_device_block = poolMalloc(*device_pool_);
     const BlockIdxType first_host_block    = poolMalloc(*host_pool_);
     const BlockIdxType second_host_block   = poolMalloc(*host_pool_);
@@ -997,8 +1019,8 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksMayUseShare
 
     auto  blocking_strategy = std::make_unique<BlockingStrategy>();
     auto* blocker           = blocking_strategy.get();
-    per_rank_transfer_engine_->device_host_executor_->strategies_.clear();
-    per_rank_transfer_engine_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
+    per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_.clear();
+    per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
 
     auto first = per_rank_transfer_engine_->execute(
         makeTransferTask({makeDescriptor(Tier::DEVICE, Tier::HOST, device_blocks_, first_host_block)}));
@@ -1016,7 +1038,7 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksMayUseShare
     const auto streams = blocker->streams();
     ASSERT_EQ(streams.size(), 2u);
     EXPECT_EQ(streams[0], streams[1]);
-    EXPECT_EQ(streams[0], per_rank_transfer_engine_->device_host_executor_->copy_streams_->d2h_stream);
+    EXPECT_EQ(streams[0], per_rank_transfer_engine_->legacy_->device_host_executor_->copy_streams_->d2h_stream);
 
     releasePoolBlock(*host_pool_, first_host_block);
     releasePoolBlock(*host_pool_, second_host_block);
@@ -1024,7 +1046,7 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionDeviceToHostTasksMayUseShare
     device_pool_->decRef(second_device_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksMayUseSharedWorkers) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksMayUseSharedWorkers) {
     const BlockIdxType second_device_block = poolMalloc(*device_pool_);
     const BlockIdxType first_host_block    = poolMalloc(*host_pool_);
     const BlockIdxType second_host_block   = poolMalloc(*host_pool_);
@@ -1034,8 +1056,8 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksMayUseShare
 
     auto  blocking_strategy = std::make_unique<BlockingStrategy>();
     auto* blocker           = blocking_strategy.get();
-    per_rank_transfer_engine_->device_host_executor_->strategies_.clear();
-    per_rank_transfer_engine_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
+    per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_.clear();
+    per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
 
     auto first = per_rank_transfer_engine_->execute(
         makeTransferTask({makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, first_host_block)}));
@@ -1053,7 +1075,7 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksMayUseShare
     const auto streams = blocker->streams();
     ASSERT_EQ(streams.size(), 2u);
     EXPECT_EQ(streams[0], streams[1]);
-    EXPECT_EQ(streams[0], per_rank_transfer_engine_->device_host_executor_->copy_streams_->h2d_stream);
+    EXPECT_EQ(streams[0], per_rank_transfer_engine_->legacy_->device_host_executor_->copy_streams_->h2d_stream);
 
     releasePoolBlock(*host_pool_, first_host_block);
     releasePoolBlock(*host_pool_, second_host_block);
@@ -1061,9 +1083,9 @@ TEST_F(PerRankBlockTransferEngineTest, SameDirectionHostToDeviceTasksMayUseShare
     device_pool_->decRef(second_device_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, HostToDeviceOvertakesQueuedDeviceToHost) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, HostToDeviceOvertakesQueuedDeviceToHost) {
     per_rank_transfer_engine_ = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group_set_}, false, DeviceHostCopyOptions{}, 4, 64, 1);
+        std::vector<GroupSetPtr>{group_set_}, false, DeviceHostCopyOptions{}, 4, 64, 1, 10000, nullptr, 0, 8, false);
 
     const BlockIdxType first_host_block  = poolMalloc(*host_pool_);
     const BlockIdxType second_host_block = poolMalloc(*host_pool_);
@@ -1074,8 +1096,8 @@ TEST_F(PerRankBlockTransferEngineTest, HostToDeviceOvertakesQueuedDeviceToHost) 
 
     auto  blocking_strategy = std::make_unique<BlockingStrategy>();
     auto* blocker           = blocking_strategy.get();
-    per_rank_transfer_engine_->device_host_executor_->strategies_.clear();
-    per_rank_transfer_engine_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
+    per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_.clear();
+    per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
     [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [blocker](void*) { blocker->release(); });
 
     auto running_background = per_rank_transfer_engine_->execute(
@@ -1103,15 +1125,24 @@ TEST_F(PerRankBlockTransferEngineTest, HostToDeviceOvertakesQueuedDeviceToHost) 
     releasePoolBlock(*host_pool_, load_host_block);
 }
 
-TEST_F(PerRankBlockTransferEngineTest, TransferWorkerCountIsPerDirection) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, TransferWorkerCountIsPerDirection) {
     constexpr size_t kWorkerCount = 4;
-    per_rank_transfer_engine_     = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group_set_}, false, DeviceHostCopyOptions{}, 4, 64, kWorkerCount);
+    per_rank_transfer_engine_     = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set_},
+                                                                             false,
+                                                                             DeviceHostCopyOptions{},
+                                                                             4,
+                                                                             64,
+                                                                             kWorkerCount,
+                                                                             10000,
+                                                                             nullptr,
+                                                                             0,
+                                                                             8,
+                                                                             false);
 
     auto  blocking_strategy = std::make_unique<BlockingStrategy>();
     auto* blocker           = blocking_strategy.get();
-    per_rank_transfer_engine_->device_host_executor_->strategies_.clear();
-    per_rank_transfer_engine_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
+    per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_.clear();
+    per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
 
     std::vector<std::shared_ptr<TransferAsyncContext>> contexts;
     for (size_t index = 0; index < kWorkerCount; ++index) {
@@ -1131,15 +1162,24 @@ TEST_F(PerRankBlockTransferEngineTest, TransferWorkerCountIsPerDirection) {
     }
 }
 
-TEST_F(PerRankBlockTransferEngineTest, FourBlockedDeviceToHostWorkersDoNotDelayHostToDevice) {
+TEST_F(LegacyPerRankBlockTransferEngineTest, FourBlockedDeviceToHostWorkersDoNotDelayHostToDevice) {
     constexpr size_t kWorkerCount = 4;
-    per_rank_transfer_engine_     = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group_set_}, false, DeviceHostCopyOptions{}, 4, 64, kWorkerCount);
+    per_rank_transfer_engine_     = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set_},
+                                                                             false,
+                                                                             DeviceHostCopyOptions{},
+                                                                             4,
+                                                                             64,
+                                                                             kWorkerCount,
+                                                                             10000,
+                                                                             nullptr,
+                                                                             0,
+                                                                             8,
+                                                                             false);
 
     auto  blocking_strategy = std::make_unique<BlockingStrategy>(/*block_device_to_host_only=*/true);
     auto* blocker           = blocking_strategy.get();
-    per_rank_transfer_engine_->device_host_executor_->strategies_.clear();
-    per_rank_transfer_engine_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
+    per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_.clear();
+    per_rank_transfer_engine_->legacy_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
     [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [blocker](void*) { blocker->release(); });
 
     std::vector<BlockIdxType>                          host_blocks;
@@ -1216,7 +1256,10 @@ protected:
                                 host_pool_,
                                 {makeGroupBase({0}, 64, 16), makeGroupBase({0}, 64, 16), makeGroupBase({0}, 64, 16)},
                                 disk_pool_);
-        engine_     = makeEngine({group});
+        group->initialize(
+            0, group->topologyPtr(), group->groupTags(), block_transfer_engine_test::makeTestBackingLayout(240, true));
+        engine_ = makeEngine({group});
+        ASSERT_TRUE(engine_->asyncEnabled());
         host_block_ = poolMalloc(*host_pool_);
         disk_block_ = poolMalloc(*disk_pool_);
         ASSERT_NE(host_block_, NULL_BLOCK_IDX);
@@ -1304,7 +1347,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTri
     auto group  = makeDeviceHostGroup(0, {device_pool}, host_pool, {makeGroupBase({0}, 64, 16)}, disk_pool);
     auto engine = makeEngine({group}, {}, true);
     fillDeviceLayer(device_pool, 0, device_block, {0x6A, 0xD3});
-    const auto expected = readDeviceLayer(device_pool, 0, device_block);
+    const auto expected  = readDeviceLayer(device_pool, 0, device_block);
     auto       profiling = AsyncProfileSession::start();
 
     expectStatus(engine,
@@ -1481,7 +1524,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithout
     auto engine = makeEngine({group}, {}, true);
 
     fillDeviceLayer(device_pool, 0, device_block, {0x6A, 0xD3});
-    const auto expected = readDeviceLayer(device_pool, 0, device_block);
+    const auto expected  = readDeviceLayer(device_pool, 0, device_block);
     auto       profiling = AsyncProfileSession::start();
 
     expectStatus(engine,
@@ -1546,7 +1589,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskFailureReleasesStagi
     auto group  = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
     auto engine = makeEngine({group}, {}, true);
 
-    auto& strategies          = engine->device_host_executor_->strategies_;
+    auto& strategies          = engine->legacy_->device_host_executor_->strategies_;
     auto  original_strategies = std::move(strategies);
     strategies.clear();
     strategies.push_back(std::make_unique<FailingStrategy>());
@@ -1572,7 +1615,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceToDiskFailureReleasesStagi
     expectStatus(engine, descriptor, TransferStatus::OK);
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DefaultStagingCanReserve64FullBlocks) {
+TEST(PerRankBlockTransferEngineIntegrationTest, LegacyDefaultStagingCanReserve64FullBlocks) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
     for (const size_t swa_bytes : {4096u, 16384u}) {
         auto full_device = makeDevicePool({{8192, 0}}, 1, "default_staging_full");
@@ -1581,16 +1624,25 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DefaultStagingCanReserve64FullBl
             makeDeviceHostGroup(0, {full_device}, nullptr, {makeGroupBase(CacheGroupType::FULL, {0}, 8192)});
         auto swa_group =
             makeDeviceHostGroup(1, {swa_device}, nullptr, {makeGroupBase(CacheGroupType::SWA, {0}, swa_bytes)});
-        auto engine =
-            std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full_group, swa_group}, true);
-        auto full = engine->device_disk_executor_->full_staging_pool_->tryMallocBatch(64);
+        auto engine = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full_group, swa_group},
+                                                                   true,
+                                                                   DeviceHostCopyOptions{},
+                                                                   128,
+                                                                   8,
+                                                                   4,
+                                                                   10000,
+                                                                   nullptr,
+                                                                   0,
+                                                                   8,
+                                                                   false);
+        auto full   = engine->legacy_->device_disk_executor_->full_staging_pool_->tryMallocBatch(64);
         ASSERT_TRUE(full.has_value());
         EXPECT_EQ(full->size(), 64u);
         const size_t expected_swa_capacity = swa_bytes == 4096 ? 128 : 64;
-        auto         swa = engine->device_disk_executor_->swa_staging_pool_->tryMallocBatch(expected_swa_capacity);
+        auto swa = engine->legacy_->device_disk_executor_->swa_staging_pool_->tryMallocBatch(expected_swa_capacity);
         ASSERT_TRUE(swa.has_value());
         EXPECT_EQ(swa->size(), expected_swa_capacity);
-        EXPECT_FALSE(engine->device_disk_executor_->swa_staging_pool_->tryMallocBatch(1).has_value());
+        EXPECT_FALSE(engine->legacy_->device_disk_executor_->swa_staging_pool_->tryMallocBatch(1).has_value());
     }
 }
 
@@ -1610,11 +1662,20 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceUsesMinimumOfBatchLimi
         makeDeviceHostGroup(0, {full_device}, nullptr, {makeGroupBase(CacheGroupType::FULL, {0}, 8192)}, full_disk);
     auto swa_group =
         makeDeviceHostGroup(1, {swa_device}, nullptr, {makeGroupBase(CacheGroupType::SWA, {0}, 4096)}, swa_disk);
-    auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{full_group, swa_group}, true, DeviceHostCopyOptions{}, 4, 3, 1);
+    auto engine = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full_group, swa_group},
+                                                               true,
+                                                               DeviceHostCopyOptions{},
+                                                               4,
+                                                               3,
+                                                               1,
+                                                               10000,
+                                                               nullptr,
+                                                               0,
+                                                               8,
+                                                               false);
 
-    EXPECT_EQ(engine->device_disk_executor_->full_batch_capacity_, 2u);
-    EXPECT_EQ(engine->device_disk_executor_->swa_batch_capacity_, 4u);
+    EXPECT_EQ(engine->legacy_->device_disk_executor_->full_batch_capacity_, 2u);
+    EXPECT_EQ(engine->legacy_->device_disk_executor_->swa_batch_capacity_, 4u);
 
     std::vector<TransferDescriptor> full_descriptors;
     std::vector<TransferDescriptor> swa_descriptors;
@@ -1651,7 +1712,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskToDeviceReturnsPendingContex
     std::vector<uint8_t>  disk_data(disk_pool->strideBytes(), 0x5A);
     ASSERT_EQ(disk_pool->write(disk_block, disk_data.data(), disk_data.size()), BlockIOStatus::OK);
 
-    auto context = engine->device_disk_executor_->executeDiskToDevice(
+    auto context = engine->legacy_->device_disk_executor_->executeDiskToDevice(
         makeTransferTask({makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0)}),
         {group.get()});
     ASSERT_NE(context, nullptr);
@@ -1709,7 +1770,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceStageTwoFailureRelease
     const auto disk_block   = poolMalloc(*disk_pool);
     auto       group        = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
     auto       engine       = makeEngine({group}, {}, true);
-    auto&      strategies   = engine->device_host_executor_->strategies_;
+    auto&      strategies   = engine->legacy_->device_host_executor_->strategies_;
     strategies.clear();
     strategies.push_back(std::make_unique<FailingStrategy>());
     const auto descriptor = makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0);
@@ -1743,23 +1804,23 @@ static void checkStagingAdmission(bool fail_observer) {
     auto group =
         makeDeviceHostGroup(0, {device_pool}, host_pool, {makeGroupBase(CacheGroupType::FULL, {0}, 64, 16)}, disk_pool);
     auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 2, 64, 1);
+        std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 2, 64, 1, 10000, nullptr, 0, 8, false);
 
-    auto held_staging = engine->device_disk_executor_->full_staging_pool_->tryMallocBatch(1);
+    auto held_staging = engine->legacy_->device_disk_executor_->full_staging_pool_->tryMallocBatch(1);
     ASSERT_TRUE(held_staging.has_value());
 
     auto  blocking_strategy = std::make_unique<BlockingStrategy>();
     auto* blocker           = blocking_strategy.get();
-    engine->device_host_executor_->strategies_.clear();
-    engine->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
+    engine->legacy_->device_host_executor_->strategies_.clear();
+    engine->legacy_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
 
     auto profiling_session = AsyncProfileSession::start();
-    auto disk_to_device = engine->execute(TransferTask(
+    auto disk_to_device    = engine->execute(TransferTask(
         {makeDescriptor(
             Tier::DISK, Tier::DEVICE, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)},
         std::chrono::seconds(10),
         42));
-    auto host_to_device = engine->execute(makeTransferTask({makeDescriptor(
+    auto host_to_device    = engine->execute(makeTransferTask({makeDescriptor(
         Tier::HOST, Tier::DEVICE, {poolMalloc(*device_pool)}, poolMalloc(*host_pool), NULL_BLOCK_IDX, 0)}));
 
     EXPECT_TRUE(blocker->waitUntilEntered(1, std::chrono::milliseconds(300)));
@@ -1822,15 +1883,15 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskWaitingForStagingDoesN
     auto group =
         makeDeviceHostGroup(0, {device_pool}, host_pool, {makeGroupBase(CacheGroupType::FULL, {0}, 64, 16)}, disk_pool);
     auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 2, 64, 1);
+        std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 2, 64, 1, 10000, nullptr, 0, 8, false);
 
-    auto held_staging = engine->device_disk_executor_->full_staging_pool_->tryMallocBatch(1);
+    auto held_staging = engine->legacy_->device_disk_executor_->full_staging_pool_->tryMallocBatch(1);
     ASSERT_TRUE(held_staging.has_value());
 
     auto  blocking_strategy = std::make_unique<BlockingStrategy>();
     auto* blocker           = blocking_strategy.get();
-    engine->device_host_executor_->strategies_.clear();
-    engine->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
+    engine->legacy_->device_host_executor_->strategies_.clear();
+    engine->legacy_->device_host_executor_->strategies_.push_back(std::move(blocking_strategy));
 
     auto device_to_disk = engine->execute(makeTransferTask({makeDescriptor(
         Tier::DEVICE, Tier::DISK, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
@@ -1859,7 +1920,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DestructionCancelsStagingWaiters
     auto             group =
         makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase(CacheGroupType::FULL, {0}, 64, 16)}, disk_pool);
     auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 2, 64, 1);
+        std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 2, 64, 1, 10000, nullptr, 0, 8, false);
 
     auto       active_transfer = engine->execute(makeTransferTask({makeDescriptor(
         Tier::DISK, Tier::DEVICE, {poolMalloc(*device_pool)}, NULL_BLOCK_IDX, poolMalloc(*disk_pool), 0)}));
@@ -1930,8 +1991,17 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceFullAndSwaStagingMayOv
         makeDeviceHostGroup(0, {full_device}, nullptr, {makeGroupBase(CacheGroupType::FULL, {0}, 64, 16)}, full_disk);
     auto swa_group =
         makeDeviceHostGroup(1, {swa_device}, nullptr, {makeGroupBase(CacheGroupType::SWA, {0}, 64, 16)}, swa_disk);
-    auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{full_group, swa_group}, true, DeviceHostCopyOptions{}, 4, 64, 2);
+    auto engine = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full_group, swa_group},
+                                                               true,
+                                                               DeviceHostCopyOptions{},
+                                                               4,
+                                                               64,
+                                                               2,
+                                                               10000,
+                                                               nullptr,
+                                                               0,
+                                                               8,
+                                                               false);
     [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [full_io_ptr, swa_io_ptr](void*) {
         full_io_ptr->release();
         swa_io_ptr->release();
@@ -1967,7 +2037,7 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceSameLaneTasksMayUseAva
         auto              group =
             makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase(group_type, {0}, 64, 16)}, disk_pool);
         auto engine = std::make_shared<PerRankBlockTransferEngine>(
-            std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 4);
+            std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 4, 8, 4, 10000, nullptr, 0, 8, false);
         [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [io](void*) { io->release(); });
 
         auto first = engine->execute(makeTransferTask({makeDescriptor(
@@ -2101,7 +2171,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
     options.cuda_batch_copy_enabled                          = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
-    installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
+    installStrategyRecorders(*per_rank_transfer_engine->legacy_->device_host_executor_, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0xAA});
     fillDeviceLayer(device_pool_, 1, device_block_, {0xBB});
@@ -2143,7 +2213,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
     options.staged_sm_copy_enabled                           = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
-    installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
+    installStrategyRecorders(*per_rank_transfer_engine->legacy_->device_host_executor_, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x11});
     fillDeviceLayer(device_pool_, 1, device_block_, {0x22});
@@ -2203,7 +2273,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedEnabledBelowThresholdFallsB
     options.cuda_batch_copy_enabled                          = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
-    installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
+    installStrategyRecorders(*per_rank_transfer_engine->legacy_->device_host_executor_, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0xCC});
     fillDeviceLayer(device_pool_, 1, device_block_, {0xDD});
@@ -2234,7 +2304,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
     options.cuda_batch_copy_enabled                          = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
-    installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
+    installStrategyRecorders(*per_rank_transfer_engine->legacy_->device_host_executor_, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x31});
     fillDeviceLayer(device_pool_, 1, device_block_, {0x42});
@@ -2279,7 +2349,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedBatchRoundTripPreservesUnse
     options.staged_sm_min_bytes            = 1;
     auto                            engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
-    installStrategyRecorders(*engine->device_host_executor_, counters);
+    installStrategyRecorders(*engine->legacy_->device_host_executor_, counters);
 
     const std::array<BlockIdxType, 2> device_blocks{device_block_, poolMalloc(*device_pool_)};
     ASSERT_NE(device_blocks[1], NULL_BLOCK_IDX);
@@ -2336,7 +2406,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, CudaBatchPrecedesStagedSmWithStag
     options.cuda_batch_copy_enabled                          = true;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
-    installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
+    installStrategyRecorders(*per_rank_transfer_engine->legacy_->device_host_executor_, counters);
 
     fillDeviceLayer(device_pool_, 0, device_block_, {0x5C});
     fillDeviceLayer(device_pool_, 1, device_block_, {0x6D});

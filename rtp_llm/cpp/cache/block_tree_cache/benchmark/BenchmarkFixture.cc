@@ -109,15 +109,18 @@ DeviceBlockPoolPtr BenchmarkFixture::createDevicePool(size_t             layer_s
     return pool;
 }
 
-std::shared_ptr<HostBlockPool>
-BenchmarkFixture::createHostPool(size_t payload_bytes, size_t usable_count, const std::string& pool_name) {
+std::shared_ptr<HostBlockPool> BenchmarkFixture::createHostPool(size_t             payload_bytes,
+                                                                size_t             usable_count,
+                                                                const std::string& pool_name,
+                                                                bool               enable_crc) {
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = pool_name;
     config->physical_block_count = usable_count + 1;
     config->payload_bytes        = payload_bytes;
-    config->stride_bytes         = alignUp(payload_bytes, kPoolAlignment);
-    config->alignment            = kPoolAlignment;
+    config->stride_bytes =
+        alignUp(enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes, kPoolAlignment);
+    config->alignment = kPoolAlignment;
 
     auto pool = std::make_shared<HostBlockPool>(config);
     RTP_LLM_CHECK(pool->init());
@@ -128,8 +131,10 @@ BlockTreeDiskBlockPoolPtr BenchmarkFixture::createDiskPool(size_t             pa
                                                            size_t             usable_count,
                                                            const std::string& work_dir,
                                                            const std::string& pool_name,
-                                                           bool               buffered_io) {
-    const size_t stride_bytes = alignUp(payload_bytes, kPoolAlignment);
+                                                           bool               buffered_io,
+                                                           bool               enable_crc) {
+    const size_t stride_bytes =
+        alignUp(enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes, kPoolAlignment);
 
     auto config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;
@@ -152,9 +157,15 @@ GroupSetPtr BenchmarkFixture::createFullGroupSet(std::vector<DeviceBlockPoolPtr>
                                                  BlockTreeDiskBlockPoolPtr            disk_pool,
                                                  size_t                               group_set_id,
                                                  std::shared_ptr<const CacheTopology> topology,
-                                                 const std::vector<std::string>&      group_tags) {
-    auto                     group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
-    group_set->initialize(group_set_id, std::move(topology), group_tags);
+                                                 const std::vector<std::string>&      group_tags,
+                                                 bool                                 enable_crc) {
+    auto   group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
+    size_t payload   = 0;
+    for (const auto& tag : group_tags)
+        payload += topology->blockSizeBytesForGroup(tag);
+    const auto storage = enable_crc ? CrcBlockCopyBatch::encodedBytes(payload) : payload;
+    group_set->initialize(
+        group_set_id, std::move(topology), group_tags, {0, storage, alignUp(storage, kPoolAlignment), enable_crc});
     return group_set;
 }
 
@@ -165,10 +176,16 @@ GroupSetPtr BenchmarkFixture::createSWAGroupSet(std::vector<DeviceBlockPoolPtr> 
                                                 std::shared_ptr<const CacheTopology> topology,
                                                 const std::vector<std::string>&      group_tags,
                                                 size_t                               sliding_window_size,
-                                                size_t                               tokens_per_block) {
+                                                size_t                               tokens_per_block,
+                                                bool                                 enable_crc) {
     auto group_set =
         std::make_shared<SWAGroupSet>(sliding_window_size, tokens_per_block, device_pools, host_pool, disk_pool);
-    group_set->initialize(group_set_id, std::move(topology), group_tags);
+    size_t payload = 0;
+    for (const auto& tag : group_tags)
+        payload += topology->blockSizeBytesForGroup(tag);
+    const auto storage = enable_crc ? CrcBlockCopyBatch::encodedBytes(payload) : payload;
+    group_set->initialize(
+        group_set_id, std::move(topology), group_tags, {0, storage, alignUp(storage, kPoolAlignment), enable_crc});
     return group_set;
 }
 
@@ -224,10 +241,11 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
                                                               double                   device_watermark_ratio,
                                                               double                   host_watermark_ratio) {
     BlockTreeCacheConfig config;
-    config.enable_device_cache = true;
-    config.enable_host_cache   = enable_host;
-    config.enable_disk_cache   = enable_disk;
-    config.task_pool_size      = static_cast<int>(task_pool_size);
+    config.enable_device_cache       = true;
+    config.enable_host_cache         = enable_host;
+    config.enable_disk_cache         = enable_disk;
+    config.btc_transfer_engine_async = true;
+    config.task_pool_size            = static_cast<int>(task_pool_size);
     // Event-driven eviction: insert commits trigger checkWatermark, which
     // demotes overflow down to the per-tier ratio watermark (0.0 = disabled).
     if (device_watermark_ratio > 0.0) {
@@ -245,7 +263,11 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
                                                                config.max_descriptors_per_transfer_batch,
                                                                config.transfer_worker_count,
                                                                config.transfer_queue_max_size,
-                                                               cache_metrics_reporter);
+                                                               cache_metrics_reporter,
+                                                               0,
+                                                               config.btc_crc_slot_count,
+                                                               config.btc_transfer_engine_async);
+    RTP_LLM_CHECK(engine->asyncEnabled());
     auto dispatcher =
         std::make_unique<BlockTransferDispatcher>(engine, nullptr, config.max_descriptors_per_transfer_batch);
     auto task_pool =

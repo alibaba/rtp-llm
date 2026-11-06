@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostTransferExecutor.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -41,12 +41,15 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
                                                        size_t                max_descriptors_per_batch,
                                                        DeviceHostCopyOptions options,
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
-                                                       std::shared_ptr<CrcTransferService>            crc_service,
-                                                       BlockTreeTaskPool*                             load_task_pool,
-                                                       const std::vector<GroupSetPtr>&                group_sets,
-                                                       int64_t world_rank):
-    TransferExecutor(transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter), load_task_pool, world_rank),
-    crc_service_(std::move(crc_service)),
+                                                       std::shared_ptr<CrcTransferService>            load_crc_service,
+                                                       std::shared_ptr<CrcTransferService> offload_crc_service,
+                                                       BlockTreeTaskPool*                  load_task_pool,
+                                                       const std::vector<GroupSetPtr>&     group_sets,
+                                                       int64_t                             world_rank):
+    TransferExecutor(
+        transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter), load_task_pool, world_rank),
+    load_crc_service_(std::move(load_crc_service)),
+    offload_crc_service_(std::move(offload_crc_service)),
     options_(std::move(options)) {
     strategies_.push_back(
         std::make_unique<Cuda3DBatchDeviceHostCopyStrategy>(group_sets, options_.cuda_3d_batch_copy_enabled));
@@ -92,7 +95,8 @@ TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
         return TransferStatus::INVALID_ARGS;
     }
     if (enable_crc) {
-        return crc_service_ ? crc_service_->copy(hosts, descriptors, group_sets) : TransferStatus::INVALID_ARGS;
+        const auto& crc = descriptors.front().source_tier == Tier::DEVICE ? offload_crc_service_ : load_crc_service_;
+        return crc ? crc->copy(hosts, descriptors, group_sets) : TransferStatus::INVALID_ARGS;
     }
     std::vector<DeviceHostCopyExecutionContext> contexts;
     std::vector<DeviceHostCopyPlan>             plans;

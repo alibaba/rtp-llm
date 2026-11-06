@@ -2,7 +2,7 @@
 
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/test/MainStagedCopyBaseline.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostCopyStrategy.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -195,10 +195,10 @@ uintptr_t FrameworkCopyPlan::touchMetadata() const {
 }
 
 struct FrameworkCopies::Impl {
-    CudaBatchDeviceHostCopyStrategy              batch;
-    StagedSmDeviceHostCopyStrategy               staged;
+    CudaBatchDeviceHostCopyStrategy               batch;
+    StagedSmDeviceHostCopyStrategy                staged;
     main_baseline::StagedSmDeviceHostCopyStrategy main_staged;
-    at::cuda::CUDAStream                         stream;
+    at::cuda::CUDAStream                          stream;
 
     explicit Impl(int device): stream(at::cuda::getStreamFromPool(false, device)) {}
 };
