@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 #include <string>
 
 #include "kvcm_client/meta_client.h"
@@ -27,6 +28,10 @@ public:
                                    const kv_cache_manager::InitParams&                init_params,
                                    const kv_cache_manager::ClientMemoryRegistrations& memory_registrations) const;
     virtual std::unique_ptr<Subscriber> createSubscriber(bool enable_vipserver) const;
+    // Read-only control-plane discovery; a failed probe never requests registration.
+    virtual std::string getLeaderAddress(const std::string& address,
+                                         const std::string& instance_id,
+                                         uint32_t timeout_ms) const;
 };
 
 }  // namespace kvcm

@@ -110,6 +110,7 @@ public:
 
 class MockClientFactory: public ClientFactory {
 public:
+    MOCK_METHOD(std::string, getLeaderAddress, (const std::string&, const std::string&, uint32_t), (const, override));
     MOCK_METHOD(std::unique_ptr<kv_cache_manager::MetaClient>,
                 createMetaClient,
                 (const std::string&, const kv_cache_manager::InitParams&),

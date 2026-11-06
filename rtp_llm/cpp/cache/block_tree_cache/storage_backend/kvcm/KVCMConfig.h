@@ -152,6 +152,9 @@ public:
     inline uint32_t retry_time() const {
         return retry_time_;
     }
+    inline uint32_t call_timeout() const {
+        return call_timeout_;
+    }
 
 private:
     uint32_t retry_time_         = 3;
