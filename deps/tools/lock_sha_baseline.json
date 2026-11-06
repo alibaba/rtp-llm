@@ -1,6 +1,6 @@
 {
  "_meta": {
-  "note": "frozen sha256 snapshot of the pre-unification internal locks; regenerate only after a reviewed re-resolution (see check_lock_sha.py)"
+  "note": "reviewed sha256 snapshot of the nine platform locks; regenerate only after a reviewed re-resolution (see check_lock_sha.py)"
  },
  "requirements_lock_cuda12_arm.txt": {
   "aiohappyeyeballs": [
@@ -26737,6 +26737,10 @@
    "f10fe89397e8da81026d8143e17fc5c12ae5e66e51753a0f49e1db179c4f7113",
    "f979e712187796ad57cd0bef76666dd48ed4887104775833c9489ea837144ad8"
   ],
+  "narwhals": [
+   "1f69d6385ec30e2fa6e1fdeb37c562ecabd0f713f6f3e3b58a668c5c9df9567f",
+   "2d9860c80d6610820826e94c6e42ce4b1d92d89cdd479586e652a8d211dab345"
+  ],
   "nest-asyncio": [
    "6f172d5449aca15afd6c646851f4e31e02c598d553a667e38cafa997cfec55fe",
    "87af6efd6b5e897c81050477ef65c62e2b2f35d51703cae01aff2905b1852e1c"
@@ -27309,6 +27313,10 @@
   "platformdirs": [
    "3d512d96e16bcb959a814c9f348431070822a6496326a4be0911c40b5a74c2bc",
    "ff7059bb7eb1179e2685604f4aaf157cfd9535242bd23742eadc3c13542139b4"
+  ],
+  "plotly": [
+   "dbb7fa18afce40d0a8e80d1bf162eceb3faa0ce5a77fe741ad09a74cf78f53f3",
+   "f860166a4a3d78c69cb1f4a15f28a5c8283eade98a282a698f3bb853a449ace5"
   ],
   "pooch": [
    "3529a57096f7198778a5ceefd5ac3ef0e4d06a6ddaf9fc2d609b806f25302c47",
@@ -29633,6 +29641,9 @@
   "deep-gemm": [
    "7e42900e3e86927f874daac8466f2d8611efe9b0c2ffeea30a306fe5e445a0cd"
   ],
+  "deep-gemm-mega": [
+   "48039c6fbac4832b8990fdc1ace9ce1b5bfc3a7c4d7fa02a9b5172e01f78c392"
+  ],
   "einops": [
    "54058201ac7087911181bfec4af6091bb59380360f069276601256a76af08193",
    "609da665570e5e265e27283aab09e7f279ade90c4f01bcfca111f3d3e13f2827"
@@ -30865,6 +30876,9 @@
    "9b59d5a78e9d4c9da6c8ef053549c0a44966b8fc318c0f4886c11e3ffed6f769",
    "c9282273cc32e14658fb63f45cd4ab40607c982e4667017d258c18f2c6d7f114",
    "dcdf88f0bf542eb1a9be94c45eca2ec9b752c6edc54e0cf28d4dc23117b69e3c"
+  ],
+  "ml-dtypes": [
+   "9ad459e99793fa6e13bd5b7e6792c8f9190b4e5a1b45c63aba14a4d0a7f1d5ff"
   ],
   "mpmath": [
    "7a28eb2a9774d00c7bc92411c19a89209d5da7c4c9a9e227be8330a23a25b91f",
@@ -32962,6 +32976,9 @@
    "e54be9a2cd2f6d6ffa3517b064983fb695c9a9d8aa7d574d1ef3c3f931a99225",
    "fffdcb319b614cf14f04d02a52e26b1d1ae14a570f90e9b55461a72672f7b13d"
   ],
+  "tilelang": [
+   "a6f0a90330d7abaae9aac56c27935fcfb4a5b27bbbbe9aaa918cf2245aecdd0e"
+  ],
   "timm": [
    "2a828afac5b710a80ec66d0f85807e171e342faf5c0703b33102d8aa206f19dc",
    "9121d1cf320f7f32490d893340fd33117bda0a0270eb8282dfd52ae5fd3e1af6"
@@ -32994,6 +33011,9 @@
   ],
   "torch": [
    "34ec402766652465f13482025b8ebc35fe7a0921a5325c6b7d308fe31976d7ff"
+  ],
+  "torch-c-dlpack-ext": [
+   "e6f9da4bb9af70e27facc777458be62e10dbbbddda7672d16138db0553c5a524"
   ],
   "torchvision": [
    "7fe8f5e0c4da1c422531cb3b944f1a33d8a69374d4233da3d33e3e79c7cae270"
@@ -33239,6 +33259,9 @@
    "f53dcd26694f148f738edc052b5a69234833e739f10f4c3287bdfd8ec0f7b326",
    "f61964f235a43738bfac50da46fc4254943a7eea3051aeb0b6fc7c992c29fadc",
    "fe01645169a2112aa1d4ebc3e4c5f029c5c8f97adfc32e5d37c993b39a994d75"
+  ],
+  "z3-solver": [
+   "7e103a6f203f505b8b8b8e5c931cc407c95b61556512d4921c1ddc0b3f41b08e"
   ],
   "zipp": [
    "7ebb7a44c021b29fd8dbd7cce6812d0d7b5b454521f93cc71af6ccd155aaa70b",

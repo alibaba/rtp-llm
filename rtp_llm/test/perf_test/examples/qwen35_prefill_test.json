@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "qwen35-prefill-ci",
+    "type": "qwen35_moe",
+    "checkpoint": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "tokenizer": "/mnt/nas1/hf/Qwen3.5-35B-A3B-FP8",
+    "topology": {"tp": 2, "dp": 1, "pp": 1, "ep": 1}
+  },
+  "engine": {
+    "max_seq_len": 8193,
+    "max_batch_tokens": 16384,
+    "concurrency_limit": 1,
+    "args": {
+      "reuse_cache": 1,
+      "reserver_runtime_mem_mb": 4096,
+      "seq_size_per_block": 2048,
+      "kernel_seq_size_per_block": 64,
+      "enable_cuda_graph": 0
+    },
+    "env": {"TOKENIZERS_PARALLELISM": "false"}
+  },
+  "workload": {
+    "kind": "cache_grid",
+    "max_input_len": 8192,
+    "cache_alignment": 64,
+    "commit_tail_tokens": 64,
+    "compute_steps": [2048, 512],
+    "batch_sizes": [1],
+    "measure_runs": 3,
+    "min_compute_len": 512,
+    "cache_lengths": [0, 4096],
+    "seed": 1
+  },
+  "execution": {"backend": "local", "devices": [0, 1]},
+  "output": {"result_root": "perf_test_results"},
+  "regression": {},
+  "publish": {}
+}

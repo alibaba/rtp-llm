@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "qwen2.5-0.5b-prefill-aone-gang",
+    "type": "qwen_2",
+    "checkpoint": "Qwen/Qwen2.5-0.5B-Instruct",
+    "tokenizer": "Qwen/Qwen2.5-0.5B-Instruct",
+    "topology": {
+      "tp": 2,
+      "dp": 1,
+      "pp": 1,
+      "ep": 1
+    }
+  },
+  "engine": {
+    "max_seq_len": 4097,
+    "max_batch_tokens": 8192,
+    "concurrency_limit": 2,
+    "args": {
+      "reuse_cache": 1
+    },
+    "env": {
+      "TOKENIZERS_PARALLELISM": "false"
+    }
+  },
+  "workload": {
+    "kind": "cache_grid",
+    "max_input_len": 256,
+    "cache_alignment": 64,
+    "commit_tail_tokens": 64,
+    "compute_steps": [
+      128
+    ],
+    "batch_sizes": [
+      1
+    ],
+    "measure_runs": 1,
+    "cache_lengths": [
+      0,
+      128
+    ],
+    "seed": 1
+  },
+  "execution": {
+    "backend": "aone",
+    "resource": "daily",
+    "gpu_type": "H20_CU13",
+    "max_parallel": 2,
+    "gpus_per_machine": 1
+  },
+  "output": {
+    "result_root": "perf_test_results"
+  },
+  "regression": {},
+  "publish": {}
+}

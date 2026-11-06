@@ -6,9 +6,9 @@ enter_work_dir() {
   export SUB_DIR=${FT_SUB_DIR:-"."}
   export WORK_DIR=${FT_WORK_DIR:-${HIPPO_APP_WORKDIR:-$HOME}}/$SUB_DIR
   if [ ! -d "$WORK_DIR" ]; then
-    mkdir -p $WORK_DIR
+    mkdir -p "$WORK_DIR"
   fi
-  cd $WORK_DIR
+  cd "$WORK_DIR" || exit 1
 }
 
 kill_processes() {
@@ -34,14 +34,14 @@ checkout_code() {
       CLEAR_BAZEL_CACHE=true;
     fi
     if [ ! -d "RTP-LLM" ]; then
-      (git clone $GIT_REPO_URL) || exit 1;
+      (git clone "$GIT_REPO_URL" RTP-LLM) || exit 1;
     fi
-    cd RTP-LLM;
+    cd RTP-LLM || exit 1;
     (git fetch origin && git reset --hard $GIT_CHECKOUT_REF) || exit 1;
     echo "开始更新子模块..."
     (git submodule sync --recursive) || exit 1;
     (git submodule update --init --recursive --remote) || exit 1;
-    cd github-opensource;
+    cd github-opensource || exit 1;
     (git fetch origin && git reset --hard $OPEN_SOURCE_REF) || exit 1;
     echo "更新子模块成功"
     echo "当前commit id: $OPEN_SOURCE_REF"
@@ -57,11 +57,11 @@ checkout_code() {
     if [ ! -d "RTP-LLM" ]; then
       mkdir -p RTP-LLM;
     fi
-    cd RTP-LLM;
+    cd RTP-LLM || exit 1;
     if [ ! -d "github-opensource" ]; then
-      (git clone $OPEN_SOURCE_URL github-opensource) || exit 1;
+      (git clone "$OPEN_SOURCE_URL" github-opensource) || exit 1;
     fi
-    cd github-opensource;
+    cd github-opensource || exit 1;
     (git fetch origin && git reset --hard $OPEN_SOURCE_REF) || exit 1;
     echo "当前commit id: $OPEN_SOURCE_REF"
     echo "开始下载大文件..."
@@ -76,11 +76,14 @@ checkout_code() {
 
 install_requirements() {
   if [ "${BUILD_FROM_SCRATCH:-2}" -gt 1 ]; then
-    # Pip install requirements
+    # The manual SSH path must work from an open-source-only checkout.
+    local python_bin="${PERF_TEST_PYTHON_BIN:-/opt/conda310/bin/python3}"
     if [ `uname -m` == "aarch64" ]; then
-      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_cuda13_arm.txt) || exit 1;
+      ("$python_bin" -m pip install -r ./deps/requirements_lock_cuda13_arm.txt) || exit 1;
     else
-      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_torch_gpu_cuda13.txt) || exit 1;
+      # The lock already lists the full resolved graph; pip re-resolution
+      # conflicts with the CUDA13 overrides used to generate it.
+      ("$python_bin" -m pip install --no-deps -r ./deps/requirements_lock_torch_gpu_cuda13.txt) || exit 1;
     fi
   fi
 }
@@ -133,7 +136,7 @@ configure_env() {
 run_server() {
   if [ "${BUILD_FROM_SCRATCH:-2}" -eq 0 ]; then
     SERVER_CMD="$PYTHON_BIN ./rtp_llm/test/perf_test/multi_node/local_server_runner.py";
-    if [ $CUDA_ASAN -eq 1 ]; then
+    if [ "${CUDA_ASAN:-0}" -eq 1 ]; then
         /usr/local/cuda/compute-sanitizer/compute-sanitizer --print-limit 10000 --target-processes all $SERVER_CMD || exit 1;
     else
       $SERVER_CMD || exit 1;
@@ -142,6 +145,14 @@ run_server() {
 }
 
 find_test_output_path() {
+  if [ -n "$PERF_TEST_RUN_ID" ]; then
+    TEST_OUTPUT_PATH=$(readlink -f -- "TEST_OUTPUT_${PERF_TEST_RUN_ID}_${WORLD_RANK:-0}") || return 1
+    if [ ! -d "$TEST_OUTPUT_PATH" ]; then
+      echo "No output directory for attempt ${PERF_TEST_RUN_ID}, rank ${WORLD_RANK:-0}" >&2
+      return 1
+    fi
+    return 0
+  fi
   # Get prefix of result directory
   TEST_OUTPUT_PATH_PREFIX="TEST_OUTPUT_"
   # Search for directories matching the prefix
@@ -210,6 +221,10 @@ local_clean_script() {
 }
 
 local_test_script() {
+  if [ -z "$PERF_TEST_CONFIG_PATH" ] || [ ! -r "$PERF_TEST_CONFIG_PATH" ]; then
+    echo "PERF_TEST_CONFIG_PATH must name the delivered perf config"
+    exit 1
+  fi
   # Kill all running processes related to rtp_llm and conda310
   kill_processes || exit 1;
   # Enter work dir

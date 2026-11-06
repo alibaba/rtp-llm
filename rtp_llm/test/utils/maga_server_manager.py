@@ -39,6 +39,7 @@ class MagaServerManager(object):
         process_file_name: str = "process.log",
         smoke_args_str: str = "",
         health_check_path: str = "/health",
+        process_prefix: Optional[List[str]] = None,
     ):
         self._username = os.getenv("USER")
         self._env_args = env_args
@@ -51,8 +52,10 @@ class MagaServerManager(object):
         self._port = port
         self._smoke_args_str = smoke_args_str
         self._health_check_path = health_check_path
+        self._process_prefix = list(process_prefix or [])
         self._exit_code: Optional[int] = None
         self._state_lock = threading.Lock()
+        self._stop_lock = threading.Lock()
         self._stop_requested = False
         if self._port is None:
             self._port = MagaServerManager.get_free_port()
@@ -73,7 +76,16 @@ class MagaServerManager(object):
 
     @property
     def exit_code(self) -> Optional[int]:
-        return self._exit_code
+        with self._state_lock:
+            return self._exit_code
+
+    def is_alive(self) -> bool:
+        """Poll the owned child, retaining its actual exit status for diagnostics."""
+        with self._state_lock:
+            if self._server_process is None:
+                return False
+            self._exit_code = self._server_process.poll()
+            return self._exit_code is None
 
     @property
     def log_file_path(self) -> Optional[str]:
@@ -119,8 +131,15 @@ class MagaServerManager(object):
             server_process, int(self._port), timeout, self._health_check_path
         )
         if not result:
-            rc = server_process.poll() if server_process is not None else None
-            self._exit_code = rc
+            with self._state_lock:
+                rc = server_process.poll() if server_process is not None else None
+                # A concurrent stop may have detached this same process already.
+                # Do not overwrite diagnostics for a subsequently launched child.
+                if (
+                    self._server_process is None
+                    or self._server_process is server_process
+                ):
+                    self._exit_code = rc
             pid = server_process.pid if server_process is not None else None
             if server_process is None:
                 logging.warning(
@@ -252,16 +271,42 @@ class MagaServerManager(object):
             current_env.get("CUDA_VISIBLE_DEVICES", "<not set>"),
         )
         python_bin = os.environ.get("RTP_PYTHON_BIN", sys.executable)
-        p = subprocess.Popen(
-            [python_bin, "-m", "rtp_llm.start_server"] + parsed_args,
-            env=current_env,
-            stdout=self._file_stream,
-            stderr=self._file_stream,
-            cwd=cwd_path,
-        )
-        with self._state_lock:
-            self._server_process = p
-            stop_requested = self._stop_requested
+        # Defer Python handlers until the new child is registered. Otherwise a
+        # handler raising between Popen and assignment loses the only handle to
+        # the child. Unlike a blocked signal mask, this is not inherited by exec.
+        handlers = {}
+        pending_signals = []
+
+        def defer_signal(signal_number, _frame):
+            pending_signals.append(signal_number)
+
+        try:
+            if threading.current_thread() is threading.main_thread():
+                for signal_number in (signal_mod.SIGINT, signal_mod.SIGTERM):
+                    handler = signal_mod.getsignal(signal_number)
+                    if handler != signal_mod.SIG_IGN:
+                        handlers[signal_number] = handler
+                        signal_mod.signal(signal_number, defer_signal)
+            with self._state_lock:
+                p = subprocess.Popen(
+                    self._process_prefix
+                    + [python_bin, "-m", "rtp_llm.start_server"]
+                    + parsed_args,
+                    env=current_env,
+                    stdout=self._file_stream,
+                    stderr=self._file_stream,
+                    cwd=cwd_path,
+                )
+                self._server_process = p
+                self._exit_code = None
+                stop_requested = self._stop_requested
+        finally:
+            for signal_number, handler in handlers.items():
+                signal_mod.signal(signal_number, handler)
+            if pending_signals:
+                # Re-deliver only the first interruption; repeated signals must
+                # not replace the original exception during stack unwinding.
+                os.kill(os.getpid(), pending_signals[0])
 
         if stop_requested:
             logging.warning(
@@ -274,6 +319,11 @@ class MagaServerManager(object):
         return self.wait_sever_done(timeout)
 
     def stop_server(self):
+        # Serialize shutdowns without holding the state lock across process waits.
+        with self._stop_lock:
+            return self._stop_server()
+
+    def _stop_server(self):
         with self._state_lock:
             self._stop_requested = True
             server_process = self._server_process
@@ -294,16 +344,13 @@ class MagaServerManager(object):
                 parent.terminate()
                 # 添加超时机制，避免永久阻塞
                 try:
-                    parent.wait(timeout=10)
-                except psutil.TimeoutExpired:
+                    server_process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
                     logging.warning(
                         "Parent process did not exit gracefully, force killing"
                     )
                     parent.kill()
-                    parent.wait(timeout=5)
-                with self._state_lock:
-                    if self._server_process is server_process:
-                        self._server_process = None
+                    server_process.wait(timeout=5)
             except Exception as e:
                 logging.error(
                     "stop_server: pid=%s already gone (%s); its children are "
@@ -311,9 +358,15 @@ class MagaServerManager(object):
                     getattr(server_process, "pid", "?"),
                     e,
                 )
+            finally:
+                # Popen must reap its own child. psutil.Process.wait() can consume
+                # waitpid first, causing Popen to report a fabricated zero code.
                 with self._state_lock:
                     if self._server_process is server_process:
-                        self._server_process = None
+                        rc = server_process.poll()
+                        self._exit_code = rc
+                        if rc is not None:
+                            self._server_process = None
         if self._file_stream is not None:
             self._file_stream.close()
             self._file_stream = None
