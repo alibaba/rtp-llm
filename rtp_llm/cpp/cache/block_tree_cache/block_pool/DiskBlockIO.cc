@@ -52,6 +52,14 @@ BlockTreePosixDiskBlockIO::openAndPreallocate(const std::string& file_path, size
         return DiskBlockIOStatus::IO_ERROR;
     }
 
+    // This cache is process-local scratch storage. Unlink before allocating so
+    // even an abrupt exit releases the space when the last fd is closed.
+    if (::unlink(file_path.c_str()) != 0) {
+        RTP_LLM_LOG_ERROR("unlink disk block file failed, file=%s, error=%s", file_path.c_str(), std::strerror(errno));
+        close();
+        return DiskBlockIOStatus::IO_ERROR;
+    }
+
     int rc = ::posix_fallocate(fd_, 0, static_cast<off_t>(bytes));
     if (rc == EOPNOTSUPP || rc == ENOSYS) {
         RTP_LLM_LOG_WARNING("posix_fallocate unsupported, falling back to ftruncate, file=%s, bytes=%zu, error=%s",

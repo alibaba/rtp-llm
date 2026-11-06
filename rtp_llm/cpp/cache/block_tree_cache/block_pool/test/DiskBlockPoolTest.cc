@@ -1,10 +1,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockIO.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 
+#include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <memory>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -27,8 +30,11 @@ TEST(DiskBlockIOTest, OpenPreallocateWriteReadAndClose) {
 
     // The file must be preallocated to at least the requested size.
     struct stat st{};
-    ASSERT_EQ(::stat(path.c_str(), &st), 0);
+    ASSERT_EQ(::fstat(io.fd_, &st), 0);
     EXPECT_GE(static_cast<size_t>(st.st_size), 4096u);
+    EXPECT_EQ(st.st_nlink, 0u);
+    EXPECT_EQ(::access(path.c_str(), F_OK), -1);
+    EXPECT_EQ(errno, ENOENT);
 
     std::vector<char> write_buf(4096);
     for (size_t i = 0; i < write_buf.size(); ++i) {
@@ -53,12 +59,13 @@ TEST(DiskBlockIOTest, OpenIsExclusiveAndRejectsExistingFile) {
     const std::string path = testFilePath("exclusive.bin");
     ::remove(path.c_str());
 
-    BlockTreePosixDiskBlockIO first;
-    ASSERT_EQ(first.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::OK);
+    FILE* existing = ::fopen(path.c_str(), "wb");
+    ASSERT_NE(existing, nullptr);
+    ASSERT_EQ(::fclose(existing), 0);
 
-    // A second exclusive create on the same, still-existing path must fail (O_EXCL).
-    BlockTreePosixDiskBlockIO second;
-    EXPECT_EQ(second.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::IO_ERROR);
+    BlockTreePosixDiskBlockIO first;
+    EXPECT_EQ(first.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::IO_ERROR);
+    EXPECT_EQ(::access(path.c_str(), F_OK), 0);
 
     first.close();
     ::remove(path.c_str());
@@ -70,6 +77,27 @@ TEST(DiskBlockIOTest, OpenIsExclusiveAndRejectsExistingFile) {
     ::remove(path.c_str());
 }
 
+TEST(DiskBlockIODeathTest, SigkillLeavesNoBackingFile) {
+    const std::string path = testFilePath("sigkill.bin");
+    ::remove(path.c_str());
+
+    ASSERT_EXIT(
+        {
+            BlockTreePosixDiskBlockIO io;
+            if (io.openAndPreallocate(path, 4096, /*buffered_io=*/true) != DiskBlockIOStatus::OK) {
+                ::_exit(1);
+            }
+            ::kill(::getpid(), SIGKILL);
+            ::_exit(2);
+        },
+        ::testing::KilledBySignal(SIGKILL),
+        "");
+
+    EXPECT_EQ(::access(path.c_str(), F_OK), -1);
+    EXPECT_EQ(errno, ENOENT);
+    ::remove(path.c_str());
+}
+
 TEST(DiskBlockIOTest, BackingFilePermissionsAre0600) {
     const std::string path = testFilePath("perms.bin");
     ::remove(path.c_str());
@@ -78,7 +106,7 @@ TEST(DiskBlockIOTest, BackingFilePermissionsAre0600) {
     ASSERT_EQ(io.openAndPreallocate(path, 4096, /*buffered_io=*/true), DiskBlockIOStatus::OK);
 
     struct stat st{};
-    ASSERT_EQ(::stat(path.c_str(), &st), 0);
+    ASSERT_EQ(::fstat(io.fd_, &st), 0);
     EXPECT_EQ(st.st_mode & 0777, 0600u);
 
     io.close();
@@ -224,7 +252,9 @@ TEST(DiskBlockPoolTest, InitPreallocatesFileAndSkipsOffsetZero) {
     ASSERT_TRUE(pool.init());
 
     struct stat st{};
-    ASSERT_EQ(::stat(pool.filePath().c_str(), &st), 0);
+    auto*       io = dynamic_cast<BlockTreePosixDiskBlockIO*>(pool.io_.get());
+    ASSERT_NE(io, nullptr);
+    ASSERT_EQ(::fstat(io->fd_, &st), 0);
     EXPECT_GE(static_cast<size_t>(st.st_size), config->disk_size_bytes);
 
     // physical_block_count(4) - reserved block 0 = 3 usable blocks.
@@ -355,13 +385,14 @@ TEST(DiskBlockPoolTest, SharedMountGuardCreatesGuardWorkDirAndBackingFile) {
     BlockTreeDiskBlockPool pool(config);
     ASSERT_TRUE(pool.init());
 
-    // Backing file must live inside the guard's rtp_llm_disk_kv work dir, not directly
-    // under the mount.
+    // The backing file is created inside the guard's work dir before unlinking.
     const std::string expected_dir = mount + "/rtp_llm_disk_kv/";
     EXPECT_EQ(pool.filePath().rfind(expected_dir, 0), 0u);
 
     struct stat st{};
-    ASSERT_EQ(::stat(pool.filePath().c_str(), &st), 0);
+    auto*       io = dynamic_cast<BlockTreePosixDiskBlockIO*>(pool.io_.get());
+    ASSERT_NE(io, nullptr);
+    ASSERT_EQ(::fstat(io->fd_, &st), 0);
     EXPECT_GE(static_cast<size_t>(st.st_size), config->disk_size_bytes);
 
     ::remove(pool.filePath().c_str());

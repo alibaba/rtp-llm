@@ -35,8 +35,9 @@ class DiskBlockIO {
 public:
     virtual ~DiskBlockIO() = default;
 
-    // Opens (creating if necessary) the file at file_path and preallocates it to
-    // exactly `bytes`. When buffered_io is false, the file is opened for direct I/O
+    // Exclusively creates the file at file_path, unlinks its name, and preallocates
+    // it to exactly `bytes`. The backing file lives until its last fd is closed.
+    // When buffered_io is false, the file is opened for direct I/O
     // and all subsequent read/write offsets, buffer addresses, and sizes must be
     // 4096-byte aligned.
     virtual DiskBlockIOStatus openAndPreallocate(const std::string& file_path, size_t bytes, bool buffered_io) = 0;
