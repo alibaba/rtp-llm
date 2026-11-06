@@ -28,8 +28,8 @@ from rtp_llm.openai.api_datatype import (
     UsageInfo,
 )
 from rtp_llm.openai.renderers.custom_renderer import StreamResponseObject
-from rtp_llm.openai.renderers.kimi_k3_renderer import K3RequestOptions
 from rtp_llm.openai.renderers.kimi_k3_renderer import (
+    K3RequestOptions,
     KimiK3Renderer,
     _K3StreamResponseObject,
     _KimiK3StreamStatus,
@@ -343,7 +343,9 @@ class KimiK3RendererTest(unittest.TestCase):
         )
         self.assertIsNone(choice.logprobs)
 
-    def test_multi_choice_final_is_split_with_per_choice_usage(self) -> None:
+    def test_multi_choice_final_is_split_with_per_choice_and_aggregate_usage(
+        self,
+    ) -> None:
         aggregate = UsageInfo(prompt_tokens=10, completion_tokens=5, total_tokens=15)
         response = StreamResponseObject(
             choices=[
@@ -366,7 +368,7 @@ class KimiK3RendererTest(unittest.TestCase):
 
         self.assertEqual(len(frames), 2)
         self.assertEqual([frame.choices[0].index for frame in frames], [0, 1])
-        self.assertTrue(all(frame.usage is None for frame in frames))
+        self.assertEqual([frame.usage for frame in frames], [None, aggregate])
         self.assertTrue(
             all(
                 frame.choices[0].delta.model_dump(exclude_none=True) == {}
@@ -377,6 +379,30 @@ class KimiK3RendererTest(unittest.TestCase):
             [frame.choices[0].usage.completion_tokens for frame in frames],
             [2, 3],
         )
+
+    def test_split_frames_preserve_step_usage_for_frontend_accounting(self) -> None:
+        usage = UsageInfo(prompt_tokens=10, completion_tokens=3, total_tokens=13)
+        response = StreamResponseObject(
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    index=0,
+                    delta=DeltaMessage(
+                        reasoning_content="think",
+                        content="answer",
+                    ),
+                )
+            ],
+            usage=usage,
+        )
+
+        frames = KimiK3Renderer._split_exclusive_response(response)
+
+        self.assertGreater(len(frames), 1)
+        self.assertEqual(
+            [frame.usage for frame in frames],
+            [None] * (len(frames) - 1) + [usage],
+        )
+        self.assertEqual(frames[-1].usage.completion_tokens, 3)
 
     def test_generate_final_computes_usage_for_each_choice(self) -> None:
         renderer = object.__new__(KimiK3Renderer)
@@ -439,7 +465,7 @@ class KimiK3RendererTest(unittest.TestCase):
         self.assertTrue(KimiK3Renderer._stream_includes_usage(default_options_request))
         self.assertFalse(KimiK3Renderer._stream_includes_usage(disabled_request))
 
-    def test_usage_summary_is_only_emitted_when_requested(self) -> None:
+    def test_empty_choice_usage_summary_is_additional_when_requested(self) -> None:
         usage = UsageInfo(prompt_tokens=10, completion_tokens=2, total_tokens=12)
         response = StreamResponseObject(
             choices=[
@@ -458,6 +484,8 @@ class KimiK3RendererTest(unittest.TestCase):
 
         self.assertEqual(len(without_summary), 1)
         self.assertEqual(len(with_summary), 2)
+        self.assertEqual(without_summary[0].usage, usage)
+        self.assertEqual(with_summary[0].usage, usage)
         self.assertEqual(with_summary[-1].choices, [])
         self.assertEqual(with_summary[-1].usage, usage)
 
