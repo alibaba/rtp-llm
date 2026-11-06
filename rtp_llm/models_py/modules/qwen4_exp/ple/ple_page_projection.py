@@ -5,11 +5,11 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS"])
 def _page_amax(
     X,
     Partial,
-    ROWS: tl.constexpr,
+    ROWS,
     K: tl.constexpr,
     PAGE: tl.constexpr,
     TILES: tl.constexpr,
@@ -25,7 +25,7 @@ def _page_amax(
     tl.store(Partial + page * TILES + tile, tl.max(x, 0))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ROWS", "PADDED"])
 def _page_quant(
     X,
     Partial,
@@ -37,8 +37,8 @@ def _page_quant(
     RowValueScale,
     WK,
     WV,
-    ROWS: tl.constexpr,
-    PADDED: tl.constexpr,
+    ROWS,
+    PADDED,
     K: tl.constexpr,
     PAGE: tl.constexpr,
     TILES: tl.constexpr,

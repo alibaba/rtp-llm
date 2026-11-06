@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["LENGTH"])
 def _ple_conv(
     Gated,
     Normed,
@@ -13,8 +13,7 @@ def _ple_conv(
     Weight,
     Output,
     Residual,
-    ROWS: tl.constexpr,
-    LENGTH: tl.constexpr,
+    LENGTH,
     WIDTH: tl.constexpr,
     KERNEL: tl.constexpr,
     DILATION: tl.constexpr,
@@ -28,9 +27,11 @@ def _ple_conv(
     # (reachable with max_seq_len=262144 in one unchunked prefill step) an
     # int32 program offset would wrap, so promote before multiplying.
     offset = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
-    row, col = offset // WIDTH, offset % WIDTH
-    batch, token = row // LENGTH, row % LENGTH
-    valid = row < ROWS
+    token, col = offset // WIDTH, offset % WIDTH
+    # A separate batch axis avoids division by the runtime sequence length.
+    batch = tl.program_id(1).to(tl.int64)
+    valid = token < LENGTH
+    offset += batch * LENGTH * WIDTH
     state_len: tl.constexpr = (KERNEL - 1) * DILATION
     acc = tl.full((BLOCK,), 0, tl.float32)
     for k in tl.static_range(KERNEL):
@@ -103,14 +104,13 @@ def try_ple_conv(gated, normed, initial, weight, dilation, *, residual=None):
     ):
         return None
     output = torch.empty_like(gated)
-    _ple_conv[(triton.cdiv(gated.numel(), 1024),)](
+    _ple_conv[(triton.cdiv(gated.shape[1] * gated.shape[2], 1024), gated.shape[0])](
         gated,
         normed,
         initial if initial is not None else normed,
         weight,
         output,
         residual if residual is not None else gated,
-        ROWS=gated.shape[0] * gated.shape[1],
         LENGTH=gated.shape[1],
         WIDTH=10240,
         KERNEL=4,

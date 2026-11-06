@@ -23,6 +23,10 @@ from rtp_llm.models_py.modules.qwen4_exp.test.support.ple_gate import (
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class PleGateTest(PLEProjectionFixture, unittest.TestCase):
+    @staticmethod
+    def kernel_cache_size(kernel):
+        return sum(len(cache[0]) for cache in kernel.device_caches.values())
+
     def tensors(self, rows):
         torch.manual_seed(7300 + rows)
         shapes = [(1, rows, 10240), (1, rows, 2560), (1, rows, 10240)]
@@ -57,7 +61,7 @@ class PleGateTest(PLEProjectionFixture, unittest.TestCase):
         )
 
         layer = self.layer()
-        for rows in (128, 129, 257, 4093, 4095, 4096, 12287, 12288):
+        for rows in (128, 129, 257, 4093, 4094, 4095, 4096, 4097, 12287, 12288):
             torch.manual_seed(7820 + rows)
             x = torch.randn(1, rows, 2560, device="cuda", dtype=torch.bfloat16)
             x[:, : min(rows, 128)] *= 0.125
@@ -109,6 +113,87 @@ class PleGateTest(PLEProjectionFixture, unittest.TestCase):
             )
             for candidate, reference in zip(actual, expected):
                 torch.testing.assert_close(candidate, reference, rtol=0, atol=0)
+
+    def test_page_quant_reuses_kernels_across_lengths(self):
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_page_projection import (
+            _page_amax,
+            _page_quant,
+            quantize_pages,
+        )
+
+        scales = [torch.tensor([s], device="cuda") for s in (0.03, 0.07)]
+        kernels = (_page_amax, _page_quant)
+        for row_scales in (False, True):
+            for kernel in kernels:
+                kernel.device_caches.clear()
+            expected_cache_sizes = None
+            for rows in (128, 1, 129, 256, 257, 4093, 4094, 4095, 4096, 4097, 32768):
+                with self.subTest(rows=rows, row_scales=row_scales):
+                    x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+                    quantized, _ = quantize_pages(x, *scales, row_scales=row_scales)
+                    self.assertEqual(
+                        torch.count_nonzero(quantized[rows:].view(torch.uint8)).item(),
+                        0,
+                    )
+                    sizes = tuple(self.kernel_cache_size(k) for k in kernels)
+                    if expected_cache_sizes is None:
+                        expected_cache_sizes = sizes
+                        self.assertTrue(all(size > 0 for size in sizes))
+                    self.assertEqual(sizes, expected_cache_sizes)
+
+    def test_conv_reuses_kernel_across_lengths_and_batches(self):
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple_conv_triton import _ple_conv
+
+        weight = torch.randn(10240, 1, 4, device="cuda", dtype=torch.bfloat16) * 0.1
+        shapes = ((1, 128), (1, 1), (3, 4), (3, 127), (2, 129), (1, 257)) + tuple(
+            (1, length) for length in (4093, 4094, 4095, 4096, 4097)
+        )
+        for has_initial in (False, True):
+            for has_residual in (False, True):
+                _ple_conv.device_caches.clear()
+                expected_cache_size = None
+                for batch, length in shapes:
+                    with self.subTest(
+                        batch=batch,
+                        length=length,
+                        initial=has_initial,
+                        residual=has_residual,
+                    ):
+                        shape = (batch, length, 10240)
+                        gated, normed = [
+                            torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+                            for _ in range(2)
+                        ]
+                        initial = torch.randn(
+                            batch, 9, 10240, device="cuda", dtype=torch.bfloat16
+                        )
+                        if not has_initial:
+                            initial.zero_()
+                        residual = torch.randn_like(gated) if has_residual else None
+                        expected = gated + F.silu(
+                            F.conv1d(
+                                torch.cat((initial, normed), 1).transpose(1, 2),
+                                weight,
+                                groups=10240,
+                                dilation=3,
+                            ).transpose(1, 2)
+                        )
+                        if has_residual:
+                            expected = residual + expected
+                        actual = try_ple_conv(
+                            gated,
+                            normed,
+                            initial if has_initial else None,
+                            weight,
+                            3,
+                            residual=residual,
+                        )
+                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                        size = self.kernel_cache_size(_ple_conv)
+                        if expected_cache_size is None:
+                            expected_cache_size = size
+                            self.assertGreater(size, 0)
+                        self.assertEqual(size, expected_cache_size)
 
     def test_shared_page_quant_keeps_both_projection_scales(self):
         for rows in (1, 17, 128):
