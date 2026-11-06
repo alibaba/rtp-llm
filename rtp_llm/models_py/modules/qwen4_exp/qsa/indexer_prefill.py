@@ -40,7 +40,7 @@ def restore_padded_indexer_cache(undo: IndexerCacheUndo) -> None:
             _restore_slots[(slots.numel(),)](pool, slots, original, num_warps=4)
 
 
-def _check_host_mirrors(lengths, cu, tables, device_tables, pool_sizes):
+def _check_host_mirrors(lengths, cu, tables, device_tables, pool_sizes, page_size):
     """Validate C++'s CPU sources of the device metadata without a GPU readback.
 
     None means that a device-only path must use the GPU preflight below. C++
@@ -66,7 +66,7 @@ def _check_host_mirrors(lengths, cu, tables, device_tables, pool_sizes):
     for table, pool_size, ratio in zip(tables, pool_sizes, (1, 4)):
         seen = set()
         for row, length in zip(table.tolist(), lengths):
-            required = triton.cdiv(length // ratio * ratio, 128)
+            required = triton.cdiv(length // ratio * ratio, page_size)
             for block in row[:required]:
                 if block <= 0 or block >= pool_size:
                     raise ValueError(
@@ -110,7 +110,7 @@ def write_zero_prefix_prefill(
         and maximum > 0
         and raw_keys.is_cuda
         and torch.version.hip is None
-        and page_size == 128
+        and page_size in (64, 128)
         and raw_keys.dtype == torch.bfloat16
         and raw_keys.shape == (sum(lengths), 128)
         and all(isinstance(n, int) and n > 0 for n in lengths)
@@ -121,7 +121,7 @@ def write_zero_prefix_prefill(
         and gamma.shape == (128,)
         and gamma.dtype in (torch.bfloat16, torch.float32)
         and kv_pool.dim() == state_pool.dim() == 3
-        and kv_pool.shape[1:] == (32, 128)
+        and kv_pool.shape[1:] == (page_size // 4, 128)
         and kv_pool.dtype == torch.bfloat16
         and state_pool.shape[1:] == (8, 128)
         and state_pool.dtype == torch.float32
@@ -154,6 +154,7 @@ def write_zero_prefix_prefill(
         (host_state_table, host_kv_table),
         (state_table, kv_table),
         (state_pool.shape[0], kv_pool.shape[0]),
+        page_size,
     )
     if host_alias is None:
         # Device-only metadata (including MTP and CUDA graph paths) retains the
@@ -453,9 +454,7 @@ def _prefix_reuse_q_prep(
         lane0 = tl.arange(0, 32)
         column0 = lane0 * 4
         for j in tl.static_range(4):
-            key_value = tl.load(
-                raw + token64 * RAW_STRIDE + column0 + j
-            ).to(tl.float32)
+            key_value = tl.load(raw + token64 * RAW_STRIDE + column0 + j).to(tl.float32)
             tl.store(
                 state_pool + slot * 128 + column0 + j,
                 key_value,
@@ -474,9 +473,7 @@ def _prefix_reuse_q_prep(
     c = tl.load(q + offset + column + 2).to(tl.float32)
     d = tl.load(q + offset + column + 3).to(tl.float32)
     inv = tl.rsqrt(tl.sum(((a * a + b * b) + c * c) + d * d, 0) / 128.0 + EPS)
-    out_base = (
-        ((request * MAX_ROWS + row).to(tl.int64) * HEADS + head) * 128
-    )
+    out_base = ((request * MAX_ROWS + row).to(tl.int64) * HEADS + head) * 128
     for j in tl.static_range(4):
         i = column + j
         gain = 1.0 + tl.load(gamma + i).to(tl.float32)
@@ -491,8 +488,10 @@ def _prefix_reuse_q_prep(
         sine = tl.load(sin + token64 * 64 + i, i < 64, other=0.0).to(tl.float32)
         left = (normalized * cosine).to(tl.bfloat16).to(tl.float32)
         right = (
-            rotated * tl.where(i < 32, -1.0, 1.0) * sine
-        ).to(tl.bfloat16).to(tl.float32)
+            (rotated * tl.where(i < 32, -1.0, 1.0) * sine)
+            .to(tl.bfloat16)
+            .to(tl.float32)
+        )
         value = tl.where(
             i < 64, (left + right).to(tl.bfloat16), normalized.to(tl.bfloat16)
         )
@@ -547,9 +546,9 @@ def _prefix_reuse_k_compress(
         cosine = tl.load(cos + rope_row + d, mask=d < 64, other=1).to(tl.float32)
         sine = tl.load(sin + rope_row + d, mask=d < 64, other=0).to(tl.float32)
         left = (normalized.to(tl.float32) * cosine).to(tl.bfloat16)
-        right = (
-            rotated.to(tl.float32) * sine * tl.where(d < 32, -1.0, 1.0)
-        ).to(tl.bfloat16)
+        right = (rotated.to(tl.float32) * sine * tl.where(d < 32, -1.0, 1.0)).to(
+            tl.bfloat16
+        )
         value = tl.where(
             d < 64,
             (left.to(tl.float32) + right.to(tl.float32)).to(tl.bfloat16),
