@@ -112,3 +112,12 @@ py_test(
     ],
     env = {"GPU_COUNT": "0"},
 )
+
+py_test(
+    name = "pipeline_seed_test",
+    srcs = ["pipeline_seed_test.py"],
+    deps = [
+        "//rtp_llm:rtp_llm_frontend_lib",
+        "//rtp_llm:testlib",
+    ],
+)
