@@ -24,7 +24,7 @@ class ConfigServiceTest {
     @Test
     void configuresCacheHitFeedbackTimeoutWithDefault() {
         var defaults = JsonUtils.strictValueToTree(ConfigTestFixtures.parse("{}"));
-        assertEquals(1000L, defaults.at("/observability/cacheHit/feedbackTimeoutMs").longValue());
+        assertEquals(60_000L, defaults.at("/observability/cacheHit/feedbackTimeoutMs").longValue());
         var configured = JsonUtils.strictValueToTree(ConfigTestFixtures.parse("""
                 {"observability":{"cacheHit":{"feedbackTimeoutMs":5000}}}
                 """));

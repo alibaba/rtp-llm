@@ -221,7 +221,7 @@ UniConfig / Nacos 的 v3 部分更新示例：
   {"observability":{"cacheHit":{"feedbackMaximumEntries":200000}}}
   ```
 
-  `feedbackTimeoutMs` 默认 `1000`，必须为正整数，独立于 WorkerStatus 的超时参数。
+  `feedbackTimeoutMs` 默认 `60000`（1 分钟），必须为正整数，独立于 WorkerStatus 的超时参数。
   它从关联登记或最近一次包含该请求的状态反馈开始计算；PENDING、RECEIVED、KV_ALLOCATED、RUNNING
   均会续期，其他请求的状态不会续期。超过该时长没有匹配反馈时关联过期，后台回收；FINISHED 立即条件删除。
   预测在选路阶段登记，等待首次反馈的排队时间也包含在内，排队较长的部署应相应调大该值。
@@ -422,7 +422,7 @@ FINISHED 在 `finally` 中按请求 key 与该次读到的关联对象条件删�
 `CacheHitFeedbackTracker` 是独立的 Spring Bean，注入 `ConfigService` 以初始化并热更新关联表容量和超时，
 `CacheAwareService` 注入同一个 Tracker 处理预测与反馈。
 预测关联上限由 `observability.cacheHit.feedbackMaximumEntries` 配置，默认 100,000 条；
-未收到 FINISHED 的记录按 `observability.cacheHit.feedbackTimeoutMs` 判断反馈静默超时，默认 1000 ms。
+未收到 FINISHED 的记录按 `observability.cacheHit.feedbackTimeoutMs` 判断反馈静默超时，默认 60,000 ms（1 分钟）。
 持续收到该请求的活跃状态时保持关联；超时后的迟到反馈无法再关联。理论与 Local Standby 对照异步完成，
 反馈阶段各自最多等待一秒；不可用的项省略，其余指标正常输出。观测回调在 Worker 状态锁外执行。
 
