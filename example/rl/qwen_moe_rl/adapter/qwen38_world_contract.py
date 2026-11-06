@@ -122,6 +122,7 @@ class World72Topology:
                       RTP_LLM_RL_METADATA_BOOTSTRAP='1',
                       RTP_FIXED_PHYSICAL_EP_LAYOUT='balanced_v1', RTP_RL_BORROW_SINGLETON_HF_SOURCES='1',
                       RTP_NCCL_EP_REFERENCE_MAX_PADDED_TOKENS='73728',
+                      RTP_ARM_BF16_ROPE_BACKEND='torch_bf16_v1',
                       RTP_LLM_RL_RUN_ID=str(incarnation), GANG_CONFIG_STRING=gang)
         return result
 

@@ -5,6 +5,17 @@ Q38_DEPLOY_ROOT="${Q38_DEPLOY_ROOT:?Set the current dedicated deployment root}"
 export RTP_SOURCE="${RTP_SOURCE:-$Q38_DEPLOY_ROOT/rtp-runtime}"
 export RTP_PYTHON="${RTP_PYTHON:-$Q38_DEPLOY_ROOT/runtime/env/bin/python}"
 export RTP_MODEL_PATH="${RTP_MODEL_PATH:?The owner must bind the mounted BF16 model}"
+# Never inherit platform tokenizer/adapters or draft-model object-store paths.
+export CHECKPOINT_PATH="$RTP_MODEL_PATH" TOKENIZER_PATH="$RTP_MODEL_PATH"
+export PTUNING_PATH= EXTRA_DATA_PATH= LOCAL_EXTRA_DATA_PATH= SP_CHECKPOINT_PATH= SP_TYPE= SP_MODEL_TYPE=
+export LORA_INFO='{}' JSON_MODEL_OVERRIDE_ARGS='{}'
+unset QUANTIZATION SP_QUANTIZATION SP_ACT_TYPE TREE_DECODE_CONFIG
+export RTP_ARM_BF16_ROPE_BACKEND=torch_bf16_v1
+export FLASHINFER_CUDA_ARCH_LIST=10.0 FLASHINFER_NO_DOWNLOAD=1
+export FLASHINFER_CUBIN_DIR="$Q38_DEPLOY_ROOT/rtp-runtime-kernels/flashinfer-runtime/cubins"
+export FLASHINFER_WORKSPACE_BASE="$Q38_DEPLOY_ROOT/rtp-runtime-kernels/flashinfer-jit"
+export MAX_JOBS=4
+unset FLASHINFER_DISABLE_JIT
 export RTP_WEIGHT_MANIFEST_DIR="${RTP_WEIGHT_MANIFEST_DIR:?The owner must bind the current native incarnation manifest directory}"
 export RTP_RL_NATIVE_LIBRARY_SHA256="${RTP_RL_NATIVE_LIBRARY_SHA256:?Pin the fresh SM100 native library artifact}"
 export RTP_RL_BOOTSTRAP_POLICY_MANIFEST="${RTP_RL_BOOTSTRAP_POLICY_MANIFEST:?Pin the 1590-source canonical metadata manifest}"
@@ -49,8 +60,10 @@ if not Path(e['RTP_RL_BOOTSTRAP_POLICY_MANIFEST']).is_file():raise ValueError('M
 if not Path(e['RTP_PHY2LOG_PATH']).is_file():raise ValueError('The fixed 576-slot expert map is absent')
 if not (Path(e['RTP_MODEL_PATH'])/'config.json').is_file():raise ValueError('Mounted model metadata is absent')
 PY
-args=("$RTP_PYTHON" -m rtp_llm.start_server
-  --model_type qwen38_moe_text --checkpoint_path "$RTP_MODEL_PATH" --act_type BF16
+args=("$RTP_PYTHON" -m qwen38_world72_entrypoint
+  --model_type qwen38_moe_text --checkpoint_path "$RTP_MODEL_PATH" --tokenizer_path "$RTP_MODEL_PATH" --act_type BF16
+  --ptuning_path "" --extra_data_path "" --local_extra_data_path ""
+  --sp_checkpoint_path "" --sp_type "" --sp_model_type "" --lora_info '{}' --json_model_override_args '{}'
   --start_port "$RTP_START_PORT" --world_size 72 --local_world_size 4 --world_rank "$RTP_WORLD_RANK"
   --tp_size 8 --dp_size 9 --ep_size 72 --ffn_sp_size 8
   --moe_strategy nccl_bf16_reference --moe_pure_tp_preshard false
