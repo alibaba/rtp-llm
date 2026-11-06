@@ -77,6 +77,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
     shape_hints[GptModelInputIndex::allLogitsRowIndexes] =
         inputs.all_logits_row_indexes.defined() ? inputs.all_logits_row_indexes.numel() : 0;
+    shape_hints[GptModelInputIndex::allLogitsTopK] = inputs.all_logits_top_k;
 
     // encode root-side tensor device for fields that may live on GPU on the
     // PDFUSION fast path, so non-root ranks can allocate matching GPU buffers
@@ -161,6 +162,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     torch::Tensor mm_extra_input_shape_t;
     int64_t*      mm_extra_input_shape_ptr = nullptr;
     inputs.need_all_logits                 = shape_hints_ptr[GptModelInputIndex::needAllLogits];
+    inputs.all_logits_top_k                = shape_hints_ptr[GptModelInputIndex::allLogitsTopK];
     inputs.need_all_hidden_states          = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
     inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
@@ -305,6 +307,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             inputs.all_logits_row_indexes =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {checkedHint(GptModelInputIndex::allLogitsRowIndexes, "allLogitsRowIndexes")});
+            inputs.all_logits_row_labels =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
+                         {checkedHint(GptModelInputIndex::allLogitsRowIndexes, "allLogitsRowIndexes")});
         }
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {combo_position_ids_size});
@@ -393,8 +398,16 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                 "attach the (possibly empty) row tensor iff need_all_logits is set",
                                 static_cast<int>(inputs.need_all_logits),
                                 inputs.all_logits_row_indexes.defined() ? "defined" : "undefined");
+        // The sharded scoring reduction needs one label per scoring row on every rank; it is
+        // broadcast together with the row indexes, so the producer must attach both or neither.
+        RTP_LLM_CHECK_WITH_INFO(inputs.all_logits_row_indexes.defined() == inputs.all_logits_row_labels.defined(),
+                                "tpSyncModelInputs: all_logits_row_indexes is %s but "
+                                "all_logits_row_labels is %s; attach both or neither",
+                                inputs.all_logits_row_indexes.defined() ? "defined" : "undefined",
+                                inputs.all_logits_row_labels.defined() ? "defined" : "undefined");
     }
     collect(inputs.all_logits_row_indexes);
+    collect(inputs.all_logits_row_labels);
     if (combo_position_ids_size) {
         collect(inputs.combo_position_ids);
     }

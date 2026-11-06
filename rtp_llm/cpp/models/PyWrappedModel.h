@@ -5,6 +5,7 @@
 #include <cstring>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/PromptScoringShards.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
@@ -109,6 +110,12 @@ private:
     // RTP_LLM_INT8_LM_HEAD_CHECK=1 additionally runs the bf16 head, serves the bf16 logits and
     // logs how often the gathered top-1 token differs.
     torch::Tensor   lmHeadLogits(const torch::Tensor& last_hidden, const torch::Tensor& lm_head_kernel);
+
+    // All-gathers the compact per-rank scoring payload produced by computeShardScoringPartials
+    // (PromptScoringShards.h) and merges it into the global per-row results. Executed
+    // identically on every TP rank (collective shape/order safety).
+    ScoringPartials tpReduceScoringPartials(const ScoringPartials& local, int64_t k_max);
+
     GptModelOutputs forwardPostLayers(torch::Tensor         hidden,
                                       const bool            has_context_request,
                                       const bool            need_all_logits,

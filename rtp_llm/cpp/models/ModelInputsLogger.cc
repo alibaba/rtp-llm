@@ -39,7 +39,7 @@ std::atomic<uint64_t> g_file_sequence{0};
     X(combo_tokens_type_ids) X(combo_position_ids) X(last_hidden_states) X(attention_mask)                           \
     X(kv_cache_block_id) X(kv_cache_kernel_block_id) X(kv_cache_group_types) X(kv_cache_update_mapping)             \
     X(text_tokens_mask) X(mm_features_locs) X(input_embeddings_locs)                                                 \
-    X(request_id) X(request_pd_separation) X(cache_keys) X(all_logits_row_indexes)
+    X(request_id) X(request_pd_separation) X(cache_keys) X(all_logits_row_indexes) X(all_logits_row_labels)
 // clang-format on
 const char* roleName(ModelInputsModelRole role) {
     static constexpr const char* names[] = {"normal", "target", "draft", "draft_prefill"};
@@ -166,6 +166,7 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     payload.insert("decode_entrance", inputs.decode_entrance);
     payload.insert("use_opaque_kv_cache_store", inputs.use_opaque_kv_cache_store);
     payload.insert("need_all_logits", inputs.need_all_logits);
+    payload.insert("all_logits_top_k", inputs.all_logits_top_k);
     payload.insert("need_all_hidden_states", inputs.need_all_hidden_states);
     payload.insert("need_moe_gating", inputs.need_moe_gating);
     payload.insert("warmup", inputs.warmup);
