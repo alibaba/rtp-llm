@@ -70,17 +70,26 @@ public:
     bool                           init();
     virtual void                   free(const FreeInfo& free_info);
     virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
-    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
+    virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id, size_t module_id = 0) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id, size_t module_id = 0) const;
     virtual std::vector<BlockInfo>
-                          convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
-    virtual BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
-    virtual std::vector<BlockInfo> convertIndexToBuffer(
-        int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id, size_t module_id = 0) const;
+    virtual BlockAddrInfo
+    convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id, size_t module_id = 0) const;
+    virtual std::vector<BlockInfo>
+    convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id, size_t module_id = 0) const;
+    virtual std::vector<BlockInfo> convertIndexToBuffer(int                layer_id,
+                                                        const std::string& group_tag,
+                                                        int                block_id,
+                                                        int                partition_count,
+                                                        int                partition_id,
+                                                        size_t             module_id = 0) const;
     virtual std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
+    // DEPRECATED: semantically changed from a merged all-layer layout to the
+    // main module's layout. Use getModuleLayout(module_id) for explicit scope.
     virtual GroupedCacheLayerLayout allLayerCacheBase() const;
+    GroupedCacheLayerLayout         getModuleLayout(size_t module_id = 0) const;
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                                                   const std::vector<int>&         block_src_batch,
                                                   bool                            copy_last_block,
@@ -159,8 +168,6 @@ public:
     virtual size_t               maxAvailableTokensNum() const;
     virtual KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
-    /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
-    uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
     // Which capacity snapshots evaluateInitCapacity() is allowed to consult.
@@ -290,8 +297,6 @@ protected:
                                                                     size_t                                reserve_blocks,
                                                                     InitCapacityMode                      mode,
                                                                     const std::vector<RequiredPositions>* required_positions) const;
-    int                                    validateGroupIdForLayer(int layer_id, int group_id) const;
-    int                                    defaultGroupIdForLayer(int layer_id) const;
     size_t                                 minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
     size_t                                 totalReservableFreeBlocks() const;
     size_t                                 reserveBlocksForPool(size_t group_id) const;
@@ -301,7 +306,12 @@ protected:
     std::unique_ptr<GpuBlockCopy> gpu_block_copy_;
 
 private:
-    size_t groupIdForTag(std::string_view tag) const;
+    // Flat union of every module's groups (main first, then MTP). The internal
+    // kv_cache_groups_/group_block_pools_ vectors are indexed by this ordering.
+    int                allGroupNums() const;
+    const std::string& allGroupTag(size_t flat_id) const;
+    const GroupBase&   allGroup(size_t flat_id) const;
+    size_t             groupIdForTag(std::string_view tag) const;
 };
 
 using CoordinatorCacheManagerPtr = std::shared_ptr<CoordinatorCacheManager>;

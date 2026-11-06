@@ -37,15 +37,6 @@ public:
     bool use_opaque_kv_cache_store                = false;
     bool disable_decode_first_malloc_device_reuse = false;
 
-    uint32_t layer_all_num() const {
-        if (cache_topology == nullptr) {
-            return layer_num;
-        }
-        RTP_LLM_CHECK_WITH_INFO(cache_topology->layers().size() <= std::numeric_limits<uint32_t>::max(),
-                                "CacheModuleConfig layer count exceeds uint32_t range");
-        return static_cast<uint32_t>(cache_topology->layers().size());
-    }
-
     int groupNums() const {
         return cache_topology == nullptr ? 0 : static_cast<int>(cache_topology->groups().size());
     }

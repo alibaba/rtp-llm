@@ -191,7 +191,7 @@ static void setGroupBlockNumsForTest(CacheConfig&                    config,
 }
 
 static void initDsv4BatchGroups(BatchKVCacheResource& batch_res, const CacheConfig& config) {
-    batch_res.initGroups(config.topologyPtr());
+    batch_res.initGroups(config.allModuleTopologyPtr());
 }
 
 // DEV's `isDsv4FixedRegion()` covered INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.  On MAIN
@@ -424,7 +424,7 @@ TEST(CacheConfigCreatorTest, SparseIndexerUsesIndependentNaturalStridePool) {
 
     ASSERT_GT(config.groupNums(), 1);
     for (const auto& group : config.topology().groups()) {
-        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, group);
+        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config.main_config, group);
         ASSERT_FALSE(pool_config.memory_layouts.empty());
         for (const auto& layout : pool_config.memory_layouts) {
             EXPECT_FALSE(layout.enable_hybrid_attention);
@@ -827,8 +827,8 @@ TEST(CacheConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBlockSi
     EXPECT_EQ(config.group("indexer_kv").kvBlockStrideBytes(), config.group("indexer_kv").spec->block_size_bytes());
     EXPECT_EQ(config.group("swa_kv").kvBlockStrideBytes(), config.group("swa_kv").spec->block_size_bytes());
 
-    auto full_pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("csa_kv"));
-    auto swa_pool  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("swa_kv"));
+    auto full_pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config.main_config, config.group("csa_kv"));
+    auto swa_pool  = DeviceBlockPoolConfigHelper::createConfigForGroup(config.main_config, config.group("swa_kv"));
     ASSERT_EQ(full_pool.memory_layouts.size(), 1u);
     ASSERT_EQ(swa_pool.memory_layouts.size(), 1u);
     EXPECT_EQ(full_pool.memory_layouts[0].kernel_blocks_per_kv_block, 1u);
@@ -878,8 +878,8 @@ TEST(CacheConfigCreatorTest, DecoupledPhysicalAndKernelBlockSizeUsesPerGroupBpk)
     EXPECT_EQ(config.group("indexer_kv").kvBlockStrideBytes(), idx_kv->block_size_bytes());
     EXPECT_EQ(config.group("swa_kv").kvBlockStrideBytes(), swa_kv->block_size_bytes());
 
-    auto full_pool_bpk = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("csa_kv"));
-    auto swa_pool_bpk  = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("swa_kv"));
+    auto full_pool_bpk = DeviceBlockPoolConfigHelper::createConfigForGroup(config.main_config, config.group("csa_kv"));
+    auto swa_pool_bpk  = DeviceBlockPoolConfigHelper::createConfigForGroup(config.main_config, config.group("swa_kv"));
     ASSERT_EQ(full_pool_bpk.memory_layouts.size(), 1u);
     ASSERT_EQ(swa_pool_bpk.memory_layouts.size(), 1u);
     EXPECT_EQ(full_pool_bpk.memory_layouts[0].kernel_blocks_per_kv_block, 128u);
@@ -993,7 +993,7 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolConfig)
 
     EXPECT_GT(config.groupNums(), 1);
     for (const auto& group : config.topology().groups()) {
-        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config, group);
+        const auto pool_config = DeviceBlockPoolConfigHelper::createConfigForGroup(config.main_config, group);
         ASSERT_FALSE(pool_config.memory_layouts.empty());
         for (const auto& layout : pool_config.memory_layouts) {
             EXPECT_FALSE(layout.enable_hybrid_attention);
@@ -2284,46 +2284,24 @@ TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     auto           config = rtp_llm::test::finalizeCacheConfig(created_config, config_candidate_block_num);
 
     ASSERT_EQ(config.layer_num(), 43u);
-    ASSERT_EQ(config.layer_all_num(), 45u);
-    ASSERT_EQ(config.topology().layers().size(), static_cast<size_t>(config.layer_all_num()));
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.topology().layers().size(), static_cast<size_t>(config.layer_num()));
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    ASSERT_EQ(config.mtp_sub_configs[0].topology().layers().size(), 1u);
 
-    EXPECT_EQ(config.groupForLayer(43, "swa_kv").tag, "swa_kv");
-    EXPECT_EQ(config.topology().layer(43).group_tags, std::vector<std::string>({"swa_kv"}));
-    EXPECT_EQ(config.topology().layer(44).group_tags, std::vector<std::string>({"swa_kv"}));
-    EXPECT_EQ(config.groupForLayer(44, "swa_kv").tag, "swa_kv");
-
-    EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 45u);
-
-    // Merge preserves target publication order and placeholder identities;
-    // only layer IDs are draft-local. Runtime block tables carry their own tags.
-    EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[0].topology()), publishedGroupTags(config.topology()));
-    EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[1].topology()), publishedGroupTags(config.topology()));
-    EXPECT_EQ(config.mtp_sub_configs[0].groupForLayer(0, "swa_kv").tag, "swa_kv");
-    EXPECT_EQ(config.mtp_sub_configs[1].groupForLayer(0, "swa_kv").tag, "swa_kv");
-    EXPECT_EQ(config.mtp_sub_configs[0].layerIdsForGroup(config.mtp_sub_configs[0].group("swa_kv").tag),
-              std::vector<int>({0}));
-    EXPECT_EQ(config.mtp_sub_configs[1].layerIdsForGroup(config.mtp_sub_configs[1].group("swa_kv").tag),
-              std::vector<int>({0}));
-    for (const auto& group : config.groups()) {
-        if (group.tag == "swa_kv") {
-            continue;
-        }
-        EXPECT_TRUE(config.mtp_sub_configs[0].layerIdsForGroup(group.tag).empty()) << group.tag;
-        EXPECT_TRUE(config.mtp_sub_configs[1].layerIdsForGroup(group.tag).empty()) << group.tag;
-    }
+    // The MTP module owns its own single-layer SWA pool under a distinct tag.
+    EXPECT_EQ(config.layerIdsForGroup("swa_kv").size(), 43u);
+    EXPECT_EQ(config.mtp_sub_configs[0].groupForLayer(0, "mtp_swa_kv").tag, "mtp_swa_kv");
+    EXPECT_EQ(config.mtp_sub_configs[0].layerIdsForGroup("mtp_swa_kv"), std::vector<int>({0}));
     EXPECT_EQ(config.seq_size_per_block, 16384u);
 
     EXPECT_EQ(config.group("csa_kv").kernelSeqSizePerBlock(), 128u);
     EXPECT_EQ(config.group("csa_kv").kernelBlocksPerKvBlock(), 128u);
     EXPECT_EQ(config.group("swa_kv").kernelBlocksPerKvBlock(), 1u);
-    EXPECT_EQ(config.mtp_sub_configs[0].group("csa_kv").kernelSeqSizePerBlock(), 128u);
+    EXPECT_EQ(config.mtp_sub_configs[0].group("mtp_csa_kv").kernelSeqSizePerBlock(), 128u);
 
     EXPECT_EQ(config.group("swa_kv").block_num, 100u);
     EXPECT_EQ(config.mtp_sub_configs[0].reuse_cache_tail_blocks, 4);
-    EXPECT_EQ(config.mtp_sub_configs[1].reuse_cache_tail_blocks, 4);
-    EXPECT_EQ(config.mtp_sub_configs[0].group("swa_kv").block_num, 100u);
-    EXPECT_EQ(config.mtp_sub_configs[1].group("swa_kv").block_num, 100u);
+    EXPECT_EQ(config.mtp_sub_configs[0].group("mtp_swa_kv").block_num, 100u);
 
     EXPECT_EQ(test::explicitPoolReserveBytes(config), 256u * config.blockSizeBytesForGroup("hca_state"));
 }
@@ -2384,10 +2362,10 @@ TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
     EXPECT_LE(backing_bytes(block_num), budget_bytes);
     EXPECT_GT(backing_bytes(block_num + 1u), budget_bytes);
 
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     for (const auto& sub_config : config.mtp_sub_configs) {
         EXPECT_EQ(sub_config.reuse_cache_tail_blocks, 4);
-        EXPECT_EQ(sub_config.group("swa_kv").block_num, block_num);
+        EXPECT_EQ(sub_config.group("mtp_swa_kv").block_num, block_num);
     }
 }
 
@@ -3857,7 +3835,7 @@ TEST(CacheConfigCreatorTest, WarmupUsesMinimalCapacityAndPreservesExplicitPoolPo
     EXPECT_EQ(config.group("state").policy.explicit_block_num, 7u);
     EXPECT_TRUE(config.mtp_sub_configs.empty());
     for (const auto& group : config.groups()) {
-        EXPECT_GT(DeviceBlockPoolConfigHelper::createConfigForGroup(config, group).total_size_bytes, 0u);
+        EXPECT_GT(DeviceBlockPoolConfigHelper::createConfigForGroup(config.main_config, group).total_size_bytes, 0u);
     }
 }
 
@@ -3883,21 +3861,27 @@ TEST(CacheConfigCreatorTest, MergedBudgetUsesEachPhysicalSegmentOnce) {
             const uint32_t config_candidate_block_num =
                 CacheConfigCreator::computeLocalBlockNum(created_config, target, {}, options, {}, std::nullopt, sp);
             auto config = finalizeCacheConfig(created_config, config_candidate_block_num);
-            ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+            ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
 
-            const auto pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("full"));
-            ASSERT_EQ(pool.memory_layouts.size(), 3u);
-            EXPECT_EQ(pool.memory_layouts[1].kv_block_stride_bytes, 2 * pool.memory_layouts[0].kv_block_stride_bytes);
-            for (const auto& sub : config.mtp_sub_configs) {
-                EXPECT_TRUE(sub.layerIdsForGroup("state").empty());
-                EXPECT_EQ(sub.group("full").block_num, config.group("full").block_num);
-            }
+            const auto full_pool =
+                DeviceBlockPoolConfigHelper::createConfigForGroup(config.main_config, config.group("full"));
+            ASSERT_EQ(full_pool.memory_layouts.size(), 1u);
+            const auto mtp_pool = DeviceBlockPoolConfigHelper::createConfigForGroup(
+                config.mtp_sub_configs[0], config.mtp_sub_configs[0].group("mtp_full"));
+            ASSERT_EQ(mtp_pool.memory_layouts.size(), 1u);
+            EXPECT_EQ(mtp_pool.memory_layouts[0].kv_block_stride_bytes,
+                      2 * full_pool.memory_layouts[0].kv_block_stride_bytes);
+            EXPECT_EQ(config.mtp_sub_configs[0].group("mtp_full").block_num, config.group("full").block_num);
             const auto charged_bytes = [&](const CacheConfig& candidate) {
                 size_t bytes = 0;
-                for (const auto& group : candidate.groups()) {
-                    const auto policy = group.policy;
-                    if (policy.explicit_block_num == 0 || policy.charge_to_paged_budget) {
-                        bytes += DeviceBlockPoolConfigHelper::createConfigForGroup(candidate, group).total_size_bytes;
+                for (size_t module_id = 0; module_id < candidate.moduleCount(); ++module_id) {
+                    const auto& module_config = candidate.moduleConfig(module_id);
+                    for (const auto& group : module_config.groups()) {
+                        const auto policy = group.policy;
+                        if (policy.explicit_block_num == 0 || policy.charge_to_paged_budget) {
+                            bytes += DeviceBlockPoolConfigHelper::createConfigForGroup(module_config, group)
+                                         .total_size_bytes;
+                        }
                     }
                 }
                 return bytes;
@@ -3923,24 +3907,30 @@ TEST(CacheConfigCreatorTest, MtpModuleCountsPreserveEagleAndDsparkRules) {
     sp.type              = SP_TYPE_MTP;
     sp.gen_num_per_cycle = 3;
 
-    auto mtp = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
-    EXPECT_EQ(mtp.mtp_sub_configs.size(), 3u);
-    EXPECT_EQ(mtp.layer_all_num(), 7u);
+    for (int prediction_depth : {1, 2, 3, 5}) {
+        sp.gen_num_per_cycle = prediction_depth;
+        auto mtp             = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
+        ASSERT_EQ(mtp.mtp_sub_configs.size(), 1u) << "prediction_depth=" << prediction_depth;
+        EXPECT_EQ(mtp.mtp_sub_configs[0].layer_num, 2u);
+        EXPECT_EQ(mtp.layer_num() + mtp.mtp_sub_configs[0].layer_num, 3u);
+    }
 
-    auto eagle = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true, true);
+    sp.type              = SP_TYPE_EAGLE;
+    sp.gen_num_per_cycle = 3;
+    auto eagle           = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true, true);
     EXPECT_EQ(eagle.mtp_sub_configs.size(), 1u);
-    EXPECT_EQ(eagle.layer_all_num(), 3u);
+    EXPECT_EQ(eagle.layer_num() + eagle.mtp_sub_configs[0].layer_num, 3u);
     sp.type = SP_TYPE_DSPARK;
 
     auto dspark = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
     EXPECT_EQ(dspark.mtp_sub_configs.size(), 1u);
-    EXPECT_EQ(dspark.layer_all_num(), 3u);
+    EXPECT_EQ(dspark.layer_num() + dspark.mtp_sub_configs[0].layer_num, 3u);
 
     auto ordinary_draft = CacheConfigCreator::createConfig(target, {}, options, sp, &draft);
     EXPECT_EQ(ordinary_draft.mtp_sub_configs.size(), 1u);
 }
 
-TEST(CacheConfigCreatorTest, MtpRejectsUnknownDraftTagsButAllowsUnusedTargetGroups) {
+TEST(CacheConfigCreatorTest, MtpRenamesCollidingDraftTagsAndKeepsDistinctOnes) {
     auto target = makeCreationModel();
     auto draft  = target;
     addCreationFixedPool(draft, false);
@@ -3949,26 +3939,18 @@ TEST(CacheConfigCreatorTest, MtpRejectsUnknownDraftTagsButAllowsUnusedTargetGrou
     SpeculativeExecutionConfig sp;
     sp.type              = SP_TYPE_MTP;
     sp.gen_num_per_cycle = 1;
-    try {
-        (void)CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
-        FAIL() << "expected the draft-only state group to be rejected";
-    } catch (const std::runtime_error& error) {
-        EXPECT_NE(std::string(error.what()).find("unmapped draft cache group tag=state"), std::string::npos);
-    }
 
-    // The reverse relation is valid: target-only pools retain empty child views.
+    // "full" collides with the target and becomes "mtp_full"; the distinct
+    // "state" tag passes through unchanged.
+    auto created_config = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
+    ASSERT_EQ(created_config.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(created_config.mtp_sub_configs[0].groupTags(), (std::vector<std::string>{"mtp_full", "state"}));
+
+    // A draft whose only colliding tag is "full" that carries no target-only group.
     std::swap(target, draft);
-
-    auto           created_config = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
-    const uint32_t config_candidate_block_num =
-        CacheConfigCreator::computeLocalBlockNum(created_config, target, {}, options, {}, std::nullopt, sp);
-    const auto config = finalizeCacheConfig(created_config, config_candidate_block_num);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
-    EXPECT_EQ(publishedGroupTags(config.mtp_sub_configs[0].topology()), publishedGroupTags(config.topology()));
-
-    EXPECT_TRUE(config.mtp_sub_configs[0].layerIdsForGroup(config.mtp_sub_configs[0].group("state").tag).empty());
-    EXPECT_EQ(DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("state")).memory_layouts.size(),
-              1u);
+    auto created2 = CacheConfigCreator::createConfig(target, {}, options, sp, &draft, true);
+    ASSERT_EQ(created2.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(created2.mtp_sub_configs[0].groupTags(), (std::vector<std::string>{"mtp_full"}));
 }
 
 TEST(CacheConfigCreatorTest, MtpRejectsIncompatiblePoolPolicyAndTokenSpans) {

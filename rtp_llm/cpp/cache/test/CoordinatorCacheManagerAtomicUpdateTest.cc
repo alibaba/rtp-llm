@@ -32,7 +32,7 @@ CacheConfig createSingleTypeTestConfig(int layer_num, int block_num, int seq_siz
 BatchKVCacheResourcePtr createBatchKVCacheResource(int batch_size, const CacheConfig& config) {
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(batch_size);
-    resource->initGroups(config.topologyPtr());
+    resource->initGroups(config.allModuleTopologyPtr());
     return resource;
 }
 

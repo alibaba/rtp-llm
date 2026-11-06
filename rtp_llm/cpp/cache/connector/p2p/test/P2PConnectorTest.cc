@@ -62,7 +62,7 @@ protected:
         pd_sep_config.decode_polling_call_prefill_ms = 30;
 
         config_ = P2PConnectorConfig::create(
-            runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*layer_all_num=*/2);
+            runtime_config, cache_store_config, parallelism_config, pd_sep_config, /*total_layer_num=*/2);
 
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 

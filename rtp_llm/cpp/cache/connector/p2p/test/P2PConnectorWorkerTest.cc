@@ -185,7 +185,9 @@ private:
             const auto layer_begin = has_identity && third_last != std::string::npos ? third_last + 1 : second_last + 1;
             const auto layer_end   = has_identity ? second_last : last;
             return std::stoi(layer_key.substr(layer_begin, layer_end - layer_begin));
-        } catch (...) { return -1; }
+        } catch (...) {
+            return -1;
+        }
     }
 
     static std::string parseCacheTag(const std::string& layer_key) {
@@ -315,7 +317,7 @@ protected:
         worker_config_.tp_size                                              = 2;
         worker_config_.tp_rank                                              = 0;
         worker_config_.transfer_backend_config.cache_store_listen_port      = 0;
-        worker_config_.layer_all_num                                        = 2;
+        worker_config_.total_layer_num                                      = 2;
 
         mock_layer_block_converter_ = std::make_shared<MockLayerBlockConverter>();
 
@@ -339,7 +341,7 @@ protected:
 
     KVCacheResourcePtr createKVCacheResource(int layer_id, int num_blocks = 2) {
         auto                          resource  = std::make_shared<KVCacheResource>();
-        int                           layer_num = static_cast<int>(worker_config_.layer_all_num);
+        int                           layer_num = static_cast<int>(worker_config_.total_layer_num);
         std::vector<std::vector<int>> layer_to_group_ids(layer_num);
         for (int i = 0; i < layer_num; ++i) {
             layer_to_group_ids[i] = {i};
@@ -373,7 +375,7 @@ protected:
     void addComputedBuffer(int64_t request_id, int layer_id, int64_t deadline_ms, const std::string& cache_tag) {
         auto computed_buffer = computed_buffers_->addBuffer(request_id, nullptr, deadline_ms);
         if (!computed_buffer->expectedBufferCount().has_value()) {
-            computed_buffer->setExpectedBufferCount(static_cast<size_t>(worker_config_.layer_all_num));
+            computed_buffer->setExpectedBufferCount(static_cast<size_t>(worker_config_.total_layer_num));
         }
         auto layer_cache_buffer = createTaggedLayerCacheBuffer(layer_id, cache_tag, 2);
         computed_buffers_->addBuffer(request_id, layer_cache_buffer, deadline_ms);

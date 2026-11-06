@@ -413,7 +413,7 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
         }
         auto& batch = resource.kvCacheMutable();
         // Only the resource order changes; the manager keeps its original topology.
-        batch.initGroups(config.topologyPtr());
+        batch.initGroups(config.allModuleTopologyPtr());
         for (const auto& group : config.topology().groups()) {
             batch.mutableBlockIds(0, group.tag).assign({2, 5});
         }

@@ -49,50 +49,60 @@ void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
     total += bytes * count;
 }
 
-KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
-    KVCacheBlockBudget budget;
-    for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
-        const auto& group          = config.topology().groups()[gid];
-        size_t      group_bytes    = 0;
-        const auto  append_segment = [&](const CacheModuleConfig& source, const GroupBase& segment, bool main) {
-            const auto   layer_ids = source.layerIdsForGroup(segment.tag);
-            const size_t layer_count =
-                main ? std::count_if(
-                           layer_ids.begin(),
-                           layer_ids.end(),
-                           [&source](int id) { return id >= 0 && static_cast<uint32_t>(id) < source.layer_num; }) :
-                        layer_ids.size();
-            addBudgetBytes(group_bytes, segment.kvBlockStrideBytes(), layer_count);
-            addBudgetBytes(group_bytes, segment.kvScaleStrideBytes(), layer_count);
-        };
-        // Exactly the physical segments assembled by BlockPoolConfigHelper:
-        // target layers use the target Spec, draft layers use their own Specs.
-        append_segment(config.main_config, group, true);
-        for (const auto& sub : config.mtp_sub_configs) {
-            RTP_LLM_CHECK_WITH_INFO(gid < sub.topology().groups().size(),
-                                    "MTP cache configuration is missing group index=%zu for tag=%s",
-                                    gid,
-                                    group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(sub.topology().groups()[gid].tag == group.tag,
-                                    "MTP group order is inconsistent for tag=%s",
-                                    group.tag.c_str());
-            append_segment(sub, sub.topology().groups()[gid], false);
-        }
-        const auto& policy = group.policy;
-        if (policy.explicit_block_num > 0) {
-            if (policy.charge_to_paged_budget) {
-                addBudgetBytes(budget.explicit_pool_reserve_bytes, group_bytes, policy.explicit_block_num);
-            }
+CacheModuleConfig renameMTPGroupTags(CacheModuleConfig module_config, const CacheModuleConfig& main_config) {
+    const std::set<std::string>        main_tags(main_config.groupTags().begin(), main_config.groupTags().end());
+    std::map<std::string, std::string> rename_map;
+    auto                               groups = module_config.topology().groups();
+    auto                               layers = module_config.topology().layers();
+    for (auto& group : groups) {
+        if (main_tags.count(group.tag) == 0) {
             continue;
         }
-        switch (policy.group_type) {
-            case CacheGroupType::FULL:
-            case CacheGroupType::LINEAR:
-                addBudgetBytes(budget.paged_block_bytes, group_bytes);
-                break;
-            case CacheGroupType::SWA:
-                addBudgetBytes(budget.swa_block_bytes, group_bytes);
-                break;
+        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "MTP group tag=%s has null spec", group.tag.c_str());
+        const std::string old_tag = group.tag;
+        const std::string new_tag = "mtp_" + old_tag;
+        rename_map.emplace(old_tag, new_tag);
+        auto spec  = group.spec->clone();
+        spec->tag  = new_tag;
+        group.spec = std::move(spec);
+        group.tag  = new_tag;
+    }
+    for (auto& layer : layers) {
+        for (auto& tag : layer.group_tags) {
+            const auto it = rename_map.find(tag);
+            if (it != rename_map.end()) {
+                tag = it->second;
+            }
+        }
+    }
+    module_config.setTopology(std::move(groups), std::move(layers));
+    return module_config;
+}
+
+KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
+    KVCacheBlockBudget budget;
+    // Each module owns an independent pool per group tag, so the paged-HBM
+    // budget is the sum over every module's own group byte layout.
+    for (size_t module_id = 0; module_id < config.moduleCount(); ++module_id) {
+        const auto& module_config = config.moduleConfig(module_id);
+        for (const auto& group : module_config.groups()) {
+            const size_t group_bytes = module_config.blockSizeBytesForGroup(group.tag);
+            const auto&  policy      = group.policy;
+            if (policy.explicit_block_num > 0) {
+                if (policy.charge_to_paged_budget) {
+                    addBudgetBytes(budget.explicit_pool_reserve_bytes, group_bytes, policy.explicit_block_num);
+                }
+                continue;
+            }
+            switch (policy.group_type) {
+                case CacheGroupType::FULL:
+                case CacheGroupType::LINEAR:
+                    addBudgetBytes(budget.paged_block_bytes, group_bytes);
+                    break;
+                case CacheGroupType::SWA:
+                    addBudgetBytes(budget.swa_block_bytes, group_bytes);
+                    break;
+            }
         }
     }
     return budget;
@@ -419,15 +429,13 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     const int gen_num_per_cycle = draft_model_config != nullptr ? sp_config->gen_num_per_cycle : 0;
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
-        auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
-        RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
-        config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
-        for (int module = 0; module < num_mtp_modules; ++module) {
-            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num()));
-        }
+        auto draft_config =
+            createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+        auto draft_module = std::move(draft_config.main_config);
+        draft_module      = renameMTPGroupTags(std::move(draft_module), config.main_config);
+        config.mtp_sub_configs.push_back(std::move(draft_module));
     }
-
+    config.validateCrossModuleInvariants();
     return config;
 }
 

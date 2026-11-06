@@ -94,7 +94,8 @@ inline DeviceBlockPoolConfig createTestConfig(size_t   k_block_stride_bytes = 51
                               {kBlockNum},
                               {k_block_stride_bytes + v_block_stride_bytes},
                               {k_scale_stride_bytes + v_scale_stride_bytes});
-    return DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
+    return DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config.main_config,
+                                                             cache_config.topology().groups().front());
 }
 
 inline void createDevice() {

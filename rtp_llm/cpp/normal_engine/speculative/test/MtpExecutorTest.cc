@@ -1150,19 +1150,19 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     };
     auto target = make_config(multiple_groups, 3);
     auto draft  = make_config(draft_has_linear, 1, true);
-    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num()));
+    target.mtp_sub_configs.push_back(test::renameMtpModuleTags(std::move(draft.main_config), target.main_config));
     target.finalizeBlockNums(8, RuntimeConfig{});
     if (multiple_groups && !draft_has_linear) {
-        EXPECT_TRUE(target.mtp_sub_configs[0].layerIdsForGroup("linear").empty());
-        EXPECT_EQ(target.mtp_sub_configs[0].groupNums(), 2);  // groups, including placeholder
+        EXPECT_EQ(target.mtp_sub_configs[0].groupNums(), 1);
+        EXPECT_EQ(target.mtp_sub_configs[0].groupTags(), (std::vector<std::string>{"mtp_full"}));
     }
 
     auto         components         = createMtpExecutorComponents(MtpExecutorTestConfig{}, &target);
     auto*        executor           = components.executor.get();
     const size_t target_stride      = multiple_groups ? 0 : 48;
     const size_t target_scale       = multiple_groups ? 0 : 12;
-    const size_t draft_stride       = multiple_groups ? 0 : 16;
-    const size_t draft_scale        = multiple_groups ? 0 : 4;
+    const size_t draft_stride       = draft_has_linear ? 0 : 16;
+    const size_t draft_scale        = draft_has_linear ? 0 : 4;
     bool         saw_target_prepare = false;
     bool         saw_draft_prepare  = false;
     components.fake_target_model->setInputObserver([&](const GptModelInputs& inputs) {

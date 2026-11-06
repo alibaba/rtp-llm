@@ -129,7 +129,7 @@ std::vector<SingleTypeCacheManagerPtr> alignCoordinatorGroups(const CacheConfig&
         return {};
     }
     const auto coordinator_groups = coordinator_manager->cacheGroups();
-    const auto group_count        = static_cast<size_t>(cache_config.groupNums());
+    const auto group_count        = static_cast<size_t>(cache_config.allGroupNums());
     if (coordinator_groups.size() != group_count) {
         RTP_LLM_LOG_ERROR("coordinator/topology group count mismatch, coordinator=%zu topology=%zu",
                           coordinator_groups.size(),
@@ -138,21 +138,13 @@ std::vector<SingleTypeCacheManagerPtr> alignCoordinatorGroups(const CacheConfig&
     }
 
     std::vector<SingleTypeCacheManagerPtr> aligned(group_count);
-    const auto&                            topology_groups = cache_config.topology().groups();
     for (const auto& group : coordinator_groups) {
         if (!group || !group->blockPool()) {
             RTP_LLM_LOG_ERROR("coordinator group/direct pool must be non-null");
             return {};
         }
-        const auto& tag   = group->tag();
-        const auto  found = std::find_if(topology_groups.begin(),
-                                        topology_groups.end(),
-                                        [&tag](const GroupBase& declared) { return declared.tag == tag; });
-        if (found == topology_groups.end()) {
-            RTP_LLM_LOG_ERROR("coordinator has unknown group tag=%s", tag.c_str());
-            return {};
-        }
-        const size_t group_id      = static_cast<size_t>(std::distance(topology_groups.begin(), found));
+        const auto&  tag           = group->tag();
+        const size_t group_id      = static_cast<size_t>(cache_config.groupIdForTagGlobal(tag));
         auto&        aligned_group = aligned[group_id];
         if (aligned_group != nullptr) {
             RTP_LLM_LOG_ERROR("duplicate coordinator group tag=%s", tag.c_str());
@@ -164,11 +156,11 @@ std::vector<SingleTypeCacheManagerPtr> alignCoordinatorGroups(const CacheConfig&
     for (size_t group_id = 0; group_id < group_count; ++group_id) {
         const auto& group = aligned[group_id];
         if (group == nullptr) {
-            RTP_LLM_LOG_ERROR("coordinator is missing tag=%s", topology_groups[group_id].tag.c_str());
+            RTP_LLM_LOG_ERROR("coordinator is missing tag=%s", cache_config.allGroupTags()[group_id].c_str());
             return {};
         }
         const auto& actual   = group->config();
-        const auto& declared = topology_groups[group_id];
+        const auto& declared = cache_config.groupByTagGlobal(cache_config.allGroupTags()[group_id]);
         if (actual.spec != declared.spec || !CacheConfig::samePolicy(actual.policy, declared.policy)
             || actual.block_num != declared.block_num) {
             RTP_LLM_LOG_ERROR("coordinator tag=%s does not exactly match topology", declared.tag.c_str());
@@ -232,8 +224,8 @@ BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                   
 }
 
 bool groupSetSemanticsCompatible(const CacheConfig& cache_config, std::string_view lhs_tag, std::string_view rhs_tag) {
-    const GroupBase& lhs = cache_config.topology().group(lhs_tag);
-    const GroupBase& rhs = cache_config.topology().group(rhs_tag);
+    const GroupBase& lhs = cache_config.groupByTagGlobal(lhs_tag);
+    const GroupBase& rhs = cache_config.groupByTagGlobal(rhs_tag);
     if (lhs.policy.group_type != rhs.policy.group_type || lhs.seqSizePerBlock() != rhs.seqSizePerBlock()
         || lhs.policy.cp_mapping != rhs.policy.cp_mapping) {
         return false;
@@ -253,33 +245,36 @@ bool groupSetSemanticsCompatible(const CacheConfig& cache_config, std::string_vi
 
 bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<std::string>>& group_members) {
     group_members.clear();
-    for (const GroupBase& group : cache_config.topology().groups()) {
-        if (!group.policy.enable_prefix_reuse) {
-            continue;
-        }
+    for (size_t module_id = 0; module_id < cache_config.moduleCount(); ++module_id) {
+        const auto& module_groups = cache_config.moduleConfig(module_id).groups();
+        for (const GroupBase& group : module_groups) {
+            if (!group.policy.enable_prefix_reuse) {
+                continue;
+            }
 
-        const CacheGroupType group_type = group.policy.group_type;
-        if (group_type != CacheGroupType::FULL && group_type != CacheGroupType::SWA
-            && group_type != CacheGroupType::LINEAR) {
-            RTP_LLM_LOG_ERROR("unsupported reusable cache group type for tag=%s", group.tag.c_str());
-            return false;
-        }
-
-        auto it =
-            std::find_if(group_members.begin(), group_members.end(), [&](const std::vector<std::string>& members) {
-                const GroupBase& first = cache_config.topology().group(members.front());
-                return first.policy.group_type == group.policy.group_type;
-            });
-        if (it == group_members.end()) {
-            group_members.push_back({group.tag});
-        } else {
-            if (!groupSetSemanticsCompatible(cache_config, it->front(), group.tag)) {
-                RTP_LLM_LOG_ERROR("incompatible BlockTree reuse coordinates for tags=%s and %s",
-                                  it->front().c_str(),
-                                  group.tag.c_str());
+            const CacheGroupType group_type = group.policy.group_type;
+            if (group_type != CacheGroupType::FULL && group_type != CacheGroupType::SWA
+                && group_type != CacheGroupType::LINEAR) {
+                RTP_LLM_LOG_ERROR("unsupported reusable cache group type for tag=%s", group.tag.c_str());
                 return false;
             }
-            it->push_back(group.tag);
+
+            auto it =
+                std::find_if(group_members.begin(), group_members.end(), [&](const std::vector<std::string>& members) {
+                    const GroupBase& first = cache_config.groupByTagGlobal(members.front());
+                    return first.policy.group_type == group.policy.group_type;
+                });
+            if (it == group_members.end()) {
+                group_members.push_back({group.tag});
+            } else {
+                if (!groupSetSemanticsCompatible(cache_config, it->front(), group.tag)) {
+                    RTP_LLM_LOG_ERROR("incompatible BlockTree reuse coordinates for tags=%s and %s",
+                                      it->front().c_str(),
+                                      group.tag.c_str());
+                    return false;
+                }
+                it->push_back(group.tag);
+            }
         }
     }
     return true;
@@ -291,7 +286,7 @@ BackingLayout computeBackingLayout(const CacheConfig&              cache_config,
                                    size_t                          pool_alignment) {
     BackingLayout layout;
     for (const auto& tag : members) {
-        const size_t group_bytes = cache_config.blockSizeBytesForGroup(tag);
+        const size_t group_bytes = cache_config.moduleConfig(cache_config.moduleOfTag(tag)).blockSizeBytesForGroup(tag);
         RTP_LLM_CHECK_WITH_INFO(group_bytes > 0, "tag=%s has zero payload", tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - layout.payload_bytes,
                                 "group set payload overflow at tag=%s",
@@ -300,7 +295,7 @@ BackingLayout computeBackingLayout(const CacheConfig&              cache_config,
         // The instance owns one GPU; only explicitly host-resident members
         // need the ordinary backing format.
         enable_crc =
-            enable_crc && cache_config.topology().group(tag).policy.memory_placement == CacheMemoryPlacement::DEVICE;
+            enable_crc && cache_config.groupByTagGlobal(tag).policy.memory_placement == CacheMemoryPlacement::DEVICE;
     }
     layout.crc_enabled   = enable_crc;
     layout.storage_bytes = enable_crc ? CrcBlockCopyBatch::encodedBytes(layout.payload_bytes) : layout.payload_bytes;
@@ -308,15 +303,13 @@ BackingLayout computeBackingLayout(const CacheConfig&              cache_config,
     return layout;
 }
 
-// group_pools is a complete dense table bound to this topology's immutable tag order.
-const DeviceBlockPoolPtr&
-poolForTag(const CacheTopology& topology, const std::vector<DeviceBlockPoolPtr>& group_pools, const std::string& tag) {
-    const auto& tags  = topology.groupTags();
-    const auto  found = std::find(tags.begin(), tags.end(), tag);
-    RTP_LLM_CHECK_WITH_INFO(found != tags.end() && group_pools.size() == tags.size(),
-                            "invalid storage pool binding for tag=%s",
-                            tag.c_str());
-    return group_pools[static_cast<size_t>(std::distance(tags.begin(), found))];
+// group_pools is a complete dense table bound to the union group order.
+const DeviceBlockPoolPtr& poolForTag(const CacheConfig&                     cache_config,
+                                     const std::vector<DeviceBlockPoolPtr>& group_pools,
+                                     const std::string&                     tag) {
+    const size_t flat_id = static_cast<size_t>(cache_config.groupIdForTagGlobal(tag));
+    RTP_LLM_CHECK_WITH_INFO(flat_id < group_pools.size(), "invalid storage pool binding for tag=%s", tag.c_str());
+    return group_pools[flat_id];
 }
 
 std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                cache_config,
@@ -324,17 +317,17 @@ std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                c
                                              int                               layer_id,
                                              const std::string&                tag,
                                              int                               block_id) {
-    const auto& topology  = cache_config.topology();
-    const auto& pool      = pools_by_tag.at(tag);
-    const auto  layer_ids = topology.layerIdsForGroup(tag);
-    const auto  layer     = std::find(layer_ids.begin(), layer_ids.end(), layer_id);
+    const auto& module_config = cache_config.moduleConfig(cache_config.moduleOfTag(tag));
+    const auto& pool          = pools_by_tag.at(tag);
+    const auto  layer_ids     = module_config.layerIdsForGroup(tag);
+    const auto  layer         = std::find(layer_ids.begin(), layer_ids.end(), layer_id);
     RTP_LLM_CHECK_WITH_INFO(
         layer != layer_ids.end(), "layer_id=%d does not belong to storage tag=%s", layer_id, tag.c_str());
-    // Pools are laid out in group-local layer order. This is the same model-global -> pool-layer mapping used by
+    // Pools are laid out in group-local layer order. This is the same model-local -> pool-layer mapping used by
     // SingleTypeCacheManager::convertIndexToBuffer; model layer IDs cannot be passed
     // directly to these physical pools.
     auto buffers = pool->convertIndexToBuffer(static_cast<int>(std::distance(layer_ids.begin(), layer)), block_id);
-    const auto& physical_group = cache_config.physicalGroupForLayer(layer_id, tag);
+    const auto& physical_group = module_config.groupForLayer(layer_id, tag);
     RTP_LLM_CHECK_WITH_INFO(!buffers.empty(), "storage tag=%s returned no block buffers", tag.c_str());
     RTP_LLM_CHECK_WITH_INFO(buffers[0].size_bytes >= physical_group.kvBlockStrideBytes(),
                             "storage tag=%s physical kv block is smaller than logical block",
@@ -416,7 +409,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                           kv_cache_config.disk_eviction_policy.c_str());
         return nullptr;
     }
-    const int group_count = cache_config.groupNums();
+    const int group_count = cache_config.allGroupNums();
     if (group_count <= 0) {
         RTP_LLM_LOG_ERROR("topology must contain at least one group");
         return nullptr;
@@ -441,7 +434,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     }
     for (int group_id = 0; group_id < group_count; ++group_id) {
         auto        pool = groups[static_cast<size_t>(group_id)]->blockPool();
-        const auto& tag  = cache_config.topology().groupTags()[static_cast<size_t>(group_id)];
+        const auto& tag  = cache_config.allGroupTags()[static_cast<size_t>(group_id)];
         if (!pool || pool->poolName() != tag || unique_pools.erase(pool.get()) != 1) {
             RTP_LLM_LOG_ERROR("coordinator/group direct pool mismatch for tag=%s", tag.c_str());
             return nullptr;
@@ -456,9 +449,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             "CRC32C KV cache protection disabled by KVCacheConfig.enable_crc; host/disk transfers use plain copies");
     }
     if (kv_cache_config.enable_crc && (host_enabled || disk_enabled) && !CrcBlockCopyBatch::available()) {
-        RTP_LLM_LOG_WARNING(
-            "CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
-            "host/disk transfers use plain copies");
+        RTP_LLM_LOG_WARNING("CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
+                            "host/disk transfers use plain copies");
     }
     const bool crc_backend_available =
         kv_cache_config.enable_crc && CrcBlockCopyBatch::available() && (host_enabled || disk_enabled);
@@ -486,7 +478,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     if (disk_enabled) {
         for (const std::vector<std::string>& members : group_members) {
             RTP_LLM_CHECK_WITH_INFO(!members.empty(), "BlockTreeCache aggregation plan contains an empty group set");
-            if (cache_config.topology().group(members.front()).policy.group_type == CacheGroupType::LINEAR) {
+            if (cache_config.groupByTagGlobal(members.front()).policy.group_type == CacheGroupType::LINEAR) {
                 RTP_LLM_LOG_ERROR("disk cache does not support reusable LINEAR group sets, tag=%s",
                                   members.front().c_str());
                 return nullptr;
@@ -500,8 +492,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     std::vector<size_t> pool_strides;
     for (const std::vector<std::string>& members : group_members) {
         const auto layout = computeBackingLayout(cache_config, members, crc_backend_available, pool_alignment);
-        device_block_counts.push_back(
-            poolForTag(cache_config.topology(), group_pools, members.front())->totalBlocksNum() + 1);
+        device_block_counts.push_back(poolForTag(cache_config, group_pools, members.front())->totalBlocksNum() + 1);
         pool_strides.push_back(layout.pool_stride);
         backing_layouts.push_back(layout);
     }
@@ -512,7 +503,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         const auto   block_counts = computeTierBlockCounts(bytes, device_block_counts, pool_strides);
         for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
             const std::vector<std::string>& members = group_members[group_set_id];
-            const GroupBase&                first   = cache_config.topology().group(members.front());
+            const GroupBase&                first   = cache_config.groupByTagGlobal(members.front());
             const std::string               pool_name =
                 "block_tree_host_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
             const size_t physical_blocks = block_counts[group_set_id];
@@ -535,14 +526,14 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     if (disk_enabled && !group_members.empty()) {
         const size_t bytes        = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
         const auto   block_counts = computeTierBlockCounts(bytes, device_block_counts, pool_strides);
-        auto guard =
+        auto         guard =
             createDiskMountGuard(kv_cache_config, parallelism_config.local_world_size, parallelism_config.local_rank);
         if (!guard) {
             return nullptr;
         }
         for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
             const std::vector<std::string>& members = group_members[group_set_id];
-            const GroupBase&                first   = cache_config.topology().group(members.front());
+            const GroupBase&                first   = cache_config.groupByTagGlobal(members.front());
             const std::string               pool_name =
                 "block_tree_disk_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
             const size_t physical_blocks = block_counts[group_set_id];
@@ -568,7 +559,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     // Canonical CP keys cover a virtual token block. Keep the physical layout
     // unchanged and publish the key stride only to cache matching/remote storage.
-    auto cache_topology = cache_config.topologyPtr();
+    auto cache_topology = cache_config.allModuleTopologyPtr();
     if (const auto mapper = coordinator_manager->cpSlotMapper(); mapper && mapper->isSharded()) {
         auto         groups  = cache_topology->groups();
         const size_t cp_size = static_cast<size_t>(mapper->cpSize());
@@ -587,7 +578,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         std::vector<DeviceBlockPoolPtr> device_pools;
         device_pools.reserve(members.size());
         for (const auto& tag : members) {
-            device_pools.push_back(poolForTag(cache_config.topology(), group_pools, tag));
+            device_pools.push_back(poolForTag(cache_config, group_pools, tag));
         }
         const auto& first     = cache_topology->group(members.front());
         auto        group_set = createGroupSet(

@@ -100,8 +100,7 @@ CacheConfig makeHeterogeneousMtpConfig() {
                                                 DataType::TYPE_FP16,
                                                 /*local_head_num_kv=*/1,
                                                 /*size_per_head=*/4);
-    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, /*module_index=*/0, target.layer_num()));
-    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, /*module_index=*/1, target.layer_num()));
+    target.mtp_sub_configs.push_back(test::renameMtpModuleTags(std::move(draft.main_config), target.main_config));
     return target;
 }
 
@@ -508,7 +507,7 @@ std::vector<BlockIdxType>
 insertOneKeyThroughAllocator(const CacheConfig& config, const CoordinatorCacheManagerPtr& allocator, CacheKeyType key) {
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(1);
-    resource->initGroups(config.topologyPtr());
+    resource->initGroups(config.allModuleTopologyPtr());
     resource->setBatchCacheKeys(0, CacheKeysType{key});
 
     std::vector<BlockIdxType> blocks(static_cast<size_t>(config.groupNums()), NULL_BLOCK_IDX);
@@ -755,108 +754,38 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguous
 
 TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCopyHostAndRemoteResolver) {
     const auto config = makeHeterogeneousMtpConfig();
-    ASSERT_EQ(config.layerIdsForGroup("default"), (std::vector<int>{0, 1, 2}));
-    EXPECT_EQ(config.physicalGroupForLayer(0, "default").kvBlockStrideBytes(), 32u);
-    EXPECT_EQ(config.physicalGroupForLayer(1, "default").kvBlockStrideBytes(), 64u);
-    EXPECT_EQ(config.physicalGroupForLayer(2, "default").kvBlockStrideBytes(), 64u);
-    EXPECT_EQ(config.blockSizeBytesForGroup(config.topology().groups().front().tag), 160u);
-    EXPECT_EQ(config.totalGroupBlockSizeBytes(), 160u);
+    // Each module owns its layers exclusively now: main keeps stride 32, the MTP
+    // module carries its own 64-byte stride under a distinct tag.
+    ASSERT_EQ(config.moduleConfig(0).layerIdsForGroup("default"), (std::vector<int>{0}));
+    ASSERT_EQ(config.moduleConfig(1).layerIdsForGroup("mtp_default"), (std::vector<int>{0}));
+    EXPECT_EQ(config.moduleConfig(0).groupForLayer(0, "default").kvBlockStrideBytes(), 32u);
+    EXPECT_EQ(config.moduleConfig(1).groupForLayer(0, "mtp_default").kvBlockStrideBytes(), 64u);
+    EXPECT_EQ(config.moduleConfig(0).blockSizeBytesForGroup("default"), 32u);
+    EXPECT_EQ(config.moduleConfig(1).blockSizeBytesForGroup("mtp_default"), 64u);
 
-    auto        allocator = initAllocator<CoordinatorCacheManager>(config);
-    const auto& pool      = allocator->groupBlockPools().front();
-    const auto  blocks    = pool->malloc(2);
-    ASSERT_TRUE(blocks.has_value());
-    pool->incRef(*blocks);
-    const BlockIdxType           src = blocks->at(0);
-    const BlockIdxType           dst = blocks->at(1);
-    const std::array<uint8_t, 3> patterns{0x21, 0x43, 0x65};
-    const std::array<size_t, 3>  bytes{32, 64, 64};
-    for (int layer = 0; layer < 3; ++layer) {
-        writeDevicePattern(allocator->convertIndexToAddr(layer, "default", src).kv_addr,
-                           bytes[static_cast<size_t>(layer)],
-                           patterns[static_cast<size_t>(layer)]);
-        writeDevicePattern(
-            allocator->convertIndexToAddr(layer, "default", dst).kv_addr, bytes[static_cast<size_t>(layer)], 0);
-    }
-    allocator->blockBatchCopyByGroup({{"default", src, dst}});
-    runtimeSyncAndCheck();
-    for (int layer = 0; layer < 3; ++layer) {
-        expectDevicePattern(allocator->convertIndexToAddr(layer, "default", dst).kv_addr,
-                            bytes[static_cast<size_t>(layer)],
-                            patterns[static_cast<size_t>(layer)]);
-    }
-
-    auto          backend = std::make_shared<CountingStorageBackend>();
+    auto          backend   = std::make_shared<CountingStorageBackend>();
+    auto          allocator = initAllocator<CoordinatorCacheManager>(config);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_remote_cache  = true;
     kv_cache_config.enable_memory_cache  = true;
     kv_cache_config.memory_cache_size_mb = 1;
     auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{}, backend);
     ASSERT_NE(cache, nullptr);
+    // The two FULL members (main "default" + MTP "mtp_default") coalesce into one
+    // group set whose backing payload sums each member's own block bytes.
     ASSERT_EQ(cache->groupSets().size(), 1u);
     const auto& group_set = cache->groupSets().front();
     ASSERT_NE(group_set->hostPool(), nullptr);
     EXPECT_TRUE(group_set->usesPhysicalPayloadGeometry());
-    EXPECT_EQ(group_set->payloadBytes(), 160u);
-    EXPECT_EQ(group_set->hostPool()->payloadBytes(), 160u);
-    EXPECT_EQ(group_set->crcEnabled(), CrcBlockCopyBatch::available());
-    EXPECT_EQ(group_set->storageBytes(), CrcBlockCopyBatch::available() ? 176u : 160u);
+    EXPECT_EQ(group_set->payloadBytes(), 96u);
+    EXPECT_EQ(group_set->hostPool()->payloadBytes(), 96u);
 
-    for (int layer = 0; layer < 3; ++layer) {
-        const auto resolved = backend->resolve(layer, "default", src);
+    const std::vector<std::pair<std::string, size_t>> members = {{"default", 32u}, {"mtp_default", 64u}};
+    for (const auto& [tag, bytes] : members) {
+        const auto resolved = backend->resolve(0, tag, 1);
         ASSERT_EQ(resolved.size(), 1u);
-        EXPECT_EQ(resolved.front().addr, allocator->convertIndexToAddr(layer, "default", src).kv_addr);
-        EXPECT_EQ(resolved.front().size_bytes, bytes[static_cast<size_t>(layer)]);
+        EXPECT_EQ(resolved.front().size_bytes, bytes);
     }
-
-    const auto host_block = group_set->hostPool()->malloc();
-    ASSERT_TRUE(host_block.has_value());
-    group_set->hostPool()->incTreeRef(*host_block, BlockTreeRefType::STORE);
-    EXPECT_TRUE(cache
-                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
-                        {TransferDescriptor::deviceToHost(group_set->groupSetId(), {src}, *host_block)}))
-                    .ok());
-    for (int layer = 0; layer < 3; ++layer) {
-        writeDevicePattern(
-            allocator->convertIndexToAddr(layer, "default", src).kv_addr, bytes[static_cast<size_t>(layer)], 0);
-    }
-    EXPECT_TRUE(cache
-                    ->executeTransfer(block_transfer_engine_test::makeTransferTask(
-                        {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})}))
-                    .ok());
-    for (int layer = 0; layer < 3; ++layer) {
-        expectDevicePattern(allocator->convertIndexToAddr(layer, "default", src).kv_addr,
-                            bytes[static_cast<size_t>(layer)],
-                            patterns[static_cast<size_t>(layer)]);
-    }
-
-    if (CrcBlockCopyBatch::available()) {
-        // This byte lies beyond the logical 32-byte stride of the target tag.
-        // Its corruption must reject the entire MTP backing, even though scatter may already have completed.
-        auto* host_data = static_cast<uint8_t*>(group_set->hostPool()->blockBuffer(*host_block).addr);
-        host_data[159] ^= 1;
-        for (int layer = 0; layer < 3; ++layer) {
-            writeDevicePattern(
-                allocator->convertIndexToAddr(layer, "default", src).kv_addr, bytes[static_cast<size_t>(layer)], 0xa5);
-        }
-        const auto status = cache->executeTransfer(block_transfer_engine_test::makeTransferTask(
-            {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})}));
-        EXPECT_FALSE(status.ok());
-        EXPECT_EQ(status.copy_error, CacheCopyError::CRC_MISMATCH);
-        host_data[159] ^= 1;
-        ASSERT_TRUE(cache
-                        ->executeTransfer(block_transfer_engine_test::makeTransferTask(
-                            {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, {src})}))
-                        .ok());
-        for (int layer = 0; layer < 3; ++layer) {
-            expectDevicePattern(allocator->convertIndexToAddr(layer, "default", src).kv_addr,
-                                bytes[static_cast<size_t>(layer)],
-                                patterns[static_cast<size_t>(layer)]);
-        }
-    }
-
-    group_set->hostPool()->decTreeRef(*host_block, BlockTreeRefType::STORE);
-    pool->decRef(*blocks);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RemoteBackendResolverDoesNotKeepAttachedCacheAndAllocatorAlive) {

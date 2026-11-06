@@ -1290,19 +1290,6 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                         std::vector<std::string> mtp_layer_tags =
                             layerGroupTags(mtp_cache_cfg, mtp_use_hybrid, layer_id);
 
-                        const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
-                            static_cast<uint32_t>(maga_init_params_.model_config_.num_layers),
-                            static_cast<int>(mtp_model_id),
-                            static_cast<uint32_t>(layer_num),
-                            static_cast<int>(layer_id));
-                        RTP_LLM_CHECK_WITH_INFO(global_layer_id != std::numeric_limits<uint32_t>::max(),
-                                                "invalid decode MTP global layer: main=%ld module=%zu "
-                                                "module_layers=%zu local=%zu",
-                                                maga_init_params_.model_config_.num_layers,
-                                                mtp_model_id,
-                                                layer_num,
-                                                layer_id);
-
                         for (const auto& tag : mtp_layer_tags) {
                             auto request_key      = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
                             auto load_layer_cache = std::make_shared<RequestBlockBuffer>(
@@ -1339,13 +1326,15 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 const bool mtp_use_mla = mtp_cache_cfg.use_mla;
                                 const bool mtp_use_kv_key_prefix =
                                     mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
-                                const bool mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
+                                const bool   mtp_use_whole_kv_block = is_page_level_rr || mtp_use_kv_key_prefix;
+                                const size_t mtp_module_id          = mtp_model_id + 1;
                                 std::vector<BlockInfo> parts;
                                 if (mtp_use_whole_kv_block) {
-                                    parts = cache_manager->convertIndexToBuffer(global_layer_id, tag, block_id);
+                                    parts = cache_manager->convertIndexToBuffer(
+                                        static_cast<int>(layer_id), tag, block_id, mtp_module_id);
                                 } else {
                                     parts = cache_manager->convertIndexToBuffer(
-                                        global_layer_id, tag, block_id, peer_cnt, i);
+                                        static_cast<int>(layer_id), tag, block_id, peer_cnt, i, mtp_module_id);
                                 }
 
                                 parts            = sliceCpDestinationForPeer(std::move(parts), mtp_cache_cfg, tag, i);

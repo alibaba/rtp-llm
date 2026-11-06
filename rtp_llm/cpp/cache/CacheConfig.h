@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -46,6 +47,13 @@ struct CacheConfig {
 
     CacheConfig() {}
 
+private:
+    // Lazily-built union of every module's group tags (see allGroupTags()).
+    mutable std::vector<std::string> all_group_tags_;
+    // Lazily-built topology describing every module's groups (block-table rows).
+    mutable std::shared_ptr<const CacheTopology> all_module_topology_;
+
+public:
     // === Module access (0=main, 1..N=mtp) ===
     size_t moduleCount() const {
         return 1 + mtp_sub_configs.size();
@@ -59,23 +67,6 @@ struct CacheConfig {
 
     int maxPrefixReuseTokens(int prompt_tokens) const {
         return std::max(0, prompt_tokens - std::max(1, cache_min_replay_tokens));
-    }
-
-    uint32_t layer_all_num(size_t module = 0) const {
-        return moduleConfig(module).layer_all_num();
-    }
-
-    static uint32_t
-    mtpGlobalLayerId(uint32_t main_layer_num, int module_index, uint32_t module_layer_num, int local_layer_id) {
-        constexpr uint32_t invalid = std::numeric_limits<uint32_t>::max();
-        if (module_index < 0 || module_layer_num == 0 || local_layer_id < 0
-            || static_cast<uint32_t>(local_layer_id) >= module_layer_num) {
-            return invalid;
-        }
-        const uint64_t global_layer_id = static_cast<uint64_t>(main_layer_num)
-                                         + static_cast<uint64_t>(module_index) * module_layer_num
-                                         + static_cast<uint32_t>(local_layer_id);
-        return global_layer_id < invalid ? static_cast<uint32_t>(global_layer_id) : invalid;
     }
 
     // === Topology accessors (module=0 default; old signatures unchanged) ===
@@ -119,59 +110,83 @@ struct CacheConfig {
         return moduleConfig(module).groupTags();
     }
 
-    // === Block sizing ===
-    // module 0 keeps the merged main+MTP semantics (physical byte layout is
-    // resolved through the MTP children); module > 0 is a single module.
+    // Union of every module's groups (as a single topology) — used as the block
+    // table's tag-keyed row schema, not for addressing.
+    const std::shared_ptr<const CacheTopology>& allModuleTopologyPtr() const;
+
+    // === Block sizing (per-module; module=0 = main module) ===
+    // Each module owns its layers exclusively now, so this is a pure per-module
+    // sum over the module's own group geometry.
     size_t blockSizeBytesForGroup(std::string_view group_tag, size_t module = 0) const {
-        if (module != 0) {
-            return moduleConfig(module).blockSizeBytesForGroup(group_tag);
-        }
-        size_t      total = 0;
-        const auto& tag   = topology().group(group_tag).tag;
-        for (int layer_id : layerIdsForGroup(group_tag)) {
-            const auto&  physical_group = physicalGroupForLayer(layer_id, tag);
-            const size_t kv_bytes       = physical_group.kvBlockStrideBytes();
-            const size_t scale_bytes    = physical_group.kvScaleStrideBytes();
-            RTP_LLM_CHECK_WITH_INFO(scale_bytes <= std::numeric_limits<size_t>::max() - kv_bytes,
-                                    "CacheConfig tag=%s layer=%d stride overflow",
-                                    tag.c_str(),
-                                    layer_id);
-            const size_t layer_bytes = kv_bytes + scale_bytes;
-            RTP_LLM_CHECK_WITH_INFO(layer_bytes <= std::numeric_limits<size_t>::max() - total,
-                                    "CacheConfig tag=%s block size overflow",
-                                    tag.c_str());
-            total += layer_bytes;
-        }
-        return total;
+        return moduleConfig(module).blockSizeBytesForGroup(group_tag);
     }
 
     size_t totalGroupBlockSizeBytes(size_t module = 0) const {
-        if (module != 0) {
-            return moduleConfig(module).totalGroupBlockSizeBytes();
-        }
+        return moduleConfig(module).totalGroupBlockSizeBytes();
+    }
+
+    // Sum of every module's total block size; used for the paged-HBM budget.
+    size_t totalAllModulesBlockSizeBytes() const {
         size_t total = 0;
-        for (const auto& group : topology().groups()) {
-            const size_t group_bytes = blockSizeBytesForGroup(group.tag);
-            RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - total,
-                                    "CacheConfig total block size overflow");
-            total += group_bytes;
+        for (size_t module_id = 0; module_id < moduleCount(); ++module_id) {
+            const size_t module_bytes = moduleConfig(module_id).totalGroupBlockSizeBytes();
+            RTP_LLM_CHECK_WITH_INFO(module_bytes <= std::numeric_limits<size_t>::max() - total,
+                                    "CacheConfig total block size overflow across modules");
+            total += module_bytes;
         }
         return total;
     }
 
-    size_t layerBlockStrideBytes(size_t layer_id) const {
-        size_t total = 0;
-        for (const auto& group : groupsForLayer(static_cast<int>(layer_id))) {
-            const auto& physical_group = physicalGroupForLayer(static_cast<int>(layer_id), group.get().tag);
-            total += physical_group.kvBlockStrideBytes() + physical_group.kvScaleStrideBytes();
+    // === Union accessors (all modules; block-table / snapshot / GroupSet) ===
+    // Group tags are globally unique after the MTP rename, so the union is a
+    // simple concatenation: main module groups first, then each MTP module's
+    // groups in order.
+    const std::vector<std::string>& allGroupTags() const {
+        if (all_group_tags_.empty() && moduleCount() > 0) {
+            for (size_t module_id = 0; module_id < moduleCount(); ++module_id) {
+                const auto& tags = moduleConfig(module_id).groupTags();
+                all_group_tags_.insert(all_group_tags_.end(), tags.begin(), tags.end());
+            }
+        }
+        return all_group_tags_;
+    }
+
+    int allGroupNums() const {
+        int total = 0;
+        for (size_t module_id = 0; module_id < moduleCount(); ++module_id) {
+            total += moduleConfig(module_id).groupNums();
         }
         return total;
     }
 
-    // The merged topology owns logical tag membership, while each MTP child
-    // remains the authority for its physical byte layout. Resolve that owner
-    // on demand instead of copying a second geometry table into the topology.
-    const GroupBase& physicalGroupForLayer(int layer_id, const std::string& tag) const;
+    // Flat index into allGroupTags() (main groups first, then MTP groups).
+    int groupIdForTagGlobal(std::string_view tag) const {
+        const auto& tags = allGroupTags();
+        const auto  it   = std::find(tags.begin(), tags.end(), tag);
+        RTP_LLM_CHECK_WITH_INFO(
+            it != tags.end(), "unknown cache group tag %.*s", static_cast<int>(tag.size()), tag.data());
+        return static_cast<int>(std::distance(tags.begin(), it));
+    }
+
+    // Module that owns a group tag (0 = main, 1..N = MTP).
+    size_t moduleOfTag(std::string_view tag) const {
+        for (size_t module_id = 0; module_id < moduleCount(); ++module_id) {
+            const auto& tags = moduleConfig(module_id).groupTags();
+            if (std::find(tags.begin(), tags.end(), tag) != tags.end()) {
+                return module_id;
+            }
+        }
+        RTP_LLM_FAIL("unknown cache group tag %.*s", static_cast<int>(tag.size()), tag.data());
+    }
+
+    // Cross-module group lookup: resolve a (globally unique) tag to its owning
+    // module's GroupBase.
+    const GroupBase& groupByTagGlobal(std::string_view tag) const {
+        return moduleConfig(moduleOfTag(tag)).group(std::string(tag));
+    }
+
+    // === Cross-module invariants ===
+    void validateCrossModuleInvariants() const;
 
     // === Field accessors (module=0 default; earlier public fields) ===
     uint32_t layer_num(size_t module = 0) const {
@@ -203,8 +218,6 @@ struct CacheConfig {
                              const std::vector<uint32_t>&    block_nums,
                              const std::vector<size_t>&      kv_block_stride_bytes,
                              const std::vector<size_t>&      kv_scale_stride_bytes);
-
-    CacheModuleConfig mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 

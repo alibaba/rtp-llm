@@ -129,7 +129,7 @@ TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
         auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
         BatchKVCacheResource resource;
         resource.resetBatchSize(1);
-        resource.initGroups(config.topologyPtr());
+        resource.initGroups(config.allModuleTopologyPtr());
         resource.mutableBlockIds(0, "first").assign({1, 2});
         resource.mutableBlockIds(0, "second").assign({1, 2});
         stream->setKVCache(resource);

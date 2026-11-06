@@ -794,10 +794,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // variable beams may still increase sampler rows. Keep the safe dynamic growth path enabled.
     sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
-    // Optional per-layer cache buffers from KVCacheManager::allLayerCacheBase().
+    // Optional per-layer cache buffers for the main model.
     std::optional<GroupedCacheLayerLayout> kv_cache_layer_layout = std::nullopt;
     if (cache_manager && cache_manager->cacheConfig().groupNums() > 1) {
-        kv_cache_layer_layout = cache_manager->allLayerCacheBase();
+        kv_cache_layer_layout = cache_manager->getMainModelGroupedCacheLayerLayout();
     }
 
     // Cache-backed target and draft geometry comes from their own resolved configs.

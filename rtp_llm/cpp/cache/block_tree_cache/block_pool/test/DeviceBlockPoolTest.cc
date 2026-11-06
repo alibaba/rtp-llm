@@ -19,7 +19,7 @@ namespace rtp_llm {
 namespace {
 
 static_assert(std::is_same_v<decltype(DeviceBlockPoolConfigHelper::createConfigForGroup(
-                                 std::declval<const CacheConfig&>(), std::declval<const GroupBase&>())),
+                                 std::declval<const CacheModuleConfig&>(), std::declval<const GroupBase&>())),
                              DeviceBlockPoolConfig>);
 
 std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
@@ -33,9 +33,9 @@ std::shared_ptr<DeviceBlockPoolConfig> makeConfig() {
                                                                                 /*local_head_num_kv=*/1,
                                                                                 /*size_per_head=*/64);
     cache_config.finalizeBlockNums(kBlockNum, rtp_llm::RuntimeConfig{});
-    auto config = std::make_shared<DeviceBlockPoolConfig>(
-        DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front()));
-    config->pool_name                 = "device";
+    auto config       = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfigForGroup(
+        cache_config.main_config, cache_config.topology().groups().front()));
+    config->pool_name = "device";
     config->use_device_malloc_backing = true;
     return config;
 }
@@ -51,10 +51,10 @@ std::shared_ptr<DeviceBlockPoolConfig> makeMixedScaleConfig() {
     scaled_cfg.finalizeBlockNums(kBlockNum, rtp_llm::RuntimeConfig{});
     plain_cfg.finalizeBlockNums(kBlockNum, rtp_llm::RuntimeConfig{});
 
-    DeviceBlockPoolConfig scaled_pool =
-        DeviceBlockPoolConfigHelper::createConfigForGroup(scaled_cfg, scaled_cfg.topology().groups().front());
+    DeviceBlockPoolConfig scaled_pool = DeviceBlockPoolConfigHelper::createConfigForGroup(
+        scaled_cfg.main_config, scaled_cfg.topology().groups().front());
     DeviceBlockPoolConfig plain_pool =
-        DeviceBlockPoolConfigHelper::createConfigForGroup(plain_cfg, plain_cfg.topology().groups().front());
+        DeviceBlockPoolConfigHelper::createConfigForGroup(plain_cfg.main_config, plain_cfg.topology().groups().front());
 
     MemoryLayoutConfig l0    = scaled_pool.memory_layouts[0];
     MemoryLayoutConfig l1    = plain_pool.memory_layouts[0];
@@ -74,11 +74,9 @@ std::shared_ptr<DeviceBlockPoolConfig> makeMixedScaleConfig() {
 CacheConfig makeMtpCacheConfig() {
     CacheConfig main = rtp_llm::test::makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/3, /*seq_size_per_block=*/1, TYPE_FP16, /*local_head_num_kv=*/1, 64);
-    for (int module = 0; module < 2; ++module) {
-        const auto draft = std::make_shared<CacheConfig>(rtp_llm::test::makeSimpleMhaCacheConfig(
-            /*layer_num=*/1, /*block_num=*/4 + module, /*seq_size_per_block=*/1, TYPE_FP16, 1, 64));
-        main.mtp_sub_configs.push_back(main.mergeMTPModule(*draft, module, main.layer_num()));
-    }
+    CacheConfig draft = rtp_llm::test::makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*seq_size_per_block=*/1, TYPE_FP16, 1, 64);
+    main.mtp_sub_configs.push_back(rtp_llm::test::renameMtpModuleTags(std::move(draft.main_config), main.main_config));
     main.finalizeBlockNums(/*baseline_block_num=*/3, rtp_llm::RuntimeConfig{});
     return main;
 }
@@ -152,8 +150,8 @@ TEST(DeviceBlockPoolTest, MultiLayoutMtpConfigUsesMainBlockCountAndGlobalLayerMa
     ASSERT_EQ(cache_config.mtp_sub_configs[0].group("default").block_num, 3u);
     ASSERT_EQ(cache_config.mtp_sub_configs[1].group("default").block_num, 3u);
 
-    auto config = std::make_shared<DeviceBlockPoolConfig>(
-        DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front()));
+    auto config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfigForGroup(
+        cache_config.main_config, cache_config.topology().groups().front()));
     config->use_device_malloc_backing = true;
     ASSERT_EQ(config->physical_block_count, 3u);
     ASSERT_EQ(config->memory_layouts.size(), 3u);

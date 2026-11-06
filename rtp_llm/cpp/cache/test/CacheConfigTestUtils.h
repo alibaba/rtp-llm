@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <numeric>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -187,15 +189,46 @@ inline void setTestGroupPolicies(CacheConfig& config, const std::vector<CacheGro
     config.setTopology(std::move(groups), config.topology().layers());
 }
 
+// Production createConfig renames MTP group tags that collide with the main
+// model. Tests building a draft CacheModuleConfig directly apply the same rule.
+inline CacheModuleConfig renameMtpModuleTags(CacheModuleConfig module_config, const CacheModuleConfig& main_config) {
+    const std::set<std::string>        main_tags(main_config.groupTags().begin(), main_config.groupTags().end());
+    std::map<std::string, std::string> rename_map;
+    auto                               groups = module_config.topology().groups();
+    auto                               layers = module_config.topology().layers();
+    for (auto& group : groups) {
+        if (main_tags.count(group.tag) == 0) {
+            continue;
+        }
+        const std::string old_tag = group.tag;
+        const std::string new_tag = "mtp_" + old_tag;
+        rename_map.emplace(old_tag, new_tag);
+        auto spec  = group.spec->clone();
+        spec->tag  = new_tag;
+        group.spec = std::move(spec);
+        group.tag  = new_tag;
+    }
+    for (auto& layer : layers) {
+        for (auto& tag : layer.group_tags) {
+            const auto it = rename_map.find(tag);
+            if (it != rename_map.end()) {
+                tag = it->second;
+            }
+        }
+    }
+    module_config.setTopology(std::move(groups), std::move(layers));
+    return module_config;
+}
+
 inline size_t explicitPoolReserveBytes(const CacheConfig& config) {
     size_t reserve = 0;
-    if (config.groupNums() == 0) {
-        return reserve;
-    }
-    for (const auto& group : config.groups()) {
-        const auto& policy = group.policy;
-        if (policy.explicit_block_num > 0 && policy.charge_to_paged_budget) {
-            reserve += static_cast<size_t>(group.block_num) * config.blockSizeBytesForGroup(group.tag);
+    for (size_t module_id = 0; module_id < config.moduleCount(); ++module_id) {
+        const auto& module_config = config.moduleConfig(module_id);
+        for (const auto& group : module_config.groups()) {
+            const auto& policy = group.policy;
+            if (policy.explicit_block_num > 0 && policy.charge_to_paged_budget) {
+                reserve += static_cast<size_t>(group.block_num) * module_config.blockSizeBytesForGroup(group.tag);
+            }
         }
     }
     return reserve;

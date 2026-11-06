@@ -44,7 +44,7 @@ void StreamCacheResource::init(int batch_size) {
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
     const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
+                              resource_context_.cache_manager->cacheConfig().allModuleTopologyPtr() :
                               warmupCacheTopology();
     batch_kv_cache_resource_->initGroups(topology);
     resource_released_ = false;
@@ -537,7 +537,7 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
     fake_inited_ = true;
     batch_kv_cache_resource_->resetBatchSize(stream_->maxBatchSize());
     const auto topology = resource_context_.cache_manager ?
-                              resource_context_.cache_manager->cacheConfig().topologyPtr() :
+                              resource_context_.cache_manager->cacheConfig().allModuleTopologyPtr() :
                               warmupCacheTopology();
     batch_kv_cache_resource_->initGroups(topology);
 

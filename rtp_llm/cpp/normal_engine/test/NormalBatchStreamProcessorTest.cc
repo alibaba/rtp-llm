@@ -708,7 +708,7 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
 
     BatchKVCacheResource resource;
     resource.resetBatchSize(2);
-    resource.initGroups(cache_config.topologyPtr());
+    resource.initGroups(cache_config.allModuleTopologyPtr());
     resource.setBatchBlocks(0, "default", {1, 2});
     resource.setBatchBlocks(1, "default", {3, 4});
     resource.setBatchCacheKeys(0, CacheKeysType{101, 102, 103});
@@ -882,7 +882,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMixedGroupBlockWidthsGatherCompleteRo
                     query, model_config, runtime_config, resource_context, nullptr);
                 BatchKVCacheResource resource;
                 resource.resetBatchSize(1);
-                resource.initGroups(resource_config.topologyPtr());
+                resource.initGroups(resource_config.allModuleTopologyPtr());
                 resource.mutableBlockIds(0, "full").assign({10 + batch * 2, NULL_BLOCK_IDX, 11 + batch * 2});
                 resource.mutableBlockIds(0, "swa").assign({20 + batch, 30 + batch, 40 + batch, 50 + batch, 60 + batch});
                 stream->setKVCache(resource);
@@ -1004,7 +1004,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMixedEmptyAndNonEmptyOrdinaryResource
 
     BatchKVCacheResource full_resource;
     full_resource.resetBatchSize(1);
-    full_resource.initGroups(config.topologyPtr());
+    full_resource.initGroups(config.allModuleTopologyPtr());
     full_resource.setBatchBlocks(0, "default", {1, 2, 3});
 
     auto         empty_stream = make_stream(std::move(empty_resource));
@@ -1053,7 +1053,7 @@ TEST_F(NormalBatchStreamProcessorTest, testGatherDistinguishesEmptyAndUnknownGro
     stream->generate_status_->status = StreamState::RUNNING;
     BatchKVCacheResource resource;
     resource.resetBatchSize(1);
-    resource.initGroups(config.topologyPtr());
+    resource.initGroups(config.allModuleTopologyPtr());
     resource.mutableBlockIds(0, "full").assign({7});
     stream->setKVCache(resource);
     StreamGroups groups({stream});
@@ -1067,7 +1067,7 @@ TEST_F(NormalBatchStreamProcessorTest, testGatherDistinguishesEmptyAndUnknownGro
     CacheConfig wrong_config;
     wrong_config.main_config.layer_num = 2;
     wrong_config.fromGroupedSpecs({full, unknown}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::SWA});
-    resource.initGroups(wrong_config.topologyPtr());
+    resource.initGroups(wrong_config.allModuleTopologyPtr());
     resource.mutableBlockIds(0, "full").assign({7});
     stream->setKVCache(resource);
     StreamGroups wrong_groups({stream});
@@ -1151,7 +1151,7 @@ protected:
     void setKvCacheBlocks(const GenerateStreamPtr& stream, std::vector<int> blocks) {
         BatchKVCacheResource kv_cache;
         kv_cache.resetBatchSize(1);
-        kv_cache.initGroups(cache_config_.topologyPtr());
+        kv_cache.initGroups(cache_config_.allModuleTopologyPtr());
         kv_cache.setBatchBlocks(0, "default", blocks);
         stream->setKVCache(kv_cache);
     }
@@ -1191,7 +1191,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query1->input_ids = hostIntBuffer({1});
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(cache_config.topologyPtr());
+    addr1.initGroups(cache_config.allModuleTopologyPtr());
     addr1.setBatchBlocks(0, "default", {1, 2, 3, 4});
     stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
@@ -1204,7 +1204,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     query2->input_ids = hostIntBuffer({1, 2});
     BatchKVCacheResource addr2;
     addr2.resetBatchSize(1);
-    addr2.initGroups(cache_config.topologyPtr());
+    addr2.initGroups(cache_config.allModuleTopologyPtr());
     addr2.setBatchBlocks(0, "default", {5, 6, 7, 8});
     stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
@@ -1216,7 +1216,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
-    addr3.initGroups(cache_config.topologyPtr());
+    addr3.initGroups(cache_config.allModuleTopologyPtr());
     addr3.setBatchBlocks(0, "default", {9, 10});
     stream3->setKVCache(addr3);
 
@@ -1227,7 +1227,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
-    addr4.initGroups(cache_config.topologyPtr());
+    addr4.initGroups(cache_config.allModuleTopologyPtr());
     addr4.setBatchBlocks(0, "default", {11, 12, 13, 14});
     stream4->setKVCache(addr4);
     stream4->setReuseLength(1);
@@ -1428,7 +1428,7 @@ TEST_P(OutputDispatchTest, testSoftmaxProbs) {
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(cache_config.topologyPtr());
+    addr1.initGroups(cache_config.allModuleTopologyPtr());
     addr1.setBatchBlocks(0, "default", {1});
     stream1->setKVCache(addr1);
 
@@ -2214,7 +2214,7 @@ TEST_P(OutputDispatchTest, testLoss) {
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
-    addr1.initGroups(cache_config.topologyPtr());
+    addr1.initGroups(cache_config.allModuleTopologyPtr());
     addr1.setBatchBlocks(0, "default", {1});
     stream1->setKVCache(addr1);
 
@@ -2226,7 +2226,7 @@ TEST_P(OutputDispatchTest, testLoss) {
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
-    addr3.initGroups(cache_config.topologyPtr());
+    addr3.initGroups(cache_config.allModuleTopologyPtr());
     addr3.setBatchBlocks(0, "default", {9});
     stream3->setKVCache(addr3);
 
@@ -2238,7 +2238,7 @@ TEST_P(OutputDispatchTest, testLoss) {
         make_shared<NormalGenerateStream>(query4, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
-    addr4.initGroups(cache_config.topologyPtr());
+    addr4.initGroups(cache_config.allModuleTopologyPtr());
     addr4.setBatchBlocks(0, "default", {11, 12});
     stream4->setKVCache(addr4);
 
@@ -2316,7 +2316,7 @@ TEST_P(OutputDispatchTest, testCustomOutputDispatch) {
         }
         BatchKVCacheResource addr;
         addr.resetBatchSize(stream->currentBatchSize());
-        addr.initGroups(cache_config.topologyPtr());
+        addr.initGroups(cache_config.allModuleTopologyPtr());
         for (int i = 0; i < stream->currentBatchSize(); ++i) {
             addr.setBatchBlocks(i, "default", {1, 2});
         }

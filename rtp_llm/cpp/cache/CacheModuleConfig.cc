@@ -235,7 +235,6 @@ std::string CacheModuleConfig::debugString(size_t indent) const {
     os << indent1 << "# Module Configuration:\n";
     OUTPUT_FIELD_EXPR("dtype", static_cast<int>(dtype));
     OUTPUT_FIELD(layer_num);
-    OUTPUT_FIELD_EXPR("layer_all_num", layer_all_num());
     OUTPUT_FIELD_EXPR("use_mla", (use_mla ? "true" : "false"));
     os << "\n";
 

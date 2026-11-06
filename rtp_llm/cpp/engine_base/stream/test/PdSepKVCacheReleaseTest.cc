@@ -428,7 +428,7 @@ TEST_F(PdSepKVCacheReleaseTest, MalformedGroupIndexRejectsAsyncLoadBeforeConnect
     DecodeGenerateContext        decode_context(rpc_context, 1000, &server_context, reporter, nullptr);
     decode_context.peer_addrs = {"prefill-0"};
     KVCacheResource resource;
-    resource.initGroups(manager->cacheConfig().topologyPtr());
+    resource.initGroups(manager->cacheConfig().allModuleTopologyPtr());
     auto                             holder = std::make_shared<BlockIds>();
     const auto                       tag    = manager->cacheConfig().groupTags().front();
     const std::vector<GroupBlockIds> malformed{{{}, {holder}},
@@ -812,7 +812,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
     auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
         auto resource = std::make_shared<BatchKVCacheResource>();
         resource->resetBatchSize(1);
-        resource->initGroups(manager->cacheConfig().topologyPtr());
+        resource->initGroups(manager->cacheConfig().allModuleTopologyPtr());
         return resource;
     };
     auto makeCompleteTokens = [spb](int seq_len) {
@@ -976,7 +976,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
         auto resource = std::make_shared<BatchKVCacheResource>();
         resource->resetBatchSize(1);
-        resource->initGroups(manager->cacheConfig().topologyPtr());
+        resource->initGroups(manager->cacheConfig().allModuleTopologyPtr());
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -1129,7 +1129,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
         auto resource = std::make_shared<BatchKVCacheResource>();
         resource->resetBatchSize(1);
-        resource->initGroups(manager->cacheConfig().topologyPtr());
+        resource->initGroups(manager->cacheConfig().allModuleTopologyPtr());
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -1273,7 +1273,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
         auto resource = std::make_shared<BatchKVCacheResource>();
         resource->resetBatchSize(1);
-        resource->initGroups(manager->cacheConfig().topologyPtr());
+        resource->initGroups(manager->cacheConfig().allModuleTopologyPtr());
         return resource;
     };
     auto makeCompleteTokens = [spb, block_num](int max_seq_len) {
@@ -1435,7 +1435,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
     // Allocate KV blocks.
     auto resource = std::make_shared<BatchKVCacheResource>();
     resource->resetBatchSize(1);
-    resource->initGroups(manager->cacheConfig().topologyPtr());
+    resource->initGroups(manager->cacheConfig().allModuleTopologyPtr());
 
     auto input              = std::make_shared<GenerateInput>();
     input->input_ids        = torch::arange(input_length, torch::kInt32);

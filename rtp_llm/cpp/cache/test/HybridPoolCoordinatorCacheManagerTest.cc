@@ -409,7 +409,7 @@ static CompleteTokenIdsPtr makeCompleteTokenIds(int batch_size, int seq_length, 
 static BatchKVCacheResourcePtr makeBatchResource(int batch_size, const CacheConfig& config) {
     auto res = std::make_shared<BatchKVCacheResource>();
     res->resetBatchSize(batch_size);
-    res->initGroups(config.topologyPtr());
+    res->initGroups(config.allModuleTopologyPtr());
     return res;
 }
 
@@ -1144,7 +1144,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllLayerCacheBaseExposesPerLayerAn
         EXPECT_EQ(layout.topology().group(group.tag).policy.group_type, group.policy.group_type);
     }
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
-    for (size_t i = 0; i < static_cast<size_t>(config.layer_all_num()); ++i) {
+    for (size_t i = 0; i < static_cast<size_t>(config.layer_num()); ++i) {
         const auto& layer = layout.topology().layer(static_cast<int>(i));
         ASSERT_FALSE(layer.group_tags.empty());
         for (const auto& tag : layer.group_tags) {
@@ -2463,7 +2463,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4ConvertIndexToAddrByTagRoutesT
 
     // CSA layer (compress_ratio=4) -- pick the first one.
     int csa_layer = -1;
-    for (size_t l = 0; l < config.layer_all_num(); ++l) {
+    for (size_t l = 0; l < config.layer_num(); ++l) {
         const auto& tags = config.topology().layer(static_cast<int>(l)).group_tags;
         if (std::find(tags.begin(), tags.end(), "csa_kv") != tags.end()) {
             csa_layer = static_cast<int>(l);
@@ -2496,7 +2496,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4ConvertIndexToBufferByTagAndPa
     ASSERT_TRUE(allocator->init());
 
     int csa_layer = -1;
-    for (size_t l = 0; l < config.layer_all_num(); ++l) {
+    for (size_t l = 0; l < config.layer_num(); ++l) {
         const auto& tags = config.topology().layer(static_cast<int>(l)).group_tags;
         if (std::find(tags.begin(), tags.end(), "csa_kv") != tags.end()) {
             csa_layer = static_cast<int>(l);
@@ -2521,7 +2521,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4AllLayerCacheBaseHasPerGroupTe
     ASSERT_TRUE(allocator->init());
 
     auto layout = allocator->allLayerCacheBase();
-    for (size_t l = 0; l < static_cast<size_t>(config.layer_all_num()); ++l) {
+    for (size_t l = 0; l < static_cast<size_t>(config.layer_num()); ++l) {
         EXPECT_TRUE(layout.group("swa_kv").hasLayer(l)) << "layer " << l << " missing SWA_KV tensor";
     }
     EXPECT_EQ(layout.groups().size(), 7u);
