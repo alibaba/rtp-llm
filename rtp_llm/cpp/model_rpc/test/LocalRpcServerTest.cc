@@ -5,6 +5,7 @@
 #include <future>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -95,6 +96,21 @@ public:
 
     void setEngineForTest(const std::shared_ptr<EngineBase>& engine) {
         engine_ = engine;
+    }
+
+    void configureProfile(int tp_size, int world_size, int world_rank, const std::vector<std::string>& worker_addrs) {
+        auto& parallelism                                        = maga_init_params_.parallelism_config;
+        parallelism.tp_size                                      = tp_size;
+        parallelism.dp_size                                      = world_size / tp_size;
+        parallelism.world_size                                   = world_size;
+        parallelism.world_rank                                   = world_rank;
+        parallelism.tp_rank                                      = world_rank % tp_size;
+        parallelism.dp_rank                                      = world_rank / tp_size;
+        maga_init_params_.runtime_config.world_worker_grpc_addrs = worker_addrs;
+    }
+
+    const BroadcastManager* worldBroadcaster() const {
+        return world_broadcaster_.get();
     }
 
     std::atomic<bool> cancelled{false};
@@ -193,6 +209,245 @@ public:
 private:
     EngineFailureMode mode_;
 };
+
+class RecordingProfileEngine: public FailingEngine {
+public:
+    RecordingProfileEngine(): FailingEngine(EngineFailureMode::REJECT_ALL) {}
+
+    MOCK_METHOD(void, startTimelineProfiling, (const std::string&, int, int), (override));
+};
+
+class RecordingProfileService: public RpcService::Service {
+public:
+    grpc::Status
+    StartProfileInternal(grpc::ServerContext*, const StartProfileInternalRequestPB* request, EmptyPB*) override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            requests_.push_back(*request);
+        }
+        std::this_thread::sleep_for(delay);
+        return status;
+    }
+
+    std::vector<StartProfileInternalRequestPB> requests() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return requests_;
+    }
+
+    grpc::Status              status;
+    std::chrono::milliseconds delay{0};
+
+private:
+    mutable std::mutex                         mutex_;
+    std::vector<StartProfileInternalRequestPB> requests_;
+};
+
+class StartProfileFanoutTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        for (size_t rank = 0; rank < services_.size(); ++rank) {
+            grpc::ServerBuilder builder;
+            int                 port = 0;
+            builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+            builder.RegisterService(&services_[rank]);
+            servers_[rank] = builder.BuildAndStart();
+            ASSERT_NE(servers_[rank], nullptr);
+            ASSERT_GT(port, 0);
+            addresses_.push_back("127.0.0.1:" + std::to_string(port));
+        }
+        request_.set_enable_all_rank(true);
+        request_.set_trace_name("world_profile");
+        request_.set_start_step(7);
+        request_.set_num_steps(20);
+    }
+
+    void TearDown() override {
+        for (auto& server : servers_) {
+            if (server) {
+                server->Shutdown();
+                server->Wait();
+            }
+        }
+    }
+
+    void expectAllWorkersConfigured() const {
+        for (size_t rank = 0; rank < services_.size(); ++rank) {
+            SCOPED_TRACE(rank);
+            const auto requests = services_[rank].requests();
+            ASSERT_EQ(requests.size(), 1);
+            EXPECT_EQ(requests[0].trace_name(), request_.trace_name());
+            EXPECT_EQ(requests[0].start_step(), request_.start_step());
+            EXPECT_EQ(requests[0].num_steps(), request_.num_steps());
+        }
+    }
+
+    std::array<RecordingProfileService, 4>       services_;
+    std::array<std::unique_ptr<grpc::Server>, 4> servers_;
+    std::vector<std::string>                     addresses_;
+    TestLocalRpcServer                           server_;
+    grpc::ServerContext                          context_;
+    StartProfileRequestPB                        request_;
+    EmptyPB                                      response_;
+};
+
+TEST_F(StartProfileFanoutTest, TpOneReachesEveryDpRankFromNonzeroLeader) {
+    server_.configureProfile(/*tp_size=*/1, /*world_size=*/4, /*world_rank=*/2, addresses_);
+    ASSERT_TRUE(server_.StartProfile(&context_, &request_, &response_).ok());
+    expectAllWorkersConfigured();
+}
+
+TEST_F(StartProfileFanoutTest, ReachesAllTpAndDpRanksFromNonzeroLeader) {
+    server_.configureProfile(/*tp_size=*/2, /*world_size=*/4, /*world_rank=*/2, addresses_);
+    ASSERT_TRUE(server_.StartProfile(&context_, &request_, &response_).ok());
+    expectAllWorkersConfigured();
+}
+
+TEST_F(StartProfileFanoutTest, RepeatedRequestsReuseBroadcaster) {
+    server_.configureProfile(/*tp_size=*/2, /*world_size=*/4, /*world_rank=*/2, addresses_);
+    EXPECT_EQ(server_.worldBroadcaster(), nullptr);
+    ASSERT_TRUE(server_.StartProfile(&context_, &request_, &response_).ok());
+    const auto* broadcaster = server_.worldBroadcaster();
+    ASSERT_NE(broadcaster, nullptr);
+
+    request_.set_trace_name("second_profile");
+    ASSERT_TRUE(server_.StartProfile(&context_, &request_, &response_).ok());
+    EXPECT_EQ(server_.worldBroadcaster(), broadcaster);
+    for (const auto& service : services_) {
+        const auto requests = service.requests();
+        ASSERT_EQ(requests.size(), 2);
+        EXPECT_EQ(requests[0].trace_name(), "world_profile");
+        EXPECT_EQ(requests[1].trace_name(), "second_profile");
+    }
+}
+
+TEST_F(StartProfileFanoutTest, ConcurrentFirstRequestsReachEveryWorker) {
+    server_.configureProfile(/*tp_size=*/2, /*world_size=*/4, /*world_rank=*/2, addresses_);
+    std::promise<void>                       start;
+    const auto                               ready = start.get_future().share();
+    std::array<std::future<grpc::Status>, 4> calls;
+    for (auto& call : calls) {
+        call = std::async(std::launch::async, [&] {
+            ready.wait();
+            grpc::ServerContext context;
+            EmptyPB             response;
+            return server_.StartProfile(&context, &request_, &response);
+        });
+    }
+    start.set_value();
+    for (auto& call : calls) {
+        EXPECT_TRUE(call.get().ok());
+    }
+    ASSERT_NE(server_.worldBroadcaster(), nullptr);
+    for (const auto& service : services_) {
+        const auto requests = service.requests();
+        ASSERT_EQ(requests.size(), calls.size());
+        for (const auto& request : requests) {
+            EXPECT_EQ(request.trace_name(), request_.trace_name());
+            EXPECT_EQ(request.start_step(), request_.start_step());
+            EXPECT_EQ(request.num_steps(), request_.num_steps());
+        }
+    }
+}
+
+TEST_F(StartProfileFanoutTest, MissingOrPartialWorldAddressesAreRejectedBeforeFanout) {
+    for (const auto& addresses : {std::vector<std::string>{}, std::vector<std::string>{addresses_[2]}}) {
+        server_.configureProfile(/*tp_size=*/1, /*world_size=*/4, /*world_rank=*/2, addresses);
+        const auto status = server_.StartProfile(&context_, &request_, &response_);
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    }
+    for (const auto& service : services_) {
+        EXPECT_TRUE(service.requests().empty());
+    }
+}
+
+TEST_F(StartProfileFanoutTest, NonTpLeaderIsRejected) {
+    server_.configureProfile(/*tp_size=*/2, /*world_size=*/4, /*world_rank=*/3, addresses_);
+    EXPECT_EQ(server_.StartProfile(&context_, &request_, &response_).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    for (const auto& service : services_) {
+        EXPECT_TRUE(service.requests().empty());
+    }
+}
+
+TEST_F(StartProfileFanoutTest, WorkerFailureIsReturnedWithAddress) {
+    services_[3].status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "injected profiler failure");
+    server_.configureProfile(/*tp_size=*/1, /*world_size=*/4, /*world_rank=*/0, addresses_);
+    const auto status = server_.StartProfile(&context_, &request_, &response_);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_THAT(status.error_message(), HasSubstr(addresses_[3]));
+    EXPECT_THAT(status.error_message(), HasSubstr("injected profiler failure"));
+    expectAllWorkersConfigured();
+    const auto* broadcaster = server_.worldBroadcaster();
+    services_[3].status     = grpc::Status::OK;
+    ASSERT_TRUE(server_.StartProfile(&context_, &request_, &response_).ok());
+    EXPECT_EQ(server_.worldBroadcaster(), broadcaster);
+    for (const auto& service : services_) {
+        EXPECT_EQ(service.requests().size(), 2);
+    }
+}
+
+TEST_F(StartProfileFanoutTest, WorkerDeadlineIsReturnedWithoutThrowing) {
+    services_[3].status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "injected profiler timeout");
+    server_.configureProfile(/*tp_size=*/1, /*world_size=*/4, /*world_rank=*/0, addresses_);
+    const auto status = server_.StartProfile(&context_, &request_, &response_);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_THAT(status.error_message(), HasSubstr(addresses_[3]));
+    expectAllWorkersConfigured();
+}
+
+TEST_F(StartProfileFanoutTest, UnresponsiveWorkerHasBoundedDeadline) {
+    services_[3].delay = std::chrono::milliseconds(3500);
+    server_.configureProfile(/*tp_size=*/1, /*world_size=*/4, /*world_rank=*/0, addresses_);
+    const auto start   = std::chrono::steady_clock::now();
+    const auto status  = server_.StartProfile(&context_, &request_, &response_);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_THAT(status.error_message(), HasSubstr(addresses_[3]));
+    EXPECT_GE(elapsed, std::chrono::milliseconds(2800));
+    EXPECT_LT(elapsed, std::chrono::seconds(5));
+    expectAllWorkersConfigured();
+}
+
+TEST_F(StartProfileFanoutTest, DisabledFanoutOnlyConfiguresLocalEngine) {
+    auto engine = std::make_shared<RecordingProfileEngine>();
+    server_.setEngineForTest(engine);
+    server_.configureProfile(/*tp_size=*/2, /*world_size=*/4, /*world_rank=*/3, addresses_);
+    request_.set_enable_all_rank(false);
+    EXPECT_CALL(*engine, startTimelineProfiling("world_profile", 7, 20)).Times(1);
+    ASSERT_TRUE(server_.StartProfile(&context_, &request_, &response_).ok());
+    EXPECT_EQ(server_.worldBroadcaster(), nullptr);
+    for (const auto& service : services_) {
+        EXPECT_TRUE(service.requests().empty());
+    }
+}
+
+TEST(StartProfileTest, StandaloneWithoutWorldAddressesConfiguresLocalEngine) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<RecordingProfileEngine>();
+    server.setEngineForTest(engine);
+    server.configureProfile(/*tp_size=*/1, /*world_size=*/1, /*world_rank=*/0, {});
+    grpc::ServerContext   context;
+    StartProfileRequestPB request;
+    request.set_enable_all_rank(true);
+    request.set_trace_name("standalone");
+    request.set_num_steps(3);
+    EmptyPB response;
+    EXPECT_CALL(*engine, startTimelineProfiling("standalone", 0, 3)).Times(1);
+    EXPECT_TRUE(server.StartProfile(&context, &request, &response).ok());
+}
+
+TEST(StartProfileTest, InternalRequestConfiguresLocalEngine) {
+    TestLocalRpcServer server;
+    auto               engine = std::make_shared<RecordingProfileEngine>();
+    server.setEngineForTest(engine);
+    grpc::ServerContext           context;
+    StartProfileInternalRequestPB request;
+    request.set_trace_name("world_profile");
+    request.set_start_step(7);
+    request.set_num_steps(20);
+    EmptyPB response;
+    EXPECT_CALL(*engine, startTimelineProfiling("world_profile", 7, 20)).Times(1);
+    EXPECT_TRUE(server.StartProfileInternal(&context, &request, &response).ok());
+}
 
 class RecordingWriter: public LocalRpcServer::WriterInterface {
 public:

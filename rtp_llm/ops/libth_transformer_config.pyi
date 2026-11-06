@@ -1704,7 +1704,7 @@ class RuntimeConfig:
     model_warm_up: bool
     worker_addrs: list[str]
     worker_grpc_addrs: list[str]
-    shutdown_worker_grpc_addrs: list[str]
+    world_worker_grpc_addrs: list[str]
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

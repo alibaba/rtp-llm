@@ -21,6 +21,7 @@
 #include <limits>
 #include <memory>
 #include <pybind11/embed.h>
+#include <set>
 
 namespace py = pybind11;
 
@@ -32,6 +33,47 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+TEST_F(NormalEngineTest, testExecuteStepPersistsAcrossProfilerWindows) {
+    class NoopExecutor: public Executor {
+    public:
+        absl::Status process(const std::list<GenerateStreamPtr>&, int64_t) override {
+            return absl::OkStatus();
+        }
+    };
+
+    auto engine = createMockEngine(CustomConfig{});
+    ASSERT_TRUE(engine->stop().ok());
+    engine->executor_                  = std::make_unique<NoopExecutor>();
+    engine->parallelism_config.tp_rank = 1;  // Enter process without waiting for the scheduler.
+    // Twenty years at one step per millisecond; also verifies formatting beyond 32 bits.
+    constexpr int64_t twenty_year_steps = 631152000000;
+    engine->execute_step_               = twenty_year_steps;
+
+    namespace tap = torch::autograd::profiler;
+    for (int64_t window = 0; window < 2; ++window) {
+        ASSERT_FALSE(at::hasCallbacks());
+        ASSERT_TRUE(engine->step().ok());
+        EXPECT_EQ(engine->execute_step_, twenty_year_steps + window * 2 + 1);
+
+        tpi::ProfilerConfig               config(tpi::ProfilerState::KINETO, /*report_input_shapes=*/false);
+        const std::set<tpi::ActivityType> activities{tpi::ActivityType::CPU};
+        tap::prepareProfiler(config, activities);
+        tap::enableProfiler(config, activities);
+        EXPECT_TRUE(engine->step().ok());
+        auto result = tap::disableProfiler();
+
+        std::vector<std::string> execute_events;
+        for (const auto& event : result->events()) {
+            if (event.name().find("engine.normal.execute(") == 0) {
+                execute_events.push_back(event.name());
+            }
+        }
+        EXPECT_EQ(execute_events,
+                  std::vector<std::string>{"engine.normal.execute(step="
+                                           + std::to_string(twenty_year_steps + window * 2 + 2) + ",stream_size=0)"});
+    }
+}
 
 TEST_F(NormalEngineTest, testExecutorDecodesCopyRowsUsingPayloadTags) {
     class CopyPayloadProcessor: public NormalBatchStreamProcessor {

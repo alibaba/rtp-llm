@@ -779,6 +779,7 @@ class FrontendApp(object):
             return result
 
         # request format: '{"trace_name":"normal_profiler", "start_step": 0, "num_steps": 3, "enable_all_rank": false}'
+        # enable_all_rank reaches all TP/DP workers. Each worker counts start_step locally.
         @app.post("/rtp_llm/start_profile")
         @app.post("/start_profile")
         async def start_profile(

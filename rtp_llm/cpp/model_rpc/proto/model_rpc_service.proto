@@ -586,6 +586,8 @@ message StartProfileRequestPB {
     string trace_name = 1;
     int32 start_step = 2;
     int32 num_steps = 3;
+    // Notify all world ranks (TP and DP) via the receiving TP leader.
+    // start_step is counted locally; this does not synchronize execution steps.
     bool enable_all_rank = 4;
 }
 

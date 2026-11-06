@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include "absl/status/status.h"
@@ -100,6 +101,8 @@ private:
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;
+    // Engine-loop counter; advances even when profiling is disabled and never resets between captures.
+    int64_t                                       execute_step_ = 0;
     int                                           reserve_step_ = 0;
 };
 
