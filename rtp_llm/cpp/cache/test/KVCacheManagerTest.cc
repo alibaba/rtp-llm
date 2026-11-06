@@ -3000,6 +3000,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     std::vector<SwaCachedSlotSnapshot> swa_cached_before;
     std::vector<size_t>                swa_group_set_ids;
     {
+        const auto  cache_lock = BlockTreeCacheTestPeer::lockForTest(*manager->blockTreeCache());
         const auto& group_sets = manager->blockTreeCache()->groupSets();
         const auto  find_a     = manager->blockTreeCache()->tree()->findNode(keys_a);
         const auto  find_b     = manager->blockTreeCache()->tree()->findNode(keys_b);
@@ -3057,6 +3058,8 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     // resource is older than every surviving one within its group set), and
     // surviving slots keep their exact device blocks.
     {
+        // Keep borrowed slot pointers stable while deferred watermark work runs.
+        const auto cache_lock          = BlockTreeCacheTestPeer::lockForTest(*manager->blockTreeCache());
         auto current_device_slot = [&](const SwaCachedSlotSnapshot& snapshot) -> const GroupSetResource* {
             const auto path = manager->blockTreeCache()->tree()->findNode(snapshot.path_keys);
             if (path.size() != snapshot.path_keys.size()) {
