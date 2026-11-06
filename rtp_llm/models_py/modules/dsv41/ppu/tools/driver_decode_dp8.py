@@ -198,9 +198,10 @@ def worker_main(args: argparse.Namespace) -> int:
     # The repository root is already on sys.path (the module-level bootstrap
     # above covers the plain-script worker spawn); import the heavy pieces
     # only inside the worker process.
+    from datetime import timedelta
+
     import torch
     import torch.distributed as dist
-    from datetime import timedelta
 
     rank = int(os.environ["RANK"])
     world = int(os.environ["WORLD_SIZE"])
@@ -235,7 +236,14 @@ def worker_main(args: argparse.Namespace) -> int:
         config = json.load(handle)
     geometry = V41Geometry.from_config(config)
     ep_size = args.nproc
-    ops = PPUOps(
+    ops_cls = PPUOps
+    if os.environ.get("RTP_V41_TEST_MHC_VALIDATE") == "1":
+        from rtp_llm.models_py.modules.dsv41.ppu.test.test_mhc_mega_integration import (
+            ValidatedPPUOps,
+        )
+
+        ops_cls = ValidatedPPUOps
+    ops = ops_cls(
         ep_rank=rank,
         ep_size=ep_size,
         num_routed_experts=geometry.n_routed_experts,
@@ -391,7 +399,6 @@ def worker_main(args: argparse.Namespace) -> int:
 
 def _local_prefill(args, rank, world, geometry, core, device):
     import torch
-
     from rtp_llm.models_py.modules.dsv41.ppu.decode import wire_decode
 
     # ---- prefill phase: every rank prefills its scenario request count (at
@@ -479,7 +486,6 @@ def _run_decode(
 ):
     import torch
     import torch.distributed as dist
-
     from rtp_llm.models_py.modules.dsv41.ppu.dp_coord import (
         DPStepCoordinator,
         OwnerRouter,
@@ -692,6 +698,7 @@ def _run_decode(
     payload = {
         "rank": rank,
         "moe": ops.moe_engine.execution_stats(),
+        "mhc": ops.mhc_execution_stats(),
         "world_size": world,
         "device": str(device),
         "scenario": args.scenario,
@@ -766,9 +773,8 @@ def _prepare_config(args) -> str:
         return out
     cache_path = Path(args.output).resolve().parent / "engram_token_map.json"
     if not cache_path.is_file():
-        from transformers import AutoTokenizer
-
         from rtp_llm.models_py.modules.dsv41.ppu.engram import compressed_vocab_map
+        from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(
             args.checkpoint_path, trust_remote_code=True

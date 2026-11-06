@@ -1136,20 +1136,43 @@ def run_prefill(
         )
         attn_branch = layer.wo_b(projected.reshape(tokens, -1))
 
-        step_attn_post = ops.mhc(residual, attn_branch, phase="post", state=step_attn)
-        h = step_attn_post.hidden
-
-        # ---- FFN sublayer (MoE).
-        residual = h
-        step_ffn = ops.mhc(
-            residual,
-            None,
-            phase="pre",
-            parameters=layer.mhc_parameters("ffn"),
-            state=prev_mix,
+        transition = (
+            ops.try_mhc_ffn_transition(
+                attn_branch,
+                residual,
+                step_attn,
+                layer.mhc_parameters("ffn"),
+                layer.ffn_norm,
+                geometry.norm_eps,
+                phase=(
+                    "prefill"
+                    if not capture_layer_ids
+                    and not policy.ced
+                    and not policy.bounded_replay
+                    else "prefill_replay"
+                ),
+            )
+            if hasattr(ops, "try_mhc_ffn_transition")
+            else None
         )
+        if transition is None:
+            step_attn_post = ops.mhc(
+                residual, attn_branch, phase="post", state=step_attn
+            )
+            residual = step_attn_post.hidden
+            step_ffn = ops.mhc(
+                residual,
+                None,
+                phase="pre",
+                parameters=layer.mhc_parameters("ffn"),
+                state=prev_mix,
+            )
+            x_ffn = _rms_norm(step_ffn.hidden, layer.ffn_norm, geometry.norm_eps)
+        else:
+            residual = transition.residual
+            step_ffn = transition
+            x_ffn = transition.normalized
         prev_mix = step_ffn
-        x_ffn = _rms_norm(step_ffn.hidden, layer.ffn_norm, geometry.norm_eps)
 
         ids, route_weights = sqrtsoftplus_gate(
             x_ffn,

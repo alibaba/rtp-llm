@@ -122,7 +122,6 @@ def _make_enpm_group(args):
     for CPU multi-process runs."""
     import torch
     import torch.distributed as dist
-
     from rtp_llm.models_py.modules.dsv41.ppu.engram import DistributedEnpmGroup
 
     if args.device == "cuda":
@@ -138,8 +137,8 @@ def _make_enpm_group(args):
 
 
 def worker_main(args: argparse.Namespace) -> int:
-    from datetime import timedelta
     import sys as _sys
+    from datetime import timedelta
 
     # The self-spawned workers run this file directly (no ``-m``), so the
     # repository root is not on sys.path.
@@ -208,7 +207,14 @@ def worker_main(args: argparse.Namespace) -> int:
         ep_backend = args.ep_backend or ("sim" if args.device == "cpu" else "deepep")
     load_start = time.time()
     enpm_group = _make_enpm_group(args)
-    ops = PPUOps(
+    ops_cls = PPUOps
+    if os.environ.get("RTP_V41_TEST_MHC_VALIDATE") == "1":
+        from rtp_llm.models_py.modules.dsv41.ppu.test.test_mhc_mega_integration import (
+            ValidatedPPUOps,
+        )
+
+        ops_cls = ValidatedPPUOps
+    ops = ops_cls(
         ep_rank=rank,
         ep_size=world_size,
         num_routed_experts=geometry.n_routed_experts,
@@ -360,6 +366,7 @@ def worker_main(args: argparse.Namespace) -> int:
     payload = {
         "rank": rank,
         "moe": ops.moe_engine.execution_stats(),
+        "mhc": ops.mhc_execution_stats(),
         "world_size": world_size,
         "device": str(device),
         "tokens": int(full_ids.numel()),

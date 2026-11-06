@@ -13,6 +13,11 @@ export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
 export PYTHONPATH="$v41_source:${PYTHONPATH:-}"
 
+if [[ "$v41_role" == s5-kernel-surface ]]; then
+    # The normal runtime_identity package import queries device availability.
+    # This direct script validates the same snapshot with standard-library IO.
+    exec "$v41_python" -B rtp_llm/models_py/modules/dsv41/ppu/test/test_mhc_mega_probe.py --mode surface
+fi
 "$v41_python" -B -c 'from rtp_llm.models_py.modules.dsv41.ppu.pd_handoff import runtime_identity; print(runtime_identity())'
 if [[ "$v41_role" == moe-device ]]; then
     export RTP_V41_TEST_W4A8_DEVICE=1
@@ -28,6 +33,12 @@ fi
 if [[ "$v41_role" == graph-cache-device ]]; then
     export RTP_V41_TEST_GRAPH_DEVICE=1
     exec "$v41_python" -B -m unittest rtp_llm.models_py.modules.dsv41.ppu.test.test_graph_cache
+fi
+if [[ "$v41_role" == s5-mhc-mega ]]; then
+    exec "$v41_python" -B rtp_llm/models_py/modules/dsv41/ppu/test/test_mhc_mega_probe.py --mode mhc-mega "${@:2}"
+fi
+if [[ "$v41_role" == mhc-integration ]]; then
+    exec "$v41_python" -B -m unittest rtp_llm.models_py.modules.dsv41.ppu.test.test_mhc_mega_integration
 fi
 : "${RTP_V41_TEST_CHECKPOINT:?checkpoint directory required}"
 if [[ "$v41_role" == graph-fidelity ]]; then

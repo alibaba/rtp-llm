@@ -1,6 +1,19 @@
 package(default_visibility = ["//visibility:public"])
 
 sh_test(
+    name = "mhc_mega_integration_test",
+    srcs = ["//example/deepseek_v41/ppu:test_functional.sh"],
+    args = ["mhc-integration"],
+    env = {"GPU_COUNT": "1", "RTP_V41_TEST_MHC_DEVICE": "1"},
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "long",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+sh_test(
     name = "dspark_contract_test",
     srcs = ["run_dspark_contracts.sh"],
     env = {"GPU_COUNT": "0"},
@@ -94,6 +107,32 @@ sh_test(
         "GPU_COUNT": "1",
         "RTP_V41_TEST_W4A8_DEVICE": "1",
     },
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "long",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+sh_test(
+    name = "s5_kernel_surface_probe_test",
+    srcs = ["//example/deepseek_v41/ppu:test_functional.sh"],
+    args = ["s5-kernel-surface"],
+    env = {"GPU_COUNT": "0"},
+    tags = ["manual", "PPU-ZW890P"],
+    timeout = "long",
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+sh_test(
+    name = "s5_mhc_mega_probe_test",
+    srcs = ["//example/deepseek_v41/ppu:test_functional.sh"],
+    args = ["s5-mhc-mega"],
+    env = {"GPU_COUNT": "1"},
     tags = ["manual", "PPU-ZW890P"],
     timeout = "long",
     target_compatible_with = select({

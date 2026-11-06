@@ -53,7 +53,6 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
-
 from rtp_llm.models_py.modules.dsv41.backend import (
     V41QuantizedTensor,
     V41StepContext,
@@ -673,32 +672,47 @@ class DecodeStepOrchestrator:
         )
         attn_branch = layer.wo_b(projected.reshape(tokens, -1))
 
-        step_attn_post = self.ops.mhc(
-            residual,
-            attn_branch,
-            phase="post",
-            parameters=layer.mhc_parameters("attn"),
-            context=context,
-            state=step_attn,
+        transition = (
+            self.ops.try_mhc_ffn_transition(
+                attn_branch,
+                residual,
+                step_attn,
+                layer.mhc_parameters("ffn"),
+                layer.ffn_norm,
+                geometry.norm_eps,
+                phase="decode" if not self.capture_layer_ids else "target_capture",
+            )
+            if hasattr(self.ops, "try_mhc_ffn_transition")
+            else None
         )
-        h = step_attn_post.hidden
-
-        # ---- FFN sublayer: mHC pre -> norm -> router -> MoE + shared ----------
-        residual = h
-        step_ffn = self.ops.mhc(
-            residual,
-            None,
-            phase="pre",
-            parameters=layer.mhc_parameters("ffn"),
-            context=context,
-            state=prev_mix,
-        )
+        if transition is None:
+            step_attn_post = self.ops.mhc(
+                residual,
+                attn_branch,
+                phase="post",
+                parameters=layer.mhc_parameters("attn"),
+                context=context,
+                state=step_attn,
+            )
+            residual = step_attn_post.hidden
+            step_ffn = self.ops.mhc(
+                residual,
+                None,
+                phase="pre",
+                parameters=layer.mhc_parameters("ffn"),
+                context=context,
+                state=prev_mix,
+            )
+            x_ffn = _rms_norm(
+                step_ffn.hidden.reshape(-1, geometry.hidden_size),
+                layer.ffn_norm,
+                geometry.norm_eps,
+            )
+        else:
+            residual = transition.residual
+            step_ffn = transition
+            x_ffn = transition.normalized
         prev_mix = step_ffn
-        x_ffn = _rms_norm(
-            step_ffn.hidden.reshape(-1, geometry.hidden_size),
-            layer.ffn_norm,
-            geometry.norm_eps,
-        )
 
         ids, route_weights = sqrtsoftplus_gate(
             x_ffn,

@@ -16,7 +16,6 @@ from __future__ import annotations
 from typing import Mapping, Optional, Tuple
 
 import torch
-
 from rtp_llm.models_py.modules.dsv41.backend import (
     V41BackendOps,
     V41MHCResult,
@@ -37,6 +36,7 @@ from .kv_codec import decode_kv as _decode_kv
 from .kv_codec import encode_kv as _encode_kv
 from .linear import PPUResidentBF16Linear, dequant_fp8_block32_ue8m0
 from .mhc import PPUMHC, MHCConfig, PPUStepMix
+from .mhc_mega import PPUMegaMHC
 from .moe import (
     PPUMoE,
     combine_routed_and_shared,
@@ -83,6 +83,7 @@ class PPUOps(V41BackendOps):
             group=deepep_group,
         )
         self._mhc = PPUMHC(mhc_config)
+        self._mega_mhc = PPUMegaMHC()
         self._enpm_group = enpm_group
         self._engram: dict[int, Tuple[HostShard, EngramShardLayout, object]] = {}
         self._sm_scale = sm_scale
@@ -264,6 +265,24 @@ class PPUOps(V41BackendOps):
             context=context,
             state=state,
         )
+
+    def try_mhc_ffn_transition(
+        self, branch, residual, state, parameters, norm, eps, *, phase
+    ):
+        """PPU-only seam; normalized output is separate from legacy mHC.hidden."""
+        return self._mega_mhc.try_transition(
+            branch,
+            residual,
+            state,
+            parameters,
+            norm,
+            eps,
+            self._mhc.config,
+            phase=phase,
+        )
+
+    def mhc_execution_stats(self):
+        return self._mega_mhc.execution_stats()
 
 
 # Model-side helpers re-exported for the L2/L3 wiring convenience; the ops
