@@ -185,6 +185,8 @@ struct KVCacheConfig {
     int64_t                                 disk_cache_size_mb                              = 0;
     bool                                    disk_cache_buffered_io                          = true;
     int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
+    // Evict/store override; -1 inherits the load timeout above.
+    int64_t                                 disk_cache_evict_timeout_ms                     = -1;
     int64_t                                 disk_cache_staging_block_count                  = 128;
     int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
     int64_t                                 block_tree_transfer_worker_count                = 4;

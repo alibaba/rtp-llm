@@ -17,18 +17,23 @@ class KVCacheConfigPickleTest(TestCase):
         config.block_tree_transfer_worker_count = 7
         config.enable_disk_cache = True
         config.disk_cache_paths = "/tmp/cache"
+        config.disk_cache_sync_timeout_ms = 200
+        config.disk_cache_evict_timeout_ms = 45000
+        config.kvcm_task_timeout_ms = 23000
         for name, value in BASE_EVENT_FIELD_VALUES.items():
             setattr(config, name, value)
         for enable_crc in (False, True):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 85)
-                self.assertEqual(state[:2], ("KVCacheConfig", 13))
+                self.assertEqual(len(state), 86)
+                self.assertEqual(state[:2], ("KVCacheConfig", 14))
                 self.assertEqual(
                     state[64:69], tuple(BASE_EVENT_FIELD_VALUES.values())
                 )
                 self.assertIs(state[69], enable_crc)
+                self.assertEqual(state[80], 23000)
+                self.assertEqual(state[85], 45000)
                 # Normalizing old fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -40,6 +45,9 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
                 self.assertTrue(restored.enable_disk_cache)
                 self.assertEqual(restored.disk_cache_paths, "/tmp/cache")
+                self.assertEqual(restored.disk_cache_sync_timeout_ms, 200)
+                self.assertEqual(restored.disk_cache_evict_timeout_ms, 45000)
+                self.assertEqual(restored.kvcm_task_timeout_ms, 23000)
                 for name, value in BASE_EVENT_FIELD_VALUES.items():
                     self.assertEqual(getattr(restored, name), value, name)
                 self.assertIn(f"enable_crc: {int(enable_crc)}\n", restored.to_string())
@@ -74,6 +82,43 @@ class KVCacheConfigPickleTest(TestCase):
         defaults = KVCacheConfig()
         for name in EVENT_PICKLE_FIELDS:
             self.assertEqual(getattr(restored, name), getattr(defaults, name), name)
+
+    def test_disk_timeout_defaults_and_overrides_survive_worker_round_trips(self):
+        self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 30000)
+        self.assertEqual(KVCacheConfig().disk_cache_evict_timeout_ms, -1)
+        for eviction_timeout in (-1, 45000):
+            with self.subTest(eviction_timeout=eviction_timeout):
+                config = KVCacheConfig()
+                config.disk_cache_sync_timeout_ms = 200
+                config.disk_cache_evict_timeout_ms = eviction_timeout
+                config.kvcm_task_timeout_ms = 23000
+                for _ in range(2):
+                    config = pickle.loads(pickle.dumps(config))
+                    self.assertEqual(config.disk_cache_sync_timeout_ms, 200)
+                    self.assertEqual(
+                        config.disk_cache_evict_timeout_ms, eviction_timeout
+                    )
+                    self.assertEqual(config.kvcm_task_timeout_ms, 23000)
+
+    def test_older_versions_inherit_the_disk_load_timeout_for_eviction(self):
+        source = KVCacheConfig()
+        source.disk_cache_sync_timeout_ms = 4321
+        source.disk_cache_evict_timeout_ms = 45000
+        source.kvcm_task_timeout_ms = 23000
+        source.linear_pool_avg_prompt_tokens = 100_000
+        state = source.__getstate__()
+        for version, size in ((12, 84), (13, 85)):
+            with self.subTest(version=version):
+                previous = (state[0], version, *state[2:size])
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__(previous)
+                self.assertEqual(restored.disk_cache_sync_timeout_ms, 4321)
+                self.assertEqual(restored.disk_cache_evict_timeout_ms, -1)
+                self.assertEqual(restored.kvcm_task_timeout_ms, 23000)
+                self.assertEqual(
+                    restored.linear_pool_avg_prompt_tokens,
+                    -1 if version == 12 else 100_000,
+                )
 
     def test_tail_and_pool_configuration_survives_worker_round_trips(self):
         config = KVCacheConfig()
@@ -115,7 +160,7 @@ class KVCacheConfigPickleTest(TestCase):
         legacy.__setstate__((state[0], 12, *state[2:84]))
         self.assertEqual(legacy.linear_pool_avg_prompt_tokens, -1)
         disabled = KVCacheConfig.__new__(KVCacheConfig)
-        disabled.__setstate__((*state[:84], 0))
+        disabled.__setstate__((state[0], 13, *state[2:84], 0))
         self.assertEqual(disabled.linear_pool_avg_prompt_tokens, -1)
 
     def test_pool_settings_round_trip_and_version10_defaults(self):
@@ -161,6 +206,8 @@ class KVCacheConfigPickleTest(TestCase):
             state[:-1],
             state + ("extra",),
             (state[0], 99, *state[2:]),
+            (state[0], 12, *state[2:]),
+            (state[0], 13, *state[2:]),
             ("OtherConfig", *state[1:]),
         ):
             with self.subTest(state=malformed), self.assertRaisesRegex(

@@ -264,6 +264,47 @@ class CacheConfigArgumentsTest(TestCase):
             parser.parse_args(None if use_sys_argv else args)
         return config
 
+    def test_disk_timeouts_support_independent_env_and_cli_overrides(self):
+        cases = (
+            ([], {}, (30000, -1)),
+            ([], {"DISK_CACHE_SYNC_TIMEOUT_MS": "4321"}, (4321, -1)),
+            (
+                [],
+                {
+                    "DISK_CACHE_SYNC_TIMEOUT_MS": "200",
+                    "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
+                },
+                (200, 45000),
+            ),
+            (
+                ["--disk_cache_sync_timeout_ms", "100"],
+                {
+                    "DISK_CACHE_SYNC_TIMEOUT_MS": "200",
+                    "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
+                },
+                (100, 45000),
+            ),
+            (
+                ["--disk_cache_evict_timeout_ms", "60000"],
+                {
+                    "DISK_CACHE_SYNC_TIMEOUT_MS": "200",
+                    "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
+                },
+                (200, 60000),
+            ),
+        )
+        for args, env, expected in cases:
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                config = pickle.loads(pickle.dumps(config))
+                self.assertEqual(
+                    (
+                        config.disk_cache_sync_timeout_ms,
+                        config.disk_cache_evict_timeout_ms,
+                    ),
+                    expected,
+                )
+
     def test_crc_default_and_environment(self):
         for args in (None, []):
             for env, expected in (
