@@ -177,6 +177,11 @@ def _forward_worker_setup():
     @functools.wraps(previous)
     def runtime_env():
         result=previous()
+        # rLLM forwards CUDA_* by default. A CPU coordinator legitimately has
+        # CUDA_VISIBLE_DEVICES='', which must never become a job/actor mask.
+        # Keep the real process mask unchanged; Ray owns worker assignment.
+        result.setdefault('env_vars',{}).pop('CUDA_VISIBLE_DEVICES',None)
+        result['env_vars'].pop('RLLM_EXCLUDE',None)
         if result.get('worker_process_setup_hook') not in (None,'install_rtp_bridge.worker_setup',
                                                          'qwen38_final_policy.worker_setup'):
             raise RuntimeError('An unreviewed worker hook cannot be overwritten')
@@ -191,6 +196,12 @@ def worker_setup():
     # A Raylet may have inherited the deprecated alias even when the current
     # driver has unset it. Remove it before either bridge or Torch imports.
     os.environ.pop('PYTORCH_CUDA_ALLOC_CONF',None)
+    # This documented control is process-local and is deliberately not
+    # forwarded by rLLM. Reapply it in every passive setup hook so original
+    # function aliases used inside the CPU TaskRunner also exclude the mask.
+    excluded=[name.strip() for name in os.environ.get('RLLM_EXCLUDE','').split(',') if name.strip()]
+    if 'CUDA_VISIBLE_DEVICES' not in excluded:excluded.append('CUDA_VISIBLE_DEVICES')
+    os.environ['RLLM_EXCLUDE']=','.join(excluded)
     if (os.environ.get('RTP_LLM_RL_WORLD72')=='1'
             and os.environ.get('PYTORCH_ALLOC_CONF')!='backend:native,expandable_segments:False'):
         raise RuntimeError('World72 CUDA IPC requires explicit PYTORCH_ALLOC_CONF=backend:native,expandable_segments:False')

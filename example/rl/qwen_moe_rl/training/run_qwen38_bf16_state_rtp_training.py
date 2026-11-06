@@ -41,6 +41,10 @@ def forward_worker_environment(runtime,environ):
             env[name]=value
     if 'PYTORCH_ALLOC_CONF' in environ:
         env.pop('PYTORCH_CUDA_ALLOC_CONF',None)
+    # The original rLLM runtime may already contain CUDA_VISIBLE_DEVICES from
+    # its CUDA_* forwarding prefix; never serialize a CPU driver's empty mask.
+    env.pop('CUDA_VISIBLE_DEVICES',None)
+    env.pop('RLLM_EXCLUDE',None)
     return runtime
 
 
