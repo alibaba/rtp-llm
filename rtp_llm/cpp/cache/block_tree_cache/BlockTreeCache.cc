@@ -37,7 +37,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
         *metrics_reporter_,
         mutex_,
         config_.host_cache_sync_timeout_ms,
-        config_.disk_cache_sync_timeout_ms,
+        config_.disk_cache_evict_timeout_ms,
         config_.max_descriptors_per_transfer_batch,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
         [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
@@ -59,7 +59,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
             *metrics_reporter_,
             mutex_,
             config_.host_cache_sync_timeout_ms,
-            config_.disk_cache_sync_timeout_ms,
+            config_.disk_cache_evict_timeout_ms,
             storage_backend_,
             [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }) {
     if (storage_backend_)

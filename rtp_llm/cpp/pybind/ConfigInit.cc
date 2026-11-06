@@ -476,6 +476,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disk_cache_read_thread_count", &KVCacheConfig::disk_cache_read_thread_count)
         .def_readwrite("disk_cache_write_thread_count", &KVCacheConfig::disk_cache_write_thread_count)
         .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
+        .def_readwrite("disk_cache_evict_timeout_ms", &KVCacheConfig::disk_cache_evict_timeout_ms)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
         .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
@@ -582,7 +583,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      13,
+                                      14,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -668,9 +669,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.btc_crc_slot_count,
                                       self.btc_transfer_engine_async,
                                       self.disk_cache_read_thread_count,
-                                      self.disk_cache_write_thread_count);
+                                      self.disk_cache_write_thread_count,
+                                      self.disk_cache_evict_timeout_ms);
             },
             [](py::tuple t) {
+                const py::tuple disk_timeout_state = t;
+                const bool has_disk_timeout =
+                    t.size() == 89 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 14;
+                if (has_disk_timeout) {
+                    t = t[py::slice(0, 88, 1)].cast<py::tuple>();
+                    t[1] = py::int_(13);
+                }
                 const py::tuple backend_state = t;
                 const bool      has_async_fields =
                     t.size() == 88 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 13;
@@ -738,6 +747,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_disk_timeout) {
+                    c.disk_cache_evict_timeout_ms = disk_timeout_state[88].cast<int64_t>();
+                }
                 if (has_async_fields) {
                     c.btc_crc_slot_count            = backend_state[84].cast<int64_t>();
                     c.btc_transfer_engine_async     = backend_state[85].cast<bool>();

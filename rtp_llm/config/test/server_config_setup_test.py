@@ -239,6 +239,7 @@ class GenerateConfigTest(TestCase):
             "DISK_CACHE_READ_THREAD_COUNT": "3",
             "DISK_CACHE_WRITE_THREAD_COUNT": "5",
             "DISK_CACHE_SYNC_TIMEOUT_MS": "12345",
+            "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
             "DISK_CACHE_STAGING_BLOCK_COUNT": "8",
             "ENABLE_MEMORY_CACHE": "1",
             "MEMORY_CACHE_SIZE_MB": "2048",
@@ -269,6 +270,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.disk_cache_read_thread_count, 3)
         self.assertEqual(config.disk_cache_write_thread_count, 5)
         self.assertEqual(config.disk_cache_sync_timeout_ms, 12345)
+        self.assertEqual(config.disk_cache_evict_timeout_ms, 45000)
         self.assertEqual(config.disk_cache_staging_block_count, 8)
         self.assertTrue(config.enable_memory_cache)
         self.assertEqual(config.memory_cache_size_mb, 2048)
@@ -560,8 +562,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 88)
-        self.assertEqual(state[:2], ("KVCacheConfig", 13))
+        self.assertEqual(len(state), 89)
+        self.assertEqual(state[:2], ("KVCacheConfig", 14))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)

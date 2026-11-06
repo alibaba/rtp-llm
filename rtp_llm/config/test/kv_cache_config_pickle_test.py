@@ -28,8 +28,8 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 88)
-                self.assertEqual(state[:2], ("KVCacheConfig", 13))
+                self.assertEqual(len(state), 89)
+                self.assertEqual(state[:2], ("KVCacheConfig", 14))
                 self.assertEqual(state[64:69], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[69], enable_crc)
                 self.assertEqual(state[84:88], (3, False, 3, 5))
@@ -120,7 +120,41 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertTrue(restored.btc_transfer_engine_async)
         self.assertEqual(restored.disk_cache_read_thread_count, 16)
         self.assertEqual(restored.disk_cache_write_thread_count, 16)
-        self.assertEqual(restored.__getstate__()[:2], ("KVCacheConfig", 13))
+        self.assertEqual(restored.__getstate__()[:2], ("KVCacheConfig", 14))
+
+    def test_disk_timeout_defaults_and_overrides_survive_worker_round_trips(self):
+        self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 30000)
+        self.assertEqual(KVCacheConfig().disk_cache_evict_timeout_ms, -1)
+        for eviction_timeout in (-1, 45000):
+            with self.subTest(eviction_timeout=eviction_timeout):
+                config = KVCacheConfig()
+                config.disk_cache_sync_timeout_ms = 200
+                config.disk_cache_evict_timeout_ms = eviction_timeout
+                config.kvcm_task_timeout_ms = 23000
+                for _ in range(2):
+                    config = pickle.loads(pickle.dumps(config))
+                    self.assertEqual(config.disk_cache_sync_timeout_ms, 200)
+                    self.assertEqual(
+                        config.disk_cache_evict_timeout_ms, eviction_timeout
+                    )
+                    self.assertEqual(config.kvcm_task_timeout_ms, 23000)
+
+    def test_older_versions_inherit_the_disk_load_timeout_for_eviction(self):
+        source = KVCacheConfig()
+        source.disk_cache_sync_timeout_ms = 4321
+        source.disk_cache_evict_timeout_ms = 45000
+        source.kvcm_task_timeout_ms = 23000
+        state = source.__getstate__()
+        for version, size in ((12, 84), (13, 88)):
+            with self.subTest(version=version):
+                previous = (state[0], version, *state[2:size])
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__(previous)
+                self.assertEqual(restored.disk_cache_sync_timeout_ms, 4321)
+                self.assertEqual(restored.disk_cache_evict_timeout_ms, -1)
+                self.assertEqual(
+                    restored.kvcm_task_timeout_ms, 23000
+                )
 
     def test_tail_and_pool_configuration_survives_worker_round_trips(self):
         config = KVCacheConfig()

@@ -713,6 +713,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         RTP_LLM_LOG_ERROR("btc_crc_slot_count overflows total CRC slot count");
         return nullptr;
     }
+    config.disk_cache_evict_timeout_ms =
+        disk_enabled && kv_cache_config.disk_cache_evict_timeout_ms != -1 ?
+            checkedTimeout(kv_cache_config.disk_cache_evict_timeout_ms, "disk_cache_evict_timeout_ms") :
+            config.disk_cache_sync_timeout_ms;
     config.transfer_worker_count =
         checkedSize(kv_cache_config.block_tree_transfer_worker_count, "block_tree_transfer_worker_count");
     if (uses_workloop && transfer_queue_size < config.transfer_worker_count) {
