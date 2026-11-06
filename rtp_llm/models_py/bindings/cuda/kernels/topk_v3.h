@@ -49,4 +49,10 @@ void dsa_select_topk_candidates(torch::Tensor scores, torch::Tensor positions,
     c10::optional<torch::Tensor> starts, c10::optional<torch::Tensor> ends,
     torch::Tensor output_scores, torch::Tensor output_positions, int64_t topk);
 
+// Read the rank-major All-to-All receive buffer without materializing dense scores.
+void dsa_select_page_rr_candidates(torch::Tensor received, torch::Tensor query_positions,
+                                  torch::Tensor out_scores, torch::Tensor out_positions,
+                                  int64_t topk, int64_t shards, int64_t shard_rank,
+                                  int64_t page, int64_t start);
+
 }  // namespace torch_ext

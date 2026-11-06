@@ -525,13 +525,13 @@ struct BoundedDsaTopKParams {
  __device__ device::k31_range_topk::TopKProblem problem(uint32_t row) const {
   const uint32_t start=min(static_cast<uint32_t>(max(starts ? starts[row] : 0,0)),width);
   const uint32_t end=max(start,min(static_cast<uint32_t>(max(ends ? ends[row] : static_cast<int32_t>(width),0)),width));
-  return device::k31_range_topk::TopKProblem{scores+row*score_stride+start,positions+row*position_stride+start,
+  return device::k31_range_topk::TopKProblem{{scores+row*score_stride+start},positions+row*position_stride+start,
                            selected_scores+row*topk,selected_positions+row*topk,topk,end-start};
  }
 };
-template<class Implementation>
+template<class Implementation, class Params>
 __global__ __launch_bounds__(device::topk::TopKConfig::kBlockSize,device::topk::TopKConfig::kOccupancy)
-void select_bounded(const __grid_constant__ BoundedDsaTopKParams params) {
+void select_bounded(const __grid_constant__ Params params) {
  device::enable_smem_spilling();
  const auto problem=params.problem(blockIdx.x);
  for(uint32_t i=threadIdx.x;i<problem.topk;i+=blockDim.x){problem.out[i]=-1;problem.output_scores[i]=-CUDART_INF_F;}
@@ -541,9 +541,17 @@ void select_bounded(const __grid_constant__ BoundedDsaTopKParams params) {
   return;
  }
  __shared__ device::topk::MaxSmem<typename Implementation::Smem> smem;
- if((reinterpret_cast<uintptr_t>(problem.in)&15u)==0)Implementation::template forward<true>(problem,&smem);
+ if((reinterpret_cast<uintptr_t>(problem.score_ptr(0))&15u)==0)Implementation::template forward<true>(problem,&smem);
  else Implementation::template forward<false>(problem,&smem);
 }
+template <typename Params>
+void launch_bounded_dsa_topk(Params params, int64_t rows, int64_t width, cudaStream_t stream) {
+ if(width<=device::k31_range_topk::TopKRegister<1>::kMaxSeqLen)select_bounded<device::k31_range_topk::TopKRegister<1>><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(params);
+ else if(width<=device::k31_range_topk::TopKRegister<2>::kMaxSeqLen)select_bounded<device::k31_range_topk::TopKRegister<2>><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(params);
+ else if(width<=device::k31_range_topk::TopKRegister<4>::kMaxSeqLen)select_bounded<device::k31_range_topk::TopKRegister<4>><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(params);
+ else select_bounded<device::k31_range_topk::TopKStreaming><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(params);
+}
+
 void dsa_select_topk_candidates(torch::Tensor scores,torch::Tensor positions,
                  c10::optional<torch::Tensor> starts,c10::optional<torch::Tensor> ends,
                  torch::Tensor out_scores,torch::Tensor out_positions,int64_t topk){
@@ -567,11 +575,77 @@ void dsa_select_topk_candidates(torch::Tensor scores,torch::Tensor positions,
  const c10::cuda::CUDAGuard guard(scores.device());
  BoundedDsaTopKParams p{scores.data_ptr<float>(),positions.data_ptr<int32_t>(),starts ? starts->data_ptr<int32_t>() : nullptr,ends ? ends->data_ptr<int32_t>() : nullptr,out_scores.data_ptr<float>(),out_positions.data_ptr<int32_t>(),scores.stride(0),positions.dim()==2?positions.stride(0):0,static_cast<uint32_t>(width),static_cast<uint32_t>(topk)};
  const auto stream=at::cuda::getCurrentCUDAStream(scores.get_device());
- if(width<=device::k31_range_topk::TopKRegister<1>::kMaxSeqLen)select_bounded<device::k31_range_topk::TopKRegister<1>><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(p);
- else if(width<=device::k31_range_topk::TopKRegister<2>::kMaxSeqLen)select_bounded<device::k31_range_topk::TopKRegister<2>><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(p);
- else if(width<=device::k31_range_topk::TopKRegister<4>::kMaxSeqLen)select_bounded<device::k31_range_topk::TopKRegister<4>><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(p);
- else select_bounded<device::k31_range_topk::TopKStreaming><<<rows,device::topk::TopKConfig::kBlockSize,0,stream>>>(p);
+ launch_bounded_dsa_topk(p, rows, width, stream);
  TORCH_CHECK(cudaGetLastError()==cudaSuccess,"Bounded selector launch failed");
+}
+
+struct PageRRDsaTopKParams {
+    const float* scores;
+    const int32_t* query_positions;
+    float* selected_scores;
+    int32_t* selected_positions;
+    uint64_t owner_stride;
+    uint32_t owner_width, query_offset, query_rows, width, topk;
+    uint32_t page_shift, owner_shift, page_mask, owner_mask;
+    int32_t first_position;
+
+    __device__ device::k31_range_topk::PageRRTopKProblem problem(uint32_t row) const {
+        const uint32_t query = query_offset + row;
+        const int32_t position = query < query_rows ? query_positions[query] : -1;
+        const uint32_t length = position < first_position
+            ? 0u : min(static_cast<uint32_t>(position - first_position) + 1u, width);
+        const device::k31_range_topk::PageRRScoreInput input{
+            scores + static_cast<uint64_t>(row) * owner_width, owner_stride,
+            page_shift, owner_shift, page_mask, owner_mask, first_position,
+        };
+        return {input, nullptr, selected_scores + static_cast<uint64_t>(row) * topk,
+                selected_positions + static_cast<uint64_t>(row) * topk, topk, length};
+    }
+};
+
+void dsa_select_page_rr_candidates(torch::Tensor received, torch::Tensor query_positions,
+                                  torch::Tensor out_scores, torch::Tensor out_positions,
+                                  int64_t topk, int64_t shards, int64_t shard_rank,
+                                  int64_t page, int64_t start) {
+    TORCH_CHECK(received.is_cuda() && received.scalar_type() == torch::kFloat32 &&
+                    received.dim() == 2 && received.is_contiguous(), "FP32 CUDA owner-major score rows required");
+    TORCH_CHECK(shards > 0 && shards <= 256 && (shards & (shards - 1)) == 0 &&
+                    shard_rank >= 0 && shard_rank < shards, "Power-of-two PageRR shard geometry required");
+    TORCH_CHECK(page >= 4 && page <= INT32_MAX && (page & (page - 1)) == 0 &&
+                    start >= 0 && start % page == 0, "Whole, vector-aligned PageRR pages required");
+    const int64_t owner_width = received.size(1);
+    TORCH_CHECK(owner_width > 0 && owner_width % page == 0 && received.size(0) % shards == 0 &&
+                    owner_width <= INT32_MAX / shards && start <= INT32_MAX / shards - owner_width,
+                "Owner-major score width or position range does not fit PageRR");
+    const int64_t rows = received.size(0) / shards;
+    TORCH_CHECK(received.size(0) <= UINT32_MAX &&
+                    (topk == 512 || topk == 1024 || topk == 2048), "Unsupported PageRR selector geometry");
+    TORCH_CHECK(query_positions.dim() == 1 && query_positions.numel() <= received.size(0) &&
+                    query_positions.is_contiguous() && query_positions.device() == received.device() &&
+                    query_positions.scalar_type() == torch::kInt32, "Contiguous INT32 PageRR query positions required");
+    TORCH_CHECK(out_scores.dim() == 2 && out_scores.size(0) == rows && out_scores.size(1) == topk &&
+                    out_scores.device() == received.device() && out_scores.is_contiguous() &&
+                    out_scores.scalar_type() == torch::kFloat32, "FP32 PageRR score output mismatch");
+    TORCH_CHECK(out_positions.sizes() == out_scores.sizes() && out_positions.is_contiguous() &&
+                    out_positions.device() == received.device() && out_positions.scalar_type() == torch::kInt32,
+                "INT32 PageRR position output mismatch");
+    TORCH_CHECK(out_scores.storage().data_ptr().get() != received.storage().data_ptr().get() &&
+                    out_positions.storage().data_ptr().get() != query_positions.storage().data_ptr().get(),
+                "PageRR outputs must not alias inputs");
+    if (rows == 0) return;
+    const c10::cuda::CUDAGuard guard(received.device());
+    const PageRRDsaTopKParams params{
+        received.data_ptr<float>(), query_positions.data_ptr<int32_t>(), out_scores.data_ptr<float>(),
+        out_positions.data_ptr<int32_t>(), static_cast<uint64_t>(rows * owner_width),
+        static_cast<uint32_t>(owner_width), static_cast<uint32_t>(rows * shard_rank),
+        static_cast<uint32_t>(query_positions.numel()), static_cast<uint32_t>(owner_width * shards),
+        static_cast<uint32_t>(topk), static_cast<uint32_t>(__builtin_ctzll(page)),
+        static_cast<uint32_t>(__builtin_ctzll(shards)), static_cast<uint32_t>(page - 1),
+        static_cast<uint32_t>(shards - 1), static_cast<int32_t>(start * shards),
+    };
+    const auto stream = at::cuda::getCurrentCUDAStream(received.get_device());
+    launch_bounded_dsa_topk(params, rows, owner_width * shards, stream);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }  // namespace torch_ext

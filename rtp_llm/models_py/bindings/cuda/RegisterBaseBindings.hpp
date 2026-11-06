@@ -255,6 +255,11 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("scores"), py::arg("positions"), py::arg("starts"),
                   py::arg("ends"), py::arg("output_scores"),
                   py::arg("output_positions"), py::arg("topk"));
+    rtp_ops_m.def("dsa_select_page_rr_candidates", &dsa_select_page_rr_candidates,
+                  "Select exact K3.1 Decode candidates from rank-major PageRR scores",
+                  py::arg("received"), py::arg("query_positions"), py::arg("output_scores"),
+                  py::arg("output_positions"), py::arg("topk"), py::arg("shards"),
+                  py::arg("shard_rank"), py::arg("page"), py::arg("start"));
     rtp_ops_m.def("dsa_repair_topk_candidates", &dsa_repair_topk_candidates,
                   "Refine float TopK boundary ties by global position",
                   py::arg("scores"), py::arg("positions"), py::arg("raw_indices"),

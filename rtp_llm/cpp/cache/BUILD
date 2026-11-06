@@ -397,3 +397,11 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = ["//rtp_llm/cpp/utils:core_utils"],
 )
+
+cc_library(
+    name = "numa_memory_policy",
+    srcs = ["NumaMemoryPolicy.cc"],
+    hdrs = ["NumaMemoryPolicy.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)

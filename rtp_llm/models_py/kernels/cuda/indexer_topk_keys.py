@@ -51,6 +51,27 @@ def sanitize_indexer_scores(score, positions, *, starts=None, ends=None):
         )
 
 
+@triton.jit(do_not_specialize=["ROWS", "COLS", "S_ROW"])
+def _score_to_wire(Score, Positions, Ends, Wire, ROWS, COLS, S_ROW, BLOCK: tl.constexpr):
+    row = tl.program_id(0).to(tl.int64)
+    col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    end = tl.load(Ends + row, row < ROWS, other=0)
+    in_bounds = (col < COLS) & (col < end)
+    score = tl.load(Score + row * S_ROW + col, in_bounds, other=-float("inf"))
+    position = tl.load(Positions + col, in_bounds, other=-1)
+    valid = (tl.abs(score) < float("inf")) & (position >= 0)
+    tl.store(Wire + row * COLS + col, tl.where(valid, score, -float("inf")), col < COLS)
+
+
+def write_indexer_score_wire(score, positions, ends, wire):
+    """Copy bounded paged MQA scores directly into the padded DCP input."""
+    rows, cols = score.shape
+    if wire.numel():
+        _score_to_wire[(wire.size(0), triton.cdiv(cols, 1024))](
+            score, positions, ends, wire, rows, cols, score.stride(0), 1024, num_warps=4,
+        )
+
+
 @triton.jit
 def _pack(
     S,

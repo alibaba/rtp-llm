@@ -8,7 +8,9 @@ import importlib
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.indexer_topk_keys import sanitize_indexer_scores
+from rtp_llm.models_py.kernels.cuda.indexer_topk_keys import (
+    sanitize_indexer_scores, write_indexer_score_wire,
+)
 from rtp_llm.models_py.utils.module_profiler import profile_scope
 
 
@@ -47,12 +49,19 @@ class NativeFp8IndexerScore:
                 or value.device != device or not value.is_contiguous()):
             raise ValueError(f"{name} must be contiguous {dtype} on {device}")
 
-    def prepare_paged_metadata(self, context_lens, *, num_sms):
+    def supports_direct_pages(self, page_size, device):
+        return (page_size in (64, 128)
+                and getattr(self.backend, "__name__", "") == "deep_gemm_mqa"
+                and torch.cuda.get_device_capability(device)[0] == 10)
+
+    def prepare_paged_metadata(self, context_lens, *, num_sms, page_size=64):
         """Prepare the pinned native API's per-request, per-query lengths."""
         self._tensor(context_lens, torch.int32, context_lens.device, "Paged MQA context lengths")
         if context_lens.ndim != 2 or not context_lens.is_cuda or type(num_sms) is not int or num_sms <= 0:
             raise ValueError("Prepare CUDA per-query lengths and a positive SM count")
-        return self._metadata(context_lens, 64, num_sms)
+        if page_size != 64 and not self.supports_direct_pages(page_size, context_lens.device):
+            raise ValueError("Native paged MQA does not support this physical page size")
+        return self._metadata(context_lens, page_size, num_sms)
 
     def _query(self, query, weights):
         if query.ndim not in (3, 4) or query.shape[-2:] != (32, 128) or not query.is_cuda:
@@ -64,12 +73,19 @@ class NativeFp8IndexerScore:
             raise ValueError("Indexer head weights must include one Q scale per token/head")
         return rows
 
-    def _finish(self, score, positions, starts, ends, shape, out, sanitize=True):
+    def _finish(self, score, positions, starts, ends, shape, out, sanitize=True, *, wire=None):
         if score.dtype != torch.float32 or score.shape != shape or score.stride(-1) != 1:
             raise RuntimeError("Native FP8 MQA returned an incompatible score layout")
         if (positions.dtype != torch.int32 or positions.shape != (shape[1],)
                 or positions.device != score.device or not positions.is_contiguous()):
             raise ValueError("Indexer columns require INT32 global positions")
+        if wire is not None:
+            self._tensor(wire, torch.float32, score.device, "Indexer DCP wire")
+            self._tensor(ends, torch.int32, score.device, "Paged MQA score ends")
+            if wire.ndim != 2 or wire.shape[0] < shape[0] or wire.shape[1] != shape[1]:
+                raise ValueError("Indexer DCP wire shape mismatch")
+            write_indexer_score_wire(score, positions, ends, wire)
+            return wire
         if out is not None:
             self._tensor(out, torch.float32, score.device, "Indexer score workspace")
             if out.shape != shape:
@@ -102,13 +118,16 @@ class NativeFp8IndexerScore:
                             sanitize=sanitize)
 
     def paged(self, query, cache, weights, context_lens, block_table, metadata,
-              max_context_len, positions, *, out=None):
+              max_context_len, positions, *, out=None, wire=None):
         rows = self._query(query, weights)
+        if out is not None and wire is not None:
+            raise ValueError("Paged MQA accepts one score destination")
         if query.ndim != 4:
             raise ValueError("Paged MQA requires Q[B,next_n,32,128]")
         self._tensor(cache, torch.uint8, query.device, "FP8 paged cache")
-        if cache.ndim != 4 or cache.shape[1:] != (64, 1, 132):
-            raise ValueError("Native paged MQA needs explicit64-token block-planar workspace")
+        if (cache.ndim != 4 or cache.shape[2:] != (1, 132)
+                or (cache.size(1) != 64 and not self.supports_direct_pages(cache.size(1), cache.device))):
+            raise ValueError("Native paged MQA needs a supported block-planar page size")
         self._tensor(context_lens, torch.int32, query.device, "Paged MQA context lengths")
         self._tensor(block_table, torch.int32, query.device, "Paged MQA block table")
         if (context_lens.shape != query.shape[:2] or block_table.ndim != 2
@@ -118,4 +137,4 @@ class NativeFp8IndexerScore:
             score = self._paged(query, cache, weights, context_lens, block_table,
                                 metadata, max_context_len, clean_logits=False)
         return self._finish(score, positions, None, context_lens.view(rows),
-                            (rows, max_context_len), out)
+                            (rows, max_context_len), out, wire=wire)

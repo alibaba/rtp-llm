@@ -642,6 +642,11 @@ struct TopKRadixBase: TopKConfig {
 protected:
     template<bool kAlignedInput, typename F>
     SGL_DEVICE static void for_each_input(const float* __restrict__ in, uint32_t seq_len, F&& fn) {
+        for_each_input_address<kAlignedInput>([in](uint32_t index) { return in + index; }, seq_len, fn);
+    }
+
+    template<bool kAlignedInput, typename Address, typename F>
+    SGL_DEVICE static void for_each_input_address(Address address, uint32_t seq_len, F&& fn) {
         const auto     tx       = threadIdx.x;
         const uint32_t num_full = seq_len / kVecSize;  // fully-in-bounds vectors
 
@@ -649,9 +654,9 @@ protected:
         uint32_t vi = tx;
         if (vi < num_full) {
             if constexpr (kAlignedInput) {
-                next_vec.load(in, vi);
+                next_vec.load(address(vi * kVecSize), 0);
             } else {
-                next_vec.load_unaligned(in, vi);
+                next_vec.load_unaligned(address(vi * kVecSize), 0);
             }
         }
         while (vi < num_full) {
@@ -660,9 +665,9 @@ protected:
             vi += kBlockSize;
             if (vi < num_full) {
                 if constexpr (kAlignedInput) {
-                    next_vec.load(in, vi);
+                    next_vec.load(address(vi * kVecSize), 0);
                 } else {
-                    next_vec.load_unaligned(in, vi);
+                    next_vec.load_unaligned(address(vi * kVecSize), 0);
                 }
             }
 #pragma unroll
@@ -676,7 +681,7 @@ protected:
         const uint32_t tail_start = num_full * kVecSize;
         if (tx < seq_len - tail_start) {
             const auto idx = tail_start + tx;
-            fn(in[idx], idx);
+            fn(*address(idx), idx);
         }
     }
 

@@ -9,7 +9,8 @@ from rtp_llm.models_py.distributed.collective_torch import (
     all_to_all_single,
 )
 from rtp_llm.models_py.modules.dsv4.indexer_topk import (
-    NativeExactIndexerTopKBackend, TorchIndexerTopKBackend, native_exact_topk_enabled,
+    NativeExactIndexerTopKBackend, TorchIndexerTopKBackend,
+    native_exact_topk_enabled, native_page_rr_selection_supported,
 )
 from rtp_llm.models_py.utils.module_profiler import profile_scope
 
@@ -71,58 +72,76 @@ class IndexerKVOp(nn.Module):
                 "running.positions", (execution.selection_rows, self.topk), torch.int32
             ),
         )
+        native_fp8 = execution.fp8_indexer and isinstance(self.selector, NativeExactIndexerTopKBackend)
         for number, block in enumerate(execution.blocks):
             bounds = {}
+            page_rr = False
             width = block.width
-            score = (None if execution.fp8_indexer and params.is_prefill else
+            score = (None if execution.fp8_indexer else
                      workspace("score", (execution.rows, width), torch.float32))
             if params.is_prefill:
                 score = self._score_prefill(query, gates, q_positions, keys, params,
                                            execution, block, workspace, score)
                 positions, complete = block.key_positions, score
             else:
-                score = self._score_decode(query, gates, q_positions, keys, params,
-                                          execution, block, workspace, score)
                 padded = execution.selection_rows * params.shard_size
                 wire = workspace("wire", (padded, width), torch.float32)
-                wire[: execution.rows].copy_(score)
-                if padded > execution.rows:
-                    wire[execution.rows :].fill_(-float("inf"))
+                score = self._score_decode(query, gates, q_positions, keys, params,
+                                          execution, block, workspace,
+                                          wire if execution.fp8_indexer else score)
+                if not execution.fp8_indexer:
+                    wire[: execution.rows].copy_(score)
+                    if padded > execution.rows:
+                        wire[execution.rows :].fill_(-float("inf"))
                 received = workspace("received", (padded, width), torch.float32)
                 received = all_to_all_single(wire, Group.TP, output=received)
-                complete = workspace(
-                    "complete",
-                    (execution.selection_rows, width * params.shard_size),
-                    torch.float32,
+                page_rr = native_fp8 and native_page_rr_selection_supported(
+                    width, self.topk, shards=params.shard_size, page=params.page_size, start=block.start,
                 )
-                if execution.fp8_indexer and isinstance(self.selector, NativeExactIndexerTopKBackend):
-                    from rtp_llm.models_py.kernels.cuda.dsa_decode_compact import restore_visible_decode_scores
-
-                    ends = workspace("decode.ends", (execution.selection_rows,), torch.int32)
-                    with profile_scope("RTP::attention.dsa.indexer.decode_visible_restore"):
-                        restore_visible_decode_scores(
-                            received, params.positions_d, complete, ends,
-                            shard_rank=params.shard_rank, shards=params.shard_size,
-                            page=params.page_size, start=block.start,
-                        )
-                    positions = block.indexer_decode_positions
-                    bounds = {"ends": ends}
+                if page_rr:
+                    complete = received
                 else:
-                    complete.view(execution.selection_rows, params.shard_size, width).copy_(
-                        received.view(
-                            params.shard_size, execution.selection_rows, width
-                        ).transpose(0, 1)
+                    complete = workspace(
+                        "complete",
+                        (execution.selection_rows, width * params.shard_size),
+                        torch.float32,
                     )
-                    positions = block.dcp_positions
+                    if native_fp8:
+                        from rtp_llm.models_py.kernels.cuda.dsa_decode_compact import restore_visible_decode_scores
+
+                        ends = workspace("decode.ends", (execution.selection_rows,), torch.int32)
+                        with profile_scope("RTP::attention.dsa.indexer.decode_visible_restore"):
+                            restore_visible_decode_scores(
+                                received, params.positions_d, complete, ends,
+                                shard_rank=params.shard_rank, shards=params.shard_size,
+                                page=params.page_size, start=block.start,
+                            )
+                        positions = block.indexer_decode_positions
+                        bounds = {"ends": ends}
+                    else:
+                        complete.view(execution.selection_rows, params.shard_size, width).copy_(
+                            received.view(
+                                params.shard_size, execution.selection_rows, width
+                            ).transpose(0, 1)
+                        )
+                        positions = block.dcp_positions
             with profile_scope("RTP::attention.dsa.indexer.chunk_topk"):
-                if params.is_prefill and execution.fp8_indexer and isinstance(self.selector, NativeExactIndexerTopKBackend):
-                    bounds = {"starts": block.indexer_starts, "ends": block.indexer_ends}
-                current = self.selector.select_candidates(
-                    complete, positions, self.topk, workspace=workspace,
-                    scores_are_sanitized=self.scores_are_sanitized and params.is_prefill,
-                    out=running if number == 0 else None,
-                    **bounds,
-                )
+                if page_rr:
+                    current = self.selector.select_page_rr_candidates(
+                        complete, params.positions_d, self.topk, workspace=workspace,
+                        out=running if number == 0 else None,
+                        shard_rank=params.shard_rank, shards=params.shard_size,
+                        page=params.page_size, start=block.start,
+                    )
+                else:
+                    if params.is_prefill and native_fp8:
+                        bounds = {"starts": block.indexer_starts, "ends": block.indexer_ends}
+                    current = self.selector.select_candidates(
+                        complete, positions, self.topk, workspace=workspace,
+                        scores_are_sanitized=self.scores_are_sanitized and params.is_prefill,
+                        out=running if number == 0 else None,
+                        **bounds,
+                    )
             if number != 0:
                 with profile_scope("RTP::attention.dsa.indexer.running_topk_merge"):
                     self.selector.merge_candidates(
