@@ -28,6 +28,8 @@ std::vector<size_t> computeHostUsableBlockCounts(size_t                         
 
 std::string resolveDiskMountPath(const std::string& disk_paths_csv, int64_t local_world_size, int64_t local_rank);
 
+size_t blockTreeCrcWorkspaceBytes(const CacheConfig& cache_config, const KVCacheConfig& kv_cache_config);
+
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                              cache_config,
                                        const KVCacheConfig&                            kv_cache_config,
                                        const std::shared_ptr<CoordinatorCacheManager>& coordinator_manager,

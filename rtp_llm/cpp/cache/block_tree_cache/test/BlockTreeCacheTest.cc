@@ -838,7 +838,7 @@ TEST_F(BlockTreeCacheTest, InsertHardStopReportsOnceEvenWithoutAcceptedResources
         cache_->groupSets()[index]->unreferenceBlocks(
             MultiNodeResource{index, Tier::DEVICE, {{node, resource.device_blocks}}}, BlockTreeRefType::CACHE);
         resource.evictFromTier(Tier::DEVICE);
-        resource.host_block = 7;
+        resource.host_block     = 7;
         resource.transfer_state = GroupSetTransferState::LOAD_PENDING;
     }
 
@@ -1191,7 +1191,7 @@ TEST(BlockTreeCacheMetricsTest, PairedCompletionTimersFinishOnceAcrossThreads) {
     for (const auto& event : events) {
         EXPECT_NE(event.name.find("host_to_disk"), std::string::npos);
         EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
-    const std::string stage(event.record.stage);
+        const std::string stage(event.record.stage);
         if (stage == "completion_execute") {
             EXPECT_EQ(event.record.kind, AsyncProfileKind::Execution);
             EXPECT_NE(event.record.start_tid, owner_tid);
@@ -1531,7 +1531,6 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
                              CacheCopyError::INVALID_REQUEST,
                              CacheCopyError::IO_FAILED,
                              CacheCopyError::RPC_FAILED,
-                             CacheCopyError::CRC_COMPUTE_FAILED,
                              CacheCopyError::CRC_MISMATCH}) {
         for (auto descriptor : {TransferDescriptor::deviceToHost(0, {1}, 2),
                                 TransferDescriptor::hostToDevice(0, 2, {1}),
@@ -1544,10 +1543,9 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
     }
     auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
     EXPECT_EQ(metric->GetMetricType(), kmonitor::QPS);
-    EXPECT_EQ(metricSeriesCount(metric), 24u);
+    EXPECT_EQ(metricSeriesCount(metric), 20u);
     for (const char* direction : {"TO_GPU", "FROM_GPU", "TO_DISK", "FROM_DISK"}) {
-        for (const char* error :
-             {"COPY_FAILED", "INVALID_REQUEST", "IO_FAILED", "RPC_FAILED", "CRC_COMPUTE_FAILED", "CRC_MISMATCH"}) {
+        for (const char* error : {"COPY_FAILED", "INVALID_REQUEST", "IO_FAILED", "RPC_FAILED", "CRC_MISMATCH"}) {
             auto tags = common_tags;
             tags.AddTag("copy_direction", direction);
             tags.AddTag("error_type", error);
@@ -1580,20 +1578,17 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorsAreReportedOnlyForFailedLogicalCopiesW
 }
 
 TEST(BlockTreeCacheMetricsTest, ConfirmedCrcErrorWinsOverOtherBatchRpcFailureOnce) {
-    for (bool mismatch : {false, true}) {
-        auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
-        BlockTreeCacheMetricsReporter reporter(metrics_reporter);
-        const ErrorInfo               failure(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer failed");
-        TransferResult                result(failure, CacheCopyError::RPC_FAILED);
-        result.merge({failure, mismatch ? CacheCopyError::CRC_MISMATCH : CacheCopyError::CRC_COMPUTE_FAILED});
-        reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
-        auto* metric =
-            metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
-        EXPECT_EQ(metricSeriesCount(metric), 1u);
-        kmonitor::MetricsTags tags("copy_direction", "TO_GPU");
-        tags.AddTag("error_type", mismatch ? "CRC_MISMATCH" : "CRC_COMPUTE_FAILED");
-        EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 1);
-    }
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
+    const ErrorInfo               failure(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer failed");
+    TransferResult                result(failure, CacheCopyError::RPC_FAILED);
+    result.merge({failure, CacheCopyError::CRC_MISMATCH});
+    reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
+    EXPECT_EQ(metricSeriesCount(metric), 1u);
+    kmonitor::MetricsTags tags("copy_direction", "TO_GPU");
+    tags.AddTag("error_type", "CRC_MISMATCH");
+    EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 1);
 }
 
 TEST(BlockTreeCacheMetricsTest, QuarantineEventsKeepReasonAndWeightedCountsSeparateFromFrozenCapacity) {
@@ -1697,14 +1692,14 @@ TEST_F(BlockTreeCacheTest, DropLifetimeAndIdletimeCoverDiskAndPrunedResources) {
     dependent_desc.source_tier        = Tier::HOST;
     task.dependent_prune_descs.push_back(dependent_desc);
     task.dependent_prune_timings.push_back(task.primary_timing);
-    task.dependent_prune_timings.back().tier_enter_time_us = 110000;
+    task.dependent_prune_timings.back().tier_enter_time_us  = 110000;
     task.dependent_prune_timings.back().last_access_time_us = 135000;
 
     TransferDescriptor cascade_desc = task.primary_desc;
     cascade_desc.source_tier        = Tier::DEVICE;
     task.cascade_descs.push_back(cascade_desc);
     task.cascade_timings.push_back(task.primary_timing);
-    task.cascade_timings.back().tier_enter_time_us = 130000;
+    task.cascade_timings.back().tier_enter_time_us  = 130000;
     task.cascade_timings.back().last_access_time_us = 145000;
 
     for (const char* trigger_type : {"watermark", "force_drop"}) {
@@ -2428,7 +2423,7 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropSkipsHeldLruCandidateUntilLastRequ
 
 TEST_F(BlockTreeCacheTest, CapacityReleaseRetriesWatermarkWithoutDroppingHeldOrFrozenBlocks) {
     std::shared_ptr<BlockTreeCache> cache = std::move(cache_);
-    const auto& pool = cache->groupSets()[0]->devicePools()[0];
+    const auto&                     pool  = cache->groupSets()[0]->devicePools()[0];
     pool->incRef(42, DeviceBlockRefType::REQUEST);
     pool->incRef(42, DeviceBlockRefType::REMOTE_CONNECTOR);
     pool->freezeBlock(43);
@@ -2464,7 +2459,7 @@ TEST_F(BlockTreeCacheTest, CapacityReleaseRetriesWatermarkWithoutDroppingHeldOrF
 }
 
 TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperationReference) {
-    const auto& pool = cache_->groupSets()[0]->devicePools()[0];
+    const auto&                                pool = cache_->groupSets()[0]->devicePools()[0];
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     cache_->insert({100}, resources, Tier::DEVICE);
@@ -2472,8 +2467,7 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperat
 
     const size_t initial_free = pool->freeBlocksNum();
     const auto   version      = cache_->getKeySnapshot().version;
-    for (const BlockTreeRefType type :
-         {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE}) {
+    for (const BlockTreeRefType type : {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE}) {
         pool->incTreeRef(42, type);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
         EXPECT_EQ(pool->freeBlocksNum(), initial_free);
@@ -2538,12 +2532,11 @@ TEST_F(BlockTreeCacheTest, ForceDropSkipsHeldLruCandidateUntilLastRequestRelease
 }
 
 TEST_F(BlockTreeCacheTest, ForceDropSkipsDeviceBlockWithTreeOperationReference) {
-    const auto& pool = cache_->groupSets()[0]->devicePools()[0];
+    const auto&                                pool = cache_->groupSets()[0]->devicePools()[0];
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     cache_->insert({100}, resources, Tier::DEVICE);
-    for (const BlockTreeRefType type :
-         {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE}) {
+    for (const BlockTreeRefType type : {BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::STORE}) {
         pool->incTreeRef(42, type);
         const size_t initial_free = pool->freeBlocksNum();
         EXPECT_EQ(cache_->evictForGroup("group0", 1), 0);
@@ -2567,7 +2560,7 @@ TEST_F(BlockTreeCacheTest, ForceDropSkipsDeviceBlockWithTreeOperationReference) 
 
 TEST_F(BlockTreeCacheTest, ForceDropRequiresEveryDevicePoolMemberToBeReclaimable) {
     const auto pools = makeStructuralDevicePools(2, "force_drop_members");
-    auto full = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
+    auto       full  = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);
     initializeTestGroupSet(full, pools);
     auto cache = makeBlockTreeCacheForTest({full});
     ASSERT_NE(cache, nullptr);
@@ -2598,7 +2591,7 @@ TEST_F(BlockTreeCacheTest, ForceDropRequiresEveryDevicePoolMemberToBeReclaimable
 
 TEST_F(BlockTreeCacheTest, FullForceDropKeepsRequestHeldCascadePhysicallyAlive) {
     const std::vector<DeviceBlockPoolPtr> pools = {makeStructuralDevicePool(0), makeStructuralDevicePool(1)};
-    std::vector<GroupSetPtr> groups;
+    std::vector<GroupSetPtr>              groups;
     for (const auto& pool : pools) {
         groups.push_back(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool}, nullptr, nullptr));
     }
@@ -4520,7 +4513,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksComponentsIndependently) {
     EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, complete.block_groups);
 
     // A failed demotion retracts/restores only the affected component.
-    TreeNode* node = cache->tree()->findNode({100, 200, 300}).back();
+    TreeNode*                node = cache->tree()->findNode({100, 200, 300}).back();
     const TransferDescriptor desc(node, 1, 0, Tier::DEVICE, Tier::HOST, {46});
     {
         std::lock_guard<std::mutex> lock(cache->mutex_);
@@ -4589,19 +4582,19 @@ TEST_F(BlockTreeCacheTest, EventPublicationRequiresEveryMemberOfSharedGroupSet) 
     EXPECT_EQ(complete.block_groups, (std::map<int64_t, std::vector<size_t>>{{100, {0, 1}}}));
     ASSERT_EQ(publisher->events.size(), 2u);
 
-    TreeNode* node = cache->tree()->findNode({100}).front();
+    TreeNode*                      node = cache->tree()->findNode({100}).front();
     const std::vector<BlockIdList> incomplete_values{{42}, {42, NULL_BLOCK_IDX}, {NULL_BLOCK_IDX, 43}};
     for (const auto& incomplete : incomplete_values) {
-        const size_t event_count = publisher->events.size();
+        const size_t    event_count = publisher->events.size();
         KVCacheSnapshot incomplete_snapshot;
         KVCacheSnapshot restored_snapshot;
         {
             std::lock_guard<std::mutex> lock(cache->mutex_);
-            auto& resource = node->group_set_resources[0];
+            auto&                       resource = node->group_set_resources[0];
             // Keep pool ownership intact while checking partial member representations.
             resource.device_blocks = incomplete;
             cache->tree()->refreshPublishedState(node);
-            incomplete_snapshot = cache->tree()->logicalCacheSnapshot();
+            incomplete_snapshot    = cache->tree()->logicalCacheSnapshot();
             resource.device_blocks = resources[0][0].device_blocks;
             cache->tree()->refreshPublishedState(node);
             restored_snapshot = cache->tree()->logicalCacheSnapshot();

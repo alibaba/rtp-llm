@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "rtp_llm/cpp/utils/Logger.h"
+
 namespace rtp_llm {
 
 void TransferBatchAsyncContext::waitDone() {
@@ -59,7 +61,13 @@ void TransferBatchAsyncContext::complete(TransferResult result) {
     }
     done_cv_.notify_all();
     for (auto& callback : callbacks) {
-        callback(result_);
+        try {
+            callback(result_);
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_WARNING("transfer completion callback failed: %s", error.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("transfer completion callback failed");
+        }
     }
 }
 

@@ -130,3 +130,13 @@ e2e_B_{direction}_{group_set}_{strategy}_u{upper}_l{lower}_n160_b8
 | `requested_copy_strategy` / `actual_copy_strategy` | 请求与实际使用的传输策略 |
 | `requested_transfer_descriptor_batch_size` / `resolved_transfer_descriptor_batch_size` | transfer engine API 请求/解析后的 descriptor batch 大小；与 CUDA copy strategy 无关 |
 | `descriptor_batch_size_avg/max` | measured window 内每次 `submit()` 携带的 descriptor 数量；另有 `direction.<dir>.*` 分方向值 |
+
+## Transfer 实现与布局 provenance
+
+case 名称及计数保持原矩阵；`BenchmarkCase.transfer_implementation` 明确记录预期实现。
+默认 Tree/auto Transfer（含 smoke）使用 CRC＋WorkLoop；保留的 batch/staged-sm 和 worker/e2e 对比
+显式携带 `--btc-transfer-engine-async=false --enable-crc=false`，属于 legacy 比较。
+worker 参数不会出现在 WorkLoop case 中，CLI 拒绝把它当作 owner 配置。
+检查 manifest 的 `expected_transfer_implementation` 以及结果 `resolved_config` 的
+`transfer_implementation`、`btc_transfer_engine_async`、`enable_crc`、C/M/Q、owner/worker 与 staging。
+WorkLoop Device copy 报 `actual_copy_strategy=crc`，旧策略 lowest-api 统计仅用于 legacy。

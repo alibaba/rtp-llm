@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkCli.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TreeBenchmarkRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/TransferBenchmarkRunner.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostCopyStrategy.h"
 
 namespace rtp_llm::benchmark {
 namespace {

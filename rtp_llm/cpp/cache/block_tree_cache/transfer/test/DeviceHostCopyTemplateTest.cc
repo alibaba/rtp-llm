@@ -5,7 +5,7 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
@@ -88,7 +88,7 @@ TEST(DeviceHostCopyTemplateTest, Disabled3DBatchDoesNotInitializeTemplates) {
     BlockTreeTaskPool     tasks(1, 8, "DisabledTemplateInitTest");
     DeviceHostCopyOptions options;
     options.cuda_3d_batch_copy_enabled = false;
-    DeviceHostTransferExecutor executor(tasks, 8, options, nullptr, nullptr, nullptr, {group});
+    DeviceHostTransferExecutor executor(tasks, 8, options, nullptr, nullptr, nullptr, nullptr, {group});
     auto* strategy = dynamic_cast<Cuda3DBatchDeviceHostCopyStrategy*>(executor.strategies_.front().get());
     ASSERT_NE(strategy, nullptr);
     EXPECT_TRUE(strategy->templates_.empty());

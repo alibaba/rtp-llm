@@ -52,7 +52,7 @@ std::vector<GroupSetPtr> makeGroupSets(bool with_host = true, bool with_disk = t
 
     const std::vector<std::vector<std::string>> memberships = {
         {"group0"}, {"group1", "group2"}, {"group3", "group4"}, {"group5"}, {"group6"}};
-    std::vector<GroupSetPtr>               group_sets;
+    std::vector<GroupSetPtr> group_sets;
     for (size_t group_set_id = 0; group_set_id < memberships.size(); ++group_set_id) {
         const auto& membership = memberships[group_set_id];
         auto        group_set  = makeTestGroupSet(group_set_id,
@@ -483,8 +483,8 @@ TEST(BlockTransferRequestConverterTest, ResolvesReorderedLocalGroupSetAndPoolSlo
     const auto&                     source   = groupSets()[2];
     auto                            receiver = makeTestGroupSet(0,
                                      source->topologyPtr(),
-                                     {"group4", "group3"},
-                                     {source->devicePools()[1], source->devicePools()[0]},
+                                                                {"group4", "group3"},
+                                                                {source->devicePools()[1], source->devicePools()[0]},
                                      source->hostPool(),
                                      source->diskPool());
     std::vector<TransferDescriptor> descriptors;
@@ -704,7 +704,6 @@ TEST(BlockTransferRequestConverterTest, ResponseCodePreservesEveryCopyFailure) {
                        CacheCopyError::COPY_FAILED,
                        CacheCopyError::INVALID_REQUEST,
                        CacheCopyError::IO_FAILED,
-                       CacheCopyError::CRC_COMPUTE_FAILED,
                        CacheCopyError::CRC_MISMATCH}) {
         SCOPED_TRACE(cacheCopyErrorName(error));
         TransferResult expected(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected transfer failure"), error);
@@ -728,23 +727,19 @@ TEST(BlockTransferRequestConverterTest, ResponseReportsHighestCopyErrorForEntire
     EXPECT_EQ(BlockTransferRequestConverter::encodeCode(CacheCopyError::COPY_FAILED),
               MemoryOperationResponsePB::COPY_FAILED);
     TransferResult result(failure, CacheCopyError::IO_FAILED);
-    result.merge({failure, CacheCopyError::CRC_COMPUTE_FAILED});
+    result.merge({failure, CacheCopyError::CRC_MISMATCH});
     MemoryOperationResponsePB response;
     BlockTransferRequestConverter::encodeTransferResult(response, result);
     MemoryOperationResponsePB received;
     ASSERT_TRUE(received.ParseFromString(response.SerializeAsString()));
-    EXPECT_EQ(received.code(), MemoryOperationResponsePB::CRC_COMPUTE_FAILED);
-    EXPECT_EQ(BlockTransferRequestConverter::decodeCode(received.code()), CacheCopyError::CRC_COMPUTE_FAILED);
-    result.merge({failure, CacheCopyError::CRC_MISMATCH});
-    EXPECT_EQ(BlockTransferRequestConverter::encodeCode(result.copy_error), MemoryOperationResponsePB::CRC_MISMATCH);
+    EXPECT_EQ(received.code(), MemoryOperationResponsePB::CRC_MISMATCH);
+    EXPECT_EQ(BlockTransferRequestConverter::decodeCode(received.code()), CacheCopyError::CRC_MISMATCH);
 }
 
 TEST(BlockTransferRequestConverterTest, ResponseRoundTripPreservesMixedBlockOutcomes) {
     TransferResult result(TransferStatus::CRC_MISMATCH);
-    result.block_errors = {CacheCopyError::NONE,
-                           CacheCopyError::NOT_EXECUTED,
-                           CacheCopyError::CRC_MISMATCH,
-                           CacheCopyError::CRC_COMPUTE_FAILED};
+    result.block_errors = {
+        CacheCopyError::NONE, CacheCopyError::NOT_EXECUTED, CacheCopyError::CRC_MISMATCH, CacheCopyError::IO_FAILED};
     MemoryOperationResponsePB response;
     BlockTransferRequestConverter::encodeTransferResult(response, result);
     MemoryOperationResponsePB received;

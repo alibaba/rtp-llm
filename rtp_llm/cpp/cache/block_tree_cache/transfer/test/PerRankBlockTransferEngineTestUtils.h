@@ -33,13 +33,15 @@ TestGroupConfig makeTestGroupBase(CacheGroupPolicy policy    = defaultCacheGroup
 
 std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupConfig> groups);
 
+void encodeTestRecord(void* data, size_t payload_bytes);
+
 BackingLayout makeTestBackingLayout(size_t payload_bytes, bool enable_crc, bool physical_geometry = false);
 
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::shared_ptr<const CacheTopology> topology,
                              std::vector<std::string>             group_tags,
                              std::vector<DeviceBlockPoolPtr>      device_pools,
-                             std::shared_ptr<HostBlockPool>       host_pool = nullptr,
+                             std::shared_ptr<HostBlockPool>       host_pool              = nullptr,
                              BlockTreeDiskBlockPoolPtr            disk_pool              = nullptr,
                              bool                                 enable_crc             = false,
                              size_t                               physical_payload_bytes = 0);
@@ -55,7 +57,7 @@ public:
     explicit TempDirGuard(const char* name);
     ~TempDirGuard();
 
-    TempDirGuard(const TempDirGuard&) = delete;
+    TempDirGuard(const TempDirGuard&)            = delete;
     TempDirGuard& operator=(const TempDirGuard&) = delete;
 
     std::string path;

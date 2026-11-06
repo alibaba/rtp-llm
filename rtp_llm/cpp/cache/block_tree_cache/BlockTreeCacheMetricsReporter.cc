@@ -481,6 +481,13 @@ void BlockTreeCacheMetricsReporter::reportQueueBacklog(const BlockTreeQueueSizes
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
 }
 
+void BlockTreeCacheMetricsReporter::reportWorkLoopQueueWait(Tier    source,
+                                                            Tier    target,
+                                                            int64_t latency_us) const noexcept {
+    if (stage_metrics_ && latency_us >= 0)
+        stage_metrics_->recordQueueWait(tierName(source), tierName(target), latency_us);
+}
+
 void BlockTreeCacheMetricsReporter::maybeReportCopyError(Tier                  source_tier,
                                                          Tier                  target_tier,
                                                          const TransferResult& result) const {
@@ -491,7 +498,8 @@ void BlockTreeCacheMetricsReporter::maybeReportCopyError(Tier                  s
     collector.error_type     = cacheCopyErrorName(result.copy_error);
     collector.copy_direction = source_tier == Tier::DEVICE ? "FROM_GPU" :
                                target_tier == Tier::DEVICE ? "TO_GPU" :
-                               target_tier == Tier::DISK   ? "TO_DISK" : "FROM_DISK";
+                               target_tier == Tier::DISK   ? "TO_DISK" :
+                                                             "FROM_DISK";
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheCopyErrorMetricsCollector>(nullptr, &collector);
 }
 

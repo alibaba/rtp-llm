@@ -473,10 +473,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disk_cache_paths", &KVCacheConfig::disk_cache_paths)
         .def_readwrite("disk_cache_size_mb", &KVCacheConfig::disk_cache_size_mb)
         .def_readwrite("disk_cache_buffered_io", &KVCacheConfig::disk_cache_buffered_io)
+        .def_readwrite("disk_cache_read_thread_count", &KVCacheConfig::disk_cache_read_thread_count)
+        .def_readwrite("disk_cache_write_thread_count", &KVCacheConfig::disk_cache_write_thread_count)
         .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
         .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
+        .def_readwrite("btc_transfer_engine_async", &KVCacheConfig::btc_transfer_engine_async)
+        .def_readwrite("btc_crc_slot_count", &KVCacheConfig::btc_crc_slot_count)
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
@@ -578,7 +582,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      12,
+                                      13,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -660,25 +664,34 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kvcm_task_timeout_ms,
                                       self.kvcm_read_backend_type,
                                       self.kvcm_min_replica_count,
-                                      self.kv_cache_event_snapshot_interval_ms);
+                                      self.kv_cache_event_snapshot_interval_ms,
+                                      self.btc_crc_slot_count,
+                                      self.btc_transfer_engine_async,
+                                      self.disk_cache_read_thread_count,
+                                      self.disk_cache_write_thread_count);
             },
             [](py::tuple t) {
                 const py::tuple backend_state = t;
-                const bool has_backend_fields = t.size() == 84 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 12;
+                const bool      has_async_fields =
+                    t.size() == 88 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 13;
+                const bool has_backend_fields =
+                    has_async_fields || (t.size() == 84 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 12);
                 if (has_backend_fields) {
-                    t = t[py::slice(0, 80, 1)].cast<py::tuple>();
+                    t    = t[py::slice(0, 80, 1)].cast<py::tuple>();
                     t[1] = py::int_(11);
                 }
                 const py::tuple host_pool_state = t;
-                const bool has_host_pool_fields = t.size() == 80 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                const bool      has_host_pool_fields =
+                    t.size() == 80 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
                 if (has_host_pool_fields) {
-                    t = t[py::slice(0, 78, 1)].cast<py::tuple>();
+                    t    = t[py::slice(0, 78, 1)].cast<py::tuple>();
                     t[1] = py::int_(10);
                 }
                 const py::tuple full_watermark_state = t;
-                const bool has_full_watermarks = t.size() == 78 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                const bool      has_full_watermarks =
+                    t.size() == 78 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
                 if (has_full_watermarks) {
-                    t = t[py::slice(0, 72, 1)].cast<py::tuple>();
+                    t    = t[py::slice(0, 72, 1)].cast<py::tuple>();
                     t[1] = py::int_(9);
                 }
                 const py::tuple tail_state = t;
@@ -725,17 +738,23 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_async_fields) {
+                    c.btc_crc_slot_count            = backend_state[84].cast<int64_t>();
+                    c.btc_transfer_engine_async     = backend_state[85].cast<bool>();
+                    c.disk_cache_read_thread_count  = backend_state[86].cast<int64_t>();
+                    c.disk_cache_write_thread_count = backend_state[87].cast<int64_t>();
+                }
                 if (has_host_pool_fields) {
-                    c.memory_cache_swa_block_ratio = host_pool_state[78].cast<double>();
+                    c.memory_cache_swa_block_ratio  = host_pool_state[78].cast<double>();
                     c.dsv41_decoder_swa_pool_blocks = host_pool_state[79].cast<uint32_t>();
                 }
                 if (has_full_watermarks) {
-                    c.block_tree_full_device_evict_low_watermark_ratio = full_watermark_state[72].cast<double>();
+                    c.block_tree_full_device_evict_low_watermark_ratio  = full_watermark_state[72].cast<double>();
                     c.block_tree_full_device_evict_high_watermark_ratio = full_watermark_state[73].cast<double>();
-                    c.block_tree_full_memory_evict_low_watermark_ratio = full_watermark_state[74].cast<double>();
+                    c.block_tree_full_memory_evict_low_watermark_ratio  = full_watermark_state[74].cast<double>();
                     c.block_tree_full_memory_evict_high_watermark_ratio = full_watermark_state[75].cast<double>();
-                    c.block_tree_full_disk_evict_low_watermark_ratio = full_watermark_state[76].cast<double>();
-                    c.block_tree_full_disk_evict_high_watermark_ratio = full_watermark_state[77].cast<double>();
+                    c.block_tree_full_disk_evict_low_watermark_ratio    = full_watermark_state[76].cast<double>();
+                    c.block_tree_full_disk_evict_high_watermark_ratio   = full_watermark_state[77].cast<double>();
                 }
                 // Legacy indices include host pinning (removed in v4) and the absolute reserve (removed in v5).
                 const auto value = [&](size_t index) {
@@ -825,9 +844,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.enable_crc = crc_state[69].cast<bool>();
                 }
                 if (has_backend_fields) {
-                    c.kvcm_task_timeout_ms = backend_state[80].cast<int>();
-                    c.kvcm_read_backend_type = backend_state[81].cast<int32_t>();
-                    c.kvcm_min_replica_count = backend_state[82].cast<int32_t>();
+                    c.kvcm_task_timeout_ms                = backend_state[80].cast<int>();
+                    c.kvcm_read_backend_type              = backend_state[81].cast<int32_t>();
+                    c.kvcm_min_replica_count              = backend_state[82].cast<int32_t>();
                     c.kv_cache_event_snapshot_interval_ms = backend_state[83].cast<int>();
                 }
                 return c;

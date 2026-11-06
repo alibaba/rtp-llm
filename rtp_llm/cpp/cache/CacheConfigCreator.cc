@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -444,8 +445,22 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_num = static_cast<uint32_t>(kv_cache_config.test_block_num);
     } else {
-        const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
+        auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
+        if (kv_cache_config.kv_cache_mem_mb <= 0) {
+            const auto workspace_bytes = blockTreeCrcWorkspaceBytes(config, kv_cache_config);
+            RTP_LLM_CHECK_WITH_INFO(
+                workspace_bytes <= kv_cache_mem_size,
+                "BlockTree CRC workspace needs %zu MiB, only %zu MiB available after runtime reserve",
+                workspace_bytes / 1024 / 1024,
+                kv_cache_mem_size / 1024 / 1024);
+            kv_cache_mem_size -= workspace_bytes;
+            if (workspace_bytes > 0) {
+                RTP_LLM_LOG_INFO("kv cache: reserved %zu MiB for BlockTree CRC, remaining budget %zu MiB",
+                                 workspace_bytes / 1024 / 1024,
+                                 kv_cache_mem_size / 1024 / 1024);
+            }
+        }
         const auto block_budget = blockBudgetForConfig(config);
         if (block_budget.explicit_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size >= block_budget.explicit_pool_reserve_bytes,
