@@ -72,6 +72,7 @@ cc_library(
     deps = [
         ":config",
         ":subscriber",
+        "//rtp_llm/cpp/cache/events:kvcm_discovery_proto",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
         "//rtp_llm/cpp/cache:storage_3fs",

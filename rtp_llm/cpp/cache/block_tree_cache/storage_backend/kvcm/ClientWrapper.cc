@@ -5,10 +5,8 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <algorithm>
 #include <exception>
-#include <numeric>
 #include <pthread.h>
 #include <thread>
-#include <random>
 #include <chrono>
 
 namespace rtp_llm {
@@ -41,33 +39,12 @@ private:
     ClientWrapper::TransferCompletion* previous_completion_;
 };
 
-class ReinitPolicy {
-public:
-    ReinitPolicy(): rd_(), gen_(rd_()), jitter_dist_(jitter_min_, jitter_max_) {}
-
-    int sleep_time_ms() {
-        int sleep_time_ms = next_sleep_time_ms_ + jitter_dist_(gen_);
-        next_sleep_time_ms_ *= multiplier_;
-        next_sleep_time_ms_ = std::min(next_sleep_time_ms_, max_delay_ms_);
-        return sleep_time_ms;
-    }
-
-private:
-    static constexpr int            base_delay_ms_      = 20;
-    static constexpr int            max_delay_ms_       = 20000;
-    static constexpr double         multiplier_         = 1.5;
-    static constexpr int            jitter_min_         = 0;
-    static constexpr int            jitter_max_         = 2000;
-    int                             next_sleep_time_ms_ = base_delay_ms_;
-    std::random_device              rd_;
-    std::mt19937                    gen_;
-    std::uniform_int_distribution<> jitter_dist_;
-};
-
 }  // namespace
 
-ClientWrapper::ClientWrapper(std::unique_ptr<ClientFactory> client_factory):
-    client_factory_(std::move(client_factory)) {
+ClientWrapper::ClientWrapper(std::unique_ptr<ClientFactory> client_factory,
+                             std::chrono::milliseconds reinit_interval):
+    client_factory_(std::move(client_factory)),
+    reinit_interval_(std::max(reinit_interval, std::chrono::milliseconds(1))) {
     RTP_LLM_CHECK_WITH_INFO(client_factory_ != nullptr, "ClientWrapper requires a client factory");
 }
 
@@ -211,7 +188,9 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
         transfer_clients_ = std::move(clients);
         tag_to_index_     = std::move(pending_tags);
         try {
-            reinit_worker_ = std::thread([this] { reinitWorkerLoop(); });
+            if (!meta_client_map_.empty()) {
+                reinit_worker_ = std::thread([this] { reinitWorkerLoop(); });
+            }
         } catch (const std::exception& error) {
             RTP_LLM_LOG_ERROR("start KVCM re-registration worker failed: %s", error.what());
             transfer_clients_.clear();
@@ -246,7 +225,7 @@ void ClientWrapper::shutdown() noexcept {
     {
         std::lock_guard<std::mutex> lock(reinit_worker_mutex_);
         stop_requested_   = true;
-        reinit_requested_ = false;
+        reinit_action_ = ReinitAction::NONE;
     }
     reinit_worker_cv_.notify_all();
     if (reinit_worker_.joinable()) {
@@ -291,6 +270,7 @@ bool ClientWrapper::initMetaClient(const std::string& unique_id, KVCMConfigPtr c
             RTP_LLM_LOG_ERROR("unique_id [%s] init direct subscriber failed.", unique_id.c_str());
             return false;
         }
+        address_snapshot_ = config->addresses();
     }
     if (config->addresses().empty()) {
         RTP_LLM_LOG_ERROR("empty kvcm addresses");
@@ -302,7 +282,17 @@ bool ClientWrapper::initMetaClient(const std::string& unique_id, KVCMConfigPtr c
     std::unique_ptr<kv_cache_manager::MetaClient> meta_client;
     for (int i = 1; i <= config->meta_channel_config()->retry_time(); ++i) {
         RTP_LLM_LOG_INFO("try meta client, try time[%d]", i);
-        meta_client = client_factory_->createMetaClient(real_config_str, init_params_);
+        // Record the actual bound address. The SDK does not expose it, and
+        // some versions stop at the first unreachable address in a list.
+        for (const auto& address : address_snapshot_) {
+            auto candidate_config = *config;
+            candidate_config.set_addresses({address});
+            meta_client = client_factory_->createMetaClient(autil::legacy::ToJsonString(candidate_config), init_params_);
+            if (meta_client) {
+                bound_address_ = address;
+                break;
+            }
+        }
         if (meta_client) {
             break;
         }
@@ -315,88 +305,21 @@ bool ClientWrapper::initMetaClient(const std::string& unique_id, KVCMConfigPtr c
     return true;
 }
 
-bool ClientWrapper::reinit(const std::string&       unique_id,
-                           ConfigMap::iterator&     config_iter,
-                           MetaClientMap::iterator& meta_client_iter) {
-    auto config = config_iter->second;
-    config->set_addresses(address_snapshot_);
-    auto real_config_str = autil::legacy::ToJsonString(*config);
-    RTP_LLM_LOG_INFO("reinit unique_id[%s], kvcm real config[%s]", unique_id.c_str(), real_config_str.c_str());
-    auto meta_client = client_factory_->createMetaClient(real_config_str, init_params_);
-    if (meta_client == nullptr) {
-        RTP_LLM_LOG_ERROR("create meta client failed");
-        return false;
-    }
-    meta_client_iter->second = std::move(meta_client);
-    return true;
-}
-
-bool ClientWrapper::tryReinit(const std::string& unique_id) {
-    auto config_iter      = config_map_.find(unique_id);
-    auto meta_client_iter = meta_client_map_.find(unique_id);
-    if (config_iter == config_map_.end() || meta_client_iter == meta_client_map_.end()) {
-        RTP_LLM_LOG_WARNING("not find unique_id [%s]", unique_id.c_str());
-        return false;
-    }
-    if (config_iter->second->enable_vipserver()) {
-        std::vector<std::string> addresses;
-        if (!subscriber_->getAddresses(addresses)) {
-            return false;
-        }
-        {
-            std::shared_lock read_guard(reinit_mutex_);
-            if (addresses == address_snapshot_ && addresses == config_iter->second->addresses()) {
-                return true;
-            }
-        }
-        {
-            std::unique_lock write_guard(reinit_mutex_);
-            // double check
-            if (addresses == address_snapshot_ && addresses == config_iter->second->addresses()) {
-                return true;
-            }
-            std::string current_address_str = "";
-            std::string new_address_str     = "";
-            auto        join_address        = [](auto a, const auto& b) { return a + "," + b; };
-            if (address_snapshot_.size() > 0) {
-                current_address_str = std::accumulate(
-                    std::next(address_snapshot_.begin()), address_snapshot_.end(), address_snapshot_[0], join_address);
-            }
-            if (addresses.size() > 0) {
-                new_address_str =
-                    std::accumulate(std::next(addresses.begin()), addresses.end(), addresses[0], join_address);
-            }
-            RTP_LLM_LOG_INFO("ClientWrapper [%s] address changed, start reinit, current [%s], new [%s]",
-                             unique_id.c_str(),
-                             current_address_str.c_str(),
-                             new_address_str.c_str());
-            address_snapshot_.swap(addresses);
-            if (!reinit(unique_id, config_iter, meta_client_iter)) {
-                // clear address_snapshot, reinit next time
-                address_snapshot_.clear();
-                config_iter->second->set_addresses({});
-                RTP_LLM_LOG_ERROR("ClientWrapper [%s] reinit failed", unique_id.c_str());
-                return false;
-            }
-        }
-        RTP_LLM_LOG_INFO("ClientWrapper [%s] reinit finish", unique_id.c_str());
-    }
-    return true;
-}
-
 std::shared_ptr<kv_cache_manager::MetaClient> ClientWrapper::getMetaClient(const std::string& unique_id) {
-    if (!tryReinit(unique_id)) {
+    std::lock_guard<std::mutex> worker_lock(reinit_worker_mutex_);
+    // Keep in-flight snapshots alive, but do not send new calls to a known non-leader.
+    if (stop_requested_ || reinit_action_ == ReinitAction::FIND_LEADER) {
         return nullptr;
     }
-    std::shared_lock lock(reinit_mutex_);
-    return meta_client_map_.at(unique_id);
+    const auto it = meta_client_map_.find(unique_id);
+    return it == meta_client_map_.end() ? nullptr : it->second;
 }
 
 #define DEFER(...) __VA_ARGS__
 #define CHECK_INIT_BASE(unique_id, return_value)                                                                       \
     std::shared_lock read_guard(rr_mutex_, std::try_to_lock);                                                          \
     if (!read_guard.owns_lock()) {                                                                                     \
-        RTP_LLM_LOG_WARNING("doing re-registration");                                                                  \
+        RTP_LLM_LOG_WARNING("KVCM metadata client is shutting down");                                                  \
         return return_value;                                                                                           \
     }                                                                                                                  \
     const auto client = getMetaClient(unique_id);                                                                      \
@@ -408,7 +331,7 @@ std::shared_ptr<kv_cache_manager::MetaClient> ClientWrapper::getMetaClient(const
 
 #define CALL_CLIENT2(function_name, ...)                                                                               \
     auto [ec, result] = client->function_name(__VA_ARGS__);                                                            \
-    if (!checkError(ec)) {                                                                                             \
+    if (!checkError(ec, client)) {                                                                                     \
         RTP_LLM_LOG_WARNING(#function_name " fail, ec [%d]", ec);                                                      \
         return {false, {}};                                                                                            \
     }                                                                                                                  \
@@ -441,7 +364,7 @@ bool ClientWrapper::removeCache(const std::string& unique_id, const std::string&
                                 const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
                                 const kv_cache_manager::BlockMask& block_mask) {
     CHECK_INIT1(unique_id);
-    return checkError(client->RemoveCache(trace_id, keys, tokens, block_mask));
+    return checkError(client->RemoveCache(trace_id, keys, tokens, block_mask), client);
 }
 
 std::pair<bool, kv_cache_manager::BackendLocations>
@@ -461,7 +384,7 @@ ClientWrapper::getHostCacheState(const std::string& unique_id, const std::string
                                  const std::vector<std::string>& medium, int32_t p2p_host_count) {
     CHECK_INIT2(unique_id);
     auto [ec, result] = getSdkHostCacheState(*client, trace_id, query_type, keys, medium, p2p_host_count);
-    if (!checkError(ec)) {
+    if (!checkError(ec, client)) {
         RTP_LLM_LOG_WARNING("GetHostCacheState fail, ec [%d]", ec);
         return {false, {}};
     }
@@ -475,7 +398,7 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
                                 const kv_cache_manager::Locations& locations) {
     CHECK_INIT1(unique_id);
     auto ec = client->FinishWrite(trace_id, write_session_id, block_mask, locations);
-    if (!checkError(ec)) {
+    if (!checkError(ec, client)) {
         RTP_LLM_LOG_WARNING("FinishWrite fail, ec [%d]", ec);
         return false;
     }
@@ -492,7 +415,7 @@ bool ClientWrapper::abortWrite(const std::string& unique_id, const std::string& 
     auto attempt_abort = [&]() -> std::optional<kv_cache_manager::ClientErrorCode> {
         CHECK_INIT_BASE(unique_id, std::nullopt);
         const auto ec = client->FinishWrite(trace_id, write_session_id, kv_cache_manager::BlockMaskOffset{0}, {});
-        checkError(ec);
+        checkError(ec, client);
         return ec;
     };
     for (int attempt = 0; attempt < max_attempts; ++attempt) {
@@ -519,89 +442,149 @@ bool ClientWrapper::abortWrite(const std::string& unique_id, const std::string& 
     return false;
 }
 
-bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec) {
-    if (ec == kv_cache_manager::ClientErrorCode::ER_INVALID_GRPCSTATUS) {
-        grpc_error_count_.fetch_add(1, std::memory_order_acquire);
-    }
+bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec,
+                               const std::shared_ptr<kv_cache_manager::MetaClient>& client) {
     if (ec == kv_cache_manager::ClientErrorCode::ER_OK) {
         return true;
-    } else if (ec == kv_cache_manager::ClientErrorCode::ER_SERVICE_INSTANCE_NOT_EXIST
-               || ec == kv_cache_manager::ClientErrorCode::ER_SERVICE_NOT_LEADER
-               || grpc_error_count_.load(std::memory_order_acquire) > 2) {
-        requestReinit();
-        return false;
+    }
+    if (ec == kv_cache_manager::ClientErrorCode::ER_SERVICE_INSTANCE_NOT_EXIST
+        || ec == kv_cache_manager::ClientErrorCode::ER_SERVICE_NOT_LEADER) {
+        {
+            std::lock_guard<std::mutex> lock(reinit_worker_mutex_);
+            if (stop_requested_ || meta_client_map_.empty() || meta_client_map_.begin()->second != client) {
+                return false;
+            }
+            if (ec == kv_cache_manager::ER_SERVICE_NOT_LEADER) {
+                reinit_action_ = ReinitAction::FIND_LEADER;
+            } else if (reinit_action_ == ReinitAction::NONE) {
+                reinit_action_ = ReinitAction::REGISTER;
+            }
+        }
+        reinit_worker_cv_.notify_all();
     }
     return false;
 }
 
-void ClientWrapper::requestReinit() {
-    {
-        std::lock_guard<std::mutex> lock(reinit_worker_mutex_);
+void ClientWrapper::reinitWorkerLoop() noexcept {
+    pthread_setname_np(pthread_self(), "kvcm_reinit");
+    bool attempted = false;
+    size_t attempt_index = 0;
+    std::vector<std::string> attempt_addresses;
+    std::string attempt_preferred;
+    const auto& [unique_id, config] = *config_map_.begin();
+    std::unique_lock<std::mutex> lock(reinit_worker_mutex_);
+    while (!stop_requested_) {
+        const auto ready = [this, &attempted] {
+            return stop_requested_ || (!attempted && reinit_action_ != ReinitAction::NONE);
+        };
+        // Only VIP refresh and an attempt's cooldown need a timed wait.
+        if (attempted || config->enable_vipserver()) {
+            reinit_worker_cv_.wait_for(lock, reinit_interval_, ready);
+        } else {
+            reinit_worker_cv_.wait(lock, ready);
+        }
         if (stop_requested_) {
             return;
         }
-        reinit_requested_ = true;
-    }
-    reinit_worker_cv_.notify_one();
-}
 
-void ClientWrapper::reinitWorkerLoop() noexcept {
-    pthread_setname_np(pthread_self(), "kvcm_reinit");
-    while (true) {
-        {
-            std::unique_lock<std::mutex> lock(reinit_worker_mutex_);
-            reinit_worker_cv_.wait(lock, [this] { return stop_requested_ || reinit_requested_; });
-            if (stop_requested_) {
-                return;
-            }
-            reinit_requested_ = false;
-        }
-        bool succeeded = false;
+        auto addresses = address_snapshot_;
+        lock.unlock();
         try {
-            succeeded = reinitAllMetaClients();
+            if (config->enable_vipserver()) {
+                std::vector<std::string> discovered;
+                if (subscriber_->getAddresses(discovered) && !discovered.empty()) {
+                    addresses = std::move(discovered);
+                }
+            }
         } catch (const std::exception& error) {
-            RTP_LLM_LOG_ERROR("KVCM re-registration worker failed: %s", error.what());
-        } catch (...) { RTP_LLM_LOG_ERROR("KVCM re-registration worker failed with an unknown exception"); }
-        if (succeeded) {
-            grpc_error_count_.store(0, std::memory_order_release);
+            RTP_LLM_LOG_WARNING("KVCM VIP refresh failed: %s", error.what());
+        } catch (...) { RTP_LLM_LOG_WARNING("KVCM VIP refresh threw"); }
+        lock.lock();
+        if (stop_requested_) {
+            return;
         }
-    }
-}
+        const bool bound_present = std::find(addresses.begin(), addresses.end(), bound_address_) != addresses.end();
+        const bool removed = !bound_present
+                             && std::find(address_snapshot_.begin(), address_snapshot_.end(), bound_address_)
+                                    != address_snapshot_.end();
+        address_snapshot_ = addresses;
+        if (removed && reinit_action_ == ReinitAction::NONE) {
+            reinit_action_ = ReinitAction::REGISTER;
+        }
+        attempted = reinit_action_ != ReinitAction::NONE;
+        if (!attempted) {
+            continue;
+        }
 
-bool ClientWrapper::reinitAllMetaClients() {
-    std::unique_lock write_guard(rr_mutex_);
-    RTP_LLM_LOG_INFO("reinitAllMetaClients start");
-    ReinitPolicy policy;
-    while (true) {
-        RTP_LLM_INTERVAL_LOG(5, INFO, "doing reinitAllMetaClients...");
-        try {
-            if (subscriber_->getAddresses(address_snapshot_)) {
-                bool all_succeed = true;
-                for (auto config_iter = config_map_.begin(); config_iter != config_map_.end(); ++config_iter) {
-                    const auto& unique_id = config_iter->first;
-                    if (auto meta_client_iter = meta_client_map_.find(unique_id);
-                        meta_client_iter != meta_client_map_.end()) {
-                        if (!reinit(unique_id, config_iter, meta_client_iter)) {
-                            all_succeed = false;
-                            break;
-                        }
-                    } else {
-                        all_succeed = false;
-                        break;
-                    }
+        const auto action = reinit_action_;
+        std::string preferred;
+        if (!config->enable_vipserver() || bound_present) {
+            preferred = bound_address_;
+        }
+        lock.unlock();
+        if (action == ReinitAction::FIND_LEADER) {
+            preferred.clear();
+            // The last bound node may be gone; configured peers can still report the leader.
+            for (size_t i = 0; i <= addresses.size() && preferred.empty(); ++i) {
+                const auto& source = i == 0 ? bound_address_ : addresses[i - 1];
+                if (i != 0 && source == bound_address_) {
+                    continue;
                 }
-                if (all_succeed) {
-                    RTP_LLM_LOG_INFO("reinitAllMetaClients finish");
-                    return true;
+                {
+                    std::lock_guard<std::mutex> stop_lock(reinit_worker_mutex_);
+                    if (stop_requested_) return;
                 }
+                try {
+                    preferred = client_factory_->getLeaderAddress(
+                        source, config->instance_id(), config->meta_channel_config()->call_timeout());
+                } catch (const std::exception& error) {
+                    RTP_LLM_LOG_WARNING("KVCM leader discovery failed: %s", error.what());
+                } catch (...) { RTP_LLM_LOG_WARNING("KVCM leader discovery threw"); }
             }
+        }
+        if (!preferred.empty()) {
+            addresses.erase(std::remove(addresses.begin(), addresses.end(), preferred), addresses.end());
+            addresses.insert(addresses.begin(), preferred);
+        }
+        // Keep fallback order stable across VIP reordering, but try a newly discovered leader first.
+        if (preferred != attempt_preferred
+            || !std::is_permutation(addresses.begin(), addresses.end(),
+                                    attempt_addresses.begin(), attempt_addresses.end())) {
+            attempt_index = 0;
+            attempt_preferred = preferred;
+            attempt_addresses = addresses;
+        }
+        const auto address = attempt_addresses[attempt_index % attempt_addresses.size()];
+        std::shared_ptr<kv_cache_manager::MetaClient> candidate;
+        lock.lock();
+        if (stop_requested_) {
+            return;
+        }
+        lock.unlock();
+        try {
+            auto candidate_config = *config;
+            candidate_config.set_addresses({address});
+            candidate = client_factory_->createMetaClient(autil::legacy::ToJsonString(candidate_config), init_params_);
         } catch (const std::exception& error) {
             RTP_LLM_LOG_ERROR("KVCM re-registration attempt failed: %s", error.what());
         } catch (...) { RTP_LLM_LOG_ERROR("KVCM re-registration attempt failed with an unknown exception"); }
-        if (!waitForRetry(policy.sleep_time_ms())) {
-            RTP_LLM_LOG_INFO("reinitAllMetaClients stopped");
-            return false;
+        lock.lock();
+        if (candidate && !stop_requested_) {
+            candidate.swap(meta_client_map_.at(unique_id));
+            bound_address_ = address;
+            reinit_action_ = ReinitAction::NONE;
+            attempt_index = 0;
+            attempt_addresses.clear();
+            attempt_preferred.clear();
+            RTP_LLM_LOG_INFO("KVCM metadata client recovered, address=%s", address.c_str());
+        } else if (!stop_requested_) {
+            attempt_index = reinit_action_ == action ? attempt_index + 1 : 0;
+            RTP_LLM_INTERVAL_LOG(5, WARN, "KVCM metadata recovery failed, address=%s", address.c_str());
         }
+        // Destruction can run SDK cleanup; keep it outside publication/state locks.
+        lock.unlock();
+        candidate.reset();
+        lock.lock();
     }
 }
 
