@@ -48,8 +48,10 @@ public:
 
     static bool apply(NaviSchedScheduleContext &context,
                       multi_call::RandomGenerator &randomGenerator, Result &result,
-                      const std::function<uint64_t()> &randomDraw = {});
+                      const std::function<uint64_t()> &randomDraw = {},
+                      bool limitAllColdInflight = true);
     static Analysis analyze(const NaviSchedScheduleContext &context);
+    static bool hasTrustedNode(const NaviSchedScheduleContext &context);
     static double calculateTargetInflight(int64_t trustedInflight,
                                           size_t trustedNodeCount);
     static size_t calculateUntrustedCapacity(long double totalPositiveDeficit,
