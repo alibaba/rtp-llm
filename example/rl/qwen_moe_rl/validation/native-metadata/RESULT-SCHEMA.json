@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Qwen3.8 actual72 metadata-only result (not training acceptance)",
+  "type": "object",
+  "required": [
+    "schema",
+    "passed",
+    "namespace",
+    "driver_identity",
+    "metadata_bootstrap_completed",
+    "actual72_native_GPU_UUIDs_verified",
+    "actual18_native_leader_exits",
+    "all_owned_native_contexts_released",
+    "training_admission_safe",
+    "complete_policy_commits",
+    "HF_workers_created",
+    "weight_refit_generation_training_performed",
+    "full_model_training_accepted",
+    "error",
+    "cleanup_errors"
+  ],
+  "properties": {
+    "schema": {
+      "const": "q38-actual72-native-metadata-preflight-result-v1"
+    },
+    "namespace": {
+      "type": "string",
+      "pattern": "^q38meta-"
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "metadata_bootstrap_completed": {
+      "type": "boolean"
+    },
+    "actual72_native_GPU_UUIDs_verified": {
+      "type": "boolean"
+    },
+    "descriptor_sources_per_rank": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "actual18_native_leader_exits": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      }
+    },
+    "all_owned_native_contexts_released": {
+      "type": "boolean"
+    },
+    "training_admission_safe": {
+      "const": false
+    },
+    "complete_policy_commits": {
+      "const": 0
+    },
+    "HF_workers_created": {
+      "const": 0
+    },
+    "weight_refit_generation_training_performed": {
+      "const": false
+    },
+    "full_model_training_accepted": {
+      "const": false
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cleanup_errors": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "passed": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "metadata_bootstrap_completed": {
+            "const": true
+          },
+          "actual72_native_GPU_UUIDs_verified": {
+            "const": true
+          },
+          "descriptor_sources_per_rank": {
+            "const": 1590
+          },
+          "actual18_native_leader_exits": {
+            "minItems": 18,
+            "maxItems": 18
+          },
+          "all_owned_native_contexts_released": {
+            "const": true
+          },
+          "error": {
+            "const": null
+          },
+          "cleanup_errors": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ]
+}
