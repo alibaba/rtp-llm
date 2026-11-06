@@ -701,7 +701,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     torch::Tensor cpu_packed, gpu_packed;
 
     if (cpu_total_bytes > 0) {
-        cpu_packed = torch::empty({cpu_total_bytes}, torch::kUInt8).pin_memory();
+        // Allocate pinned storage directly; pin_memory() copies an uninitialized CPU buffer.
+        cpu_packed = torch::empty(
+            {cpu_total_bytes}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
         if (is_root) {
             auto* base = static_cast<uint8_t*>(cpu_packed.data_ptr());
             for (auto& e : cpu_entries) {
