@@ -131,7 +131,7 @@ def _try_validate_main_paged_geometry(
         and query_lengths.dtype in (torch.int32, torch.int64)
         and batch_size <= 256
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(device) == (12, 0)
+        and torch.cuda.get_device_capability(device) in ((9, 0), (12, 0))
     ):
         return None
     page_size, cache_blocks = _validate_main_cache_layout(
