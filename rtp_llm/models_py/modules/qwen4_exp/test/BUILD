@@ -344,6 +344,13 @@ qwen4_test(
 )
 
 qwen4_test(
+    name = "marlin_prefill_test",
+    src = "moe/marlin_prefill_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
+qwen4_test(
     name = "gated_residual_bf16_test",
     src = "parity/gated_residual_bf16_test.py",
     gpu = "RTX_5000_PRO_CU13",
@@ -615,7 +622,6 @@ qwen4_test(
 qwen4_test(
     name = "cpu_target_status_test",
     src = "distributed/cpu_target_status_test.py",
-    gpu = "L20_CU13",
     deps = _REFERENCE_DEPS,
 )
 
@@ -729,6 +735,7 @@ test_suite(
         ":marlin_large_decode_test",
         ":marlin_nvfp4_hopper_test",
         ":marlin_nvfp4_test",
+        ":marlin_prefill_test",
         ":moe_align_triton_test",
         ":moe_topk_triton_test",
         ":shared_expert_overlap_test",

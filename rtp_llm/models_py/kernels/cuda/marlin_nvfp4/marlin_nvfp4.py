@@ -13,6 +13,10 @@ import triton
 import triton.language as tl
 from torch.torch_version import TorchVersion
 
+# Bound both the per-CTA alignment tensors and the routed activation scratch.
+# Expert padding uses at most eight slots per route.
+_MAX_ROUTES_PER_CHUNK = 4096
+
 
 @functools.lru_cache(maxsize=1)
 def load_library():
@@ -343,6 +347,21 @@ class Nvfp4MarlinMoE:
         self.workspaces = {}
 
     def __call__(self, x, ids, weights):
+        topk = ids.shape[1]
+        assert 0 < topk <= _MAX_ROUTES_PER_CHUNK
+        chunk_tokens = _MAX_ROUTES_PER_CHUNK // topk
+        if x.shape[0] <= chunk_tokens:
+            return self._forward_chunk(x, ids, weights)
+
+        out = torch.empty_like(x)
+        for start in range(0, x.shape[0], chunk_tokens):
+            end = start + chunk_tokens
+            self._forward_chunk(
+                x[start:end], ids[start:end], weights[start:end], out[start:end]
+            )
+        return out
+
+    def _forward_chunk(self, x, ids, weights, out=None):
         m, k = x.shape
         assert (
             0 < m
@@ -363,7 +382,8 @@ class Nvfp4MarlinMoE:
         upgate = torch.empty((m * topk, self.n * 2), device=x.device, dtype=x.dtype)
         activated = torch.empty((m * topk, self.n), device=x.device, dtype=x.dtype)
         down = torch.empty((m * topk, k), device=x.device, dtype=x.dtype)
-        out = torch.empty_like(x)
+        if out is None:
+            out = torch.empty_like(x)
         for a, c, w, sf, glob, size_m, n, kk, kt, weighted in [
             (x, upgate, self.w1, self.s1, self.g1, m, 2 * self.n, k, topk, False),
             (activated, down, self.w2, self.s2, self.g2, m * topk, k, self.n, 1, True),
