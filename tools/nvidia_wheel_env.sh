@@ -37,6 +37,35 @@ base_paths=(/opt/rh/gcc-toolset-12/root/usr/lib64 /usr/local/cuda/lib64 /opt/con
 for _stub in /usr/local/cuda/lib64/stubs /usr/local/cuda-13.2/lib64/stubs; do
     [ -d "$_stub" ] && base_paths+=("$_stub")
 done
+# Final fallback for driver-less workers (CPU-only test execution with
+# GPU_COUNT=0): device-linked test binaries DT_NEED libcuda.so.1. If no
+# driver and no toolkit stub exists, synthesize an EMPTY stub - lazy binding
+# resolves symbols only at first call, and CPU-only tests never call driver
+# APIs, so the load succeeds and the CPU accounting assertions run.
+_have_driver=no
+for _d in "${base_paths[@]}"; do
+    [ -e "$_d/libcuda.so.1" ] || [ -e "$_d/libcuda.so" ] && _have_driver=yes
+done
+if [ "$_have_driver" = no ] && ! ldconfig -p 2>/dev/null | grep -q 'libcuda\.so'; then
+    _stub=""
+    for _cand in /usr/local/cuda/compat /usr/local/cuda*/lib64/stubs; do
+        if [ -e "$_cand/libcuda.so" ] || [ -e "$_cand/libcuda.so.1" ]; then
+            _stub="$_cand"
+            break
+        fi
+    done
+    if [ -z "$_stub" ] && command -v gcc >/dev/null 2>&1; then
+        _gen=/tmp/rtp-libcuda-stub.$$
+        mkdir -p "$_gen" 2>/dev/null || true
+        if printf '' | gcc -shared -x c -o "$_gen/libcuda.so.1" - 2>/dev/null && [ -e "$_gen/libcuda.so.1" ]; then
+            _stub="$_gen"
+            echo "nvidia_wheel_env: no driver libcuda found; using empty stub $_stub" >&2
+        else
+            rm -rf "$_gen" 2>/dev/null || true
+        fi
+    fi
+    [ -n "$_stub" ] && base_paths+=("$_stub")
+fi
 prefix="$(IFS=:; echo "${base_paths[*]}")"
 if [ "${#wheel_lib_dirs[@]}" -gt 0 ]; then
     prefix="$(IFS=:; echo "${wheel_lib_dirs[*]}"):$prefix"
