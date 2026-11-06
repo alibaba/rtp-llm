@@ -62,14 +62,14 @@ if [ "$_have_driver" = no ]; then
     if [ -z "$_stub" ]; then
         _gen=/tmp/rtp-libcuda-stub.$$
         mkdir -p "$_gen" 2>/dev/null || true
+        # NOTE: iterate with indexed arrays - `set --` here would clobber
+        # the script's "$@" (the test command), which we must forward intact.
+        _sonames=(libcuda.so.1 libnvidia-ml.so.1)
+        _devs=(libcuda.so libnvidia-ml.so)
         _linked=0
-        for _pair in \
-            'libcuda.so.1 libcuda.so' \
-            'libnvidia-ml.so.1 libnvidia-ml.so'
-        do
-            set -- $_pair
-            _soname=$1
-            _dev=$2
+        for _i in 0 1; do
+            _soname=${_sonames[$_i]}
+            _dev=${_devs[$_i]}
             _src=""
             for _cand in /usr/local/cuda*/lib64/stubs /usr/local/cuda/lib64/stubs; do
                 [ -e "$_cand/$_dev" ] && _src="$_cand/$_dev" && break
