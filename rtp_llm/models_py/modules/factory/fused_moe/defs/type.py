@@ -37,6 +37,6 @@ class ExecutorType(Enum):
     )
     TRTLLM_FP4 = 7  # TRTLLM FP4 executor (specialized)
     CUTEDSL_FP4 = 8  # CuteDSL FP4 executor (FP4 optimized)
+    FP8_FP4 = 9  # DeepGEMM FP8-activation x FP4-weight executor
     CUTLASS_NVFP4 = 10
     MARLIN_NVFP4 = 11
-    FP8_FP4 = 9  # DeepGEMM FP8-activation x FP4-weight executor

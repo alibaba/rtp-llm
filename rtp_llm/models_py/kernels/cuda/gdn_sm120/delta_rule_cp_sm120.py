@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025-2026 FlashInfer team.
-# Adapted from the installed FlashInfer0.7.0 snapshot; see PROVENANCE.json.
+# Adapted from FlashInfer 0.7.0, flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_cp_sm120.py.
 import functools
 import math
 from enum import IntEnum

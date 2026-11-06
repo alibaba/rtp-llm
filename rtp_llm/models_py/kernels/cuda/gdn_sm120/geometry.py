@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025-2026 FlashInfer team.
-# Extracted from FlashInfer 0.7.0 delta_rule_sm120.py; see PROVENANCE.json.
+# Extracted from FlashInfer 0.7.0, flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_sm120.py:
+# _FullyFusedDeltaRuleSm120.can_implement.
 
 
 def can_implement(

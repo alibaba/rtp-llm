@@ -270,7 +270,6 @@ py_library(
     }),
     data = [
         ":marlin_nvfp4_jit_sources",
-        "kernels/cuda/gdn_sm120/PROVENANCE.json",
     ],
 )
 

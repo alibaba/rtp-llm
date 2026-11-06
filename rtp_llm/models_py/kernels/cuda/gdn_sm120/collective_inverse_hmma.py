@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025-2026 FlashInfer team.
-# Adapted from FlashInfer 0.7.0, gdn_kernels/delta_rule_dsl; see PROVENANCE.json.
+# Adapted from FlashInfer 0.7.0, flashinfer/gdn_kernels/delta_rule_dsl/collective_inverse_hmma.py.
 import cutlass
 import cutlass.cute as cute
 from cutlass.cute.nvgpu import warp
