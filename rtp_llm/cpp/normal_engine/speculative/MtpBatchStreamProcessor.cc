@@ -701,9 +701,10 @@ bool collectMtpStateProposeSlices(const std::list<GenerateStreamPtr>& streams,
         propose_slices.push_back(lastColumnAsFlat(gpu_t));
         if (next_seq_lengths) {
             torch::Tensor next_seq_len = state.next_seq_len_gpu;
-            if (next_seq_len.defined() && next_seq_len.is_cuda()) {
-                next_seq_lengths->push_back(std::move(next_seq_len));
+            if (!next_seq_len.defined() || !next_seq_len.is_cuda()) {
+                return false;
             }
+            next_seq_lengths->push_back(std::move(next_seq_len));
         }
     }
     return true;
@@ -1147,19 +1148,12 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
             auto combo_tokens_gpu         = torch::cat(propose_slices_gpu, 0).to(torch::kInt32);
             model_input.combo_tokens      = std::move(combo_tokens_gpu);
             model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
-            if (sequence_lengths_gpu.size() == batch_size) {
-                // next_seq_len includes the carried target token. Shifted
-                // draft KV and target verification both resume at length - 1;
-                // explicit rotary position IDs are managed separately.
-                auto committed_len           = torch::cat(sequence_lengths_gpu, 0);
-                model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
-                model_input.prefix_lengths   = model_input.sequence_lengths;
-            } else if (model_input.sequence_lengths.defined()) {
-                auto target_prefix_lengths = toCudaInt32(model_input.sequence_lengths, host_holder);
-                model_input.prefix_lengths = target_prefix_lengths;
-                model_input.sequence_lengths =
-                    normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
-            }
+            // next_seq_len includes the carried target token. Shifted
+            // draft KV and target verification both resume at length - 1;
+            // explicit rotary position IDs are managed separately.
+            auto committed_len           = torch::cat(sequence_lengths_gpu, 0);
+            model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
+            model_input.prefix_lengths   = model_input.sequence_lengths;
             model_input.input_lengths = toCudaInt32(model_input.input_lengths, host_holder);
             if (device_positions) {
                 expandTargetVerifyPositionIds(stream_groups, model_input, model_input.prefix_lengths, 1);
@@ -1173,20 +1167,25 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
     const bool has_device_row = std::any_of(streams.begin(), streams.end(), [](const auto& stream) {
         const auto state = stream->getMtpAsyncDeviceState();
         return stream->hasMtpCacheSnapshot()
-               || (state.propose_tokens_gpu.defined() && state.next_seq_len_gpu.defined());
+               || (state.propose_tokens_gpu.defined() && state.propose_tokens_gpu.is_cuda());
     });
     if (has_device_row) {
         std::vector<torch::Tensor> proposals, prefixes;
         int64_t                    row = 0;
         for (const auto& stream : streams) {
             const auto state = stream->getMtpAsyncDeviceState();
-            if (state.propose_tokens_gpu.defined() && state.next_seq_len_gpu.defined()) {
+            if (state.propose_tokens_gpu.defined() && state.propose_tokens_gpu.is_cuda()
+                && state.next_seq_len_gpu.defined() && state.next_seq_len_gpu.is_cuda()) {
                 proposals.push_back(lastColumnAsFlat(state.propose_tokens_gpu));
                 prefixes.push_back((state.next_seq_len_gpu.reshape({1}) - 1).to(torch::kInt32));
             } else {
                 RTP_LLM_CHECK_WITH_INFO(!stream->hasPendingAsyncBookkeeping() && !stream->hasMtpCacheSnapshot(),
                                         "pending MTP draft requires published proposals and lengths");
-                proposals.push_back(toCudaInt32(pickOneStepDraftToken(stream), host_holder));
+                // Idle rows may publish only a proposal, even with device state disabled.
+                auto proposal = state.propose_tokens_gpu.defined() && state.propose_tokens_gpu.is_cuda() ?
+                                    lastColumnAsFlat(state.propose_tokens_gpu) :
+                                    pickOneStepDraftToken(stream);
+                proposals.push_back(toCudaInt32(proposal, host_holder));
                 prefixes.push_back(toCudaInt32(model_input.sequence_lengths.narrow(0, row, 1), host_holder));
             }
             ++row;
@@ -1366,7 +1365,10 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
     // here combo_tokens is a device buffer
     model_input.combo_tokens = draft_token_ids.reshape({batch_size});
 
-    if (model_input.combo_position_ids.defined()) {
+    if (model_input.combo_position_ids.defined() && model_input.combo_position_ids.is_cuda()) {
+        // Earlier async steps can still reference the previous positions.
+        model_input.combo_position_ids = model_input.combo_position_ids + 1;
+    } else if (model_input.combo_position_ids.defined()) {
         const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
         auto         next_position_ids =
             torch::empty({(int64_t)(batch_size * position_id_len_factor)}, torch::kInt32).pin_memory();
