@@ -39,6 +39,7 @@ class MagaServerManager(object):
         process_file_name: str = "process.log",
         smoke_args_str: str = "",
         health_check_path: str = "/health",
+        process_prefix: Optional[List[str]] = None,
     ):
         self._username = os.getenv("USER")
         self._env_args = env_args
@@ -51,6 +52,7 @@ class MagaServerManager(object):
         self._port = port
         self._smoke_args_str = smoke_args_str
         self._health_check_path = health_check_path
+        self._process_prefix = list(process_prefix or [])
         self._exit_code: Optional[int] = None
         self._state_lock = threading.Lock()
         self._stop_requested = False
@@ -253,7 +255,9 @@ class MagaServerManager(object):
         )
         python_bin = os.environ.get("RTP_PYTHON_BIN", sys.executable)
         p = subprocess.Popen(
-            [python_bin, "-m", "rtp_llm.start_server"] + parsed_args,
+            self._process_prefix
+            + [python_bin, "-m", "rtp_llm.start_server"]
+            + parsed_args,
             env=current_env,
             stdout=self._file_stream,
             stderr=self._file_stream,

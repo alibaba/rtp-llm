@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "qwen2.5-7b-prefill",
+    "type": "qwen_2",
+    "checkpoint": "/data/models/Qwen2.5-7B-Instruct",
+    "tokenizer": "/data/models/Qwen2.5-7B-Instruct",
+    "topology": {
+      "tp": 1,
+      "dp": 1,
+      "pp": 1,
+      "ep": 1
+    }
+  },
+  "engine": {
+    "max_seq_len": 8193,
+    "max_batch_tokens": 32768,
+    "concurrency_limit": 4,
+    "args": {
+      "reuse_cache": 1
+    },
+    "env": {
+      "TOKENIZERS_PARALLELISM": "false"
+    }
+  },
+  "workload": {
+    "kind": "cache_grid",
+    "cache_alignment": 64,
+    "commit_tail_tokens": 64,
+    "measure_runs": 3,
+    "workspace_tokens": 32768,
+    "request_batches": [
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 1024,
+            "cache_len": 0
+          },
+          {
+            "count": 2,
+            "input_len": 2048,
+            "cache_len": 1024
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 2,
+            "input_len": 4096,
+            "cache_len": 2048
+          }
+        ]
+      }
+    ]
+  },
+  "execution": {
+    "backend": "local",
+    "devices": [
+      0
+    ]
+  },
+  "output": {
+    "result_root": "perf_test_results"
+  },
+  "regression": {},
+  "publish": {}
+}

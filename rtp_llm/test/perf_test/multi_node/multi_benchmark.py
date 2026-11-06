@@ -1,14 +1,36 @@
 import argparse
 import copy
+import itertools
+import json
 import logging
 import math
 import os
 import subprocess
+import sys
 import time
+import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List
 
 import yaml
+
+# Support the existing standalone invocation from the multi_node directory.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+
+from rtp_llm.test.perf_test.config_resolver import canonical_json
+from rtp_llm.test.perf_test.errors import (
+    ConfigurationError,
+    PartialRunError,
+    PerfTestError,
+)
+from rtp_llm.test.perf_test.multi_node.decode_runtime import build_external_decode_plan
+from rtp_llm.test.perf_test.multi_node.prefill_runtime import (
+    build_external_prefill_plan,
+)
+from rtp_llm.test.perf_test.plan import thaw
+from rtp_llm.test.perf_test.results import parse_result_envelope
 
 # Global variables
 logger = None
@@ -17,6 +39,7 @@ experiment_output_dir = None
 
 benchmark_separator = "=" * 120
 task_separator = "-" * 120
+SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 
 
 def get_args():
@@ -24,7 +47,7 @@ def get_args():
     parser.add_argument(
         "-c",
         "--config",
-        default="./multi_benchmark_config.yaml",
+        default=str(SCRIPT_DIRECTORY / "multi_benchmark_config.yaml"),
         type=str,
         help="Path to the configuration file",
     )
@@ -35,7 +58,74 @@ def get_args():
 def load_config(config_path: str) -> Dict[str, Any]:
     with open(config_path, "r") as config_file:
         config = yaml.safe_load(config_file)
+    # Validate every expanded task before main can build, clean, or contact hosts.
+    for benchmark in config.get("benchmarks", []):
+        fixed = benchmark.get("fixed_config")
+        if not isinstance(fixed, dict):
+            raise ConfigurationError("each benchmark requires fixed_config")
+        path = fixed.get("perf_test_config")
+        if not isinstance(path, str) or not path.strip():
+            raise ConfigurationError("each benchmark requires perf_test_config")
+        fixed["perf_test_config"] = str(
+            (Path(config_path).resolve().parent / path).resolve()
+        )
+        common = {}
+        for section in ("machine_config", "build_config", "common_config"):
+            common.update(config.get(section) or {})
+        common.update(fixed)
+        iterative = benchmark.get("iterative_search_config") or {}
+        recursive = benchmark.get("recursive_search_config") or {}
+        check_benchmark_iterative_search_config(iterative)
+        check_benchmark_recursive_search_config(recursive)
+        iterations = (
+            [dict(zip(iterative, values)) for values in zip(*iterative.values())]
+            if iterative
+            else [{}]
+        )
+        for iteration in iterations:
+            for values in itertools.product(*recursive.values()):
+                task = {**common, **iteration, **dict(zip(recursive, values))}
+                validate_benchmark(task)
     return config
+
+
+def validate_benchmark(task_config, result_directory="preflight"):
+    path = task_config.get("perf_test_config")
+    if not path:
+        raise ConfigurationError("each benchmark requires perf_test_config")
+    tp = int(task_config["tp_size"])
+    dp = int(task_config["dp_size"])
+    source = json.loads(Path(path).read_text(encoding="utf-8"))
+    kind = source.get("workload", {}).get("kind")
+    if kind == "cache_grid":
+        builder = build_external_prefill_plan
+    elif kind in ("grid", "distribution"):
+        builder = build_external_decode_plan
+    else:
+        raise ConfigurationError(f"unsupported perf workload kind: {kind!r}")
+    return builder(
+        path,
+        result_directory=result_directory,
+        **(
+            {"resolved_workload_path": task_config["resolved_workload_path"]}
+            if kind == "cache_grid" and task_config.get("resolved_workload_path")
+            else {}
+        ),
+        actual_topology={
+            "tp": tp,
+            "dp": dp,
+            "pp": int(task_config.get("pp_size", 1)),
+            "ep": int(task_config.get("ep_size", tp * dp)),
+        },
+    )
+
+
+def validate_decode_benchmark(task_config, result_directory="preflight"):
+    """Compatibility name for callers that still preflight decode tasks."""
+    plan, source = validate_benchmark(task_config, result_directory)
+    if plan.mode != "decode":
+        raise ConfigurationError("decode benchmark requires a decode workload")
+    return plan, source
 
 
 def convert_to_env(benchmark_config: Dict[str, Any]) -> Dict[str, str]:
@@ -47,6 +137,8 @@ def convert_to_env(benchmark_config: Dict[str, Any]) -> Dict[str, str]:
             env[key.upper()] = "1" if value else "0"
         else:
             env[key.upper()] = str(value)
+    if "perf_test_config" in benchmark_config:
+        env["PERF_TEST_CONFIG_PATH"] = str(benchmark_config["perf_test_config"])
     return env
 
 
@@ -118,65 +210,111 @@ def log_stage(message: str, stage: str = ""):
         logger.info(f"{stage_marker} {message}")
 
 
-def extract_table_from_log(log_file_path: str) -> str:
-    """Extract table content from log file using improved method"""
+def extract_run_state(log_file_path: str, *, plan, run_id):
+    """Find this master's terminal marker; collected artifacts remain authoritative."""
     if not os.path.exists(log_file_path):
-        return ""
-
-    try:
-        with open(log_file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except Exception as e:
-        log_stage(f"Error reading log file {log_file_path}: {e}", stage="WARNING")
-        return ""
-
-    # Find table start position - ensure it's within table structure
-    table_start = -1
-    for i, line in enumerate(lines):
-        # Check if line contains table title and has table borders
-        if ("Decode Result" in line or "Prefill Result" in line) and "|" in line:
-            # Check if previous line is table border
-            if i > 0 and lines[i - 1].strip().startswith("+") and "-" in lines[i - 1]:
-                table_start = i - 1  # Include border line
-                break
-            # Check if next line is table border
-            elif (
-                i + 1 < len(lines)
-                and lines[i + 1].strip().startswith("+")
-                and "-" in lines[i + 1]
+        return None
+    state = None
+    with open(log_file_path, encoding="utf-8") as stream:
+        for line in stream:
+            if not line.startswith(f"PERF_TEST_{plan.mode.upper()}_RESULT "):
+                continue
+            try:
+                value = json.loads(line.split(" ", 1)[1])
+            except json.JSONDecodeError:
+                continue
+            expected = {
+                "run_id": run_id,
+                "world_rank": 0,
+                "config_fingerprint": plan.config_fingerprint,
+                "workload_fingerprint": plan.workload_fingerprint,
+            }
+            if (
+                isinstance(value, dict)
+                and type(value.get("world_rank")) is int
+                and value.get("state") in ("completed", "partial")
+                and all(value.get(key) == item for key, item in expected.items())
             ):
-                table_start = i
-                break
+                state = value["state"]
+    return state
 
-    if table_start == -1:
-        return ""
 
-    # Find table end position
-    table_end = -1
-    for i in range(table_start, len(lines)):
-        line = lines[i].strip()
-        # Find lines starting with "+" and containing "-"
-        if line.startswith("+") and "-" in line:
-            # Check if next line is still table content
-            if i + 1 < len(lines):
-                next_line = lines[i + 1].strip()
-                # If next line is not table content (not starting with | or +), current line is end border
-                if not next_line.startswith("|") and not next_line.startswith("+"):
-                    table_end = i
-                    break
-            else:
-                # If it's the last line, treat as end
-                table_end = i
-                break
+def extract_decode_state(log_file_path: str, *, plan, run_id):
+    return extract_run_state(log_file_path, plan=plan, run_id=run_id)
 
-    if table_end == -1:
-        return ""
 
-    # Extract table content
-    table_lines = lines[table_start : table_end + 1]
+def verify_collected_run(root, *, plan, run_id, state):
+    """Accept only terminal artifacts copied from this attempt's master path."""
+    root = Path(root)
+    try:
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+        envelope = json.loads(
+            (root / "results/result.json").read_text(encoding="utf-8")
+        )
+        if not isinstance(manifest, dict):
+            raise ValueError("manifest must contain an object")
+        resolved = json.loads(
+            (root / "resolved_config.json").read_text(encoding="utf-8")
+        )
+        persisted_plan = json.loads(
+            (root / "execution_plan.json").read_text(encoding="utf-8")
+        )
+        if canonical_json(resolved) != canonical_json(thaw(plan.resolved_config)):
+            raise ValueError("persisted normalized config differs from the plan")
+        if (
+            not isinstance(persisted_plan, dict)
+            or not isinstance(persisted_plan.get("result_directory"), str)
+            or not persisted_plan["result_directory"].strip()
+        ):
+            raise ValueError("persisted execution plan requires a result directory")
+        expected_plan = plan.to_dict()
+        # The master's run root differs from both preflight and collected roots.
+        expected_plan["result_directory"] = persisted_plan["result_directory"]
+        if canonical_json(persisted_plan) != canonical_json(expected_plan):
+            raise ValueError("persisted execution plan differs from the plan")
+        parse_result_envelope(envelope)
+        expected = {
+            "run_id": run_id,
+            "mode": plan.mode,
+            "backend": "local",
+            "config_fingerprint": plan.config_fingerprint,
+            "workload_fingerprint": plan.workload_fingerprint,
+        }
+        if any(
+            manifest.get(key) != value or envelope.get(key) != value
+            for key, value in expected.items()
+        ):
+            raise ValueError("run identity or fingerprints differ")
+        if manifest.get("state") != state or envelope.get("status") != state:
+            raise ValueError("terminal states differ")
+        identities = {case.case_id: thaw(case.identity) for case in plan.cases}
+        cases = envelope["cases"]
+        if (
+            manifest.get("case_ids") != [case.case_id for case in plan.cases]
+            or len(cases) != len(identities)
+            or {case["case_id"]: case["identity"] for case in cases} != identities
+        ):
+            raise ValueError("persisted cases differ from the plan")
+        actual_state = (
+            "completed" if all(case["status"] == "ok" for case in cases) else "partial"
+        )
+        if actual_state != state:
+            raise ValueError("case statuses differ from terminal state")
+    except (
+        OSError,
+        UnicodeError,
+        ValueError,
+        TypeError,
+        KeyError,
+        PerfTestError,
+    ) as error:
+        raise RuntimeError(
+            f"persisted {plan.mode} run verification failed: {error}"
+        ) from error
 
-    # Return table content, remove trailing newlines and recombine
-    return "".join(line.rstrip() + "\n" for line in table_lines).rstrip()
+
+def verify_collected_decode_run(root, *, plan, run_id, state):
+    return verify_collected_run(root, plan=plan, run_id=run_id, state=state)
 
 
 def execute_task(
@@ -186,6 +324,7 @@ def execute_task(
     copy_test_result: bool,
     num_retry_times: int,
 ) -> None:
+    plan, source = validate_benchmark(task_config)
     # Create task output directory
     task_output_name = "Task_" + "_".join(f"{k}-{v}" for k, v in variable_dict.items())
     task_output_dir = os.path.join(benchmark_output_dir, task_output_name)
@@ -213,25 +352,71 @@ def execute_task(
     log_stage(f"Task Variable Dict: {variable_dict}", stage="TASK")
     # Convert task config to environment variables
     multi_runner_env = convert_to_env(task_config)
+    multi_runner_env["PERF_TEST_MODE"] = plan.mode
+    config_dir = Path(task_output_dir) / "config"
+    config_dir.mkdir()
+    if plan.mode == "prefill":
+        # Freeze traffic distributions on the launcher; remote hosts do not
+        # need the original external distribution file.
+        from rtp_llm.test.perf_test.prefill.traffic_batch import (
+            materialize_traffic_source,
+        )
+
+        source = materialize_traffic_source(
+            source, thaw(plan.resolved_config["workload"])
+        )
+        resolved_workload_path = config_dir / "resolved_workload.json"
+        resolved_workload_path.write_text(
+            json.dumps(thaw(plan.resolved_config["workload"])), encoding="utf-8"
+        )
+        multi_runner_env["PERF_TEST_RESOLVED_WORKLOAD_PATH"] = str(
+            resolved_workload_path
+        )
+    if source["workload"]["kind"] == "distribution":
+        # Keep the delivered config self-contained; relative distributions must
+        # not point back to the launcher's filesystem on a remote rank.
+        distribution_path = config_dir / "distribution.json"
+        distribution_path.write_text(
+            json.dumps(thaw(plan.resolved_config)["workload"]["distribution"]),
+            encoding="utf-8",
+        )
+        source["workload"]["distribution_file"] = "distribution.json"
+        multi_runner_env["PERF_TEST_DISTRIBUTION_PATH"] = str(distribution_path)
+    config_path = config_dir / "config.json"
+    config_path.write_text(json.dumps(source), encoding="utf-8")
+    plan, source = validate_benchmark(
+        {
+            **task_config,
+            "perf_test_config": str(config_path),
+            "resolved_workload_path": multi_runner_env.get(
+                "PERF_TEST_RESOLVED_WORKLOAD_PATH"
+            ),
+        }
+    )
+    multi_runner_env["PERF_TEST_CONFIG_PATH"] = str(config_path)
     log_stage(f"Task Config: {multi_runner_env}", stage="TASK")
     multi_runner_args = [
-        "sh",
-        "./multi_runner.sh",
+        "bash",
+        str(SCRIPT_DIRECTORY / "multi_runner.sh"),
     ]
     # Retry test
-    test_success_flag = False
+    terminal_state = None
     for i in range(num_retry_times + 1):
+        multi_runner_env["PERF_TEST_RUN_ID"] = uuid.uuid4().hex
         # Run subprocess and redirect both stdout and stderr to file
         with open(task_test_output_path, "a", encoding="utf-8") as f:
             f.write(f"=== OUTPUT {i} ===\n")
             f.flush()
             result = subprocess.run(
                 multi_runner_args,
+                cwd=SCRIPT_DIRECTORY,
                 env=multi_runner_env,
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 text=True,
-                check=True,
+                # Preserve launcher failures for terminal-state validation below.
+                # A bound marker triggers collection; persisted artifacts prove completion.
+                check=False,
             )
             f.write(f"\n\n=== Return Code: {result.returncode} ===\n")
             f.flush()
@@ -244,15 +429,63 @@ def execute_task(
             },
             kill_log_path=task_kill_output_path,
         )
-        # Check if test was successful and extract table
-        table_content = extract_table_from_log(task_test_output_path)
-        if table_content:
-            log_stage("Test results table:", stage="TASK")
-            log_stage("\n" + table_content, stage="TASK")
-            test_success_flag = True
+        # A partial run still has diagnostic artifacts that must be collected.
+        state = extract_run_state(
+            task_test_output_path,
+            plan=plan,
+            run_id=multi_runner_env["PERF_TEST_RUN_ID"],
+        )
+        if state:
+            multi_copy_script(
+                {
+                    "ip_lists": task_config["ip_lists"],
+                    "run_user": task_config["run_user"],
+                    "ssh_port": task_config["ssh_port"],
+                    "ft_sub_dir": task_config["ft_sub_dir"],
+                    "task_output_dir": task_output_dir,
+                    "perf_test_run_id": multi_runner_env["PERF_TEST_RUN_ID"],
+                    "local_world_size": task_config.get("local_world_size", 8),
+                    "collect_diagnostics": (
+                        copy_test_result or state == "partial" or result.returncode != 0
+                    ),
+                },
+                copy_log_path=task_copy_output_path,
+            )
+            verify_collected_run(
+                Path(task_output_dir) / "run",
+                plan=plan,
+                run_id=multi_runner_env["PERF_TEST_RUN_ID"],
+                state=state,
+            )
+            log_stage(f"{plan.mode} run finalized: {state}", stage="TASK")
+            terminal_state = state
             break
         else:
-            # clean task result files
+            # Early failures may have logs/manifests but no complete result tree.
+            # Never delete remote evidence if even best-effort collection fails.
+            try:
+                multi_copy_script(
+                    {
+                        "ip_lists": task_config["ip_lists"],
+                        "run_user": task_config["run_user"],
+                        "ssh_port": task_config["ssh_port"],
+                        "ft_sub_dir": task_config["ft_sub_dir"],
+                        "task_output_dir": str(
+                            Path(task_output_dir)
+                            / "failed_attempts"
+                            / multi_runner_env["PERF_TEST_RUN_ID"]
+                        ),
+                        "perf_test_run_id": multi_runner_env["PERF_TEST_RUN_ID"],
+                        "local_world_size": task_config.get("local_world_size", 8),
+                        "collect_diagnostics": True,
+                        "diagnostics_only": True,
+                    },
+                    copy_log_path=task_copy_output_path,
+                )
+            except (OSError, subprocess.CalledProcessError):
+                raise RuntimeError(
+                    "diagnostic collection failed; remote output retained"
+                )
             multi_clean_script(
                 {
                     "ip_lists": task_config["ip_lists"],
@@ -264,27 +497,18 @@ def execute_task(
             )
             if i < num_retry_times:
                 log_stage(
-                    f"Test may have failed - no table pattern found in log, please check log file, retry times: {i+1}......",
+                    f"{plan.mode} run did not finalize; check log file, retry times: {i+1}",
                     stage="WARNING",
                 )
             else:
                 log_stage(
-                    "Test failed - no table pattern found in log, please check log file\n\n",
+                    f"{plan.mode} run did not finalize; check log file\n\n",
                     stage="ERROR",
                 )
+    if terminal_state is None:
+        raise RuntimeError(f"{plan.mode} run did not finalize; see task test.log")
     # Copy test result and clean task result files
-    if copy_test_result and test_success_flag:
-        # copy test result to local
-        multi_copy_script(
-            {
-                "ip_lists": task_config["ip_lists"],
-                "run_user": task_config["run_user"],
-                "ssh_port": task_config["ssh_port"],
-                "ft_sub_dir": task_config["ft_sub_dir"],
-                "task_output_dir": task_output_dir,
-            },
-            copy_log_path=task_copy_output_path,
-        )
+    if copy_test_result or terminal_state == "partial" or result.returncode != 0:
         # clean task result files
         multi_clean_script(
             {
@@ -294,6 +518,15 @@ def execute_task(
                 "ft_sub_dir": task_config["ft_sub_dir"],
             },
             clean_log_path=task_clean_output_path,
+        )
+    if terminal_state == "partial":
+        raise PartialRunError(
+            f"{plan.mode} run is partial; diagnostic artifacts were collected"
+        )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{plan.mode} rank failure: SSH runner exited {result.returncode}; "
+            "diagnostic artifacts were collected"
         )
 
 
@@ -335,8 +568,8 @@ def search_recursive_config(
     assert (
         dp_size is not None and tp_size is not None
     ), "dp_size and tp_size must be provided"
-    ep_size = dp_size * tp_size
-    world_size = ep_size
+    ep_size = task_config.get("ep_size", dp_size * tp_size)
+    world_size = dp_size * tp_size * task_config.get("pp_size", 1)
     local_world_size = task_config.get("local_world_size", 8)
     local_world_size = world_size if world_size < local_world_size else local_world_size
     used_ip_lists = get_used_ip_lists(
@@ -430,7 +663,7 @@ def multi_build_script(
     copy_build_config["ip_lists"] = ",".join(copy_build_config["ip_lists"])
     # Convert build config to environment variables
     multi_runner_env = convert_to_env(copy_build_config)
-    multi_runner_args = ["sh", "./multi_runner.sh"]
+    multi_runner_args = ["bash", str(SCRIPT_DIRECTORY / "multi_runner.sh")]
     # Log build information
     log_stage(f"Build environment | Log: {build_log_path}", stage="BUILD")
     # Run build command and redirect both stdout and stderr to build log file
@@ -440,6 +673,7 @@ def multi_build_script(
             f.flush()
             result = subprocess.run(
                 multi_runner_args,
+                cwd=SCRIPT_DIRECTORY,
                 env=multi_runner_env,
                 stdout=f,
                 stderr=subprocess.STDOUT,
@@ -473,7 +707,7 @@ def multi_kill_script(copy_kill_config: Dict[str, Any], kill_log_path: str) -> N
         copy_kill_config["ip_lists"] = ",".join(copy_kill_config["ip_lists"])
     # Convert kill config to environment variables
     multi_runner_env = convert_to_env(copy_kill_config)
-    multi_runner_args = ["sh", "./multi_runner.sh"]
+    multi_runner_args = ["bash", str(SCRIPT_DIRECTORY / "multi_runner.sh")]
     # Log kill information
     log_stage(f"Kill processes | Log: {kill_log_path}", stage="KILL")
     # Run kill command and redirect both stdout and stderr to file
@@ -482,6 +716,7 @@ def multi_kill_script(copy_kill_config: Dict[str, Any], kill_log_path: str) -> N
         f.flush()
         result = subprocess.run(
             multi_runner_args,
+            cwd=SCRIPT_DIRECTORY,
             env=multi_runner_env,
             stdout=f,
             stderr=subprocess.STDOUT,
@@ -500,7 +735,7 @@ def multi_copy_script(copy_copy_config: Dict[str, Any], copy_log_path: str) -> N
         copy_copy_config["ip_lists"] = ",".join(copy_copy_config["ip_lists"])
     # Convert clean config to environment variables
     multi_runner_env = convert_to_env(copy_copy_config)
-    multi_runner_args = ["sh", "./multi_runner.sh"]
+    multi_runner_args = ["bash", str(SCRIPT_DIRECTORY / "multi_runner.sh")]
     # Log copy test results information
     log_stage(f"Copy test results | Log: {copy_log_path}", stage="COPY")
     # Run copy test results command and redirect both stdout and stderr to file
@@ -509,6 +744,7 @@ def multi_copy_script(copy_copy_config: Dict[str, Any], copy_log_path: str) -> N
         f.flush()
         result = subprocess.run(
             multi_runner_args,
+            cwd=SCRIPT_DIRECTORY,
             env=multi_runner_env,
             stdout=f,
             stderr=subprocess.STDOUT,
@@ -527,7 +763,7 @@ def multi_clean_script(copy_clean_config: Dict[str, Any], clean_log_path: str) -
         copy_clean_config["ip_lists"] = ",".join(copy_clean_config["ip_lists"])
     # Convert clean config to environment variables
     multi_runner_env = convert_to_env(copy_clean_config)
-    multi_runner_args = ["sh", "./multi_runner.sh"]
+    multi_runner_args = ["bash", str(SCRIPT_DIRECTORY / "multi_runner.sh")]
     # Log clean information
     log_stage(f"Clean log files | Log: {clean_log_path}", stage="CLEAN")
     # Run clean command and redirect both stdout and stderr to file
@@ -536,6 +772,7 @@ def multi_clean_script(copy_clean_config: Dict[str, Any], clean_log_path: str) -
         f.flush()
         result = subprocess.run(
             multi_runner_args,
+            cwd=SCRIPT_DIRECTORY,
             env=multi_runner_env,
             stdout=f,
             stderr=subprocess.STDOUT,
@@ -727,16 +964,19 @@ def main():
     copy_clean_config["ft_sub_dir"] = build_config["ft_sub_dir"]
     multi_clean_script(copy_clean_config, clean_log_path=clean_log_path)
     # Run all benchmarks
+    exit_code = 0
     for benchmark_config in benchmarks:
         # Get benchmark name, fixed config, iterative search config and recursive search config
         benchmark_name = benchmark_config.get("benchmark_name", "unknown_benchmark")
-        fixed_config = benchmark_config.get("fixed_config") or {}
+        benchmark_fixed = benchmark_config.get("fixed_config") or {}
+        fixed_config = {}
         iterative_search_config = benchmark_config.get("iterative_search_config") or {}
         recursive_search_config = benchmark_config.get("recursive_search_config") or {}
         # Merge single fixed config
         fixed_config.update(machine_config)
         fixed_config.update(build_config)
         fixed_config.update(common_config)
+        fixed_config.update(benchmark_fixed)
         fixed_config["sub_cmd"] = "test"
         fixed_config["build_from_scratch"] = 0
         fixed_config["benchmark_name"] = benchmark_name
@@ -755,8 +995,10 @@ def main():
             )
         except Exception as e:
             log_stage(f"Benchmark {benchmark_name} failed: {e}", stage="ERROR")
+            exit_code = max(exit_code, getattr(e, "exit_code", 1))
             continue
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

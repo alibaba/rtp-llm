@@ -15,9 +15,11 @@ Usage (tokenizer same as frontend: ckpt_path, tokenizer_path, model_type):
 from __future__ import annotations
 
 import argparse
+import array
 import json
 import struct
 import sys
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Iterable
 
 import grpc
@@ -68,14 +70,19 @@ def _append_fp32_scalar(
 
 def append_input_ids_to_model_infer_request(
     request: predict_v2_pb2.ModelInferRequest,
-    input_ids: list[int],
+    input_ids: Sequence[int],
 ) -> None:
     """Append ``input_ids`` tensor (INT32, shape ``[len]``) and matching ``raw_input_contents``."""
     inp = request.inputs.add()
     inp.name = "input_ids"
     inp.datatype = "INT32"
     inp.shape.append(len(input_ids))
-    request.raw_input_contents.append(struct.pack("<%di" % len(input_ids), *input_ids))
+    packed = array.array("i", input_ids)
+    if packed.itemsize != 4:
+        raise RuntimeError(f"native signed int is {packed.itemsize} bytes, expected 4")
+    if sys.byteorder != "little":
+        packed.byteswap()
+    request.raw_input_contents.append(packed.tobytes())
 
 
 def append_sampling_params_to_model_infer_request(
@@ -154,10 +161,11 @@ def build_model_infer_request(
     *,
     request_id: str,
     model_name: str,
-    input_ids: list[int],
+    input_ids: Sequence[int],
     sampling: SamplingParams,
     return_input_ids: bool = False,
     enable_thinking: bool | None = None,
+    force_sp_accept: bool = False,
 ) -> predict_v2_pb2.ModelInferRequest:
     """Build ``ModelInferRequest`` for ``ModelStreamInfer`` (sampling tensors + ``input_ids``)."""
     request = predict_v2_pb2.ModelInferRequest()
@@ -167,6 +175,8 @@ def build_model_infer_request(
     append_return_input_ids_to_model_infer_request(request, return_input_ids)
     if enable_thinking is not None:
         request.parameters["enable_thinking"].bool_param = bool(enable_thinking)
+    if force_sp_accept:
+        request.parameters["force_sp_accept"].bool_param = True
     append_input_ids_to_model_infer_request(request, input_ids)
     return request
 
