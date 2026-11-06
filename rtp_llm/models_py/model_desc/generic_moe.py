@@ -149,6 +149,16 @@ class GenericMoeLayer(nn.Module):
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+        if self.correction_bias is not None:
+            # Model-constant routing helpers: freezing them here keeps the
+            # per-layer forward free of module construction and attribute
+            # re-assignment (config/correction_bias never change per layer).
+            self.group_topk = GroupTopK()
+            self.renormalize = self.config.has_moe_norm
+            self.num_expert_group = self.config.moe_n_group
+            self.topk_group = self.config.moe_topk_group
+            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
+            self.routed_scaling_factor = self.config.routed_scaling_factor
 
     def _merge_shared_expert_output(
         self,
@@ -192,13 +202,8 @@ class GenericMoeLayer(nn.Module):
         )
 
         if self.correction_bias is not None:
-            self.group_topk = GroupTopK()
-            self.renormalize = self.config.has_moe_norm
-            self.num_expert_group = self.config.moe_n_group
-
-            self.topk_group = self.config.moe_topk_group
-            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
-            self.routed_scaling_factor = self.config.routed_scaling_factor
+            # The group-topk helpers were frozen at __init__ (model
+            # constants); the forward only runs the routing op.
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
