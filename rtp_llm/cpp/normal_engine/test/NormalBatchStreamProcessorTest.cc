@@ -1192,7 +1192,7 @@ TEST_F(NormalBatchStreamProcessorTest, testBatchTtftCapturedAtOutputUpdate) {
     // Non-streaming, aux_info disabled: TTFT must not wait for publication.
     auto              first  = makeLogprobsStream(config, 3, false);
     auto              second = makeLogprobsStream(config, 3, false);
-    ExecutionRecorder recorder("", "");
+    ExecutionRecorder recorder("");
     auto              make_batch = [&] {
         return std::make_shared<RecordedBatch>(
             recorder, ExecutionRecorder::Json{}, std::vector<ExecutionRecorder::Json>(2));

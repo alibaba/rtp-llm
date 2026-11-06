@@ -82,6 +82,8 @@ struct CustomConfig {
     int64_t                                    max_context_batch_size         = 128;
     std::shared_ptr<std::vector<ForwardShape>> forward_shapes;
     int                                        tokens_per_block = 2;
+    bool                                       enable_batch_record = false;
+    bool                                       record_decode       = false;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -180,6 +182,8 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::ConcurrencyConfig           concurrency_config;
     rtp_llm::FMHAConfig                  fmha_config;
     rtp_llm::ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    profiling_debug_logging_config.enable_batch_record = config.enable_batch_record;
+    profiling_debug_logging_config.record_decode       = config.record_decode;
     rtp_llm::HWKernelConfig              hw_kernel_config;
     rtp_llm::DeviceResourceConfig        device_resource_config;
     rtp_llm::MoeConfig                   moe_config;

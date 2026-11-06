@@ -15,6 +15,8 @@
 
 namespace rtp_llm {
 
+struct ProfilingDebugLoggingConfig;
+
 // CPU-only batch snapshot worker with the alog-configured batch_schedule sink.
 class ExecutionRecorder {
 public:
@@ -22,13 +24,17 @@ public:
     using JsonArray = autil::legacy::json::JsonArray;
     using JsonValue = autil::legacy::Any;
     static std::string        toJson(const JsonValue& value);
-    static ExecutionRecorder& instance();
+    // The singleton is built on first call. The first call normally happens
+    // during single-threaded engine init (NormalExecutor ctor) and may carry
+    // the engine's ProfilingDebugLoggingConfig (already arg+env resolved on
+    // the Python side); every later call returns the same object no matter
+    // what it passes. A null or disabled config yields a Disabled recorder.
+    static ExecutionRecorder& instance(const ProfilingDebugLoggingConfig* config = nullptr);
     static std::string        quote(const std::string& value);
     static int64_t            unixNs();
-    ExecutionRecorder(std::string directory,
-                      std::string session,
-                      size_t      capacity        = 4096,
-                      size_t      max_total_bytes = 1024ULL * 1024 * 1024);
+    // Empty directory leaves the recorder Disabled. Direct construction is
+    // for tests; production code goes through instance().
+    ExecutionRecorder(std::string directory, size_t capacity = 4096);
     ~ExecutionRecorder();
     bool enabled() const {
         return state_.load(std::memory_order_acquire) == State::Ready;
@@ -69,10 +75,10 @@ private:
     void run();
     void manifest(bool closed);
     using Task = std::function<std::string()>;
-    std::string             directory_, session_, owner_, replica_;
+    std::string             directory_, owner_;
     Json                    metadata_;
     int                     rank_ = 0, dp_rank_ = 0;
-    size_t                  capacity_, max_total_bytes_, total_bytes_ = 0;
+    size_t                  capacity_, total_bytes_ = 0;
     std::atomic<State>      state_{State::Disabled};
     std::atomic<int64_t>    next_id_{1};
     std::atomic<int64_t>    next_warning_ns_{0};

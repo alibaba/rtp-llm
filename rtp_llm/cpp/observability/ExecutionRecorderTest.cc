@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
@@ -97,10 +98,56 @@ static void testMultiprocessConfig(const std::string& directory) {
     assert(!std::filesystem::exists(workdir / "logs/batch_schedule.log"));
 }
 
+// The process-wide singleton is configured from engine config (arg+env
+// resolved upstream) with LOG_PATH-derived manifest location. Fork before
+// any recorder exists so the child builds its own singleton state.
+static void testConfigDrivenInstance(const std::string& directory) {
+    const auto log_root = std::filesystem::absolute(directory + "/config_instance");
+    std::filesystem::create_directories(log_root);
+    const auto pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        setenv("LOG_PATH", log_root.c_str(), 1);
+        configureBatch(log_root.string() + "/batches.log");
+        rtp_llm::ProfilingDebugLoggingConfig config;
+        config.enable_batch_record = true;
+        config.record_queue_size   = 0;  // non-positive falls back to the default
+        auto& recorder = rtp_llm::ExecutionRecorder::instance(&config);
+        assert(recorder.needsConfiguration());
+        assert(recorder.configure(0, 0, {}));
+        assert(recorder.enabled());
+        assert(recorder.submitBatch("{}"));
+        recorder.close();
+        const auto manifest =
+            readFile(log_root.string() + "/batch_record/owner-" + recorder.owner() + "/manifest.json");
+        assert(manifest.find("\"session_id\":\"\"") != std::string::npos);
+        assert(manifest.find("\"replica_id\":\"dp0\"") != std::string::npos);
+        assert(manifest.find("\"submitted_to_alog\":1") != std::string::npos);
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
 int main(int argc, char** argv) {
     const char* directory = argc == 2 ? argv[1] : std::getenv("TEST_TMPDIR");
     assert(directory);
     testMultiprocessConfig(directory);
+    testConfigDrivenInstance(directory);
+    {
+        // First use without config (or with decode-only flags) stays Disabled:
+        // record_decode alone must never enable recording.
+        auto& idle = rtp_llm::ExecutionRecorder::instance();
+        assert(!idle.enabled());
+        assert(!idle.needsConfiguration());
+        rtp_llm::ProfilingDebugLoggingConfig decode_only;
+        decode_only.record_decode = true;
+        auto& silent = rtp_llm::ExecutionRecorder::instance(&decode_only);
+        assert(&silent == &idle);
+        assert(!silent.enabled());
+        assert(!silent.submitBatch("{}"));
+    }
     const auto root_path = std::string(directory) + "/root.log";
     alog::Logger::getRootLogger()->setAppender(alog::FileAppender::getAppender(root_path.c_str()));
     RTP_LLM_BATCH_SCHEDULE_LOG_INFO("{\"unconfigured\":true}");  // Must not inherit root.
@@ -108,7 +155,7 @@ int main(int argc, char** argv) {
     {
         const auto path = std::string(directory) + "/initialization.log";
         configureBatch(path);
-        ExecutionRecorder recorder(std::string(directory) + "/initialization", "test");
+        ExecutionRecorder recorder(std::string(directory) + "/initialization");
         assert(recorder.needsConfiguration());
         assert(!recorder.enabled());
         bool produced = false;
@@ -145,7 +192,7 @@ int main(int argc, char** argv) {
     }
     {
         // Competing initializers must publish exactly one coherent configuration.
-        ExecutionRecorder        recorder(std::string(directory) + "/concurrent-init", "test");
+        ExecutionRecorder        recorder(std::string(directory) + "/concurrent-init");
         std::atomic<int>         configured{0};
         std::vector<std::thread> threads;
         for (int i = 0; i < 8; ++i) {
@@ -168,7 +215,7 @@ int main(int argc, char** argv) {
                == ExecutionRecorder::toJson(metadata.at("initializer")));
     }
     {
-        ExecutionRecorder closed(std::string(directory) + "/closed-before-init", "test");
+        ExecutionRecorder closed(std::string(directory) + "/closed-before-init");
         closed.close();
         assert(!closed.needsConfiguration());
         assert(!closed.configure(0, 0, {}));
@@ -176,7 +223,7 @@ int main(int argc, char** argv) {
 
         const auto blocker = std::string(directory) + "/init-blocker";
         std::ofstream(blocker).put('x');
-        ExecutionRecorder failed(blocker, "test");
+        ExecutionRecorder failed(blocker);
         assert(!failed.configure(0, 0, {}));
         assert(!failed.enabled());
         assert(!failed.needsConfiguration());
@@ -200,7 +247,7 @@ int main(int argc, char** argv) {
     {
         const auto path = std::string(directory) + "/delayed-batch.log";
         configureBatch(path);
-        ExecutionRecorder recorder(std::string(directory) + "/delayed", "ttft");
+        ExecutionRecorder recorder(std::string(directory) + "/delayed");
         assert(recorder.configure(0, 0, {}));
         auto make_batch = [&](int64_t execution) {
             auto record       = recorder.identity();
@@ -260,7 +307,7 @@ int main(int argc, char** argv) {
         assert(count == 4);
     }
     {
-        ExecutionRecorder recorder(std::string(directory) + "/normal", "test", 1024);
+        ExecutionRecorder recorder(std::string(directory) + "/normal", 1024);
         assert(!recorder.enabled());
         assert(recorder.configure(2,
                                   1,
@@ -282,6 +329,8 @@ int main(int argc, char** argv) {
         assert(autil::legacy::AnyCast<std::string>(metadata.at("model_config")) == special);
         assert(metadata.at("model_fingerprint").IsEmpty());
         assert(autil::legacy::AnyCast<std::string>(parsed.at("owner_id")) == recorder.owner());
+        // Byte budget removed: alog rotation bounds the disk footprint.
+        assert(parsed.count("max_total_bytes") == 0);
         assert(manifest.find("\"submitted_to_alog\":0") != std::string::npos);
         assert(manifest.find("\"written\":null") != std::string::npos);
         assert(manifest.find("\"complete\":false") != std::string::npos);
@@ -290,7 +339,7 @@ int main(int argc, char** argv) {
     {
         const auto path = std::string(directory) + "/overflow.log";
         configureBatch(path);
-        ExecutionRecorder recorder(std::string(directory) + "/overflow", "test", 1);
+        ExecutionRecorder recorder(std::string(directory) + "/overflow", 1);
         assert(recorder.configure(0, 0, {}));
         std::promise<void> entered, release;
         auto               gate = release.get_future().share();
@@ -308,7 +357,7 @@ int main(int argc, char** argv) {
         assert(readFile(path) == "{}\n{}\n");
     }
     {
-        ExecutionRecorder disabled("", "test");
+        ExecutionRecorder disabled("");
         assert(!disabled.enabled());
         assert(!disabled.needsConfiguration());
         assert(!disabled.configure(0, 0, {}));
@@ -317,7 +366,7 @@ int main(int argc, char** argv) {
     {
         const auto batch_path = std::string(directory) + "/configured-batches.jsonl";
         configureBatch(batch_path);
-        ExecutionRecorder recorder(std::string(directory) + "/single_file", "test");
+        ExecutionRecorder recorder(std::string(directory) + "/single_file");
         assert(recorder.configure(0, 0, {}));
         for (int i = 0; i < 128; ++i)
             assert(recorder.submitBatch("{\"exec_id\":" + std::to_string(i + 1) + "}"));
@@ -337,7 +386,7 @@ int main(int argc, char** argv) {
     {
         const auto path = std::string(directory) + "/configured-live.jsonl";
         configureBatch(path);
-        ExecutionRecorder recorder(std::string(directory) + "/live", "test");
+        ExecutionRecorder recorder(std::string(directory) + "/live");
         assert(recorder.configure(0, 0, {}));
         assert(recorder.submitBatch("{\"live\":true}"));
         bool visible = false;
@@ -355,7 +404,7 @@ int main(int argc, char** argv) {
         // Exercise messages larger than even the production alog.max_msg_len.
         const auto path = std::string(directory) + "/configured-large.jsonl";
         configureBatch(path);
-        ExecutionRecorder recorder(std::string(directory) + "/large", "test");
+        ExecutionRecorder recorder(std::string(directory) + "/large");
         assert(recorder.configure(0, 0, {}));
         const auto line = "{\"payload\":\"" + std::string(3 * 1024 * 1024, 'x') + "\"}";
         assert(recorder.submitBatch(line));
@@ -371,9 +420,9 @@ int main(int argc, char** argv) {
             return "{\"filtered\":true}";
         })());
         assert(!evaluated);
-        // A filtered record exceeds the entire budget but must not consume it
-        // or even invoke the JSON producer. The next accepted record fits exactly.
-        ExecutionRecorder recorder(std::string(directory) + "/filtered", "test", 8, 3);
+        // A level-filtered record must not invoke the JSON producer and only
+        // counts as dropped; recording stays enabled (no byte budget).
+        ExecutionRecorder recorder(std::string(directory) + "/filtered", 8);
         assert(recorder.configure(0, 0, {}));
         bool serialized = false;
         assert(recorder.submitBatch([&] {
@@ -385,11 +434,11 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 200 && recorder.dropped() < 2; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         assert(recorder.dropped() == 2);
-        assert(recorder.enabled());  // Filtering must not exhaust the budget.
+        assert(recorder.enabled());  // Filtering never disables the recorder.
         Logger::getBatchScheduleLogger()->flush();
         assert(readFile(path).empty());
         Logger::getBatchScheduleLogger()->setLevel(alog::LOG_LEVEL_INFO);
-        assert(recorder.submitBatch("{}"));  // Still has the full three-byte budget.
+        assert(recorder.submitBatch("{}"));
         recorder.close();
         assert(!serialized);
         assert(readFile(path) == "{}\n");
@@ -407,7 +456,7 @@ int main(int argc, char** argv) {
     {
         const auto path = std::string(directory) + "/producer-error.log";
         configureBatch(path);
-        ExecutionRecorder recorder(std::string(directory) + "/producer_error", "test");
+        ExecutionRecorder recorder(std::string(directory) + "/producer_error");
         assert(recorder.configure(0, 0, {}));
         assert(recorder.submitBatch([]() -> std::string { throw std::runtime_error("snapshot failed"); }));
         recorder.close();
@@ -416,32 +465,6 @@ int main(int argc, char** argv) {
         assert(manifest.find("\"errors\":1") != std::string::npos);
         assert(manifest.find("\"submitted_to_alog\":0") != std::string::npos);
         assert(readFile(path).empty());
-    }
-    {
-        const auto path = std::string(directory) + "/oversized.log";
-        configureBatch(path);
-        ExecutionRecorder limited(std::string(directory) + "/budget", "test", 8, 4);
-        assert(limited.configure(0, 0, {}));
-        assert(limited.submitBatch("12345"));
-        limited.close();
-        assert(limited.dropped() == 1);
-        assert(readFile(path).empty());
-    }
-    {
-        const auto path = std::string(directory) + "/batch-budget.jsonl";
-        configureBatch(path);
-        ExecutionRecorder recorder(std::string(directory) + "/batch-budget", "test", 8, 3);
-        assert(recorder.configure(0, 0, {}));
-        assert(recorder.submitBatch("{}"));
-        assert(recorder.submitBatch("{}"));
-        recorder.close();
-        assert(readFile(path) == "{}\n");
-        const auto manifest =
-            readFile(std::string(directory) + "/batch-budget/owner-" + recorder.owner() + "/manifest.json");
-        assert(manifest.find("\"submitted_to_alog\":1") != std::string::npos);
-        assert(manifest.find("\"bytes_submitted\":3") != std::string::npos);
-        assert(manifest.find("\"dropped\":1") != std::string::npos);
-        assert(manifest.find("\"errors\":1") != std::string::npos);
     }
     alog::Logger::getRootLogger()->flush();
     assert(readFile(root_path).empty());  // Recorder JSON never inherits the engine/root appender.
@@ -472,7 +495,7 @@ int main(int argc, char** argv) {
                               "alog.appender.snapshotWarnings.layout=PatternLayout\n"
                               "alog.appender.snapshotWarnings.layout.LogPattern=%%m\n";
         alog::Configurator::configureLoggerFromString(config.c_str());
-        ExecutionRecorder recorder(std::string(directory) + "/snapshot-errors", "test");
+        ExecutionRecorder recorder(std::string(directory) + "/snapshot-errors");
         assert(recorder.configure(0, 0, {}));
         for (int i = 0; i < 2; ++i) {
             RecordedBatch batch(recorder, {}, {});
@@ -501,7 +524,7 @@ int main(int argc, char** argv) {
         // concurrent callers must produce exactly one error report per batch.
         const auto path = std::string(directory) + "/concurrent-timing.log";
         configureBatch(path);
-        ExecutionRecorder recorder(std::string(directory) + "/concurrent_timing", "test");
+        ExecutionRecorder recorder(std::string(directory) + "/concurrent_timing");
         assert(recorder.configure(0, 0, {}));
         constexpr int kBatches = 256;
         constexpr int kWorkers = 32;

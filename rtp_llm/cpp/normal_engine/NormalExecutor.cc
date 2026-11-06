@@ -31,10 +31,6 @@ bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* labe
     return on;
 }
 
-bool recordDecodeEnabled() {
-    static const bool enabled = readEnvFlagOnce("RTP_LLM_RECORD_DECODE", "execution-recorder", "record_decode");
-    return enabled;
-}
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
     holder.hold_host(inputs.token_ids);
     holder.hold_host(inputs.input_lengths);
@@ -135,10 +131,13 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
     has_engram_         = !params.model_config_.attn_config.v41_kv_source_layer_ids.empty();
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
+    record_decode_      = params.profiling_debug_logging_config.record_decode;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
     role_type_          = params.pd_sep_config.role_type;
-    auto& recorder      = ExecutionRecorder::instance();
+    // First instance() call may carry the arg+env resolved engine config; a
+    // null/disabled config leaves the recorder Disabled.
+    auto& recorder      = ExecutionRecorder::instance(&params.profiling_debug_logging_config);
     if (!warm_up_ && !is_propose_ && recorder.needsConfiguration()) {
         const bool configured =
             recorder.configure(parallelism_config_.world_rank,
@@ -153,7 +152,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                 {"cache_groups", cache_manager_->cacheConfig().groupNums()},
                                 {"model_config", params.model_config_.to_string()},
                                 {"cache_config", cache_manager_->cacheConfig().debugString()},
-                                {"record_decode", recordDecodeEnabled()},
+                                {"record_decode", record_decode_},
                                 {"decode_filter_policy", std::string("skip_entire_batch_containing_decode")},
                                 {"model_fingerprint", ExecutionRecorder::JsonValue()},
                                 {"scope", std::string("normal_executor")}});
@@ -345,7 +344,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     // FFN disaggregation and TP collectives, carry no request slots, and
     // would drain the recorder's total-bytes budget with requests:[] lines.
     const int64_t record_id = record_owner && has_request_stream && stream_groups.totalModelBatchSize() > 0
-                                      && (recordDecodeEnabled() || stream_groups.totalDecodeBatchSize() == 0) ?
+                                      && (record_decode_ || stream_groups.totalDecodeBatchSize() == 0) ?
                                   execution_recorder.nextId() :
                                   0;
     {
