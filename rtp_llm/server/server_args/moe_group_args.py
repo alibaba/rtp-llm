@@ -6,6 +6,7 @@ MOE_STRATEGY_CHOICES = (
     "no_auant_ep_low_latency",
     "no_quant_cpp",
     "no_auant_dp_normal",
+    "nccl_bf16_reference",
     "fp8_per_block_no_dp_masked",
     "fp8_per_block_no_dp",
     "fp8_per_block_ep_low_latency",

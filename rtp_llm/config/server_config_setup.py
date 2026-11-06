@@ -449,6 +449,7 @@ def _configure_qwen35_fp32_ssm_cache(py_env_configs: PyEnvConfigs) -> None:
         "qwen35_moe",
         "qwen35_moe_text",
         "qwen36_moe_text",
+        "qwen38_moe_text",
         "qwen35_dense",
         "qwen35_moe_mtp",
         "qwen35_dense_mtp",

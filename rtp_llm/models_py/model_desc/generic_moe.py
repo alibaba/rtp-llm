@@ -110,6 +110,23 @@ class GenericMoeLayer(nn.Module):
             enable_cuda_graph=enable_cuda_graph,
             max_generate_batch_size=max_generate_batch_size,
         )
+        # This opt-in layout keeps logical softmax/top-k at 512 experts. Only
+        # dispatched IDs and the backend physical expert partition use 576 slots.
+        self._fixed_physical_ep_lut = None
+        if os.environ.get("RTP_FIXED_PHYSICAL_EP_LAYOUT", "") == "balanced_v1":
+            from rtp_llm.utils.fixed_physical_ep import validate_native_fixed_profile
+            from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import MoeConfigResolver
+
+            layout = validate_native_fixed_profile(
+                config, parallelism_config, moe_config,
+                quantized=MoeConfigResolver().has_quantization(config_adapter),
+            )
+            config_adapter.logical_expert_num = config.expert_num
+            config_adapter.expert_num = layout.physical_experts
+            self._fixed_physical_ep_lut = torch.tensor(
+                layout.logical_to_physical, dtype=torch.int64,
+                device=weights[W.moe_gate].device,
+            )
         config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
         self._mega_moe_chunker = None
@@ -331,6 +348,8 @@ class GenericMoeLayer(nn.Module):
                 topk_weights,
             )
 
+        if self._fixed_physical_ep_lut is not None:
+            topk_ids = self._fixed_physical_ep_lut[topk_ids.to(torch.int64)].to(topk_ids.dtype)
         return topk_weights, topk_ids
 
     def _prepare_mega_moe_chunks(self, hidden_states: torch.Tensor):

@@ -89,6 +89,7 @@ else:
         CudaMegaMoeFp8Strategy,
         CudaMegaMoeSEStrategy,
         CudaMegaMoeStrategy,
+        CudaBf16NcclReferenceStrategy,
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
@@ -117,6 +118,7 @@ else:
     registry.register(CudaFp8PerTensorNoDPStrategy())
     registry.register(CudaNoQuantEpLowLatencyStrategy())
     registry.register(CudaNoQuantDpNormalStrategy())
+    registry.register(CudaBf16NcclReferenceStrategy())
     registry.register(CudaNoQuantCppStrategy())
     registry.register(BatchedTritonStrategy())
     registry.register(CudaW4a8Int4PerChannelEpLowLatencyStrategy())

@@ -25,6 +25,7 @@ from .fp8_per_tensor import (
     CudaFp8PerTensorNoDPStrategy,
 )
 from .mega_moe_fp8 import CudaMegaMoeFp8SEStrategy, CudaMegaMoeFp8Strategy
+from .nccl_reference import CudaBf16NcclReferenceStrategy
 from .no_quant import (
     CudaNoQuantCppStrategy,
     CudaNoQuantDpNormalStrategy,
@@ -38,6 +39,7 @@ from .w4a8_int4_per_channel import (
 
 __all__ = [
     # No quantization
+    "CudaBf16NcclReferenceStrategy",
     "CudaNoQuantEpLowLatencyStrategy",
     "CudaNoQuantCppStrategy",
     "CudaNoQuantDpNormalStrategy",
