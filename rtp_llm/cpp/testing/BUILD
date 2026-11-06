@@ -68,6 +68,7 @@ cc_library(
         "BeamSearchOpTest.hpp",
     ],
     deps = [
+        "//3rdparty/trt_beam_search:beam_search_limits",
         ":device_test_utils",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core/ops:torch_beam_search_op_impl",

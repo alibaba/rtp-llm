@@ -38,6 +38,6 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
                                      runtime::SizeType32 beamWidthIn,
                                      runtime::SizeType32 beamWidthOut,
                                      runtime::SizeType32 vocabSize,
-                                     int                 topkForcePath = -1);
+                                     int                 topkForcePath = -1, bool forceV2 = false);
 
 }  // namespace tensorrt_llm

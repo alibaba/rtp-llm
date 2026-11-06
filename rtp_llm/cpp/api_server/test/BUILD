@@ -43,6 +43,8 @@ py_test(
     ],
     deps = [
         ":api_server_unittest_pylib",
+        "//rtp_llm:frontend",
+        "//rtp_llm:numpy",
     ],
     data = [
         "testdata/annocation",

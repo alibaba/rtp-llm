@@ -19,6 +19,7 @@ struct SamplerInitParams {
     // max_batch_size == 0, fixed_max_batch_size is ignored and buffers grow dynamically.
     size_t max_batch_size       = 0;
     bool   fixed_max_batch_size = true;
+    bool   force_beam_search_v2 = false;
 };
 
 struct SamplerInputs {
@@ -78,7 +79,7 @@ public:
     std::vector<std::optional<ErrorInfo>> processor_errors;
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].
-    bool                                  token_ids_are_point_mass = false;
+    bool token_ids_are_point_mass = false;
 };
 
 struct MergedOutput {

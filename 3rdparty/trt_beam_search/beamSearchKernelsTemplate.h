@@ -688,7 +688,11 @@ void beamSearchKernelLauncher(
 
     if constexpr (IS_V2)
     {
-        RTP_LLM_CHECK_WITH_INFO(bh.numBeamsCBA == nullptr, "beam search V2 does not support CBA");
+        // CBA (candidate-beam-array) is unsupported in V2: stage C emits only nBMOut
+        // candidates. Wiring it must restore 2*nBMOut emission first.
+        RTP_LLM_CHECK_WITH_INFO(
+            bh.numBeamsCBA == nullptr, "beam search V2 does not support the CBA path (numBeamsCBA != nullptr)");
+
         size_t const nStage1TopK{bh.nStage1TopK > 0 ? bh.nStage1TopK : std::min(nV, nBMOut)};
         size_t const nStage2InputLen{bh.nStage2InputLen > 0 ? bh.nStage2InputLen : nBMIn * nStage1TopK};
         size_t const nStage2TopK{bh.nStage2TopK > 0 ? bh.nStage2TopK : nBMOut};
