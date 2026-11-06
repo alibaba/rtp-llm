@@ -1,0 +1,10 @@
+{
+  "status": "SOURCE_ONLY_NOT_RUN_HYPOTHESIS",
+  "base_v6_sha256": "0cc84e1aeba9e5d005c5442a42afab7cd8d52e607253733331234f1bb95a4580",
+  "kernel_sha256": "fec9351126776a37bd49b3bfbb6b6ba503488718338a23ff569c729cd5e71bdb",
+  "variant": "precision_fma_v1",
+  "changes": "Only active normal GEMM1/GEMM2 K128 scale promotion: mulRN(A,B) then fmaRN(dot,scale,final). No BN/exp/quant/routing/combine/debug changes.",
+  "host_abi_changed": false,
+  "activation_changed": false,
+  "candidate_not_proven_fix": true
+}

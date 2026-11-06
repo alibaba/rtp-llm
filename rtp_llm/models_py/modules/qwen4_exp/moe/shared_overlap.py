@@ -26,8 +26,33 @@ class Qwen4MoeLayer(GenericMoeLayer):
     _ep_shared_stream = None
     _ep_two_batch = None
 
+    def __init__(
+        self,
+        config,
+        parallelism_config,
+        weights,
+        moe_config,
+        max_generate_batch_size=0,
+        enable_cuda_graph=False,
+        hw_kernel_config=None,
+        linear_factory=None,
+    ):
+        super().__init__(
+            config, parallelism_config, weights, moe_config,
+            max_generate_batch_size, enable_cuda_graph, hw_kernel_config,
+            linear_factory,
+        )
+        self._sm90_mega_decode_limit = max_generate_batch_size
+        self._sm90_mega_moe = None
+
     def prepare_shared_expert_overlap(self) -> None:
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
+        if os.environ.get("QWEN_MOE_SM90_MEGA_MOE", "0") == "1":
+            from .sm90_mega_moe import QwenSm90Fp8MegaMoe
+
+            self._sm90_mega_moe = QwenSm90Fp8MegaMoe(
+                self, self._sm90_mega_decode_limit
+            )
         self._fuse_ep_shared_gate = (
             os.environ.get("QWEN_MOE_SHARED_GATE_FUSION", "0") == "1"
         )
@@ -82,6 +107,22 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._shared_input_ready = torch.cuda.Event()
         self._shared_output_ready = torch.cuda.Event()
 
+    def _forward_routed(self, hidden_states):
+        mega = getattr(self, "_sm90_mega_moe", None)
+        if mega is None or not mega.supports(hidden_states):
+            return super()._forward_routed(hidden_states)
+        tokens = hidden_states.shape[0]
+        logits = self.gate(hidden_states)
+        weights = torch.empty(
+            (tokens, self.top_k), device=hidden_states.device, dtype=torch.float32
+        )
+        ids = torch.empty(
+            weights.shape, device=hidden_states.device,
+            dtype=self.fused_moe.topk_ids_dtype,
+        )
+        self.select_topk(logits, ids, weights)
+        return mega.forward(hidden_states, ids, weights)
+
     def _prepare_ep_shared_overlap(self) -> None:
         from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
         from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
@@ -96,8 +137,19 @@ class Qwen4MoeLayer(GenericMoeLayer):
         pc = self.parallelism_config
         shared = self.shared_expert
         if not (
-            pc.tp_size == 2
-            and pc.ep_size == 2
+            (
+                (
+                    pc.tp_size == 2 and pc.ep_size == 2
+                    and tuple(shared.up_proj.weight.shape) == (640, 2560)
+                    and tuple(shared.down_proj.weight.shape) == (2560, 320)
+                )
+                or (
+                    os.environ.get("QWEN_MOE_EP8_OVERLAP_EXPERIMENT", "0") == "1"
+                    and pc.tp_size == 8 and pc.ep_size == 8
+                    and tuple(shared.up_proj.weight.shape) == (160, 2560)
+                    and tuple(shared.down_proj.weight.shape) == (2560, 80)
+                )
+            )
             and pc.dp_size == 1
             and self.use_ep_shared_allreduce
             and not self.use_unified_tp_allreduce
@@ -109,8 +161,6 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and type(shared.up_proj) is Fp8Linear
             and type(shared.down_proj) is Fp8Linear
             and type(self.shared_expert_gate) is Fp8Linear
-            and tuple(shared.up_proj.weight.shape) == (640, 2560)
-            and tuple(shared.down_proj.weight.shape) == (2560, 320)
             and tuple(self.shared_expert_gate.weight.shape) == (1, 2560)
             and shared.up_proj.weight.is_cuda
             and torch.version.hip is None
