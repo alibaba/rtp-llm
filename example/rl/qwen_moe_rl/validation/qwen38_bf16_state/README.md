@@ -17,3 +17,15 @@ This source passed the CPU reference, real four-GPU HF/FSDP tests, and a real
 independent CPU/GPU FP32 operation differed by one ULP at an exact stochastic
 rounding threshold; replaying the actual GPU equations was bit exact. These
 tests do not constitute completed Qwen3.8-2.4T RL training or convergence proof.
+
+The opt-in `qwen38_bf16_training_runtime` additionally streams the pinned
+checkpoint directly into 72 BF16 FSDP shards, subdivides expert and vocabulary
+wraps, and keeps original FP32 rotary buffers across the real verl dtype cast.
+Its phase manager releases gradients and partially offloads masters before
+native allocation. Restoring training requires the real native cleanup proof.
+The original rLLM/verl configuration path was checked with reference and critic
+disabled, one TP8/attention-DP9/global-EP72 rollout world, and two GRPO updates.
+The final policy hook requires actual step-2 synchronization and fresh native
+probes before reporting success. The matching world adapter and SM100 native
+build remain separate prerequisites; checkpoints are disabled until a bounded
+state writer is provided.
