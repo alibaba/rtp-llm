@@ -40,14 +40,17 @@ public:
                                                              const std::string& pool_name,
                                                              size_t             tokens_per_block);
 
-    static std::shared_ptr<HostBlockPool>
-    createHostPool(size_t payload_bytes, size_t usable_count, const std::string& pool_name = "benchmark_host");
+    static std::shared_ptr<HostBlockPool> createHostPool(size_t             payload_bytes,
+                                                         size_t             usable_count,
+                                                         const std::string& pool_name  = "benchmark_host",
+                                                         bool               enable_crc = true);
 
     static std::shared_ptr<BlockTreeDiskBlockPool> createDiskPool(size_t             payload_bytes,
                                                                   size_t             usable_count,
                                                                   const std::string& work_dir,
                                                                   const std::string& pool_name,
-                                                                  bool               buffered_io);
+                                                                  bool               buffered_io,
+                                                                  bool               enable_crc = true);
 
     // GroupSet builders (share one global CacheTopology across GroupSets so
     // group ids are unique in the BlockTree). Payload is derived by
@@ -57,7 +60,8 @@ public:
                                                         std::shared_ptr<BlockTreeDiskBlockPool>       disk_pool,
                                                         size_t                                        group_set_id,
                                                         std::shared_ptr<const CacheTopology>          topology,
-                                                        const std::vector<std::string>&               group_tags);
+                                                        const std::vector<std::string>&               group_tags,
+                                                        bool enable_crc = true);
 
     static std::shared_ptr<GroupSet> createSWAGroupSet(std::vector<std::shared_ptr<DeviceBlockPool>> device_pools,
                                                        std::shared_ptr<HostBlockPool>                host_pool,
@@ -66,7 +70,8 @@ public:
                                                        std::shared_ptr<const CacheTopology>          topology,
                                                        const std::vector<std::string>&               group_tags,
                                                        size_t sliding_window_size,
-                                                       size_t tokens_per_block);
+                                                       size_t tokens_per_block,
+                                                       bool   enable_crc = true);
 
     // Build a shared CacheTopology: one group per entry with a unique tag.
     // layer_stride_bytes_per_group is the per-layer stride; each group gets

@@ -6,8 +6,8 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostCopyStrategy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/TransferExecutor.h"
 
 namespace rtp_llm {
 
@@ -19,12 +19,13 @@ class DeviceHostTransferExecutor: public TransferExecutor {
 public:
     DeviceHostTransferExecutor(BlockTreeTaskPool&                             transfer_task_pool,
                                size_t                                         max_descriptors_per_batch,
-                               DeviceHostCopyOptions                          options          = {},
-                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
-                               std::shared_ptr<CrcTransferService>            crc_service      = nullptr,
-                               BlockTreeTaskPool*                             load_task_pool   = nullptr,
-                               const std::vector<GroupSetPtr>&                group_sets       = {},
-                               int64_t world_rank = -1);
+                               DeviceHostCopyOptions                          options             = {},
+                               std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter    = nullptr,
+                               std::shared_ptr<CrcTransferService>            load_crc_service    = nullptr,
+                               std::shared_ptr<CrcTransferService>            offload_crc_service = nullptr,
+                               BlockTreeTaskPool*                             load_task_pool      = nullptr,
+                               const std::vector<GroupSetPtr>&                group_sets          = {},
+                               int64_t                                        world_rank          = -1);
     ~DeviceHostTransferExecutor() = default;
 
 private:
@@ -39,7 +40,7 @@ private:
                  const std::vector<TransferDescriptor>& descriptors,
                  const std::vector<const GroupSet*>&    group_sets) const;
 
-    std::shared_ptr<CrcTransferService> crc_service_;
+    std::shared_ptr<CrcTransferService> load_crc_service_, offload_crc_service_;
     DeviceHostCopyOptions               options_;
     // A rank uses one device. Bind its stream pair on the first copy; call_once
     // publishes it safely to concurrent transfer workers.

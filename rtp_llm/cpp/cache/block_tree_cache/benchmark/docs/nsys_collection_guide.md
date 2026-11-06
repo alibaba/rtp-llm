@@ -278,3 +278,9 @@ nsys export \
 | 本机 nsys-ui 打不开远端 report | 安装与 collector 相同或更高版本的 Nsight Systems UI |
 
 更多 CLI 和指标定义见 [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)。
+
+### WorkLoop 与 legacy 的采集范围
+
+默认 binary 的 Tree/Transfer 使用 CRC＋WorkLoop。采集前先检查 `resolved_config.transfer_implementation`。
+需要普通 copy 策略比较时显式加 `--btc-transfer-engine-async=false --enable-crc=false`，再使用 worker/strategy 参数。
+`models_py/bindings/cuda/test` 的 main staged baseline 保留为 legacy/test-only 依赖；其时间不能作为 WorkLoop owner 时间。

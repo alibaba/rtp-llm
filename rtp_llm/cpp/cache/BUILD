@@ -347,6 +347,7 @@ cc_library(
         ":cache_types",
         ":coordinator_cache_manager",
         ":prefill_cache_hit_metrics_reporter",
+        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/config:rank_layout",
         "//rtp_llm/cpp/config:stage_layer_range",

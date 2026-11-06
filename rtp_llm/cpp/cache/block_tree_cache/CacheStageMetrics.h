@@ -22,6 +22,8 @@ public:
                 const char* source,
                 const char* target) noexcept;
     void flush();
+    // Same bounded table/consumer, with queue metric tags rather than stages.
+    void recordQueueWait(const char* source, const char* target, int64_t latency) noexcept;
 
 private:
     struct Impl;

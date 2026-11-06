@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/TransferExecutor.h"
 
 namespace rtp_llm {
 
@@ -23,9 +23,6 @@ private:
     TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
                                 const std::vector<TransferDescriptor>& descriptors,
                                 const std::vector<const GroupSet*>&    group_sets) override;
-
-    static TransferStatus blockIOStatusToTransferStatus(BlockIOStatus status);
-    static const char*    blockIOStatusName(BlockIOStatus status);
 };
 
 }  // namespace rtp_llm

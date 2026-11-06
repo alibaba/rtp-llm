@@ -89,6 +89,11 @@ class BenchmarkSmokeTest(unittest.TestCase):
                 self.assertEqual(_load_json(manifest_path).get("status"), "completed")
                 results[case] = _load_json(result_path)
                 self.assertEqual(results[case].get("status"), "completed")
+                mode = results[case].get("resolved_config", {})
+                self.assertEqual(mode.get("transfer_implementation"), "workloop")
+                self.assertEqual(mode.get("btc_transfer_engine_async"), 1)
+                self.assertEqual(mode.get("enable_crc"), 1)
+                self.assertEqual(mode.get("owners_per_direction"), 1)
 
             tree = results["smoke_tree_online_mini"]
             self.assertGreater(tree.get("metrics", {}).get("loads_committed", 0), 0)

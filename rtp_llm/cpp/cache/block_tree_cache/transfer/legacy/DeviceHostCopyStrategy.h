@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostCopyOptions.h"
 #include <cstdint>
 #include <map>
 #include <memory>

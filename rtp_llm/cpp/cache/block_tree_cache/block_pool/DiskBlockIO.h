@@ -27,10 +27,8 @@ struct DiskWrite {
     size_t      bytes;
 };
 
-// DiskBlockIO is a thin, block-pool-agnostic abstraction over POSIX file I/O for a
-// single backing disk file. It owns no scheduling or block-allocation policy -
-// BlockTreeDiskBlockPool (task 5) is responsible for mapping block indices to file offsets and
-// driving this interface.
+// Block-pool-agnostic I/O for one backing file. BlockTreeDiskBlockPool owns
+// allocation policy and maps block indices to offsets.
 class DiskBlockIO {
 public:
     virtual ~DiskBlockIO() = default;
@@ -49,6 +47,7 @@ public:
     virtual DiskBlockIOStatus read(const std::vector<DiskRead>& reads)    = 0;
     virtual DiskBlockIOStatus write(const std::vector<DiskWrite>& writes) = 0;
 
+    // The owner finishes all synchronous and executor-driven I/O before closing.
     virtual void close() = 0;
 
     virtual std::string debugString() const = 0;
@@ -79,11 +78,10 @@ private:
     // open() call actually succeeded in getting O_DIRECT semantics from the
     // filesystem.
     DiskBlockIOStatus validate(uint64_t offset, const void* buffer, size_t bytes) const;
-
-    int         fd_{-1};
-    std::string file_path_;
-    size_t      bytes_{0};
-    bool        buffered_io_{true};
+    int               fd_{-1};
+    std::string       file_path_;
+    size_t            bytes_{0};
+    bool              buffered_io_{true};
 };
 
 }  // namespace rtp_llm

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <condition_variable>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -31,9 +32,13 @@ static_assert(sizeof(Result) == 12, "CRC result transfer layout must remain unch
 namespace {
 using crc_block_copy_internal::Result;
 
+struct CudaFailure: std::runtime_error {
+    explicit CudaFailure(cudaError_t error): std::runtime_error(cudaGetErrorString(error)) {}
+};
+
 void checkCuda(cudaError_t error) {
     if (error != cudaSuccess)
-        throw std::runtime_error(cudaGetErrorString(error));
+        throw CudaFailure(error);
 }
 
 size_t checkedProduct(size_t a, size_t b) {
@@ -57,9 +62,10 @@ constexpr size_t kH2dPipelineMinBytes = size_t{4} << 20;
 // rows[bit] of every level on shared bank `bit`, so lanes that diverge into
 // different shift levels serialize 32-way on every load; 33 spreads them.
 constexpr int kPowerStride = 33;
+constexpr size_t kCrcTableWords = 8 * 256;
 
 std::vector<uint32_t> buildCrc32cTables() {
-    std::vector<uint32_t> tables(8 * 256);
+    std::vector<uint32_t> tables(kCrcTableWords);
     for (int index = 0; index < 256; ++index) {
         uint32_t entry = static_cast<uint32_t>(index);
         for (int bit = 0; bit < 8; ++bit)
@@ -98,14 +104,19 @@ Gf2Matrix composeShift(const Gf2Matrix& a, const Gf2Matrix& b) {
     return out;
 }
 
+int shiftPowerLevels(size_t max_payload) {
+    int levels = 0;
+    for (size_t value = max_payload; value != 0; value >>= 1)
+        ++levels;
+    return levels;
+}
+
 // Row j of each level is the image of basis vector e_j under the linear map
 // that advances one raw CRC32C state by 2^level zero bytes; powers of the same
 // map commute, so any byte count is the product of the rows for its set bits.
 std::vector<uint32_t> buildShiftPowers(size_t max_payload) {
     const auto tables = buildCrc32cTables();
-    int        levels = 0;
-    for (size_t value = max_payload; value != 0; value >>= 1)
-        ++levels;
+    const int             levels = shiftPowerLevels(max_payload);
     std::vector<uint32_t> powers(static_cast<size_t>(levels) * kPowerStride, 0);
     // Level 0 rows: M1(e_j) = (e_j >> 8) ^ T0[e_j & 0xFF].
     for (int row = 0; row < 32; ++row) {
@@ -495,6 +506,65 @@ cudaError_t launchCrc32cBatched(unsigned char*  staging,
 }
 }  // namespace crc_block_copy_internal
 
+namespace {
+
+struct WorkspaceLayout {
+    size_t staging_bytes;
+    size_t result_bytes;
+    size_t partials_bytes;
+    size_t fold_mats_bytes;
+    size_t final_const_bytes;
+    size_t shift_power_bytes;
+    size_t aliases_bytes;
+    size_t arrived_offset;
+    size_t tiles_offset;
+    size_t pack_bytes;
+
+    size_t deviceBytes() const {
+        size_t total = 0;
+        for (const auto bytes : {staging_bytes,
+                                 result_bytes,
+                                 partials_bytes,
+                                 fold_mats_bytes,
+                                 final_const_bytes,
+                                 kCrcTableWords * sizeof(uint32_t),
+                                 shift_power_bytes,
+                                 aliases_bytes,
+                                 pack_bytes}) {
+            if (bytes > std::numeric_limits<size_t>::max() - total)
+                throw std::overflow_error("CRC workspace size overflow");
+            total += bytes;
+        }
+        return total;
+    }
+};
+
+WorkspaceLayout workspaceLayout(size_t items, size_t payload, size_t tiles) {
+    if (!items || !payload || !tiles || items > unsigned(std::numeric_limits<int>::max())
+        || tiles > unsigned(std::numeric_limits<int>::max()))
+        throw std::invalid_argument("invalid CRC capacity");
+    // Preserve overflow checking before the kernel's narrower payload limit.
+    const size_t staging_bytes = checkedProduct(items, CrcBlockCopyBatch::encodedBytes(payload));
+    if (payload > std::numeric_limits<uint32_t>::max())
+        throw std::invalid_argument("CRC payload too large");
+    constexpr size_t align          = 8;
+    const size_t     arrived_offset = (checkedProduct(items, sizeof(size_t)) + align - 1) / align * align;
+    const size_t     tiles_offset =
+        (arrived_offset + checkedProduct(items, sizeof(unsigned int)) + align - 1) / align * align;
+    return {staging_bytes,
+            checkedProduct(items, sizeof(Result)),
+            checkedProduct(checkedProduct(items, kMaxCrcBlocksPerMessage), 2 * sizeof(uint32_t)),
+            checkedProduct(checkedProduct(items, 33 * kPowerStride), sizeof(uint32_t)),
+            checkedProduct(items, sizeof(uint32_t)),
+            static_cast<size_t>(shiftPowerLevels(payload)) * kPowerStride * sizeof(uint32_t),
+            checkedProduct(items, sizeof(void*)),
+            arrived_offset,
+            tiles_offset,
+            tiles_offset + checkedProduct(tiles, sizeof(CopyTile))};
+}
+
+}  // namespace
+
 struct CrcBlockCopyBatch::Impl {
     int          device;
     size_t       max_items, max_payload, max_tiles, stride;
@@ -517,9 +587,22 @@ struct CrcBlockCopyBatch::Impl {
     int                   fold_blocks{-1};
     // Fixed offsets inside the pack buffers; arrived stays zero on the host
     // copy, so every descriptor upload also resets it on the device.
-    size_t                         lengths_offset, arrived_offset, tiles_offset;
-    std::mutex                     mutex;
-    std::shared_ptr<CrcDumpWriter> dump_writer;
+    size_t                                        lengths_offset, arrived_offset, tiles_offset;
+    std::mutex                                    mutex;
+    std::condition_variable                       idle;
+    std::shared_ptr<CrcDumpWriter>                dump_writer;
+    CrcCopyState                                  state{CrcCopyState::IDLE};
+    CrcCopyDirection                              direction{CrcCopyDirection::STORE};
+    std::vector<CrcCopyItem>                      batch;
+    std::vector<CrcCopyFailure>                   failures;
+    bool                                          diagnostic_cuda_error{false};
+    bool                                          diagnostic_pending{false};
+    std::function<int(const char*, void*, void*)> test_hook;
+
+    void checkpoint(const char* point) {
+        if (test_hook)
+            checkCuda(static_cast<cudaError_t>(test_hook(point, stream, copy_stream)));
+    }
 
     Impl(int device_index, size_t items, size_t payload, size_t tile_count, std::shared_ptr<CrcDumpWriter> writer):
         device(device_index),
@@ -528,71 +611,60 @@ struct CrcBlockCopyBatch::Impl {
         max_tiles(tile_count),
         stride(CrcBlockCopyBatch::encodedBytes(payload)),
         dump_writer(std::move(writer)) {
-        if (device < 0 || !items || !payload || !tile_count || items > unsigned(std::numeric_limits<int>::max())
-            || tile_count > unsigned(std::numeric_limits<int>::max()))
-            throw std::invalid_argument("invalid CRC capacity");
-        // Check every capacity before allocating anything on the GPU. The
-        // products run first: overflowing sizes keep the historical
-        // std::overflow_error even when the payload also exceeds the kernel's
-        // 32-bit byte-count range.
-        const size_t staging_bytes = checkedProduct(items, stride);
-        const size_t result_bytes  = checkedProduct(items, sizeof(Result));
-        const size_t partials_bytes =
-            checkedProduct(checkedProduct(items, kMaxCrcBlocksPerMessage), 2 * sizeof(uint32_t));
-        const size_t fold_mats_bytes   = checkedProduct(checkedProduct(items, 33 * kPowerStride), sizeof(uint32_t));
-        const size_t final_const_bytes = checkedProduct(items, sizeof(uint32_t));
-        // Reduction byte counts travel as 32-bit words inside the CRC kernel.
-        if (payload > std::numeric_limits<uint32_t>::max())
-            throw std::invalid_argument("CRC payload too large");
-        const auto tables  = buildCrc32cTables();
-        const auto powers  = buildShiftPowers(payload);
-        power_levels       = static_cast<int>(powers.size() / kPowerStride);
-        powers_host        = powers;
-        const size_t align = 8;
-        lengths_offset     = 0;
-        arrived_offset     = (lengths_offset + checkedProduct(items, sizeof(size_t)) + align - 1) / align * align;
-        tiles_offset       = (arrived_offset + checkedProduct(items, sizeof(unsigned int)) + align - 1) / align * align;
-        const size_t pack_bytes = tiles_offset + checkedProduct(tile_count, sizeof(CopyTile));
+        if (device < 0)
+            throw std::invalid_argument("invalid CRC device");
+        const auto layout = workspaceLayout(items, payload, tile_count);
+        device_bytes      = layout.deviceBytes();
+        const auto tables = buildCrc32cTables();
+        auto       powers = buildShiftPowers(payload);
+        power_levels      = static_cast<int>(powers.size() / kPowerStride);
+        powers_host       = std::move(powers);
+        lengths_offset    = 0;
+        arrived_offset    = layout.arrived_offset;
+        tiles_offset      = layout.tiles_offset;
         checkCuda(cudaSetDevice(device));
-        staging.allocate(staging_bytes);
-        results.allocate(result_bytes);
-        partials.allocate(partials_bytes);
-        fold_mats.allocate(fold_mats_bytes);
-        final_consts.allocate(final_const_bytes);
-        fold_mats_host.allocate(fold_mats_bytes, true);
-        final_consts_host.allocate(final_const_bytes, true);
+        staging.allocate(layout.staging_bytes);
+        results.allocate(layout.result_bytes);
+        partials.allocate(layout.partials_bytes);
+        fold_mats.allocate(layout.fold_mats_bytes);
+        final_consts.allocate(layout.final_const_bytes);
+        fold_mats_host.allocate(layout.fold_mats_bytes, true);
+        final_consts_host.allocate(layout.final_const_bytes, true);
         crc_tables.allocate(tables.size() * sizeof(uint32_t));
-        shift_powers.allocate(powers.size() * sizeof(uint32_t));
-        pack_device.allocate(pack_bytes);
-        aliases.allocate(checkedProduct(items, sizeof(void*)));
-        pack_host.allocate(pack_bytes, true);
-        host_aliases.allocate(checkedProduct(items, sizeof(void*)), true);
-        host_results.allocate(result_bytes, true);
-        std::memset(pack_host.pointer, 0, pack_bytes);
+        shift_powers.allocate(layout.shift_power_bytes);
+        pack_device.allocate(layout.pack_bytes);
+        aliases.allocate(layout.aliases_bytes);
+        pack_host.allocate(layout.pack_bytes, true);
+        host_aliases.allocate(layout.aliases_bytes, true);
+        host_results.allocate(layout.result_bytes, true);
+        std::memset(pack_host.pointer, 0, layout.pack_bytes);
         checkCuda(
             cudaMemcpy(crc_tables.pointer, tables.data(), tables.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
         checkCuda(
-            cudaMemcpy(shift_powers.pointer, powers.data(), powers.size() * sizeof(uint32_t), cudaMemcpyHostToDevice));
+            cudaMemcpy(shift_powers.pointer, powers_host.data(), layout.shift_power_bytes, cudaMemcpyHostToDevice));
         host_failed.allocate(items * sizeof(bool), true, cudaHostAllocMapped);
         checkCuda(cudaHostGetDevicePointer(reinterpret_cast<void**>(&device_failed), host_failed.pointer, 0));
         // Create streams and events last: no constructor-failure path can strand work.
-        checkCuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-        checkCuda(cudaStreamCreateWithFlags(&copy_stream, cudaStreamNonBlocking));
-        checkCuda(cudaEventCreateWithFlags(&gather_done, cudaEventDisableTiming));
-        checkCuda(cudaEventCreateWithFlags(&copy_done, cudaEventDisableTiming));
-        for (auto& event : wave_done)
-            checkCuda(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
-        device_bytes = staging_bytes + result_bytes + partials_bytes + fold_mats_bytes + final_const_bytes
-                       + tables.size() * sizeof(uint32_t) + powers.size() * sizeof(uint32_t) + pack_bytes
-                       + checkedProduct(items, sizeof(void*));
-        host_bytes = pack_bytes + fold_mats_bytes + final_const_bytes + checkedProduct(items, sizeof(void*))
-                     + result_bytes + checkedProduct(items, sizeof(bool));
+        try {
+            checkCuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+            checkCuda(cudaStreamCreateWithFlags(&copy_stream, cudaStreamNonBlocking));
+            checkCuda(cudaEventCreateWithFlags(&gather_done, cudaEventDisableTiming));
+            checkCuda(cudaEventCreateWithFlags(&copy_done, cudaEventDisableTiming));
+            for (auto& event : wave_done)
+                checkCuda(cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+        } catch (...) {
+            destroyHandles();
+            throw;
+        }
+        host_bytes = layout.pack_bytes + layout.fold_mats_bytes + layout.final_const_bytes + layout.aliases_bytes
+                     + layout.result_bytes + checkedProduct(items, sizeof(bool));
     }
 
     void drainOrAbort() noexcept {
         // Returning while submitted work still owns caller pointers is unsafe.
-        const auto  select = cudaSetDevice(device);
-        cudaError_t error  = select;
+        cudaError_t error = cudaSetDevice(device);
+        if (error == cudaSuccess && test_hook)
+            error = static_cast<cudaError_t>(test_hook("drain", stream, copy_stream));
         if (error == cudaSuccess)
             error = cudaStreamSynchronize(stream);
         if (error == cudaSuccess)
@@ -616,35 +688,50 @@ struct CrcBlockCopyBatch::Impl {
         if (error == cudaSuccess)
             error = cudaStreamSynchronize(copy_stream);
         if (error != cudaSuccess) {
-            std::fprintf(stderr,
-                         "CRC teardown could not establish CUDA completion: %s\n",
-                         cudaGetErrorString(error));
+            std::fprintf(stderr, "CRC teardown could not establish CUDA completion: %s\n", cudaGetErrorString(error));
         }
     }
 
-    ~Impl() {
-        if (stream) {
-            drainForTeardown();
+    void destroyHandles() noexcept {
+        if (gather_done)
             cudaEventDestroy(gather_done);
+        if (copy_done)
             cudaEventDestroy(copy_done);
-            for (auto& event : wave_done)
+        for (auto& event : wave_done)
+            if (event)
                 cudaEventDestroy(event);
+        if (copy_stream)
             cudaStreamDestroy(copy_stream);
+        if (stream)
             cudaStreamDestroy(stream);
-        }
+    }
+
+    ~Impl() {
+        if (state != CrcCopyState::IDLE)
+            drainOrAbort();
+        else if (stream)
+            drainForTeardown();
+        // Allocation destructors run on this same, explicitly selected device.
+        destroyHandles();
     }
 
     CrcCopyFailure captureSnapshot(const CrcCopyItem& item, const CrcCopyFailure& failure) {
         auto snapshot = failure;
         try {
+            checkCuda(cudaSetDevice(device));
             const size_t encoded = CrcBlockCopyBatch::encodedBytes(item.payload_bytes);
             const auto*  host    = static_cast<const uint8_t*>(item.host);
             snapshot.cpu_snapshot.assign(host, host + encoded);
             snapshot.staging_snapshot.resize(encoded);
+            checkpoint("snapshot");
             checkCuda(cudaMemcpy(snapshot.staging_snapshot.data(),
                                  staging.as<unsigned char>() + failure.item_index * stride,
                                  encoded,
                                  cudaMemcpyDeviceToHost));
+        } catch (const CudaFailure& error) {
+            diagnostic_cuda_error = true;
+            snapshot.staging_snapshot.clear();
+            snapshot.capture_error = error.what();
         } catch (const std::exception& error) {
             snapshot.staging_snapshot.clear();
             snapshot.capture_error = error.what();
@@ -670,22 +757,19 @@ struct CrcBlockCopyBatch::Impl {
         size_t tile_count{0};
         size_t largest_payload{0};
         int    crc_blocks{1};
+        bool   upload_fold{false};
     };
 
     // Fold matrices and final constants depend only on (lengths, blocks), so
-    // they are rebuilt and re-uploaded only when that signature changes. Every
-    // public entry point synchronizes before returning, which makes a previous
-    // upload's completion a precondition of the next call.
-    void uploadFoldTables(const PreparedBatch& prepared) {
+    // they are rebuilt and re-uploaded only when that signature changes. The
+    // preceding operation must retire before this slot can be used again.
+    void prepareFoldTables(PreparedBatch& prepared) {
         const size_t* lengths = packHostAt<size_t>(lengths_offset);
         if (fold_blocks == prepared.crc_blocks && fold_lengths.size() == prepared.count
             && std::equal(lengths, lengths + prepared.count, fold_lengths.begin()))
             return;
-        // Invalidate before touching the device tables. If either upload (or the
-        // host-side signature assign below) throws, the next call must rebuild
-        // instead of hitting a stale cache entry with mismatched tables.
         fold_blocks = -1;
-        fold_lengths.clear();
+        fold_lengths.assign(lengths, lengths + prepared.count);
         uint32_t* mats   = fold_mats_host.as<uint32_t>();
         uint32_t* finals = final_consts_host.as<uint32_t>();
         for (size_t index = 0; index < prepared.count; ++index) {
@@ -693,6 +777,12 @@ struct CrcBlockCopyBatch::Impl {
             std::copy(message.begin(), message.end(), mats + index * (33 * kPowerStride));
             finals[index] = hostApplyShift(powers_host, 0xFFFFFFFFu, lengths[index]);
         }
+        prepared.upload_fold = true;
+    }
+
+    void uploadFoldTables(const PreparedBatch& prepared) {
+        if (!prepared.upload_fold)
+            return;
         checkCuda(cudaMemcpyAsync(fold_mats.pointer,
                                   fold_mats_host.pointer,
                                   prepared.count * (33 * kPowerStride) * sizeof(uint32_t),
@@ -703,16 +793,12 @@ struct CrcBlockCopyBatch::Impl {
                                   prepared.count * sizeof(uint32_t),
                                   cudaMemcpyHostToDevice,
                                   stream));
-        // Commit the signature only after both uploads are enqueued: a failed
-        // submission must leave the cache cold so a retry re-uploads instead of
-        // folding through stale tables.
-        fold_lengths.assign(lengths, lengths + prepared.count);
         fold_blocks = prepared.crc_blocks;
     }
 
     // One walk validates and builds the descriptors; the single packed upload
-    // is issued only after the whole batch validated, so invalid input performs
-    // no CUDA call at all. Partial writes stay in our own pinned scratch.
+    // is separate from this pure CPU plan. Partial writes stay in private pinned
+    // scratch; no rejected request has submitted asynchronous CUDA accesses.
     std::optional<PreparedBatch> prepareBatch(const std::vector<CrcCopyItem>& batch) {
         if (batch.empty() || batch.size() > max_items)
             return std::nullopt;
@@ -757,23 +843,14 @@ struct CrcBlockCopyBatch::Impl {
         // largest_payload is nonzero, so ceil is at least 1; the min clamps at 32.
         prepared.crc_blocks = static_cast<int>(std::min<size_t>(
             kMaxCrcBlocksPerMessage, (prepared.largest_payload + kCrcBytesPerBlockHint - 1) / kCrcBytesPerBlockHint));
-        checkCuda(cudaSetDevice(device));
-        checkCuda(cudaMemcpyAsync(pack_device.pointer,
-                                  pack_host.pointer,
-                                  tiles_offset + total_tiles * sizeof(CopyTile),
-                                  cudaMemcpyHostToDevice,
-                                  stream));
         return prepared;
     }
 
     // Binds the workspace-owned buffers in one place; only the message range,
     // direction, and optional host alias array vary between the store, serial
     // load, and wave load sites.
-    void launchCrc(const PreparedBatch& prepared,
-                   size_t               count,
-                   size_t               msg_offset,
-                   bool                 store,
-                   void* const*         host_records) {
+    void
+    launchCrc(const PreparedBatch& prepared, size_t count, size_t msg_offset, bool store, void* const* host_records) {
         checkCuda(crc_block_copy_internal::launchCrc32cBatched(staging.as<unsigned char>(),
                                                                stride,
                                                                packDeviceAt<size_t>(lengths_offset),
@@ -794,169 +871,269 @@ struct CrcBlockCopyBatch::Impl {
                                                                stream));
     }
 
-    // Caller must have synchronized: every active item overwrites its mapped
-    // flag during this invocation before the stream(s) went idle.
-    CrcCopyStatus collectResults(const std::vector<CrcCopyItem>& batch,
-                                 bool                            checked_footer_available,
-                                 std::vector<CrcCopyFailure>&    failures) {
-        CrcCopyStatus result = CrcCopyStatus::OK;
+    // Called only after the complete pipeline has converged. Results and
+    // failure storage were reserved before the first metadata upload.
+    void collectResults() {
+        checkCuda(cudaSetDevice(device));
         for (size_t index = 0; index < batch.size(); ++index) {
             if (!host_failed.as<bool>()[index])
                 continue;
-            // Full diagnostics stay on the GPU until a failure needs them.
+            diagnostic_pending = true;
             checkCuda(cudaMemcpyAsync(host_results.as<Result>() + index,
                                       results.as<Result>() + index,
                                       sizeof(Result),
                                       cudaMemcpyDeviceToHost,
                                       stream));
-            checkCuda(cudaStreamSynchronize(stream));
-            const auto& observed = host_results.as<Result>()[index];
-            // The kernel always writes nvcompSuccess; the status field only
-            // preserves the historical 12-byte Result layout.
-            if (result == CrcCopyStatus::OK)
-                result = CrcCopyStatus::CRC_MISMATCH;
-            CrcCopyFailure failure{
-                index, observed.expected, observed.actual, CrcCopyStatus::CRC_MISMATCH, int(observed.status)};
-            failure.checked_footer_available = checked_footer_available;
-            failures.push_back(failure);
-            if (dump_writer)
-                dump_writer->write(batch[index], failure, [&] { return captureSnapshot(batch[index], failure); });
+            checkpoint("result_copy");
         }
-        return result;
+        checkCuda(cudaStreamSynchronize(stream));
+        diagnostic_pending = false;
+        for (size_t index = 0; index < batch.size(); ++index) {
+            if (!host_failed.as<bool>()[index])
+                continue;
+            const auto&    observed = host_results.as<Result>()[index];
+            CrcCopyFailure failure{
+                index, observed.expected, observed.actual, CrcCopyState::CRC_MISMATCH, int(observed.status)};
+            failure.checked_footer_available = direction == CrcCopyDirection::LOAD;
+            failures.push_back(std::move(failure));
+            if (dump_writer) {
+                const auto& verdict = failures.back();
+                dump_writer->write(batch[index], verdict, [&] { return captureSnapshot(batch[index], verdict); });
+            }
+            if (diagnostic_cuda_error)
+                break;
+        }
     }
 
-    CrcCopyStatus store(const std::vector<CrcCopyItem>& batch, std::vector<CrcCopyFailure>& failures) {
-        std::lock_guard<std::mutex> lock(mutex);
-        failures.clear();
-        try {
-            failures.reserve(batch.size());
-            const auto prepared = prepareBatch(batch);
-            if (!prepared)
-                return CrcCopyStatus::INVALID_ARGS;
-            checkCuda(launchCopyTiles(
-                packDeviceAt<CopyTile>(tiles_offset), prepared->tile_count, staging.pointer, false, stream));
-            checkCuda(cudaEventRecord(gather_done, stream));
-            uploadFoldTables(*prepared);
-            // Probe host records for device aliases before the CRC launch: the
-            // kernel seals the tails itself and needs the aliases resident.
-            bool mapped = true;
-            for (size_t index = 0; index < prepared->count; ++index) {
-                void* alias = nullptr;
-                if (cudaHostGetDevicePointer(&alias, batch[index].host, 0) != cudaSuccess) {
-                    // A pageable host record is expected to fail this probe.
-                    // Consume its sticky last-error so the next launch's
-                    // cudaGetLastError() reports only that launch's result.
-                    cudaGetLastError();
-                    mapped = false;
-                    break;
-                }
-                host_aliases.as<void*>()[index] = alias;
-            }
-            void* const* host_records = nullptr;
-            if (mapped) {
-                checkCuda(cudaMemcpyAsync(aliases.pointer,
-                                          host_aliases.pointer,
-                                          prepared->count * sizeof(void*),
+    bool prepareHostAliases(const std::vector<CrcCopyItem>& items, bool require_pinned) {
+        for (size_t index = 0; index < items.size(); ++index) {
+            cudaPointerAttributes attributes{};
+            // CUDA 13 reports ordinary host allocations as Unregistered. Any
+            // actual probe error is a device error, never a pageable fallback.
+            checkCuda(cudaPointerGetAttributes(&attributes, items[index].host));
+            const bool pinned = attributes.type == cudaMemoryTypeHost;
+            if (require_pinned && !pinned)
+                return false;
+            host_aliases.as<void*>()[index] = pinned ? attributes.devicePointer : nullptr;
+        }
+        return true;
+    }
+
+    void enqueueStore(const PreparedBatch& prepared) {
+        checkCuda(
+            launchCopyTiles(packDeviceAt<CopyTile>(tiles_offset), prepared.tile_count, staging.pointer, false, stream));
+        checkCuda(cudaEventRecord(gather_done, stream));
+        uploadFoldTables(prepared);
+        const bool   mapped       = std::all_of(host_aliases.as<void*>(),
+                                        host_aliases.as<void*>() + prepared.count,
+                                        [](void* alias) { return alias != nullptr; });
+        void* const* host_records = nullptr;
+        if (mapped) {
+            checkCuda(cudaMemcpyAsync(
+                aliases.pointer, host_aliases.pointer, prepared.count * sizeof(void*), cudaMemcpyHostToDevice, stream));
+            host_records = aliases.as<void*>();
+        }
+        checkpoint("store_crc");
+        launchCrc(prepared, prepared.count, 0, true, host_records);
+        if (mapped) {
+            checkCuda(cudaStreamWaitEvent(copy_stream, gather_done));
+            checkpoint("store_dma");
+            for (size_t index = 0; index < prepared.count; ++index)
+                checkCuda(cudaMemcpyAsync(batch[index].host,
+                                          staging.as<unsigned char>() + index * stride,
+                                          batch[index].payload_bytes,
+                                          cudaMemcpyDeviceToHost,
+                                          copy_stream));
+            checkCuda(cudaEventRecord(copy_done, copy_stream));
+            checkpoint("join");
+            checkCuda(cudaStreamWaitEvent(stream, copy_done));
+        } else {
+            for (size_t index = 0; index < prepared.count; ++index)
+                checkCuda(cudaMemcpyAsync(batch[index].host,
+                                          staging.as<unsigned char>() + index * stride,
+                                          CrcBlockCopyBatch::encodedBytes(batch[index].payload_bytes),
+                                          cudaMemcpyDeviceToHost,
+                                          stream));
+        }
+    }
+
+    void enqueueLoad(const PreparedBatch& prepared) {
+        size_t total_bytes = 0;
+        for (const auto& item : batch)
+            total_bytes += CrcBlockCopyBatch::encodedBytes(item.payload_bytes);
+        const size_t waves =
+            total_bytes >= kH2dPipelineMinBytes ? std::min<size_t>(kMaxH2dWaveCount, prepared.count) : 1;
+        if (waves == 1) {
+            for (size_t index = 0; index < prepared.count; ++index)
+                checkCuda(cudaMemcpyAsync(staging.as<unsigned char>() + index * stride,
+                                          batch[index].host,
+                                          CrcBlockCopyBatch::encodedBytes(batch[index].payload_bytes),
                                           cudaMemcpyHostToDevice,
                                           stream));
-                host_records = aliases.as<void*>();
-            }
-            launchCrc(*prepared, prepared->count, /*msg_offset=*/0, /*store=*/true, host_records);
-            if (mapped) {
-                // Payload-only D2H overlaps the CRC kernel; the kernel seals the tails.
-                checkCuda(cudaStreamWaitEvent(copy_stream, gather_done));
-                for (size_t index = 0; index < prepared->count; ++index)
-                    checkCuda(cudaMemcpyAsync(batch[index].host,
-                                              staging.as<unsigned char>() + index * stride,
-                                              batch[index].payload_bytes,
-                                              cudaMemcpyDeviceToHost,
-                                              copy_stream));
-                checkCuda(cudaEventRecord(copy_done, copy_stream));
-                checkCuda(cudaStreamWaitEvent(stream, copy_done));
-                checkCuda(cudaStreamSynchronize(stream));
-            } else {
-                for (size_t index = 0; index < prepared->count; ++index)
-                    checkCuda(cudaMemcpyAsync(batch[index].host,
-                                              staging.as<unsigned char>() + index * stride,
-                                              CrcBlockCopyBatch::encodedBytes(batch[index].payload_bytes),
-                                              cudaMemcpyDeviceToHost,
-                                              stream));
-                checkCuda(cudaStreamSynchronize(stream));
-            }
-            return collectResults(batch, /*checked_footer_available=*/false, failures);
-        } catch (const std::exception& error) {
-            std::fprintf(stderr, "CRC device execution failed: %s\n", error.what());
-            drainOrAbort();
-            return CrcCopyStatus::DEVICE_ERROR;
-        } catch (...) {
-            drainOrAbort();
-            return CrcCopyStatus::DEVICE_ERROR;
-        }
-    }
-
-    CrcCopyStatus load(const std::vector<CrcCopyItem>& batch, std::vector<CrcCopyFailure>& failures) {
-        std::lock_guard<std::mutex> lock(mutex);
-        failures.clear();
-        try {
-            failures.reserve(batch.size());
-            const auto prepared = prepareBatch(batch);
-            if (!prepared)
-                return CrcCopyStatus::INVALID_ARGS;
-            size_t total_bytes = 0;
-            for (size_t index = 0; index < prepared->count; ++index)
-                total_bytes += CrcBlockCopyBatch::encodedBytes(batch[index].payload_bytes);
-            const size_t waves =
-                total_bytes >= kH2dPipelineMinBytes ? std::min<size_t>(kMaxH2dWaveCount, prepared->count) : 1;
-            if (waves == 1) {
-                for (size_t index = 0; index < prepared->count; ++index)
+            uploadFoldTables(prepared);
+            launchCrc(prepared, prepared.count, 0, false, nullptr);
+        } else {
+            uploadFoldTables(prepared);
+            const size_t base  = prepared.count / waves;
+            const size_t extra = prepared.count % waves;
+            size_t       begin = 0;
+            for (size_t wave = 0; wave < waves; ++wave) {
+                const size_t count = base + (wave < extra ? 1 : 0);
+                for (size_t index = begin; index < begin + count; ++index)
                     checkCuda(cudaMemcpyAsync(staging.as<unsigned char>() + index * stride,
                                               batch[index].host,
                                               CrcBlockCopyBatch::encodedBytes(batch[index].payload_bytes),
                                               cudaMemcpyHostToDevice,
-                                              stream));
-                uploadFoldTables(*prepared);
-                launchCrc(*prepared, prepared->count, /*msg_offset=*/0, /*store=*/false, /*host_records=*/nullptr);
-            } else {
-                uploadFoldTables(*prepared);
-                const size_t base  = prepared->count / waves;
-                const size_t extra = prepared->count % waves;
-                size_t       begin = 0;
-                for (size_t wave = 0; wave < waves; ++wave) {
-                    const size_t wcount = base + (wave < extra ? 1 : 0);
-                    for (size_t index = begin; index < begin + wcount; ++index)
-                        checkCuda(cudaMemcpyAsync(staging.as<unsigned char>() + index * stride,
-                                                  batch[index].host,
-                                                  CrcBlockCopyBatch::encodedBytes(batch[index].payload_bytes),
-                                                  cudaMemcpyHostToDevice,
-                                                  copy_stream));
-                    // Gate the wave's CRC on its own DMA: the copy engine keeps
-                    // streaming the next wave while the SMs fold this one.
-                    checkCuda(cudaEventRecord(wave_done[wave], copy_stream));
-                    checkCuda(cudaStreamWaitEvent(stream, wave_done[wave]));
-                    launchCrc(*prepared, wcount, begin, /*store=*/false, /*host_records=*/nullptr);
-                    begin += wcount;
-                }
+                                              copy_stream));
+                checkCuda(cudaEventRecord(wave_done[wave], copy_stream));
+                checkCuda(cudaStreamWaitEvent(stream, wave_done[wave]));
+                launchCrc(prepared, count, begin, false, nullptr);
+                begin += count;
             }
-            // The verdict only decides what the caller adopts: a failed
-            // message may still land in its device tiles, and the caller
-            // discards it through the reported status.
-            checkCuda(launchCopyTiles(
-                packDeviceAt<CopyTile>(tiles_offset), prepared->tile_count, staging.pointer, true, stream));
-            checkCuda(cudaStreamSynchronize(stream));
-            return collectResults(batch, /*checked_footer_available=*/true, failures);
-        } catch (const std::exception& error) {
-            std::fprintf(stderr, "CRC device execution failed: %s\n", error.what());
-            drainOrAbort();
-            return CrcCopyStatus::DEVICE_ERROR;
-        } catch (...) {
-            drainOrAbort();
-            return CrcCopyStatus::DEVICE_ERROR;
         }
+        // A failed load still scatters. Only settlement may adopt its targets.
+        checkpoint("scatter");
+        checkCuda(
+            launchCopyTiles(packDeviceAt<CopyTile>(tiles_offset), prepared.tile_count, staging.pointer, true, stream));
+    }
+
+    CrcCopyState submit(const std::vector<CrcCopyItem>& items, CrcCopyDirection operation, bool require_pinned) {
+        if (state != CrcCopyState::IDLE)
+            return CrcCopyState::BUSY;
+        std::optional<PreparedBatch> prepared;
+        try {
+            prepared = prepareBatch(items);
+            if (!prepared || (operation != CrcCopyDirection::STORE && operation != CrcCopyDirection::LOAD))
+                return CrcCopyState::INVALID_ARGS;
+            checkCuda(cudaSetDevice(device));
+            if (!prepareHostAliases(items, require_pinned))
+                return CrcCopyState::INVALID_ARGS;
+            prepareFoldTables(*prepared);
+            // All potentially allocating operation metadata is stable before
+            // the first enqueue, including lazy dump captures and failures.
+            batch = items;
+            failures.clear();
+            failures.reserve(items.size());
+        } catch (...) {
+            batch.clear();
+            fold_blocks = -1;
+            return CrcCopyState::DEVICE_ERROR;
+        }
+        direction             = operation;
+        diagnostic_cuda_error = false;
+        diagnostic_pending    = false;
+        // Even a failing first CUDA API may have started work. Any exception
+        // from here drains both streams before releasing workspace ownership.
+        state = CrcCopyState::PENDING;
+        try {
+            checkCuda(cudaMemcpyAsync(pack_device.pointer,
+                                      pack_host.pointer,
+                                      tiles_offset + prepared->tile_count * sizeof(CopyTile),
+                                      cudaMemcpyHostToDevice,
+                                      stream));
+            checkpoint("metadata");
+            if (direction == CrcCopyDirection::STORE)
+                enqueueStore(*prepared);
+            else
+                enqueueLoad(*prepared);
+        } catch (...) {
+            failDevice();
+            return finish();
+        }
+        return state;
+    }
+
+    CrcCopyState failDevice() noexcept {
+        fold_blocks = -1;
+        drainOrAbort();
+        state = CrcCopyState::DEVICE_ERROR;
+        return state;
+    }
+
+    CrcCopyState poll() {
+        if (state == CrcCopyState::IDLE)
+            throw std::invalid_argument("CRC workspace has no active operation");
+        if (state == CrcCopyState::PENDING) {
+            try {
+                checkCuda(cudaSetDevice(device));
+                checkpoint("query");
+                const auto ready = cudaStreamQuery(stream);
+                if (ready == cudaErrorNotReady)
+                    return CrcCopyState::PENDING;
+                checkCuda(ready);
+                state = CrcCopyState::OK;
+                for (size_t index = 0; index < batch.size(); ++index)
+                    if (host_failed.as<bool>()[index]) {
+                        return diagnose();
+                    }
+            } catch (...) {
+                return failDevice();
+            }
+        }
+        return state;
+    }
+
+    CrcCopyState diagnose() {
+        state = CrcCopyState::CRC_MISMATCH;
+        try {
+            collectResults();
+        } catch (const CudaFailure&) {
+            diagnostic_cuda_error = true;
+        } catch (...) {
+            diagnostic_cuda_error = diagnostic_cuda_error || diagnostic_pending;
+            // Allocation/CPU diagnostic failures do not change physical safety
+            // or erase a confirmed mismatch. No CUDA work is pending here unless
+            // a CUDA call failed, in which case both streams must be drained.
+        }
+        if (diagnostic_cuda_error)
+            return failDevice();
+        return state;
+    }
+
+    void requireTerminal() const {
+        if (state != CrcCopyState::OK && state != CrcCopyState::CRC_MISMATCH && state != CrcCopyState::DEVICE_ERROR)
+            throw std::invalid_argument("CRC operation is not safe to retire");
+    }
+
+    CrcCopyState finish() {
+        requireTerminal();
+        const auto result = state;
+        batch.clear();
+        failures.clear();
+        state = CrcCopyState::IDLE;
+        idle.notify_all();
+        return result;
+    }
+
+    CrcCopyState synchronous(const std::vector<CrcCopyItem>& items,
+                             CrcCopyDirection                operation,
+                             std::vector<CrcCopyFailure>&    output) {
+        std::unique_lock<std::mutex> lock(mutex);
+        idle.wait(lock, [&] { return state == CrcCopyState::IDLE; });
+        output.clear();
+        const auto submitted = submit(items, operation, false);
+        if (state == CrcCopyState::IDLE)
+            return submitted;
+        if (state == CrcCopyState::PENDING) {
+            try {
+                checkCuda(cudaSetDevice(device));
+                checkCuda(cudaStreamSynchronize(stream));
+            } catch (...) {
+                failDevice();
+            }
+        }
+        poll();
+        output = std::move(failures);
+        return finish();
     }
 };
 
 bool CrcBlockCopyBatch::available() {
     return true;
+}
+
+size_t CrcBlockCopyBatch::deviceMemoryBytesFor(size_t items, size_t payload, size_t tiles) {
+    return workspaceLayout(items, payload, tiles).deviceBytes();
 }
 
 size_t CrcBlockCopyBatch::deviceMemoryBytes() const {
@@ -973,12 +1150,42 @@ CrcBlockCopyBatch::CrcBlockCopyBatch(
 
 CrcBlockCopyBatch::~CrcBlockCopyBatch() = default;
 
-CrcCopyStatus CrcBlockCopyBatch::store(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {
-    return impl_->store(items, failures);
+CrcCopyState CrcBlockCopyBatch::store(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {
+    return impl_->synchronous(items, CrcCopyDirection::STORE, failures);
 }
 
-CrcCopyStatus CrcBlockCopyBatch::load(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {
-    return impl_->load(items, failures);
+CrcCopyState CrcBlockCopyBatch::load(const std::vector<CrcCopyItem>& items, std::vector<CrcCopyFailure>& failures) {
+    return impl_->synchronous(items, CrcCopyDirection::LOAD, failures);
+}
+
+CrcCopyState CrcBlockCopyBatch::trySubmit(const std::vector<CrcCopyItem>& items, CrcCopyDirection direction) {
+    std::unique_lock<std::mutex> lock(impl_->mutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return CrcCopyState::BUSY;
+    return impl_->submit(items, direction, true);
+}
+
+CrcCopyState CrcBlockCopyBatch::poll() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->poll();
+}
+
+const std::vector<CrcCopyFailure>& CrcBlockCopyBatch::failures() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->requireTerminal();
+    return impl_->failures;
+}
+
+CrcCopyState CrcBlockCopyBatch::finish() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->finish();
+}
+
+void CrcBlockCopyBatch::setTestHook(std::function<int(const char*, void*, void*)> hook) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->state != CrcCopyState::IDLE)
+        throw std::logic_error("cannot change hooks on an active CRC workspace");
+    impl_->test_hook = std::move(hook);
 }
 
 }  // namespace rtp_llm

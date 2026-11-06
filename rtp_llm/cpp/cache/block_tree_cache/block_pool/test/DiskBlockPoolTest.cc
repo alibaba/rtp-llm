@@ -1,10 +1,15 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockIO.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
 
 #include <cstdio>
+#include <chrono>
+#include <future>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <vector>
 
 #include "gtest/gtest.h"
@@ -195,6 +200,9 @@ std::shared_ptr<BlockTreeDiskBlockPoolConfig> makeDiskConfig(const std::string& 
 // mapping faithfully instead of only ever returning OK/error-from-real-IO.
 class FailingDiskBlockIO: public DiskBlockIO {
 public:
+    ~FailingDiskBlockIO() override {
+        close();
+    }
     DiskBlockIOStatus openAndPreallocate(const std::string&, size_t, bool) override {
         return DiskBlockIOStatus::OK;
     }
@@ -214,6 +222,23 @@ public:
     std::string debugString() const override {
         return "FailingDiskBlockIO";
     }
+};
+
+class PendingDiskBlockIO final: public FailingDiskBlockIO {
+public:
+    explicit PendingDiskBlockIO(std::shared_future<void> release): release_(std::move(release)) {}
+    ~PendingDiskBlockIO() override {
+        close();
+    }
+    DiskBlockIOStatus write(uint64_t, const void*, size_t) override {
+        started.set_value();
+        return release_.wait_for(std::chrono::seconds(5)) == std::future_status::ready ? DiskBlockIOStatus::OK :
+                                                                                         DiskBlockIOStatus::IO_ERROR;
+    }
+    std::promise<void> started;
+
+private:
+    std::shared_future<void> release_;
 };
 
 }  // namespace
@@ -459,6 +484,276 @@ TEST(DiskBlockPoolTest, TracksBatchReadWriteBytes) {
     EXPECT_EQ(pool.readBytes(), pool.strideBytes() * blocks.size());
 
     ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, AsyncRoundTripMapsBlocksAndCountsOnlyCompletedBytes) {
+    DiskIOExecutor              executor;
+    std::promise<BlockIOStatus> written, read;
+    auto                        write_result = written.get_future();
+    auto                        read_result  = read.get_future();
+    auto                        config       = makeDiskConfig(::testing::TempDir());
+    config->pool_name                        = "async_round_trip";
+    BlockTreeDiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    const BlockIdList blocks{1, 3};
+    std::vector<char> first(4096, 'a'), second(4096, 'b');
+    std::vector<char> first_read(4096), second_read(4096);
+    ASSERT_EQ(pool.asyncWrite(executor,
+                              blocks,
+                              {first.data(), second.data()},
+                              4096,
+                              [&](BlockIOStatus status) {
+                                  EXPECT_EQ(pool.writeBytes(), 8192u);
+                                  written.set_value(status);
+                              }),
+              BlockIOStatus::OK);
+    ASSERT_EQ(write_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(write_result.get(), BlockIOStatus::OK);
+    ASSERT_EQ(pool.asyncRead(executor,
+                             blocks,
+                             {first_read.data(), second_read.data()},
+                             4096,
+                             [&](BlockIOStatus status) {
+                                 EXPECT_EQ(pool.readBytes(), 8192u);
+                                 read.set_value(status);
+                             }),
+              BlockIOStatus::OK);
+    ASSERT_EQ(read_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(read_result.get(), BlockIOStatus::OK);
+    EXPECT_EQ(first, first_read);
+    EXPECT_EQ(second, second_read);
+    ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, SynchronousFailureStopsAtTheInputPosition) {
+    char source1 = 'a', source3 = 'c', target = 0;
+    auto config       = makeDiskConfig(::testing::TempDir());
+    config->pool_name = "sync_failure";
+    BlockTreeDiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    EXPECT_EQ(pool.write({3, 2, 1}, {&source3, nullptr, &source1}, 1), BlockIOStatus::INVALID_SIZE);
+    ASSERT_EQ(pool.read(1, &target, 1), BlockIOStatus::OK);
+    EXPECT_EQ(target, 0);
+    ASSERT_EQ(pool.read(3, &target, 1), BlockIOStatus::OK);
+    EXPECT_EQ(target, source3);
+    ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, AsyncValidationAndSubmissionRejectionDoNotCountBytesOrCallback) {
+    DiskIOExecutorConfig io_config;
+    io_config.max_batch_bytes = 4096;
+    DiskIOExecutor executor(io_config);
+    auto           config = makeDiskConfig(::testing::TempDir());
+    config->pool_name     = "async_rejection";
+    BlockTreeDiskBlockPool pool(config);
+    ASSERT_TRUE(pool.init());
+    std::atomic<size_t> calls{0};
+    auto                done   = [&](BlockIOStatus) { ++calls; };
+    char                buffer = 0;
+    EXPECT_EQ(pool.asyncRead(executor, {0}, {&buffer}, 1, done), BlockIOStatus::INVALID_BLOCK);
+    EXPECT_EQ(pool.asyncRead(executor, {4}, {&buffer}, 1, done), BlockIOStatus::INVALID_BLOCK);
+    EXPECT_EQ(pool.asyncWrite(executor, {1}, {&buffer}, 4097, done), BlockIOStatus::INVALID_SIZE);
+    EXPECT_EQ(pool.asyncWrite(executor, {1}, {&buffer}, 0, done), BlockIOStatus::INVALID_SIZE);
+    EXPECT_EQ(pool.asyncWrite(executor, {1}, {&buffer}, 1, {}), BlockIOStatus::IO_ERROR);
+    EXPECT_EQ(pool.asyncWrite(executor, {1, 2}, {&buffer, &buffer}, 4096, done), BlockIOStatus::IO_ERROR);
+    EXPECT_EQ(calls, 0u);
+    EXPECT_EQ(pool.readBytes(), 0u);
+    EXPECT_EQ(pool.writeBytes(), 0u);
+    ::remove(pool.filePath().c_str());
+}
+
+TEST(DiskBlockPoolTest, AsyncFailureMapsStatusWithoutCountingWholeBatchSuccess) {
+    DiskIOExecutor              executor;
+    std::promise<BlockIOStatus> completed;
+    auto                        result = completed.get_future();
+    auto                        config = makeDiskConfig(::testing::TempDir());
+    BlockTreeDiskBlockPool      pool(config, std::make_unique<FailingDiskBlockIO>());
+    ASSERT_TRUE(pool.init());
+    char buffer = 0;
+    ASSERT_EQ(pool.asyncWrite(
+                  executor, {1, 2}, {&buffer, &buffer}, 1, [&](BlockIOStatus status) { completed.set_value(status); }),
+              BlockIOStatus::OK);
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(result.get(), BlockIOStatus::PARTIAL_FAILURE);
+    EXPECT_EQ(pool.writeBytes(), 0u);
+}
+
+TEST(DiskBlockPoolTest, AcceptedIODoesNotCountBytesBeforePhysicalCompletion) {
+    DiskIOExecutor              executor;
+    std::promise<void>          release;
+    std::promise<BlockIOStatus> completed;
+    auto                        result  = completed.get_future();
+    auto                        io      = std::make_unique<PendingDiskBlockIO>(release.get_future().share());
+    auto                        started = io->started.get_future();
+    auto                        config  = makeDiskConfig(::testing::TempDir());
+    char                        buffer  = 0;
+    BlockTreeDiskBlockPool      pool(config, std::move(io));
+    ASSERT_TRUE(pool.init());
+    ASSERT_EQ(pool.asyncWrite(executor, {1}, {&buffer}, 1, [&](BlockIOStatus status) { completed.set_value(status); }),
+              BlockIOStatus::OK);
+    EXPECT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(pool.writeBytes(), 0u);
+    EXPECT_EQ(result.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    release.set_value();
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(result.get(), BlockIOStatus::OK);
+    EXPECT_EQ(pool.writeBytes(), 1u);
+}
+
+TEST(DiskBlockPoolTest, DestructorDrainsIOAndCallbackBeforeDestroyingCounters) {
+    DiskIOExecutor              executor;
+    std::promise<BlockIOStatus> completed;
+    auto                        result = completed.get_future();
+    auto                        config = makeDiskConfig(::testing::TempDir());
+    config->pool_name                  = "async_destructor";
+    std::vector<char> buffer(4096, 'x');
+    std::string       path;
+    {
+        BlockTreeDiskBlockPool pool(config);
+        ASSERT_TRUE(pool.init());
+        path = pool.filePath();
+        ASSERT_EQ(pool.asyncWrite(executor,
+                                  {1},
+                                  {buffer.data()},
+                                  4096,
+                                  [&](BlockIOStatus status) {
+                                      EXPECT_EQ(pool.writeBytes(), 4096u);
+                                      completed.set_value(status);
+                                  }),
+                  BlockIOStatus::OK);
+    }
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(0)), std::future_status::ready);
+    EXPECT_EQ(result.get(), BlockIOStatus::OK);
+    ::remove(path.c_str());
+}
+
+TEST(DiskBlockPoolTest, CloseDrainsItsQueuedIOAndCallbackCapturesWithoutStoppingOtherFiles) {
+    using namespace std::chrono_literals;
+    DiskIOExecutorConfig options;
+    options.read_thread_count = options.write_thread_count = 1;
+    DiskIOExecutor              executor(options);
+    std::promise<void>          release_other;
+    std::promise<BlockIOStatus> queued, other, healthy;
+    auto                        queued_result  = queued.get_future();
+    auto                        other_result   = other.get_future();
+    auto                        healthy_result = healthy.get_future();
+    std::promise<void>          entered_callback, release_callback;
+    auto                        entered  = entered_callback.get_future();
+    auto                        released = release_callback.get_future();
+    auto                        owner    = std::make_shared<int>(42);
+    std::weak_ptr<int>          weak     = owner;
+    char                        buffer   = 0;
+    auto                        config   = makeDiskConfig(::testing::TempDir());
+    auto                        other_io = std::make_unique<PendingDiskBlockIO>(release_other.get_future().share());
+    auto                        other_started = other_io->started.get_future();
+    BlockTreeDiskBlockPool      full(config, std::make_unique<FailingDiskBlockIO>());
+    BlockTreeDiskBlockPool      swa(config, std::move(other_io));
+    ASSERT_TRUE(full.init());
+    ASSERT_TRUE(swa.init());
+    ASSERT_EQ(full.asyncRead(executor,
+                             {1},
+                             {&buffer},
+                             1,
+                             [&, owner](BlockIOStatus status) {
+                                 EXPECT_EQ(status, BlockIOStatus::PARTIAL_FAILURE);
+                                 entered_callback.set_value();
+                                 EXPECT_EQ(released.wait_for(5s), std::future_status::ready);
+                             }),
+              BlockIOStatus::OK);
+    owner.reset();
+    ASSERT_EQ(entered.wait_for(5s), std::future_status::ready);
+    ASSERT_EQ(full.asyncRead(executor, {2}, {&buffer}, 1, [&](BlockIOStatus status) { queued.set_value(status); }),
+              BlockIOStatus::OK);
+    ASSERT_EQ(swa.asyncWrite(executor, {1}, {&buffer}, 1, [&](BlockIOStatus status) { other.set_value(status); }),
+              BlockIOStatus::OK);
+    ASSERT_EQ(other_started.wait_for(5s), std::future_status::ready);
+    auto closing = std::async(std::launch::async, [&] { full.close(); });
+    EXPECT_EQ(closing.wait_for(20ms), std::future_status::timeout);
+    EXPECT_EQ(queued_result.wait_for(0s), std::future_status::timeout);
+    EXPECT_FALSE(weak.expired());
+    release_callback.set_value();
+    ASSERT_EQ(closing.wait_for(5s), std::future_status::ready);
+    closing.get();
+    EXPECT_TRUE(weak.expired());
+    ASSERT_EQ(queued_result.wait_for(0s), std::future_status::ready);
+    EXPECT_EQ(queued_result.get(), BlockIOStatus::PARTIAL_FAILURE);
+    EXPECT_EQ(other_result.wait_for(0s), std::future_status::timeout);
+    ASSERT_EQ(swa.asyncRead(executor, {1}, {&buffer}, 1, [&](BlockIOStatus status) { healthy.set_value(status); }),
+              BlockIOStatus::OK);
+    ASSERT_EQ(healthy_result.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(healthy_result.get(), BlockIOStatus::PARTIAL_FAILURE);
+    release_other.set_value();
+    ASSERT_EQ(other_result.wait_for(5s), std::future_status::ready);
+    EXPECT_EQ(other_result.get(), BlockIOStatus::OK);
+    full.close();
+    swa.close();
+}
+
+TEST(DiskBlockPoolTest, SubmissionsRacingCloseHaveExactlyOneCompletionPerAcceptance) {
+    using namespace std::chrono_literals;
+    DiskIOExecutor         executor;
+    auto                   config = makeDiskConfig(::testing::TempDir());
+    BlockTreeDiskBlockPool pool(config, std::make_unique<FailingDiskBlockIO>());
+    ASSERT_TRUE(pool.init());
+    std::atomic<size_t>             accepted{0}, completed{0};
+    std::promise<void>              start;
+    auto                            started = start.get_future().share();
+    std::vector<std::promise<void>> submitted(4);
+    std::vector<std::future<void>>  first_submissions;
+    std::vector<std::thread>        submitters;
+    for (auto& signal : submitted)
+        first_submissions.push_back(signal.get_future());
+    for (size_t thread = 0; thread < submitted.size(); ++thread) {
+        submitters.emplace_back([&, thread] {
+            EXPECT_EQ(started.wait_for(5s), std::future_status::ready);
+            for (size_t i = 0; i < 200; ++i) {
+                if (pool.asyncRead(executor,
+                                   {},
+                                   {},
+                                   1,
+                                   [&](BlockIOStatus status) {
+                                       EXPECT_EQ(status, BlockIOStatus::OK);
+                                       ++completed;
+                                   })
+                    == BlockIOStatus::OK)
+                    ++accepted;
+                if (i == 0)
+                    submitted[thread].set_value();
+            }
+        });
+    }
+    start.set_value();
+    for (auto& first : first_submissions)
+        EXPECT_EQ(first.wait_for(5s), std::future_status::ready);
+    pool.close();
+    for (auto& submitter : submitters)
+        submitter.join();
+    EXPECT_GT(accepted, 0u);
+    EXPECT_EQ(accepted, completed);
+    EXPECT_EQ(pool.asyncRead(executor, {}, {}, 1, [&](BlockIOStatus) { ++completed; }), BlockIOStatus::IO_ERROR);
+    EXPECT_EQ(accepted, completed);
+}
+
+TEST(DiskBlockPoolTest, CloseDrainsThrowingCallbacksAndReleasesTheirCaptures) {
+    DiskIOExecutor         executor;
+    auto                   config = makeDiskConfig(::testing::TempDir());
+    BlockTreeDiskBlockPool pool(config, std::make_unique<FailingDiskBlockIO>());
+    ASSERT_TRUE(pool.init());
+    auto               owner  = std::make_shared<int>(42);
+    std::weak_ptr<int> weak   = owner;
+    char               buffer = 0;
+    ASSERT_EQ(pool.asyncRead(executor,
+                             {1},
+                             {&buffer},
+                             1,
+                             [owner](BlockIOStatus status) {
+                                 EXPECT_EQ(status, BlockIOStatus::PARTIAL_FAILURE);
+                                 throw std::runtime_error("injected pool callback failure");
+                             }),
+              BlockIOStatus::OK);
+    owner.reset();
+    pool.close();
+    EXPECT_TRUE(weak.expired());
 }
 
 }  // namespace rtp_llm

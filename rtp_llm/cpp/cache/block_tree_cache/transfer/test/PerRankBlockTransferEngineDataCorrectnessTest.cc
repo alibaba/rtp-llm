@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 #include <torch/torch.h>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 
@@ -118,6 +119,7 @@ void writeHostPayload(const std::shared_ptr<HostBlockPool>& pool,
                       const std::vector<uint8_t>&           bytes) {
     ASSERT_EQ(bytes.size(), pool->payloadBytes());
     std::memcpy(pool->blockBuffer(block).addr, bytes.data(), bytes.size());
+    block_transfer_engine_test::encodeTestRecord(pool->blockBuffer(block).addr, bytes.size());
 }
 
 std::vector<uint8_t> readHostPayload(const std::shared_ptr<HostBlockPool>& pool, BlockIdxType block) {
@@ -144,6 +146,7 @@ void writeDiskPayload(const BlockTreeDiskBlockPoolPtr& pool,
     ASSERT_EQ(bytes.size(), pool->payloadBytes());
     std::vector<uint8_t> stride(pool->strideBytes(), padding);
     std::copy(bytes.begin(), bytes.end(), stride.begin());
+    block_transfer_engine_test::encodeTestRecord(stride.data(), bytes.size());
     ASSERT_EQ(pool->write(block, stride.data(), stride.size()), BlockIOStatus::OK);
 }
 
@@ -164,9 +167,9 @@ std::vector<uint8_t> readDiskPayload(const BlockTreeDiskBlockPoolPtr& pool, Bloc
     return bytes;
 }
 
-void expectTransferSuccess(const std::shared_ptr<PerRankBlockTransferEngine>& engine,
-                           const std::vector<TransferDescriptor>&             descriptors) {
-    auto context = engine->execute(makeTransferTask(descriptors));
+void expectTransferSuccess(const BlockTransferDispatcher&         dispatcher,
+                           const std::vector<TransferDescriptor>& descriptors) {
+    auto context = dispatcher.executePerRank(makeTransferTask(descriptors));
     ASSERT_NE(context, nullptr);
     context->waitDone();
     ASSERT_TRUE(context->success()) << context->errorInfo().ToString();
@@ -185,10 +188,13 @@ struct TransferFixture {
         auto topology = makeTestTopology({makeTestGroupBase(std::move(policy), {0, 1}, kKvBytes, kScaleBytes)});
         device_pool =
             makeTestDevicePool({{kKvBytes, kScaleBytes}, {kKvBytes, kScaleBytes}}, usable_count, name + "_device");
-        host_pool = makeHostPool(kPayloadBytes, usable_count);
-        disk_pool = makeDiskPool(kPayloadBytes, usable_count, temp_dir.path, nullptr, name + "_disk");
-        group_set = makeTestGroupSet(0, std::move(topology), {"group0"}, {device_pool}, host_pool, disk_pool);
-        engine    = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set}, true);
+        host_pool = makeHostPool(kPayloadBytes, usable_count, true);
+        disk_pool = makeDiskPool(kPayloadBytes, usable_count, temp_dir.path, nullptr, name + "_disk", true, true);
+        group_set = makeTestGroupSet(0, std::move(topology), {"group0"}, {device_pool}, host_pool, disk_pool, true);
+        engine    = std::make_shared<PerRankBlockTransferEngine>(
+            std::vector<GroupSetPtr>{group_set}, true, DeviceHostCopyOptions{}, 128, 8, 4, 10000, nullptr, 0, 4, true);
+        EXPECT_TRUE(engine->asyncEnabled());
+        dispatcher = std::make_unique<BlockTransferDispatcher>(engine);
     }
 
     TempDirGuard                                temp_dir;
@@ -197,6 +203,7 @@ struct TransferFixture {
     BlockTreeDiskBlockPoolPtr                   disk_pool;
     GroupSetPtr                                 group_set;
     std::shared_ptr<PerRankBlockTransferEngine> engine;
+    std::unique_ptr<BlockTransferDispatcher>    dispatcher;
 };
 
 class PerRankBlockTransferEngineDataCorrectnessTest: public ::testing::TestWithParam<CacheGroupType> {
@@ -228,7 +235,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceHostRoundTripsNineDi
         writeDevicePayload(env.device_pool, device_blocks.data[index], makePattern(100 + index));
         h2d.push_back(makeDescriptor(Tier::HOST, Tier::DEVICE, {device_blocks.data[index]}, host_blocks.data[index]));
     }
-    expectTransferSuccess(env.engine, h2d);
+    expectTransferSuccess(*env.dispatcher, h2d);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
         EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.data[index]), h2d_expected[index]);
         EXPECT_EQ(readHostPayload(env.host_pool, host_blocks.data[index]), h2d_expected[index]);
@@ -242,7 +249,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceHostRoundTripsNineDi
         writeHostPayload(env.host_pool, host_blocks.data[index], makePattern(300 + index));
         d2h.push_back(makeDescriptor(Tier::DEVICE, Tier::HOST, {device_blocks.data[index]}, host_blocks.data[index]));
     }
-    expectTransferSuccess(env.engine, d2h);
+    expectTransferSuccess(*env.dispatcher, d2h);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
         EXPECT_EQ(readHostPayload(env.host_pool, host_blocks.data[index]), d2h_expected[index]);
         EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.data[index]), d2h_expected[index]);
@@ -276,7 +283,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskRoundTripsDistinct
         writeDiskPayload(env.disk_pool, disk_blocks.data[index], makePattern(450 + index), 0xEE);
         h2disk.push_back(makeDescriptor(Tier::HOST, Tier::DISK, {}, host_blocks.data[index], disk_blocks.data[index]));
     }
-    expectTransferSuccess(env.engine, h2disk);
+    expectTransferSuccess(*env.dispatcher, h2disk);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
         EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), h2disk_expected[index]);
         EXPECT_EQ(readHostPayload(env.host_pool, host_blocks.data[index]), h2disk_expected[index]);
@@ -290,7 +297,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskRoundTripsDistinct
         writeHostPayload(env.host_pool, host_blocks.data[index], makePattern(550 + index));
         disk2h.push_back(makeDescriptor(Tier::DISK, Tier::HOST, {}, host_blocks.data[index], disk_blocks.data[index]));
     }
-    expectTransferSuccess(env.engine, disk2h);
+    expectTransferSuccess(*env.dispatcher, disk2h);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
         EXPECT_EQ(readHostPayload(env.host_pool, host_blocks.data[index]), disk2h_expected[index]);
         EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), disk2h_expected[index]);
@@ -322,7 +329,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceDiskRoundTripsDistin
         writeDevicePayload(env.device_pool, device_blocks.data[index], d2disk_expected.back());
         writeDiskPayload(env.disk_pool, disk_blocks.data[index], makePattern(750 + index), 0xF0);
         expectTransferSuccess(
-            env.engine,
+            *env.dispatcher,
             {makeDescriptor(
                 Tier::DEVICE, Tier::DISK, {device_blocks.data[index]}, NULL_BLOCK_IDX, disk_blocks.data[index])});
     }
@@ -340,7 +347,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceDiskRoundTripsDistin
         disk2d.push_back(makeDescriptor(
             Tier::DISK, Tier::DEVICE, {device_blocks.data[index]}, NULL_BLOCK_IDX, disk_blocks.data[index]));
     }
-    expectTransferSuccess(env.engine, disk2d);
+    expectTransferSuccess(*env.dispatcher, disk2d);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
         EXPECT_EQ(readDevicePayload(env.device_pool, device_blocks.data[index]), disk2d_expected[index]);
         EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), disk2d_expected[index]);

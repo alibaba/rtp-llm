@@ -116,6 +116,20 @@ cc_library(
 )
 
 cc_library(
+    name = "legacy_copy_benchmark_support",
+    target_compatible_with = CUDA_ONLY,
+    tags = ["manual"],
+    srcs = ["LegacyCopyBenchmarkSupport.cc"],
+    hdrs = ["LegacyCopyBenchmarkSupport.h"],
+    copts = copts() + ["-fno-access-control"],
+    deps = [
+        ":benchmark_common",
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/transfer/legacy",
+    ],
+)
+
+cc_library(
     name = "transfer_benchmark_runner",
     target_compatible_with = CUDA_ONLY,
     srcs = [
@@ -127,6 +141,7 @@ cc_library(
     copts = copts() + ["-fno-access-control"],
     tags = ["manual"],
     deps = [
+        ":legacy_copy_benchmark_support",
         ":benchmark_common",
         ":benchmark_fixture",
         ":transfer_benchmark_workload",

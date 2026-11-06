@@ -43,6 +43,24 @@ class BenchmarkRegistryDocumentationTest(unittest.TestCase):
             documentation,
         )
 
+    def test_cases_record_the_selected_transfer_contract(self):
+        for case in ALL_CASES:
+            with self.subTest(case=case.name):
+                if case.subcommand == "tree":
+                    self.assertEqual(case.transfer_implementation, "workloop")
+                    continue
+                legacy = case.transfer_implementation == "legacy"
+                self.assertEqual(
+                    case.params["--btc-transfer-engine-async"],
+                    "false" if legacy else "true",
+                )
+                self.assertEqual(
+                    case.params["--enable-crc"], "false" if legacy else "true"
+                )
+                if not legacy:
+                    self.assertNotIn("--transfer-worker-count", case.params)
+                    self.assertIn(case.params.get("--copy-strategy", "auto"), ("auto",))
+
     def test_nsys_documented_profiles_exist(self):
         path = driver.resolve_runfile_path("docs/nsys_collection_guide.md")
         self.assertIsNotNone(path)

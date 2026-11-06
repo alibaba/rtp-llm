@@ -18,6 +18,7 @@ struct CacheStageMetrics::Impl {
         std::array<std::array<char, kLabelSize>, 5> labels{};
         int64_t                                     rank{-1};
         bool                                        success{false};
+        bool                                        queue_wait{false};
         uint64_t                                    count{0}, sum_us{0};
         std::unique_ptr<kmonitor::MetricsTags>      tags;  // consumer-only
     };
@@ -41,7 +42,11 @@ struct CacheStageMetrics::Impl {
         wake.notify_one();
         worker.join();
     }
-    void record(const std::array<std::string_view, 5>& labels, int64_t latency, int64_t rank, bool success) noexcept {
+    void record(const std::array<std::string_view, 5>& labels,
+                int64_t                                latency,
+                int64_t                                rank,
+                bool                                   success,
+                bool                                   queue_wait = false) noexcept {
         uint64_t hash = 1469598103934665603ULL;
         for (auto label : labels) {
             if (label.size() >= kLabelSize) {
@@ -54,6 +59,7 @@ struct CacheStageMetrics::Impl {
         }
         hash ^= static_cast<uint64_t>(rank) * 1099511628211ULL;
         hash ^= success;
+        hash ^= static_cast<uint64_t>(queue_wait) << 32;
         for (size_t probe = 0; probe < kMaxProbes; ++probe) {
             auto&      slot  = slots[(hash + probe) % kCapacity];
             const auto state = slot.state.load(std::memory_order_acquire);
@@ -65,14 +71,15 @@ struct CacheStageMetrics::Impl {
                 }
                 for (size_t i = 0; i < labels.size(); ++i)
                     std::memcpy(slot.labels[i].data(), labels[i].data(), labels[i].size());
-                slot.rank    = rank;
-                slot.success = success;
+                slot.rank       = rank;
+                slot.success    = success;
+                slot.queue_wait = queue_wait;
                 slot.state.store(2, std::memory_order_release);
             } else if (state == 1) {
                 dropped.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
-            bool match = slot.rank == rank && slot.success == success;
+            bool match = slot.rank == rank && slot.success == success && slot.queue_wait == queue_wait;
             for (size_t i = 0; match && i < labels.size(); ++i)
                 match = labels[i] == slot.labels[i].data();
             if (!match)
@@ -99,6 +106,18 @@ struct CacheStageMetrics::Impl {
             if (count == 0)
                 continue;
             try {
+                if (slot.queue_wait) {
+                    RtpLLMCacheTransferMetricsCollector c;
+                    c.pool_type         = "transfer";
+                    c.source_tier       = slot.labels[3].data();
+                    c.target_tier       = slot.labels[4].data();
+                    c.report_transfer   = false;
+                    c.report_task_queue = c.report_queue_wait_latency = true;
+                    c.queue_waiting_tasks                             = count;
+                    c.queue_wait_latency_us                           = sum / count;
+                    reporter->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &c);
+                    continue;
+                }
                 if (!slot.tags) {
                     auto        tags    = std::make_unique<kmonitor::MetricsTags>();
                     const char* names[] = {"stage", "scope", "operation", "source_tier", "target_tier"};
@@ -156,5 +175,8 @@ void CacheStageMetrics::record(const char* stage,
 }
 void CacheStageMetrics::flush() {
     impl_->flush();
+}
+void CacheStageMetrics::recordQueueWait(const char* source, const char* target, int64_t latency) noexcept {
+    impl_->record({"transfer_queue_wait", "", "", source, target}, latency, -1, true, true);
 }
 }  // namespace rtp_llm
