@@ -922,10 +922,13 @@ private:
                 auto                        now = std::chrono::steady_clock::now();
                 if (collector_.hasMetrics()) {
                     should_report = takeReportCollector(now, report_collector);
-                } else if (active_count_ == 0) {
-                    // Idle service reports 0 wall TPS with priority="0". In-flight long steps stay
-                    // silent so their eventual wall window includes the full in-flight time since
-                    // the last wall report.
+                } else {
+                    // Every tick with no completed work emits a zero report, including ticks
+                    // covered by in-flight steps. Holding the previous window's rate during
+                    // active silence lets slow scrapers over-sample burst rates: a completed
+                    // window's value would be displayed for the NEXT window's duration, so
+                    // long steps following big bursts inflate sampled averages. The zero ticks
+                    // keep the duty cycle correct, so fixed-interval sampling stays unbiased.
                     collector_.markIdleWindow();
                     should_report = takeReportCollector(now, report_collector);
                 }

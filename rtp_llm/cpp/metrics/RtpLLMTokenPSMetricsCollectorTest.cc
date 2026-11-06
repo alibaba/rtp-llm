@@ -306,6 +306,36 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, WallClockReporterResetsTokenCountsAfterR
         WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector>>();
 }
 
+TEST(RtpLLMTokenPSMetricsCollectorTest, WallClockReporterEmitsZeroReportsDuringActiveSilence) {
+    // A burst followed by active-but-completing-nothing ticks must not pin the burst's rate
+    // on the gauge: every silent tick emits a zero report so fixed-interval scrapers see the
+    // true duty cycle (otherwise sampled averages over-report bursty throughput).
+    auto monitor          = std::make_shared<kmonitor::KMonitor>("wall_clock_active_silence_test");
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto* recording_metrics = metrics_reporter->getMetricsGroup<RecordingTokenCountMetrics>();
+    ASSERT_NE(recording_metrics, nullptr);
+
+    WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector> reporter(
+        metrics_reporter, 1);
+    auto guard = reporter.makeActiveGuard();
+
+    RtpLLMTokenPSMetricsCollector burst;
+    burst.addTokenSize(1000000, 1000000, 0, 1000000, 1000000);
+    reporter.report(&burst);
+
+    std::vector<TokenCountReport> reports;
+    TokenCountReport              idle_report;
+    ASSERT_TRUE(recording_metrics->waitForIdleAfter(1, reports, idle_report))
+        << "no zero report arrived while a step was in flight: silent ticks keep the burst "
+           "rate pinned on the gauge";
+    ASSERT_EQ(reports.size(), 1);
+    EXPECT_EQ(reports[0].context_tokens, 1000000);
+    EXPECT_EQ(reports[0].context_tokens_with_cache, 1000000);
+    EXPECT_EQ(idle_report.priority, "0");
+    EXPECT_EQ(idle_report.context_tokens, 0);
+    EXPECT_EQ(idle_report.context_tokens_with_cache, 0);
+}
+
 TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
     RtpLLMTokenPSMetricsCollector collector;
 
