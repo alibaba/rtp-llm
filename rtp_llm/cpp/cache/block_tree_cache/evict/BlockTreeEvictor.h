@@ -104,9 +104,13 @@ public:
     void onLoaded(TreeNode* node, size_t group_set_id);
 
 private:
-    // Reuse only within one selection pass for the same group, tier and mode,
-    // while holding the cache mutex. A new pass must recheck released references.
-    using VictimSelectionCache = std::unordered_set<TreeNode*>;
+    // Reuse only within one eviction pass for the same group, tier and mode,
+    // while holding the cache mutex, with only synchronous drops mutating the tree.
+    // A new pass must recheck released references and matchability.
+    struct EvictionBatchContext {
+        std::unordered_set<TreeNode*>       rejected_candidates;
+        std::unordered_map<TreeNode*, bool> endpoint_matchable;
+    };
 
     struct BatchEvictResult {
         bool   direct_progress{false};
@@ -172,22 +176,25 @@ private:
     bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
     std::optional<TransferDescriptor> chooseVictim(size_t                 group_set_id,
                                                    Tier                   tier,
-                                                   bool                   force_drop      = false,
-                                                   VictimSelectionCache*  selection_cache = nullptr,
+                                                   bool                   force_drop             = false,
+                                                   EvictionBatchContext*  eviction_batch_context = nullptr,
                                                    VictimSelectionTrigger trigger = VictimSelectionTrigger::WATERMARK);
-    bool canReclaimDeviceDrop(const TransferDescriptor& desc) const;
+    bool canReclaimDeviceDrop(const TransferDescriptor& desc, EvictionBatchContext* eviction_batch_context) const;
 
     // Direct DEVICE drops require the primary resource to be immediately reclaimable.
     // Non-FULL candidates additionally check every DEVICE resource in their drop plan.
     bool dropLocked(size_t                 group_set_id,
                     Tier                   source_tier,
                     bool                   notify_settled,
-                    VictimSelectionTrigger trigger         = VictimSelectionTrigger::ON_DEMAND,
-                    VictimSelectionCache*  selection_cache = nullptr);
+                    VictimSelectionTrigger trigger                = VictimSelectionTrigger::ON_DEMAND,
+                    EvictionBatchContext*  eviction_batch_context = nullptr);
     // Builds the drop closure without reserving or detaching its resources.
-    EvictionDropTask planDropTask(TransferDescriptor                        eviction_desc,
-                                 std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
-    EvictionDropTask createDropTask(TransferDescriptor eviction_desc, const char* trigger_type = "force_drop");
+    EvictionDropTask planDropTask(TransferDescriptor                         eviction_desc,
+                                  std::vector<std::pair<TreeNode*, size_t>>& detached_resources,
+                                  EvictionBatchContext*                      eviction_batch_context) const;
+    EvictionDropTask createDropTask(TransferDescriptor    eviction_desc,
+                                    const char*           trigger_type           = "force_drop",
+                                    EvictionBatchContext* eviction_batch_context = nullptr);
     bool   batchDropLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count, size_t& scheduled_count);
     bool   submitEvictionTask(std::vector<TransferDescriptor> descriptors, std::vector<EvictionTimingSnapshot> timings);
     void   finishWatermarkRoundLocked(size_t group_set_id, Tier source_tier);
@@ -197,13 +204,15 @@ private:
     void   completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, TransferResult result) noexcept;
     BatchEvictResult batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
     void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
-    void
-    runDropTask(TransferDescriptor eviction_desc, bool notify_settled = true, const char* trigger_type = "force_drop");
+    void             runDropTask(TransferDescriptor    eviction_desc,
+                                 bool                  notify_settled         = true,
+                                 const char*           trigger_type           = "force_drop",
+                                 EvictionBatchContext* eviction_batch_context = nullptr);
     void rollbackTransferLocked(const std::vector<TransferDescriptor>& descs);
     void updateFullCandidate(TreeNode* node, size_t group_set_id);
     void updateFullCandidate(TreeNode* parent);
 
-    void                            selectUpwardCascades(EvictionDropTask& task) const;
+    void selectUpwardCascades(EvictionDropTask& task, EvictionBatchContext* eviction_batch_context) const;
     void                            collectFullPrune(const TransferDescriptor&                  eviction_desc,
                                                      EvictionDropTask&                          task,
                                                      std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
