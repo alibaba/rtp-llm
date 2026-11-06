@@ -147,7 +147,6 @@ def _worker_process_task(
     """
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
-
     params = dict(_worker_preprocess_params)
     if capture_inspection_sources:
         params.update(capture_inspection_sources=True, deadline=deadline)
@@ -260,10 +259,10 @@ class PreprocessExecutor:
                 if not event.wait(
                     timeout=min(item.remaining_timeout_s() for item in pending)
                 ):
-                    self._on_wait_timeout()
+                    self._on_wait_timeout(pending)
                     raise TimeoutError("CPU preprocessing result wait timed out")
 
-    def _on_wait_timeout(self):
+    def _on_wait_timeout(self, pending):
         pass
 
     @staticmethod
@@ -386,6 +385,10 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self.pool: Optional[multiprocessing.pool.Pool] = None
         self._consecutive_timeouts = 0
         self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
+        # Counts completed tasks so a timeout can tell a stuck pool (no
+        # progress) from an overloaded one (slow but draining).
+        self._completed_tasks = 0
+        self._last_timeout_completed = 0
         # Track accepted work items independently of multiprocessing.Pool's
         # private task queue. The gauge includes both running and waiting tasks.
         self._preprocess_queue_lock = threading.Lock()
@@ -435,12 +438,29 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             ),
         )
 
-    def _on_wait_timeout(self):
+    def _on_wait_timeout(self, pending):
         with self._pool_lock:
-            self._consecutive_timeouts += 1
-            if self._consecutive_timeouts >= self._max_consecutive_timeouts:
-                self._rebuild_pool()
-                self._consecutive_timeouts = 0
+            self._record_timeout_locked()
+
+    def _record_timeout_locked(self):
+        # Distinguish a stuck pool (no task completed since the last timeout)
+        # from an overloaded one (tasks are still draining). Rebuilding an
+        # overloaded pool would discard queued work and make the backlog worse.
+        completed = self._completed_tasks
+        if completed != self._last_timeout_completed:
+            self._consecutive_timeouts = 0
+            self._last_timeout_completed = completed
+            return
+        self._consecutive_timeouts += 1
+        if self._consecutive_timeouts >= self._max_consecutive_timeouts:
+            logging.warning(
+                f"Hit {self._consecutive_timeouts} consecutive timeouts "
+                f"with no completed tasks, rebuilding pool "
+                f"(workers may be stuck)"
+            )
+            self._rebuild_pool()
+            self._consecutive_timeouts = 0
+            self._last_timeout_completed = self._completed_tasks
 
     def _track_preprocess_task(self) -> int:
         with self._preprocess_queue_lock:
@@ -456,6 +476,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             if task_id not in self._pending_preprocess_tasks:
                 return
             self._pending_preprocess_tasks.remove(task_id)
+            self._completed_tasks = getattr(self, "_completed_tasks", 0) + 1
         # multiprocessing.Pool invokes callbacks on its single result-handler
         # thread, before waking ApplyResult.get(). Never run telemetry or I/O
         # here; the consuming request thread reports the latest count.
@@ -590,14 +611,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             raise e.error from e
         except multiprocessing.pool.TimeoutError:
             with self._pool_lock:
-                self._consecutive_timeouts += 1
-                if self._consecutive_timeouts >= self._max_consecutive_timeouts:
-                    logging.warning(
-                        f"Hit {self._consecutive_timeouts} consecutive timeouts, "
-                        f"rebuilding pool (workers may be stuck)"
-                    )
-                    self._rebuild_pool()
-                    self._consecutive_timeouts = 0
+                self._record_timeout_locked()
             raise TimeoutError(
                 f"Preprocessing timeout after {work_item.mm_timeout_ms}ms"
             )
