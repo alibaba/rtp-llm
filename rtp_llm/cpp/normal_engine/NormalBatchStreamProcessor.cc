@@ -35,7 +35,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
 
     model_input_gatherer_   = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
     sampler_input_gatherer_ = std::make_unique<NormalSamplerInputGatherer>();
-    output_dispatcher_      = std::make_unique<NormalOutputDispatcher>(model_config.output_vocab_ids);
+    output_dispatcher_      = std::make_unique<NormalOutputDispatcher>(model_config.output_vocab_ids, warm_up);
 }
 
 absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_groups,

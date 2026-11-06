@@ -1212,6 +1212,141 @@ TEST_F(NormalBatchStreamProcessorTest, testAllLogitsRowSelectedLayout) {
     }
 }
 
+namespace {
+
+// Shared fixture for the dispatcher-local scoring-OOM guard tests: one calculate_loss stream,
+// one prompt-logits stream and one normal stream dispatched in a single batch.
+struct ScoringOomFixture {
+    ResourceContext              resource_context;
+    ModelConfig                  model_config;
+    PDSepConfig                  pd_sep_config;
+    ProfilingDebugLoggingConfig  profiling_debug_logging_config;
+    CacheConfig                  cache_config;
+    RuntimeConfig                runtime_config;
+    GenerateStreamPtr            loss_stream;
+    GenerateStreamPtr            prompt_stream;
+    GenerateStreamPtr            normal_stream;
+    MergedOutput                 merge_outputs;
+    std::list<GenerateStreamPtr> streams;
+
+    GenerateStreamPtr makeStream(const std::vector<int32_t>& ids, int loss, bool prompt_logits, int& next_block) {
+        auto query                                   = make_shared<GenerateInput>();
+        query->input_ids                             = hostIntBuffer(ids);
+        query->generate_config                       = make_shared<GenerateConfig>();
+        query->generate_config->calculate_loss       = loss;
+        query->generate_config->return_prompt_logits = prompt_logits;
+        query->generate_config->prompt_logits_top_k  = 2;
+        query->generate_config->is_streaming         = true;
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        BatchKVCacheResource addr;
+        addr.resetBatchSize(1);
+        addr.initGroups(cache_config.topologyPtr());
+        addr.setBatchBlocks(0, 0, {next_block, next_block + 1, next_block + 2});
+        next_block += 3;
+        stream->setKVCache(addr);
+        stream->setIsContextStream(true);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    }
+
+    explicit ScoringOomFixture(size_t vocab = 16) {
+        model_config.max_seq_len = 2048;
+        model_config.vocab_size  = vocab;
+        model_config.num_layers  = 2;
+        initFullCacheConfig(cache_config, model_config.num_layers);
+
+        int next_block = 1;
+        loss_stream    = makeStream({1, 2, 3}, /*loss=*/1, /*prompt_logits=*/false, next_block);
+        prompt_stream  = makeStream({4, 5, 6, 7}, /*loss=*/0, /*prompt_logits=*/true, next_block);
+        normal_stream  = makeStream({8, 9}, /*loss=*/0, /*prompt_logits=*/false, next_block);
+        streams        = {loss_stream, prompt_stream, normal_stream};
+
+        // Legacy token-aligned layout: 3 + 4 + 2 = 9 executed-token rows.
+        merge_outputs.model_output.logits      = torch::zeros({3, (int64_t)vocab}, torch::kFloat32).to(torch::kCUDA);
+        merge_outputs.model_output.all_logits  = torch::randn({9, (int64_t)vocab}, torch::kFloat32).to(torch::kCUDA);
+        merge_outputs.sampler_output.token_ids = torch::ones({3, 4}, torch::kInt32);
+        merge_outputs.sampler_output.cum_log_probs = torch::zeros({3}, torch::kFloat32).to(torch::kCUDA);
+    }
+};
+
+struct ScoringHookResetGuard {
+    ~ScoringHookResetGuard() {
+        NormalOutputDispatcher::test_scoring_failure_hook = nullptr;
+    }
+};
+
+}  // namespace
+
+TEST_F(NormalBatchStreamProcessorTest, testDispatchScoringOomFailsOnlyThatStream) {
+    ScoringOomFixture          fixture;
+    NormalBatchStreamProcessor processor(fixture.model_config,
+                                         fixture.pd_sep_config,
+                                         fixture.profiling_debug_logging_config,
+                                         fixture.cache_config,
+                                         /*warm_up=*/false);
+
+    // Inject a dispatch-stage OOM inside each scoring stream's own output computation.
+    std::vector<const GenerateStream*> hooked;
+    NormalOutputDispatcher::test_scoring_failure_hook = [&](const GenerateStreamPtr& s) {
+        hooked.push_back(s.get());
+        throw c10::OutOfMemoryError("CUDA out of memory");
+    };
+    ScoringHookResetGuard hook_guard;
+
+    StreamGroups stream_groups(fixture.streams);
+    EXPECT_TRUE(processor.dispatch(stream_groups, fixture.merge_outputs).ok());
+
+    // Both scoring streams fail request-locally with the non-retryable execution error.
+    for (const auto& stream : {fixture.loss_stream, fixture.prompt_stream}) {
+        EXPECT_TRUE(stream->hasError());
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_NE(stream->statusInfo().ToString().find("out-of-memory"), std::string::npos);
+    }
+    // The normal stream in the same batch is dispatched and produces output.
+    EXPECT_FALSE(fixture.normal_stream->hasError());
+    auto normal_out = fixture.normal_stream->nextOutput(5000);
+    ASSERT_TRUE(normal_out.ok());
+    // The hook only fires for streams that consume scoring rows (covers loss and prompt
+    // logits), never for the normal stream.
+    EXPECT_EQ(hooked, (std::vector<const GenerateStream*>{fixture.loss_stream.get(), fixture.prompt_stream.get()}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDispatchScoringNonOomRethrows) {
+    ScoringOomFixture          fixture;
+    NormalBatchStreamProcessor processor(fixture.model_config,
+                                         fixture.pd_sep_config,
+                                         fixture.profiling_debug_logging_config,
+                                         fixture.cache_config,
+                                         /*warm_up=*/false);
+
+    NormalOutputDispatcher::test_scoring_failure_hook = [](const GenerateStreamPtr&) {
+        throw std::runtime_error("some non-OOM dispatch failure");
+    };
+    ScoringHookResetGuard hook_guard;
+
+    StreamGroups stream_groups(fixture.streams);
+    EXPECT_THROW(processor.dispatch(stream_groups, fixture.merge_outputs), std::runtime_error);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDispatchScoringOomRethrowsOnWarmUp) {
+    ScoringOomFixture fixture;
+    // A warm-up processor must never convert a scoring OOM into a request failure: the
+    // exception propagates so the warm-up/sizing step fails.
+    NormalBatchStreamProcessor processor(fixture.model_config,
+                                         fixture.pd_sep_config,
+                                         fixture.profiling_debug_logging_config,
+                                         fixture.cache_config,
+                                         /*warm_up=*/true);
+
+    NormalOutputDispatcher::test_scoring_failure_hook = [](const GenerateStreamPtr&) {
+        throw c10::OutOfMemoryError("CUDA out of memory");
+    };
+    ScoringHookResetGuard hook_guard;
+
+    StreamGroups stream_groups(fixture.streams);
+    EXPECT_THROW(processor.dispatch(stream_groups, fixture.merge_outputs), c10::OutOfMemoryError);
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     ResourceContext resource_context;
     ModelConfig     model_config;

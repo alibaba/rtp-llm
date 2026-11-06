@@ -85,6 +85,8 @@ bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<Genera
 }
 }  // anonymous namespace
 
+NormalEngine::ExecutorFactory NormalEngine::test_executor_factory = nullptr;
+
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
                            std::unique_ptr<ProposeModelEngineInitParams> propose_params):
     EngineBase(params),
@@ -188,6 +190,8 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
     if (propose_params_) {
         executor_.reset(new MtpExecutor(
             params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
+    } else if (test_executor_factory) {
+        executor_ = test_executor_factory(params);
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -265,6 +269,13 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     };
     std::list<GenerateStreamPtr> streams{stream};
     THROW_IF_STATUS_ERROR(executor_->process(streams));
+    // A pre-run stream that was marked failed during process (e.g. an output-stage error
+    // reported instead of thrown) must not count as a successful warm-up/sizing step.
+    if (stream->hasError()) {
+        const auto error = stream->statusInfo();
+        return absl::InternalError("preRun stream failed with error code "
+                                   + std::to_string(static_cast<int>(error.code())) + ": " + error.ToString());
+    }
 #if USING_CUDA
     if (mode == preRunMode::build_system_prompt) {
         // Keep the stream and its execution buffers alive until the resident KV writes finish.

@@ -34,6 +34,13 @@ public:
         int64_t num_tokens = inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.size(0) : 1;
         outputs.logits     = torch::randn({num_tokens, (int64_t)vocab_size_},
                                       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        if (inputs.need_all_logits) {
+            // Legacy token-aligned layout (all_logits_lm_rows stays -1): one row per executed
+            // token so the dispatcher's prompt-scoring/loss paths have rows to read.
+            const int64_t execute_tokens = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : num_tokens;
+            outputs.all_logits           = torch::randn({execute_tokens, (int64_t)vocab_size_},
+                                              torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        }
         return outputs;
     }
 
