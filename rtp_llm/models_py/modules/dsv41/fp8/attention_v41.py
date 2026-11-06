@@ -116,13 +116,38 @@ def _prefill_x_cohort_plan(cp_ctx):
             if local > first_local:
                 cohorts.append((first_local, local, first_global, global_row))
             half = chunk // 2
-            if half > limit:
-                raise ValueError("CP source request exceeds the model sequence limit")
-            front = min(length, cp_size * half)
-            cohorts.append((local, local + half, global_row, global_row + front))
-            cohorts.append(
-                (local + half, local + chunk, global_row + front, global_row + length)
-            )
+            if half <= limit:
+                front = min(length, cp_size * half)
+                cohorts.append((local, local + half, global_row, global_row + front))
+                cohorts.append(
+                    (
+                        local + half,
+                        local + chunk,
+                        global_row + front,
+                        global_row + length,
+                    )
+                )
+            else:
+                # A long request's zigzag halves contain one contiguous
+                # global segment per rank. Stream those segments in global
+                # order without retaining a full half in the AG buffer.
+                for segment in range(2 * cp_size):
+                    begin = segment * half
+                    real_end = min(length, begin + half)
+                    for offset in range(0, max(0, real_end - begin), limit):
+                        count = min(limit, real_end - begin - offset)
+                        local_begin = (
+                            local + (half if segment >= cp_size else 0) + offset
+                        )
+                        global_begin = global_row + begin + offset
+                        cohorts.append(
+                            (
+                                local_begin,
+                                local_begin + count,
+                                global_begin,
+                                global_begin + count,
+                            )
+                        )
             local += chunk
             global_row += length
             first_local, first_global = local, global_row
@@ -162,6 +187,7 @@ def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights):
         stop = first + 1
         while (
             stop < len(cohorts)
+            and cohorts[stop][0] == cohorts[stop - 1][1]
             and cohorts[stop][1] - cohorts[first][0] <= max_local_rows
         ):
             stop += 1

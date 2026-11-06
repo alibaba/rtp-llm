@@ -21,6 +21,8 @@ _SPEC.loader.exec_module(CONTRACTS)
 
 MIXED = (503, 159, 3263, 583, 8127, 1940, 5177, 8370, 2913, 131071, 14606, 9695)
 LONG = (131072,)
+LONG_OVER_LIMIT = (262144,)
+ONE_MILLION = (1048576,)
 ONLINE_B8 = (36091,) * 8
 TYPICAL_REUSE = ((983,) * 32, (983,) * 64, (8192,) * 4, (8192,) * 8, (2943,) * 9)
 WIDE = (1, 9, 127, 129) * 32 + (2049,)
@@ -185,6 +187,9 @@ class CPStreamNCCLTest(unittest.TestCase):
 
     def test_mixed_and_long_cp4(self):
         self._run_cases((MIXED, LONG))
+
+    def test_long_request_beyond_old_limit_cp4(self):
+        self._run_cases((LONG_OVER_LIMIT, ONE_MILLION))
 
     def test_wide_and_b1024_cp4(self):
         self._run_cases((WIDE, COLD_B1024))

@@ -48,7 +48,7 @@ def _case(lengths):
 
 class CPSourceCohortPlanCPU(unittest.TestCase):
     def test_other_cp_sizes_keep_global_order(self):
-        lengths = (1, 129, 65537, 131071)
+        lengths = (1, 129, 65537, 131071, 10000000)
         for cp_size in (2, 8):
             chunks = tuple(
                 2 * ((length + 2 * cp_size - 1) // (2 * cp_size)) for length in lengths
@@ -82,6 +82,10 @@ class CPSourceCohortPlanCPU(unittest.TestCase):
             (1024,) * 64,
             (8192,) * 8,
             (131071,),
+            (131073,),
+            (262144,),
+            (1048576,),
+            (10000000,),
             (1,) * 1024,
         ]
         cases.extend(
@@ -142,8 +146,12 @@ class CPSourceCohortPlanCPU(unittest.TestCase):
                             local += half
                         self.assertTrue(local_start <= local < local_end)
 
-    def test_oversized_request_is_rejected_before_collective(self):
-        for length in (159357, 1048576):
+    def test_long_request_keeps_global_order_and_bounded_tiles(self):
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_producer_metadata import (
+            raw_tile_plan,
+        )
+
+        for length in (131073, 159357, 262144, 1048576, 10000000):
             chunk = 2 * ((length + 7) // 8)
             cp = types.SimpleNamespace(
                 cp_size=4,
@@ -152,8 +160,28 @@ class CPSourceCohortPlanCPU(unittest.TestCase):
                 seq_len_full=length,
                 chunk_length=chunk,
             )
-            with self.assertRaisesRegex(ValueError, "model sequence limit"):
-                STREAM._prefill_x_cohort_plan(cp)
+            plan = STREAM._prefill_x_cohort_plan(cp)
+            self.assertEqual(plan[0][2], 0)
+            self.assertEqual(plan[-1][3], length)
+            self.assertTrue(all(a[3] == b[2] for a, b in zip(plan, plan[1:])))
+            self.assertTrue(all(4 * (b - a) <= 65536 for a, b, _, _ in plan))
+            for ratio in (1, 2):
+                for rank in range(4):
+                    tiles = list(
+                        raw_tile_plan(
+                            (length,),
+                            (31744,),
+                            ratio,
+                            4,
+                            rank,
+                            256,
+                            ranges=((g0, g1) for _, _, g0, g1 in plan),
+                        )
+                    )
+                    self.assertEqual(
+                        [(a, b) for a, b, _ in tiles],
+                        [(g0, g1) for _, _, g0, g1 in plan],
+                    )
 
     def test_replay_layout_is_rejected_before_collective(self):
         cp, _, _ = _case((129, 1024))
