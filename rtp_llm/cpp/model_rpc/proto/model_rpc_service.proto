@@ -959,6 +959,8 @@ message FunctionResponsePB {
 
 message BatchGenerateInputPB {
     repeated GenerateInputPB inputs = 1;
+    // /batch_infer only: start all inputs together, never fall back to partial admission.
+    bool force_batch = 2;
 }
 
 message BatchGenerateResultPB {

@@ -676,6 +676,14 @@ class Pipeline(object):
         generate_env_config=None,
         **kwargs: Any,
     ) -> List[GenerateResponse]:
+        # This option belongs to /batch_infer, not the shared generation config.
+        generate_config_json = dict(generate_config_json)
+        force_batch = generate_config_json.pop("force_batch", False)
+        if not isinstance(force_batch, bool):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_GENERATE_CONFIG_FORMAT,
+                "generate_config.force_batch must be a boolean",
+            )
         generate_config = self.create_generate_config(
             generate_config_json,
             len(self.tokenizer),
@@ -726,7 +734,12 @@ class Pipeline(object):
             )
             inputs.append(gen_input)
 
-        batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
+        if force_batch:
+            batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(
+                inputs, force_batch=True
+            )
+        else:
+            batch_outputs = await self.backend_rpc_server_visitor.batch_enqueue(inputs)
 
         stop_word_strs = generate_config.stop_words_str
         stop_word_str_slices = get_stop_word_slices(stop_word_strs)

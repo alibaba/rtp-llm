@@ -1008,7 +1008,9 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     @torch.inference_mode()
-    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+    async def batch_enqueue(
+        self, inputs: list[GenerateInput], *, force_batch: bool = False
+    ) -> list[GenerateOutputs]:
         for input in inputs:
             self.fill_request_info(input)
             input.generate_config.validate()
@@ -1020,6 +1022,8 @@ class BackendRPCServerVisitor:
             for input in inputs:
                 await self.route_ips(input)
 
+        if force_batch:
+            return await self.model_rpc_client.batch_enqueue(inputs, force_batch=True)
         return await self.model_rpc_client.batch_enqueue(inputs)
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:

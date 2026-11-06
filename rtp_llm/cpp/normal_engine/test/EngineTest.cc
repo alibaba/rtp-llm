@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
@@ -621,6 +622,67 @@ TEST_F(NormalEngineTest, testEnqueueMultipleIgnoresInvalidStreamForModeCheck) {
     EXPECT_EQ(streams[0]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
     EXPECT_FALSE(streams[1]->hasError());
     EXPECT_EQ(engine->getScheduler().onflightStreams(), 1);
+}
+
+TEST_F(NormalEngineTest, testForceBatchRejectsInvalidMemberBeforeScheduling) {
+    for (bool force_batch : {false, true}) {
+        SCOPED_TRACE(force_batch);
+        auto engine = createMockEngine(CustomConfig{});
+        ASSERT_TRUE(engine->stop().ok());
+        auto make_query = [force_batch](bool invalid) {
+            auto query = make_shared<GenerateInput>();
+            query->input_ids = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+            query->generate_config = make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens = invalid ? 0 : 1;
+            query->generate_config->min_new_tokens = invalid ? 1 : 0;
+            query->force_batch = force_batch;
+            return query;
+        };
+        auto [successes, streams] = engine->enqueueMultiple({make_query(false), make_query(true)});
+        ASSERT_EQ(streams.size(), 2);
+        EXPECT_EQ(successes, std::vector<bool>({!force_batch, false}));
+        EXPECT_EQ(engine->getScheduler().onflightStreams(), force_batch ? 0 : 1);
+        for (size_t i = 0; i < streams.size(); ++i) {
+            EXPECT_EQ(streams[i]->hasError(), force_batch || i == 1);
+            EXPECT_FALSE(streams[i]->hasEvent(StreamEvents::CanRun));
+            if (streams[i]->hasError()) {
+                EXPECT_EQ(streams[i]->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            }
+        }
+    }
+}
+
+TEST_F(NormalEngineTest, testForceBatchRejectsNonFIFOSchedulerBeforeEnqueue) {
+    for (bool force_batch : {false, true}) {
+        SCOPED_TRACE(force_batch);
+        auto engine = createMockEngine(CustomConfig{});
+        // Join the engine loop before replacing its scheduler to make the
+        // zero-enqueue assertion deterministic and avoid a scheduler race.
+        ASSERT_TRUE(engine->stop().ok());
+        engine->scheduler_ = std::make_unique<BatchDecodeScheduler>(
+            RuntimeConfig{}, engine->getCacheManager(), nullptr);
+        std::vector<std::shared_ptr<GenerateInput>> inputs;
+        for (int i = 0; i < 2; ++i) {
+            auto query = make_shared<GenerateInput>();
+            query->request_id = i;
+            query->input_ids = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+            query->generate_config = make_shared<GenerateConfig>();
+            query->generate_config->max_new_tokens = 1;
+            query->force_batch = force_batch;
+            inputs.push_back(query);
+        }
+        auto [successes, streams] = engine->enqueueMultiple(inputs);
+        EXPECT_EQ(successes, std::vector<bool>(2, !force_batch));
+        ASSERT_EQ(streams.size(), 2);
+        EXPECT_EQ(engine->getScheduler().onflightStreams(), force_batch ? 0 : 2);
+        for (const auto& stream : streams) {
+            EXPECT_EQ(stream->hasError(), force_batch);
+            EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+            if (force_batch) {
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            }
+        }
+    }
 }
 
 class NormalEngineCustomOutputTest: public NormalEngineTest {

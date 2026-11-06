@@ -27,7 +27,8 @@ public:
 
     // Group-aware enqueue: streams enter the dedicated group queues and are
     // co-scheduled at an isolated execution boundary. Falls back to individual
-    // FIFO admission when the group exceeds scheduler-wide limits.
+    // FIFO admission when the group exceeds scheduler-wide limits, unless
+    // /batch_infer explicitly requests force_batch (whole-group admission).
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
@@ -100,6 +101,7 @@ private:
 
     void cancelGroups(StreamGroupQueue& group_queue);
     void evaluateWaitingGroupQueue();
+    void evaluateForcedGroup(StreamGroup& group);
     void evaluateLoadingCacheGroupQueue();
     bool loadingGroupReady() const;
     void advanceLoadingGroup(StreamGroup& group);

@@ -1598,7 +1598,7 @@ class ModelRpcClient(object):
                 response_iterator.cancel()
 
     async def batch_generate(
-        self, inputs: list[GenerateInput]
+        self, inputs: list[GenerateInput], *, force_batch: bool = False
     ) -> list[GenerateOutputs]:
         """Run BatchGenerateCall with atomic batch failure semantics.
 
@@ -1649,6 +1649,7 @@ class ModelRpcClient(object):
         conversion_index = None
         try:
             batch_input_pb = BatchGenerateInputPB()
+            batch_input_pb.force_batch = force_batch
             for i, inp in enumerate(batch_inputs):
                 conversion_index = i
                 span, item_metadata = start_batch_item_span(inp.request_id, i)
@@ -1861,6 +1862,10 @@ class ModelRpcClient(object):
                 )
             break
 
-    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+    async def batch_enqueue(
+        self, inputs: list[GenerateInput], *, force_batch: bool = False
+    ) -> list[GenerateOutputs]:
         """Compatibility alias for callers using the historical enqueue name."""
+        if force_batch:
+            return await self.batch_generate(inputs, force_batch=True)
         return await self.batch_generate(inputs)
