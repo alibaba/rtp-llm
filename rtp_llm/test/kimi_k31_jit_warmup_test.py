@@ -148,7 +148,6 @@ class KimiK31JitWarmupTest(unittest.TestCase):
 
     def test_pack_restore_and_sanitize_reuse_across_shapes(self):
         import triton
-
         from rtp_llm.models_py.kernels.cuda.fp8_indexer_cache import (
             pack_indexer_pages64,
         )
@@ -298,7 +297,6 @@ class KimiK31JitWarmupTest(unittest.TestCase):
 
     def test_target_verify_and_native_draft_metadata_reuse(self):
         import triton
-
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.page_rr_mla_metadata import (
             PageRRMlaMetadata,
         )
@@ -372,7 +370,6 @@ class KimiK31JitWarmupTest(unittest.TestCase):
 
     def test_grouped_norm_reuses_kernel_across_token_counts(self):
         import triton
-
         from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
             grouped_q_kv_rmsnorm,
         )
@@ -421,7 +418,6 @@ class KimiK31JitWarmupTest(unittest.TestCase):
 
     def test_prefill_warmup_prepares_grouped_norm_layouts(self):
         import triton
-
         from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
             grouped_q_kv_rmsnorm,
         )
@@ -445,11 +441,82 @@ class KimiK31JitWarmupTest(unittest.TestCase):
         model = SimpleNamespace(
             kv_cache=object(), layers=[SimpleNamespace(attention=attention)]
         )
-        self.warmup.warmup_kimi_k31_dsa_jit(
-            model, SimpleNamespace(is_decode_role=False)
-        )
-        source = torch.ones((129, 14400), device=self.device, dtype=torch.bfloat16)
-        q, kv, suffix = source[:, :2112].split((1536, 512, 64), dim=-1)
+        for dtype, width in ((torch.bfloat16, 14400), (torch.float8_e4m3fn, 14464)):
+            with self.subTest(dtype=dtype):
+                attention.input = SimpleNamespace(
+                    weight=torch.empty((width, 7168), device="meta", dtype=dtype)
+                )
+                self.warmup.warmup_kimi_k31_dsa_jit(
+                    model, SimpleNamespace(is_decode_role=False)
+                )
+                source = torch.ones(
+                    (129, width), device=self.device, dtype=torch.bfloat16
+                )
+                misses = []
+                with triton.knobs.compilation.scope():
+
+                    def observe(*, cache_hit, src, **_):
+                        if not cache_hit:
+                            misses.append(src.fn.__name__)
+
+                    triton.knobs.compilation.listener = observe
+                    for rows in (1, 34, 58, 129):
+                        q, kv, suffix = source[:rows, :2112].split(
+                            (1536, 512, 64), dim=-1
+                        )
+                        for packed in (False, True):
+                            actual = attention._qkv_norm(
+                                q,
+                                kv,
+                                attention.q_norm.weight,
+                                attention.kv_norm.weight,
+                                attention.q_norm.variance_epsilon,
+                                kv_suffix=suffix if packed else None,
+                            )
+                            for output in actual:
+                                self.assertTrue(
+                                    torch.equal(output, torch.ones_like(output))
+                                )
+                    torch.cuda.synchronize()
+                self.assertEqual(
+                    misses, [], "Prefill warmup missed grouped Norm layouts"
+                )
+
+    def test_prefill_slot_map_reuses_kernel_across_request_geometry(self):
+        import triton
+        from rtp_llm.models_py.kernels.cuda.dsa_kv_chunk import map_dsa_chunk_slots
+
+        def run(rows, start, width, request_offset):
+            requests = torch.arange(
+                rows + request_offset, device=self.device, dtype=torch.int32
+            ).remainder_(2)[request_offset:]
+            slices = torch.tensor(
+                [[start, start + width, 0], [start + 17, start + 17 + width, width]],
+                device=self.device,
+                dtype=torch.int32,
+            )
+            indices = (
+                torch.arange(2048, device=self.device, dtype=torch.int32) - 3
+            ).repeat(rows, 1)
+            output = torch.empty_like(indices)
+            params = SimpleNamespace(
+                is_prefill=True,
+                query_requests=requests,
+                page_size=128,
+                shard_size=8,
+                shard_rank=1,
+            )
+            block = SimpleNamespace(start=start, width=width, slices=slices)
+            map_dsa_chunk_slots(indices, params, block, output)
+            begin, end, offset = slices[requests.long()].unbind(1)
+            valid = (indices >= begin[:, None]) & (indices < end[:, None])
+            expected = torch.where(
+                valid, indices - begin[:, None] + offset[:, None], -1
+            )
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+        for offset in (0, 1, 2):
+            run(16, 0, 64, offset)
         misses = []
         with triton.knobs.compilation.scope():
 
@@ -458,23 +525,83 @@ class KimiK31JitWarmupTest(unittest.TestCase):
                     misses.append(src.fn.__name__)
 
             triton.knobs.compilation.listener = observe
-            for packed in (False, True):
-                actual = attention._qkv_norm(
-                    q,
-                    kv,
-                    attention.q_norm.weight,
-                    attention.kv_norm.weight,
-                    attention.q_norm.variance_epsilon,
-                    kv_suffix=suffix if packed else None,
-                )
-                for output in actual:
-                    self.assertTrue(torch.equal(output, torch.ones_like(output)))
+            for rows in (34, 58, 176, 924, 1030, 1252, 2118, 3596, 5836, 8192):
+                for offset in (0, 1, 2):
+                    run(rows, rows // 3, rows + 17, offset)
             torch.cuda.synchronize()
-        self.assertEqual(misses, [], "Prefill warmup missed grouped Norm layouts")
+        self.assertEqual(misses, [], "Prefill geometry introduced slot-mapping JIT")
+
+    def test_decode_slot_map_preserves_chunk_and_owner_bounds(self):
+        from rtp_llm.models_py.kernels.cuda.dsa_kv_chunk import map_dsa_chunk_slots
+
+        indices = torch.tensor(
+            [[4, 5, 6, 7, 12, 13, 14, 15, 20, -1]],
+            device=self.device,
+            dtype=torch.int32,
+        ).repeat(2, 1)
+        params = SimpleNamespace(
+            is_prefill=False,
+            batch_indice_d=torch.arange(2, device=self.device, dtype=torch.int32),
+            page_size=4,
+            kernel_page_size=4,
+            shard_size=2,
+            shard_rank=1,
+        )
+        block = SimpleNamespace(start=4, width=4, slices=None)
+        table = torch.tensor(
+            [[0, 7, 9], [0, 11, 13]], device=self.device, dtype=torch.int32
+        )
+        for block_table, selected in (
+            (None, [[0, 1, 2, 3], [4, 5, 6, 7]]),
+            (table, [[28, 29, 30, 31], [44, 45, 46, 47]]),
+        ):
+            output = torch.empty_like(indices)
+            map_dsa_chunk_slots(indices, params, block, output, block_table=block_table)
+            expected = torch.full_like(indices, -1)
+            expected[:, 4:8] = torch.tensor(
+                selected, device=self.device, dtype=torch.int32
+            )
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+    def test_absorbed_query_reuses_padding_kernel_across_token_counts(self):
+        import triton
+        from rtp_llm.models_py.kernels.cuda.dsa_buffer_ops import absorbed_query
+
+        weight = torch.arange(96 * 128 * 512, device=self.device).remainder_(4)
+        weight = weight.reshape(96, 128, 512).to(torch.bfloat16).div_(8)
+
+        def run(rows):
+            query = torch.full(
+                (rows, 96, 192), 0.5, device=self.device, dtype=torch.bfloat16
+            )
+            query[..., 128:] = (
+                torch.arange(64, device=self.device, dtype=query.dtype) / 64
+            )
+            output = absorbed_query(query, weight, 512, 128)
+            expected = torch.zeros_like(output)
+            # Each NoPE dot is 128 * 0.5 * ((column % 4) / 8), exactly representable.
+            expected[:, :96, :512] = (
+                torch.arange(512, device=self.device).remainder_(4) * 8
+            )
+            expected[:, :96, 512:] = query[..., 128:]
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
+        run(128)
+        misses = []
+        with triton.knobs.compilation.scope():
+
+            def observe(*, cache_hit, src, **_):
+                if not cache_hit:
+                    misses.append(src.fn.__name__)
+
+            triton.knobs.compilation.listener = observe
+            for rows in (34, 58, 176, 924):
+                run(rows)
+            torch.cuda.synchronize()
+        self.assertEqual(misses, [], "token count introduced sparse-query padding JIT")
 
     def test_model_warmup_does_not_change_live_kv(self):
         import triton
-
         from rtp_llm.models_py.modules.base.cuda.fp8_indexer_op import Fp8IndexerOp
 
         op = SimpleNamespace(native_score=self.score)

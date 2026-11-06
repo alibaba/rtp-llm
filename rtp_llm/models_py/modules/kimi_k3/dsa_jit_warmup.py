@@ -26,18 +26,20 @@ def _warmup_grouped_norm(attention, prepared):
         return
     q_weight, kv_weight = attention.q_norm.weight, attention.kv_norm.weight
     dimensions = (attention.q_rank, attention.kv_rank, attention.suffix_dim)
-    width = sum(dimensions) + attention.heads * attention.v_dim
+    width = attention.input.weight.shape[0]
     eps = attention.q_norm.variance_epsilon
     key = (q_weight.device, q_weight.dtype, dimensions, width, eps)
     if key in prepared:
         return
     # Preserve the real fused projection's row stride and split offsets.
     source = torch.zeros((128, width), device=q_weight.device, dtype=q_weight.dtype)
-    q, kv, suffix = source[:, : sum(dimensions)].split(dimensions, dim=-1)
-    for packed in (False, True):
-        grouped_q_kv_rmsnorm(
-            q, kv, q_weight, kv_weight, eps, kv_suffix=suffix if packed else None
-        )
+    # Short requests use the existing one-row producer instead of grouped norm.
+    for rows in (1, 128):
+        q, kv, suffix = source[:rows, : sum(dimensions)].split(dimensions, dim=-1)
+        for packed in (False, True):
+            grouped_q_kv_rmsnorm(
+                q, kv, q_weight, kv_weight, eps, kv_suffix=suffix if packed else None
+            )
     torch.cuda.synchronize(q_weight.device)
     prepared.add(key)
 

@@ -225,6 +225,17 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k31_prefill_jit_ab_test",
+    srcs = ["kimi_k31_prefill_jit_ab_test.py"],
+    data = ["kimi_k31_prefill_jit_ab_baseline.tar"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    tags = ["SM103_CU13", "manual"],
+    timeout = "long",
+)
+
+py_test(
     name = "kimi_k3_rope_cpu_test",
     srcs = ["kimi_k3_rope_test.py"],
     main = "kimi_k3_rope_test.py",
