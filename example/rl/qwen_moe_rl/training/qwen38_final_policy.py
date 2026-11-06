@@ -63,6 +63,44 @@ def require_final_policy_completion(backend):
     return validate_final_policy_proof(record['proof'])
 
 
+def validate_single_global_minibatch(backend, batch, trainer_state):
+    """Check the original backend's dynamic ROWS metadata before GPU dispatch.
+
+    The untouched backend normalizes by 72 rollouts while expanding the one
+    minibatch to contain all real multi-turn rows and neutral DP padding.
+    """
+    actor=backend.config.actor_rollout_ref.actor
+    metadata=batch.meta_info
+    rows=len(batch)
+    mini=int(metadata.get('rllm_actor_mini_batch_size',0))
+    denominator=int(metadata.get('rllm_actor_global_batch_size',0))
+    updates=int(metadata.get('rllm_actor_num_updates',0))
+    real_rows=int(metadata.get('rllm_actor_rows_pre_pad',0))
+    dp=int(backend._get_dp_size(backend.actor_rollout_wg,'actor'))
+    if (not backend.config.trainer.balance_batch or int(actor.ppo_epochs)!=1
+            or int(backend.config.data.train_batch_size)!=18
+            or int(actor.ppo_mini_batch_size)!=18
+            or int(backend.config.actor_rollout_ref.rollout.n)!=4
+            or dp!=72 or rows<=0 or rows%dp or mini!=rows
+            or updates!=1 or denominator!=72 or not (0<real_rows<=rows)):
+        raise RuntimeError('Q38 requires exactly one original dynamically padded global minibatch per iteration')
+    loss_map=backend.algorithm_config.loss_fn_map if backend.algorithm_config is not None else {}
+    roles=batch.non_tensor_batch.get('group_roles')
+    actual_losses={loss_map.get(str(role),'vanilla') for role in roles.tolist()} if roles is not None else set()
+    if len(actual_losses)>1:
+        raise RuntimeError('Q38 single-update acceptance refuses multiple sequential per-role loss updates')
+    record=dict(schema='q38-real-single-global-minibatch-before-dispatch-v1',
+        trainer_global_step=int(trainer_state.global_step), rows_pre_pad=real_rows, rows_post_pad=rows,
+        global_minibatch_rows=mini, rollout_loss_denominator=denominator, data_parallel_size=dp,
+        rows_per_rank=rows//dp, ppo_epochs=1, predicted_optimizer_steps_this_iteration=1,
+        actual_distinct_role_losses=sorted(actual_losses), original_backend_metadata_preserved=True,
+        optimizer_step_executed_by_this_observer=False, time_ns=time.time_ns(),pid=os.getpid())
+    root=Path(os.environ['Q38_RUN_ROOT']);root.mkdir(parents=True,exist_ok=True)
+    path=root/f'global-minibatch-step{record["trainer_global_step"]}-pid{os.getpid()}-{record["time_ns"]}.json'
+    with path.open('x') as stream:json.dump(record,stream);stream.write('\n')
+    return record
+
+
 def install_backend_hooks():
     global _BACKEND_PATCHED
     if _BACKEND_PATCHED:return
@@ -72,7 +110,14 @@ def install_backend_hooks():
     install_length_guards()
     old_batch_end=VerlBackend.on_batch_end
     old_train_end=VerlBackend.on_train_end
+    old_update=VerlBackend._update_actor_with_loss_routing
     old_fit=UnifiedTrainer.fit_async
+
+    @functools.wraps(old_update)
+    def checked_update(self,batch,trainer_state):
+        if _target(self) and os.environ.get('RLLM_REQUIRE_REAL_UPDATE')=='1':
+            validate_single_global_minibatch(self,batch,trainer_state)
+        return old_update(self,batch,trainer_state)
 
     @functools.wraps(old_batch_end)
     async def batch_end(self,state):
@@ -120,6 +165,7 @@ def install_backend_hooks():
     train_end._q38_final_policy_completion=True
     checked_fit._q38_final_policy_completion=True
     VerlBackend.on_batch_end=batch_end;VerlBackend.on_train_end=train_end
+    VerlBackend._update_actor_with_loss_routing=checked_update
     UnifiedTrainer.fit_async=checked_fit
     _BACKEND_PATCHED=True
 
