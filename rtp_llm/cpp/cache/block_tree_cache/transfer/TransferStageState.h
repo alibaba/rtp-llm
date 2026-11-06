@@ -44,7 +44,7 @@ public:
         }
     }
 
-    void finishSubmitting() {
+    void finishSubmitting(TransferResult submission_error = {}) {
         DoneCallback   callback;
         TransferResult result;
         {
@@ -52,6 +52,7 @@ public:
             if (submitting_finished_ || completed_) {
                 return;
             }
+            result_.merge(std::move(submission_error));
             submitting_finished_ = true;
             --remaining_;
             finishIfReadyLocked(callback, result);

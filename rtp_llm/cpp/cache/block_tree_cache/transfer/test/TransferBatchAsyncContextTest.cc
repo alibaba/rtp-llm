@@ -4,6 +4,7 @@
 #include <chrono>
 #include <memory>
 #include <thread>
+#include <stdexcept>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 
@@ -11,13 +12,13 @@ namespace rtp_llm {
 namespace {
 
 TEST(TransferBatchAsyncContextTest, WaitersWakeAfterCompletion) {
-    auto context = std::make_shared<TransferBatchAsyncContext>();
+    auto                context = std::make_shared<TransferBatchAsyncContext>();
     std::atomic<size_t> completed_waiters{0};
-    std::thread first([&] {
+    std::thread         first([&] {
         context->waitDone();
         ++completed_waiters;
     });
-    std::thread second([&] {
+    std::thread         second([&] {
         context->waitDone();
         ++completed_waiters;
     });
@@ -65,8 +66,8 @@ TEST(TransferBatchAsyncContextTest, CompletionReleasesGuard) {
 
 TEST(TransferBatchAsyncContextTest, CallbackRegisteredBeforeCompletionRunsOnce) {
     TransferBatchAsyncContext context;
-    std::atomic<size_t> callback_count{0};
-    ErrorCode           callback_code = ErrorCode::INVALID_PARAMS;
+    std::atomic<size_t>       callback_count{0};
+    ErrorCode                 callback_code = ErrorCode::INVALID_PARAMS;
 
     context.onDone([&](TransferResult error) {
         callback_code = error.status.code();
@@ -104,7 +105,7 @@ TEST(TransferBatchAsyncContextTest, CallbackCanReadContextWithoutDeadlock) {
 }
 
 TEST(TransferBatchAsyncContextTest, MultipleCallbacksAndWaiterObserveSameTerminalResult) {
-    auto context = std::make_shared<TransferBatchAsyncContext>();
+    auto                context = std::make_shared<TransferBatchAsyncContext>();
     std::atomic<size_t> callback_count{0};
 
     context->onDone([&](TransferResult error) {
@@ -139,6 +140,40 @@ TEST(TransferBatchAsyncContextTest, ClassifiedResultReachesCallbacksBeforeAndAft
     context.onDone(callback);
     EXPECT_EQ(calls, 2u);
     EXPECT_EQ(context.result().copy_error, CacheCopyError::IO_FAILED);
+}
+
+TEST(TransferBatchAsyncContextTest, ThrowingConsumersDoNotInterruptOtherRegisteredCallbacks) {
+    TransferBatchAsyncContext context(2);
+    size_t                    calls = 0;
+    context.onDone([&](TransferResult) {
+        ++calls;
+        throw std::runtime_error("consumer");
+    });
+    context.onDone([&](TransferResult result) {
+        ++calls;
+        EXPECT_EQ(result.block_errors.size(), 2u);
+    });
+    context.onDone([&](TransferResult) {
+        ++calls;
+        throw 7;
+    });
+    context.onDone([&](TransferResult) { ++calls; });
+    EXPECT_NO_THROW(context.complete(TransferStatus::OK));
+    EXPECT_TRUE(context.done());
+    EXPECT_EQ(calls, 4u);
+    context.complete(TransferStatus::DEVICE_IO_ERROR);
+    EXPECT_EQ(calls, 4u);
+}
+
+TEST(TransferBatchAsyncContextTest, LateCallbackKeepsRegistrationThreadAndExceptionSemantics) {
+    TransferBatchAsyncContext context;
+    context.complete(TransferStatus::OK);
+    const auto registrar = std::this_thread::get_id();
+    EXPECT_THROW(context.onDone([&](TransferResult) {
+        EXPECT_EQ(std::this_thread::get_id(), registrar);
+        throw std::runtime_error("late consumer");
+    }),
+                 std::runtime_error);
 }
 
 }  // namespace

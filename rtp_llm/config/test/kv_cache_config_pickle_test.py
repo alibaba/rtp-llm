@@ -5,7 +5,8 @@ from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_FIELD_
 from rtp_llm.ops import KVCacheConfig
 
 BASE_EVENT_FIELD_VALUES = {
-    name: value for name, value in KV_CACHE_EVENT_FIELD_VALUES.items()
+    name: value
+    for name, value in KV_CACHE_EVENT_FIELD_VALUES.items()
     if name != "kv_cache_event_snapshot_interval_ms"
 }
 EVENT_PICKLE_FIELDS = tuple(BASE_EVENT_FIELD_VALUES)
@@ -15,6 +16,10 @@ class KVCacheConfigPickleTest(TestCase):
     def test_event_fields_round_trip_with_block_tree_configuration(self):
         config = KVCacheConfig()
         config.block_tree_transfer_worker_count = 7
+        config.btc_crc_slot_count = 3
+        config.btc_transfer_engine_async = False
+        config.disk_cache_read_thread_count = 3
+        config.disk_cache_write_thread_count = 5
         config.enable_disk_cache = True
         config.disk_cache_paths = "/tmp/cache"
         for name, value in BASE_EVENT_FIELD_VALUES.items():
@@ -23,12 +28,11 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 84)
-                self.assertEqual(state[:2], ("KVCacheConfig", 12))
-                self.assertEqual(
-                    state[64:69], tuple(BASE_EVENT_FIELD_VALUES.values())
-                )
+                self.assertEqual(len(state), 88)
+                self.assertEqual(state[:2], ("KVCacheConfig", 13))
+                self.assertEqual(state[64:69], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[69], enable_crc)
+                self.assertEqual(state[84:88], (3, False, 3, 5))
                 # Normalizing old fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -38,6 +42,10 @@ class KVCacheConfigPickleTest(TestCase):
                 restored = pickle.loads(pickle.dumps(config))
                 self.assertIs(restored.enable_crc, enable_crc)
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
+                self.assertEqual(restored.btc_crc_slot_count, 3)
+                self.assertFalse(restored.btc_transfer_engine_async)
+                self.assertEqual(restored.disk_cache_read_thread_count, 3)
+                self.assertEqual(restored.disk_cache_write_thread_count, 5)
                 self.assertTrue(restored.enable_disk_cache)
                 self.assertEqual(restored.disk_cache_paths, "/tmp/cache")
                 for name, value in BASE_EVENT_FIELD_VALUES.items():
@@ -74,6 +82,45 @@ class KVCacheConfigPickleTest(TestCase):
         defaults = KVCacheConfig()
         for name in EVENT_PICKLE_FIELDS:
             self.assertEqual(getattr(restored, name), getattr(defaults, name), name)
+
+    def test_async_defaults_and_explicit_values_round_trip(self):
+        defaults = KVCacheConfig()
+        self.assertTrue(defaults.btc_transfer_engine_async)
+        self.assertEqual(defaults.btc_crc_slot_count, 8)
+        self.assertEqual(defaults.block_tree_transfer_worker_count, 1)
+        self.assertEqual(defaults.disk_cache_read_thread_count, 16)
+        self.assertEqual(defaults.disk_cache_write_thread_count, 16)
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                config = KVCacheConfig()
+                config.btc_transfer_engine_async = enabled
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertIs(restored.btc_transfer_engine_async, enabled)
+
+    def test_version_twelve_preserves_layout_and_defaults_async_fields(self):
+        source = KVCacheConfig()
+        source.enable_crc = False
+        source.block_tree_transfer_worker_count = 7
+        source.kvcm_task_timeout_ms = 23000
+        source.kvcm_read_backend_type = 2
+        source.kvcm_min_replica_count = 3
+        source.kv_cache_event_snapshot_interval_ms = 45000
+        source.btc_crc_slot_count = 3
+        source.btc_transfer_engine_async = False
+        source.disk_cache_read_thread_count = 3
+        source.disk_cache_write_thread_count = 5
+        state = source.__getstate__()
+        previous = (state[0], 12, *state[2:84])
+        original = tuple(list(previous))
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(previous, original)
+        self.assertEqual(restored.__getstate__()[2:84], previous[2:])
+        self.assertEqual(restored.btc_crc_slot_count, 8)
+        self.assertTrue(restored.btc_transfer_engine_async)
+        self.assertEqual(restored.disk_cache_read_thread_count, 16)
+        self.assertEqual(restored.disk_cache_write_thread_count, 16)
+        self.assertEqual(restored.__getstate__()[:2], ("KVCacheConfig", 13))
 
     def test_tail_and_pool_configuration_survives_worker_round_trips(self):
         config = KVCacheConfig()

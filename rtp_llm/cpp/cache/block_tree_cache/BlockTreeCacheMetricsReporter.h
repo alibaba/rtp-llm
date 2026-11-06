@@ -164,6 +164,10 @@ public:
                                int64_t     latency_us) const noexcept;
     void reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
     void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
+    // Buffered, bounded and nonblocking on the WorkLoop owner. Rejections before
+    // admission are stage failures, not consumed queue tasks. Availability follows
+    // the existing stage metrics switch; no buffer is created when it is off.
+    void reportWorkLoopQueueWait(Tier source, Tier target, int64_t latency_us) const noexcept;
 
 private:
     struct PoolIOSample {

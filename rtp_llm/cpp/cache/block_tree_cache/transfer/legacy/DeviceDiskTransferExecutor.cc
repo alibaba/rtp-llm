@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceDiskTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceDiskTransferExecutor.h"
 
 #include <algorithm>
 #include <exception>
@@ -10,8 +10,8 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/HostDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
@@ -144,8 +144,16 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
         const auto transfer_id = batch_task.traceId();
         auto       batch_timer = TransferStageTimer::create(
             metrics_reporter_, "worker_batch_total", request_id, begin, end, world_rank_, "worker_batch", transfer_id);
-        auto staging_timer = TransferStageTimer::create(
-            metrics_reporter_, "staging_wait", request_id, begin, end, world_rank_, "worker_batch", transfer_id, {}, AsyncProfileKind::Wait);
+        auto staging_timer = TransferStageTimer::create(metrics_reporter_,
+                                                        "staging_wait",
+                                                        request_id,
+                                                        begin,
+                                                        end,
+                                                        world_rank_,
+                                                        "worker_batch",
+                                                        transfer_id,
+                                                        {},
+                                                        AsyncProfileKind::Wait);
         pool->requestBatch(
             end - begin,
             deadline,
@@ -170,7 +178,7 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
                             ErrorInfo(timed_out ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION,
                                       std::string(timed_out ?
                                                       "disk-to-device staging admission timed out, descriptor_range=[" :
-                                                      "disk-to-device staging admission cancelled, descriptor_range=[")
+                                                      "di sk-to-device staging admission cancelled, descriptor_range=[")
                                           + std::to_string(begin) + "," + std::to_string(end) + ")"),
                             CacheCopyError::NOT_EXECUTED),
                         indices);
@@ -180,15 +188,15 @@ DeviceDiskTransferExecutor::executeDiskToDevice(TransferTask task, const std::ve
                 auto batch_leases = std::make_shared<HostStagingBlockPool::HostStagingBlockBatch>(std::move(*leases));
                 const int64_t queue_begin = currentTimeUs();
                 auto          queue_timer = TransferStageTimer::create(metrics_reporter_,
-                                                                       "transfer_queue_wait",
-                                                                       request_id,
-                                                                       begin,
-                                                                       end,
-                                                                       world_rank_,
-                                                                       "worker_batch",
-                                                                       transfer_id,
+                                                              "transfer_queue_wait",
+                                                              request_id,
+                                                              begin,
+                                                              end,
+                                                              world_rank_,
+                                                              "worker_batch",
+                                                              transfer_id,
                                                                        {},
-                                                                       AsyncProfileKind::Wait);
+                                                              AsyncProfileKind::Wait);
                 auto on_timeout = [this, stage_state, indices, begin, end, queue_begin, queue_timer, batch_timer]() {
                     queue_timer.finish(false);
                     batch_timer.finish(false);
@@ -316,8 +324,16 @@ std::shared_ptr<TransferAsyncContext> DeviceDiskTransferExecutor::executeDeviceT
     const auto      transfer_id   = task.traceId();
     auto            total         = TransferStageTimer::create(
         metrics_reporter_, "worker_batch_total", request_id, 0, 1, world_rank_, "worker_batch", transfer_id, identity);
-    auto staging = TransferStageTimer::create(
-        metrics_reporter_, "staging_wait", request_id, 0, 1, world_rank_, "worker_batch", transfer_id, identity, AsyncProfileKind::Wait);
+    auto       staging  = TransferStageTimer::create(metrics_reporter_,
+                                              "staging_wait",
+                                              request_id,
+                                              0,
+                                              1,
+                                              world_rank_,
+                                              "worker_batch",
+                                              transfer_id,
+                                              identity,
+                                              AsyncProfileKind::Wait);
     const auto complete = [context, total](TransferResult result) {
         total.finish(result.ok());
         context->complete(std::move(result));
@@ -341,15 +357,15 @@ std::shared_ptr<TransferAsyncContext> DeviceDiskTransferExecutor::executeDeviceT
             auto batch_leases = std::make_shared<HostStagingBlockPool::HostStagingBlockBatch>(std::move(*leases));
             const int64_t queue_begin = currentTimeUs();
             auto          queue       = TransferStageTimer::create(metrics_reporter_,
-                                                                   "transfer_queue_wait",
-                                                                   request_id,
-                                                                   0,
-                                                                   1,
-                                                                   world_rank_,
-                                                                   "worker_batch",
-                                                                   transfer_id,
-                                                                   identity,
-                                                                   AsyncProfileKind::Wait);
+                                                    "transfer_queue_wait",
+                                                    request_id,
+                                                    0,
+                                                    1,
+                                                    world_rank_,
+                                                    "worker_batch",
+                                                    transfer_id,
+                                                    identity,
+                                                    AsyncProfileKind::Wait);
             auto          on_timeout  = [this, complete, queue_begin, queue]() {
                 queue.finish(false);
                 if (metrics_reporter_ != nullptr) {
@@ -384,14 +400,14 @@ std::shared_ptr<TransferAsyncContext> DeviceDiskTransferExecutor::executeDeviceT
                         const std::vector<TransferDescriptor> descriptors{descriptor};
                         const std::vector<const GroupSet*>    group_sets{group_set_ptr};
                         TransferStageTimer                    copy(metrics_reporter_,
-                                                                   "d2h",
-                                                                   request_id,
-                                                                   0,
-                                                                   1,
-                                                                   world_rank_,
-                                                                   "worker_batch",
-                                                                   transfer_id,
-                                                                   identity);
+                                                "d2h",
+                                                request_id,
+                                                0,
+                                                1,
+                                                world_rank_,
+                                                "worker_batch",
+                                                transfer_id,
+                                                identity);
                         auto result = device_host_executor_.executeBatch(hosts, descriptors, group_sets);
                         copy.finish(result.ok());
                         if (!result.ok()) {

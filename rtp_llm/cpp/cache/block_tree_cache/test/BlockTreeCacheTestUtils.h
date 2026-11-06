@@ -25,6 +25,8 @@ class BroadcastManager;
 
 namespace rtp_llm::block_tree_cache_test {
 
+std::vector<GroupSetPtr> workLoopTestGroups(std::vector<GroupSetPtr> groups);
+
 struct DeviceLayerBufferSpec {
     size_t kv_bytes{0};
     size_t scale_bytes{0};

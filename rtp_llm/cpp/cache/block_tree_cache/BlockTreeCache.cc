@@ -125,7 +125,7 @@ BlockTreeCache::~BlockTreeCache() {
     // Task-body idleness does not imply asynchronous RPC/transfer completion.
     // Keep dispatcher and cache state alive until transfer callbacks return,
     // then drain the settlement tasks those callbacks submitted.
-    transfer_dispatcher_->drainTransfers();
+    transfer_dispatcher_->shutdown();
     task_pool_->waitForIdle();
     transfer_dispatcher_.reset();
     task_pool_.reset();
@@ -193,8 +193,14 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
     StorageWriteTask storage_write;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length,
-                                            request_id, remote_reuse_begin, remote_reuse_end);
+        storage_write = storer_.storeLocked(cache_keys,
+                                            resources,
+                                            target_tier,
+                                            is_resident,
+                                            resident_prefix_length,
+                                            request_id,
+                                            remote_reuse_begin,
+                                            remote_reuse_end);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
@@ -248,7 +254,7 @@ void BlockTreeCache::reportMetrics() const {
     VictimSelectionMetrics                         victim_selection;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        snapshots = metrics_reporter_->collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
+        snapshots        = metrics_reporter_->collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
         victim_selection = evictor_.takeVictimSelectionMetrics();
     }
     metrics_reporter_->reportEvictableCandidateCount(snapshots);
