@@ -225,6 +225,13 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         self.renormalize = True
         self.use_fp8_w8a8 = True
         self.use_block_quant = True
+        # Per-process pinned staging buffers for the eager expert-count path:
+        # one for the device->host routed counts, one for the host->device
+        # padded counts.  A plain ``.cpu()``/``torch.tensor(pin_memory=True)``
+        # pays a pageable staging copy and a fresh cudaHostAlloc every layer;
+        # these buffers are reallocated only when the expert count changes.
+        self._expert_counts_pinned = None
+        self._padded_counts_pinned = None
 
         self.masked_max_token_num = config.masked_max_token_num
         self.enable_cuda_graph = config.enable_cuda_graph
@@ -641,6 +648,34 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             )
             return CombineForwardPayload(fused_expert_output=gather_out)
 
+    def _read_expert_counts_host(
+        self, num_recv_tokens_per_expert: torch.Tensor
+    ) -> list:
+        """Blocking D2H of the routed expert counts over a cached pinned buffer.
+
+        The eager path reads the counts once per layer.  A plain ``.cpu()``
+        pays a pageable staging copy on top of the unavoidable stream sync;
+        one non-blocking copy into a persistent pinned buffer keeps the
+        transfer itself async, and the sync below waits for the producing
+        router/recompute kernels queued on the current stream (any earlier
+        H2D from the padded-counts buffer has also drained by then, so
+        overwriting that buffer next layer stays ordered).
+        """
+        if (
+            self._expert_counts_pinned is None
+            or self._expert_counts_pinned.shape != num_recv_tokens_per_expert.shape
+            or self._expert_counts_pinned.dtype != num_recv_tokens_per_expert.dtype
+        ):
+            self._expert_counts_pinned = torch.empty(
+                num_recv_tokens_per_expert.shape,
+                dtype=num_recv_tokens_per_expert.dtype,
+                pin_memory=True,
+                device="cpu",
+            )
+        self._expert_counts_pinned.copy_(num_recv_tokens_per_expert, non_blocking=True)
+        torch.cuda.current_stream(num_recv_tokens_per_expert.device).synchronize()
+        return self._expert_counts_pinned.tolist()
+
     def execute_contiguous(
         self,
         payload: ExpertForwardPayload,
@@ -721,8 +756,8 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 payload.expert_tokens_meta.expert_num_tokens_cpu
             )
             if num_recv_tokens_per_expert_cpu is None:
-                num_recv_tokens_per_expert_cpu = (
-                    num_recv_tokens_per_expert.cpu().tolist()
+                num_recv_tokens_per_expert_cpu = self._read_expert_counts_host(
+                    num_recv_tokens_per_expert
                 )
             elif isinstance(num_recv_tokens_per_expert_cpu, torch.Tensor):
                 num_recv_tokens_per_expert_cpu = num_recv_tokens_per_expert_cpu.tolist()
@@ -778,12 +813,31 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 align_up_math(int(x), expert_alignment)
                 for x in num_recv_tokens_per_expert_cpu
             ]
-            scatter_num_tokens_per_expert = torch.tensor(
-                padded_num_tokens_per_expert,
-                dtype=torch.int32,
-                pin_memory=True,
-                device="cpu",
-            ).cuda(non_blocking=True)
+            # Reuse one persistent pinned buffer instead of a per-layer
+            # cudaHostAlloc; the counts read above synchronized the stream,
+            # so the previous layer's H2D from this buffer has drained
+            # before the host rewrites it.
+            if (
+                self._padded_counts_pinned is None
+                or self._padded_counts_pinned.numel()
+                != len(padded_num_tokens_per_expert)
+            ):
+                self._padded_counts_pinned = torch.empty(
+                    len(padded_num_tokens_per_expert),
+                    dtype=torch.int32,
+                    pin_memory=True,
+                    device="cpu",
+                )
+            self._padded_counts_pinned.copy_(
+                torch.tensor(
+                    padded_num_tokens_per_expert,
+                    dtype=torch.int32,
+                ),
+                non_blocking=False,
+            )
+            scatter_num_tokens_per_expert = self._padded_counts_pinned.cuda(
+                non_blocking=True
+            )
             scatter_alignment = 1
         expert_start_loc = torch.empty_like(scatter_num_tokens_per_expert)
         ep_scatter(
