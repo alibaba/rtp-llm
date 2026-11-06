@@ -742,6 +742,8 @@ class KVCacheConfig:
     dsv4_hca_state_pool_blocks: int
     dsv4_fixed_pool_use_memory: bool
     block_tree_full_prefix_scan_interval_ms: int
+    btc_transfer_engine_async: bool
+    btc_crc_slot_count: int
     block_tree_transfer_worker_count: int
     block_tree_business_queue_max_size: int
     block_tree_transfer_queue_max_size: int
@@ -771,6 +773,8 @@ class KVCacheConfig:
     disk_cache_paths: str
     disk_cache_size_mb: int
     disk_cache_buffered_io: bool
+    disk_cache_read_thread_count: int
+    disk_cache_write_thread_count: int
     disk_cache_sync_timeout_ms: int
     disk_cache_evict_timeout_ms: int
     disk_cache_staging_block_count: int

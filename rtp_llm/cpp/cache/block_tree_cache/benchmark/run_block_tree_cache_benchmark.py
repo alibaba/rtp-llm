@@ -857,6 +857,7 @@ def run_case(
         "case": case.name,
         "suite": case.suite,
         "subcommand": case.subcommand,
+        "expected_transfer_implementation": case.transfer_implementation,
         "status": "unknown",
         "repetitions": [],
         "perf": {"status": "skipped"},
@@ -1118,6 +1119,7 @@ def apply_task_pool_overrides(
                     case,
                     name=f"{case.name}_tp{task_pool_size}",
                     params=params,
+                    transfer_implementation=case.transfer_implementation,
                 )
             )
     return expanded_cases

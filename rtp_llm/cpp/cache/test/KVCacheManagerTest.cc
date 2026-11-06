@@ -2312,15 +2312,15 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsHighestRankErrorWithoutRecordIn
                      std::chrono::seconds(30)),
         manager->blockTreeCache()->groupSets()));
 
-    engine->copy_errors = {CacheCopyError::IO_FAILED, CacheCopyError::CRC_COMPUTE_FAILED};
+    engine->copy_errors = {CacheCopyError::IO_FAILED, CacheCopyError::COPY_FAILED};
     FunctionResponsePB response;
     ASSERT_TRUE(manager->executeFunction(request, response));
-    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::CRC_COMPUTE_FAILED);
+    EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::IO_FAILED);
     ASSERT_EQ(response.mem_response().block_errors_size(), 2);
     EXPECT_EQ(response.mem_response().block_errors(0), MemoryOperationResponsePB::IO_FAILED);
-    EXPECT_EQ(response.mem_response().block_errors(1), MemoryOperationResponsePB::CRC_COMPUTE_FAILED);
+    EXPECT_EQ(response.mem_response().block_errors(1), MemoryOperationResponsePB::COPY_FAILED);
 
-    engine->copy_errors = {CacheCopyError::CRC_MISMATCH, CacheCopyError::CRC_COMPUTE_FAILED};
+    engine->copy_errors = {CacheCopyError::CRC_MISMATCH, CacheCopyError::IO_FAILED};
     ASSERT_TRUE(manager->executeFunction(request, response));
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::CRC_MISMATCH);
 

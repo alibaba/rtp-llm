@@ -19,6 +19,18 @@ namespace rtp_llm {
 
 struct TreeNode;
 
+// Transfer lanes describe cache movement, independently of business priority.
+enum class TransferDirection {
+    LOAD,
+    OFFLOAD,
+};
+
+// Cache promotion is Disk -> Host -> Device; keep backend routing consistent.
+inline bool isLoadTransfer(Tier source, Tier target) {
+    return (source == Tier::DISK && (target == Tier::HOST || target == Tier::DEVICE))
+           || (source == Tier::HOST && target == Tier::DEVICE);
+}
+
 enum class TransferStatus {
     OK,
     INVALID_ARGS,
@@ -26,7 +38,6 @@ enum class TransferStatus {
     DISK_IO_ERROR,
     RESOURCE_EXHAUSTED,
     CRC_MISMATCH,
-    CRC_COMPUTE_ERROR,
 };
 
 // Diagnostic categories for the existing cache-copy metric. They do not change
@@ -40,7 +51,6 @@ enum class CacheCopyError : uint8_t {
     INVALID_REQUEST,
     IO_FAILED,
     RPC_FAILED,
-    CRC_COMPUTE_FAILED,
     CRC_MISMATCH,
 };
 
@@ -58,8 +68,6 @@ inline const char* cacheCopyErrorName(CacheCopyError error) {
             return "IO_FAILED";
         case CacheCopyError::RPC_FAILED:
             return "RPC_FAILED";
-        case CacheCopyError::CRC_COMPUTE_FAILED:
-            return "CRC_COMPUTE_FAILED";
         case CacheCopyError::CRC_MISMATCH:
             return "CRC_MISMATCH";
     }
@@ -74,8 +82,6 @@ inline CacheCopyError cacheCopyErrorFor(TransferStatus status) {
             return CacheCopyError::INVALID_REQUEST;
         case TransferStatus::DISK_IO_ERROR:
             return CacheCopyError::IO_FAILED;
-        case TransferStatus::CRC_COMPUTE_ERROR:
-            return CacheCopyError::CRC_COMPUTE_FAILED;
         case TransferStatus::CRC_MISMATCH:
             return CacheCopyError::CRC_MISMATCH;
         default:
@@ -93,8 +99,6 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device block transfer failed");
         case TransferStatus::DISK_IO_ERROR:
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "disk block transfer failed");
-        case TransferStatus::CRC_COMPUTE_ERROR:
-            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "cache CRC computation failed");
         case TransferStatus::CRC_MISMATCH:
             return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "cache integrity verification failed");
         case TransferStatus::RESOURCE_EXHAUSTED:
@@ -157,13 +161,6 @@ struct TransferResult {
     ErrorInfo                   status{ErrorInfo::OkStatus()};
     CacheCopyError              copy_error{CacheCopyError::NONE};
     std::vector<CacheCopyError> block_errors;
-};
-
-struct DeviceHostCopyOptions {
-    size_t staged_sm_min_tile_count{16};
-    size_t staged_sm_min_bytes{64 * 1024};
-    bool   staged_sm_copy_enabled{true};
-    bool   cuda_batch_copy_enabled{true};
 };
 
 struct HostBufferView {
@@ -317,6 +314,10 @@ private:
     }
 };
 
+// Shared task description across preparation, RPC grouping and local batching.
+// Builders resolve descriptors before submission; execution entrances validate
+// their batch constraints. Executors own their copy and do not mutate it.
+// Results use the current descriptor order; the dispatcher owns parent-index maps.
 class TransferTask {
 public:
     using Clock = std::chrono::steady_clock;

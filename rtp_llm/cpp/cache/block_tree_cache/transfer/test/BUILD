@@ -40,9 +40,13 @@ cc_library(
 cc_test(
     name = "block_transfer_dispatcher_test",
     exec_properties = {"gpu": "L20_CU13"},
-    srcs = ["BlockTransferDispatcherTest.cc"],
+    testonly = True,
+    srcs = [
+        "BlockTransferDispatcherTest.cc",
+        "//rtp_llm/cpp/cache/block_tree_cache/transfer/legacy:TransferExecutorTest.cc",
+    ],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils"],
     tags = ["L20_CU13"],
 )
 
@@ -181,4 +185,20 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+cc_test(
+    name = "transfer_work_loop_test",
+    srcs = ["TransferWorkLoopTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_transfer_engine_test_utils",
+        "@havenask//aios/autil:env_util",
+        "//rtp_llm/cpp/utils:async_profile_trace",
+    ],
+    exec_properties = select({
+        "//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13"},
+        "//conditions:default": {"gpu": "H20_CU13"},
+    }),
+    tags = ["exclusive-if-local"],
 )

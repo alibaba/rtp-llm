@@ -773,7 +773,6 @@ message MemoryOperationResponsePB {
         COPY_FAILED = 1;
         INVALID_REQUEST = 2;
         IO_FAILED = 3;
-        CRC_COMPUTE_FAILED = 4;
         CRC_MISMATCH = 5;
         NOT_EXECUTED = 6;
     }

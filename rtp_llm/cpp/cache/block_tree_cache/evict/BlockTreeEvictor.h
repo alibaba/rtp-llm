@@ -210,7 +210,7 @@ private:
     std::unique_ptr<EvictionTaskRunner> task_runner_;
     int                                 host_timeout_ms_{0};
     int                                 disk_timeout_ms_{0};
-    size_t                              max_descriptors_per_batch_{8};
+    size_t                              max_descriptors_per_batch_{32};
 
     // Heap ownership: vector index is the declared group_set_id.
     std::vector<GroupSetTierHeaps>          heaps_;

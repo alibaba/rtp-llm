@@ -481,6 +481,13 @@ void BlockTreeCacheMetricsReporter::reportQueueBacklog(const BlockTreeQueueSizes
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
 }
 
+void BlockTreeCacheMetricsReporter::reportWorkLoopQueueWait(Tier    source,
+                                                            Tier    target,
+                                                            int64_t latency_us) const noexcept {
+    if (stage_metrics_ && latency_us >= 0)
+        stage_metrics_->recordQueueWait(tierName(source), tierName(target), latency_us);
+}
+
 void BlockTreeCacheMetricsReporter::maybeReportCopyError(Tier                  source_tier,
                                                          Tier                  target_tier,
                                                          const TransferResult& result) const {

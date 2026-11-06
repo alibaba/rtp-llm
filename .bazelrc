@@ -145,6 +145,9 @@ build:cuda13_arm --host_copt=-Wno-missing-field-initializers
 # can choose CUDA-13-specific dependencies without being tied to the ARM
 # path's using_cuda13_arm.
 build:cuda13 --config=cuda13_base
+# GCC12 diagnoses jsoncpp 1.8.4's move/swap union as uninitialized at -O2.
+# Keep the diagnostic visible without blocking targets that link the cache factory.
+build:cuda13 --per_file_copt=external/jsoncpp_git/src/lib_json/json_value.cpp@-Wno-error=uninitialized
 build:cuda13 --cpu=k8
 build:cuda13 --host_cpu=k8
 # Same -Wno-* set as cuda13_arm — gcc 10 (al8) on the CUDA 13 toolchain is

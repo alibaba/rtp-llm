@@ -315,6 +315,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_cache_layout",
         ":batch_kv_cache_resource",
         ":cache_types",
         ":coordinator_cache_manager",

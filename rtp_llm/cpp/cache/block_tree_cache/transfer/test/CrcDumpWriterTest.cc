@@ -128,23 +128,6 @@ TEST_F(CrcDumpWriterTest, SavesCheckedGpuBytesAndLaterCpuMutationSeparately) {
         EXPECT_NE(manifest.find(field), std::string::npos) << field << "\n" << manifest;
 }
 
-TEST_F(CrcDumpWriterTest, ComputeFailureKeepsEvidenceWithoutInventingAValidChecksumOrCheckedFooter) {
-    CrcDumpWriter writer(2, root_.string());
-    auto          observed            = failure();
-    observed.status                   = CrcCopyStatus::CRC_COMPUTE_ERROR;
-    observed.nvcomp_status            = 7;
-    observed.checked_footer_available = false;  // Failed store seals an invalid candidate; it checks no stored footer.
-    const auto path                   = dump(writer, observed, {{"direction", "DEVICE->HOST"}});
-    ASSERT_FALSE(path.empty());
-    EXPECT_EQ(readBytes(fs::path(path) / "cpu.bin"), observed.cpu_snapshot);
-    EXPECT_FALSE(fs::exists(fs::path(path) / "checked_footer.bin"));
-    const auto manifest = readText(fs::path(path) / "manifest.json");
-    EXPECT_NE(manifest.find("\"failure_stage\": \"crc_compute\""), std::string::npos);
-    EXPECT_NE(manifest.find("\"actual_crc32c\": \"unavailable\""), std::string::npos);
-    EXPECT_NE(manifest.find("\"expected_crc32c\": \"unavailable\""), std::string::npos);
-    EXPECT_NE(manifest.find("\"gpu_crc_status\": \"7\""), std::string::npos);
-}
-
 TEST_F(CrcDumpWriterTest, CaptureFailureStillWritesVerdictAndExplicitMissingSnapshot) {
     CrcDumpWriter writer(0, root_.string());
     auto          observed = failure();

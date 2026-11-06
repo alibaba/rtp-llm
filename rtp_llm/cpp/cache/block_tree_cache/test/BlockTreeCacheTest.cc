@@ -1547,7 +1547,6 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
                              CacheCopyError::INVALID_REQUEST,
                              CacheCopyError::IO_FAILED,
                              CacheCopyError::RPC_FAILED,
-                             CacheCopyError::CRC_COMPUTE_FAILED,
                              CacheCopyError::CRC_MISMATCH}) {
         for (auto descriptor : {TransferDescriptor::deviceToHost(0, {1}, 2),
                                 TransferDescriptor::hostToDevice(0, 2, {1}),
@@ -1560,10 +1559,9 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorMetricKeepsLegacyNameDirectionsAndDiagn
     }
     auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
     EXPECT_EQ(metric->GetMetricType(), kmonitor::QPS);
-    EXPECT_EQ(metricSeriesCount(metric), 24u);
+    EXPECT_EQ(metricSeriesCount(metric), 20u);
     for (const char* direction : {"TO_GPU", "FROM_GPU", "TO_DISK", "FROM_DISK"}) {
-        for (const char* error :
-             {"COPY_FAILED", "INVALID_REQUEST", "IO_FAILED", "RPC_FAILED", "CRC_COMPUTE_FAILED", "CRC_MISMATCH"}) {
+        for (const char* error : {"COPY_FAILED", "INVALID_REQUEST", "IO_FAILED", "RPC_FAILED", "CRC_MISMATCH"}) {
             auto tags = common_tags;
             tags.AddTag("copy_direction", direction);
             tags.AddTag("error_type", error);
@@ -1596,20 +1594,17 @@ TEST(BlockTreeCacheMetricsTest, CopyErrorsAreReportedOnlyForFailedLogicalCopiesW
 }
 
 TEST(BlockTreeCacheMetricsTest, ConfirmedCrcErrorWinsOverOtherBatchRpcFailureOnce) {
-    for (bool mismatch : {false, true}) {
-        auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
-        BlockTreeCacheMetricsReporter reporter(metrics_reporter);
-        const ErrorInfo               failure(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer failed");
-        TransferResult                result(failure, CacheCopyError::RPC_FAILED);
-        result.merge({failure, mismatch ? CacheCopyError::CRC_MISMATCH : CacheCopyError::CRC_COMPUTE_FAILED});
-        reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
-        auto* metric =
-            metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
-        EXPECT_EQ(metricSeriesCount(metric), 1u);
-        kmonitor::MetricsTags tags("copy_direction", "TO_GPU");
-        tags.AddTag("error_type", mismatch ? "CRC_MISMATCH" : "CRC_COMPUTE_FAILED");
-        EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 1);
-    }
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter);
+    const ErrorInfo               failure(ErrorCode::EXECUTION_EXCEPTION, "multi-rank transfer failed");
+    TransferResult                result(failure, CacheCopyError::RPC_FAILED);
+    result.merge({failure, CacheCopyError::CRC_MISMATCH});
+    reporter.maybeReportCopyError(Tier::HOST, Tier::DEVICE, result);
+    auto* metric = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
+    EXPECT_EQ(metricSeriesCount(metric), 1u);
+    kmonitor::MetricsTags tags("copy_direction", "TO_GPU");
+    tags.AddTag("error_type", "CRC_MISMATCH");
+    EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 1);
 }
 
 TEST(BlockTreeCacheMetricsTest, EvictionReferenceMetricKeepsLegacyAlias) {

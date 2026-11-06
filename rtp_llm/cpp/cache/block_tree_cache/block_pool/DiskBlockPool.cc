@@ -1,8 +1,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 
+#include <condition_variable>
+#include <limits>
+#include <mutex>
 #include <sstream>
+#include <type_traits>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -17,6 +22,60 @@ std::string buildFilePath(const std::string& dir, const BlockTreeDiskBlockPoolCo
 }
 
 }  // namespace
+
+struct BlockTreeDiskBlockPool::AsyncState {
+    using Callback = DiskIOExecutor::Callback;
+
+    void finish() {
+        std::lock_guard<std::mutex> lock(admission_mutex);
+        if (--pending_batches == 0)
+            cv.notify_all();
+    }
+
+    template<typename Request>
+    DiskBlockIOStatus
+    submit(DiskIOExecutor& executor, DiskBlockIO& io, std::vector<Request> requests, Callback callback) {
+        if (!callback)
+            return DiskBlockIOStatus::IO_ERROR;
+        std::unique_lock<std::mutex> lock(admission_mutex);
+        if (!accepting)
+            return DiskBlockIOStatus::IO_ERROR;
+        // Count before enqueue: completion may precede submit's return. Keep the
+        // file alive through callback return and destruction of its captures.
+        Callback done = [this, callback = std::move(callback)](DiskBlockIOStatus status) mutable {
+            try {
+                callback(status);
+            } catch (...) {
+                callback = nullptr;
+                finish();
+                throw;
+            }
+            callback = nullptr;
+            finish();
+        };
+        ++pending_batches;
+        DiskBlockIOStatus status;
+        try {
+            if constexpr (std::is_same_v<Request, DiskRead>) {
+                status = executor.asyncRead(io, std::move(requests), std::move(done));
+            } else {
+                status = executor.asyncWrite(io, std::move(requests), std::move(done));
+            }
+        } catch (...) {
+            if (--pending_batches == 0)
+                cv.notify_all();
+            throw;
+        }
+        if (status != DiskBlockIOStatus::OK && --pending_batches == 0)
+            cv.notify_all();
+        return status;
+    }
+
+    std::mutex              admission_mutex;
+    std::condition_variable cv;
+    size_t                  pending_batches{0};
+    bool                    accepting{false};
+};
 
 std::shared_ptr<const BlockTreeDiskBlockPoolConfig>
 BlockTreeDiskBlockPool::normalizeConfig(const std::shared_ptr<const BlockTreeDiskBlockPoolConfig>& config) {
@@ -51,9 +110,22 @@ BlockTreeDiskBlockPool::normalizeConfig(const std::shared_ptr<const BlockTreeDis
 
 BlockTreeDiskBlockPool::BlockTreeDiskBlockPool(std::shared_ptr<const BlockTreeDiskBlockPoolConfig> config,
                                                std::unique_ptr<DiskBlockIO>                        io):
-    IBlockPool(normalizeConfig(config)), io_(std::move(io)) {}
+    IBlockPool(normalizeConfig(config)), io_(std::move(io)), async_state_(std::make_unique<AsyncState>()) {}
 
-BlockTreeDiskBlockPool::~BlockTreeDiskBlockPool() = default;
+BlockTreeDiskBlockPool::~BlockTreeDiskBlockPool() {
+    close();
+}
+
+void BlockTreeDiskBlockPool::close() {
+    auto& state = *async_state_;
+    {
+        std::unique_lock<std::mutex> lock(state.admission_mutex);
+        state.accepting = false;
+        state.cv.wait(lock, [&] { return state.pending_batches == 0; });
+    }
+    if (io_)
+        io_->close();
+}
 
 const BlockTreeDiskBlockPoolConfig& BlockTreeDiskBlockPool::config() const {
     return configAs<BlockTreeDiskBlockPoolConfig>(BlockPoolType::DISK);
@@ -108,6 +180,10 @@ bool BlockTreeDiskBlockPool::init() {
                             file_path_.c_str(),
                             total_bytes);
 
+    {
+        std::lock_guard<std::mutex> lock(async_state_->admission_mutex);
+        async_state_->accepting = true;
+    }
     markInitialized();
     return true;
 }
@@ -142,14 +218,17 @@ BlockIOStatus BlockTreeDiskBlockPool::write(BlockIdxType block, const void* src,
     return status;
 }
 
-BlockIOStatus
-BlockTreeDiskBlockPool::read(const BlockIdList& blocks, const std::vector<void*>& dsts, size_t bytes_per_block) {
+template<typename Request, typename Buffer>
+BlockIOStatus BlockTreeDiskBlockPool::prepareBatch(const BlockIdList&         blocks,
+                                                   const std::vector<Buffer>& buffers,
+                                                   size_t                     bytes_per_block,
+                                                   std::vector<Request>&      requests) const {
     RTP_LLM_CHECK(initialized());
-    RTP_LLM_CHECK_WITH_INFO(blocks.size() == dsts.size(),
-                            "disk block pool [%s] batch read blocks/dsts size mismatch, blocks=[%zu] dsts=[%zu]",
+    RTP_LLM_CHECK_WITH_INFO(blocks.size() == buffers.size(),
+                            "disk block pool [%s] batch blocks/buffers size mismatch, blocks=[%zu] buffers=[%zu]",
                             poolName().c_str(),
                             blocks.size(),
-                            dsts.size());
+                            buffers.size());
     if (bytes_per_block == 0 || bytes_per_block > strideBytes()) {
         return BlockIOStatus::INVALID_SIZE;
     }
@@ -159,10 +238,19 @@ BlockTreeDiskBlockPool::read(const BlockIdList& blocks, const std::vector<void*>
         }
     }
 
-    std::vector<DiskRead> reads;
-    reads.reserve(blocks.size());
+    requests.reserve(blocks.size());
     for (size_t i = 0; i < blocks.size(); ++i) {
-        reads.push_back(DiskRead{blockOffset(blocks[i]), dsts[i], bytes_per_block});
+        requests.push_back(Request{blockOffset(blocks[i]), buffers[i], bytes_per_block});
+    }
+    return BlockIOStatus::OK;
+}
+
+BlockIOStatus
+BlockTreeDiskBlockPool::read(const BlockIdList& blocks, const std::vector<void*>& dsts, size_t bytes_per_block) {
+    std::vector<DiskRead> reads;
+    const auto            validation = prepareBatch(blocks, dsts, bytes_per_block, reads);
+    if (validation != BlockIOStatus::OK) {
+        return validation;
     }
     const auto status = mapStatus(io_->read(reads));
     if (status == BlockIOStatus::OK) {
@@ -173,31 +261,70 @@ BlockTreeDiskBlockPool::read(const BlockIdList& blocks, const std::vector<void*>
 
 BlockIOStatus
 BlockTreeDiskBlockPool::write(const BlockIdList& blocks, const std::vector<const void*>& srcs, size_t bytes_per_block) {
-    RTP_LLM_CHECK(initialized());
-    RTP_LLM_CHECK_WITH_INFO(blocks.size() == srcs.size(),
-                            "disk block pool [%s] batch write blocks/srcs size mismatch, blocks=[%zu] srcs=[%zu]",
-                            poolName().c_str(),
-                            blocks.size(),
-                            srcs.size());
-    if (bytes_per_block == 0 || bytes_per_block > strideBytes()) {
-        return BlockIOStatus::INVALID_SIZE;
-    }
-    for (const auto block : blocks) {
-        if (!validBlock(block)) {
-            return BlockIOStatus::INVALID_BLOCK;
-        }
-    }
-
     std::vector<DiskWrite> writes;
-    writes.reserve(blocks.size());
-    for (size_t i = 0; i < blocks.size(); ++i) {
-        writes.push_back(DiskWrite{blockOffset(blocks[i]), srcs[i], bytes_per_block});
+    const auto             validation = prepareBatch(blocks, srcs, bytes_per_block, writes);
+    if (validation != BlockIOStatus::OK) {
+        return validation;
     }
     const auto status = mapStatus(io_->write(writes));
     if (status == BlockIOStatus::OK) {
         write_bytes_.fetch_add(bytes_per_block * blocks.size(), std::memory_order_relaxed);
     }
     return status;
+}
+
+BlockIOStatus BlockTreeDiskBlockPool::asyncRead(DiskIOExecutor&           executor,
+                                                const BlockIdList&        blocks,
+                                                const std::vector<void*>& dsts,
+                                                size_t                    bytes_per_block,
+                                                Callback                  callback) {
+    if (!callback) {
+        return BlockIOStatus::IO_ERROR;
+    }
+    std::vector<DiskRead> reads;
+    const auto            validation = prepareBatch(blocks, dsts, bytes_per_block, reads);
+    if (validation != BlockIOStatus::OK) {
+        return validation;
+    }
+    const size_t bytes = bytes_per_block * blocks.size();
+    return mapStatus(async_state_->submit(
+        executor, *io_, std::move(reads), [this, bytes, callback = std::move(callback)](DiskBlockIOStatus status) {
+            if (status == DiskBlockIOStatus::OK) {
+                read_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+            }
+            callback(mapStatus(status));
+        }));
+}
+
+BlockIOStatus BlockTreeDiskBlockPool::asyncWrite(DiskIOExecutor&           executor,
+                                                 const BlockIdList&        blocks,
+                                                 const std::vector<void*>& srcs,
+                                                 size_t                    bytes_per_block,
+                                                 size_t                    storage_bytes,
+                                                 Callback                  callback) {
+    if (!callback)
+        return BlockIOStatus::IO_ERROR;
+    if (storage_bytes > bytes_per_block)
+        return BlockIOStatus::INVALID_SIZE;
+    std::vector<DiskWrite> writes;
+    const auto             validation = prepareBatch(blocks, srcs, bytes_per_block, writes);
+    if (validation != BlockIOStatus::OK)
+        return validation;
+    for (auto& request : writes) {
+        if (!request.buffer)
+            return BlockIOStatus::INVALID_SIZE;
+    }
+    for (size_t i = 0; i < writes.size(); ++i) {
+        writes[i].padding       = static_cast<uint8_t*>(srcs[i]) + storage_bytes;
+        writes[i].padding_bytes = bytes_per_block - storage_bytes;
+    }
+    const size_t bytes = bytes_per_block * blocks.size();
+    return mapStatus(async_state_->submit(
+        executor, *io_, std::move(writes), [this, bytes, callback = std::move(callback)](DiskBlockIOStatus status) {
+            if (status == DiskBlockIOStatus::OK)
+                write_bytes_.fetch_add(bytes, std::memory_order_relaxed);
+            callback(mapStatus(status));
+        }));
 }
 
 size_t BlockTreeDiskBlockPool::payloadBytes() const {
