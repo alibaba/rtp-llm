@@ -116,15 +116,15 @@ TEST(DiskIOExecutorConfigTest, ConvertsBatchBudgetsAndCapsFanoutAtDirectionWorke
     DiskIOExecutorConfig config;
     ASSERT_TRUE(config.setQueueSizesFromBatchCapacity(20000, 10000, 8));
     EXPECT_EQ(config.read_queue_size, 160000u);
-    EXPECT_EQ(config.write_queue_size, 80000u);
+    EXPECT_EQ(config.write_queue_size, 10000u);
     ASSERT_TRUE(config.setQueueSizesFromBatchCapacity(20000, 10000, 64));
     EXPECT_EQ(config.read_queue_size, 320000u);
-    EXPECT_EQ(config.write_queue_size, 160000u);
+    EXPECT_EQ(config.write_queue_size, 10000u);
     config.read_thread_count  = 3;
     config.write_thread_count = 5;
     ASSERT_TRUE(config.setQueueSizesFromBatchCapacity(14, 7, 9));
     EXPECT_EQ(config.read_queue_size, 42u);
-    EXPECT_EQ(config.write_queue_size, 35u);
+    EXPECT_EQ(config.write_queue_size, 7u);
 }
 
 TEST(DiskIOExecutorConfigTest, RejectsInvalidOrOverflowingBudgetsWithoutPartialUpdates) {
@@ -154,31 +154,45 @@ TEST(DiskIOExecutorConfigTest, EnforcesAutilCircularQueueCapacityLimit) {
     EXPECT_EQ(config.write_queue_size, 1u);
 }
 
-TEST(DiskIOExecutorTest, SingleBatchUsesMultipleWorkersInEachDirection) {
+TEST(DiskIOExecutorTest, ReadBatchFansOutAndWriteBatchUsesOneWorkerInOffsetOrder) {
     for (bool write : {false, true}) {
-        Signal         started;
-        Signal         release;
-        Completion     done;
-        FakeDiskIO     io;
-        DiskIOExecutor executor(smallConfig());
-        io.operation = [&](bool actual_write, uint64_t) {
+        Signal                started;
+        Signal                release;
+        Completion            done, queued;
+        FakeDiskIO            io;
+        DiskIOExecutor        executor(smallConfig());
+        std::mutex            mutex;
+        std::vector<uint64_t> offsets;
+        io.operation = [&](bool actual_write, uint64_t offset) {
             EXPECT_EQ(actual_write, write);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                offsets.push_back(offset);
+            }
             started.arrive();
             EXPECT_TRUE(release.wait());
             return DiskBlockIOStatus::OK;
         };
         ASSERT_EQ(io.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
         char       buffer = 0;
-        const auto status = write ? executor.asyncWrite(io, {{0, &buffer, 1}, {1, &buffer, 1}}, done.callback()) :
+        const auto status = write ? executor.asyncWrite(io, {{1, &buffer, 1}, {0, &buffer, 1}}, done.callback()) :
                                     executor.asyncRead(io, {{0, &buffer, 1}, {1, &buffer, 1}}, done.callback());
         EXPECT_EQ(status, DiskBlockIOStatus::OK);
-        EXPECT_TRUE(started.wait(2));
+        EXPECT_TRUE(started.wait(write ? 1 : 2));
+        if (write) {
+            // A second worker stays available while this batch's first write is blocked.
+            EXPECT_EQ(executor.asyncWrite(io, {}, queued.callback()), DiskBlockIOStatus::OK);
+            EXPECT_EQ(queued.get(), DiskBlockIOStatus::OK);
+        }
         EXPECT_EQ(done.calls, 0u);
         release.arrive();
         EXPECT_EQ(done.get(), DiskBlockIOStatus::OK);
         executor.stop();
         io.close();
         EXPECT_EQ(done.calls, 1u);
+        if (write) {
+            EXPECT_EQ(offsets, (std::vector<uint64_t>{0, 1}));
+        }
     }
 }
 
@@ -556,7 +570,7 @@ TEST_P(PosixDiskIOAsyncTest, RoundTripValidationDrainAndReopen) {
     for (size_t i = 0; i < sizeof(source); ++i) {
         source[i] = static_cast<char>(i % 251);
     }
-    ASSERT_EQ(executor.asyncWrite(io, {{0, source, 4096}, {4096, source + 4096, 4096}}, write.callback()),
+    ASSERT_EQ(executor.asyncWrite(io, {{4096, source + 4096, 4096}, {0, source, 4096}}, write.callback()),
               DiskBlockIOStatus::OK);
     EXPECT_EQ(write.get(), DiskBlockIOStatus::OK);
     ASSERT_EQ(executor.asyncRead(io, {{0, destination, 4096}, {4096, destination + 4096, 4096}}, read.callback()),

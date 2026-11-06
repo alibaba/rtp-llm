@@ -75,7 +75,7 @@ struct BlockTreeCacheConfig {
     // Legacy: rank-wide byte budget measured in maximum-stride blocks.
     size_t device_disk_staging_block_count{128};
     // Shared descriptor batching limit for watermark planning and all transfer directions.
-    size_t max_descriptors_per_transfer_batch{8};
+    size_t max_descriptors_per_transfer_batch{32};
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.

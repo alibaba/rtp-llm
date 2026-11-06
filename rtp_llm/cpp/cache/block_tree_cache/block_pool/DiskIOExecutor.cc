@@ -15,16 +15,15 @@ namespace rtp_llm {
 bool DiskIOExecutorConfig::setQueueSizesFromBatchCapacity(size_t read_batches,
                                                           size_t write_batches,
                                                           size_t max_blocks_per_batch) {
-    const size_t read_tasks  = std::min(max_blocks_per_batch, read_thread_count);
-    const size_t write_tasks = std::min(max_blocks_per_batch, write_thread_count);
+    const size_t read_tasks = std::min(max_blocks_per_batch, read_thread_count);
     // autil::CircularQueue requires capacity < INT32_MAX.
     constexpr size_t max_queue_size = std::numeric_limits<int32_t>::max() - 1;
-    if (read_batches == 0 || write_batches == 0 || read_tasks == 0 || write_tasks == 0
-        || read_batches > max_queue_size / read_tasks || write_batches > max_queue_size / write_tasks) {
+    if (read_batches == 0 || write_batches == 0 || read_tasks == 0 || write_thread_count == 0
+        || read_batches > max_queue_size / read_tasks || write_batches > max_queue_size) {
         return false;
     }
     read_queue_size  = read_batches * read_tasks;
-    write_queue_size = write_batches * write_tasks;
+    write_queue_size = write_batches;
     return true;
 }
 
@@ -57,25 +56,31 @@ struct DiskIOExecutor::State {
         }
 
         void process(DiskBlockIO& io) {
-            while (true) {
-                size_t index;
-                {
-                    std::lock_guard<std::mutex> lock(mutex);
-                    if (status != DiskBlockIOStatus::OK || next == requests.size()) {
-                        break;
-                    }
-                    index = next++;
-                }
-                const auto&       request = requests[index];
-                DiskBlockIOStatus result;
-                if constexpr (std::is_same_v<Request, DiskRead>) {
-                    result = io.read(request.offset, request.buffer, request.bytes);
-                } else {
-                    result = io.write(request.offset, request.buffer, request.bytes);
-                }
+            if constexpr (std::is_same_v<Request, DiskWrite>) {
+                // One worker owns the whole write batch. Keep buffers paired with their file offsets.
+                std::sort(requests.begin(), requests.end(), [](const DiskWrite& lhs, const DiskWrite& rhs) {
+                    return lhs.offset < rhs.offset;
+                });
+                const auto result = io.write(requests);
                 if (result != DiskBlockIOStatus::OK) {
                     fail(result);
-                    break;
+                }
+            } else {
+                while (true) {
+                    size_t index;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex);
+                        if (status != DiskBlockIOStatus::OK || next == requests.size()) {
+                            break;
+                        }
+                        index = next++;
+                    }
+                    const auto& request = requests[index];
+                    const auto  result  = io.read(request.offset, request.buffer, request.bytes);
+                    if (result != DiskBlockIOStatus::OK) {
+                        fail(result);
+                        break;
+                    }
                 }
             }
         }
@@ -159,7 +164,10 @@ struct DiskIOExecutor::State {
         }
         // Register all participants before any worker can finish.
         std::lock_guard<std::mutex> batch_lock(batch->mutex);
-        const size_t task_count = std::max(size_t{1}, std::min(batch->requests.size(), pool->getThreadNum()));
+
+        const size_t task_count = std::is_same_v<Request, DiskRead> ?
+                                      std::max(size_t{1}, std::min(batch->requests.size(), pool->getThreadNum())) :
+                                      1;
         for (size_t i = 0; i < task_count; ++i) {
             try {
                 const auto error = pool->pushTask([batch, &io] { batch->run(io); }, false, false);

@@ -21,7 +21,7 @@ public:
 
     BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                             std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine         = nullptr,
-                            size_t                                        max_descriptors_per_batch = 8);
+                            size_t                                        max_descriptors_per_batch = 32);
     ~BlockTransferDispatcher();
 
     // Requests are grouped and split locally before entering either engine.
@@ -64,7 +64,7 @@ private:
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
-    size_t                                        max_descriptors_per_batch_{8};
+    size_t                                        max_descriptors_per_batch_{32};
     mutable std::mutex                            completion_mutex_;
     mutable std::condition_variable               completion_cv_;
     mutable size_t                                inflight_transfers_{0};
