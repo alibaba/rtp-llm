@@ -46,7 +46,10 @@ private:
                           const std::function<uint64_t()> &randomDraw = {});
     bool applyQueueOverloadLimit(
         const std::shared_ptr<MasterScheduleContextData> &context,
-        const std::function<uint64_t()> &randomDraw = {});
+        const std::function<uint64_t()> &randomDraw = {},
+        bool forceExecutionUtilization = false);
+    void updateExecutionUtilization(const NaviSchedScheduleContext &context,
+                                    bool enabled);
     static double calculateQueueOverloadDropProbability(double averagePredictedLatencyMs,
                                                         int64_t scheduleCycleMs,
                                                         int64_t startCycleMultiplier,

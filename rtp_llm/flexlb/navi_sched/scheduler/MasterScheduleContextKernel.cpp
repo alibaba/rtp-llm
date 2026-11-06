@@ -457,21 +457,96 @@ bool MasterScheduleContextKernel::prepareAdmission(
         const auto beginUs = autil::TimeUtility::monotonicTimeUs();
         const auto prepared = context.prepare();
         context._contextPrepareUs = autil::TimeUtility::monotonicTimeUs() - beginUs;
-        CostSchedulerColdStartStrategy::Result result;
-        if (!prepared || !CostSchedulerColdStartStrategy::apply(context, _randomGenerator,
-                                                                result, randomDraw)) {
+        if (!prepared) {
             context.fail("scheduler_error");
             return false;
+        }
+        const bool allCold = !CostSchedulerColdStartStrategy::hasTrustedNode(context);
+        context._allColdUtilizationAdmission = allCold;
+        if (allCold) {
+            const bool accepted = applyQueueOverloadLimit(contextData, randomDraw, true);
+            // Admission compacts requests before any routing decisions exist.
+            context._decisions.resize(context.requestCount());
+            context._selectedNodeIndexes.resize(context.requestCount());
+            if (!accepted) {
+                return false;
+            }
+        }
+        CostSchedulerColdStartStrategy::Result result;
+        if (!CostSchedulerColdStartStrategy::apply(context, _randomGenerator, result,
+                                                   randomDraw, !allCold)) {
+            context.fail("scheduler_error");
+            return false;
+        }
+        if (allCold) {
+            return true;
         }
     }
     return applyQueueOverloadLimit(contextData, randomDraw);
 }
 
+void MasterScheduleContextKernel::updateExecutionUtilization(
+    const NaviSchedScheduleContext &context, bool enabled)
+{
+    long double sum = 0.0;
+    ClusterExecutionUtilization cluster;
+    autil::legacy::json::JsonArray utilizationNodes;
+    _executionUtilizationReportingNodes = 0;
+    // Admission observes all ready nodes, including cold-start routes.
+    for (const auto &node : context._scheduleNodes) {
+        const auto busy = node.getExecutionBusyUtilization();
+        if (node.getWorkloadRevision() > 0) {
+            cluster.add(busy, node.getExecutionRunningRequests(),
+                        node.getExecutionWaitingRequests());
+        }
+        const auto value = node.getExecutionUtilization();
+        if (context._replay) {
+            autil::legacy::json::JsonMap sample;
+            sample["effective"] = value;
+            sample["busy"] = busy;
+            utilizationNodes.emplace_back(std::move(sample));
+        }
+        if (value >= 0.0) {
+            sum += value;
+            ++_executionUtilizationReportingNodes;
+        }
+    }
+    if (context._replay) {
+        context._replay->schedulerInfo["admission_utilization_nodes"] =
+            std::move(utilizationNodes);
+    }
+    _averageExecutionUtilization =
+        _executionUtilizationReportingNodes > 0
+            ? static_cast<double>(sum / _executionUtilizationReportingNodes)
+            : 0.0;
+    _clusterExecutionUtilization = cluster;
+    if (_executionUtilizationConfig.globalScaling) {
+        _averageExecutionUtilization = cluster.effective();
+        _executionUtilizationReportingNodes = cluster.nodes;
+    }
+    if (enabled) {
+        _executionUtilizationController.update(
+            _executionUtilizationConfig, _averageExecutionUtilization,
+            _executionUtilizationReportingNodes, autil::TimeUtility::monotonicTimeUs());
+    } else {
+        _executionUtilizationController.reset();
+    }
+    _masterScheduleR->recordExecutionUtilization(
+        _averageExecutionUtilization, _executionUtilizationController.integral(),
+        _executionUtilizationReportingNodes, enabled,
+        _clusterExecutionUtilization.average(), _clusterExecutionUtilization.running,
+        _clusterExecutionUtilization.waiting, _executionUtilizationConfig.globalScaling);
+}
+
 bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     const MasterScheduleContextDataPtr &contextData,
-    const std::function<uint64_t()> &randomDraw)
+    const std::function<uint64_t()> &randomDraw, bool forceExecutionUtilization)
 {
     auto &context = *contextData->context;
+    const bool executionUtilizationMode =
+        forceExecutionUtilization || _executionUtilizationLimitEnabled;
+    context._executionUtilizationAdmission = executionUtilizationMode;
+    updateExecutionUtilization(context, executionUtilizationMode);
     context._queueOverloadRandomDecisions.clear();
     context._queueOverloadEvaluated = false;
     context._queueOverloadAveragePredictedLatencyMs = 0.0;
@@ -489,7 +564,7 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
     if (0 == context.requestCount() || 0 == context.nodeCount()) {
         return context.requestCount() > 0;
     }
-    const auto coldStartAnalysis = _executionUtilizationLimitEnabled
+    const auto coldStartAnalysis = executionUtilizationMode
                                        ? CostSchedulerColdStartStrategy::Analysis()
                                        : CostSchedulerColdStartStrategy::analyze(context);
     const auto averagePredictedLatencyMs =
@@ -498,62 +573,15 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
                                   coldStartAnalysis.trustedBacklogInflight)
             : 0.0;
     auto dropProbability =
-        _executionUtilizationLimitEnabled
+        executionUtilizationMode
             ? 0.0
             : calculateQueueOverloadDropProbability(
                   averagePredictedLatencyMs, _maxWaitScheduleTimeMs,
                   _queueOverloadStartCycleMultiplier, _queueOverloadFullCycleMultiplier);
-    if (_executionUtilizationLimitEnabled) {
-        const auto now = autil::TimeUtility::monotonicTimeUs();
-        {
-            long double sum = 0.0;
-            ClusterExecutionUtilization cluster;
-            _executionUtilizationReportingNodes = 0;
-            // Admission observes all ready nodes, including cold-start routes.
-            for (const auto &node : context._scheduleNodes) {
-                if (node.getWorkloadRevision() > 0) {
-                    cluster.add(node.getExecutionBusyUtilization(),
-                                node.getExecutionRunningRequests(),
-                                node.getExecutionWaitingRequests());
-                }
-                const auto value = node.getExecutionUtilization();
-                if (value >= 0.0) {
-                    sum += value;
-                    ++_executionUtilizationReportingNodes;
-                }
-            }
-            _averageExecutionUtilization =
-                _executionUtilizationReportingNodes > 0
-                    ? static_cast<double>(sum / _executionUtilizationReportingNodes)
-                    : 0.0;
-            _clusterExecutionUtilization = cluster;
-            if (_executionUtilizationConfig.globalScaling) {
-                _averageExecutionUtilization = cluster.effective();
-                _executionUtilizationReportingNodes = cluster.nodes;
-            }
-            _executionUtilizationController.update(
-                _executionUtilizationConfig, _averageExecutionUtilization,
-                _executionUtilizationReportingNodes, now);
-            NAVI_KERNEL_LOG(DEBUG,
-                            "[navi-master-execution-utilization] nodes=%lu average=%.6f "
-                            "target=%.6f integral=%.6f drop_probability=%.6f",
-                            _executionUtilizationReportingNodes,
-                            _averageExecutionUtilization,
-                            _executionUtilizationConfig.target,
-                            _executionUtilizationController.integral(),
-                            _executionUtilizationController.probability());
-        }
+    if (executionUtilizationMode) {
         dropProbability = _executionUtilizationController.probability();
         if (dropProbability < 0.001) dropProbability = 0.0;
-    } else {
-        _executionUtilizationController.reset();
     }
-    _masterScheduleR->recordExecutionUtilization(
-        _averageExecutionUtilization, _executionUtilizationController.integral(),
-        _executionUtilizationLimitEnabled ? _executionUtilizationReportingNodes : 0,
-        _executionUtilizationLimitEnabled, _clusterExecutionUtilization.average(),
-        _clusterExecutionUtilization.running, _clusterExecutionUtilization.waiting,
-        _executionUtilizationConfig.globalScaling);
     context._queueOverloadEvaluated = true;
     context._queueOverloadAveragePredictedLatencyMs = averagePredictedLatencyMs;
     context._queueOverloadDropProbability = dropProbability;
@@ -635,9 +663,8 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
                     "overload limit evaluated, executionUtilizationMode [%d], "
                     "averagePredictedLatencyMs [%.3f], dropProbability [%.6f], "
                     "requests [%lu], rejected [%lu]",
-                    static_cast<int>(_executionUtilizationLimitEnabled),
-                    averagePredictedLatencyMs, dropProbability, requestCount,
-                    rejectedRequestCount);
+                    static_cast<int>(executionUtilizationMode), averagePredictedLatencyMs,
+                    dropProbability, requestCount, rejectedRequestCount);
     return routed || !context._requests.empty();
 }
 
@@ -1102,7 +1129,12 @@ void MasterScheduleResultKernel::recordReplayAdmission(NaviSchedScheduleContext 
         auto &schedulerInfo = context._replay->schedulerInfo;
         schedulerInfo["audit_version"] = int64_t(1);
         schedulerInfo["admission_after_cold_start"] =
-            context._coldStartRoutingStats.evaluated;
+            context._coldStartRoutingStats.evaluated &&
+            !context._allColdUtilizationAdmission;
+        schedulerInfo["admission_all_cold_utilization"] =
+            context._allColdUtilizationAdmission;
+        schedulerInfo["admission_execution_utilization"] =
+            context._executionUtilizationAdmission;
         schedulerInfo["schedule_id"] = context._scheduleId;
         schedulerInfo["schedule_begin_time_us"] = context._scheduleBeginTimeUs;
         schedulerInfo["schedule_latency_us"] = context._scheduleLatencyUs;
