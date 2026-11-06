@@ -9,6 +9,7 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.utils.arch import get_sm
 from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
@@ -36,12 +37,25 @@ class DenseMLP(nn.Module):
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         enable_w4a16_sm120: bool = False,
+        max_prefill_tokens: int = 0,
     ):
         super().__init__()
 
         self.activation_type = activation_type
         self.parallelism_config = parallelism_config
         self.enable_w4a16_sm120 = enable_w4a16_sm120
+        projection = weights.get(
+            W.ffn_w13, weights.get(W.ffn_w1, weights.get(W.ffn_w3))
+        )
+        # The policy is explicit and independent of quantization. Hardware
+        # eligibility is resolved once when the module is constructed.
+        self.max_prefill_tokens = (
+            max_prefill_tokens
+            if max_prefill_tokens > 0
+            and projection.is_cuda
+            and get_sm(projection.device) == (12, 0)
+            else 0
+        )
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
         self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
@@ -106,8 +120,8 @@ class DenseMLP(nn.Module):
                     "W4A16 FFN unavailable, falling back to the default path"
                 )
 
-    def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
-        if self.w4a16 is not None and 0 < x.shape[0] < 64:
+    def _forward_block(self, x: torch.Tensor, use_w4a16: bool = True) -> torch.Tensor:
+        if use_w4a16 and self.w4a16 is not None and 0 < x.shape[0] < 64:
             output = self.w4a16(x, self.act_fn)
         elif not self.is_gated and self.activation_type == ActivationType.Gelu:
             activated = self.up_proj.forward_with_bias_gelu(x)
@@ -115,8 +129,29 @@ class DenseMLP(nn.Module):
         else:
             up = self.up_proj(x)
             activated = self.act_fn(up)
+            del up
             output = self.down_proj(activated)
+        return output
 
+    def forward(self, x: torch.Tensor, skip_allreduce: bool = False) -> torch.Tensor:
+        if (
+            self.max_prefill_tokens > 0
+            and x.ndim == 2
+            and x.shape[0] > self.max_prefill_tokens
+        ):
+            output = None
+            for start in range(0, x.shape[0], self.max_prefill_tokens):
+                stop = min(start + self.max_prefill_tokens, x.shape[0])
+                # A short tail still uses the full prefill batch's weights.
+                block = self._forward_block(x[start:stop], use_w4a16=False)
+                if output is None:
+                    output = block.new_empty((x.shape[0], block.shape[1]))
+                output[start:stop].copy_(block)
+                del block
+        else:
+            output = self._forward_block(x)
+
+        # Preserve a single full-output collective after local FFN execution.
         ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
         if not skip_allreduce and ffn_tp_size > 1:
             output = all_reduce(output, group=Group.TP)

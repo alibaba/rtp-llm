@@ -135,7 +135,10 @@ def l2norm_fwd_kernel(
 
 
 def l2norm_fwd(
-    x: torch.Tensor, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None
+    x: torch.Tensor,
+    eps: float = 1e-6,
+    output_dtype: Optional[torch.dtype] = None,
+    use_blocked_kernel: Optional[bool] = None,
 ):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -155,7 +158,9 @@ def l2norm_fwd(
 
     # Not use this path since different batch will always go into compile， since T is different,
     # and compile time is too long (70ms) compared to kernel execution time (under 1ms)
-    if D <= 512 and T <= 128:
+    if use_blocked_kernel is None:
+        use_blocked_kernel = D <= 512 and T <= 128
+    if use_blocked_kernel:
         NB = triton.cdiv(T, 2048)
 
         def grid(meta):
