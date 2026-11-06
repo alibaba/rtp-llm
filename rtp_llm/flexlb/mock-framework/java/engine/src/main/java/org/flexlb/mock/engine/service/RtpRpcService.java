@@ -48,6 +48,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     private final PrefillRpcServer prefill;
     private final DecodeRpcServer decode;
     private final boolean groups;
+    private final AtomicLong onflightRequests = new AtomicLong();
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
 
@@ -62,8 +63,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         rpcMetrics = new EventMetrics(config.role().name(), System::nanoTime, metricTags);
         rpcMetrics.register(rpcRegistry);
         prefill = config.role() == Role.prefill
-            ? new PrefillRpcServer(config, executionLock, finished, engine, this::recordCancellation) : null;
-        decode = prefill == null ? new DecodeRpcServer(config, executionLock, engine, this::recordCancellation) : null;
+            ? new PrefillRpcServer(config, executionLock, finished, engine, this::recordCancellation, this::trackRequest) : null;
+        decode = prefill == null ? new DecodeRpcServer(config, executionLock, engine, this::recordCancellation, this::trackRequest) : null;
     }
     public void close() {
         closed = true;
@@ -165,6 +166,16 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             for (long key : snapshot.keys()) result.putCacheKeys(key, true);
             return new StatusResult<>(result.build(), collected);
         });
+    }
+
+    // Real samples at GenerateContext destruction, before its AtomicGuard decrements.
+    private Runnable trackRequest() {
+        onflightRequests.incrementAndGet();
+        var completed = new java.util.concurrent.atomic.AtomicBoolean();
+        return () -> {
+            if (completed.compareAndSet(false, true))
+                rpcMetrics.observe("rtp_llm_rpc_onflight_request", onflightRequests.getAndDecrement());
+        };
     }
 
     private void recordCancellation() {

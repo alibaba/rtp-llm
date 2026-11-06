@@ -262,3 +262,13 @@ def test_vit_native_work_and_blocking_request_sources_are_explicit():
     request_rt = next(expr for expr in expressions if 'py_rtp_vit_request_rt_sum{' in expr)
     assert request_rt.count('source="get_embedding_result"') == 2
     assert 'status=' not in request_rt  # Success and error retain original sample weights.
+
+
+def test_rpc_onflight_keeps_native_event_sampling_and_role_weights():
+    panel=next(p for p in panels() if p['id']==409203)
+    assert panel['fieldConfig']['defaults']['unit']=='short'
+    for target, role in zip(panel['targets'], ('prefill','decode')):
+        assert f'role="{role}"' in target['expr']
+        assert 'rate(rtp_llm_rpc_onflight_request_sum{' in target['expr']
+        assert 'rate(rtp_llm_rpc_onflight_request_count{' in target['expr']
+        assert 'or vector(0)' not in target['expr']

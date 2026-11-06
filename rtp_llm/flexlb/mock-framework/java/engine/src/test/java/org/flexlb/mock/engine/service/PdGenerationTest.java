@@ -157,6 +157,13 @@ class PdGenerationTest {
             var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
             assertTrue(keys.stream().allMatch(cached.getCacheKeysMap()::containsKey));
             assertEquals(6, calls.size());
+            for(var item:List.of(Map.entry(p,6),Map.entry(d,5))) {
+                try(var stream=java.net.URI.create((String)item.getKey().node.endpoints().get("metrics")).toURL().openStream()) {
+                    String text=new String(stream.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8);
+                    assertEquals(item.getValue().doubleValue(),LocalRpcTest.sample(text,"rtp_llm_rpc_onflight_request_count",""));
+                    assertTrue(LocalRpcTest.sample(text,"rtp_llm_rpc_onflight_request_sum","")>=item.getValue());
+                }
+            }
         } finally { vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
     }
 

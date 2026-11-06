@@ -25096,6 +25096,84 @@
               "targetBlank": true
             }
           ]
+        },
+        {
+          "id": 409203,
+          "type": "timeseries",
+          "title": "rpc onflight request · 生成请求终态采样",
+          "gridPos": {
+            "x": 12,
+            "y": 1874,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mock-prometheus"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "(sum by(${prefill_group})(rate(rtp_llm_rpc_onflight_request_sum{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval]))) / (sum by(${prefill_group})(rate(rtp_llm_rpc_onflight_request_count{instance=~\"${prefill_instance}\",role=\"prefill\"}[$__rate_interval])) > 0)",
+              "legendFormat": "prefill · {{${prefill_group}}} · 请求终态采样均值",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            },
+            {
+              "refId": "B",
+              "expr": "(sum by(${decode_group})(rate(rtp_llm_rpc_onflight_request_sum{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval]))) / (sum by(${decode_group})(rate(rtp_llm_rpc_onflight_request_count{instance=~\"${decode_instance}\",role=\"decode\"}[$__rate_interval])) > 0)",
+              "legendFormat": "decode · {{${decode_group}}} · 请求终态采样均值",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "showPoints": "auto",
+                "spanNulls": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            },
+            "legend": {
+              "displayMode": "table",
+              "placement": "bottom",
+              "calcs": [
+                "mean",
+                "max",
+                "lastNotNull"
+              ]
+            }
+          },
+          "description": "对齐 real GenerateContext：生成请求结束时采样尚未退出的生成请求数量，包含本次请求；不含 health/status/cache 查询。P 包含等待 D 的完整请求，批量按每个请求计数。它是终态事件采样，不是每次抓取的瞬时并发；无完成事件时不补零。异步输出传输不阻塞计算，终态统计不代表待发送字节数。",
+          "links": []
         }
       ],
       "gridPos": {

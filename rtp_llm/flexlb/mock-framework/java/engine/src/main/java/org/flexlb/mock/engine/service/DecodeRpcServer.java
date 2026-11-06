@@ -17,6 +17,7 @@ final class DecodeRpcServer implements AutoCloseable {
     private final EngineLoop engine;
     private final Object executionLock;
     private final Runnable recordCancellation;
+    private final java.util.function.Supplier<Runnable> trackRequest;
     private final ExecutorService transport = Executors.newVirtualThreadPerTaskExecutor();
     private final ScheduledThreadPoolExecutor deadlines = new ScheduledThreadPoolExecutor(1,
         Thread.ofPlatform().daemon().name("rtp-decode-output-deadline").factory());
@@ -24,7 +25,8 @@ final class DecodeRpcServer implements AutoCloseable {
     private enum Stage { ALLOCATING, ALLOCATED, LOADING, LOADED, GENERATING, FINISHING }
     private boolean closed;
 
-    DecodeRpcServer(RtpRpcService.Config config, Object executionLock, EngineLoop engine, Runnable recordCancellation) {
+    DecodeRpcServer(RtpRpcService.Config config, Object executionLock, EngineLoop engine, Runnable recordCancellation, java.util.function.Supplier<Runnable> trackRequest) {
+        this.trackRequest=trackRequest;
         deadlines.setRemoveOnCancelPolicy(true);
         this.config = config;
         this.executionLock = executionLock;
@@ -39,6 +41,7 @@ final class DecodeRpcServer implements AutoCloseable {
     private final class Call implements StreamObserver<GenerateRequestPB>, EngineScheduler.Listener {
         final ServerCallStreamObserver<GenerateOutputsPB> response;
         final GeneratedOutput delivery;
+        final Runnable rpcCompleted;
         final long started = System.nanoTime();
         final long rpcDeadline;
         GenerateInputPB input;
@@ -51,6 +54,7 @@ final class DecodeRpcServer implements AutoCloseable {
 
         Call(ServerCallStreamObserver<GenerateOutputsPB> response, Context context) {
             this.response = response;
+            rpcCompleted=trackRequest.get();
             rpcDeadline = context.getDeadline() == null ? Long.MAX_VALUE
                 : RpcMessages.after(started, context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
             delivery = new GeneratedOutput(transport, deadlines, TimeUnit.MINUTES.toMillis(10), ignored -> {});
@@ -206,6 +210,7 @@ final class DecodeRpcServer implements AutoCloseable {
     }
 
     private void disconnected(Call call, Status status, long code) {
+        call.rpcCompleted.run();
         synchronized (executionLock) {
             // Once GENERATE is accepted, D computes independently of its P output consumer.
             // Scheduler deadlines, explicit engine cancellation and node shutdown still own termination.
@@ -225,6 +230,7 @@ final class DecodeRpcServer implements AutoCloseable {
         synchronized (executionLock) {
             if (call.terminal) return;
             call.terminal = true;
+            call.rpcCompleted.run();
             if (status.getCode() == Status.Code.CANCELLED) recordCancellation.run();
             if (call.transfer != null) call.transfer.cancel();
             call.delivery.finish(status.isOk() ? null : RpcErrors.failure(status, code));
