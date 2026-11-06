@@ -288,13 +288,87 @@ class ChunkedMoeTest(unittest.TestCase):
             ) as all_reduce,
         ):
             with synchronized_moe_chunk_plan(
-                [SimpleNamespace(ffn=layer)], 3, torch.device("cpu")
+                [SimpleNamespace(ffn=layer)],
+                3,
+                torch.device("cpu"),
+                is_decode_forward=True,
             ):
                 output = layer(
                     torch.ones(3, 4),
                     torch.arange(3),
                     is_decode_forward=True,
                 )
+
+        all_reduce.assert_called_once()
+        self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
+        self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
+
+    def test_decode_forward_skips_plan_when_cuda_graphs_enabled(self):
+        # A graph-replaying peer never executes the plan all-reduce (capture
+        # short-circuits it), so an eager decode fallback must skip it too;
+        # it runs one unchunked MoE invocation, matching a replayed graph.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+        layer.enable_cuda_graph = True
+
+        with (
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_available",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_initialized",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.all_reduce",
+            ) as all_reduce,
+        ):
+            with synchronized_moe_chunk_plan(
+                [SimpleNamespace(ffn=layer)],
+                3,
+                torch.device("cpu"),
+                is_decode_forward=True,
+            ):
+                output = layer(
+                    torch.ones(3, 4),
+                    torch.arange(3),
+                    is_decode_forward=True,
+                )
+
+        all_reduce.assert_not_called()
+        self.assertEqual(layer._moe.token_chunks, [3])
+        self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
+
+    def test_prefill_forward_keeps_plan_when_cuda_graphs_enabled(self):
+        # Prefill is always eager, so the plan collective stays required
+        # there even when the model runs decode CUDA graphs.
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "fp8_per_block_pure_dp"
+        layer.enable_cuda_graph = True
+
+        def set_remote_max(plan, **_):
+            plan[0] = 9
+            plan[1] = 3
+
+        with (
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_available",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_initialized",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.all_reduce",
+                side_effect=set_remote_max,
+            ) as all_reduce,
+        ):
+            with synchronized_moe_chunk_plan(
+                [SimpleNamespace(ffn=layer)], 3, torch.device("cpu")
+            ):
+                output = layer(torch.ones(3, 4), torch.arange(3))
 
         all_reduce.assert_called_once()
         self.assertEqual(layer._moe.token_chunks, [3, 0, 0])

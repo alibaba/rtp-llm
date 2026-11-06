@@ -582,7 +582,10 @@ class V4Transformer(nn.Module):
             begin_decode(attn_metadata)
         layer_forward_range = _profiler.make_layer_forward_range()
         with synchronized_moe_chunk_plan(
-            self.layers, input_ids_2d.numel(), input_ids_2d.device
+            self.layers,
+            input_ids_2d.numel(),
+            input_ids_2d.device,
+            is_decode_forward=True,
         ):
             for layer_idx, layer in enumerate(self.layers):
                 with layer_forward_range(layer_idx):

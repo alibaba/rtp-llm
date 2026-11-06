@@ -120,22 +120,40 @@ def _get_or_create_final_out(
 
 @contextmanager
 def synchronized_moe_chunk_plan(
-    layers: Iterable[nn.Module], tokens: int, device: torch.device
+    layers: Iterable[nn.Module],
+    tokens: int,
+    device: torch.device,
+    *,
+    is_decode_forward: bool = False,
 ):
     """Synchronize the largest token count for one complete MoE forward.
 
-    The plan is intentionally shared by prefill and decode.  Pure-DP and
-    normal-EP routers use collectives on every MoE invocation, so a rank that
-    is decoding while another rank is prefilling must execute the same number
-    of chunk invocations.  Decode participates in this context even though it
+    The plan is shared by prefill and decode.  Pure-DP and normal-EP routers
+    use collectives on every MoE invocation, so a rank that is decoding while
+    another rank is prefilling must execute the same number of chunk
+    invocations.  Decode participates in this context even though it
     normally rejects oversized inputs; planned empty chunks are used only to
     keep the router collectives aligned.
+
+    ``is_decode_forward=True`` marks a decode forward.  When CUDA graphs are
+    enabled for those layers, the plan is skipped: graph-replaying ranks
+    never execute this all-reduce (capture short-circuits it), so an eager
+    decode fallback entering it would block forever against a replaying
+    peer.  Skipped decode forwards run one unchunked MoE invocation per
+    layer, matching what a captured graph replays.
     """
     layers = tuple(layers)
     if (
         not dist.is_available()
         or not dist.is_initialized()
         or (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing())
+    ):
+        yield
+        return
+
+    if is_decode_forward and any(
+        getattr(getattr(layer, "ffn", layer), "enable_cuda_graph", False)
+        for layer in layers
     ):
         yield
         return
@@ -219,6 +237,9 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         self.max_tokens_per_rank = int(max_tokens_per_rank)
         self._is_decode_role = bool(is_decode_role)
         self.chunking_enabled = chunking_enabled
+        # Surfaced for synchronized_moe_chunk_plan: a decode forward must
+        # skip the plan collective when peers may replay CUDA graphs.
+        self.enable_cuda_graph = bool(enable_cuda_graph)
         self._observer_factory = observer_factory
         self._record_function_scope = record_function_scope
         self._moe = Fp8Fp4MoeLayer(
