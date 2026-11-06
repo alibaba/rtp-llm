@@ -20,7 +20,6 @@ from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     RESPONSE_CLOSE,
     THINK_TO_RESPONSE,
     apply_kimi_k3_request_contract,
-    kimi_k3_pending_prompt_token_ids,
     validate_kimi_k3_tool_history,
     validate_kimi_k3_top_logprobs,
 )
@@ -35,7 +34,6 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
     TopLogprob,
-    UsageInfo,
     get_tool_choice_function_name,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
@@ -48,8 +46,6 @@ from rtp_llm.openai.renderers.custom_renderer import (
     StreamStatus,
     ThinkStatus,
 )
-from rtp_llm.ops import MultimodalInput
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.word_util import truncate_response_with_stop_words
 
@@ -363,38 +359,6 @@ class KimiK3Renderer(CustomChatRenderer):
         )
 
     @staticmethod
-    def _pending_prompt_token_count(tokenizer, thinking: bool) -> int:
-        """Count the open generation channel excluded from tokenism usage."""
-
-        return len(kimi_k3_pending_prompt_token_ids(tokenizer, thinking))
-
-    @staticmethod
-    def _subtract_pending_prompt_tokens(
-        response: StreamResponseObject, pending_tokens: int
-    ) -> None:
-        def adjust(usage: Optional[UsageInfo]) -> None:
-            if usage is None:
-                return
-            if (
-                usage.prompt_tokens < pending_tokens
-                or usage.total_tokens < pending_tokens
-            ):
-                raise RuntimeError(
-                    "Kimi K3 usage is shorter than its pending generation prompt: "
-                    f"prompt={usage.prompt_tokens}, total={usage.total_tokens}, "
-                    f"pending={pending_tokens}"
-                )
-            usage.prompt_tokens -= pending_tokens
-            usage.total_tokens -= pending_tokens
-            details = usage.prompt_tokens_details
-            if details is not None and details.cached_tokens is not None:
-                details.cached_tokens = min(details.cached_tokens, usage.prompt_tokens)
-
-        adjust(response.usage)
-        for choice in response.choices:
-            adjust(choice.usage)
-
-    @staticmethod
     def _has_logprobs(choice: ChatCompletionResponseStreamChoice) -> bool:
         logprobs = choice.logprobs
         return logprobs is not None and bool(logprobs.content or logprobs.refusal)
@@ -422,50 +386,7 @@ class KimiK3Renderer(CustomChatRenderer):
                 and status.finish_reason in (None, FinisheReason.stop)
             ):
                 status.finish_reason = FinisheReason.tool_calls
-        response = await super()._generate_final(
-            buffer_list, request, think_status_list
-        )
-        if response.usage is None:
-            return response
-        for choice, buffer, think_status in zip(
-            response.choices, buffer_list, think_status_list
-        ):
-            assert buffer.output is not None
-            choice_usage = copy.deepcopy(response.usage)
-            output_tokens = buffer.output.aux_info.output_len
-            choice_usage.completion_tokens = output_tokens
-            choice_usage.total_tokens = choice_usage.prompt_tokens + output_tokens
-            if choice_usage.completion_tokens_details is not None:
-                choice_usage.completion_tokens_details.reasoning_tokens = (
-                    think_status.think_tokens
-                )
-            choice.usage = choice_usage
-        return response
-
-    @override
-    async def generate_choice(
-        self,
-        request_id: int,
-        input_ids: List[int],
-        mm_inputs: List[MultimodalInput],
-        generate_config: GenerateConfig,
-        backend_rpc_server_visitor: BackendRPCServerVisitor,
-        request: ChatCompletionRequest,
-        headers: Optional[Dict[str, str]] = None,
-    ) -> AsyncGenerator[StreamResponseObject, None]:
-        thinking = bool(generate_config.in_think_mode)
-        pending_tokens = self._pending_prompt_token_count(self.tokenizer, thinking)
-        async for response in super().generate_choice(
-            request_id,
-            input_ids,
-            mm_inputs,
-            generate_config,
-            backend_rpc_server_visitor,
-            request,
-            headers,
-        ):
-            self._subtract_pending_prompt_tokens(response, pending_tokens)
-            yield response
+        return await super()._generate_final(buffer_list, request, think_status_list)
 
     @staticmethod
     def _split_exclusive_delta(delta: DeltaMessage) -> List[DeltaMessage]:
@@ -525,7 +446,6 @@ class KimiK3Renderer(CustomChatRenderer):
                         "finish_reason": (
                             choice.finish_reason if is_last_delta else None
                         ),
-                        "usage": choice.usage if is_last_delta else None,
                     }
                 )
                 split_response = StreamResponseObject(
@@ -1327,6 +1247,12 @@ class KimiK3Renderer(CustomChatRenderer):
                     ExceptionType.INVALID_PARAMS,
                     f"invalid {name}: {value}; must be greater than 0",
                 )
+        # Match the OpenAI/vLLM precedence when both limits are present:
+        # max_completion_tokens supersedes the deprecated max_tokens field.
+        if request.max_completion_tokens is not None:
+            generate_config.max_new_tokens = request.max_completion_tokens
+        elif request.max_tokens is not None:
+            generate_config.max_new_tokens = request.max_tokens
         specified_fields = {
             name
             for name in request.model_fields_set

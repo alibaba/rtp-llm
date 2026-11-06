@@ -23,7 +23,6 @@ from rtp_llm.openai.api_datatype import (
     ChoiceLogprobs,
     DeltaMessage,
     FinisheReason,
-    PromptTokensDetails,
     TopLogprob,
     UsageInfo,
 )
@@ -343,7 +342,7 @@ class KimiK3RendererTest(unittest.TestCase):
         )
         self.assertIsNone(choice.logprobs)
 
-    def test_multi_choice_final_is_split_with_per_choice_usage(self) -> None:
+    def test_multi_choice_final_is_split_without_per_choice_usage(self) -> None:
         aggregate = UsageInfo(prompt_tokens=10, completion_tokens=5, total_tokens=15)
         response = StreamResponseObject(
             choices=[
@@ -351,13 +350,8 @@ class KimiK3RendererTest(unittest.TestCase):
                     index=index,
                     delta=DeltaMessage(content=""),
                     finish_reason=FinisheReason.stop,
-                    usage=UsageInfo(
-                        prompt_tokens=10,
-                        completion_tokens=completion_tokens,
-                        total_tokens=10 + completion_tokens,
-                    ),
                 )
-                for index, completion_tokens in enumerate((2, 3))
+                for index in range(2)
             ],
             usage=aggregate,
         )
@@ -373,20 +367,22 @@ class KimiK3RendererTest(unittest.TestCase):
                 for frame in frames
             )
         )
-        self.assertEqual(
-            [frame.choices[0].usage.completion_tokens for frame in frames],
-            [2, 3],
+        self.assertTrue(
+            all(
+                "usage" not in frame.choices[0].model_dump(exclude_none=True)
+                for frame in frames
+            )
         )
 
-    def test_generate_final_computes_usage_for_each_choice(self) -> None:
+    def test_generate_final_uses_full_prompt_and_aggregate_completion(self) -> None:
         renderer = object.__new__(KimiK3Renderer)
         buffers = [
             SimpleNamespace(
                 output=SimpleNamespace(
                     aux_info=SimpleNamespace(
-                        input_len=10,
+                        input_len=39,
                         output_len=output_tokens,
-                        reuse_len=0,
+                        reuse_len=38,
                         multimodal_lengths={},
                     )
                 ),
@@ -406,14 +402,15 @@ class KimiK3RendererTest(unittest.TestCase):
             )
         )
 
+        self.assertEqual(response.usage.prompt_tokens, 39)
         self.assertEqual(response.usage.completion_tokens, 5)
-        self.assertEqual(
-            [choice.usage.completion_tokens for choice in response.choices],
-            [2, 3],
-        )
-        self.assertEqual(
-            [choice.usage.total_tokens for choice in response.choices],
-            [12, 13],
+        self.assertEqual(response.usage.total_tokens, 44)
+        self.assertEqual(response.usage.prompt_tokens_details.cached_tokens, 38)
+        self.assertTrue(
+            all(
+                "usage" not in choice.model_dump(exclude_none=True)
+                for choice in response.choices
+            )
         )
 
     def test_stream_options_include_usage_is_explicit(self) -> None:
@@ -435,7 +432,6 @@ class KimiK3RendererTest(unittest.TestCase):
                     index=0,
                     delta=DeltaMessage(),
                     finish_reason=FinisheReason.stop,
-                    usage=copy.deepcopy(usage),
                 )
             ],
             usage=usage,
@@ -622,6 +618,21 @@ class KimiK3RendererTest(unittest.TestCase):
                 renderer.apply_chat_completion_constraints(request, config)
 
                 self.assertEqual(config.max_new_tokens, expected)
+
+    def test_max_completion_tokens_supersedes_legacy_max_tokens(self) -> None:
+        renderer = KimiK3Renderer.__new__(KimiK3Renderer)
+        request = ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "max_completion_tokens": 128,
+                "max_tokens": 64,
+            }
+        )
+        config = GenerateConfig(max_new_tokens=64)
+
+        renderer.apply_chat_completion_constraints(request, config)
+
+        self.assertEqual(config.max_new_tokens, 128)
 
     def test_openai_completion_limit_rejects_explicit_non_positive_values(
         self,
@@ -1041,38 +1052,6 @@ class KimiK3RendererTest(unittest.TestCase):
 
         self.assertIsNone(config.json_schema)
         self.assertIsNotNone(config.structural_tag)
-
-    def test_pending_generation_channel_is_excluded_from_usage(self) -> None:
-        class Tokenizer:
-            def encode(self, text: str) -> list[int]:
-                return {
-                    "<|open|>response<|sep|>": [10, 11, 13],
-                    "<|open|>think<|sep|>": [10, 12, 13],
-                }[text]
-
-        tokenizer = Tokenizer()
-        pending_tokens = KimiK3Renderer._pending_prompt_token_count(
-            tokenizer, thinking=False
-        )
-        response = StreamResponseObject(
-            usage=UsageInfo(
-                prompt_tokens=39,
-                completion_tokens=7,
-                total_tokens=46,
-                prompt_tokens_details=PromptTokensDetails(cached_tokens=38),
-            )
-        )
-
-        KimiK3Renderer._subtract_pending_prompt_tokens(response, pending_tokens)
-
-        usage = response.usage
-        self.assertIsNotNone(usage)
-        assert usage is not None
-        self.assertEqual(pending_tokens, 3)
-        self.assertEqual(usage.prompt_tokens, 36)
-        self.assertEqual(usage.completion_tokens, 7)
-        self.assertEqual(usage.total_tokens, 43)
-        self.assertEqual(usage.prompt_tokens_details.cached_tokens, 36)
 
     def test_invalid_channel_marker_remains_visible(self) -> None:
         status = self.status(False)

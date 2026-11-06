@@ -472,7 +472,6 @@ class ChatCompletionResponseStreamChoice(BaseModel):
     delta: DeltaMessage
     finish_reason: Optional[FinisheReason] = None
     logprobs: Optional[ChoiceLogprobs] = None
-    usage: Optional[UsageInfo] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):
