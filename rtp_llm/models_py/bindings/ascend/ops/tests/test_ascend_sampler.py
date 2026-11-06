@@ -937,7 +937,7 @@ def _rejection_reference(draft_ids, draft_probs, uniform, target_probs, target_t
                 cdf = np.cumsum(residual)
                 total = cdf[-1]
                 u_next = uniform[b, min(pos + 1, K)]
-                recovered = int(np.sum(cdf < u_next * total))
+                recovered = int(np.sum(cdf <= u_next * total))
                 out[b, pos] = min(recovered, V - 1)
             else:
                 out[b, pos] = target_tokens[b, pos]
@@ -1059,6 +1059,43 @@ class TestAscendRejectionSampling(unittest.TestCase):
         )
         np.testing.assert_array_equal(out, [[2, 1, 3]])
         np.testing.assert_array_equal(acc, [3])
+
+    def test_stochastic_reject_u_next_zero(self):
+        # Boundary t==0 with leading zero residual: recover the first
+        # positive-residual token (3), not the zero-residual token 0.
+        # residual=relu(onehot(3)-onehot(1))=[0,0,0,1], cdf=[0,0,0,1], u'=0.
+        target_probs = np.zeros((1, 2, self.VOCAB), dtype=np.float32)
+        target_probs[0, 0, 3] = 1.0          # q(draft0)=0 -> reject at pos=0
+        target_probs[0, 1, 1] = 1.0
+        out, acc = self._check(
+            draft_ids=[[1]],
+            draft_probs=_one_hot_probs([[1]], self.VOCAB),
+            uniform=[[0.5, 0.0]],
+            target_probs=target_probs,
+            target_tokens=[[9, 9]],
+            do_sample=[True],
+        )
+        np.testing.assert_array_equal(out, [[3, -1]])
+        np.testing.assert_array_equal(acc, [1])
+
+    def test_stochastic_reject_cdf_exact_tie(self):
+        # Boundary: u'*S exactly equals an interior cdf value -> take the first
+        # index with cdf>t (1), not the tie index (0).
+        # residual=[0.5,0.5,0,0], cdf=[0.5,1,1,1], S=1, u'=0.5 -> t=0.5=cdf[0].
+        target_probs = np.zeros((1, 2, self.VOCAB), dtype=np.float32)
+        target_probs[0, 0, 0] = 0.5
+        target_probs[0, 0, 1] = 0.5
+        target_probs[0, 1, 1] = 1.0
+        out, acc = self._check(
+            draft_ids=[[3]],
+            draft_probs=_one_hot_probs([[3]], self.VOCAB),
+            uniform=[[0.6, 0.5]],
+            target_probs=target_probs,
+            target_tokens=[[9, 9]],
+            do_sample=[True],
+        )
+        np.testing.assert_array_equal(out, [[1, -1]])
+        np.testing.assert_array_equal(acc, [1])
 
     def test_point_mass_matches_explicit_one_hot(self):
         # draft_probs_point_mass synthesizes one-hot rows: must equal the

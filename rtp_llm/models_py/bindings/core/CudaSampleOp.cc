@@ -866,7 +866,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
 
     // ---- token at the first rejected position (stochastic rows) ----
     // residual r[v] = max(target[b,pos,v] - draft[b,pos,v], 0);
-    // sampled index = #{v : cumsum(r)[v] < u' * sum(r)}  (inverse CDF)
+    // sampled index = #{v : cumsum(r)[v] <= u' * sum(r)}  (inverse CDF)
     auto pos_safe     = pos.clamp_max(K - 1);
     auto gather_idx   = pos_safe.view({bs, 1, 1}).expand({bs, 1, V});
     auto q_row        = target.gather(1, gather_idx).squeeze(1);    // [bs, V]
@@ -875,7 +875,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
     auto cdf          = residual.cumsum(-1);                        // [bs, V]
     auto residual_sum = cdf.select(-1, V - 1);                      // [bs]
     auto u_next       = uniform.gather(1, (pos + 1).clamp_max(K).unsqueeze(1)).squeeze(1);  // [bs]
-    auto recovered    = (cdf < (u_next * residual_sum).unsqueeze(1)).to(torch::kLong).sum(-1);  // [bs]
+    auto recovered    = (cdf <= (u_next * residual_sum).unsqueeze(1)).to(torch::kLong).sum(-1);  // [bs]
     recovered         = recovered.clamp_max(V - 1);
     recovered         = torch::where(pos.lt(K), recovered, torch::full_like(recovered, -1));
 

@@ -1026,13 +1026,14 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
         model_input.combo_position_ids = std::move(next_position_ids);
     }
 
-    if (useMtpDeviceInput() || model_input.sequence_lengths.is_cuda()) {
-        auto seq_lengths_d           = model_input.sequence_lengths.is_cuda() ? model_input.sequence_lengths :
-                                                                                model_input.sequence_lengths.to(torch::kCUDA);
+    if (useMtpDeviceInput() || model_input.sequence_lengths.is_cuda() || model_input.sequence_lengths.is_privateuseone()) {
+        auto seq_lengths_d = (model_input.sequence_lengths.is_cuda() || model_input.sequence_lengths.is_privateuseone())
+                                 ? model_input.sequence_lengths
+                                 : model_input.sequence_lengths.to(getTorchCudaDevice());
         model_input.sequence_lengths = (seq_lengths_d + 1).to(torch::kInt32);
     } else {
         // Legacy CPU fallback when device input is disabled and the caller has
-        // not already published sequence_lengths on CUDA.
+        // not already published sequence_lengths on an accelerator device.
         auto sequence_lengths_cpu = model_input.sequence_lengths.cpu().clone().pin_memory();
         for (int i = 0; i < batch_size; i++) {
             sequence_lengths_cpu.data_ptr<int>()[i]++;
