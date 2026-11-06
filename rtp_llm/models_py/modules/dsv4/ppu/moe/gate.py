@@ -88,7 +88,14 @@ class Gate(BaseGate):
             if self._fp32_rowwise:
                 scores = torch.cat([F.linear(row[None].float(), self.weight.float()) for row in x])
             else:
-                scores = F.linear(x.float(), self.weight.float())
+                from rtp_llm.models_py.modules.dsv4.ppu.prefill.request_rows import request_row_lengths
+
+                lengths = request_row_lengths(len(x))
+                weight = self.weight.float()
+                if lengths:
+                    scores = torch.cat([F.linear(part.float(), weight) for part in x.split(lengths)])
+                else:
+                    scores = F.linear(x.float(), weight)
         else:
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
             scores = self._bf16_fp32_linear(x_bf16, self._weight_bf16())

@@ -71,6 +71,8 @@ class PpuFP4Compressor(CompressorFP8):
             requires_grad=False,
         )
 
+    _project_prefill = CompressorFP8._project_separate_prefill
+
     def _project_raw(self, x):
         x = x.float()
         return torch.cat((self.wkv(x), self.wgate(x)), dim=-1)

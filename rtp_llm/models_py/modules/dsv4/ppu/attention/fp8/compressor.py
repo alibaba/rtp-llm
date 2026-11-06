@@ -193,6 +193,19 @@ class CompressorFP8(_BaseCompressorFP8):
             x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
         )
 
+    def _project_separate_prefill(self, x: torch.Tensor) -> torch.Tensor:
+        from rtp_llm.models_py.modules.dsv4.ppu.prefill.request_rows import request_row_lengths
+
+        lengths = request_row_lengths(len(x)) if x.ndim == 2 else ()
+        if not lengths:
+            return self._project_raw(x)
+        return torch.cat([self._project_raw(part) for part in x.split(lengths)], dim=0)
+
+    def _project_prefill(self, x: torch.Tensor) -> torch.Tensor:
+        if self.head_dim == KV_HEAD_DIM:
+            return self._project_separate_prefill(x)
+        return self._project_raw(x)
+
     def _launch(
         self,
         kv_flat: torch.Tensor,  # [N, coff*head_dim] fp32
@@ -358,7 +371,7 @@ class CompressorFP8(_BaseCompressorFP8):
 
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = self._project_raw(x)
+            fused_out = self._project_prefill(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 
@@ -459,7 +472,7 @@ class CompressorFP8(_BaseCompressorFP8):
         device = x.device
         out_dim = (1 + self.overlap) * self.head_dim
         with record_function_range("dsv4.fp8.compressor.prefill.fused_linear"):
-            fused_out = self._project_raw(x)
+            fused_out = self._project_prefill(x)
             N = bsz * seqlen
             fused_flat = fused_out.reshape(N, -1)
 

@@ -759,19 +759,25 @@ def forward_prefill(
         )
         fixed_valid_tokens = v4._mtp_hidden_valid_tokens
         v4._mtp_hidden_buffer = temporary_mtp_buffer
+    from rtp_llm.models_py.modules.dsv4.ppu.prefill.request_rows import prefill_request_rows
+
     try:
-        hidden = forward_layers(
-            v4,
-            kv_cache,
-            input_ids,
-            positions,
-            cu_seqlens,
-            block_tables_by_type,
-            attn_inputs=attn,
-            attention_inputs=attn_inputs,
-            prepare_hidden_fn=prepare_hidden_fn,
-            capture_context=capture_context,
-        )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
+        with prefill_request_rows(
+            cu_seqlens, input_ids.numel(),
+            enabled=not is_capturing and getattr(v4, "_cp_size", 1) == 1,
+        ):
+            hidden = forward_layers(
+                v4,
+                kv_cache,
+                input_ids,
+                positions,
+                cu_seqlens,
+                block_tables_by_type,
+                attn_inputs=attn,
+                attention_inputs=attn_inputs,
+                prepare_hidden_fn=prepare_hidden_fn,
+                capture_context=capture_context,
+            )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
     finally:
         if temporary_mtp_buffer is not None:
             v4._mtp_hidden_buffer = fixed_mtp_buffer
