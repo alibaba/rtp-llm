@@ -313,3 +313,37 @@ py_test(
     tags = ["requires-network", "requires-openssl"],
     legacy_create_init = 0,
 )
+
+py_test(
+    name = "test_engram_local_cuda",
+    size = "large",
+    timeout = "long",
+    srcs = ["test_engram_local_cuda.py"],
+    main = "test_engram_local_cuda.py",
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//tools/engram_sidecar/native:native_runtime",
+    ],
+    env = {"GPU_COUNT": "4"},
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "4"},
+    tags = ["SM103_CU13"],
+    legacy_create_init = 0,
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "test_engram_local_cuda_config",
+    size = "small",
+    srcs = ["test_engram_local_cuda.py"],
+    main = "test_engram_local_cuda.py",
+    args = ["LocalCudaEngramConfigTest"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+    ],
+    env = {"GPU_COUNT": "0"},
+    legacy_create_init = 0,
+)

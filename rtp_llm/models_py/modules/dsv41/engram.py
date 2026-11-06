@@ -878,7 +878,9 @@ class HostEngramEmbedding:
                 uva[1].record_stream(torch.cuda.current_stream(indices.device))
 
     @classmethod
-    def from_storage(cls, storage, layer_id: int, *, scale_group=None, scale_identity=None):
+    def from_storage(
+        cls, storage, layer_id: int, *, scale_group=None, scale_identity=None
+    ):
         """Use validated external device views without loading a local table.
 
         The caller owns storage attach/drain. Graph capture must retain that
@@ -889,22 +891,33 @@ class HostEngramEmbedding:
         """
         with storage.use():
             weight, scales = storage.table_views(layer_id)
-            if (weight.device.type != "cuda" or scales.device != weight.device
-                    or weight.device.index != storage.device):
-                raise ValueError("external Engram views must use the storage CUDA device")
+            if (
+                weight.device.type != "cuda"
+                or scales.device != weight.device
+                or weight.device.index != storage.device
+            ):
+                raise ValueError(
+                    "external Engram views must use the storage CUDA device"
+                )
             if weight.dtype != torch.uint8 or scales.dtype != torch.uint8:
-                raise ValueError("external Engram views must preserve FP8/E8M0 as uint8")
+                raise ValueError(
+                    "external Engram views must preserve FP8/E8M0 as uint8"
+                )
             if weight.ndim != 2 or weight.shape[0] <= 0:
                 raise ValueError("external Engram weight must be a nonempty matrix")
             dim = weight.shape[1]
             if dim < 32 or dim % 32 or dim & (dim - 1):
-                raise ValueError("current Engram lookup requires power-of-two width >=32")
+                raise ValueError(
+                    "current Engram lookup requires power-of-two width >=32"
+                )
             if scales.shape != (weight.shape[0], dim // 32):
                 raise ValueError("external Engram scale shape does not match weight")
             if not weight.is_contiguous() or not scales.is_contiguous():
                 raise ValueError("external Engram views must be contiguous")
             result = cls.__new__(cls)
-            result.weight = result.scales = None  # No private host table/reference copy.
+            result.weight = result.scales = (
+                None  # No private host table/reference copy.
+            )
             result.block_size = 32
             result._initialize_lookup_state(storage=storage)
             properties = torch.cuda.get_device_properties(weight.device)
@@ -917,7 +930,17 @@ class HostEngramEmbedding:
             )
             # The sharded scales are only readable by the quantized kernel, so a
             # target that cannot run it keeps the fabric view untouched.
-            if quantized_target and os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1":
+            if getattr(storage, "direct_device_scales", False):
+                # Local VRAM shards already expose one contiguous scale VA.
+                # Keep both table pointers: another clone would replicate all scales.
+                result._uva = (weight, scales)
+                result._quantized_lookup_supported = quantized_target
+                result._device_scale_lease = _DeviceScaleLease(
+                    result._uva, None, storage=storage
+                )
+            elif (
+                quantized_target and os.getenv("DSV41_ENGRAM_DEVICE_SCALES", "1") == "1"
+            ):
                 from rtp_llm.models_py.modules.dsv41._engram_scale_shards import (
                     create_sharded_scales,
                 )
@@ -930,9 +953,11 @@ class HostEngramEmbedding:
                         scales,
                         scale_group,
                         weight.device,
-                        (scale_identity, f"layers.{layer_id}.engram.embed.scale")
-                        if scale_identity
-                        else None,
+                        (
+                            (scale_identity, f"layers.{layer_id}.engram.embed.scale")
+                            if scale_identity
+                            else None
+                        ),
                         external_source=True,
                     )
                     if scale_group is not None
@@ -1002,12 +1027,22 @@ class HostEngramEmbedding:
             with self.lookup_guard():
                 storage = self._external_storage
                 target = torch.device(device)
-                if (not indices.is_cuda or indices.device != self._uva[0].device
-                        or target.type != "cuda"
-                        or (target.index is not None and target.index != indices.device.index)):
-                    raise ValueError("external Engram lookup requires indices on its CUDA device")
+                if (
+                    not indices.is_cuda
+                    or indices.device != self._uva[0].device
+                    or target.type != "cuda"
+                    or (
+                        target.index is not None
+                        and target.index != indices.device.index
+                    )
+                ):
+                    raise ValueError(
+                        "external Engram lookup requires indices on its CUDA device"
+                    )
                 if indices.ndim != 2 or indices.dtype not in (torch.int32, torch.int64):
-                    raise ValueError("external Engram lookup requires a 2D int32/int64 index tensor")
+                    raise ValueError(
+                        "external Engram lookup requires a 2D int32/int64 index tensor"
+                    )
                 with torch.cuda.device(storage.device):
                     lease = self._device_scale_resources()
                     if lease is not None and torch.cuda.is_current_stream_capturing():
@@ -1026,7 +1061,9 @@ class HostEngramEmbedding:
                         )
                     finally:
                         if lease is not None:
-                            uva[1].record_stream(torch.cuda.current_stream(indices.device))
+                            uva[1].record_stream(
+                                torch.cuda.current_stream(indices.device)
+                            )
         if indices.is_cuda:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
@@ -2000,9 +2037,15 @@ class Engram(nn.Module):
         if external_storage is not None:
             if target.type != "cuda":
                 raise ValueError("external Engram storage requires a CUDA model")
-            ordinal = target.index if target.index is not None else torch.cuda.current_device()
+            ordinal = (
+                target.index
+                if target.index is not None
+                else torch.cuda.current_device()
+            )
             if ordinal != external_storage.device:
-                raise ValueError("model and external Engram storage must use the same CUDA device")
+                raise ValueError(
+                    "model and external Engram storage must use the same CUDA device"
+                )
             # Check every configured layer, not just the layer being constructed.
             # Revision/hash/dataset identities are pinned by the prior attach.
             with external_storage.use():
@@ -2019,44 +2062,65 @@ class Engram(nn.Module):
             name = prefix + suffix
             if name not in weight_map:
                 raise KeyError(f"V4.1 checkpoint is missing {name}")
-            with safe_open(root / weight_map[name], framework="pt", device="cpu") as file:
+            with safe_open(
+                root / weight_map[name], framework="pt", device="cpu"
+            ) as file:
                 return file.get_tensor(name)
 
         embedding = None
         try:
             if external_storage is not None:
-                manifest = external_storage.validated.manifest
+                identity = getattr(external_storage, "identity_key", None)
+                if identity is None:
+                    manifest = external_storage.validated.manifest
+                    identity = f"{manifest.dataset_id}|{manifest.generation}"
                 embedding = HostEngramEmbedding.from_storage(
                     external_storage,
                     layer_id,
                     scale_group=scale_group,
-                    scale_identity=f"{manifest.dataset_id}|{manifest.generation}",
+                    scale_identity=identity,
                 )
                 with torch.cuda.device(target):
                     from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
-                    projection = V41MXFP8Linear(load("wkv.weight").to(target), load("wkv.scale").to(target))
+
+                    projection = V41MXFP8Linear(
+                        load("wkv.weight").to(target), load("wkv.scale").to(target)
+                    )
             else:
                 table, scales = load("embed.weight"), load("embed.scale")
                 expected = (layout.num_embeddings[layer_hash_index], layout.head_dim)
                 if tuple(table.shape) != expected:
-                    raise ValueError(f"Engram table shape {table.shape} does not match {expected}")
+                    raise ValueError(
+                        f"Engram table shape {table.shape} does not match {expected}"
+                    )
                 pinned = None
                 scale_identity = None
                 if target.type == "cuda":
                     from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
                     identity = [str(root.resolve()), prefix]
                     for suffix in ("embed.weight", "embed.scale"):
                         path = root / weight_map[prefix + suffix]
                         stat = path.stat()
-                        identity.extend([str(path.resolve()), str(stat.st_size), str(stat.st_mtime_ns)])
+                        identity.extend(
+                            [
+                                str(path.resolve()),
+                                str(stat.st_size),
+                                str(stat.st_mtime_ns),
+                            ]
+                        )
                     scale_identity = "|".join(identity)
                     pinned = _PinnedSharedTable(table, scales, scale_identity, target)
                     table, scales = pinned.weight, pinned.scales
-                    projection = V41MXFP8Linear(load("wkv.weight").to(target), load("wkv.scale").to(target))
+                    projection = V41MXFP8Linear(
+                        load("wkv.weight").to(target), load("wkv.scale").to(target)
+                    )
                 else:
                     _prefault_host_tensor(table, prefix + "embed.weight")
                     _prefault_host_tensor(scales, prefix + "embed.scale")
-                    projection = _ReferenceWKV(dequantize_block_weight(load("wkv.weight"), load("wkv.scale")))
+                    projection = _ReferenceWKV(
+                        dequantize_block_weight(load("wkv.weight"), load("wkv.scale"))
+                    )
                 embedding = HostEngramEmbedding(
                     table,
                     scales,
@@ -2064,9 +2128,15 @@ class Engram(nn.Module):
                     scale_group=scale_group,
                     scale_identity=scale_identity,
                 )
-            return cls(layout, layer_hash_index, embedding, projection,
-                       load("q_weight").to(target), load("k_weight").to(target),
-                       float(_config_value(config, "rms_norm_eps")))
+            return cls(
+                layout,
+                layer_hash_index,
+                embedding,
+                projection,
+                load("q_weight").to(target),
+                load("k_weight").to(target),
+                float(_config_value(config, "rms_norm_eps")),
+            )
         except BaseException:
             if external_storage is not None and embedding is not None:
                 embedding.release_external_views()
