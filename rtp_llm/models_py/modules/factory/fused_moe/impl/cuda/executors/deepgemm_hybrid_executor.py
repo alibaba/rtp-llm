@@ -228,6 +228,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         self.masked_max_token_num = config.masked_max_token_num
         self.enable_cuda_graph = config.enable_cuda_graph
+        # SwiGLU clamp from the model config (DeepSeek-V4 contract). 0.0
+        # disables clamping and keeps the kernels bit-identical to the
+        # unclamped launch.
+        self.clamp_limit = float(getattr(config, "swiglu_limit", 0.0) or 0.0)
         # Triton's route aligner requires every expert ID to be valid; Top-p uses -1.
         self.norm_top_p_enabled = bool(getattr(config, "norm_top_p_enabled", False))
         self.is_sm120 = get_sm()[0] == 12
@@ -423,7 +427,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             device=hidden_states_fp8.device,
             dtype=torch.bfloat16,
         )
-        silu_and_mul(down_input, gate_up_output)
+        silu_and_mul(down_input, gate_up_output, clamp_limit=self.clamp_limit)
         down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
             down_input,
             group_size=self.BLOCK_SIZE,
@@ -591,6 +595,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     down_input_scale,
                     self.DEEPGEMM_BLOCK_SHAPE[0],
                     num_recv_tokens_per_expert,
+                    clamp_limit=self.clamp_limit,
                 )
             else:
                 # Standard path for other SM versions
@@ -613,6 +618,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     expected_m=expected_m,
                     input_layout=MaskedSiluInputLayout.BATCH_TOKEN_ALIGNMENT,
                     scale_ue8m0=is_deep_gemm_e8m0_used(),
+                    clamp_limit=self.clamp_limit,
                 )
 
             # Free upgate_output
@@ -847,7 +853,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             dtype=torch.bfloat16,
         )
         gateup_output = gateup_output.view(-1, N)
-        silu_and_mul(down_input, gateup_output)
+        silu_and_mul(down_input, gateup_output, clamp_limit=self.clamp_limit)
         del gateup_output
         down_output = torch.empty(
             (all_tokens, K),

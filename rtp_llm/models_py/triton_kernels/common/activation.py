@@ -15,8 +15,11 @@ def _silu_and_mul_kernel(
     # Row strides for jumping between batches
     input_row_stride: tl.int32,
     output_row_stride: tl.int32,
+    # SwiGLU clamp threshold; 0 disables clamping
+    clamp_limit,
     # Meta-parameter for tuning
     BLOCK_SIZE_N: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
 ):
     pid_b = tl.program_id(axis=0)  # Batch dimension
     pid_n_block = tl.program_id(axis=1)  # N-dimension block
@@ -34,6 +37,12 @@ def _silu_and_mul_kernel(
     gate = tl.load(gate_ptrs, mask=mask)
     value = tl.load(value_ptrs, mask=mask)
 
+    if HAS_CLAMP:
+        # SwiGLU clamp: the gate branch is capped at the limit, the linear
+        # (up/value) branch is clamped symmetrically.
+        gate = tl.minimum(gate.to(tl.float32), clamp_limit)
+        value = tl.clamp(value.to(tl.float32), -clamp_limit, clamp_limit)
+
     silu_gate = gate * tl.sigmoid(gate.to(tl.float32))
     output = silu_gate * value
 
@@ -41,11 +50,15 @@ def _silu_and_mul_kernel(
 
 
 def silu_and_mul(
-    output_tensor: torch.Tensor, input_tensor: torch.Tensor
+    output_tensor: torch.Tensor,
+    input_tensor: torch.Tensor,
+    clamp_limit: float = 0.0,
 ) -> torch.Tensor:
     """
     Computes SiLU(gate) * value in a fused Triton kernel.
     Assumes input_tensor has shape [B, 2*N] and is contiguous.
+    ``clamp_limit > 0`` applies the SwiGLU clamp (gate capped at the limit,
+    value clamped symmetrically) before the activation.
     """
     B, D = input_tensor.shape
     assert D % 2 == 0, "Last dimension must be even (2*N)"
@@ -57,13 +70,17 @@ def silu_and_mul(
     # Heuristic for block size
     BLOCK_SIZE_N = 1024 if N > 1024 else triton.next_power_of_2(N)
 
+    has_clamp = clamp_limit > 0
+
     _silu_and_mul_kernel[grid](
         output_tensor,
         input_tensor,
         N,
         input_tensor.stride(0),
         output_tensor.stride(0),
+        clamp_limit if has_clamp else 0.0,
         BLOCK_SIZE_N=BLOCK_SIZE_N,
+        HAS_CLAMP=has_clamp,
     )
     return output_tensor
 
@@ -658,8 +675,11 @@ def _silu_and_mul_post_quant_packed_kernel(
     size_n,
     fp8_max,
     fp8_min,
+    # SwiGLU clamp threshold; 0 disables clamping
+    clamp_limit,
     BLOCK_N: tl.constexpr,  # group_size (e.g., 128)
     NUM_STAGE: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
 ):
     """
     Fused SiLU-and-mul + FP8 quantization with UE8M0 scale packing.
@@ -724,6 +744,14 @@ def _silu_and_mul_post_quant_packed_kernel(
                 mask=mask,
                 other=0.0,
             )
+
+            if HAS_CLAMP:
+                # SwiGLU clamp: gate capped at the limit, up clamped
+                # symmetrically, both before the activation.
+                gate = tl.minimum(gate, clamp_limit)
+                up = tl.clamp(
+                    up.to(tl.float32), -clamp_limit, clamp_limit
+                ).to(input_ptr.dtype.element_ty)
 
             # SiLU activation
             gate = gate / (1 + tl.exp(-gate))
@@ -814,6 +842,7 @@ def silu_and_mul_masked_post_quant_packed_fwd(
     output_scale: torch.Tensor,
     quant_group_size: int,
     masked_m: torch.Tensor,
+    clamp_limit: float = 0.0,
 ):
     """
     Fused SiLU-and-mul + FP8 quantization with UE8M0 scale packing.
@@ -828,6 +857,7 @@ def silu_and_mul_masked_post_quant_packed_fwd(
                       dtype int32 (packed UE8M0 format), use create_packed_scale_tensor() to create
         quant_group_size: int, typically 128
         masked_m: shape [expert_num], number of valid tokens per expert
+        clamp_limit: optional SwiGLU clamp threshold; 0 disables clamping
     """
     assert input.is_contiguous()
     assert output.dtype == torch.float8_e4m3fn
@@ -867,6 +897,8 @@ def silu_and_mul_masked_post_quant_packed_fwd(
     fp8_max = finfo.max
     fp8_min = -fp8_max
 
+    has_clamp = clamp_limit > 0
+
     _silu_and_mul_post_quant_packed_kernel[grid](
         input,
         *input.stride(),
@@ -878,8 +910,10 @@ def silu_and_mul_masked_post_quant_packed_fwd(
         size_n,
         fp8_max,
         fp8_min,
+        clamp_limit if has_clamp else 0.0,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
+        HAS_CLAMP=has_clamp,
     )
     return
 
@@ -983,9 +1017,12 @@ def _silu_mul_masked_fp8_post_quant_fwd(
     size_n,
     fp8_max,
     fp8_min,
+    # SwiGLU clamp threshold; 0 disables clamping
+    clamp_limit,
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
 ):
     expert_id = tl.program_id(2)
     token_id = tl.program_id(1)
@@ -1022,6 +1059,13 @@ def _silu_mul_masked_fp8_post_quant_fwd(
             mask=offs_in_d < size_n,
             other=0.0,
         )
+        if HAS_CLAMP:
+            # SwiGLU clamp: gate capped at the limit, up clamped
+            # symmetrically, both before the activation.
+            gate = tl.minimum(gate, clamp_limit)
+            up = tl.clamp(
+                up.to(tl.float32), -clamp_limit, clamp_limit
+            ).to(input_ptr.dtype.element_ty)
         gate = gate / (1 + tl.exp(-gate))
         gate_up = up * gate
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
@@ -1051,6 +1095,7 @@ def silu_mul_masked_fp8_post_quant_fwd(
     expected_m: int,
     input_layout: MaskedSiluInputLayout = MaskedSiluInputLayout.PER_EXPERT_CAPACITY,
     scale_ue8m0: bool = False,
+    clamp_limit: float = 0.0,
 ):
     """
     SiLU and multiply with masked FP8 post-quantization forward pass.
@@ -1064,6 +1109,7 @@ def silu_mul_masked_fp8_post_quant_fwd(
         expected_m: Expected number of tokens
         input_layout: Meaning of ``input.shape[1]`` for heuristic selection
         scale_ue8m0: Whether to use ue8m0 scaling format
+        clamp_limit: optional SwiGLU clamp threshold; 0 disables clamping
     """
 
     assert input.is_contiguous()
@@ -1100,6 +1146,8 @@ def silu_mul_masked_fp8_post_quant_fwd(
     fp8_max = finfo.max
     fp8_min = -fp8_max
 
+    has_clamp = clamp_limit > 0
+
     _silu_mul_masked_fp8_post_quant_fwd[grid](
         input,
         *input.stride(),
@@ -1111,10 +1159,12 @@ def silu_mul_masked_fp8_post_quant_fwd(
         size_n,
         fp8_max,
         fp8_min,
+        clamp_limit if has_clamp else 0.0,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
         num_warps=num_warps,
         SCALE_UE8M0=scale_ue8m0,
+        HAS_CLAMP=has_clamp,
     )
     return
 
@@ -1131,8 +1181,11 @@ def _silu_mul_masked_bf16_no_post_quant_fwd(
     stride_output_2,
     masked_m_ptr,
     size_n,
+    # SwiGLU clamp threshold; 0 disables clamping
+    clamp_limit,
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
+    HAS_CLAMP: tl.constexpr,
 ):
     expert_id = tl.program_id(2)
     token_id = tl.program_id(1)
@@ -1164,6 +1217,13 @@ def _silu_mul_masked_bf16_no_post_quant_fwd(
             mask=offs_in_d < size_n,
             other=0.0,
         )
+        if HAS_CLAMP:
+            # SwiGLU clamp: gate capped at the limit, up clamped
+            # symmetrically, both before the activation.
+            gate = tl.minimum(gate, clamp_limit)
+            up = tl.clamp(
+                up.to(tl.float32), -clamp_limit, clamp_limit
+            ).to(input_ptr.dtype.element_ty)
         gate = gate / (1 + tl.exp(-gate))
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = (up * gate).to(output_ptr.dtype.element_ty)
@@ -1181,6 +1241,7 @@ def silu_mul_masked_bf16_no_post_quant_fwd(
     expected_m: int,
     input_layout: MaskedSiluInputLayout = MaskedSiluInputLayout.PER_EXPERT_CAPACITY,
     group_size: int = 256,
+    clamp_limit: float = 0.0,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
@@ -1189,6 +1250,7 @@ def silu_mul_masked_bf16_no_post_quant_fwd(
     expected_m int,
     input_layout MaskedSiluInputLayout,
     group_size int,
+    clamp_limit optional SwiGLU clamp threshold; 0 disables clamping,
     """
 
     assert input.is_contiguous()
@@ -1220,6 +1282,8 @@ def silu_mul_masked_bf16_no_post_quant_fwd(
         expert_num,
     )
 
+    has_clamp = clamp_limit > 0
+
     _silu_mul_masked_bf16_no_post_quant_fwd[grid](
         input,
         *input.stride(),
@@ -1227,8 +1291,10 @@ def silu_mul_masked_bf16_no_post_quant_fwd(
         *output.stride(),
         masked_m,
         size_n,
+        clamp_limit if has_clamp else 0.0,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
         num_warps=num_warps,
+        HAS_CLAMP=has_clamp,
     )
     return

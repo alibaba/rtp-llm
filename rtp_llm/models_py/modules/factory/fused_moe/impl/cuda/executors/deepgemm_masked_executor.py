@@ -70,6 +70,10 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
             weights: Dictionary containing model weights.
         """
         super().__init__(config, quant_config, weights)
+        # SwiGLU clamp from the model config (DeepSeek-V4 contract). 0.0
+        # disables clamping and keeps the kernels bit-identical to the
+        # unclamped launch.
+        self.clamp_limit = float(getattr(config, "swiglu_limit", 0.0) or 0.0)
         # Initialize w1 and w2
         self._w1 = weights[W.moe_w1]
         self._w2 = weights[W.moe_w2]
@@ -238,6 +242,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                         down_input_scale,
                         self.DEEPGEMM_BLOCK_SHAPE[0],
                         masked_m[start_idx:end_idx],
+                        clamp_limit=self.clamp_limit,
                     )
                 else:
                     # Standard path for other SM versions
@@ -260,6 +265,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                         expected_m=expected_m,
                         input_layout=MaskedSiluInputLayout.PER_EXPERT_CAPACITY,
                         scale_ue8m0=is_deep_gemm_e8m0_used(),
+                        clamp_limit=self.clamp_limit,
                     )
 
                 # Free upgate_output
@@ -328,6 +334,7 @@ class DeepGemmMaskedExecutor(FusedMoeExpertExecutor):
                     expected_m=expected_m,
                     input_layout=MaskedSiluInputLayout.PER_EXPERT_CAPACITY,
                     group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                    clamp_limit=self.clamp_limit,
                 )
 
                 # Free upgate_output
