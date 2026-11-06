@@ -1242,7 +1242,7 @@ public:
         uint32_t pivot_value_x2_bits = ((uint32_t)pivot_value << 16) | pivot_value;
 
         auto census = get_census_counts<N, NUM_PACKED_VALUES_ALIGNMENT>(values, num_values, pivot_value_x2_bits);
-        if constexpr (Config::pin_last_index) {
+        if constexpr (Config::exclude_padding) {
             // Padding is the lowest histogram bucket, so it cannot change the
             // valid kth pivot. Exclude it from the tie census before quotas.
             if (pivot_value == PLACEHOLDER)
@@ -1426,7 +1426,7 @@ public:
             // quota computation at the real count
             uint32_t effective_topk   = min(topk, num_real_init_elems);
             uint32_t my_padding_count = 0;
-            if constexpr (Config::pin_last_index) {
+            if constexpr (Config::exclude_padding) {
                 static_assert(!USE_CLUSTER_ADDRESSING);
                 uint32_t padding_begin = max(my_elem_start_idx, num_local_tail_elems);
                 uint32_t padding_end   = min(my_elem_start_idx + num_my_elems, num_local_tail_elems_padded);
@@ -1468,7 +1468,7 @@ public:
                     uint32_t     index0    = __float_as_uint(unit_base_f + __uint_as_float(i % 4 * 2));
                     uint32_t     index1    = __float_as_uint(unit_base_f + __uint_as_float(i % 4 * 2 + 1));
                     nv_bfloat162 cur_value = init_values[i];  // two bf16 payloads packed as bf16x2
-                    if constexpr (Config::pin_last_index) {
+                    if constexpr (Config::exclude_padding) {
                         if (index1 >= end_vocab_idx) {
                             append_valid_candidate_pair(out_ptr,
                                                         eq_quota,
@@ -1509,7 +1509,7 @@ public:
 
             // Candidate runtime K may be smaller than the capacity. Never let
             // unused survivor slots compete with real -INF scores.
-            uint32_t survivor_count = Config::pin_last_index ? topk : MAX_TOPK;
+            uint32_t survivor_count = Config::exclude_padding ? topk : MAX_TOPK;
             // units [0, survivor_count/2): the current survivor buffer
             // The rest: incomers
             uint32_t num_uint32 = (survivor_count + padded_extra_len) / 2;
@@ -1540,7 +1540,7 @@ public:
             __syncthreads();
 
             uint32_t my_padding_count = 0;
-            if constexpr (Config::pin_last_index) {
+            if constexpr (Config::exclude_padding) {
                 my_padding_count = (cur_extra_len & 1u) && num_my_units && unit_base + num_my_units == num_uint32;
             }
             auto [pivot_value_x2_bits, out_prefix, eq_quota, cnt_nan] = compute_pivot_and_quota<USE_CLUSTER_ADDRESSING>(
@@ -1556,7 +1556,7 @@ public:
                 for (uint32_t m = 0; m < NUM_UINT32_RECONSTRUCT_PER_THREAD; m++) {
                     if (m == num_my_units)
                         break;
-                    if constexpr (Config::pin_last_index) {
+                    if constexpr (Config::exclude_padding) {
                         if ((cur_extra_len & 1u) && unit_base + m + 1 == num_uint32) {
                             uint32_t pair2[4];
                             ld_shared<4>(pair2, (const uint32_t*)unit_to_pair_addr(unit_base + m));
