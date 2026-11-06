@@ -1,5 +1,5 @@
 {
-  "schema": "q38-world72-bf16-state-real-rl-acceptance-plan-v1",
+  "schema": "q38-world72-bf16-state-real-rl-acceptance-plan-v2",
   "full_model_training_accepted": false,
   "model": {
     "path": "/mnt/fuse/Qwen/Qwen3.8-2.4T-A95B",
@@ -10,15 +10,34 @@
     "weights_download": "not resumed"
   },
   "allocation": {
-    "nodes": 18, "gpus_per_node": 4, "world_size": 72,
-    "gpu_type": "L20A SM100", "gpu_total_MiB_each": 189471,
+    "nodes": 18,
+    "gpus_per_node": 4,
+    "world_size": 72,
+    "gpu_type": "L20A SM100",
+    "gpu_total_MiB_each": 189471,
     "container_memory_limit_bytes_each": 858993459200,
     "physical_gpu_binding": "72 distinct current UUIDs; actor rank and native rank must bind the same UUID and owner IP",
     "logical_policy_instances": 1,
-    "native": {"tp": 8, "attention_dp": 9, "ep": 72, "pp": 1, "ffn_sp": 8, "ffn_tp": 1},
-    "actual_verl_rollout_device_mesh": {"dp": 1, "infer_tp": 72, "infer_pp": 1},
+    "native": {
+      "tp": 8,
+      "attention_dp": 9,
+      "ep": 72,
+      "pp": 1,
+      "ffn_sp": 8,
+      "ffn_tp": 1
+    },
+    "actual_verl_rollout_device_mesh": {
+      "dp": 1,
+      "infer_tp": 72,
+      "infer_pp": 1
+    },
     "native_rank_mapping": "tp_rank=world_rank%8, attention_dp_rank=world_rank//8, ep_rank=world_rank",
-    "experts": {"logical": 512, "physical_slots": 576, "slots_per_rank": 8, "never_routed_padding_slots": 64}
+    "experts": {
+      "logical": 512,
+      "physical_slots": 576,
+      "slots_per_rank": 8,
+      "never_routed_padding_slots": 64
+    }
   },
   "persistent_state": {
     "unique_training_master": "BF16",
@@ -33,12 +52,14 @@
     "checkpoint_saving": "disabled; small code, logs, dataset and Python Tool sandbox files are permitted"
   },
   "required_checks": [
+    "All18 same frozen runtime/source manifest; hash-pinned setproctitle1.3.8/thrift0.24.0 plus existing CPU dependencies; actual imports pass without changing Torch/Triton/NCCL/FlashInfer/FFI versions",
     "Fresh SM100 native SHA, mapped-file/inode proof and initial-pause capability marker=1 from all 72 real rank PIDs; no old .so reuse",
     "Native metadata-only allocation with RL_MODE/WORLD72/START_PAUSED/METADATA_BOOTSTRAP; exact physical map; no admission before all 1590 source COMMIT ACKs from all72",
     "All72 initial BF16 shard loader receipts: correct global policy coverage, dtype, sampled actual source coordinates; no full checkpoint replica in any rank",
     "Collectively identical canonical source order, dtype, shape, actual SR-produced byte digest and per-key all72 native ACK before lease reuse; no live full source backing before training restore",
     "For policy0,policy1,policy2: actual HF FSDP72 BF16 forward scores, identical target IDs and FP32 score bits; all nine real native DP probes within 0.05 of HF and each other before admission",
     "Two genuine GRPO updates: eighteen distinct original DeepScaleR prompts times four actual trajectories=72 per iteration; one global prompt-unit minibatch18, ppo_epochs1, micro1; every one of72 actor ranks participates",
+    "Actual complete multi-turn prompt/response token IDs satisfy prompt<=2048 and total<=4096 before and after converter padding; no silent truncation or altered reward/advantages to force a pass",
     "Original math correctness evaluator recomputation; at least one nonuniform same-question reward group in each iteration; observed real CUDA loss has nonzero positive and negative GRPO advantages in each update; no synthetic tool rewards",
     "Python Tool calls decoded from actual native output tokens, independently replayed through the original bounded sandbox; delivered gateway histories/token arrays/raw FP32 logprobs match exact native receipts and retries are accounted separately",
     "Every rank has exactly two optimizer commits, step1 and step2; BF16 master/m/v and FP32 gradients observed; finite nonzero global gradient norm; global changed BF16 weight elements>0 at each step; next source digest/version changes",
@@ -51,5 +72,46 @@
     "NVML peaks are maximum observed sampled usage; record sampling interval and do not describe them as guaranteed instantaneous hardware maxima",
     "Model mount size/config/index checks are complete; full official weight-object SHA verification is a separate read-integrity claim",
     "Dataset selection cannot guarantee nonuniform model rewards; lack of actual positive/negative advantages fails acceptance and must never be repaired by reward injection"
-  ]
+  ],
+  "base_plan_sha256": "d1217763a413afdee7c19404f7db466f9539470d088c0ba88cf874c6dbd49871",
+  "training_token_envelope": {
+    "max_prompt_tokens": 2048,
+    "max_response_tokens": 2048,
+    "max_actual_prompt_plus_response_tokens": 4096,
+    "tool_call_generated_tokens_maximum": 1024,
+    "tool_generated_tokens_total_maximum": 2048,
+    "workflow_max_turns": 2,
+    "thinking_enabled": true,
+    "reasoning_effort": "low",
+    "official18_initial_prompt_observed_tokens": [
+      508,
+      673
+    ],
+    "silent_prompt_or_response_truncation_forbidden": true,
+    "strict_converter_guard": "required; training-agent CPU boundary qualification and all18 source deployment before full RL"
+  },
+  "native_service_envelope": {
+    "max_seq_len": 8192,
+    "ssm_physical_block": 8192,
+    "ssm_kernel_block": 64,
+    "ssm_state_dtype": "fp32",
+    "kv_cache_mem_MiB": 2048,
+    "BI": false,
+    "CUDA_Graph": false,
+    "MTP": false,
+    "rope_backend": "explicit project-owned torch_bf16_v1 with canonical fused path and explicit decode sequence lengths; source SHA qualification required"
+  },
+  "startup_path_contract": {
+    "checkpoint_and_tokenizer": "exact same mounted BF16 model path",
+    "ptuning_extra_data_draft_paths": "explicit empty",
+    "lora_info": {},
+    "foreign_platform_quantization_or_model_overrides": "not inherited",
+    "secret_OSS_URI_or_query_log_disclosure": "forbidden; redact before collection/output"
+  },
+  "current_observation": {
+    "full_model_training_accepted": false,
+    "native_metadata72_attempt1": "failed before backend bootstrap because setproctitle missing and foreign tokenizer inherited; all18 actual native leader exit1 and all72 owned contexts absent",
+    "CPU_missing_dependency_trial": "setproctitle/thrift installed actualwait0 each; fresh backend closure actualwait0 with explicit CPU CUDA-branch fixture, no CUDA initialization",
+    "next_actual72_native_metadata": "root-supervised fresh run required; not established by CPU imports"
+  }
 }

@@ -11,6 +11,7 @@ export Q38_RAY_ADDRESS="${Q38_RAY_ADDRESS:?Use only the current owned Ray alloca
 export Q38_NODES_FILE="${Q38_NODES_FILE:?The fresh 18-node allocation manifest is required}"
 export Q38_GATEWAY_HOST="${Q38_GATEWAY_HOST:?Bind the current head container IP}"
 export Q38_MODEL_PATH="${Q38_MODEL_PATH:-/mnt/fuse/Qwen/Qwen3.8-2.4T-A95B}"
+export Q38_SOURCE_PROVIDER=platform_mounted Q38_EXISTING_SNAPSHOT_VERIFIED=1
 export Q38_ENABLE_BF16_STATE_RUNTIME=1 Q38_BF16_ROUNDING_SEED=20261106
 export Q38_VERIFIED_CPU_LIMIT_BYTES_PER_NODE=858993459200
 export Q38_CPU_MOMENT_BYTES_PER_NODE=549755813888 Q38_CPU_RESERVE_BYTES_PER_NODE=103079215104
@@ -19,6 +20,12 @@ export Q38_TRAINING_AUDIT_DIR="$RUN/training" Q38_POLICY_AUDIT_DIR="$RUN/policy-
 export RTP_PROJECT_ROOT="$PROJECT" QWEN36_RL_ROOT="$PROJECT"
 export RTP_SOURCE="${RTP_SOURCE:-$DEPLOY/rtp-runtime}"
 export RTP_PYTHON="$PYTHON" RTP_MODEL_PATH="$Q38_MODEL_PATH"
+export CHECKPOINT_PATH="$Q38_MODEL_PATH" TOKENIZER_PATH="$Q38_MODEL_PATH"
+export PTUNING_PATH= EXTRA_DATA_PATH= LOCAL_EXTRA_DATA_PATH= SP_CHECKPOINT_PATH= SP_TYPE= SP_MODEL_TYPE=
+export LORA_INFO='{}' JSON_MODEL_OVERRIDE_ARGS='{}'
+unset QUANTIZATION SP_QUANTIZATION SP_ACT_TYPE TREE_DECODE_CONFIG
+export RTP_ARM_BF16_ROPE_BACKEND=torch_bf16_v1
+export Q38_TRAIN_MAX_PROMPT_TOKENS=2048 Q38_TRAIN_MAX_TOTAL_TOKENS=4096
 export RTP_SERVER_LAUNCHER="$PROJECT/adapter/serve_rtp_world72.sh"
 export RTP_RL_BOOTSTRAP_POLICY_MANIFEST="$PROJECT/training/expected-canonical-policy-manifest.json"
 export RTP_RL_NATIVE_LIBRARY_SHA256="${RTP_RL_NATIVE_LIBRARY_SHA256:?Pin the accepted freshly built native artifact}"
@@ -36,7 +43,7 @@ export RLLM_RTP_KEEP_KV_CACHE=1 RLLM_RTP_STARTUP_TIMEOUT=5400 RLLM_RTP_CONTROL_T
 export RLLM_RTP_TOKEN_TIMEOUT=1800 RLLM_RTP_MAX_ACTIVE_REQUESTS=8
 export RLLM_PYTHON_TOOL_TRAIN_JSONL="$PROJECT/data/deepscaler-world72-18.jsonl"
 export RLLM_PYTHON_TOOL_ENABLE_THINKING=1 RLLM_PYTHON_TOOL_REASONING_EFFORT=low
-export RLLM_PYTHON_TOOL_MAX_TURNS=3 RLLM_PYTHON_TOOL_CALL_TOKENS=2048 RLLM_PYTHON_TOOL_TOTAL_TOKENS=4096
+export RLLM_PYTHON_TOOL_MAX_TURNS=2 RLLM_PYTHON_TOOL_CALL_TOKENS=1024 RLLM_PYTHON_TOOL_TOTAL_TOKENS=2048
 export RLLM_PYTHON_TOOL_HTTP_TIMEOUT=2100 RLLM_PYTHON_TOOL_HTTP_MAX_RETRIES=0
 export RLLM_PYTHON_TOOL_TRACE_DIR="$RUN/tool-episodes" RLLM_EPISODE_LOG_DIR="$RUN/episodes"
 export RLLM_QWEN36_TRACE_AUDIT_DIR="$RUN/trace-linkage" RLLM_REQUIRE_REAL_UPDATE=1
@@ -59,7 +66,7 @@ args=("$PYTHON" -m run_qwen38_bf16_state_rtp_training
   rllm/backend=verl rllm.algorithm.adv_estimator=grpo ++rllm.disable_thinking=false
   rllm.algorithm.norm_adv_by_std_in_grpo=true rllm.algorithm.kl_beta=0.0
   rllm.algorithm.lr_schedule=constant rllm.algorithm.warmup_steps_ratio=0.0 rllm.algorithm.router_replay=disabled
-  rllm.data.train_batch_size=18 rllm.data.max_prompt_length=4096 rllm.data.max_response_length=4096
+  rllm.data.train_batch_size=18 rllm.data.max_prompt_length=2048 rllm.data.max_response_length=2048
   rllm.rollout.n=4 rllm.rollout.train.temperature=1.0 rllm.rollout.train.top_p=1.0
   +rllm.rollout.train.top_k=0 +rllm.rollout.val.top_k=0 '~rllm.rollout.train.max_tokens'
   rllm.workflow.n_parallel_tasks=18 rllm.workflow.retry_limit=1 rllm.workflow.raise_on_error=true

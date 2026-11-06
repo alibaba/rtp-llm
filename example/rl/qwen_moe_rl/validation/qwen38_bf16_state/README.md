@@ -53,3 +53,12 @@ two updates with source-lease offload/restore. These are limited qualification
 results, not a full 2.4T memory peak, RL completion, or convergence result.
 The two `qualify_*checkpoint*` scripts use the checked-in official config
 fixture and random tiny weights; they never open official weight payloads.
+
+
+`qwen38_length_guards` is enabled by explicit real-token bounds in the recipe.
+It rejects out-of-range trace steps and merged rows before the original
+converter can truncate, then checks all converted IDs and masks. Synthetic
+CPU boundary tests exercise the actual installed converter; no tool calls or
+rewards are manufactured by those tests. The separate GPU 8K single-layer GDN
+measurement does not certify a full-model 8K training peak, so the initial
+complete-model recipe uses a 4K real-token bound.

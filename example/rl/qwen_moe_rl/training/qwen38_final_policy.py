@@ -68,6 +68,8 @@ def install_backend_hooks():
     if _BACKEND_PATCHED:return
     from rllm.trainer.verl.verl_backend import VerlBackend
     from rllm.trainer.unified_trainer import UnifiedTrainer
+    from qwen38_length_guards import install as install_length_guards
+    install_length_guards()
     old_batch_end=VerlBackend.on_batch_end
     old_train_end=VerlBackend.on_train_end
     old_fit=UnifiedTrainer.fit_async

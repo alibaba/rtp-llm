@@ -28,3 +28,24 @@ The two offline validators take explicit evidence and source paths; neither inde
 The separate metadata-only preflight takes a fresh dedicated run directory and Ray namespace. Build its private input using `--cluster-plan`, `--collective-proof`, `--targets`, `--model-path` and optional `--start-port`. Keep that generated input and its IP/UUID/container identities outside version control. The wrapper preserves the recipe prefix and changes only the terminal driver. It refuses execution without the explicit operator start gate `Q38_NATIVE_METADATA_BOOT_AUTHORIZED=1`, which is set only after other GPU work is released. It creates no HF workers and permits only native STATUS, PAUSE and owned teardown; no source COMMIT, RESUME or generation. Its actual cleanup must remain training-safe=false.
 
 `validation/qualify_recipe_native_chain_cpu.py` preserves the actual recipe's dataset validator, executes an explicit CPU fixture of the production owner's pre-Popen prefix, and preserves the native launcher's stdin validator. It intercepts the training and native final module entry points before execution and invokes a supplied CPU checker with the captured native argv/profile JSON. It does not claim a live Ray owner, native health or GPU bootstrap.
+
+
+The ARM SM100/Torch 2.13 world72 entrypoint selects the project-owned
+`torch_bf16_v1` RoPE implementation explicitly and retains canonical Triton QK
+normalization. It does not load an old Torch 2.11 `rtp_kernel` binary or invoke
+the pure-TP hook. Full-attention TRTLLM requires a matching freshly compiled
+FFI AOT library and checksum-verified SM100 cubins. Native GDN still uses local
+CuTe DSL JIT with downloads disabled. The launcher uses only the supplied local
+checkpoint/tokenizer and clears unrelated model auxiliary paths. These source
+backends passed small-tensor qualification; full-model acceptance is separate.
+
+The first functional recipe limits each real training row to 2048 prompt
+tokens and 4096 total tokens, including tool observations. Two agent turns,
+1024 tokens per call, and 2048 generated tokens per episode are explicit.
+The original converter's padded storage width can be 6144; that is not the
+actual model-compute length. Native serving keeps its separate 8192 sequence
+limit. Strict pre- and post-conversion guards reject oversize inputs and check
+all native token IDs and action masks rather than silently truncating them.
+One rollout contains 72 real trajectories; multi-turn conversion may yield
+72 to144 training rows before neutral balance padding. The original dynamic
+minibatch metadata must still cover one complete global update per iteration.

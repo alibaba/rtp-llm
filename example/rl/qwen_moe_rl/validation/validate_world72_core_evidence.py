@@ -187,6 +187,46 @@ class Validator:
             positive=sum(v>0 for row in observations[step].values() for v in row),
             negative=sum(v<0 for row in observations[step].values() for v in row)) for step in (1,2)]
 
+    def actual_token_lengths(self):
+        records=self.records('training-native-lengths-*.json')
+        self.need(len(records)>=2,'Actual original converter length receipts are required for the two real training batches')
+        summaries=[]
+        for path,record in records:
+            self.need(record.get('schema')=='q38-real-native-token-training-lengths-v1'
+                and record.get('prompt_bound')==2048 and record.get('total_bound')==4096,
+                f'{path}: actual training prompt/total contract differs from2048/4096')
+            self.need(record.get('actual_all_native_IDs_preserved') is True
+                and record.get('silent_truncation_performed') is False
+                and record.get('reward_or_advantage_modified') is False
+                and record.get('actual_per_turn_trace_bound_guard_installed') is True
+                and digest(record.get('original_converter_sha256')),
+                f'{path}: native ID preservation/no-truncation/per-turn observation was not established')
+            rows=record.get('rows',[])
+            if not self.need(isinstance(rows,list) and bool(rows),f'{path}: no actual converter rows'):continue
+            prompt_max=total_max=0
+            for index,row in enumerate(rows):
+                p=row.get('prompt_tokens');r=row.get('response_tokens_with_observations');t=row.get('total_tokens')
+                valid=all(type(value) is int and value>0 for value in (p,r,t))
+                if self.need(valid,f'{path}: invalid actual token counts on row{index}'):
+                    self.need(p<=2048 and p+r==t and t<=4096,
+                        f'{path}: actual native row{index} exceeded the strict prompt/total bounds')
+                    prompt_max=max(prompt_max,p);total_max=max(total_max,t)
+                self.need(row.get('row')==index and digest(row.get('prompt_sha256')) and digest(row.get('response_sha256')),
+                    f'{path}: original row order/native-token digests are absent')
+            self.need(record.get('maximum_actual_prompt_tokens')==prompt_max
+                and record.get('maximum_actual_total_tokens')==total_max,
+                f'{path}: recorded maxima disagree with the actual row counts')
+            width=record.get('padded_tensor_width')
+            self.need(type(width) is int and width>=total_max
+                and record.get('padding_width_is_not_actual_micro_sequence_length') is True,
+                f'{path}: padded storage width was confused with actual micro sequence length')
+            summaries.append(dict(rows=len(rows),maximum_actual_prompt_tokens=prompt_max,
+                maximum_actual_total_tokens=total_max,padded_storage_width=width))
+        self.details['actual_training_token_lengths']=dict(conversions=len(records),records=summaries,
+            trajectory_count_not_inferred_from_converter_row_count=True,
+            policy_step_not_inferred_from_receipt_file_count=True,
+            remaining_binding='Validate original72 trajectories/iteration through episode/native traces and actual two optimizer commits separately')
+
     def numerical_policies(self):
         syncs={};probes={};hfs=defaultdict(dict)
         for path,row in self.records('hf-probe-step*-rank*.json'):hfs[row.get('global_step')][row.get('rank')]=(path,row)
@@ -259,10 +299,10 @@ class Validator:
             except BaseException as error:self.errors.append(f'{label}: {error!r}');loads={}
         try:updates=self.optimizer_updates(loads)
         except BaseException as error:self.errors.append(f'optimizer: {error!r}');updates={}
-        for label,method in (('actual_loss',lambda:self.policy_loss(updates)),('numerical_policies',self.numerical_policies)):
+        for label,method in (('actual_loss',lambda:self.policy_loss(updates)),('actual_token_lengths',self.actual_token_lengths),('numerical_policies',self.numerical_policies)):
             try:method()
             except BaseException as error:self.errors.append(f'{label}: {error!r}')
-        return dict(schema='q38-world72-BF16-core-offline-validation-v1',core_checks_passed=not self.errors,
+        return dict(schema='q38-world72-BF16-core-offline-validation-v2',core_checks_passed=not self.errors,
             full_RL_acceptance=False,errors=self.errors,details=self.details,inputs=self.inventory,
             remaining_mandatory_checks=['Original genuine DeepScaleR correctness rewards and72 trajectories/iteration',
                 'Decoded actual Python Tool calls, sandbox replay and exact gateway/native delivered trace linkage',
