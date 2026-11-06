@@ -142,6 +142,16 @@ class PpuHCUnit(TileLangHCUnit):
         with torch.inference_mode(), record_function_range(
             f"dsv4.hc.L{self.layer_id:02d}.{self.name}.pre_norm"
         ):
+            prenorm_partials = self._prenorm_partials
+            if self._backend == "fp32":
+                if self._rowwise_prenorm or (x.ndim == 4 and x.shape[1] == 6):
+                    prenorm_partials = partial(prenorm_partials, rowwise=True)
+                else:
+                    from rtp_llm.models_py.modules.dsv4.ppu.prefill.request_rows import request_row_lengths
+
+                    lengths = request_row_lengths(x.numel() // (self.hc_mult * self.dim))
+                    if lengths:
+                        prenorm_partials = partial(self._request_prenorm_partials, lengths=lengths)
             post, comb, y = self._pre_kernel(
                 x,
                 self.fn,
@@ -156,12 +166,7 @@ class PpuHCUnit(TileLangHCUnit):
                 prenorm_gemm=self._prenorm_gemm,
                 prenorm_output="reduced",
                 stabilize_atomic=self._backend == "deepgemm",
-                prenorm_partials=(
-                    partial(self._prenorm_partials, rowwise=True)
-                    if self._backend == "fp32"
-                    and (self._rowwise_prenorm or (x.ndim == 4 and x.shape[1] == 6))
-                    else self._prenorm_partials
-                ),
+                prenorm_partials=prenorm_partials,
                 norm_weight=None if self._backend == "fp32" else weight,
                 norm_eps=norm.variance_epsilon,
             )
@@ -177,6 +182,11 @@ class PpuHCUnit(TileLangHCUnit):
             for name, tensor in (("y", y), ("post", post), ("comb", comb)):
                 _rt.record_if_level(2, f"{dbg_tag}_fused_norm_{name}", tensor)
         return y, post, comb
+
+    def _request_prenorm_partials(self, x, weight, *, lengths):
+        chunks = [self._prenorm_partials(part, weight) for part in x.split(lengths)]
+        dots, squares = zip(*chunks)
+        return torch.cat(dots, dim=1), torch.cat(squares, dim=1)
 
     def prefill_fast_pre_norm(self, x, norm, *, tp_size, tp_rank):
         """Use the fused HC/RMSNorm boundary from Block's prefill fast path.

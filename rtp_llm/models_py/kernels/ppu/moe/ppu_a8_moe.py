@@ -190,31 +190,32 @@ def masked_a8_experts(
 
 
 @triton.jit
-def _quantize_rows(X, Q, S, M: tl.constexpr, K: tl.constexpr):
+def _quantize_rows(X, Q, S, M: tl.constexpr, K: tl.constexpr, TILE: tl.constexpr):
     row, block = tl.program_id(0), tl.program_id(1)
-    col = block * 512 + tl.arange(0, 512)
-    value = tl.load(X + row * K + col).to(tl.float32).reshape(4, 128)
+    col = block * TILE + tl.arange(0, TILE)
+    value = tl.load(X + row * K + col).to(tl.float32).reshape(TILE // 128, 128)
     scale = tl.exp2(
         tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(value), 1), 1.0e-4) / 448.0))
     )
-    quant = (value / scale[:, None]).to(Q.dtype.element_ty).reshape(512)
+    quant = (value / scale[:, None]).to(Q.dtype.element_ty).reshape(TILE)
     tl.store(Q + row * K + col, quant)
-    tl.store(S + (block * 4 + tl.arange(0, 4)) * M + row, scale)
+    tl.store(S + (block * (TILE // 128) + tl.arange(0, TILE // 128)) * M + row, scale)
 
 
 def quantize_a8(x):
     if (
         x.ndim != 2
-        or x.shape[1] % 512
+        or x.shape[1] % 256
         or x.dtype != torch.bfloat16
         or not x.is_contiguous()
     ):
-        raise ValueError("A8 quantization requires contiguous BF16 rows aligned to512")
+        raise ValueError("A8 quantization requires contiguous BF16 rows aligned to 256")
     m, k = x.shape
     q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     scale = torch.empty((k // 128, m), device=x.device, dtype=torch.float32)
     if m:
-        _quantize_rows[(m, k // 512)](x, q, scale, M=m, K=k, num_warps=4)
+        tile = 512 if k % 512 == 0 else 256
+        _quantize_rows[(m, k // tile)](x, q, scale, M=m, K=k, TILE=tile, num_warps=4)
     return q, scale.t()
 
 
@@ -232,6 +233,7 @@ def _weighted_nopad(
     I: tl.constexpr,
     TOPK: tl.constexpr,
     BK: tl.constexpr,
+    TILE: tl.constexpr,
     LIMIT: tl.constexpr,
 ):
     row, block = tl.program_id(0), tl.program_id(1)
@@ -242,7 +244,7 @@ def _weighted_nopad(
     ids = tl.load(IDS + token * TOPK + slots, mask=slots < TOPK, other=-1)
     weights = tl.load(WEIGHTS + token * TOPK + slots, mask=slots < TOPK, other=0.0)
     weight = tl.sum(tl.where(ids == expert, weights, 0.0), 0)
-    col = block * 512 + tl.arange(0, 512)
+    col = block * TILE + tl.arange(0, TILE)
     gate = tl.load(GU + row * 2 * I + col, mask=valid, other=0.0).to(tl.float32)
     up = tl.load(GU + row * 2 * I + I + col, mask=valid, other=0.0).to(tl.float32)
     if LIMIT > 0:
@@ -252,25 +254,26 @@ def _weighted_nopad(
         (tl.div_rn(gate, 1.0 + libdevice.exp(-gate)) * up * weight)
         .to(tl.bfloat16)
         .to(tl.float32)
-        .reshape(4, 128)
+        .reshape(TILE // 128, 128)
     )
     scale = tl.exp2(
         tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(value), 1), 1.0e-4) / 448.0))
     )
-    quant = (value / scale[:, None]).to(Q.dtype.element_ty).reshape(512)
+    quant = (value / scale[:, None]).to(Q.dtype.element_ty).reshape(TILE)
     tl.store(Q + row * I + col, quant)
-    tl.store(S + (block * 4 + tl.arange(0, 4)) * M + row, scale)
+    tl.store(S + (block * (TILE // 128) + tl.arange(0, TILE // 128)) * M + row, scale)
 
 
 def weighted_nopad_a8(gate_up, source, expert_ids, indices, weights, counts, limit):
     m, twice_i = gate_up.shape
     i = twice_i // 2
-    if i % 512:
-        raise ValueError("PPU A8 expert intermediate size must be aligned to512")
+    if i % 256:
+        raise ValueError("PPU A8 expert intermediate size must be aligned to 256")
     q = torch.empty((m, i), device=gate_up.device, dtype=torch.float8_e4m3fn)
     scales = torch.empty((i // 128, m), device=gate_up.device, dtype=torch.float32)
     valid = counts.sum()
-    _weighted_nopad[(m, i // 512)](
+    tile = 512 if i % 512 == 0 else 256
+    _weighted_nopad[(m, i // tile)](
         gate_up,
         source,
         expert_ids,
@@ -283,6 +286,7 @@ def weighted_nopad_a8(gate_up, source, expert_ids, indices, weights, counts, lim
         I=i,
         TOPK=indices.shape[1],
         BK=triton.next_power_of_2(indices.shape[1]),
+        TILE=tile,
         LIMIT=limit,
         num_warps=4,
     )

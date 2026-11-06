@@ -287,8 +287,8 @@ class PpuFp8Linear(nn.Module):
         self.n, self.k = (int(weight.shape[0]), int(weight.shape[1]))
         if not isinstance(pow2_scales, bool):
             raise TypeError("pow2_scales must be bool")
-        if pow2_scales and self.k % 512:
-            raise ValueError("PPU power-of-two quantization requires K aligned to 512")
+        if pow2_scales and self.k % 256:
+            raise ValueError("PPU power-of-two quantization requires K aligned to 256")
         self.pow2_scales = pow2_scales
         if scale_is_prepared:
             if self.n <= 0 or self.k <= 0 or self.n % 128 or self.k % 128:
