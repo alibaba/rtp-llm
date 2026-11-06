@@ -7,7 +7,7 @@ import subprocess
 import pytest
 
 from mock_framework.config import ConfigError
-from mock_framework.execution.run_trace import write_json
+from mock_framework.execution.step_trace import write_json
 
 ROOT = FRAMEWORK
 

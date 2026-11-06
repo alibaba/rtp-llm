@@ -10,7 +10,7 @@ import urllib.request
 import yaml
 
 from ...config.validation import duration, fields, text
-from ..run_trace import timestamp, write_json
+from ..step_trace import timestamp, write_json
 from .. import ExecutionError
 
 

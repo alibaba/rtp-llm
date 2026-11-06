@@ -3,10 +3,10 @@ import asyncio
 from dataclasses import dataclass
 import json
 from typing import Annotated
-from ..step.registry import Bounds, schema
+from ..step.step_registry import Bounds, schema
 from ...config.validation import validate
 from ..processes import launch_component
-from ..run_trace import timestamp
+from ..step_trace import timestamp
 from .. import ExecutionError
 from ..transport import post
 

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.step.client_requests import playback_directories
 from mock_framework.execution.evidence.client import read_requests
 from mock_framework.execution import ExecutionError
@@ -101,7 +101,7 @@ def test_query_defaults_to_all_clients_and_limits_details_not_counts(evidence, t
     evidence('client-1', index=1, stride=2, outcome='timeout')
     topology = [dict(id=f'client-{i}', role='client', rpc=f'c:{i}', control=f'http://c:{i}') for i in range(2)]
     ctx = SimpleNamespace(records=SimpleNamespace(directory=tmp_path), runtime=SimpleNamespace(topology=SimpleNamespace(active=lambda: topology)))
-    query = Registry.standard().get('client/requests')
+    query = StepRegistry.standard().get('client/requests')
     result = asyncio.run(query.invoke(ctx, {'limit': 1}))
     assert result['matched'] == 2 and result['truncated'] and len(result['records']) == 1
     assert result['outcomes']['timeout'] == 1
@@ -119,11 +119,11 @@ def test_stop_uses_rpc_summary_while_request_query_requires_files(monkeypatch, t
     ctx = context(); ctx.records.directory = tmp_path; ctx.runtime.clients.pending = True
     async def post(*args): return {'clients': {'http://c:1': state(), 'http://c:2': state()}, 'errors': []}
     monkeypatch.setattr(client_runtime, 'post', post)
-    result = asyncio.run(Registry.standard().get('client/stop').invoke(ctx, {}))
+    result = asyncio.run(StepRegistry.standard().get('client/stop').invoke(ctx, {}))
     assert set(result) == {'c:1', 'c:2'} and not ctx.runtime.clients.pending
     assert list(tmp_path.iterdir()) == []
     with pytest.raises(ExecutionError, match='No Client playback'):
-        asyncio.run(Registry.standard().get('client/requests').invoke(ctx, {}))
+        asyncio.run(StepRegistry.standard().get('client/requests').invoke(ctx, {}))
 
 
 def test_killed_java_writer_leaves_readable_lines_but_no_complete_evidence(tmp_path):

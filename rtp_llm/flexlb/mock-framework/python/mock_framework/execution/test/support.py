@@ -4,14 +4,14 @@ from pathlib import Path
 import pytest
 
 from mock_framework.config import load_yaml
-from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.step.step_registry import StepRegistry
 
 ROOT = FRAMEWORK
 
 
 @pytest.fixture
 def registry():
-    return Registry.standard()
+    return StepRegistry.standard()
 
 
 @pytest.fixture

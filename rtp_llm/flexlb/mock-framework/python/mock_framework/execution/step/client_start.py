@@ -2,9 +2,9 @@ from dataclasses import asdict, dataclass
 import math
 from pathlib import Path
 from typing import Annotated
-from .registry import Bounds, register_step
+from .step_registry import Bounds, register_step
 from ...config.validation import duration
-from .step import Step, StepContext
+from .step import StepContext
 from .. import ExecutionError
 
 
@@ -35,22 +35,20 @@ class Start:
 
 
 @register_step('client/start', effect='write')
-class ClientStart(Step):
-    @staticmethod
-    async def execute(ctx: StepContext, args: Start) -> bool:
-        """Start the same finite plan on all Clients; rate and concurrency are global budgets."""
-        body = {key: value for key, value in asdict(args).items() if value is not None}
-        case = ctx.runtime.case
-        candidate = Path(args.requests_file)
-        if candidate.parts and candidate.parts[0] == 'data':
-            path = (case.shared_root / candidate).resolve()
-            if not path.is_relative_to((case.shared_root / 'data').resolve()):
-                raise ExecutionError(f'Client requests_file escapes shared data: {candidate}')
-        else:
-            path = (case.directory / candidate).resolve()
-        if not path.is_file():
-            raise ExecutionError(f'Client requests_file is not a regular file: {path}')
-        body['requests_file'] = str(path)
-        body['request_timeout_ms'] = int(duration(body.pop('request_timeout')) * 1000)
-        body['drain_timeout_ms'] = int(duration(body.pop('drain_timeout')) * 1000)
-        return await ctx.runtime.clients.start_playback(body, ctx.query_time, ctx.timeout)
+async def client_start(ctx: StepContext, args: Start) -> bool:
+    """Start the same finite plan on all Clients; rate and concurrency are global budgets."""
+    body = {key: value for key, value in asdict(args).items() if value is not None}
+    case = ctx.runtime.case
+    candidate = Path(args.requests_file)
+    if candidate.parts and candidate.parts[0] == 'data':
+        path = (case.shared_root / candidate).resolve()
+        if not path.is_relative_to((case.shared_root / 'data').resolve()):
+            raise ExecutionError(f'Client requests_file escapes shared data: {candidate}')
+    else:
+        path = (case.directory / candidate).resolve()
+    if not path.is_file():
+        raise ExecutionError(f'Client requests_file is not a regular file: {path}')
+    body['requests_file'] = str(path)
+    body['request_timeout_ms'] = int(duration(body.pop('request_timeout')) * 1000)
+    body['drain_timeout_ms'] = int(duration(body.pop('drain_timeout')) * 1000)
+    return await ctx.runtime.clients.start_playback(body, ctx.query_time, ctx.timeout)

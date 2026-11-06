@@ -4,7 +4,7 @@ import json
 import os
 import signal
 from ..config.validation import duration
-from .run_trace import write_json
+from .step_trace import write_json
 from . import ExecutionError
 
 

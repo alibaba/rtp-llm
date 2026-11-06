@@ -3,8 +3,8 @@ from dataclasses import dataclass
 import threading
 from typing import Annotated
 from ..evidence.client import RequestRecord, read_requests
-from .registry import Bounds, register_step
-from .step import Step, StepContext
+from .step_registry import Bounds, register_step
+from .step import StepContext
 from .. import ExecutionError
 
 
@@ -50,32 +50,30 @@ def playback_directories(root, topology, targets=None, playback=None):
 
 
 @register_step('client/requests', effect='read')
-class ClientRequests(Step):
-    @staticmethod
-    async def execute(ctx: StepContext, args: Requests) -> RequestsResult:
-        """Read a sealed playback; filters limit returned details, never completeness validation."""
-        directories = playback_directories(ctx.records.directory, ctx.runtime.topology.active(), args.targets, args.playback)
-        ids = None if args.request_ids is None else set(args.request_ids)
+async def client_requests(ctx: StepContext, args: Requests) -> RequestsResult:
+    """Read a sealed playback; filters limit returned details, never completeness validation."""
+    directories = playback_directories(ctx.records.directory, ctx.runtime.topology.active(), args.targets, args.playback)
+    ids = None if args.request_ids is None else set(args.request_ids)
 
-        cancelled = threading.Event()
+    cancelled = threading.Event()
 
-        def read():
-            details, outcomes = [], {key: 0 for key in ('success', 'error', 'timeout', 'cancelled')}
-            matched = 0
-            for directory in directories:
-                for record in read_requests(directory, cancelled):
-                    if (ids is not None and record.request_id not in ids
-                            or args.outcome is not None and record.outcome != args.outcome
-                            or args.since_ms is not None and record.sent_at_ms < args.since_ms
-                            or args.until_ms is not None and record.sent_at_ms >= args.until_ms):
-                        continue
-                    matched += 1
-                    outcomes[record.outcome] += 1
-                    if len(details) < args.limit:
-                        details.append(record)
-            return RequestsResult(matched, outcomes, details, matched > len(details))
+    def read():
+        details, outcomes = [], {key: 0 for key in ('success', 'error', 'timeout', 'cancelled')}
+        matched = 0
+        for directory in directories:
+            for record in read_requests(directory, cancelled):
+                if (ids is not None and record.request_id not in ids
+                        or args.outcome is not None and record.outcome != args.outcome
+                        or args.since_ms is not None and record.sent_at_ms < args.since_ms
+                        or args.until_ms is not None and record.sent_at_ms >= args.until_ms):
+                    continue
+                matched += 1
+                outcomes[record.outcome] += 1
+                if len(details) < args.limit:
+                    details.append(record)
+        return RequestsResult(matched, outcomes, details, matched > len(details))
 
-        try:
-            return await asyncio.to_thread(read)
-        finally:
-            cancelled.set()
+    try:
+        return await asyncio.to_thread(read)
+    finally:
+        cancelled.set()

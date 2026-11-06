@@ -13,15 +13,14 @@ from collections import deque
 import pytest
 import yaml
 from mock_framework.config import ConfigError, compile_case
-from mock_framework.execution.step.registry import Registry
-from mock_framework.execution.step.registry import register_step
-from mock_framework.execution.step.step import Step
+from mock_framework.execution.step.step_registry import StepRegistry
+from mock_framework.execution.step.step_registry import register_step
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 from mock_framework.execution import ExecutionError
-from mock_framework.execution.run_trace import timestamp
-from mock_framework.execution.step.engine_scale import EngineScale, Scale
-from mock_framework.execution.step.prometheus_query import PrometheusQuery, Promql
+from mock_framework.execution.step_trace import timestamp
+from mock_framework.execution.step.engine_scale import engine_scale, Scale
+from mock_framework.execution.step.prometheus_query import prometheus_query, Promql
 
 ROOT = FRAMEWORK
 
@@ -32,7 +31,7 @@ class Args:
 
 
 def setup_case(tmp_path, operation, monitor=False, invalid=False, master=False):
-    registry = Registry.standard(); registry.register(operation)
+    registry = StepRegistry.standard(); registry.register(operation)
     config = {'seq_size_per_block': 16, 'test_block_num': 9, 'reserve_block_ratio': 0, 'max_seq_len': 4096,
               'mock.compute.forward.expression': '1'}
     env = {role: {'engine': 'rtp', 'deployment': {'replicas': 2 if role == 'prefill' else 1}, 'config': dict(config)}
@@ -79,77 +78,75 @@ def no_children(output):
 @pytest.mark.parametrize('args', [{}, {'direction': 'other'}, {'direction': 'out', 'targets': ['p:1']}])
 def test_scale_rejects_invalid_direction_or_targets(args):
     with pytest.raises(ConfigError):
-        Registry.standard().get('engine/scale').arguments(args)
+        StepRegistry.standard().get('engine/scale').arguments(args)
 
 
 def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics(tmp_path, monkeypatch):
     @register_step('probe/lifecycle', effect='write')
-    class exercise(Step):
-        @staticmethod
-        async def execute(ctx, args: Args) -> list[str]:
-            owner = ctx.runtime
-            assert len({owner.supervisor.child(node).pid for node in owner.engines.instances}) == 3
-            original = ctx.globals()['prefill']
-            first = next(item for item in owner.topology.active('prefill') if item['rpc'] == original[0])
-            original_files = {name: (ctx.records.directory / 'components' / first['id'] / name).read_bytes()
-                              for name in ('config.json', 'effective-config.json', 'endpoints.json')}
-            removed = await EngineScale.execute(ctx, Scale(direction='in', count=1))
-            assert len(removed) == 1 and len(ctx.globals()['prefill']) == 1
-            with pytest.raises(ExecutionError):
-                await EngineScale.execute(ctx, Scale(direction='in', targets=removed))
-            # Force the allocator to encounter retired RPC and HTTP ports before fresh ports.
-            candidates = deque([int(first['rpc'].rsplit(':', 1)[1]), urllib.parse.urlsplit(first['control']).port])
-            real_socket = socket.socket
-            class ReusedPortSocket(real_socket):
-                def getsockname(self):
-                    host, port = super().getsockname()
-                    return host, candidates.popleft() if candidates else port
-            with monkeypatch.context() as patch:
-                patch.setattr(socket, 'socket', ReusedPortSocket)
-                created = await EngineScale.execute(ctx, Scale(direction='out', count=2))
-            assert not candidates
-            for name, content in original_files.items():
-                assert (ctx.records.directory / 'components' / first['id'] / name).read_bytes() == content
-            if owner.monitoring:
-                # Keep an obsolete discovery target present while new instances are already serving.
-                from mock_framework.execution.run_trace import write_json
-                from mock_framework.execution.roles.prometheus import _get
-                prom = owner.monitoring
-                retired = {'targets': [urllib.parse.urlsplit(first['metrics']).netloc], 'labels': {'instance': first['rpc'], '__metrics_path__': '/metrics'}}
-                write_json(prom.directory / 'targets.json', list(prom.targets.values()) + [{key: retired[key] for key in ('targets', 'labels')}])
-                expression = 'up{job="mock",instance="' + first['rpc'] + '"}'
-                async with asyncio.timeout(5):
-                    while True:
-                        value = await asyncio.to_thread(_get, prom.url + '/api/v1/query?' + urllib.parse.urlencode({'query': expression}))
-                        samples = value['data']['result']
-                        if samples and samples[0]['value'][1] == '0':
-                            break
-                        await asyncio.sleep(.05)
-                # A stale control URL must not reach a replacement host or Engine either.
-                with pytest.raises(OSError):
-                    await asyncio.to_thread(urllib.request.urlopen, first['metrics'], timeout=1)
-                write_json(prom.directory / 'targets.json', list(prom.targets.values()))
-            assert len(ctx.globals()['prefill']) == 3 and not set(created) & set(original)
-            assert await EngineScale.execute(ctx, Scale(direction='in', targets=created[:1])) == created[:1]
-            assert len(ctx.globals()['prefill']) == 2
-            endpoints = [json.loads(path.read_text()) for path in sorted(ctx.records.directory.glob('components/*/endpoints.json'))]
-            for item in endpoints:
-                folder = ctx.records.directory / 'components' / item['id']
-                assert json.loads((folder / 'endpoints.json').read_text())['rpc'] == item['rpc']
-                assert (folder / 'ready.json').exists() == (item['id'] in {node['id'] for node in owner.topology.active()})
-            # Exercise real TCP request traffic after removal and subsequent creation.
-            classpath = os.pathsep.join([str(ROOT / 'java/engine/target/test-classes'), str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
-            probe = await asyncio.to_thread(subprocess.run, [str(Path(os.environ['JAVA_HOME']) / 'bin/java'),
-                '-cp', classpath, 'org.flexlb.mock.engine.scheduler.NativeProbe', ctx.globals()['decode'][0],
-                str(tmp_path / 'traffic.json'), ctx.globals()['prefill'][0]], capture_output=True, text=True, timeout=15)
-            assert probe.returncode == 0, probe.stderr
-            if owner.monitoring:
-                samples = await PrometheusQuery.execute(replace(ctx, query_time=timestamp()), Promql('count_over_time(rtp_llm_requests_started_total[1m])'))
-                assert {item.labels['instance'] for item in samples.samples} == {item['rpc'] for item in endpoints}
-            assert len(await EngineScale.execute(ctx, Scale(direction='in'))) == 2
-            assert ctx.globals()['prefill'] == []
-            assert len(await EngineScale.execute(ctx, Scale(direction='out'))) == 1
-            return removed + created
+    async def exercise(ctx, args: Args) -> list[str]:
+        owner = ctx.runtime
+        assert len({owner.supervisor.child(node).pid for node in owner.engines.instances}) == 3
+        original = ctx.globals()['prefill']
+        first = next(item for item in owner.topology.active('prefill') if item['rpc'] == original[0])
+        original_files = {name: (ctx.records.directory / 'components' / first['id'] / name).read_bytes()
+                          for name in ('config.json', 'effective-config.json', 'endpoints.json')}
+        removed = await engine_scale(ctx, Scale(direction='in', count=1))
+        assert len(removed) == 1 and len(ctx.globals()['prefill']) == 1
+        with pytest.raises(ExecutionError):
+            await engine_scale(ctx, Scale(direction='in', targets=removed))
+        # Force the allocator to encounter retired RPC and HTTP ports before fresh ports.
+        candidates = deque([int(first['rpc'].rsplit(':', 1)[1]), urllib.parse.urlsplit(first['control']).port])
+        real_socket = socket.socket
+        class ReusedPortSocket(real_socket):
+            def getsockname(self):
+                host, port = super().getsockname()
+                return host, candidates.popleft() if candidates else port
+        with monkeypatch.context() as patch:
+            patch.setattr(socket, 'socket', ReusedPortSocket)
+            created = await engine_scale(ctx, Scale(direction='out', count=2))
+        assert not candidates
+        for name, content in original_files.items():
+            assert (ctx.records.directory / 'components' / first['id'] / name).read_bytes() == content
+        if owner.monitoring:
+            # Keep an obsolete discovery target present while new instances are already serving.
+            from mock_framework.execution.step_trace import write_json
+            from mock_framework.execution.roles.prometheus import _get
+            prom = owner.monitoring
+            retired = {'targets': [urllib.parse.urlsplit(first['metrics']).netloc], 'labels': {'instance': first['rpc'], '__metrics_path__': '/metrics'}}
+            write_json(prom.directory / 'targets.json', list(prom.targets.values()) + [{key: retired[key] for key in ('targets', 'labels')}])
+            expression = 'up{job="mock",instance="' + first['rpc'] + '"}'
+            async with asyncio.timeout(5):
+                while True:
+                    value = await asyncio.to_thread(_get, prom.url + '/api/v1/query?' + urllib.parse.urlencode({'query': expression}))
+                    samples = value['data']['result']
+                    if samples and samples[0]['value'][1] == '0':
+                        break
+                    await asyncio.sleep(.05)
+            # A stale control URL must not reach a replacement host or Engine either.
+            with pytest.raises(OSError):
+                await asyncio.to_thread(urllib.request.urlopen, first['metrics'], timeout=1)
+            write_json(prom.directory / 'targets.json', list(prom.targets.values()))
+        assert len(ctx.globals()['prefill']) == 3 and not set(created) & set(original)
+        assert await engine_scale(ctx, Scale(direction='in', targets=created[:1])) == created[:1]
+        assert len(ctx.globals()['prefill']) == 2
+        endpoints = [json.loads(path.read_text()) for path in sorted(ctx.records.directory.glob('components/*/endpoints.json'))]
+        for item in endpoints:
+            folder = ctx.records.directory / 'components' / item['id']
+            assert json.loads((folder / 'endpoints.json').read_text())['rpc'] == item['rpc']
+            assert (folder / 'ready.json').exists() == (item['id'] in {node['id'] for node in owner.topology.active()})
+        # Exercise real TCP request traffic after removal and subsequent creation.
+        classpath = os.pathsep.join([str(ROOT / 'java/engine/target/test-classes'), str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+        probe = await asyncio.to_thread(subprocess.run, [str(Path(os.environ['JAVA_HOME']) / 'bin/java'),
+            '-cp', classpath, 'org.flexlb.mock.engine.scheduler.NativeProbe', ctx.globals()['decode'][0],
+            str(tmp_path / 'traffic.json'), ctx.globals()['prefill'][0]], capture_output=True, text=True, timeout=15)
+        assert probe.returncode == 0, probe.stderr
+        if owner.monitoring:
+            samples = await prometheus_query(replace(ctx, query_time=timestamp()), Promql('count_over_time(rtp_llm_requests_started_total[1m])'))
+            assert {item.labels['instance'] for item in samples.samples} == {item['rpc'] for item in endpoints}
+        assert len(await engine_scale(ctx, Scale(direction='in'))) == 2
+        assert ctx.globals()['prefill'] == []
+        assert len(await engine_scale(ctx, Scale(direction='out'))) == 1
+        return removed + created
     monitor = bool(os.environ.get('PROMETHEUS_BIN'))
     case, registry, launch = setup_case(tmp_path, exercise, monitor)
     output = tmp_path / 'result'
@@ -171,12 +168,10 @@ def test_scale_in_selects_once_and_instances_keep_separate_artifacts_and_metrics
 @pytest.mark.parametrize('invalid', [False, True])
 def test_process_failure_or_partial_startup_fails_the_run_and_cleans_every_process(tmp_path, invalid):
     @register_step('probe/crash', effect='write')
-    class crash(Step):
-        @staticmethod
-        async def execute(ctx, args: Args) -> bool:
-            ctx.runtime.supervisor.child('prefill-0').kill()
-            await asyncio.sleep(20)
-            return True
+    async def crash(ctx, args: Args) -> bool:
+        ctx.runtime.supervisor.child('prefill-0').kill()
+        await asyncio.sleep(20)
+        return True
     case, registry, launch = setup_case(tmp_path, crash, invalid=invalid)
     output = tmp_path / 'result'
     result = asyncio.run(run_case(case, registry, launch, output))
@@ -204,25 +199,23 @@ def test_allocator_exhaustion_fails_without_reusing_a_retired_listener(monkeypat
 @pytest.mark.parametrize('operation', ['create', 'stop'])
 def test_partial_scale_failure_is_not_replayed_or_reported_as_success(tmp_path, operation):
     @register_step('probe/partial', effect='write')
-    class exercise(Step):
-        @staticmethod
-        async def execute(ctx, args: Args) -> bool:
-            calls = []
-            owner = ctx.runtime.engines if operation == 'create' else ctx.runtime.supervisor
-            method = '_start_instance' if operation == 'create' else 'stop_intentionally'
-            original = getattr(owner, method)
+    async def exercise(ctx, args: Args) -> bool:
+        calls = []
+        owner = ctx.runtime.engines if operation == 'create' else ctx.runtime.supervisor
+        method = '_start_instance' if operation == 'create' else 'stop_intentionally'
+        original = getattr(owner, method)
 
-            async def fail_second(*args):
-                calls.append(args[1] if operation == 'create' else args[0])
-                if len(calls) == 2:
-                    ctx.records.emit(event='injected_failure', operation=operation, calls=calls)
-                    raise ExecutionError('injected process failure')
-                return await original(*args)
+        async def fail_second(*args):
+            calls.append(args[1] if operation == 'create' else args[0])
+            if len(calls) == 2:
+                ctx.records.emit(event='injected_failure', operation=operation, calls=calls)
+                raise ExecutionError('injected process failure')
+            return await original(*args)
 
-            setattr(owner, method, fail_second)
-            if operation == 'create': await EngineScale.execute(ctx, Scale(direction='out', count=2))
-            else: await EngineScale.execute(ctx, Scale(direction='in', count=2))
-            raise AssertionError('Partial failure was swallowed')
+        setattr(owner, method, fail_second)
+        if operation == 'create': await engine_scale(ctx, Scale(direction='out', count=2))
+        else: await engine_scale(ctx, Scale(direction='in', count=2))
+        raise AssertionError('Partial failure was swallowed')
     case, registry, launch = setup_case(tmp_path, exercise)
     output = tmp_path / 'result'
     result = asyncio.run(run_case(case, registry, launch, output))
@@ -239,71 +232,69 @@ def test_live_traffic_survives_scale_and_real_master_eventually_retires_old_addr
     if not os.environ.get('PROMETHEUS_BIN'):
         pytest.skip('PROMETHEUS_BIN required for live lifecycle and historical metric verification')
     @register_step('probe/live_scale', effect='write')
-    class exercise(Step):
-        @staticmethod
-        async def execute(ctx, args: Args) -> bool:
-            from datetime import datetime
-            from mock_framework.execution.step.master_engine_get import MasterEngineGet, EngineSelection
-            from mock_framework.execution.run_trace import write_json
-            from mock_framework.execution.roles.prometheus import _get
-            directory = ctx.records.directory / 'traffic'
-            directory.mkdir()
-            classpath = os.pathsep.join([str(ROOT / 'java/client/target/test-classes'), str(ROOT / 'java/client/target/classes'),
-                str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
-            master = ctx.globals()['masters'][0]
-            def rows():
-                path = directory / 'requests.jsonl'
-                return [json.loads(line) for line in path.read_text().splitlines() if line.endswith('}')] if path.exists() else []
-            async def until(predicate, timeout=20):
-                async with asyncio.timeout(timeout):
-                    while not await predicate():
-                        if child.returncode is not None:
-                            raise AssertionError((directory / 'stderr.log').read_text())
-                        await asyncio.sleep(.05)
-            with (directory / 'stdout.log').open('wb') as stdout, (directory / 'stderr.log').open('wb') as stderr:
-                child = await asyncio.create_subprocess_exec(str(Path(os.environ['JAVA_HOME']) / 'bin/java'), '-cp', classpath,
-                    'org.flexlb.mock.client.LifecycleProbe', master, str(directory), stdout=stdout, stderr=stderr)
+    async def exercise(ctx, args: Args) -> bool:
+        from datetime import datetime
+        from mock_framework.execution.step.master_engine_get import master_engine_get, EngineSelection
+        from mock_framework.execution.step_trace import write_json
+        from mock_framework.execution.roles.prometheus import _get
+        directory = ctx.records.directory / 'traffic'
+        directory.mkdir()
+        classpath = os.pathsep.join([str(ROOT / 'java/client/target/test-classes'), str(ROOT / 'java/client/target/classes'),
+            str(ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar')])
+        master = ctx.globals()['masters'][0]
+        def rows():
+            path = directory / 'requests.jsonl'
+            return [json.loads(line) for line in path.read_text().splitlines() if line.endswith('}')] if path.exists() else []
+        async def until(predicate, timeout=20):
+            async with asyncio.timeout(timeout):
+                while not await predicate():
+                    if child.returncode is not None:
+                        raise AssertionError((directory / 'stderr.log').read_text())
+                    await asyncio.sleep(.05)
+        with (directory / 'stdout.log').open('wb') as stdout, (directory / 'stderr.log').open('wb') as stderr:
+            child = await asyncio.create_subprocess_exec(str(Path(os.environ['JAVA_HOME']) / 'bin/java'), '-cp', classpath,
+                'org.flexlb.mock.client.LifecycleProbe', master, str(directory), stdout=stdout, stderr=stderr)
+            try:
+                async def healthy(): return len([r for r in rows() if r['outcome'] == 'success']) >= 5
+                await until(healthy)
+                began = timestamp()
+                removed = await engine_scale(ctx, Scale(direction='in', count=1))
+                created = await engine_scale(ctx, Scale(direction='out'))
+                expected = sorted(ctx.globals()['prefill'])
+                observations = []
+                async def converged():
+                    value = await master_engine_get(ctx, EngineSelection())
+                    observations.append({'at': timestamp(), 'observed': value})
+                    return value == {master: expected}
+                await until(converged)
+                converged_at = timestamp()
+                async def recovered():
+                    subsequent = [r for r in rows() if datetime.fromisoformat(r['sent_at']) >= datetime.fromisoformat(converged_at)]
+                    return len(subsequent) >= 5 and all(r['outcome'] == 'success' and r['tokens'] == 3 for r in subsequent[-5:])
+                await until(recovered, 10)
+                prom = ctx.runtime.monitoring
+                async def new_engine_received_requests():
+                    expr = 'rtp_llm_requests_started_total{instance="' + created[0] + '"}'
+                    value = await asyncio.to_thread(_get, prom.url + '/api/v1/query?' + urllib.parse.urlencode({'query': expr}))
+                    return any(float(r['value'][1]) > 0 for r in value['data']['result'])
+                await until(new_engine_received_requests, 10)
+                historical = await prometheus_query(replace(ctx, query_time=timestamp()), Promql('count_over_time(rtp_llm_requests_started_total[1m])'))
+                assert set(removed + created) <= {sample.labels['instance'] for sample in historical.samples}
+                all_rows = rows()
+                transition = [r for r in all_rows if datetime.fromisoformat(began) <= datetime.fromisoformat(r['sent_at']) < datetime.fromisoformat(converged_at)]
+                assert transition, 'No requests were issued during topology propagation'
+                write_json(directory / 'lifecycle.json', {'removed': removed, 'created': created,
+                    'began': began, 'converged_at': converged_at, 'master_observations': observations,
+                    'transition_outcomes': {outcome: sum(r['outcome'] == outcome for r in transition)
+                        for outcome in {r['outcome'] for r in transition}}})
+                return True
+            finally:
+                (directory / 'stop').touch()
                 try:
-                    async def healthy(): return len([r for r in rows() if r['outcome'] == 'success']) >= 5
-                    await until(healthy)
-                    began = timestamp()
-                    removed = await EngineScale.execute(ctx, Scale(direction='in', count=1))
-                    created = await EngineScale.execute(ctx, Scale(direction='out'))
-                    expected = sorted(ctx.globals()['prefill'])
-                    observations = []
-                    async def converged():
-                        value = await MasterEngineGet.execute(ctx, EngineSelection())
-                        observations.append({'at': timestamp(), 'observed': value})
-                        return value == {master: expected}
-                    await until(converged)
-                    converged_at = timestamp()
-                    async def recovered():
-                        subsequent = [r for r in rows() if datetime.fromisoformat(r['sent_at']) >= datetime.fromisoformat(converged_at)]
-                        return len(subsequent) >= 5 and all(r['outcome'] == 'success' and r['tokens'] == 3 for r in subsequent[-5:])
-                    await until(recovered, 10)
-                    prom = ctx.runtime.monitoring
-                    async def new_engine_received_requests():
-                        expr = 'rtp_llm_requests_started_total{instance="' + created[0] + '"}'
-                        value = await asyncio.to_thread(_get, prom.url + '/api/v1/query?' + urllib.parse.urlencode({'query': expr}))
-                        return any(float(r['value'][1]) > 0 for r in value['data']['result'])
-                    await until(new_engine_received_requests, 10)
-                    historical = await PrometheusQuery.execute(replace(ctx, query_time=timestamp()), Promql('count_over_time(rtp_llm_requests_started_total[1m])'))
-                    assert set(removed + created) <= {sample.labels['instance'] for sample in historical.samples}
-                    all_rows = rows()
-                    transition = [r for r in all_rows if datetime.fromisoformat(began) <= datetime.fromisoformat(r['sent_at']) < datetime.fromisoformat(converged_at)]
-                    assert transition, 'No requests were issued during topology propagation'
-                    write_json(directory / 'lifecycle.json', {'removed': removed, 'created': created,
-                        'began': began, 'converged_at': converged_at, 'master_observations': observations,
-                        'transition_outcomes': {outcome: sum(r['outcome'] == outcome for r in transition)
-                            for outcome in {r['outcome'] for r in transition}}})
-                    return True
-                finally:
-                    (directory / 'stop').touch()
-                    try:
-                        await asyncio.wait_for(child.wait(), 5)
-                    except TimeoutError:
-                        child.kill(); await child.wait()
-                    assert child.returncode == 0, (directory / 'stderr.log').read_text()
+                    await asyncio.wait_for(child.wait(), 5)
+                except TimeoutError:
+                    child.kill(); await child.wait()
+                assert child.returncode == 0, (directory / 'stderr.log').read_text()
     case, registry, launch = setup_case(tmp_path, exercise, monitor=True, master=True)
     output = tmp_path / 'result'
     result = asyncio.run(run_case(case, registry, launch, output))

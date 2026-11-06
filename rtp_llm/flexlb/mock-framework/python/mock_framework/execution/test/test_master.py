@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from mock_framework.execution.roles.master import master_environment
-from mock_framework.execution.step.master_get import MasterGet, MasterSelection
-from mock_framework.execution.step.master_engine_get import MasterEngineGet, EngineSelection
+from mock_framework.execution.step.master_get import master_get, MasterSelection
+from mock_framework.execution.step.master_engine_get import master_engine_get, EngineSelection
 from mock_framework.execution import ExecutionError
 
 
@@ -73,7 +73,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
     import urllib.request
     import yaml
     from mock_framework.config import compile_case
-    from mock_framework.execution.step.registry import Registry
+    from mock_framework.execution.step.step_registry import StepRegistry
     from mock_framework.execution.launch import prepare_launch
     from mock_framework.execution.runner import run_case
 
@@ -134,7 +134,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
              'args': {'direction': 'in', 'targets': {'ref': 'steps.added'}}, 'wait_after': '12s'},
             {'id': 'after_remove', 'describe': 'Master清除旧P', 'interface': 'master/engine/get'}])
     case_file = tmp_path / 'case.yaml'; case_file.write_text(yaml.safe_dump(document, allow_unicode=True))
-    registry = Registry.standard(); case = compile_case(case_file, registry)
+    registry = StepRegistry.standard(); case = compile_case(case_file, registry)
     components = {'master': {'command': [str(java), '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.mock.master.LateMasterNode' if history_overflow else 'org.flexlb.MasterNode'], 'startup_timeout': '60s'}}
     for role in (('prefill', 'decode', 'vit') if vision else ('prefill', 'decode')):
         components[role] = {'command': [str(java), '-cp', str(root / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'), 'org.flexlb.mock.engine.EngineMain']}
@@ -161,7 +161,7 @@ def test_real_master_routes_to_isolated_rtp_processes(tmp_path, batched, replica
             assert result['tokens'] == 3 and 0 < result['ttft_ns'] <= result['elapsed_ns']
             if replicas == 2:
                 from mock_framework.execution.transport import post
-                from mock_framework.execution.run_trace import timestamp
+                from mock_framework.execution.step_trace import timestamp
                 nodes = {f'master-{i}': json.loads((output / f'components/master-{i}/endpoints.json').read_text())
                          for i in range(replicas)}
                 async def claims():
@@ -268,7 +268,7 @@ def test_adapter_keeps_per_master_observations(monkeypatch, operation, responses
         return responses[len(calls) - 1]
     monkeypatch.setattr(master, 'post', post)
     args = MasterSelection(is_leader=True) if operation == 'get' else EngineSelection()
-    assert asyncio.run(({'get': MasterGet, 'engines': MasterEngineGet}[operation].execute)(adapter_context(), args)) == expected
+    assert asyncio.run(({'get': master_get, 'engines': master_engine_get}[operation])(adapter_context(), args)) == expected
     assert calls == ['http://m0', 'http://m1']
 
 
@@ -286,7 +286,7 @@ def test_adapter_rejects_wrong_identity_and_invalid_or_duplicate_engine(monkeypa
     monkeypatch.setattr(master, 'post', post)
     args = MasterSelection(['m0:1'], is_leader=True) if operation == 'get' else EngineSelection(['m0:1'])
     with pytest.raises(ExecutionError):
-        asyncio.run(({'get': MasterGet, 'engines': MasterEngineGet}[operation].execute)(adapter_context(), args))
+        asyncio.run(({'get': master_get, 'engines': master_engine_get}[operation])(adapter_context(), args))
 
 
 def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypatch):
@@ -297,12 +297,12 @@ def test_explicit_master_selection_and_empty_selection_do_not_broadcast(monkeypa
         calls.append(url)
         return {'instances': []}
     monkeypatch.setattr(master, 'post', post)
-    assert asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(['m1:1'], is_leader=True))) == []
+    assert asyncio.run(master_get(adapter_context(), MasterSelection(['m1:1'], is_leader=True))) == []
     assert calls == ['http://m1']
     with pytest.raises(ValueError):
         MasterSelection([])
     with pytest.raises(ExecutionError):
-        asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(['missing:1'], is_leader=True)))
+        asyncio.run(master_get(adapter_context(), MasterSelection(['missing:1'], is_leader=True)))
     assert calls == ['http://m1']
 
 
@@ -337,7 +337,7 @@ def test_standby_query_preserves_actual_master_claims(monkeypatch, leaders, expe
         identity = 'master-0' if url == 'http://m0' else 'master-1'
         return {'instances': [{'id': identity}] if claims[url] else []}
     monkeypatch.setattr(master, 'post', post)
-    assert asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(is_leader=False))) == expected
+    assert asyncio.run(master_get(adapter_context(), MasterSelection(is_leader=False))) == expected
 
 
 @pytest.mark.parametrize('targets,expected', [(None, ['m0:1', 'm1:1']), (['m1:1'], ['m1:1'])])
@@ -347,4 +347,4 @@ def test_master_get_without_leadership_filter_lists_selected_active_masters(monk
     async def unexpected_read(*args):
         raise AssertionError('An unfiltered listing does not query leadership')
     monkeypatch.setattr(master, 'post', unexpected_read)
-    assert asyncio.run(MasterGet.execute(adapter_context(), MasterSelection(targets))) == expected
+    assert asyncio.run(master_get(adapter_context(), MasterSelection(targets))) == expected

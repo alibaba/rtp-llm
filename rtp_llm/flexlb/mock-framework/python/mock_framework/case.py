@@ -8,7 +8,7 @@ import sys
 import yaml
 
 from .config import ConfigError, compile_case, load_yaml
-from .execution.step.registry import Registry
+from .execution.step.step_registry import StepRegistry
 from .execution import ExecutionError
 from .execution.launch import prepare_launch
 from .execution.runner import run_case
@@ -64,7 +64,7 @@ def main():
     if args.command != 'launch' and any(value is not None for value in (args.java, args.prometheus)):
         parser.error('--java and --prometheus are only valid with launch')
     try:
-        registry = Registry.standard()
+        registry = StepRegistry.standard()
         case = compile_case(args.case, registry, shared_root=args.shared_root)
         if args.command == 'launch':
             _launch(args, case, parser)

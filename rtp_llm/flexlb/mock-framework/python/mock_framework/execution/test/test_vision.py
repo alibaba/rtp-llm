@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from mock_framework.config import compile_case
-from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 from mock_framework.execution.test.helpers.input import pb, write_inputs
@@ -51,7 +51,7 @@ def test_vision_playback_through_real_master(tmp_path):
     write_inputs(tmp_path / 'requests.binpb.zst', requests)
     path = tmp_path / 'case.yaml'
     path.write_text(yaml.safe_dump(data))
-    registry = Registry.standard()
+    registry = StepRegistry.standard()
     case = compile_case(path, registry)
     host = root / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'
     components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},

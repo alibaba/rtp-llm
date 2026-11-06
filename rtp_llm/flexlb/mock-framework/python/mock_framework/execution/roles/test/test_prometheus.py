@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 from mock_framework.config import compile_case
-from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 
@@ -77,7 +77,7 @@ def test_real_prometheus_ingestion_semantic_queries_and_recorded_gates(tmp_path,
         data['phases'][0]['steps'][1]['expect'] = {'eq': 0}
     path = tmp_path / 'case.yaml'
     path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
-    registry = Registry.standard()
+    registry = StepRegistry.standard()
     case = compile_case(path, registry)
     java = Path(os.environ.get('JAVA_HOME', '/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home')) / 'bin/java'
     jar = ROOT / 'java/engine/target/mock-engine-service-1.0-SNAPSHOT-all.jar'

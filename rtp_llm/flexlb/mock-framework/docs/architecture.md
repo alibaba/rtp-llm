@@ -47,19 +47,31 @@ Case 操作放在独立的 Python 实现中，不在 Runner 主循环按接口�
 
 ### Python 接口定义和 Step 模型
 
-Case 动作继承 Step 并实现 execute。装饰器登记稳定动作名、读写属性和单位，参数与返回类型来自 execute 的签名。Registry 负责登记、查找和定义检查，运行状态由当次 Case 的上下文持有。
+Case 动作是带类型注解的异步函数，不为单操作建立类或继承树。`@register_step` 从函数签名构造 `StepDefinition`，保存稳定动作名、读写属性、单位、参数/返回 schema 和函数引用；`StepRegistry` 负责动作登记与查找。编译后的 `Step` 只保存本次 Case 的步骤配置和定义引用，统一处理执行生命周期；运行状态由当次 Case 的上下文持有。
 
-配置编译按 Case → Phase → Step 推进，环境编译分别处理部署参数、组件配置文件和 Master 原生 JSON。普通值与 ref 共用 validation 的 schema 遍历；编译器只为 ref 叶子提供类型检查和转换，不再复制对象/列表/union 的校验规则。值解析、schema 校验和类型兼容检查统一在 config/validation.py；不再保留 values.py。编译器通过 Interface.arguments 检查无引用参数，dataclass 构造与结果转换作为 registry 内部实现，不直接从编译器调用。Runner 在 ref 展开后只校验并构造一次参数，由 Step.run 调用 Interface.call；Interface.invoke 供独立调用时从原始参数完成同样的准备。参数失败发生在调用前，结果校验失败发生在调用后，保留各自的错误阶段和写操作 outcome_unknown 语义。
+```mermaid
+flowchart LR
+    registry[StepRegistry 动作注册表] --> definition[StepDefinition 类型契约与函数引用]
+    compiler[Case 编译器] --> step[Step 本次调用配置与执行生命周期]
+    step --> definition
+    definition --> action[异步函数 engine_scale / master_stop / client_start 等]
+    step --> trace[StepTrace 步骤事件与门禁记录]
+    action --> manager[EngineRole / MasterRole / ClientManager]
+```
+
+动作函数没有继承 Step；StepDefinition 是共享的注册定义，Step 是每次调用独立的数据对象。保存 Case 配置时不序列化函数引用或注册元数据。
+
+配置编译按 Case → Phase → Step 推进，环境编译分别处理部署参数、组件配置文件和 Master 原生 JSON。普通值与 ref 共用 validation 的 schema 遍历；编译器只为 ref 叶子提供类型检查和转换，不再复制对象/列表/union 的校验规则。值解析、schema 校验和类型兼容检查统一在 config/validation.py；不再保留 values.py。编译器通过 StepDefinition.arguments 检查无引用参数，dataclass 构造与结果转换作为 step_registry 内部实现，不直接从编译器调用。Runner 在 ref 展开后只校验并构造一次参数，由 Step.run 调用 StepDefinition.call；StepDefinition.invoke 供独立调用时从原始参数完成同样的准备。参数失败发生在调用前，结果校验失败发生在调用后，保留各自的错误阶段和写操作 outcome_unknown 语义。
 
 Step 统一为一次接口调用，包含 id、describe、interface、args、within 和可选 expect。删除 YAML 的 call/check 外壳及两套重复 Step 类：无 expect 时执行并保存结果，有 expect 时在同一次返回后判断。读取也可以只取值供后续引用；写操作的回执可以断言，但不因断言失败重放。接口读写属性与是否断言相互独立，不把普通检查隐式变成轮询。
 
-执行链统一为解析引用、校验实参、固定查询时刻和预算、调用 Step.execute、校验返回值、保存结果、执行可选断言。编译阶段检查引用必须来自前置 step 或允许的全局信息，检查字段路径与类型；运行时解析后再次校验。Python 类型注解本身不等于运行时校验。
+执行链统一为解析引用、校验实参、固定查询时刻和预算、调用注册的动作函数、校验返回值、保存结果、执行可选断言。编译阶段检查引用必须来自前置 step 或允许的全局信息，检查字段路径与类型；运行时解析后再次校验。Python 类型注解本身不等于运行时校验。
 
 普通数值查询直接返回数值，单位声明在接口上；地址集合返回列表，动作返回明确回执，逐 Master 状态保留映射。断言按结构和运算符判断，不按 MetricValue、PerMasterEngines 等业务类型名称偷偷聚合。接口文档和清单可以由 Python 定义导出，用于保存实验现场，不再依赖 Java 构建才能编译 Case。
 
 Runner 管理声明了 background 的 Step 任务。任务属于当前 Phase，Phase 结束前会等待或回收这些任务。后台 Step 的结果不能作为 Case 引用。client/start 返回表示 Java 已确认开始回放，回放仍由 ClientManager 和 Java client0 管理，使用 client/stop 停止并收齐结果。
 
-本轮重构按职责变化整体重写 Registry、Step 模型、编译和执行主链，联动 CLI、启动配方、夹具和构建入口；复用严格 YAML 解析、进程回收、采集与记录等仍成立的机制。Java 内部端点保留明确的请求/响应协议，但不再声明整套 Case API；配置类型留在所属组件，不能随旧接口目录误删。保留引用重校验、固定时间窗口、错误结果和取消清理的验收，不保留另一套旧 Case 执行入口作为兼容分支。
+本轮重构按职责变化整体重写 StepRegistry、Step 模型、编译和执行主链，联动 CLI、启动配方、夹具和构建入口；复用严格 YAML 解析、进程回收、采集与记录等仍成立的机制。Java 内部端点保留明确的请求/响应协议，但不再声明整套 Case API；配置类型留在所属组件，不能随旧接口目录误删。保留引用重校验、固定时间窗口、错误结果和取消清理的验收，不保留另一套旧 Case 执行入口作为兼容分支。
 
 ### KV 容量的明确简化边界
 
@@ -326,7 +338,7 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 | 模块 | 唯一负责的状态与行为 |
 | --- | --- |
 | `execution/runner.py` | Phase 顺序、时间预算、后台任务及整场回收。 |
-| `execution/step/` | Step 基类、注册表、比较器及每个动作的参数、执行和返回契约。 |
+| `execution/step/` | 统一 Step 数据对象、StepRegistry、StepDefinition、比较器及每个动作函数的参数和返回契约。 |
 | `execution/environment.py` | RunEnvironment 组装角色并安排启停顺序。EndpointRegistry 持有活跃端点并发布 topology.json。 |
 | `execution/processes.py` | ProcessSupervisor 管子进程、监看和回收。角色决定何时启停及哪些退出是预期的。 |
 | `execution/roles/master.py` | MasterRole 管独立 JVM、选举配置、发现发布和原地址重启。 |
@@ -336,7 +348,7 @@ Python 运行时按以下边界组织。`RunEnvironment` 装配实例并安排�
 | `execution/roles/prometheus.py` | Prometheus 进程、目标、采集基线和末次抓取。 |
 | `execution/launch.py` | 启动配方的结构校验与规范化。 |
 | `execution/transport.py` | 共用 HTTP /invoke 请求和响应封装。 |
-| `execution/run_trace.py` | 运行快照、事件、门禁和终态。 |
+| `execution/step_trace.py` | 运行快照、事件、门禁和终态。 |
 
 EndpointRegistry 发布当前端点快照。MasterRole 消费快照，更新活跃 Master 的 discovery。主备状态来自各 Master 的实际观测。发布失败使实验报错，已登记状态和进程所有权留给回收路径处理。
 
@@ -344,7 +356,7 @@ Trace 的两个 JSONL 流共用 `run_id` 和 `seq`。Step 事件、关联动作�
 
 启动顺序固定为 Prometheus、ZK、Engine、Master、Client、采集基线。收尾先收集 Client、完成最后采样，依次清理 Client、Master、Engine、ZK、Prometheus，最后由进程监督器回收剩余进程。某一步失败仍继续后续清理，错误进入最终结果；进程未回收时保留其所有权，不能仅删除内部记录。最终没有存活的受管进程后清空活动拓扑。
 
-新增 Case 操作在 `execution/step/` 定义 Step 子类并注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
+新增 Case 操作在 `execution/step/` 定义带类型注解的异步函数并注册；新增角色生命周期行为进入对应服务；只有新的跨服务启动/收尾顺序才修改 `RunEnvironment`。不为接口名、角色名或 Case 名向 Runner 主循环增加分支，也不引入通用插件框架或事件总线。配置入口和业务 Case 的下一批接线以这些边界为基础，本批保持现有 YAML 参数、返回值与产物格式。
 
 这里的 EngineLoop 是 P/D 文本生成执行内核，不是 JVM 宿主循环，也不是 ViT 调度循环。runtime 仅提供访问和实例管理设施；EngineLoop 驱动 EngineScheduler 选批及 Forward 执行，EngineScheduler 提交生成进度、队列和资源变化。ViT 保留自己的图片合批循环。RequestState 负责进度、终态及资源使用计数；EngineScheduler.QueueSnapshot 只是队列计数值，不统一各调度器的队列容器。
 
@@ -365,7 +377,7 @@ P 的 retained 请求计算完成后变成 READY，释放 Forward 槽位但保�
 
 ## 当前接口扩展方式
 
-在 `execution/step/` 添加动作文件。在同一个文件定义参数 dataclass 和 Step 子类，实现异步 `execute()`，用 `@register_step` 声明动作名、读写属性和单位。再将这个类加入 `standard_actions()`。例如：
+在 `execution/step/` 添加动作文件。在同一个文件定义参数 dataclass 和异步动作函数，用 `@register_step` 声明动作名、读写属性和单位。再将函数加入 `standard_actions()`；不能为单操作创建 Step 子类。例如：
 
 ```python
 @dataclass(frozen=True)
@@ -373,13 +385,11 @@ class RestartArgs:
     targets: list[str] | None = None
 
 @register_step("master/restart", effect="write")
-class MasterRestart(Step):
-    @staticmethod
-    async def execute(ctx: StepContext, args: RestartArgs) -> list[str]:
-        return await ctx.runtime.masters.restart(args.targets)
+async def master_restart(ctx: StepContext, args: RestartArgs) -> list[str]:
+    return await ctx.runtime.masters.restart(args.targets)
 ```
 
-编译器绑定动作类。Runner 调用 Step.run()，由基类解析引用、调用动作并校验结果和门禁。角色负责操作的业务状态和资源回收。类型约束可用 Annotated、Bounds、duration 和 range，跨字段约束写在参数的 __post_init__。接口目录写入 interfaces.json。
+编译器把 StepDefinition 绑定到普通 Step 数据对象。Runner 调用 Step.run()，统一解析引用、调用定义中的函数并校验结果和门禁。ClientManager、MasterRole、EngineRole 等运行时管理对象负责业务状态和资源回收，不是动作的父类。类型约束可用 Annotated、Bounds、duration 和 range，跨字段约束写在参数的 __post_init__。接口目录写入 interfaces.json。
 
 Java 内部端点仍可使用 ApiServer 和 Endpoint 的序列化/校验机制；它只约束实例请求与响应，不承担 Case 目标选择、扩缩容计数、指标聚合或 Python ref 语法。当前 MasterStateApi 使用这条内部协议；未接通的 Java Case 声明及 PrometheusQueries 已删除。
 
@@ -459,3 +469,5 @@ P/D/V 健康检查只读取已安全发布的关闭/致命失败状态与 RPC �
 Prefill 初始化 KV 配额每轮准入只扫描一次活动集合，随后按本轮申请、Loading、超时和释放更新局部计数。LRU 一次回收多个块时临时跳过被引用叶子并在结束时恢复，避免为每个回收块重复扫描同一批被引用节点；新出现的父叶子仍按原 LRU 顺序参与，选择策略不变。finished-history gap 只在状态快照中登记，RPC 释放业务锁后打印，最多每秒一次。
 
 本地 Runner 在启动 Engine 前把已选定的 Master HTTP/gRPC 端口加入 Engine 端口避让集合。Master 在 Engine 发现就绪后启动，不能因尚未绑定而让动态 Engine 分配复用这些端口；这不改变 Case 端口配置或 Master 重启地址。
+
+步骤记录统一命名为 `StepTrace`（`execution/step_trace.py`）：管理 events/gates 写入、步骤身份上下文和结果封口，同时保存 Case/启动配置及版本信息。`StepRegistry` 和 `StepDefinition` 位于 `execution/step/step_registry.py`，不保留旧通用名称或旧模块入口。Case YAML 的 interface 名称、参数、引用语法和产物格式保持不变。

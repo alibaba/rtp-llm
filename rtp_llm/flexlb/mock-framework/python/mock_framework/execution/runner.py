@@ -4,7 +4,7 @@ import time
 
 from ..config.validation import duration
 from .environment import RunEnvironment
-from .run_trace import RunTrace, timestamp, write_json
+from .step_trace import StepTrace, timestamp, write_json
 from .step.step import GateFailure, StepContext
 
 
@@ -51,7 +51,7 @@ class _PhaseTasks:
 
 
 async def run_case(case, registry, launch, directory):
-    records = RunTrace(directory, case, launch)
+    records = StepTrace(directory, case, launch)
     runtime = RunEnvironment(case, launch, records)
     results = {}
     result = {'status': 'ERROR', 'started_at': timestamp()}
