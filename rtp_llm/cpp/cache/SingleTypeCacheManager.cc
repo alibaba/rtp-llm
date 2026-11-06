@@ -46,6 +46,11 @@ bool SingleTypeCacheManager::ensureFreeBlocks(int required_blocks) {
             break;
         }
 
+        // Eviction cannot reclaim blocks pinned by active users of the pool.
+        if (static_cast<size_t>(required_blocks) > block_pool_->availableBlocksNum()) {
+            return false;
+        }
+
         const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
         if (evict_callback_) {
             if (evict_callback_(need_evict) == 0) {
