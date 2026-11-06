@@ -153,9 +153,30 @@ class RtpConfigTest {
         // The special PREFILL_CP path is distinct from general CP in real PrefillCPConfig.
         config.put("cp_rotate_method", "PREFILL_CP").put("prefill_cp_size", 2);
         assertFalse(load(root).cpEnabled()); assertEquals(1, load(root).cpSize());
-        assertFalse(load(root).effective().has("prefill_cp_size"));
+        assertEquals(2,load(root).effective().path("prefill_cp_size").asInt());
         config.put("cp_rotate_method", "misspelled");
         assertThrows(IllegalArgumentException.class, () -> load(root));
+    }
+
+    @Test void shardedCacheGeometryIsSeparateFromComputeCpAndDecodeUpstreamCp() throws Exception {
+        var root=root();var config=(ObjectNode)root.path("component").path("config");
+        config.put("seq_size_per_block",128).put("tp_size",4).put("cp_rotate_method","ALL_GATHER");
+        assertEquals(1,load(root).cacheKeyStride());
+        config.put("prefill_cp_kv_cache_sharded",true).put("prefill_cp_size",4);
+        assertEquals(4,load(root).cacheKeyStride());assertEquals(512,load(root).cacheBlockSize());
+        assertEquals(128,load(root).effective().path("seq_size_per_block").asInt());
+        var env=RtpConfig.fromEnvironment("whale-p",org.flexlb.mock.protocol.Role.prefill,java.util.Map.of(
+            "SEQ_SIZE_PER_BLOCK","128","TEST_BLOCK_NUM","17","TP_SIZE","4","CP_ROTATE_METHOD","ALL_GATHER",
+            "PREFILL_CP_KV_CACHE_SHARDED","1","PREFILL_CP_SIZE","4","MOCK_COMPUTE_FORWARD_EXPRESSION","1"));
+        assertEquals(512,env.cacheBlockSize());assertEquals(128,env.blockSize());
+        config.put("prefill_cp_size",2);
+        assertThrows(IllegalArgumentException.class,()->load(root));
+        config.put("prefill_cp_size",4).put("cp_rotate_method","DISABLED");
+        assertThrows(IllegalArgumentException.class,()->load(root));
+        root.put("component_role","decode");
+        assertEquals(1,load(root).cacheKeyStride());assertEquals(128,load(root).cacheBlockSize());
+        config.put("prefill_cp_kv_cache_sharded","not-a-bool");
+        assertThrows(IllegalArgumentException.class,()->load(root));
     }
 
     @Test void implementedSettingsValidateWhileUnsupportedSettingsDoNotBecomeEffective() throws Exception {

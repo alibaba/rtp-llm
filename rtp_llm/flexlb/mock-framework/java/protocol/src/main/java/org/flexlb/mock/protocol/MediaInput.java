@@ -102,10 +102,13 @@ public final class MediaInput {
 
     public static CacheSequence sequence(Prepared prepared, int blockSize) { return sequence(prepared, blockSize, 0); }
     public static CacheSequence sequence(Prepared prepared, int blockSize, long seed) {
+        return sequence(prepared,blockSize,seed,1);
+    }
+    public static CacheSequence sequence(Prepared prepared, int blockSize, long seed, int keyStride) {
         validateSpans(prepared.input(), prepared.spans());
         return new CacheSequence(blockSize, prepared.input().getTokenIdsList(),
             prepared.spans().stream().map(span -> new CacheSequence.Span(
-                span.getOffset(), span.getRowHashesList())).toList(), seed);
+                span.getOffset(), span.getRowHashesList())).toList(), seed, keyStride);
     }
     public static List<Long> cacheKeys(Prepared prepared, int blockSize) {
         if (blockSize < 1) throw invalid("Invalid cache block size");

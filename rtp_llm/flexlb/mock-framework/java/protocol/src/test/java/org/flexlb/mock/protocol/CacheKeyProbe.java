@@ -13,7 +13,7 @@ public final class CacheKeyProbe {
             String[] pair = span.split(":", 2);
             spans.add(new CacheSequence.Span(Integer.parseInt(pair[0]), ints(pair[1])));
         }
-        var sequence = new CacheSequence(Integer.parseInt(args[0]), ints(args[1]), spans, Long.parseLong(args[3]));
+        var sequence = new CacheSequence(Integer.parseInt(args[0]), ints(args[1]), spans, Long.parseLong(args[3]),args.length>4?Integer.parseInt(args[4]):1);
         System.out.println(sequence.keys().stream().map(String::valueOf).collect(java.util.stream.Collectors.joining(",")));
     }
 }

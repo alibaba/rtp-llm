@@ -132,7 +132,7 @@ final class PrefillRpcServer implements AutoCloseable {
         try {
             requirePrepared(prepared.input());
             var input = RpcMessages.toSchedulerInput(prepared, Long.toString(session.id), session.started,
-                session.deadline, session.retained, config.blockSize(), config.cacheKeySeed());
+                session.deadline, session.retained, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
             synchronized (executionLock) {
                 requirePending(session, prepared.input());
                 session.input = prepared.input();
@@ -167,7 +167,7 @@ final class PrefillRpcServer implements AutoCloseable {
                 if (session == null) session = new Session(item.input(), true, started,
                     RpcMessages.deadline(item.input(), started, item.deadline()));
                 var input = RpcMessages.toSchedulerInput(item.prepared(), Long.toString(session.id),
-                    session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed());
+                    session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed(), config.cacheKeyStride());
                 admittedSessions.add(session); positions.add(i); items.add(new EngineScheduler.InputItem(input, session));
             } catch (RuntimeException error) {
                 var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;

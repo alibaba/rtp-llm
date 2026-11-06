@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 class CacheSequenceTest {
     @Test void appendedKeysEqualHashingTheEntireComputedSequenceAcrossPartialBlocksAndMedia() {
         var random = new Random(20261106);
+        for (int stride : List.of(1,2,4))
         for (int block : List.of(1, 2, 7, 128))
             for (int length : List.of(0, 1, block - 1, block, block + 1, 3 * block + 1)) {
                 var tokens = new ArrayList<Integer>();
@@ -18,14 +19,15 @@ class CacheSequenceTest {
                     spans.add(new CacheSequence.Span(1, hashes));
                 }
                 long seed = random.nextLong();
-                var sequence = new CacheSequence(block, tokens, spans, seed);
+                var sequence = new CacheSequence(block, tokens, spans, seed,stride);
                 assertSame(sequence.keys(), sequence.keys());
                 assertSame(sequence.keys(), sequence.keys(0, 42));
                 for (int output : List.of(1, 2, block, block + 1, 2 * block + 5)) {
                     int token = random.nextInt();
                     var computed = new ArrayList<>(tokens); computed.addAll(Collections.nCopies(output, token));
-                    assertEquals(new CacheSequence(block, computed, spans, seed).keys(), sequence.keys(output, token));
-                    assertEquals(length / block, sequence.keys().size());
+                    assertEquals(new CacheSequence(block, computed, spans, seed,stride).keys(), sequence.keys(output, token));
+                    assertEquals(length / (block*stride), sequence.keys().size());
+                    assertEquals(block*stride,sequence.blockSize());
                 }
             }
     }
