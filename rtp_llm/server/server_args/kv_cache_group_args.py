@@ -375,7 +375,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="MEMORY_CACHE_MAX_DESCRIPTORS_PER_TRANSFER_BATCH",
         bind_to=(kv_cache_config, "memory_cache_max_descriptors_per_transfer_batch"),
         type=int,
-        default=8,
+        default=32,
         help="各传输方向共用的最大 descriptor 批大小；Disk->Device 还受 staging 容量限制，Device->Disk 保留单项提交。",
     )
     kv_cache_group.add_argument(

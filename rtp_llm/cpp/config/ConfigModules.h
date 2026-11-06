@@ -184,7 +184,7 @@ struct KVCacheConfig {
     int64_t                                 disk_cache_write_thread_count                   = 16;
     int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
     int64_t                                 disk_cache_staging_block_count                  = 128;
-    int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
+    int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 32;
     // Prefer WorkLoop for supported final layouts; legal legacy layouts fall back at creation.
     bool btc_transfer_engine_async = true;
     // Slots per device in each WorkLoop's private async CRC service.
