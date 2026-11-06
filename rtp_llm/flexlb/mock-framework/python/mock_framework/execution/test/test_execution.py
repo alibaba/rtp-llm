@@ -432,3 +432,25 @@ def test_phase_waits_for_background_to_finish(setup, tmp_path):
     records = events(out)
     assert next(x['seq'] for x in records if x['event'] == 'step_finished') < next(
         x['seq'] for x in records if x['event'] == 'phase_finished')
+
+
+def test_engine_allocation_excludes_master_ports_before_master_listeners_start(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from mock_framework.execution.environment import RunEnvironment
+    from mock_framework.execution.roles import master
+    monkeypatch.setattr(master, 'master_port', lambda count: 26133)
+    (tmp_path / 'zookeeper').mkdir()
+
+    async def check():
+        case = SimpleNamespace(environment={'master': {'config': {}, 'deployment': {'replicas': 2}}})
+        runtime = RunEnvironment(case, {'components': {'master': {}}}, SimpleNamespace(directory=tmp_path))
+        async def zookeeper_start(): return '127.0.0.1:2181'
+        async def engines_start():
+            assert {26133, 26135} <= runtime.engines.used_ports
+        async def nothing(): pass
+        runtime.zookeeper.start = zookeeper_start
+        runtime.engines.start = engines_start
+        runtime.masters.start = nothing
+        runtime.clients.start_nodes = nothing
+        await runtime.start()
+    asyncio.run(check())
