@@ -131,7 +131,6 @@ class SingleGpuBackendRankTest(TestCase):
             set_parallelism_config(
                 configs.parallelism_config,
                 selected_world_rank,
-                configs.ffn_disaggregate_config,
                 configs.prefill_cp_config,
             )
             local_rank = configs.parallelism_config.local_rank

@@ -741,12 +741,6 @@ Scenario makeScenario(const std::string& name) {
     if (name == "capture_non_owner") {
         return makeCaptureScenario(false, false, false);
     }
-    if (name == "capture_ffn_service") {
-        auto scenario = makeCaptureScenario(false, true, false);
-        scenario.parallelism.ffn_disaggregate_config.enable_ffn_disaggregate = true;
-        scenario.parallelism.ffn_disaggregate_config.is_ffn_rank             = true;
-        return scenario;
-    }
     if (name == "capture_fp8") {
         return makeCaptureScenario(false, true, true);
     }

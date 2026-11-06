@@ -2955,15 +2955,6 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             ["store.setup", "store.warmup", "store.close"],
         )
 
-    def test_capture_is_disabled_on_ffn_service_model(self) -> None:
-        model = CacheStoreForwardModel()
-        result = run_scenario(model, "capture_ffn_service")
-
-        self.assertEqual(model.capture_flags, [False])
-        self.assertEqual(_FakeEagleMooncakeStore.instances, [])
-        hidden_states = result["forward_hidden_states"][0]
-        torch.testing.assert_close(hidden_states, torch.zeros_like(hidden_states))
-
     def test_capture_duplicate_store_key_only_rejects_each_current_batch(
         self,
     ) -> None:

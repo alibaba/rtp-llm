@@ -4,7 +4,7 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HiddenStateCaptureDtype', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HiddenStateCaptureDtype', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
                       'MiscellaneousConfig', 'ModelConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
@@ -537,23 +537,6 @@ class FMHAType:
         ...
     @property
     def value(self) -> int:
-        ...
-class FfnDisAggregateConfig:
-    attention_dp_size: int
-    attention_tp_size: int
-    enable_ffn_disaggregate: bool
-    ffn_dp_size: int
-    ffn_tp_size: int
-    is_ffn_rank: bool
-    def __getstate__(self) -> tuple:
-        ...
-    def __init__(self) -> None:
-        ...
-    def __setstate__(self, arg0: tuple) -> None:
-        ...
-    def is_ffn_service(self) -> bool:
-        ...
-    def to_string(self) -> str:
         ...
 class GrammarConfig:
     compile_concurrency: int
@@ -1255,7 +1238,6 @@ class ParallelismConfig:
     dp_size: int
     ep_rank: int
     ep_size: int
-    ffn_disaggregate_config: FfnDisAggregateConfig
     ffn_tp_rank: int
     ffn_tp_size: int
     local_rank: int

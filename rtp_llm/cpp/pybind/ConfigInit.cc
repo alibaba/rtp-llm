@@ -1156,43 +1156,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
-    // Register FfnDisAggregateConfig
-    py::class_<FfnDisAggregateConfig>(m, "FfnDisAggregateConfig")
-        .def(py::init<>())
-        .def_readwrite("enable_ffn_disaggregate", &FfnDisAggregateConfig::enable_ffn_disaggregate)
-        .def_readwrite("attention_tp_size", &FfnDisAggregateConfig::attention_tp_size)
-        .def_readwrite("attention_dp_size", &FfnDisAggregateConfig::attention_dp_size)
-        .def_readwrite("ffn_tp_size", &FfnDisAggregateConfig::ffn_tp_size)
-        .def_readwrite("ffn_dp_size", &FfnDisAggregateConfig::ffn_dp_size)
-        .def_readwrite("is_ffn_rank", &FfnDisAggregateConfig::is_ffn_rank)
-        .def("to_string", &FfnDisAggregateConfig::to_string)
-        .def("is_ffn_service", &FfnDisAggregateConfig::is_ffn_service)
-        .def(py::pickle(
-            [](const FfnDisAggregateConfig& self) {
-                return py::make_tuple(self.enable_ffn_disaggregate,
-                                      self.attention_tp_size,
-                                      self.attention_dp_size,
-                                      self.ffn_tp_size,
-                                      self.ffn_dp_size,
-                                      self.is_ffn_rank);
-            },
-            [](py::tuple t) {
-                if (t.size() != 6)
-                    throw std::runtime_error("Invalid state!");
-                FfnDisAggregateConfig c;
-                try {
-                    c.enable_ffn_disaggregate = t[0].cast<bool>();
-                    c.attention_tp_size       = t[1].cast<int>();
-                    c.attention_dp_size       = t[2].cast<int>();
-                    c.ffn_tp_size             = t[3].cast<int>();
-                    c.ffn_dp_size             = t[4].cast<int>();
-                    c.is_ffn_rank             = t[5].cast<bool>();
-                } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("FfnDisAggregateConfig unpickle error: ") + e.what());
-                }
-                return c;
-            }));
-
     // Register SpecialTokens
     py::class_<RoleSpecialTokens>(m, "RoleSpecialTokens")
         .def(py::init<>())
@@ -1293,7 +1256,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("ffn_tp_rank", &ParallelismConfig::ffn_tp_rank)
         .def_readwrite("use_ub_comm", &ParallelismConfig::use_ub_comm)
         .def_readwrite("role_type", &ParallelismConfig::role_type)
-        .def_readwrite("ffn_disaggregate_config", &ParallelismConfig::ffn_disaggregate_config)
         .def_readwrite("prefill_cp_config", &ParallelismConfig::prefill_cp_config)
         .def("to_string", &ParallelismConfig::to_string)
         .def("get_attn_tp_size", &ParallelismConfig::get_attn_tp_size)
@@ -1315,7 +1277,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dp_rank,
                                       self.ffn_tp_size,
                                       self.ffn_tp_rank,
-                                      self.ffn_disaggregate_config,
+                                      int64_t(0),  // reserved slot: removed ffn_disaggregate_config
                                       self.prefill_cp_config,
                                       self.use_ub_comm,
                                       self.role_type);
@@ -1338,7 +1300,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.dp_rank                 = t[10].cast<int64_t>();
                     c.ffn_tp_size             = t[11].cast<int64_t>();
                     c.ffn_tp_rank             = t[12].cast<int64_t>();
-                    c.ffn_disaggregate_config = t[13].cast<FfnDisAggregateConfig>();
+                    (void)t[13].cast<int64_t>();  // reserved slot: removed ffn_disaggregate_config
                     c.prefill_cp_config       = t[14].cast<PrefillCPConfig>();
                     c.use_ub_comm             = t[15].cast<bool>();
                     if (t.size() >= 17) {

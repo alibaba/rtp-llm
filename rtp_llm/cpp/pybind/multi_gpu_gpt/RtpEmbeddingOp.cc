@@ -74,7 +74,6 @@ void RtpEmbeddingOp::init(py::object model,
                                 misc_config,
                                 arpc_config,
                                 grpc_config,
-                                parallelism_config.ffn_disaggregate_config,
                                 vit_config_cpp,
                                 std::move(*gpt_weight),
                                 py_model);

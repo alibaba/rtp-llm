@@ -68,8 +68,6 @@ std::string ParallelismConfig::to_string() const {
         << "ffn_tp_size: " << ffn_tp_size << "\n"
         << "ffn_tp_rank: " << ffn_tp_rank << "\n"
         << "role_type: " << roleTypeToString(role_type) << "\n"
-        << "ffn_disaggregate_config: {\n"
-        << ffn_disaggregate_config.to_string() << "\n}\n"
         << "prefill_cp_config: {\n"
         << prefill_cp_config.to_string() << "}\n";
     return oss.str();
@@ -551,17 +549,6 @@ void DashScGrpcConfig::from_json(const std::string& json_str) {
     parse_grpc_client_server_maps_json(json_str, client_config, server_config);
 }
 
-// FfnDisAggregateConfig
-std::string FfnDisAggregateConfig::to_string() const {
-    std::ostringstream oss;
-    oss << "enable_ffn_disaggregate: " << enable_ffn_disaggregate << "\n";
-    if (enable_ffn_disaggregate) {
-        oss << "attention_tp_size: " << attention_tp_size << " attention_dp_size: " << attention_dp_size << "\n"
-            << "ffn_tp_size: " << ffn_tp_size << " ffn_dp_size: " << ffn_dp_size << "\n"
-            << "is_ffn_rank: " << is_ffn_rank;
-    }
-    return oss.str();
-}
 
 // PDSepConfig
 std::string PDSepConfig::to_string() const {

@@ -12,7 +12,6 @@ struct ExecProperties {
     size_t tp_rank = 0;
     size_t tp_size = 1;
 
-    bool ffn_as_service              = false;
     bool enable_prefill_cp           = false;
     bool prefill_cp_kv_cache_sharded = false;
 };
@@ -39,7 +38,6 @@ inline ExecProperties buildExecProperties(const ParallelismConfig& parallelism_c
     props.prefill_cp_kv_cache_sharded = parallelism_config.prefill_cp_config.is_enabled()
                                         && parallelism_config.prefill_cp_config.kv_cache_sharded
                                         && parallelism_config.tp_size > 1;
-    props.ffn_as_service           = parallelism_config.ffn_disaggregate_config.is_ffn_service();
     return props;
 }
 

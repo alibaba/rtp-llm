@@ -53,7 +53,6 @@ def start_dash_sc_server(
     set_parallelism_config(
         py_env_configs.parallelism_config,
         rank_id,
-        py_env_configs.ffn_disaggregate_config,
         py_env_configs.prefill_cp_config,
     )
     py_env_configs.server_config.set_local_rank(

@@ -234,7 +234,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK_WITH_INFO(isSingleDeviceGenerationPrefillCudaGraphConfig(parallelism),
                                 "Generation prefill CUDA graph currently supports only single-device execution: "
                                 "world_size=%ld tp_size=%ld dp_size=%ld ep_size=%ld pp_size=%ld "
-                                "ffn_tp_size=%ld prefill_cp=%d ffn_disaggregate=%d",
+                                "ffn_tp_size=%ld prefill_cp=%d",
                                 parallelism.world_size,
                                 parallelism.tp_size,
                                 parallelism.dp_size,
@@ -242,8 +242,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 parallelism.pp_size,
                                 parallelism.ffn_tp_size,
                                 static_cast<int>(parallelism.prefill_cp_config.is_enabled()
-                                                 || parallelism.prefill_cp_config.is_prefill_enabled()),
-                                static_cast<int>(parallelism.ffn_disaggregate_config.enable_ffn_disaggregate));
+                                                 || parallelism.prefill_cp_config.is_prefill_enabled()));
         const auto& buckets = generation_prefill_cuda_graph_buckets;
         RTP_LLM_CHECK_WITH_INFO(!buckets.empty(), "GENERATION_PREFILL_CAPTURE_CONFIG must not be empty");
         RTP_LLM_CHECK_WITH_INFO(
@@ -657,16 +656,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                     "hidden-state capture layer ids must be unique; duplicate id %ld",
                                     layer_id);
         }
-        if (!device_props_.ffn_as_service) {
-            hidden_state_capture_publisher_ = std::make_unique<HiddenStateCapturePublisher>(
-                static_cast<int64_t>(params.hidden_state_capture_layer_ids.size()),
-                params.hidden_size,
-                params.hidden_state_capture_dtype,
-                dataTypeToTorchType(description_.data_type),
-                params.parallelism_config.tp_rank == 0,
-                params.parallelism_config.local_rank,
-                params.metrics_reporter);
-        }
+        hidden_state_capture_publisher_ = std::make_unique<HiddenStateCapturePublisher>(
+            static_cast<int64_t>(params.hidden_state_capture_layer_ids.size()),
+            params.hidden_size,
+            params.hidden_state_capture_dtype,
+            dataTypeToTorchType(description_.data_type),
+            params.parallelism_config.tp_rank == 0,
+            params.parallelism_config.local_rank,
+            params.metrics_reporter);
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");

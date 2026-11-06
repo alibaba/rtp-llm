@@ -178,10 +178,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
 #endif
 
-    if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
-        RTP_LLM_LOG_INFO("using ffn as service");
-        enable_ffn_disaggregate_ = true;
-    }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
         model_.reset(new PyWrappedModel(model_init_params, params.py_model));
@@ -262,7 +258,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.skip_run  = streams.empty();
 
         // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
         // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.

@@ -18,7 +18,6 @@ from rtp_llm.ops import (
     CacheStoreConfig,
     ConcurrencyConfig,
     DashScGrpcConfig,
-    FfnDisAggregateConfig,
     FMHAConfig,
     GrammarConfig,
     GrpcConfig,

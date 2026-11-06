@@ -495,14 +495,13 @@ TEST_F(KVCacheManagerTest, LayoutWithoutCapacityCannotAllocatePool) {
     EXPECT_ANY_THROW(KVCacheManager(config, /*warmup=*/false));
 }
 
-TEST_F(KVCacheManagerTest, RankAgreementUsesMinimumAndFfnBaseline) {
+TEST_F(KVCacheManagerTest, RankAgreementUsesMinimum) {
     const int candidates[] = {11, 7, 9};
-    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, false), 7u);
-    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3, true), 1u);
+    EXPECT_EQ(CacheConfigCreator::selectConfirmedBlockNum(candidates, 3), 7u);
 
     const int invalid_candidates[] = {11, 0, 9};
-    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(invalid_candidates, 3, false));
-    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(nullptr, 0, false));
+    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(invalid_candidates, 3));
+    EXPECT_ANY_THROW(CacheConfigCreator::selectConfirmedBlockNum(nullptr, 0));
 }
 
 TEST_F(KVCacheManagerTest, BaselineOneIsRejected) {

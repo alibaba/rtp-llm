@@ -638,7 +638,6 @@ TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRequiresSingleDeviceParallel
     expect_rejected([](auto& c) { c.ffn_tp_size = 2; });
     expect_rejected([](auto& c) { c.prefill_cp_config.method = CPRotateMethod::ALL_GATHER; });
     expect_rejected([](auto& c) { c.prefill_cp_config.method = CPRotateMethod::PREFILL_CP; });
-    expect_rejected([](auto& c) { c.ffn_disaggregate_config.enable_ffn_disaggregate = true; });
 }
 
 TEST_F(ModelDataTest, testGenerationPrefillCudaGraphRejectsAutoMoeStrategy) {

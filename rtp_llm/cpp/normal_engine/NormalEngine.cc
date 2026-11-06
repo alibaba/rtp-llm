@@ -168,7 +168,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     profiling_debug_logging_config(params.profiling_debug_logging_config),
     kv_cache_config(params.kv_cache_config),
     cache_store_config(params.cache_store_config),
-    ffn_disaggregate_config(params.ffn_disaggregate_config),
     sp_config(params.sp_config),
     metrics_reporter_(params.metrics_reporter),
     propose_params_(std::move(propose_params)),
@@ -256,8 +255,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
-    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
-        && !ffn_disaggregate_config.enable_ffn_disaggregate) {
+    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
                          runtime_config.fifo_scheduler_config.max_context_batch_size,
@@ -991,7 +989,7 @@ absl::Status NormalEngine::step() try {
 
     int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
-    if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
+    if (parallelism_config.tp_rank == 0) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
@@ -1000,9 +998,8 @@ absl::Status NormalEngine::step() try {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
         }
-        // TP collectives and FFN-disaggregate alignment both require empty batches to enter process().
-        if (shouldEarlyReturnEmptyBatch(
-                streams.empty(), parallelism_config.tp_size, ffn_disaggregate_config.enable_ffn_disaggregate)) {
+        // TP collectives require empty batches to enter process().
+        if (shouldEarlyReturnEmptyBatch(streams.empty(), parallelism_config.tp_size)) {
             return absl::OkStatus();
         }
     }
@@ -1090,8 +1087,8 @@ size_t NormalEngine::reserveStepForStream(size_t configured_reserve_step, bool i
     return is_prefill_only ? 0 : configured_reserve_step;
 }
 
-bool NormalEngine::shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate) {
-    return streams_empty && tp_size == 1 && !enable_ffn_disaggregate;
+bool NormalEngine::shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size) {
+    return streams_empty && tp_size == 1;
 }
 
 bool NormalEngine::shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size) {

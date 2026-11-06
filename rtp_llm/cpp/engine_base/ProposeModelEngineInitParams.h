@@ -42,7 +42,6 @@ struct ProposeModelEngineInitParams {
             base_params.misc_config,
             base_params.arpc_config,
             base_params.grpc_config,
-            base_params.ffn_disaggregate_config,
             base_params.vit_config,
             std::move(gpt_weights),
             py_model,

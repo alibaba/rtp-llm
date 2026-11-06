@@ -483,7 +483,6 @@ def init_all_group_args(
     init_parallel_group_args(
         parser,
         py_env_configs.parallelism_config,
-        py_env_configs.ffn_disaggregate_config,
         py_env_configs.prefill_cp_config,
     )
     init_profile_debug_logging_group_args(

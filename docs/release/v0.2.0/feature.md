@@ -16,7 +16,6 @@ RTP-LLM First Release Version:0.2.0(2025.09)
 * [REUSE KV CACHE](../../backend/reuse_kv_cache.md)
 * [Quantization](../../backend/quantization.md)
 * [MultiLoRA](../../backend/lora.ipynb)
-* [Attention FFN Disaggregation](../../backend/af_disaggregation.md)
 * [Frontend/Backend Disaggregation](../../backend/Frontend.md)
 
 

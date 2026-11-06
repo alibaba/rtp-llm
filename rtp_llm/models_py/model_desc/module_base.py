@@ -49,11 +49,6 @@ class GptModelBase(nn.Module):
             and getattr(py_hw_kernel_config, "enable_decode_cascade_attention", False)
             else 0
         )
-        # AF-disagg FFN-service receive side expects the C++ two-lane
-        # micro-batch contract (planMicroBatches always emits 2 lanes); the
-        # derived attribute previously collapsed to 1 and desynced the
-        # [dp_num, lanes + 1] receive buffer.
-        self.micro_batch_size: int = 2
         self.layer_num: int = config.num_layers
         self.vocab_size: int = config.vocab_size
 

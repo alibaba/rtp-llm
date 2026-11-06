@@ -532,7 +532,6 @@ class QwenV2MTP(QWenV2):
     def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config
-        ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
         fmha_config = self.fmha_config
         py_hw_kernel_config = self.hw_kernel_config
         quant_config = self.model_config.quant_config

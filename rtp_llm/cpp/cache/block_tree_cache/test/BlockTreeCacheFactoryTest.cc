@@ -2255,7 +2255,7 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
     KVCacheConfig scan_enabled;
     scan_enabled.block_tree_full_prefix_scan_interval_ms = 5000;
 
-    // Cache owner: tp_rank 0 of a non-FFN service, on a non-zero world/dp rank so the gate
+    // Cache owner: tp_rank 0, on a non-zero world/dp rank so the gate
     // cannot be mistaken for world_rank == 0.
     {
         ParallelismConfig owner;
@@ -2284,19 +2284,6 @@ TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
         ASSERT_NE(cache, nullptr);
         EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
     }
-    // FFN service: it does not schedule normal requests, so it owns no mutable tree.
-    {
-        ParallelismConfig ffn;
-        ffn.tp_rank                                         = 0;
-        ffn.ffn_disaggregate_config.enable_ffn_disaggregate = true;
-        ffn.ffn_disaggregate_config.is_ffn_rank             = true;
-
-        auto allocator = initAllocator<CoordinatorCacheManager>(config);
-        auto cache     = createBlockTreeCache(config, scan_enabled, allocator, ffn);
-        ASSERT_NE(cache, nullptr);
-        EXPECT_EQ(cache->config().full_prefix_scan_interval_ms, 0);
-    }
-
     for (const int64_t invalid_interval : {int64_t{-1}, int64_t{999}, std::numeric_limits<int64_t>::max()}) {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;

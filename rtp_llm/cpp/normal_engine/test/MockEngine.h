@@ -188,7 +188,6 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::MiscellaneousConfig   misc_config;
     rtp_llm::ArpcConfig            arpc_config;
     rtp_llm::GrpcConfig            grpc_config;
-    rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
     rtp_llm::VitConfig             vit_config;
     runtime_config.output_dispatcher_worker_count = config.output_dispatcher_worker_count;
     pd_sep_config.role_type                       = config.role_type;
@@ -209,7 +208,6 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
                                              misc_config,
                                              arpc_config,
                                              grpc_config,
-                                             ffn_disaggregate_config,
                                              vit_config,
                                              std::move(*weights));
     return rtp_llm_params;

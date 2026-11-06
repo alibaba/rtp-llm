@@ -52,7 +52,6 @@ EngineInitParams createMockEngineInitParams() {
     CacheStoreConfig            cache_store_config;
     MiscellaneousConfig         misc_config;
     ArpcConfig                  arpc_config;
-    FfnDisAggregateConfig       ffn_disaggregate_config;
     typedef half                T;
     const at::ScalarType        scalar_type  = at::ScalarType::Half;
     const size_t                hidden_units = 128;
@@ -107,7 +106,6 @@ EngineInitParams createMockEngineInitParams() {
         cache_store_config,
         misc_config,
         arpc_config,
-        ffn_disaggregate_config,
         std::move(*convert.createGptWeights(std::make_unique<TensorMaps>(layer_weights),
                                             std::make_unique<TensorMap>(global_weights))));
     return rtp_llm_params;

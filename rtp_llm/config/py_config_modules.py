@@ -16,7 +16,6 @@ from rtp_llm.ops import (
     ConcurrencyConfig,
     DashScGrpcConfig,
     EPLBConfig,
-    FfnDisAggregateConfig,
     FMHAConfig,
     GrammarConfig,
     GrpcConfig,
@@ -723,7 +722,6 @@ class PyEnvConfigs:
         self.role_config: RoleConfig = RoleConfig()
         self.pd_separation_config: PDSepConfig = PDSepConfig()
         self.parallelism_config: ParallelismConfig = ParallelismConfig()
-        self.ffn_disaggregate_config: FfnDisAggregateConfig = FfnDisAggregateConfig()
         self.fmha_config = FMHAConfig()
         self.misc_config = PyMiscellaneousConfig()
         self.concurrency_config = ConcurrencyConfig()

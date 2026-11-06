@@ -137,7 +137,6 @@ try:
         DataType,
         EPLBConfig,
         EplbMode,
-        FfnDisAggregateConfig,
         FIFOSchedulerConfig,
         FMHAConfig,
         FMHAType,
