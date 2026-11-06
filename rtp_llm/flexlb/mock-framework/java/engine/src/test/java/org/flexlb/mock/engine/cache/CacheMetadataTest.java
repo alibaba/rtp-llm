@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class CacheMetadataTest {
     @Test void publishesOnlyValidBlocksAndReportsReclamation() throws Exception {
-        try (var cache = new KvCache(1, 4, 0)) {
+        try (var cache = new KvCacheManager(1, 4, 0)) {
             var changes = new ArrayList<CacheMetadata.Change>();
             try (var observation = cache.observeMetadata(changes::add)) {
                 var lease = cache.acquire(1, List.of()).lease();

@@ -5,7 +5,7 @@ import java.util.*;
 import java.util.function.Supplier;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.*;
-import org.flexlb.mock.engine.cache.KvCache;
+import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.forward.*;
 import static org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure.Reason.*;
@@ -37,7 +37,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     private final TaskHistory history;
     private final Object lock;
     protected final RtpConfig config;
-    private final KvCache cache;
+    private final KvCacheManager cache;
     private final RtpMetrics metrics;
     private final Map<String, Entry> active = new LinkedHashMap<>();
     protected final ArrayDeque<Entry> waiting = new ArrayDeque<>();
@@ -52,8 +52,8 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         final Listener listener;
         final RequestState state;
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
-        KvCache.Lease lease;
-        KvCache.Preparation preparation;
+        KvCacheManager.Lease lease;
+        KvCacheManager.Preparation preparation;
         long preparationStarted;
         boolean cacheMatchRequested;
 
@@ -87,7 +87,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     private record Batch(List<Member> members, long scheduleStarted, long stepStarted, long inputStarted) {}
     private record Notice(Runnable action, boolean terminal, boolean progress) {}
 
-    AbstractRtpScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
+    AbstractRtpScheduler(Object lock, RtpConfig config, KvCacheManager cache, TaskHistory history) {
         this.history = Objects.requireNonNull(history);
         this.lock = Objects.requireNonNull(lock);
         this.config = Objects.requireNonNull(config);
@@ -96,7 +96,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         cache.onEvictionLifetime(metrics::blockEvicted);
     }
 
-    @Override public Request input(Input input, Listener listener) {
+    @Override public Request enqueue(Input input, Listener listener) {
         if (closed) throw new RequestFailure(CLOSED, "Engine is closing");
         if (input.tokens() >= config.maxSeqLen())
             throw new RequestFailure(INVALID, "Prompt exceeds the context limit");
@@ -145,12 +145,12 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         }
     }
 
-    @Override public void maintain() {
+    @Override public void prepareKvAndCheckTimeouts() {
         for (var entry : List.copyOf(active.values())) {
             if (!live(entry)) continue;
-            if (entry.preparation instanceof KvCache.Loading loading) {
+            if (entry.preparation instanceof KvCacheManager.Loading loading) {
                 var result = loading.poll();
-                if (result instanceof KvCache.Loading) continue;
+                if (result instanceof KvCacheManager.Loading) continue;
                 entry.preparation = null;
                 entry.phase = prefill() ? QUEUED : Phase.CAPACITY;
                 completePreparation(entry, result);
@@ -221,7 +221,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         for (var entry : List.copyOf(queue)) {
             boolean ownedBefore = capped && ownsKv(entry);
             try {
-                if (!live(entry) || entry.preparation instanceof KvCache.Loading) continue;
+                if (!live(entry) || entry.preparation instanceof KvCacheManager.Loading) continue;
                 if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
                 if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
                 if (entry.lease == null && capped && initialized >= config.maxInitedKvStreams()) continue;
@@ -236,7 +236,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         }
     }
     private boolean ownsKv(Entry entry) {
-        return active.get(entry.input.identity()) == entry && (entry.lease != null || entry.preparation instanceof KvCache.Loading);
+        return active.get(entry.input.identity()) == entry && (entry.lease != null || entry.preparation instanceof KvCacheManager.Loading);
     }
     protected void removeWaiting(Entry entry) { waiting.remove(entry); }
 
@@ -292,7 +292,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         return true;
     }
 
-    @Override public void computeCompleted(Work work, SimulatedCompute.Outcome outcome) {
+    @Override public void processOutputs(Work work, SimulatedCompute.Outcome outcome) {
         var batch = completedBatch(work);
         long input = 0, computed = 0, output = 0, maxSequence = 0;
         // Like Real's staged accept_len, this describes the completed computation,
@@ -335,13 +335,13 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         } finally { metrics.computeFinished(); batch.members().forEach(member -> member.use().close()); }
     }
 
-    @Override public void failed(Work work, RuntimeException error) {
+    @Override public void failForward(Work work, RuntimeException error) {
         var batch = completedBatch(work);
         var failure = error instanceof RequestFailure known ? known : new RequestFailure(INTERNAL, "Forward failed", error);
         try { batch.members().forEach(member -> finish(member.request(), failure)); }
         finally { metrics.computeFinished(); batch.members().forEach(member -> member.use().close()); }
     }
-    @Override public boolean cancelled(Work work) {
+    @Override public boolean isForwardCancelled(Work work) {
         return work == executing && ((Batch) work.owner()).members().stream().allMatch(member -> member.request().state.terminating());
     }
     private Batch completedBatch(Work work) {
@@ -392,7 +392,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             entry.waitNanos = Math.max(0, now - entry.timingStarted);
         removeWaiting(entry);
         running.remove(entry);
-        if (entry.preparation instanceof KvCache.Loading loading) loading.close();
+        if (entry.preparation instanceof KvCacheManager.Loading loading) loading.close();
         entry.preparation = null;
         entry.state.finish(failure);
     }
@@ -468,7 +468,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     private boolean prepare(Entry entry) {
         if (entry.lease != null) return true;
         entry.preparationStarted = System.nanoTime();
-        if (entry.preparation instanceof KvCache.Failed failed)
+        if (entry.preparation instanceof KvCacheManager.Failed failed)
             return completePreparation(entry, failed.retry());
         boolean reuse = canReuseLocalKv(entry);
         var keys = entry.input.keys();
@@ -480,21 +480,21 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             cache.prepare(entry.input.tokens(), reuse ? keys.subList(0, matched) : List.of()));
     }
 
-    private boolean completePreparation(Entry entry, KvCache.Preparation result) {
-        if (result instanceof KvCache.Loading loading) {
+    private boolean completePreparation(Entry entry, KvCacheManager.Preparation result) {
+        if (result instanceof KvCacheManager.Loading loading) {
             entry.preparation = loading;
             entry.phase = KV_PREPARING;
             entry.canRun = 0;
             return false;
         }
-        if (result instanceof KvCache.Failed failed) {
+        if (result instanceof KvCacheManager.Failed failed) {
             entry.preparation = failed;
-            if (failed.failure() == KvCache.Failure.PERMANENT)
+            if (failed.failure() == KvCacheManager.Failure.PERMANENT)
                 finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "KV allocation exceeds capacity"));
             return false;
         }
         entry.preparation = null;
-        var ready = (KvCache.Ready) result;
+        var ready = (KvCacheManager.Ready) result;
         entry.waitNanos = Math.max(0, System.nanoTime() - entry.timingStarted);
         entry.lease = ready.lease();
         entry.reused = Math.toIntExact(entry.lease.reusedTokens());

@@ -1,7 +1,7 @@
 package org.flexlb.mock.engine.scheduler;
 
 import java.util.*;
-import org.flexlb.mock.engine.cache.KvCache;
+import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import static org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure.Reason.*;
 
@@ -11,15 +11,15 @@ final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
     private final Map<Entry, ArrayDeque<Entry>> memberships = new IdentityHashMap<>();
     private boolean preferGroup;
 
-    RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCache cache) {
+    RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCacheManager cache) {
         this(lock, config, cache, new TaskHistory());
     }
 
-    RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory finished) {
+    RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCacheManager cache, TaskHistory finished) {
         super(lock, config, cache, finished);
     }
 
-    @Override public List<InputResult> input(List<InputItem> batch) {
+    @Override public List<InputResult> enqueue(List<InputItem> batch) {
         if (closed) throw new RequestFailure(CLOSED, "Engine is closing");
         if (!prefill()) throw new RequestFailure(INVALID, "Explicit batches belong to Prefill");
         batch = List.copyOf(batch);
@@ -27,7 +27,7 @@ final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
         var group = new ArrayDeque<Entry>();
         for (var item : batch) {
             try {
-                var entry = (Entry) input(item.input(), item.listener());
+                var entry = (Entry) enqueue(item.input(), item.listener());
                 waiting.remove(entry); group.addLast(entry);
                 results.add(new InputResult(entry, null));
             } catch (RequestFailure failure) { results.add(new InputResult(null, failure)); }

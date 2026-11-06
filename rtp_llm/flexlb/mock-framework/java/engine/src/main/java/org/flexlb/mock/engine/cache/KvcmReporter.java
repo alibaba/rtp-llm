@@ -41,7 +41,7 @@ public final class KvcmReporter implements AutoCloseable {
     }
     private final Configuration config;
     private final Identity identity;
-    private final KvCache cache;
+    private final KvCacheManager cache;
     private final LongSupplier ackClock;
     private long normalAckDeadline;
     private boolean heartbeatSnapshotHint;
@@ -66,10 +66,10 @@ public final class KvcmReporter implements AutoCloseable {
     private volatile boolean registered, closed, remoteEnabled;
     private volatile String failure = "", heartbeatFailure = "", snapshotFailure = "";
 
-    public KvcmReporter(Configuration config, Identity identity, KvCache cache) {
+    public KvcmReporter(Configuration config, Identity identity, KvCacheManager cache) {
         this(config, identity, cache, System::nanoTime);
     }
-    KvcmReporter(Configuration config, Identity identity, KvCache cache, LongSupplier ackClock) {
+    KvcmReporter(Configuration config, Identity identity, KvCacheManager cache, LongSupplier ackClock) {
         this.ackClock = Objects.requireNonNull(ackClock);
         this.config = Objects.requireNonNull(config); this.identity = Objects.requireNonNull(identity);
         this.cache = Objects.requireNonNull(cache);

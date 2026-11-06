@@ -15,11 +15,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.mock.engine.cache.KvCache;
+import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.forward.ComputeModel;
 import org.flexlb.mock.protocol.Role;
-import org.flexlb.mock.engine.execution.RtpEngineLoop;
+import org.flexlb.mock.engine.execution.EngineLoop;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 
 /** Native RPC adapter; P and D owners manage request state and KV independently. */
@@ -43,7 +43,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     private final EventMetrics rpcMetrics;
     private final Map<String, String> metricTags;
     private final Config config;
-    private final KvCache cache;
+    private final KvCacheManager cache;
     private final TaskHistory finished;
     private final PrefillRpcServer prefill;
     private final DecodeRpcServer decode;
@@ -51,8 +51,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     private final AtomicLong statusVersion = new AtomicLong();
     private volatile boolean closed;
 
-    public RtpRpcService(Config config, KvCache cache, Object executionLock, TaskHistory finished,
-                         RtpEngineLoop engine, boolean groups) {
+    public RtpRpcService(Config config, KvCacheManager cache, Object executionLock, TaskHistory finished,
+                         EngineLoop engine, boolean groups) {
         this.config = config;
         this.groups = groups;
         this.cache = cache; this.finished = finished;

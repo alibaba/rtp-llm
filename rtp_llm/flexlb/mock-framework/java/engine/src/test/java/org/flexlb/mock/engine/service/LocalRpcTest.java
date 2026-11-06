@@ -12,8 +12,8 @@ import java.util.function.BooleanSupplier;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
-import org.flexlb.mock.engine.execution.RtpNode;
-import org.flexlb.mock.engine.scheduler.RtpNodeTest;
+import org.flexlb.mock.engine.execution.LLMMockEngine;
+import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class LocalRpcTest {
     @TempDir Path directory;
     private RtpConfig config(String expression) throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration("prefill"));
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("prefill"));
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
         ((ObjectNode) root.path("component").path("config").path("mock.compute").path("forward")).put("expression", expression);
         var path = directory.resolve("config.json"); json.writeValue(path.toFile(), root); return RtpConfig.load(path);
@@ -31,7 +31,7 @@ class LocalRpcTest {
         while (!condition.getAsBoolean()) { if (System.nanoTime() >= until) fail("Condition did not become true"); Thread.sleep(5); }
     }
 
-    private static String metrics(RtpNode node) throws Exception {
+    private static String metrics(LLMMockEngine node) throws Exception {
         try (var input = java.net.URI.create((String) node.endpoints().get("metrics")).toURL().openStream()) {
             return new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
         }
@@ -42,7 +42,7 @@ class LocalRpcTest {
     }
 
     @Test void nativeStreamReturnsRealTimedResultWithWireTensorAndCacheReuse() throws Exception {
-        try (var node = RtpNode.start(config("totalComputeTokens"))) {
+        try (var node = LLMMockEngine.start(config("totalComputeTokens"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
@@ -76,8 +76,8 @@ class LocalRpcTest {
     }
 
     @Test void cacheStatusPreservesVersionedKeysAndLiveCapacityOnTheWire() throws Exception {
-        try (var node = RtpNode.start(config("1"))) {
-            try (var seed = node.cache().acquire(4, List.of()).lease()) {
+        try (var node = LLMMockEngine.start(config("1"))) {
+            try (var seed = node.cacheManager().acquire(4, List.of()).lease()) {
                 assertTrue(seed.publish(List.of(Long.MIN_VALUE, Long.MAX_VALUE), 4));
             }
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
@@ -90,7 +90,7 @@ class LocalRpcTest {
                 assertEquals(2, first.getBlockSize());
                 assertEquals(16, first.getTotalKvCache());
                 assertEquals(16, first.getAvailableKvCache());
-                try (var held = node.cache().acquire(2, List.of()).lease()) {
+                try (var held = node.cacheManager().acquire(2, List.of()).lease()) {
                     assertNotNull(held);
                     var unchanged = rpc.getCacheStatus(query.toBuilder().setLatestCacheVersion(first.getVersion()).build());
                     assertEquals(first.getVersion(), unchanged.getVersion());
@@ -107,7 +107,7 @@ class LocalRpcTest {
     }
 
     @Test void requestBudgetReturnsNative603DetailsAndReclaimsKv() throws Exception {
-        try (var node = RtpNode.start(config("500"))) {
+        try (var node = LLMMockEngine.start(config("500"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
@@ -124,7 +124,7 @@ class LocalRpcTest {
     }
 
     @Test void grpcCancellationReleasesInFlightLeaseAndDoesNotCommitLater() throws Exception {
-        try (var node = RtpNode.start(config("300"))) {
+        try (var node = LLMMockEngine.start(config("300"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             var context = Context.current().withCancellation();
             try {
@@ -160,7 +160,7 @@ class LocalRpcTest {
     }
 
     @Test void missingDecodeRouteAndInsufficientMemoryAreErrorsNotSuccessfulFrames() throws Exception {
-        try (var node = RtpNode.start(config("1"))) {
+        try (var node = LLMMockEngine.start(config("1"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);
@@ -186,7 +186,7 @@ class LocalRpcTest {
     }
 
     @Test void rpcDeadlineIndependentlyCancelsARequestWithoutItsOwnBudget() throws Exception {
-        try (var node = RtpNode.start(config("3000"))) {
+        try (var node = LLMMockEngine.start(config("3000"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var read = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS);

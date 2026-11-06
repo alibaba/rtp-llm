@@ -84,7 +84,7 @@ Engine 只启用一个指标后端，不需要额外部署开关。公共构建�
 ### 配置初始化边界
 
 文件配置和 Whale ENV 都在 `RtpConfig` / `VitConfig` 中完成默认值、派生值和校验，随后才创建组件。
-`EngineConfig` 负责输入转换和模型文件读取，`RtpNode` / `VitNode` 负责装配与生命周期；Scheduler 使用最终值，不重新解释自动配置。
+`EngineConfig` 负责输入转换和模型文件读取，`LLMMockEngine` / `VitNode` 负责装配与生命周期；Scheduler 使用最终值，不重新解释自动配置。
 模型元信息每次加载只读一次，缓存 key namespace 由共享 `CacheSequence` 解析，Client 与 Engine 共用。
 ENV 路径始终使用入口传入的环境，包括模型下载和 DSV4.1 namespace，不混入另一份进程 ENV。
 

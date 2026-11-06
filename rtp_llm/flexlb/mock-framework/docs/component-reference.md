@@ -254,7 +254,9 @@ P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 
 
 本地统一池固定采用 LRU；不再接受 `device_eviction_policy`。
 
-缓存元信息由 `engine/cache/CacheMetadata` 描述，来自 KvCache/BlockTree 已提交的本地有效块。提交、淘汰和清空推进版本。Master 的原生 GetCacheStatus 返回可复用集合与容量，版本未改变时省略 key。
+缓存元信息由 `engine/cache/CacheMetadata` 描述，来自 KvCacheManager/BlockTree 已提交的本地有效块。提交、淘汰和清空推进版本。Master 的原生 GetCacheStatus 返回可复用集合与容量，版本未改变时省略 key。
+
+`KvCacheManager` 拥有并管理 Reporter 的配置、启动、查询和关闭；LLMMockEngine 只管理缓存管理器的生命周期。报告线程退出和 HOST_DOWN 在缓存锁外完成，结束后再清理 KV。
 
 `engine/cache/KvcmReporter` 使用同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 沿用本地 HBM 元信息命名空间发布统一池的有效块；扩大统一池后，这些事件表示本实例可恢复的逻辑缓存，不表示每个 key 都实际驻留 device，也不模拟分层位置。RTP 装配方提供注册模型、布局和 spec，Reporter 管理发现与传输资源。
 
@@ -376,9 +378,9 @@ prometheus/ 保存配置、targets、版本、日志、data/TSDB/WAL 和 collect
 
 ### RTP 调度实现边界
 
-`AbstractRtpScheduler` 共享请求状态、KV 引用、PD 生命周期、Forward 提交和取消，并提供运行状态和指标采样源；`RtpFifoScheduler` 仅做普通 FIFO 准入，`RtpPrefillGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。两种调度器共用 `KvCache.prepare()`。本地分配同步返回。Java 装配可给 Prefill 注入异步前缀恢复源，加载失败时 KV 层保留本地命中并返回可计算的租约。默认启动使用本地池，KVCM 上报仍只处理元数据。
+`AbstractRtpScheduler` 共享请求状态、KV 引用、PD 生命周期、Forward 提交和取消，并提供运行状态和指标采样源；`RtpFifoScheduler` 仅做普通 FIFO 准入，`RtpPrefillGroupScheduler` 单独拥有显式组队列、残余成员和普通/组之间的选择。组标识不改变普通请求的调度方式。选择在 Engine 启动时完成，不从 Master 配置推断，也不在运行中按请求切换。`fifo` 模式应配合 Master 的 `NON_BATCH` 交付；它仍会动态组成多请求 Forward batch。两种调度器共用 `KvCacheManager.prepare()`。本地分配同步返回。Java 装配可给 Prefill 注入异步前缀恢复源，加载失败时 KV 层保留本地命中并返回可计算的租约。默认启动使用本地池，KVCM 上报仍只处理元数据。
 
-`RtpNode` 装配指标导出，并在调度锁内调用采集。`RtpMetrics` 读取调度状态快照并按各指标的口径采样。
+`LLMMockEngine` 装配指标导出，采集只短暂复制调度状态；指标构造与 SDK 发送在业务锁外。`RtpMetrics` 读取调度状态快照并按各指标的口径采样。
 
 ### KVCM 元信息
 
@@ -422,3 +424,5 @@ Scheduler 只发布累计进度，删除逐轮输出等待标记、网络可写�
 GENERATE 后 D 不因 P 输出流断连或取消而停止；初始 ALLOCATE/LOAD、D 自身超时、显式调度取消和节点关闭保持其原有约束。该假设只用于合成 Mock，不模拟链路故障导致的生产行为。
 
 计算结束后，RPC 为剩余输出保留固定十分钟交付期限（独立于 Fetch 接入期限）。到期移除输出注册记录，并通过串行发送路径以 DEADLINE_EXCEEDED 结束连接；不调用计算取消。正常交付或连接取消时撤销计时器。若底层 onNext 尚未返回，注册清理仍执行，错误通知等该调用返回后发送，不并发调用 observer。
+
+LLM Mock Engine 的装配类统一命名为 `execution/LLMMockEngine`，缓存管理类为 `cache/KvCacheManager`。`execution/EngineLoop` 主链使用 enqueue → loop/step → schedule → forward → processOutputs，沿用 real 的普通执行术语。请求控制入口为 updateRequest，KV 回调为 onKvTransferCompleted；RPC 输出发送不参与 Forward 就绪判断。

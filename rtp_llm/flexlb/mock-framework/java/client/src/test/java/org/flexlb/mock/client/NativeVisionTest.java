@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
-import org.flexlb.mock.engine.execution.RtpNode;
+import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.scheduler.*;
 import org.flexlb.mock.engine.vit.*;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
@@ -36,8 +36,8 @@ class NativeVisionTest {
     }
     @Test void nativeSingleAndMasterBatchRequestsTraverseVPD() throws Exception {
         try (var v = VitNode.start(VitConfig.load(config("vit")), 0, 0);
-             var p = RtpNode.start(RtpConfig.load(config("prefill")));
-             var d = RtpNode.start(RtpConfig.load(config("decode")))) {
+             var p = LLMMockEngine.start(RtpConfig.load(config("prefill")));
+             var d = LLMMockEngine.start(RtpConfig.load(config("decode")))) {
             var routes = List.of(server("vit", v.endpoints()), server("prefill", p.endpoints()), server("decode", d.endpoints()));
             var stages=new AtomicInteger();var epoch=new AtomicInteger(1);var rejectedPin=new AtomicBoolean();var pChannel=ManagedChannelBuilder.forTarget(p.rpcAddress()).usePlaintext().build();
             var master=NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1",0)).addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {

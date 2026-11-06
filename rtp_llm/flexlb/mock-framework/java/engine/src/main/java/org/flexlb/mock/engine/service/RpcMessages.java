@@ -11,7 +11,7 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler;
 final class RpcMessages {
     private RpcMessages() {}
 
-    static EngineScheduler.Input input(org.flexlb.mock.protocol.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
+    static EngineScheduler.Input toSchedulerInput(org.flexlb.mock.protocol.MediaInput.Prepared prepared, String identity, long started, long rpcDeadline,
                                  boolean retained, int blockSize, long seed) {
         var input = prepared.input();
         return new EngineScheduler.Input(identity, input.getRequestId(), input.hasGroupId() ? input.getGroupId().getValue() : 0,

@@ -38,8 +38,8 @@ class EngineServiceTest {
         var vConfig = org.flexlb.mock.engine.vit.VitConfig.load(json.valueToTree(Map.of("id", "vit-0", "component_role", "vit",
             "component", Map.of("config", Map.of("patch_size", 14, "downsample_ratio", 3, "min_pixels", 0, "max_image_tokens", 1024, "hidden_size", 4, "vit_concurrency", 2,
                 "mock.compute.forward.expression", "1")))));
-        try (var p = org.flexlb.mock.engine.execution.RtpNode.start(org.flexlb.mock.engine.config.RtpConfig.load(pConfig));
-             var d = org.flexlb.mock.engine.execution.RtpNode.start(org.flexlb.mock.engine.config.RtpConfig.load(dConfig));
+        try (var p = org.flexlb.mock.engine.execution.LLMMockEngine.start(org.flexlb.mock.engine.config.RtpConfig.load(pConfig));
+             var d = org.flexlb.mock.engine.execution.LLMMockEngine.start(org.flexlb.mock.engine.config.RtpConfig.load(dConfig));
              var v = org.flexlb.mock.engine.vit.VitNode.start(vConfig, 0, 0)) {
             int dPort = Integer.parseInt(d.rpcAddress().split(":")[1]);
             int vPort = URI.create("http://" + v.endpoints().get("rpc")).getPort();
