@@ -96,6 +96,14 @@ void inject(const std::string& selected, const char* point) {
         throw std::runtime_error(std::string("TEST_FAULT_INJECTION: ") + point);
 }
 
+CUmemAllocationHandleType device_handle_type(const std::string& value) {
+    if (value == "posix_fd")
+        return CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+    if (value == "fabric")
+        return CU_MEM_HANDLE_TYPE_FABRIC;
+    throw std::invalid_argument("DEVICE handle_type must be posix_fd or fabric");
+}
+
 class Mapping;
 struct ViewLease {
     explicit ViewLease(std::shared_ptr<Mapping> owner);
@@ -124,13 +132,26 @@ public:
         return granularity;
     }
 
-    static uint64_t device_granularity(int device) {
-        auto state = std::shared_ptr<Mapping>(new Mapping(true));
+    static bool device_fabric_supported(int device) {
+        require(device >= 0 && device <= std::numeric_limits<c10::DeviceIndex>::max(),
+                "device ordinal is out of range");
+        check(cuInit(0), "driver_init");
+        CUdevice cuda_device{};
+        check(cuDeviceGet(&cuda_device, device), "device_get");
+        int supported = 0;
+        check(cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, cuda_device),
+              "device_fabric_supported");
+        return supported != 0;
+    }
+
+    static uint64_t device_granularity(int device, const std::string& handle_type) {
+        const auto requested = device_handle_type(handle_type);
+        auto       state     = std::shared_ptr<Mapping>(new Mapping(true));
         state->init_context(device);
         CurrentContext      current(state->context_);
         CUmemAllocationProp prop{};
         prop.type                 = CU_MEM_ALLOCATION_TYPE_PINNED;
-        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+        prop.requestedHandleTypes = requested;
         prop.location.type        = CU_MEM_LOCATION_TYPE_DEVICE;
         prop.location.id          = device;
         size_t granularity        = 0;
@@ -143,7 +164,12 @@ public:
     }
 
     static std::shared_ptr<Mapping>
-    make_owner(uint64_t size, int numa, int device, const std::string& fail_stage, bool device_backing = false) {
+    make_owner(uint64_t                  size,
+               int                       numa,
+               int                       device,
+               const std::string&        fail_stage,
+               bool                      device_backing = false,
+               CUmemAllocationHandleType device_handle  = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) {
         require(size > 0 && size <= kMaxAllocation, "size must be in 1..128GiB for this development slice");
         require(numa >= 0, "numa must be a local nonnegative HOST_NUMA ID");
         validate_fail_stage(fail_stage, true);
@@ -151,16 +177,16 @@ public:
         state->logical_bytes_     = size;
         state->numa_              = device_backing ? -1 : numa;
         state->device_backing_    = device_backing;
+        state->handle_type_       = device_backing ? device_handle : CU_MEM_HANDLE_TYPE_FABRIC;
         state->allocation_device_ = device_backing ? device : -1;
         state->init_context(device);
         inject(fail_stage, "after_context");
         CurrentContext      current(state->context_);
         CUmemAllocationProp prop{};
-        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-        prop.requestedHandleTypes =
-            device_backing ? CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR : CU_MEM_HANDLE_TYPE_FABRIC;
-        prop.location.type = device_backing ? CU_MEM_LOCATION_TYPE_DEVICE : CU_MEM_LOCATION_TYPE_HOST_NUMA;
-        prop.location.id   = device_backing ? device : numa;
+        prop.type                 = CU_MEM_ALLOCATION_TYPE_PINNED;
+        prop.requestedHandleTypes = state->handle_type_;
+        prop.location.type        = device_backing ? CU_MEM_LOCATION_TYPE_DEVICE : CU_MEM_LOCATION_TYPE_HOST_NUMA;
+        prop.location.id          = device_backing ? device : numa;
         check(cuMemGetAllocationGranularity(&state->granularity_, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM),
               "owner_granularity");
         state->validate_granularity();
@@ -171,6 +197,18 @@ public:
         state->has_handle_ = true;
         ++counters.owner_allocations;
         inject(fail_stage, "after_create");
+        if (device_backing) {
+            CUmemAllocationProp actual{};
+            check(cuMemGetAllocationPropertiesFromHandle(&actual, state->handle_), "device_owner_properties");
+            require(actual.type == CU_MEM_ALLOCATION_TYPE_PINNED && actual.location.type == CU_MEM_LOCATION_TYPE_DEVICE,
+                    "DEVICE owner allocation must be DEVICE-backed PINNED VMM");
+            size_t runtime_granularity = 0;
+            check(cuMemGetAllocationGranularity(&runtime_granularity, &actual, CU_MEM_ALLOC_GRANULARITY_MINIMUM),
+                  "device_owner_runtime_granularity");
+            require(runtime_granularity == state->granularity_ && state->bytes_ % runtime_granularity == 0,
+                    "DEVICE owner runtime granularity differs from plan");
+            state->allocation_device_ = actual.location.id;
+        }
         state->reserve_and_map(fail_stage);
         CUmemAccessDesc access{};
         access.location.type = prop.location.type;
@@ -241,48 +279,72 @@ public:
         return state;
     }
 
-    static std::shared_ptr<Mapping>
-    import_device_fd(int fd, uint64_t bytes, uint64_t granularity, int device, const std::string& fail_stage) {
-        require(fd >= 0 && bytes > 0 && bytes <= kMaxAllocation, "invalid DEVICE allocation FD/size");
-        require(granularity > 0 && bytes % granularity == 0, "invalid DEVICE allocation alignment");
+    static std::shared_ptr<Mapping> import_device(void*                     os_handle,
+                                                  CUmemAllocationHandleType handle_type,
+                                                  uint64_t                  bytes,
+                                                  uint64_t                  granularity,
+                                                  int                       device,
+                                                  const std::string&        fail_stage) {
+        require(bytes > 0 && bytes <= kMaxAllocation, "invalid DEVICE allocation size");
+        require(granularity > 0 && granularity <= kMaxAllocation && bytes % granularity == 0,
+                "invalid DEVICE allocation alignment");
         validate_fail_stage(fail_stage, false);
         auto state             = std::shared_ptr<Mapping>(new Mapping(false));
         state->device_backing_ = true;
+        state->handle_type_    = handle_type;
         state->logical_bytes_ = state->bytes_ = bytes;
         state->init_context(device);
         inject(fail_stage, "after_context");
         CurrentContext current(state->context_);
-        check(cuMemImportFromShareableHandle(&state->handle_,
-                                             reinterpret_cast<void*>(static_cast<intptr_t>(fd)),
-                                             CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
-              "device_fd_import");
+        check(cuMemImportFromShareableHandle(&state->handle_, os_handle, handle_type), "device_import");
         state->has_handle_ = true;
         ++counters.imports;
         inject(fail_stage, "after_import");
         CUmemAllocationProp actual{};
-        check(cuMemGetAllocationPropertiesFromHandle(&actual, state->handle_), "device_fd_properties");
+        check(cuMemGetAllocationPropertiesFromHandle(&actual, state->handle_), "device_import_properties");
         require(actual.type == CU_MEM_ALLOCATION_TYPE_PINNED && actual.location.type == CU_MEM_LOCATION_TYPE_DEVICE,
                 "imported allocation must be DEVICE-backed PINNED VMM");
         state->allocation_device_ = actual.location.id;
         check(cuMemGetAllocationGranularity(&state->granularity_, &actual, CU_MEM_ALLOC_GRANULARITY_MINIMUM),
-              "device_fd_runtime_granularity");
-        require(state->granularity_ == granularity, "DEVICE FD runtime granularity differs from plan");
+              "device_import_runtime_granularity");
+        require(state->granularity_ == granularity, "DEVICE runtime granularity differs from plan");
         inject(fail_stage, "after_properties");
         state->ready_ = true;
         current.finish();
         return state;
     }
 
+    static std::shared_ptr<Mapping>
+    import_device_fd(int fd, uint64_t bytes, uint64_t granularity, int device, const std::string& fail_stage) {
+        require(fd >= 0, "invalid DEVICE allocation FD");
+        return import_device(reinterpret_cast<void*>(static_cast<intptr_t>(fd)),
+                             CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+                             bytes,
+                             granularity,
+                             device,
+                             fail_stage);
+    }
+
+    static std::shared_ptr<Mapping> import_device_fabric(const CUmemFabricHandle& fabric,
+                                                         uint64_t                 bytes,
+                                                         uint64_t                 granularity,
+                                                         int                      device,
+                                                         const std::string&       fail_stage) {
+        CUmemFabricHandle copy = fabric;
+        return import_device(&copy, CU_MEM_HANDLE_TYPE_FABRIC, bytes, granularity, device, fail_stage);
+    }
+
     uint64_t imported_handle() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        require(device_backing_ && !owner_ && ready_ && !closed_ && has_handle_, "DEVICE FD import is not ready");
+        require(device_backing_ && !owner_ && ready_ && !closed_ && has_handle_, "DEVICE import is not ready");
         return static_cast<uint64_t>(handle_);
     }
 
     int export_fd() {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_ready();
-        require(owner_ && device_backing_, "FD export requires a DEVICE owner");
+        require(owner_ && device_backing_ && handle_type_ == CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+                "FD export requires a DEVICE/POSIX_FD owner");
         CurrentContext current(context_);
         check(cuCtxSynchronize(), "device_owner_publish_drain");
         int fd = -1;
@@ -337,7 +399,7 @@ public:
     CUmemFabricHandle export_handle() {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_ready();
-        require(owner_ && !device_backing_, "fabric export is HOST_NUMA owner-only");
+        require(owner_ && handle_type_ == CU_MEM_HANDLE_TYPE_FABRIC, "fabric export requires a FABRIC owner");
         CurrentContext current(context_);
         std::atomic_thread_fence(std::memory_order_seq_cst);
         check(cuCtxSynchronize(), "owner_publish_drain");
@@ -405,7 +467,7 @@ public:
         result["numa"]                     = numa_;
         result["location_type"]            = device_backing_ ? "DEVICE" : "HOST_NUMA";
         result["allocation_device"]        = allocation_device_;
-        result["handle_type"]              = device_backing_ ? "POSIX_FD" : "FABRIC";
+        result["handle_type"]              = handle_type_ == CU_MEM_HANDLE_TYPE_FABRIC ? "FABRIC" : "POSIX_FD";
         result["base_address"]             = uint64_t(address_);
         result["sealed"]                   = sealed_;
         result["active_views"]             = active_views_.load();
@@ -510,6 +572,7 @@ private:
     int                          device_ = -1, numa_ = -1, allocation_device_ = -1;
     CUdevice                     cuda_device_{};
     CUcontext                    context_{};
+    CUmemAllocationHandleType    handle_type_ = CU_MEM_HANDLE_TYPE_FABRIC;
     CUmemGenericAllocationHandle handle_{};
     CUdeviceptr                  address_{};
     uint64_t                     logical_bytes_ = 0, loaded_bytes_ = 0;
@@ -559,9 +622,10 @@ private:
 
 class DeviceOwner {
 public:
-    DeviceOwner(uint64_t size, int device, const std::string& fail_stage) {
+    DeviceOwner(uint64_t size, int device, const std::string& fail_stage, const std::string& handle_type) {
+        const auto             requested = device_handle_type(handle_type);
         py::gil_scoped_release release;
-        mapping_ = Mapping::make_owner(size, 0, device, fail_stage, true);
+        mapping_ = Mapping::make_owner(size, 0, device, fail_stage, true, requested);
     }
     void load(const py::bytes& data, uint64_t offset) {
         char*      address = nullptr;
@@ -574,6 +638,14 @@ public:
     int export_fd() {
         py::gil_scoped_release release;
         return mapping_->export_fd();
+    }
+    py::bytes export_handle() {
+        CUmemFabricHandle fabric{};
+        {
+            py::gil_scoped_release release;
+            fabric = mapping_->export_handle();
+        }
+        return py::bytes(reinterpret_cast<const char*>(&fabric), sizeof(fabric));
     }
     void close() {
         mapping_->close();
@@ -591,6 +663,34 @@ public:
     DeviceImport(int fd, uint64_t bytes, uint64_t granularity, int device, const std::string& fail_stage) {
         py::gil_scoped_release release;
         mapping_ = Mapping::import_device_fd(fd, bytes, granularity, device, fail_stage);
+    }
+    uint64_t handle() const {
+        return mapping_->imported_handle();
+    }
+    void close() {
+        mapping_->close();
+    }
+    py::dict info() const {
+        return mapping_->info();
+    }
+
+private:
+    std::shared_ptr<Mapping> mapping_;
+};
+
+class DeviceFabricImport {
+public:
+    DeviceFabricImport(
+        const py::bytes& handle, uint64_t bytes, uint64_t granularity, int device, const std::string& fail_stage) {
+        char*      address = nullptr;
+        Py_ssize_t length  = 0;
+        if (PyBytes_AsStringAndSize(handle.ptr(), &address, &length) != 0)
+            throw py::error_already_set();
+        require(length == sizeof(CUmemFabricHandle), "fabric handle has incorrect byte length");
+        CUmemFabricHandle fabric{};
+        std::memcpy(&fabric, address, sizeof(fabric));
+        py::gil_scoped_release release;
+        mapping_ = Mapping::import_device_fabric(fabric, bytes, granularity, device, fail_stage);
     }
     uint64_t handle() const {
         return mapping_->imported_handle();
@@ -662,14 +762,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
     module.def("device_granularity",
                &Mapping::device_granularity,
                py::arg("device"),
+               py::arg("handle_type") = "posix_fd",
+               py::call_guard<py::gil_scoped_release>());
+    module.def("device_fabric_supported",
+               &Mapping::device_fabric_supported,
+               py::arg("device"),
                py::call_guard<py::gil_scoped_release>());
     py::class_<DeviceOwner>(module, "DeviceOwner")
-        .def(py::init<uint64_t, int, const std::string&>(),
+        .def(py::init<uint64_t, int, const std::string&, const std::string&>(),
              py::arg("size"),
              py::arg("device"),
-             py::arg("fail_stage") = "")
+             py::arg("fail_stage")  = "",
+             py::arg("handle_type") = "posix_fd")
         .def("load", &DeviceOwner::load, py::arg("data"), py::arg("offset") = 0)
         .def("export_fd", &DeviceOwner::export_fd)
+        .def("export_handle", &DeviceOwner::export_handle)
         .def("info", &DeviceOwner::info)
         .def("close", &DeviceOwner::close, py::call_guard<py::gil_scoped_release>());
     py::class_<DeviceImport>(module, "DeviceImport")
@@ -682,6 +789,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
         .def("handle", &DeviceImport::handle)
         .def("info", &DeviceImport::info)
         .def("close", &DeviceImport::close, py::call_guard<py::gil_scoped_release>());
+    py::class_<DeviceFabricImport>(module, "DeviceFabricImport")
+        .def(py::init<const py::bytes&, uint64_t, uint64_t, int, const std::string&>(),
+             py::arg("handle"),
+             py::arg("allocation_bytes"),
+             py::arg("granularity"),
+             py::arg("device"),
+             py::arg("fail_stage") = "")
+        .def("handle", &DeviceFabricImport::handle)
+        .def("info", &DeviceFabricImport::info)
+        .def("close", &DeviceFabricImport::close, py::call_guard<py::gil_scoped_release>());
     py::class_<Owner>(module, "Owner")
         .def(py::init<uint64_t, int, int, const std::string&>(),
              py::arg("size"),

@@ -63,7 +63,7 @@ class BackendManager(object):
             checkpoint=getattr(self.py_env_configs.model_args, "ckpt_path", None),
         )
         storage_mode = os.environ.get("RTP_ENGRAM_STORAGE", "host")
-        if storage_mode == "cuda_local":
+        if storage_mode in ("cuda_local", "cuda_fabric"):
             from rtp_llm.models_py.modules.dsv41.engram_bootstrap import staged_package
             from rtp_llm.models_py.modules.dsv41.engram_local_cuda import (
                 prepare_local_cuda_engram,
@@ -78,6 +78,7 @@ class BackendManager(object):
                 store,
                 device=pc.local_rank,
                 timeout_s=float(os.environ.get("RTP_ENGRAM_COHORT_TIMEOUT", "1800")),
+                storage_mode=storage_mode,
                 **startup,
             )
         elif storage_mode == "host":

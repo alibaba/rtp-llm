@@ -4,7 +4,7 @@
 This module imports neither CUDA nor the native RTP engine at import time.
 Factory injection is for control-flow unit tests; the defaults use the actual
 Engram implementation. Successful external mappings live until worker exit.
-Decode Graph is opt-in and holds a permanent storage pin until worker exit.
+External host Graph is opt-in; DEVICE storage pins it automatically until exit.
 There is deliberately no live detach, reload, discovery or service protocol.
 """
 from __future__ import annotations
@@ -153,21 +153,20 @@ def initialize_model_engram(
         )
 
         storage_mode = env.get("RTP_ENGRAM_STORAGE", "host")
-        if storage_mode not in ("host", "cuda_local"):
+        if storage_mode not in ("host", "cuda_local", "cuda_fabric"):
             raise EngramModelInitializationError("INVALID_ENGRAM_STORAGE")
-        if storage_mode == "cuda_local" and (
-            package is not None or shared_storage_requested(env)
-        ):
+        device_storage = storage_mode in ("cuda_local", "cuda_fabric")
+        if device_storage and (package is not None or shared_storage_requested(env)):
             raise EngramModelInitializationError(
                 "LOCAL_CUDA_ENGRAM_CONFLICTS_WITH_COHORT"
             )
         if package is None and shared_storage_requested(env):
             raise EngramModelInitializationError("DISTRIBUTED_ENGRAM_REQUIRES_EXCHANGE")
-        attachment.external = package is not None or storage_mode == "cuda_local"
+        attachment.external = package is not None or device_storage
         if attachment.external:
             attachment.graph_mode = (
                 PROCESS_LIFETIME_GRAPH
-                if storage_mode == "cuda_local"
+                if device_storage
                 else env.get(EXTERNAL_GRAPH_MODE_ENV, "eager")
             )
             if attachment.graph_mode not in ("eager", PROCESS_LIFETIME_GRAPH):
@@ -195,7 +194,7 @@ def initialize_model_engram(
         device = model.v4.embed.weight.device
         checkpoint_path = config["checkpoint_path"]
         hash_state = hash_factory(layout, checkpoint_path, device=device)
-        if storage_mode == "cuda_local":
+        if device_storage:
             from pathlib import Path
 
             from rtp_llm.models_py.modules.dsv41.engram_bootstrap import (
@@ -211,6 +210,8 @@ def initialize_model_engram(
                     "LOCAL_CUDA_ENGRAM_MUST_BE_STAGED_BEFORE_KV_SIZING"
                 )
             attachment.storage = storage
+            if getattr(storage, "storage_mode", None) != storage_mode:
+                raise EngramModelInitializationError("GPU_ENGRAM_STORAGE_MODE_MISMATCH")
             if storage.checkpoint_path != str(
                 Path(checkpoint_path).resolve(strict=True)
             ) or storage.expected_layout.hash_abi != hash_state_digest(hash_state):
