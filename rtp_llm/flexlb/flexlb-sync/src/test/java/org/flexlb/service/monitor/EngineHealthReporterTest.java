@@ -179,15 +179,10 @@ class EngineHealthReporterTest {
                         MetricConstant.ENGINE_STATUS_CHECK_FAIL_TOTAL,
                         FlexMetricType.COUNTER,
                         FlexPriorityType.PRECISE);
-        verify(monitor)
-                .register(
-                        MetricConstant.ENGINE_STATUS_CHECK_FAIL_RT,
-                        FlexMetricType.GAUGE,
-                        FlexPriorityType.PRECISE);
     }
 
     @Test
-    void shouldReportStatusCheckFailureCountAndLatencyWithSameTags() {
+    void shouldReportStatusCheckFailureCountersWithSameTags() {
         BalanceStatusEnum failure = BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT;
         FlexMetricTags expectedTags =
                 FlexMetricTags.of(
@@ -196,12 +191,9 @@ class EngineHealthReporterTest {
                         "role", RoleType.PREFILL.getCode());
 
         reporter.reportStatusCheckerFail(failure, "10.0.0.1:8080@0", RoleType.PREFILL);
-        reporter.reportStatusCheckFailureLatency(
-                failure, "10.0.0.1:8080@0", RoleType.PREFILL, 201_234);
 
         verify(monitor).report(MetricConstant.ENGINE_STATUS_CHECK_FAIL, expectedTags, 1.0);
         verify(monitor).report(MetricConstant.ENGINE_STATUS_CHECK_FAIL_TOTAL, expectedTags, 1.0);
-        verify(monitor).report(MetricConstant.ENGINE_STATUS_CHECK_FAIL_RT, expectedTags, 201_234.0);
     }
 
     @Test
