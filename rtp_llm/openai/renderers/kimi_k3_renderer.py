@@ -561,6 +561,11 @@ class KimiK3Renderer(CustomChatRenderer):
                 elif delta.role is not None or not cls._has_logprobs(split_choice):
                     split_choice.logprobs = None
                 result.append(split_response)
+        # Preserve one cumulative usage value per backend response. Earlier
+        # split frames are reconciled by frontend accounting without counting
+        # the same step once per channel or choice.
+        if result:
+            result[-1].usage = response.usage
         return result
 
     @classmethod
