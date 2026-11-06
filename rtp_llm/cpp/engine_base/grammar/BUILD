@@ -50,6 +50,7 @@ cc_library(
         "//rtp_llm/cpp/utils:error_code",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@rapidjson//:rapidjson",
         "@xgrammar//:xgrammar",
     ] + torch_deps(),
     copts = copts(),
