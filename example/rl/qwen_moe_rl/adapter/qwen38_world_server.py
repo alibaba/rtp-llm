@@ -399,8 +399,15 @@ class World72RTPServer(RTPServer):
             self.client = None
             require(not any(isinstance(row, BaseException) for row in outcomes), 'a native DP token client failed to close')
 
-    async def _stop_owners(self):
-        return await asyncio.gather(*[owner.stop_for_training.remote() for owner in self.owners], return_exceptions=True)
+    async def _stop_owners(self, *, permanent=False):
+        if permanent:
+            require(len(self._owner_identities) == len(self.owners) == 18,
+                    'failed startup cleanup requires all18 prepared owner identities')
+            calls = [owner.stop_if_owned.remote(row['pid'], row['create_time'], row['audit_dir'])
+                     for owner, row in zip(self.owners, self._owner_identities)]
+        else:
+            calls = [owner.stop_for_training.remote() for owner in self.owners]
+        return await asyncio.gather(*calls, return_exceptions=True)
 
     async def ensure_native_running(self, global_step, previous_committed_version):
         if not self._owner_identities:
@@ -416,8 +423,11 @@ class World72RTPServer(RTPServer):
             self.incarnation = uuid.uuid4().hex
             self._incarnation_failed = False
             self._owners_active = True
-            results = await asyncio.gather(*[owner.start.remote(self.boot, self.incarnation) for owner in self.owners], return_exceptions=True)
             try:
+                # First failed owner must stop the whole boot immediately. The
+                # cleanup below permanently poisons identity-bound owners, so
+                # queued start RPCs cannot allocate after the cleanup receipt.
+                results = await asyncio.gather(*[owner.start.remote(self.boot, self.incarnation) for owner in self.owners])
                 require(not any(isinstance(row, BaseException) for row in results), 'native world local startup failed')
                 manifests = validate_world_manifests([row for proof in results for row in proof['rank_manifests']],
                     self.topology, self.required_sources, boot=self.boot, incarnation=self.incarnation)
@@ -441,10 +451,11 @@ class World72RTPServer(RTPServer):
                 self._started = True
                 return dict(native_boot=self.boot, native_incarnation=self.incarnation, restarted=self.boot > 0)
             except BaseException:
+                self.poisoned = True
                 try:
                     await self._close_clients()
                 finally:
-                    receipts = await self._stop_owners()
+                    receipts = await self._stop_owners(permanent=True)
                     self._owners_active = any(isinstance(row, BaseException) for row in receipts)
                     self._started = self._generation_ready = False
                     self._incarnation_failed = True
