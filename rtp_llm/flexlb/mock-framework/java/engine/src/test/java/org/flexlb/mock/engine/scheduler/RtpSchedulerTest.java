@@ -143,7 +143,7 @@ class RtpSchedulerTest {
             scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, second);
             var beforeMetrics = scheduler.metrics().scrape();
             long before = System.nanoTime(); var work = scheduler.schedule(); long after = System.nanoTime();
-            scheduler.finish(second, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel during forward"));
+            scheduler.abort(second, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel during forward"));
             // First stream is in Decode round 2 (two tokens), second in round 0 (three).
             var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 5, 2);
             assertEquals(2, RtpMetricsTest.sample(text, "rtp_llm_generate_tps", "priority=\"0\""));
@@ -164,7 +164,7 @@ class RtpSchedulerTest {
             scheduler.prepareKvAndCheckTimeouts(); drain(scheduler); generate(scheduler, request);
             var beforeMetrics = scheduler.metrics().scrape();
             long before = System.nanoTime(); var work = scheduler.schedule(); long after = System.nanoTime();
-            scheduler.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel all"));
+            scheduler.abort(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel all"));
             assertTrue(scheduler.isForwardCancelled(work));
             if (completed) {
                 var text = completeAndCheckTpot(scheduler, work, config, beforeMetrics, before, after, 4, 1);
@@ -183,7 +183,7 @@ class RtpSchedulerTest {
         try (var cache = new KvCacheManager(config.blockSize(), 32, 0);
              var scheduler = new RtpFifoScheduler(new Object(), config, cache)) {
             var request = scheduler.enqueue(metricInput(1, 20), new Listener());
-            scheduler.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel before selection"));
+            scheduler.abort(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel before selection"));
             drain(scheduler);
             assertNull(scheduler.schedule());
             var text = scheduler.metrics().scrape();
@@ -219,7 +219,7 @@ class RtpSchedulerTest {
             assertEquals(2, batch.batch().dps().getFirst().requests().size());
             assertEquals(new QueueSnapshot(0, 2, 0, 0), scheduler.queues());
             long available = cache.snapshot(0, false).availableBlocks();
-            scheduler.finish(a, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel one"));
+            scheduler.abort(a, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel one"));
             assertEquals(available, cache.snapshot(0, false).availableBlocks());
             assertFalse(first.terminal.isDone()); assertFalse(scheduler.isForwardCancelled(batch));
             complete(scheduler, batch, config); drain(scheduler);
@@ -267,9 +267,11 @@ class RtpSchedulerTest {
             assertEquals(new QueueSnapshot(0, 0, 1, 0), scheduler.queues());
             assertThrows(RequestFailure.class, () -> scheduler.control(old, new RtpControl.Generate(42)));
             loaded(scheduler, old); assertNull(scheduler.schedule());
-            scheduler.finish(old, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel")); drain(scheduler);
+            scheduler.abort(old, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel")); drain(scheduler);
             var replacement = scheduler.enqueue(input(1, false), new Listener());
-            scheduler.prepareKvAndCheckTimeouts(); scheduler.finish(old, null);
+            assertThrows(NullPointerException.class, () -> scheduler.abort(replacement, null));
+            scheduler.prepareKvAndCheckTimeouts();
+            assertThrows(NullPointerException.class, () -> scheduler.abort(old, null));
             scheduler.control(old, new RtpControl.Generate(42));
             assertFalse(replacement.snapshot().terminating());
             assertEquals(0, replacement.snapshot().generated()); assertNull(scheduler.schedule());
@@ -430,7 +432,7 @@ class RtpSchedulerTest {
             var request = engine.enqueue(metricInput(1, 100), listener);
             listener.allocated.get(2, TimeUnit.SECONDS); generate(engine, request);
             assertTrue(blocked.await(2, TimeUnit.SECONDS));
-            engine.finishRequest(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel")); release.countDown();
+            engine.abortRequest(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "cancel")); release.countDown();
             assertEquals(RequestFailure.Reason.CANCELLED, listener.terminal.get(2, TimeUnit.SECONDS).reason());
             var next = new Listener(); var following = engine.enqueue(metricInput(2, 2), next);
             next.allocated.get(2, TimeUnit.SECONDS); generate(engine, following);
@@ -508,7 +510,7 @@ class RtpSchedulerTest {
                         complete(scheduler, work, config); drain(scheduler);
                         assertEquals(7, request.snapshot().generated());
                         assertEquals(0, cache.snapshot(-1, false).availableBlocks());
-                        scheduler.finish(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
+                        scheduler.abort(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
                         assertEquals(2, cache.snapshot(-1, false).freeBlocks());
                     }
                 } finally { scheduler.close(); }
@@ -550,7 +552,7 @@ class RtpSchedulerTest {
             assertEquals(3, a.snapshot().generated());
             assertNull(first.terminal.get(1, TimeUnit.SECONDS));
             assertEquals(4, cache.snapshot(0, false).availableBlocks());
-            scheduler.finish(c, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
+            scheduler.abort(c, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
             assertEquals(7, cache.snapshot(0, false).freeBlocks());
             assertTrue(scheduler.requests().isEmpty());
             assertEquals(3, finishedLog.snapshot(0, List.of(), 0, 0).finished().size());
@@ -576,7 +578,7 @@ class RtpSchedulerTest {
                 assertFalse(listener.output.isDone());
                 assertEquals(0, request.reused());
                 if (cancel) {
-                    engine.finishRequest(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test"));
+                    engine.abortRequest(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test"));
                     assertEquals(RequestFailure.Reason.CANCELLED, listener.terminal.get(2, TimeUnit.SECONDS).reason());
                     assertTrue(remote.isCancelled());
                     assertFalse(remote.complete(1));
@@ -608,7 +610,7 @@ class RtpSchedulerTest {
             engine.enqueue(new EngineScheduler.Input("1", 1, 0, 5, 3, 0, now,
                 now + TimeUnit.MILLISECONDS.toNanos(100), new CacheSequence(2, Collections.nCopies(5, 0), List.of()), false, false, 0, false), expired);
             var request = engine.enqueue(input(2, false), cancelled);
-            engine.finishRequest(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test"));
+            engine.abortRequest(request, new RequestFailure(RequestFailure.Reason.CANCELLED, "test"));
             assertEquals(RequestFailure.Reason.CANCELLED, cancelled.terminal.get(2, TimeUnit.SECONDS).reason());
             assertEquals(RequestFailure.Reason.TIMEOUT, expired.terminal.get(2, TimeUnit.SECONDS).reason());
             assertFalse(expired.output.isDone()); assertFalse(cancelled.output.isDone());
@@ -737,7 +739,7 @@ class RtpSchedulerTest {
             var first = scheduler.schedule(); complete(scheduler, first, config); drain(scheduler);
             scheduler.enqueue(batch(sized(1, 5), sized(2, 5)));
             assertNull(scheduler.schedule());
-            scheduler.finish(held, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
+            scheduler.abort(held, new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
             var next = scheduler.schedule(); assertEquals(List.of(1L), ids(next));
             complete(scheduler, next, config); drain(scheduler);
             var tail = scheduler.schedule(); assertEquals(List.of(2L), ids(tail));
@@ -768,7 +770,7 @@ class RtpSchedulerTest {
              var scheduler = new RtpPrefillGroupScheduler(new Object(), config, cache)) {
             var admitted = scheduler.enqueue(batch(sized(1, 5), sized(1, 5), sized(2, 5)));
             assertEquals(RequestFailure.Reason.DUPLICATE, admitted.get(1).failure().reason());
-            scheduler.finish(admitted.get(0).request(), new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
+            scheduler.abort(admitted.get(0).request(), new RequestFailure(RequestFailure.Reason.CANCELLED, "test")); drain(scheduler);
             var next = scheduler.schedule(); assertEquals(List.of(2L), ids(next));
             complete(scheduler, next, config); drain(scheduler);
             assertEquals(20, cache.snapshot(0, false).freeBlocks()); assertTrue(scheduler.requests().isEmpty());

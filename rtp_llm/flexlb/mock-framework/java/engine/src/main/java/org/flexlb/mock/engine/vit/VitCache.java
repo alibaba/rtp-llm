@@ -8,9 +8,25 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /** Byte-budgeted embedding/hash LRU. Results held by callers outlive cache residency. */
 final class VitCache implements AutoCloseable {
-    record Claim(String key, CompletableFuture<VitGeometry.Image> result, AtomicInteger users, boolean producer,
-                 AtomicReference<Runnable> abandoned, AtomicBoolean errorReported) {
-        void onAbandon(Runnable action) { abandoned.set(action); if(users.get()==0) action.run(); }
+    static final class Claim implements AutoCloseable {
+        private final String key;
+        private final Pending pending;
+        private final boolean producer;
+        private final AtomicBoolean released = new AtomicBoolean();
+        private Claim(String key, Pending pending, boolean producer) {
+            this.key=key; this.pending=pending; this.producer=producer;
+        }
+        String key() { return key; }
+        boolean producer() { return producer; }
+        CompletionStage<VitGeometry.Image> result() { return pending.result.minimalCompletionStage(); }
+        boolean hasConsumers() { return pending.users.get()>0; }
+        boolean markErrorReported() { return pending.errorReported.compareAndSet(false,true); }
+        void onAbandon(Runnable action) { pending.abandoned.set(action); if(!hasConsumers()) action.run(); }
+        @Override public void close() {
+            if(!released.compareAndSet(false,true)) return;
+            int remaining=pending.users.decrementAndGet();
+            var cancel=pending.abandoned.get(); if(remaining==0 && cancel!=null) cancel.run();
+        }
     }
     private final VitConfig config;
     private final VitMetrics metrics;
@@ -29,8 +45,8 @@ final class VitCache implements AutoCloseable {
         catch(RuntimeException error) {
             // No newly created claim can escape this cache lock before commit.
             for(var claim:claims) {
-                claim.users.decrementAndGet();
-                if(claim.producer) { pending.remove(claim.key); claim.result.completeExceptionally(error); }
+                claim.pending.users.decrementAndGet();
+                if(claim.producer) { pending.remove(claim.key); claim.pending.result.completeExceptionally(error); }
             }
             throw error;
         }
@@ -41,8 +57,8 @@ final class VitCache implements AutoCloseable {
         if(result==null && (result=host.remove(key))!=null) { hostBytes-=bytes(result); retain(result); }
         if(result!=null) {
             metrics.events.increment("py_rtp_vit_embedding_cache_hit_qps");
-            return new Claim(key,CompletableFuture.completedFuture(result),new AtomicInteger(1),false,
-                new AtomicReference<>(),new AtomicBoolean());
+            return new Claim(key,new Pending(CompletableFuture.completedFuture(result),new AtomicInteger(1),
+                new AtomicReference<>(),new AtomicBoolean()),false);
         }
         var waiting=pending.get(key);
         boolean producer=waiting==null;
@@ -52,12 +68,12 @@ final class VitCache implements AutoCloseable {
         }
         metrics.events.increment(producer?"py_rtp_vit_embedding_cache_miss_qps":"py_rtp_vit_embedding_cache_inflight_qps");
         waiting.users.incrementAndGet();
-        return new Claim(key,waiting.result,waiting.users,producer,waiting.abandoned,waiting.errorReported);
+        return new Claim(key,waiting,producer);
     }
     void publish(Claim claim, VitGeometry.Image image, Throwable error) {
         synchronized(this) {
             var current=pending.get(claim.key());
-            if(current==null || current.result!=claim.result) return;
+            if(current==null || current!=claim.pending) return;
             if(error==null && closed) error=io.grpc.Status.UNAVAILABLE.withDescription("V cache stopped").asRuntimeException();
             if(error==null) {
                 try {
@@ -84,10 +100,10 @@ final class VitCache implements AutoCloseable {
         // Never execute consumer callbacks under the cache lock.
         if(error==null) {
             metrics.events.increment("py_rtp_vit_success_qps");
-            claim.result.complete(image);
+            claim.pending.result.complete(image);
         } else {
             metrics.error(error,claim);
-            claim.result.completeExceptionally(error);
+            claim.pending.result.completeExceptionally(error);
         }
     }
     private void retain(VitGeometry.Image image) {
@@ -108,11 +124,6 @@ final class VitCache implements AutoCloseable {
         }
         while (hostBytes > config.hostBytes() - bytes) { var old = host.pollFirstEntry(); hostBytes -= bytes(old.getValue()); metrics.events.increment("py_rtp_vit_embedding_cache_eviction_qps"); }
         host.put(image.key(),image); hostBytes += bytes;
-    }
-    static void release(Claim claim) {
-        int remaining=claim.users.decrementAndGet();
-        if(remaining<0) throw new IllegalStateException("V claim released twice");
-        var cancel=claim.abandoned.get(); if(remaining==0 && cancel!=null) cancel.run();
     }
     long bytes(VitGeometry.Image image) { return image.bytes(config.hidden(),2); }
     private static long hashBytes(VitGeometry.Image image) { return (long)image.rows()*4 + image.key().length(); }

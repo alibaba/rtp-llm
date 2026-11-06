@@ -36,7 +36,7 @@ final class VitPreparation implements AutoCloseable {
         if(tasks.size()+count>config.queueSize()) {
             var error=Status.RESOURCE_EXHAUSTED.withDescription("V unique media admission full").asRuntimeException();
             claims.stream().filter(VitCache.Claim::producer).forEach(claim->cache.publish(claim,null,error));
-            claims.forEach(VitCache::release); throw error;
+            claims.forEach(VitCache.Claim::close); throw error;
         }
         long timeout=input.getTimeoutMs()>0?input.getTimeoutMs():media.stream()
             .mapToInt(value->value.getMmPreprocessConfig().getMmTimeoutMs()).filter(value->value>0).max().orElse(config.timeoutMs());
@@ -51,7 +51,7 @@ final class VitPreparation implements AutoCloseable {
                 task.finish(null,rejected);
             }
         }
-        if(rejected!=null) { claims.forEach(VitCache::release); throw rejected; }
+        if(rejected!=null) { claims.forEach(VitCache.Claim::close); throw rejected; }
         return claims;
     }
 
@@ -73,7 +73,7 @@ final class VitPreparation implements AutoCloseable {
                 metrics.started();
                 var image=source.prepare(media,deadline);
                 synchronized(this) { check(); prepared=true; work=scheduler.submit(image,deadline); }
-                result=work.result().get();
+                result=work.result().toCompletableFuture().get();
             } catch(InterruptedException error) {
                 Thread.currentThread().interrupt(); failure=Status.CANCELLED.withDescription("V preparation interrupted").asRuntimeException();
             } catch(ExecutionException error) { failure=error.getCause(); }
@@ -81,7 +81,7 @@ final class VitPreparation implements AutoCloseable {
             finally { finish(result,failure); }
         }
         private void check() {
-            if(closed || cancelled || claim.users().get()==0) throw Status.CANCELLED.withDescription("No V consumers remain").asRuntimeException();
+            if(closed || cancelled || !claim.hasConsumers()) throw Status.CANCELLED.withDescription("No V consumers remain").asRuntimeException();
             if(System.nanoTime()>=deadline) throw Status.DEADLINE_EXCEEDED.withDescription("V queue wait expired").asRuntimeException();
         }
         void finish(VitGeometry.Image image,Throwable error) {

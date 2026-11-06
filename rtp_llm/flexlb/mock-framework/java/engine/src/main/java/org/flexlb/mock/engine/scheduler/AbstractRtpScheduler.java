@@ -384,7 +384,10 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         stream.prefillFinished = transferred.prefillFinished();
         stream.phase = TRANSFERRED;
     }
-    @Override public void finish(Request request, RequestFailure failure) {
+    @Override public void abort(Request request, RequestFailure failure) {
+        finish(request, java.util.Objects.requireNonNull(failure, "Abort requires a failure"));
+    }
+    private void finish(Request request, RequestFailure failure) {
         var stream = requireGenerateStream(request);
         if (stream.state.terminating()) return;
         stream.finalPhase = reportedPhase(stream);

@@ -97,7 +97,8 @@ public interface EngineScheduler extends AutoCloseable {
     }
     void control(Request request, Control event);
     void transferCompleted(Request request, TransferResult result);
-    void finish(Request request, RequestFailure failure);
+    /** Abort an accepted request. Failure is required; success is decided by internal transitions. */
+    void abort(Request request, RequestFailure failure);
     RequestState.Use beginTransfer(Request request);
     /** Current execution facts; no protocol lifecycle or finished cursor. Called under the EngineLoop lock. */
     List<Task> tasks();

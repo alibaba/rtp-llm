@@ -29,7 +29,7 @@ EngineLoop 负责唤醒、执行和结果交接，不判断后端队列和协议
 | updateRequest(request, event) | 把原生 GENERATE、PREFILL_COMPLETE、LOAD ACK 等请求更新交给后端 Scheduler.control；不是通用工作流。 |
 | beginKvTransfer(request) | 持有 KV 传输期间的资源引用。 |
 | onKvTransferCompleted(request, result) | 提交异步 KV 传输结果。 |
-| finishRequest(request, failure) | 显式结束或取消请求。 |
+| abortRequest(request, failure) | 取消或失败，failure 必填；成功由调度内部决定。 |
 | step() → forward() → processOutputs() | 私有执行主链；调度、模拟计算、提交计算结果。 |
 
 ```mermaid

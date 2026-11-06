@@ -80,3 +80,5 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 Forward 平均耗时、输入、计算和输出长度均先汇总各实例的耗时或 token 增量，再除以 Forward 次数增量之和，保留批次权重。原生周期 TPS 的实例均值、集群墙钟 TPS 合计和按批次加权长度是不同统计量，标题和说明必须写清，不能相互替代。
 
 P/D 的 DEVICE 容量指标使用 `test_block_num - 1` 及其驻留占用，不使用统一缓存保留总量。`rtp_llm_kv_cache_item_num` 与 CacheStatus key 列表来自统一索引；设置更大的 `mock.cache.total.blocks` 后，索引条目数可超过 device 总块数。缓存命中仍受 device 驻留额度约束，不模拟分层搬运耗时。
+
+事件 QPS 与 ViT embedding TPS 在 Prometheus 中使用原名加 `_total` 的累计 Counter，View 用 `rate(...[1m])` 显示每秒速率；重复读取不清零。KMonitor 原名与逐事件上报口径保持不变。原生 RTP 窗口 TPS Gauge 不适用此换算。

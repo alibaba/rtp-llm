@@ -76,7 +76,7 @@ final class RtpMetrics {
         physical.remove("priority"); // Request priority belongs to each TPS bucket, not the process.
         physical.put("dp_rank", "0"); // The current Engine supports exactly one DP worker.
         tags = Map.copyOf(physical);
-        events = new EventMetrics(role, clock, tags);
+        events = new EventMetrics(role, tags);
         events.register(registry);
         String[] identity = {role};
         started = counter("rtp_llm_requests_started_total", "Accepted engine requests.").labels(identity);

@@ -44,7 +44,7 @@ class EngineLoopTest {
         public Request enqueue(Input input, Listener listener) { throw new UnsupportedOperationException(); }
         public List<InputResult> enqueue(List<InputItem> batch) { throw new UnsupportedOperationException(); }
         public void control(Request request, Control event) { throw new UnsupportedOperationException(); }
-        public void finish(Request request, RequestFailure failure) { throw new UnsupportedOperationException(); }
+        public void abort(Request request, RequestFailure failure) { throw new UnsupportedOperationException(); }
         public RequestState.Use beginTransfer(Request request) { throw new UnsupportedOperationException(); }
     }
     private EngineLoop engine(Object lock, Policy policy, String expression) {
@@ -61,6 +61,7 @@ class EngineLoopTest {
         };
         try (var loop = engine(policy, policy, "1")) {
             loop.checkHealthy(); loop.checkHealthy();
+            assertThrows(NullPointerException.class, () -> loop.abortRequest(null, null));
             fail.set(true); loop.wakeUp();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (true) {

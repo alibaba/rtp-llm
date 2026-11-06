@@ -60,7 +60,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         var tags = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
         tags.put("dp_rank", "0");
         metricTags = Map.copyOf(tags);
-        rpcMetrics = new EventMetrics(config.role().name(), System::nanoTime, metricTags);
+        rpcMetrics = new EventMetrics(config.role().name(), metricTags);
         rpcMetrics.register(rpcRegistry);
         prefill = config.role() == Role.prefill
             ? new PrefillRpcServer(config, executionLock, finished, engine, this::recordCancellation, this::trackRequest) : null;

@@ -1695,7 +1695,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${prefill_group})(rtp_llm_rpc_cancel_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "avg by(${prefill_group})(rate(rtp_llm_rpc_cancel_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[1m]))",
               "legendFormat": "Prefill · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -5091,7 +5091,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${prefill_group})(rtp_llm_is_streaming_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_is_streaming_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[1m]))",
               "legendFormat": "{{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -5166,7 +5166,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${prefill_group})(rtp_llm_not_streaming_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_not_streaming_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[1m]))",
               "legendFormat": "{{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -9565,7 +9565,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${decode_group})(rtp_llm_rpc_cancel_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "avg by(${decode_group})(rate(rtp_llm_rpc_cancel_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[1m]))",
               "legendFormat": "Decode · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -12670,7 +12670,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${decode_group})(rtp_llm_is_streaming_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_is_streaming_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[1m]))",
               "legendFormat": "{{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -12745,7 +12745,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${decode_group})(rtp_llm_not_streaming_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_not_streaming_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[1m]))",
               "legendFormat": "{{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -15635,7 +15635,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_qps{instance=~\"${vit_instance}\",role=\"vit\",source=\"mm_embedding\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_qps_total{instance=~\"${vit_instance}\",role=\"vit\",source=\"mm_embedding\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -15710,7 +15710,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_success_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_success_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -15785,7 +15785,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_error_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_error_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -16928,7 +16928,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_cache_hit_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_embedding_cache_hit_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -17003,7 +17003,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_cache_miss_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_embedding_cache_miss_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -17078,7 +17078,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_cache_inflight_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_embedding_cache_inflight_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -17891,7 +17891,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_cache_eviction_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "avg by(${vit_group})(rate(py_rtp_vit_embedding_cache_eviction_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "淘汰 · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -17959,7 +17959,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${vit_group})(py_rtp_vit_embedding_overload_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "avg by(${vit_group})(rate(py_rtp_vit_embedding_overload_qps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "拒绝 · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -18027,7 +18027,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_embedding_tps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(rate(py_rtp_vit_embedding_tps_total{instance=~\"${vit_instance}\",role=\"vit\"}[1m]))",
               "legendFormat": "embedding token/s · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -23227,7 +23227,7 @@
           "targets": [
             {
               "refId": "A_prefill",
-              "expr": "sum by(${prefill_group})(rtp_llm_rpc_worker_status_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_rpc_worker_status_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[1m]))",
               "legendFormat": "Prefill · Worker 收到 Status 查询/秒 | 部署角色= · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -23236,7 +23236,7 @@
             },
             {
               "refId": "A_decode",
-              "expr": "sum by(${decode_group})(rtp_llm_rpc_worker_status_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_rpc_worker_status_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[1m]))",
               "legendFormat": "Decode · Worker 收到 Status 查询/秒 | 部署角色= · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -23245,7 +23245,7 @@
             },
             {
               "refId": "B_prefill",
-              "expr": "sum by(${prefill_group})(rtp_llm_rpc_cache_status_qps{instance=~\"${prefill_instance}\",role=\"prefill\"})",
+              "expr": "sum by(${prefill_group})(rate(rtp_llm_rpc_cache_status_qps_total{instance=~\"${prefill_instance}\",role=\"prefill\"}[1m]))",
               "legendFormat": "Prefill · Worker 收到 Cache 查询/秒 | 部署角色= · {{${prefill_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -23254,7 +23254,7 @@
             },
             {
               "refId": "B_decode",
-              "expr": "sum by(${decode_group})(rtp_llm_rpc_cache_status_qps{instance=~\"${decode_instance}\",role=\"decode\"})",
+              "expr": "sum by(${decode_group})(rate(rtp_llm_rpc_cache_status_qps_total{instance=~\"${decode_instance}\",role=\"decode\"}[1m]))",
               "legendFormat": "Decode · Worker 收到 Cache 查询/秒 | 部署角色= · {{${decode_group}}}",
               "datasource": {
                 "type": "prometheus",

@@ -59,7 +59,7 @@ class LocalRpcTest {
                 rpc.getCacheStatus(CacheVersionPB.getDefaultInstance());
                 var text = metrics(node);
                 for (String kind : List.of("worker_status", "cache_status")) {
-                    assertTrue(sample(text, "rtp_llm_rpc_" + kind + "_qps", "role=\"prefill\"") > 0);
+                    assertTrue(sample(text, "rtp_llm_rpc_" + kind + "_qps_total", "role=\"prefill\"") > 0);
                     assertEquals(1, sample(text, "rtp_llm_rpc_" + kind + "_total_rt_us_count", "role=\"prefill\""));
                 }
                 assertEquals(2, sample(text, "rtp_llm_kv_cache_item_num", "role=\"prefill\""));

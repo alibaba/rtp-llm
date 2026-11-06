@@ -312,7 +312,7 @@ RTP 后端的 RtpMetrics 使用 Prometheus simpleclient 0.16.0，每个节点独
 | rtp_llm_context_wall_tps / rtp_llm_context_wall_tps_with_cache | Gauge，priority | 对应 context token 数 / 实际报告窗口秒数。 |
 | rtp_llm_wall_tps_report_interval_us | Gauge | P/D 实际 TPS 报告窗口，微秒；不按 priority 重复计数。 |
 | rtp_llm_context_forward_seconds_total / rtp_llm_context_forward_with_cache_seconds_total | Counter | 与 context TPS 同一执行边界的累计秒数；不是仅模型 Forward 时间。 |
-| py_rtp_vit_embedding_tps | Prometheus 周期 Gauge / KMonitor 累计速率 | 实际计算并成功返回的 embedding token/s；缓存命中和 in-flight 去重不重复计数，失败/过期不计。 |
+| py_rtp_vit_embedding_tps | Prometheus `_total` Counter / KMonitor 累计速率 | 成功实际计算的 embedding token 累计量，Prometheus rate 查询得到 token/s；缓存命中和 in-flight 去重不重复计数，失败/过期不计。 |
 | rtp_llm_sp_estimate_tpot_us | 事件：Prometheus Summary / KMonitor Gauge | Decode 本轮执行耗时 ÷（模拟验收 token 总数 / 本轮参与 stream 数），微秒；不使用停止截断后的交付量。 |
 | rtp_llm_gather_model_input_us | 事件：Prometheus Summary / KMonitor Gauge | P/D 构造批输入的耗时，微秒；不含选批、KV 准备和模拟 Forward。 |
 | mock_client_tpot_seconds | Histogram | 成功请求收到首尾 token 的时间差，除以首 token 后的 token 数。单 token 请求不采样。 |
@@ -336,7 +336,7 @@ P/D 已补 `rtp_llm_{context,generate}_batch_size`、执行 Token 数、最长�
 
 ViT 使用相同的物理元数据与 Prometheus instance 发现；QPS、Embedding 队列/等待/Forward/合批、请求图片数/输出长度，以及缓存命中/未命中/在途合并/淘汰和逻辑驻留量均按 real 名称导出。实际读取时提供 rtp_llm_vit_image_fetch_rt_us（μs）；成功完成图片准备后采样总耗时、下载及其余耗时（ms）。其余耗时包括读尺寸、内容摘要和几何计算。跳过读取时这些指标无样本。py_rtp_vit_preprocess_queue_size 是尚未完成准备的工作数（含排队和执行），py_rtp_vit_embedding_rt 仅计成功工作的就绪排队加 Forward，py_rtp_vit_request_rt 覆盖阻塞媒体调用的成功/失败全程，包括缓存命中等待但不含 RPC 传输和输出编码。未实现的像素预处理和 CUDA Graph 指标不补零。详见 [指标覆盖与边界](../views/README.md)。
 
-事件指标统一通过 EventMetrics.observe 记录。Prometheus 使用无客户端分位数的 Summary，导出累计 `_sum` / `_count`，不再导出同名窗口均值 Gauge；抓取和空闲期间不清零。单实例和跨实例均值均使用 sum/count 的区间增量比值，跨实例先分别汇总，再相除。KMonitor 在事件发生时以原名逐样本提交，由 SDK 保留样本数、总和及极值，不再从周期快照提交事件均值或累计辅助量。SDK 出口在构造时选定，没有全局 observer 或原始样本队列；业务埋点不区分 SDK。周期线程只负责状态、原生窗口计数和已计算的速率。Prometheus 的事件 QPS 仍使用真实窗口秒数换算，KMonitor 的事件 QPS 与 ViT embedding TPS 提交原始计数，由 SDK 计算速率；原生 TPS 窗口计数和已计算的速率快照保持 Gauge。原有 Forward 最近值与 Histogram 口径保持不变。 下表的 `engine/decode/tps` 用于衡量按墙钟计的已提交输出 token 速率。
+事件指标统一通过 EventMetrics.observe 记录。Prometheus 使用无客户端分位数的 Summary，导出累计 `_sum` / `_count`，不再导出同名窗口均值 Gauge；抓取和空闲期间不清零。单实例和跨实例均值均使用 sum/count 的区间增量比值，跨实例先分别汇总，再相除。KMonitor 在事件发生时以原名逐样本提交，由 SDK 保留样本数、总和及极值，不再从周期快照提交事件均值或累计辅助量。SDK 出口在构造时选定，没有全局 observer 或原始样本队列；业务埋点不区分 SDK。周期线程只负责状态、原生窗口计数和已计算的速率。Prometheus 的事件 QPS 和 ViT embedding TPS 导出原名加 `_total` 的累计 Counter，由查询 `rate(...[1m])` 计算每秒速率；读取不清零、不推进窗口，多次抓取不会消费事件。KMonitor 仍以原名提交原始计数，由 SDK 计算速率；原生 TPS 窗口计数和已计算的速率快照保持 Gauge。原有 Forward 最近值与 Histogram 口径保持不变。 下表的 `engine/decode/tps` 用于衡量按墙钟计的已提交输出 token 速率。
 
 累计量预建 0，抓取不清零；分母为 0 不补比率。以下查询在 Python `execution/step/` 的对应指标接口中实现，直接调用本次托管 Prometheus：
 
@@ -441,7 +441,7 @@ LLM Mock Engine 的装配类统一命名为 `execution/LLMMockEngine`，缓存�
 | `py_rtp_vit_error_qps` | 首次观察到失败时计一次；entry 标志防止共享结果的不同异常重复计数，异常标志防止工作与 RPC 层重复计数。入口校验和超时也可能计入错误，因此不以 success/QPS 代替客户端成功率。 |
 | `py_rtp_vit_request_rt` | ms，`source=get_embedding_result`、`status=success/error`；阻塞调用入口到返回或失败，包含下载、共享等待，不包含异步 ACK、RPC 传输、输出编码。纯 hash 命中不调用该路径；hash 缺失只处理缺失媒体。 |
 | `py_rtp_vit_image_count` / `py_rtp_vit_embedding_length` | 每个阻塞调用的图片数 / 成功返回的 embedding 行数。缓存返回仍记录；异步提交 ACK 不记录。 |
-| `py_rtp_vit_embedding_tps` | 成功实际计算的 embedding 行数，SDK 原生累计后折算速率；Prometheus 为墙钟每秒速率。失败、缓存和共享消费者不重复计入。 |
+| `py_rtp_vit_embedding_tps` | 成功实际计算的 embedding 行数，SDK 原生累计后折算速率；Prometheus 导出 `py_rtp_vit_embedding_tps_total`，查询 `rate(...[1m])` 得到墙钟每秒速率。失败、缓存和共享消费者不重复计入。 |
 | `py_rtp_vit_embedding_batch_size` / `forward_rt` | 每次 Forward 的工作 chunk 数 / 实际模拟执行毫秒。不是 RPC 数，也不是 embedding 行数。 |
 | `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `embedding_rt` | 等待 Forward 的队列项数 / 首次入批前等待毫秒 / 成功工作提交 GPU 队列到 Forward 完成毫秒。最后一个不含下载和调用者晚取结果的时间。 |
 | `py_rtp_vit_embedding_overload_qps` | GPU scheduler 拒绝提交次数；CPU admission 拒绝走错误指标，不混为 GPU 队列溢出。 |
@@ -466,3 +466,9 @@ LLM Mock Engine 的装配类统一命名为 `execution/LLMMockEngine`，缓存�
 `rtp_llm_rpc_onflight_request` 对照 real `GenerateContext::collectBasicMetrics`：生成请求结束时，采样当前实例尚未退出的生成请求数，包含正在结束的本次请求，然后释放该请求的计数。P 覆盖本地生成以及等待 D 的整个 P/D 请求，批量 Enqueue 按每个子请求计，不按批 RPC 次数；Fetch 不另加一次。D 从 RemoteGenerate 打开计数，RPC 取消/断连时释放；已接受 GENERATE 的计算仍按既有规则独立继续，后续计算结束不能重复释放。成功、失败、取消都只释放一次；health、WorkerStatus、CacheStatus 不计入。
 
 这是 real 的终态事件 Gauge：SDK 收到原始样本，Prometheus 导出 sum/count，本地 View 先合并原始权重再求均值。它不是 Scheduler running 数，也不是定时采集的瞬时 RPC 并发；例如单个串行请求在结束时采样为 1，空闲时没有新样本，不应期待它自然上报 0。Mock 的输出交付已经解耦，逻辑请求终态与异步输出排空的边界不同，该指标不衡量待交付数据量或网络压力。
+
+### 请求终止与 ViT 结果所有权
+
+Scheduler/EngineLoop 的外部终止入口为 `abort` / `abortRequest`，必须提供失败原因；成功仅由内部计算和 P/D 状态转换决定。终止不等待输出交付，KV 使用权仍在持有时延迟释放资源。
+
+ViT Cache Claim 和 Forward Work 只提供只读 CompletionStage；调用方转换得到的 CompletableFuture 是独立副本，完成或取消副本不会修改共享结果。Claim.close() 幂等，每个消费者只归还自己的引用，最后一个消费者离开才触发放弃处理。
