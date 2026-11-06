@@ -5,8 +5,8 @@
 功能：
 1. 扫描指定目录下的所有trace文件
 2. 从目录结构中提取dp_size
-3. 从文件名中提取batch_size和seq_len
-4. 对每个(dp_size, batch_size, seq_len)组合，选取第一个trace文件（wr0）
+3. 从profile manifest读取输入、输出、batch和trace路径
+4. 保留每个(dp_size, input_length, output_length, batch_size)配置
     5. 调用trace_analyze.py分析每个文件（会自动过滤掉时长最长的1% Kernel实例，并相应调整总Timeline时长）
     6. 整合所有结果到一个CSV文件
 7. 打印制表符格式的表格
@@ -14,11 +14,9 @@
 
 import csv
 import json
-import os
 import re
-import subprocess
 import sys
-from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 # Add the directory containing this script to sys.path to allow importing modules from it
@@ -113,80 +111,91 @@ def extract_dp_size_from_path(task_dir_name: str) -> int:
     从Task目录名中提取dp_size
     例如：Task_dp_size-8 -> 8
     """
-    match = re.search(r"dp_size-(\d+)", task_dir_name)
+    match = re.search(r"(?:^|_)dp_size-([1-9]\d*)(?=_|$)", task_dir_name)
     if match:
         return int(match.group(1))
     return None
 
 
-def extract_params_from_filename(filename: str) -> dict:
-    """
-    从trace文件名中提取参数
-    例如：normal_profiler_wr0_b512_s64_prefill0_6.json
-    返回：{'wr': 0, 'batch_size': 512, 'seq_len': 64, 'prefill': 0, 'id': 6}
-    """
-    pattern = r"normal_profiler_wr(\d+)_b(\d+)_s(\d+)_prefill(\d+)_(\d+)\.json"
-    match = re.search(pattern, filename)
-
-    if match:
-        return {
-            "wr": int(match.group(1)),
-            "batch_size": int(match.group(2)),
-            "seq_len": int(match.group(3)),
-            "prefill": int(match.group(4)),
-            "id": int(match.group(5)),
-        }
-    return None
+@dataclass(frozen=True)
+class TraceConfig:
+    dp_size: int
+    input_length: int
+    output_length: int
+    batch_size: int
+    trace_file: str
 
 
 def scan_trace_files(benchmark_dir: str) -> list:
-    """
-    扫描benchmark目录下的所有trace文件
-
-    返回：[(dp_size, batch_size, seq_len, trace_file_path), ...]
-    """
-    benchmark_path = Path(benchmark_dir)
-    trace_configs = []
-
-    # 遍历所有Task_dp_size-*目录
-    for task_dir in benchmark_path.iterdir():
-        if not task_dir.is_dir() or not task_dir.name.startswith("Task_dp_size-"):
+    """Read completed profile manifests; filenames never supply workload shape."""
+    configs = []
+    for task in sorted(Path(benchmark_dir).glob("Task_*")):
+        if not task.is_dir():
             continue
-
-        dp_size = extract_dp_size_from_path(task_dir.name)
+        dp_size = extract_dp_size_from_path(task.name)
         if dp_size is None:
             continue
-
-        # 查找trace_files目录
-        trace_files_dir = task_dir / "trace_files"
-        if not trace_files_dir.exists():
-            print(f"警告: {task_dir.name} 没有trace_files目录")
-            continue
-
-        # 收集该dp_size下的所有trace文件
-        dp_traces = defaultdict(list)  # (batch_size, seq_len) -> [trace_files]
-
-        for trace_file in trace_files_dir.glob("*.json"):
-            params = extract_params_from_filename(trace_file.name)
-            if params is None:
-                continue
-
-            # 只选择wr0的文件（第一个trace）
-            if params["wr"] == 0:
-                key = (params["batch_size"], params["seq_len"])
-                dp_traces[key].append(trace_file)
-
-        # 对每个(batch_size, seq_len)组合，选择第一个文件
-        for (batch_size, seq_len), files in dp_traces.items():
-            if files:
-                # 按文件名排序，选择第一个
-                first_file = sorted(files)[0]
-                trace_configs.append((dp_size, batch_size, seq_len, str(first_file)))
-
-    # 按dp_size, batch_size, seq_len排序
-    trace_configs.sort(key=lambda x: (x[0], x[1], x[2]))
-
-    return trace_configs
+        for run in (task, task / "run"):
+            for path in sorted((run / "profiles").glob("*/profile_manifest.json")):
+                try:
+                    manifest = json.loads(path.read_text(encoding="utf-8"))
+                    if manifest["status"] != "completed":
+                        print(
+                            f"Skipping {path}: status={manifest['status']} "
+                            f"error={manifest.get('error')}"
+                        )
+                        continue
+                    inputs = manifest["input_lengths"]
+                    batch = manifest["batch_size"]
+                    output = manifest["output_length"]
+                    if (
+                        type(batch) is not int
+                        or batch <= 0
+                        or type(output) is not int
+                        or output <= 0
+                        or not isinstance(inputs, list)
+                        or len(inputs) != batch
+                        or any(type(item) is not int or item <= 0 for item in inputs)
+                        or len(set(inputs)) != 1
+                    ):
+                        raise ValueError(
+                            "expected uniform positive inputs and valid output/batch"
+                        )
+                    trace = None
+                    for artifact in manifest["artifacts"]:
+                        artifact = Path(artifact)
+                        # Remote absolute paths relocate with the retained run traces.
+                        candidates = [
+                            run / "traces" / artifact.name,
+                            task / "trace_files" / artifact.name,
+                        ]
+                        candidates.append(
+                            artifact if artifact.is_absolute() else run / artifact
+                        )
+                        trace = next(
+                            (item for item in candidates if item.is_file()), None
+                        )
+                        if trace is not None:
+                            break
+                    if trace is None:
+                        raise ValueError("no listed profile artifact is available")
+                    configs.append(
+                        TraceConfig(
+                            dp_size, inputs[0], output, batch, str(trace.resolve())
+                        )
+                    )
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    print(f"Skipping {path}: {error}")
+    return sorted(
+        set(configs),
+        key=lambda item: (
+            item.dp_size,
+            item.input_length,
+            item.output_length,
+            item.batch_size,
+            item.trace_file,
+        ),
+    )
 
 
 def analyze_single_trace(trace_file: str, min_occurrences: int = 20) -> dict:
@@ -241,16 +250,21 @@ def aggregate_results(trace_configs: list, min_occurrences: int = 20) -> list:
     """
     批量分析所有trace文件并整合结果
 
-    返回：[(dp_size, batch_size, seq_len, kernel_stats), ...]
+    返回：包含DP、batch、输入/输出长度和kernel统计信息的记录
     """
     results = []
 
     print(f"\n开始批量分析 {len(trace_configs)} 个trace文件...")
     print("=" * 80)
 
-    for idx, (dp_size, batch_size, seq_len, trace_file) in enumerate(trace_configs, 1):
+    for idx, config in enumerate(trace_configs, 1):
+        dp_size = config.dp_size
+        batch_size = config.batch_size
+        seq_len = config.input_length
+        output_length = config.output_length
+        trace_file = config.trace_file
         print(
-            f"\n[{idx}/{len(trace_configs)}] dp_size={dp_size}, batch={batch_size}, seq={seq_len}"
+            f"\n[{idx}/{len(trace_configs)}] dp_size={dp_size}, batch={batch_size}, input={seq_len}, output={output_length}"
         )
 
         analysis = analyze_single_trace(trace_file, min_occurrences)
@@ -260,7 +274,8 @@ def aggregate_results(trace_configs: list, min_occurrences: int = 20) -> list:
                 {
                     "dp_size": dp_size,
                     "batch_size": batch_size,
-                    "seq_len": seq_len,
+                    "input_length": seq_len,
+                    "output_length": output_length,
                     "trace_file": trace_file,
                     "pid": analysis["pid"],
                     "tid": analysis["tid"],
@@ -286,7 +301,7 @@ def save_aggregated_csv(results: list, output_file: str):
     将整合的结果保存到CSV文件
 
     CSV格式：
-    dp_size, batch_size, seq_len, kernel_name, count, avg_time, min_time, max_time, median_time, std_dev, variance
+    dp_size, batch_size, input_length, output_length, kernel_name, count, avg_time, ...
     """
     if not results:
         print("\n没有结果需要保存")
@@ -296,7 +311,8 @@ def save_aggregated_csv(results: list, output_file: str):
         fieldnames = [
             "dp_size",
             "batch_size",
-            "seq_len",
+            "input_length",
+            "output_length",
             "kernel_name",
             "count",
             "avg_time_us",
@@ -314,14 +330,16 @@ def save_aggregated_csv(results: list, output_file: str):
         for result in results:
             dp_size = result["dp_size"]
             batch_size = result["batch_size"]
-            seq_len = result["seq_len"]
+            seq_len = result["input_length"]
+            output_length = result["output_length"]
 
             for kernel_stat in result["kernel_stats"]:
                 writer.writerow(
                     {
                         "dp_size": dp_size,
                         "batch_size": batch_size,
-                        "seq_len": seq_len,
+                        "input_length": seq_len,
+                        "output_length": output_length,
                         "kernel_name": kernel_stat["kernel_name"],
                         "count": kernel_stat["count"],
                         "avg_time_us": f"{kernel_stat['avg_duration']:.3f}",
@@ -356,7 +374,8 @@ def print_summary_table(results: list):
     headers = [
         "dp_size",
         "batch_size",
-        "seq_len",
+        "input_length",
+        "output_length",
         "kernel种类数",
         "总kernel调用次数",
         "最常见kernel",
@@ -386,7 +405,8 @@ def print_summary_table(results: list):
         row = [
             str(result["dp_size"]),
             str(result["batch_size"]),
-            str(result["seq_len"]),
+            str(result["input_length"]),
+            str(result["output_length"]),
             str(len(kernel_stats)),
             str(total_calls),
             most_common_name,
@@ -420,7 +440,8 @@ def print_detailed_kernel_table(results: list, top_n: int = 10):
                 {
                     "dp_size": result["dp_size"],
                     "batch_size": result["batch_size"],
-                    "seq_len": result["seq_len"],
+                    "input_length": result["input_length"],
+                    "output_length": result["output_length"],
                     **kernel_stat,
                 }
             )
@@ -432,7 +453,8 @@ def print_detailed_kernel_table(results: list, top_n: int = 10):
     headers = [
         "dp_size",
         "batch_size",
-        "seq_len",
+        "input_length",
+        "output_length",
         "kernel_name",
         "count",
         "avg_time(μs)",
@@ -449,7 +471,8 @@ def print_detailed_kernel_table(results: list, top_n: int = 10):
         row = [
             str(kernel["dp_size"]),
             str(kernel["batch_size"]),
-            str(kernel["seq_len"]),
+            str(kernel["input_length"]),
+            str(kernel["output_length"]),
             kernel_name,
             str(kernel["count"]),
             f"{kernel['avg_duration']:.3f}",
@@ -473,14 +496,15 @@ def filter_kernels_by_module(results: list, module_name: str, pattern: str) -> l
 
     返回:
         匹配的kernel列表，每个元素包含：
-        {dp_size, batch_size, seq_len, kernel_name, avg_duration, median_duration, count}
+        {dp_size, batch_size, input_length, output_length, kernel_name, avg_duration, ...}
     """
     matched_kernels = []
 
     for result in results:
         dp_size = result["dp_size"]
         batch_size = result["batch_size"]
-        seq_len = result["seq_len"]
+        seq_len = result["input_length"]
+        output_length = result["output_length"]
 
         # 找出当前trace中所有匹配的kernel
         trace_matches = []
@@ -499,7 +523,8 @@ def filter_kernels_by_module(results: list, module_name: str, pattern: str) -> l
                 {
                     "dp_size": dp_size,
                     "batch_size": batch_size,
-                    "seq_len": seq_len,
+                    "input_length": seq_len,
+                    "output_length": output_length,
                     "kernel_name": k["kernel_name"],
                     "count": k["count"],
                     "avg_duration": k["avg_duration"],
@@ -529,7 +554,8 @@ def filter_kernels_by_module(results: list, module_name: str, pattern: str) -> l
                 {
                     "dp_size": dp_size,
                     "batch_size": batch_size,
-                    "seq_len": seq_len,
+                    "input_length": seq_len,
+                    "output_length": output_length,
                     "kernel_name": combined_name,
                     "count": max_count,
                     "avg_duration": total_avg,
@@ -573,7 +599,8 @@ def save_module_results_to_csv(
             "kernel_name",
             "dp_size",
             "batch_size",
-            "seq_len",
+            "input_length",
+            "output_length",
             "avg_time_us",
             "median_time_us",
             "min_time_us",
@@ -588,7 +615,13 @@ def save_module_results_to_csv(
 
         # 按dp_size, batch_size, seq_len排序
         sorted_kernels = sorted(
-            kernels, key=lambda x: (x["dp_size"], x["batch_size"], x["seq_len"])
+            kernels,
+            key=lambda x: (
+                x["dp_size"],
+                x["batch_size"],
+                x["input_length"],
+                x["output_length"],
+            ),
         )
 
         for kernel in sorted_kernels:
@@ -597,7 +630,8 @@ def save_module_results_to_csv(
                     "kernel_name": kernel["kernel_name"],
                     "dp_size": kernel["dp_size"],
                     "batch_size": kernel["batch_size"],
-                    "seq_len": kernel["seq_len"],
+                    "input_length": kernel["input_length"],
+                    "output_length": kernel["output_length"],
                     "avg_time_us": f"{kernel['avg_duration']:.3f}",
                     "median_time_us": f"{kernel['median_duration']:.3f}",
                     "min_time_us": f"{kernel['min_duration']:.3f}",
@@ -635,7 +669,8 @@ def print_module_table(module_name: str, kernels: list):
         "kernel_name",
         "dp_size",
         "batch_size",
-        "seq_len",
+        "input_length",
+        "output_length",
         "avg_time(μs)",
         "median(μs)",
     ]
@@ -643,7 +678,13 @@ def print_module_table(module_name: str, kernels: list):
 
     # 按dp_size, batch_size, seq_len排序
     sorted_kernels = sorted(
-        kernels, key=lambda x: (x["dp_size"], x["batch_size"], x["seq_len"])
+        kernels,
+        key=lambda x: (
+            x["dp_size"],
+            x["batch_size"],
+            x["input_length"],
+            x["output_length"],
+        ),
     )
 
     # 打印数据行
@@ -654,7 +695,8 @@ def print_module_table(module_name: str, kernels: list):
             kernel_name,
             str(kernel["dp_size"]),
             str(kernel["batch_size"]),
-            str(kernel["seq_len"]),
+            str(kernel["input_length"]),
+            str(kernel["output_length"]),
             f"{kernel['avg_duration']:.3f}",
             f"{kernel['median_duration']:.3f}",
         ]
@@ -671,7 +713,7 @@ def generate_combined_summary_table(
 ):
     """
     生成所有测试的所有kernel整合表格
-    列：dp_size, batch_size, seq_len, module_name, kernel_name, avg_time, median_time, timeline_percentage,
+    列：dp_size, batch_size, input_length, output_length, module_name, kernel_name, ...
         FLOPs(G), IO(MB), TFLOPS, Bandwidth(GB/s)
 
     参数:
@@ -692,7 +734,8 @@ def generate_combined_summary_table(
     for result in results:
         dp_size = result["dp_size"]
         batch_size = result["batch_size"]
-        seq_len = result["seq_len"]
+        seq_len = result["input_length"]
+        output_length = result["output_length"]
         total_duration = result.get("total_duration", 0)
 
         # Construct TestSetUp for calculations
@@ -785,7 +828,8 @@ def generate_combined_summary_table(
                 {
                     "dp_size": dp_size,
                     "batch_size": batch_size,
-                    "seq_len": seq_len,
+                    "input_length": seq_len,
+                    "output_length": output_length,
                     "module_name": module_name,
                     "kernel_name": kernel_name_display,
                     "avg_time": avg_duration,
@@ -811,7 +855,8 @@ def generate_combined_summary_table(
         fieldnames = [
             "dp_size",
             "batch_size",
-            "seq_len",
+            "input_length",
+            "output_length",
             "module_name",
             "kernel_name",
             "avg_time_us",
@@ -829,7 +874,8 @@ def generate_combined_summary_table(
                 {
                     "dp_size": row["dp_size"],
                     "batch_size": row["batch_size"],
-                    "seq_len": row["seq_len"],
+                    "input_length": row["input_length"],
+                    "output_length": row["output_length"],
                     "module_name": row["module_name"],
                     "kernel_name": row["kernel_name"],
                     "avg_time_us": f"{row['avg_time']:.3f}",
@@ -851,7 +897,8 @@ def generate_combined_summary_table(
     header = [
         "dp_size",
         "batch_size",
-        "seq_len",
+        "input_length",
+        "output_length",
         "module_name",
         "kernel_name",
         "avg_time(μs)",
@@ -868,7 +915,8 @@ def generate_combined_summary_table(
         line = [
             str(row["dp_size"]),
             str(row["batch_size"]),
-            str(row["seq_len"]),
+            str(row["input_length"]),
+            str(row["output_length"]),
             row["module_name"],
             row["kernel_name"],
             f"{row['avg_time']:.3f}",
@@ -946,7 +994,7 @@ def main():
     )
 
     parser.add_argument(
-        "benchmark_dir", help="Benchmark目录路径（包含Task_dp_size-*子目录）"
+        "benchmark_dir", help="Benchmark目录路径（包含名称中声明dp_size的Task_*子目录）"
     )
 
     parser.add_argument(
@@ -1005,8 +1053,11 @@ def main():
             sys.exit(1)
 
         print(f"\n找到 {len(trace_configs)} 个trace文件配置:")
-        for dp_size, batch_size, seq_len, _ in trace_configs:
-            print(f"  - dp_size={dp_size}, batch={batch_size}, seq={seq_len}")
+        for config in trace_configs:
+            print(
+                f"  - dp_size={config.dp_size}, batch={config.batch_size}, "
+                f"input={config.input_length}, output={config.output_length}"
+            )
 
         # 2. 批量分析
         results = aggregate_results(trace_configs, args.min_occurrences)

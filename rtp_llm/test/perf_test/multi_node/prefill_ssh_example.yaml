@@ -1,0 +1,30 @@
+# Replace host names, model paths and revision before running. The referenced
+# JSON config describes TP=2, DP=1 across two hosts with one GPU each.
+experiment_name: "prefill_ssh_example"
+test_config:
+  num_retry_times: 0
+  build_from_scratch: 2
+  copy_test_result: true
+machine_config:
+  ip_lists: ["192.0.2.11", "192.0.2.12"]
+  run_user: "your-ssh-user"
+  ssh_port: 22
+build_config:
+  open_source_url: "git@github.com:alibaba/rtp-llm.git"
+  open_source_ref: "your-perf-commit"
+  ft_sub_dir: "rtp_llm_perf_test"
+  bazel_build_args: "--jobs 64 --verbose_failures --config=cuda13"
+common_config:
+  start_port: 12333
+benchmarks:
+  - benchmark_name: "prefill_tp2"
+    fixed_config:
+      perf_test_config: "./prefill_ssh_example.json"
+      checkpoint_path: "/models/Qwen2.5-7B-Instruct"
+      tokenizer_path: "/models/Qwen2.5-7B-Instruct"
+      model_type: "qwen_2"
+      tp_size: 2
+      dp_size: 1
+      pp_size: 1
+      ep_size: 1
+      local_world_size: 1

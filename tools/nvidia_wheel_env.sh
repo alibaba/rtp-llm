@@ -10,25 +10,57 @@
 # of the system dirs as well: the JIT link lines use its ld, which needs its
 # own libctf (LIBCTF_1.1).
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-root="$here"
 wheel_lib_dirs=()
 torch_lib_dir=""
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
-    for base in "$root" "$root/external"; do
-        found=("$base"/pip_*_torch_nvidia_*/site-packages/nvidia/*/lib)
-        if [ -e "${found[0]}" ]; then
-            wheel_lib_dirs=("${found[@]}")
-        fi
-        if [ -z "$torch_lib_dir" ]; then
-            torch_lib_dir=$(ls -d "$base"/pip_*_torch_torch/site-packages/torch/lib 2>/dev/null | head -1)
-        fi
-        if [ "${#wheel_lib_dirs[@]}" -gt 0 ] && [ -n "$torch_lib_dir" ]; then
-            break 2
-        fi
+
+find_wheel_paths() {
+    local root="$1"
+    local base
+    local found
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+        for base in "$root" "$root/external"; do
+            found=("$base"/pip_*_torch_nvidia_*/site-packages/nvidia/*/lib)
+            if [ -e "${found[0]}" ]; then
+                wheel_lib_dirs=("${found[@]}")
+            fi
+            if [ -z "$torch_lib_dir" ]; then
+                torch_lib_dir=$(ls -d "$base"/pip_*_torch_torch/site-packages/torch/lib 2>/dev/null | head -1)
+            fi
+            if [ "${#wheel_lib_dirs[@]}" -gt 0 ] && [ -n "$torch_lib_dir" ]; then
+                return 0
+            fi
+        done
+        root="$(dirname "$root")"
+        [ "$root" = "/" ] && break
     done
-    root="$(dirname "$root")"
-    [ "$root" = "/" ] && break
+    return 1
+}
+
+# A --run_under binary and the wrapped test have separate runfiles trees.
+# Search both explicitly: BASH_SOURCE points at the sh_binary launcher, whose
+# data dependencies live in the adjacent <launcher>.runfiles directory.
+search_roots=()
+[ -n "${RUNFILES_DIR:-}" ] && search_roots+=("$RUNFILES_DIR")
+[ -n "${TEST_SRCDIR:-}" ] && search_roots+=("$TEST_SRCDIR")
+if [ "$#" -gt 0 ] && [ -d "$1.runfiles" ]; then
+    search_roots+=("$1.runfiles")
+fi
+if [ -d "${BASH_SOURCE[0]}.runfiles" ]; then
+    search_roots+=("${BASH_SOURCE[0]}.runfiles")
+fi
+search_roots+=("$here")
+
+for root in "${search_roots[@]}"; do
+    if find_wheel_paths "$root"; then
+        break
+    fi
 done
+
+if [ "${#wheel_lib_dirs[@]}" -gt 0 ]; then
+    echo "nvidia_wheel_env: found NVIDIA wheel libraries under $(IFS=:; echo "${wheel_lib_dirs[*]}")" >&2
+else
+    echo "nvidia_wheel_env: no NVIDIA wheel libraries found under $(IFS=:; echo "${search_roots[*]}")" >&2
+fi
 
 base_paths=(/opt/rh/gcc-toolset-12/root/usr/lib64 /usr/local/cuda/lib64 /opt/conda310/lib /usr/local/nvidia/lib64 /usr/lib64)
 prefix="$(IFS=:; echo "${base_paths[*]}")"
@@ -41,6 +73,7 @@ fi
 if [ -n "$torch_lib_dir" ]; then
     prefix="$torch_lib_dir:$prefix"
 fi
+export RTP_LLM_RUN_UNDER_LIBRARY_PATH="$prefix"
 export LD_LIBRARY_PATH="$prefix${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # CI lanes previously wrapped every test with --run_under=//rtp_llm/test/utils:gpu_lock;
