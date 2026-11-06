@@ -45,7 +45,7 @@ class AdmissionTest {
         @Override public void close() { locked(); closed = true; }
         public List<InputResult> enqueue(List<InputItem> batch) { throw new UnsupportedOperationException(); }
         @Override public void control(Request request, Control event) { fail("No admitted request"); }
-        @Override public void finish(Request request, RequestFailure failure) { fail("No admitted request"); }
+        @Override public void abort(Request request, RequestFailure failure) { fail("No admitted request"); }
         @Override public RequestState.Use beginTransfer(Request request) { throw new AssertionError("No admitted request"); }
         @Override public void processOutputs(Work work, SimulatedCompute.Outcome outcome) { fail("No admitted work"); }
         @Override public void failForward(Work work, RuntimeException error) { fail("No admitted work"); }

@@ -223,7 +223,7 @@ final class DecodeRpcServer implements AutoCloseable {
         synchronized (executionLock) {
             if (call.terminal) return;
             if (call.request == null) ended(call, status, code);
-            else engine.finishRequest(call.request, RpcErrors.scheduling(status, code));
+            else engine.abortRequest(call.request, RpcErrors.scheduling(status, code));
         }
     }
     private void ended(Call call, Status status, long code) {

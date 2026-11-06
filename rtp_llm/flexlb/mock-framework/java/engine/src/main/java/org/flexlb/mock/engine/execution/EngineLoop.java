@@ -67,8 +67,9 @@ public final class EngineLoop implements AutoCloseable {
     public void onKvTransferCompleted(EngineScheduler.Request request, EngineScheduler.TransferResult result) {
         withSchedulerLock(() -> { scheduler.transferCompleted(request, result); return null; });
     }
-    public void finishRequest(EngineScheduler.Request request, RequestFailure failure) {
-        withSchedulerLock(() -> { scheduler.finish(request, failure); return null; });
+    public void abortRequest(EngineScheduler.Request request, RequestFailure failure) {
+        Objects.requireNonNull(failure, "Abort requires a failure");
+        withSchedulerLock(() -> { scheduler.abort(request, failure); return null; });
     }
     public RequestState.Use beginKvTransfer(EngineScheduler.Request request) {
         var use = withSchedulerLock(() -> { ensureOpen(); return scheduler.beginTransfer(request); });

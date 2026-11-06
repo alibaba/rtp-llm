@@ -548,7 +548,7 @@ def test_instance_choices_use_full_saved_series_and_separate_master_reporter_fro
         {'__name__': 'mock_client_requests_issued_total', 'instance': '10.0.3.1:9000', 'role': 'client'},
         {'__name__': 'up', 'instance': 'unclassified:9000'}]
     if include_vit:
-        series.append({'__name__': 'py_rtp_vit_qps', 'instance': '10.0.1.3:9000', 'role': 'vit', 'source': 'mm_embedding'})
+        series.append({'__name__': 'py_rtp_vit_qps_total', 'instance': '10.0.1.3:9000', 'role': 'vit', 'source': 'mm_embedding'})
     def fetch(url, timeout):
         urls.append(url)
         return io.BytesIO(json.dumps({'status': 'success', 'data': series}).encode())

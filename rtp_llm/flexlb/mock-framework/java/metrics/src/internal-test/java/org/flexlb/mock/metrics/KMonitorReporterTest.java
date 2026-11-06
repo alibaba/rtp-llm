@@ -42,8 +42,8 @@ class KMonitorReporterTest {
 
     @Test void nativeSdkSerializationRetainsUnequalInstanceSampleWeights() {
         var first = new NativeGauge(); var second = new NativeGauge();
-        var a = new EventMetrics("prefill", System::nanoTime, first.reporter, Map.of("dp_rank", "0"));
-        var b = new EventMetrics("prefill", System::nanoTime, second.reporter, Map.of("dp_rank", "0"));
+        var a = new EventMetrics("prefill", first.reporter, Map.of("dp_rank", "0"));
+        var b = new EventMetrics("prefill", second.reporter, Map.of("dp_rank", "0"));
         for (int i = 0; i < 100; i++) a.observe("input_length", 10);
         b.observe("input_length", 1000);
         first.reporter.report(a.collect()); second.reporter.report(b.collect());
@@ -60,11 +60,9 @@ class KMonitorReporterTest {
 
     @Test void qpsUsesRawCountsAndPeriodicSnapshotsRemainGauges() {
         var sdk = new NativeGauge();
-        var clock = new java.util.concurrent.atomic.AtomicLong();
-        var events = new EventMetrics("vit", clock::get, sdk.reporter, Map.of());
+        var events = new EventMetrics("vit", sdk.reporter, Map.of());
         events.increment("vit_qps"); events.increment("vit_qps");
         events.observe("py_rtp_vit_embedding_tps", 60);
-        clock.set(2_000_000_000L);
         sdk.reporter.report(events.collect());
         assertEquals(List.of(1.0, 1.0), sdk.values.get("vit_qps"));
         assertEquals(MetricType.QPS, sdk.types.get("vit_qps"));

@@ -8,9 +8,8 @@ import org.flexlb.mock.metrics.*;
 final class VitMetrics {
     final CollectorRegistry registry = new CollectorRegistry();
     final EventMetrics events;
-    VitMetrics() { this(System::nanoTime); }
-    VitMetrics(java.util.function.LongSupplier clock) {
-        events = new EventMetrics("vit", clock);
+    VitMetrics() {
+        events = new EventMetrics("vit");
         events.register(registry);
         events.observe("py_rtp_vit_qps", 0, Map.of("source", "mm_embedding"));
         for (String name : List.of("py_rtp_vit_success_qps", "py_rtp_vit_error_qps",
@@ -26,7 +25,7 @@ final class VitMetrics {
     void error(Throwable error, VitCache.Claim claim) {
         synchronized(error) {
             boolean reported = Arrays.stream(error.getSuppressed()).anyMatch(ReportedError.class::isInstance);
-            boolean entryReported = claim != null && !claim.errorReported().compareAndSet(false, true);
+            boolean entryReported = claim != null && !claim.markErrorReported();
             if (!reported) error.addSuppressed(new ReportedError());
             if (!reported && !entryReported) events.increment("py_rtp_vit_error_qps");
         }

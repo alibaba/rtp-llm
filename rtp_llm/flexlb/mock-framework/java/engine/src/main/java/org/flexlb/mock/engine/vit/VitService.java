@@ -41,10 +41,11 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         var result=new ArrayList<VitGeometry.Image>();
         for(var claim:claims) {
             waiting=claim;
+            var completion=claim.result().toCompletableFuture();
             while(true) {
                 if(context.isCancelled()) throw Status.CANCELLED.withDescription("V result wait cancelled").asRuntimeException();
                 long left=end-System.nanoTime();if(left<=0) throw Status.DEADLINE_EXCEEDED.withDescription("V request timed out").asRuntimeException();
-                try { result.add(claim.result().get(Math.min(left,TimeUnit.MILLISECONDS.toNanos(25)),TimeUnit.NANOSECONDS));break; }
+                try { result.add(completion.get(Math.min(left,TimeUnit.MILLISECONDS.toNanos(25)),TimeUnit.NANOSECONDS));break; }
                 catch(TimeoutException retry) { /* A caller's deadline never cancels another caller's shared computation. */ }
                 catch(ExecutionException error) {
                     if(error.getCause() instanceof Exception failure) throw failure;
@@ -58,7 +59,7 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
         return result;
         } catch (Exception error) { metrics.error(error,waiting); throw error; }
         finally {
-            claims.forEach(VitCache::release);
+            claims.forEach(VitCache.Claim::close);
             metrics.events.observe("py_rtp_vit_request_rt",(System.nanoTime()-started)/1e6,
                 Map.of("source","get_embedding_result","status",status));
         }
@@ -122,8 +123,8 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
             List<VitCache.Claim> claims;
             try { claims=submit(input); }
             catch(RuntimeException error) { metrics.error(error,null);throw error; }
-            CompletableFuture.allOf(claims.stream().map(VitCache.Claim::result).toArray(CompletableFuture[]::new))
-                .whenComplete((value,error) -> claims.forEach(VitCache::release));
+            CompletableFuture.allOf(claims.stream().map(claim->claim.result().toCompletableFuture()).toArray(CompletableFuture[]::new))
+                .whenComplete((value,error) -> claims.forEach(VitCache.Claim::close));
             return EmptyPB.getDefaultInstance();
         });
     }

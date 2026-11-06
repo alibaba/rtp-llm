@@ -220,7 +220,7 @@ def test_event_metrics_use_counts_instead_of_averaging_instance_window_means():
     names = set()
     for path in source.rglob('*.java'):
         names.update(re.findall(r'(?:events\.observe|observePositive|positiveMicros)\("([^\"]+)"', path.read_text()))
-    names = {name for name in names if not name.endswith('_qps') and name != 'py_rtp_vit_embedding_tps'}
+    names = {name for name in names if not name.endswith('_qps') and name != 'py_rtp_vit_embedding_tps_total'}
     names.update(('rtp_llm_rpc_worker_status_total_rt_us', 'rtp_llm_rpc_cache_status_total_rt_us'))
     assert 'rtp_llm_input_token_length' in names
     checked = 0
@@ -252,12 +252,12 @@ def test_tps_window_counts_rates_and_priority_aggregation_have_distinct_contract
     for panel_id in (110430, 210431):
         assert '墙钟 TPS' in items[panel_id]['title']
         assert 'rtp_llm_forward_tokens_total' in items[panel_id]['targets'][0]['expr']
-    assert 'py_rtp_vit_embedding_tps{' in items[310691]['targets'][0]['expr']
+    assert 'py_rtp_vit_embedding_tps_total{' in items[310691]['targets'][0]['expr']
 
 
 def test_vit_native_work_and_blocking_request_sources_are_explicit():
     expressions = [t['expr'] for p in panels() for t in p['targets']]
-    qps = next(expr for expr in expressions if 'py_rtp_vit_qps{' in expr)
+    qps = next(expr for expr in expressions if 'py_rtp_vit_qps_total{' in expr)
     assert 'source="mm_embedding"' in qps
     request_rt = next(expr for expr in expressions if 'py_rtp_vit_request_rt_sum{' in expr)
     assert request_rt.count('source="get_embedding_result"') == 2

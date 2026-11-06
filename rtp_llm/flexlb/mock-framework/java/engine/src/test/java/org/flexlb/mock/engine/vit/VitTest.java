@@ -52,8 +52,7 @@ class VitTest {
         return result;
     }
     @Test void nativeWorkRatesCountUniqueMediaAcrossRpcCacheAndAsyncPaths() throws Exception {
-        var clock=new java.util.concurrent.atomic.AtomicLong();
-        var metrics=new VitMetrics(clock::get);
+        var metrics=new VitMetrics();
         try(var service=new VitService(config("1",4096,4096,4096,0),metrics)) {
             var multi=input("one").toBuilder().addMultimodalInputs(input("two").getMultimodalInputs(0))
                 .addMultimodalInputs(input("one").getMultimodalInputs(0)).build();
@@ -62,12 +61,11 @@ class VitTest {
             VitTest.<EmptyPB>response(out->service.asyncSubmitEmbedding(input("three"),out)).get(3,TimeUnit.SECONDS);
             // Waiting on the same async media must not create another embedding work item.
             VitTest.<MultimodalOutputPB>response(out->service.remoteMultimodalEmbedding(input("three"),out)).get(3,TimeUnit.SECONDS);
-            clock.set(TimeUnit.SECONDS.toNanos(1));
             var text=service.metrics();
-            assertEquals(3,sample(text,"py_rtp_vit_qps"));
-            assertEquals(3,sample(text,"py_rtp_vit_success_qps"));
-            assertEquals(0,sample(text,"py_rtp_vit_error_qps"));
-            assertEquals(15,sample(text,"py_rtp_vit_embedding_tps"));
+            assertEquals(3,sample(text,"py_rtp_vit_qps_total"));
+            assertEquals(3,sample(text,"py_rtp_vit_success_qps_total"));
+            assertEquals(0,sample(text,"py_rtp_vit_error_qps_total"));
+            assertEquals(15,sample(text,"py_rtp_vit_embedding_tps_total"));
             assertEquals(7,sample(text,"py_rtp_vit_image_count_sum"));
             assertEquals(35,sample(text,"py_rtp_vit_embedding_length_sum"));
             assertEquals(3,sample(text,"py_rtp_vit_request_rt_count"));
@@ -75,9 +73,28 @@ class VitTest {
             assertTrue(text.contains("source=\"get_embedding_result\",status=\"success\""));
         }
     }
+    @Test void consumersCannotCompleteSharedCacheOrForwardResults() throws Exception {
+        var settings=config("100",4096,4096,4096,0);
+        var image=new VitGeometry.Image("private-result",56,28,2);
+        try(var cache=new VitCache(settings);var scheduler=new VitScheduler(settings)) {
+            var claims=cache.acquire(List.of(image.key(),image.key()));
+            var first=claims.getFirst(); var second=claims.getLast();
+            first.result().toCompletableFuture().complete(image);
+            second.result().toCompletableFuture().cancel(true);
+            assertFalse(first.result().toCompletableFuture().isDone());
+            first.close(); first.close();
+            assertTrue(second.hasConsumers());
+            cache.publish(first,image,null);
+            assertEquals(image,second.result().toCompletableFuture().join());
+            second.close(); assertFalse(second.hasConsumers());
+            var work=scheduler.submit(image);
+            work.result().toCompletableFuture().cancel(true);
+            assertEquals(image,work.result().toCompletableFuture().get(3,TimeUnit.SECONDS));
+        }
+    }
+
     @Test void sharedWorkFailureIsCountedOnceAndAsyncFailuresAreVisible() throws Exception {
-        var clock=new java.util.concurrent.atomic.AtomicLong();
-        var metrics=new VitMetrics(clock::get);
+        var metrics=new VitMetrics();
         var settings=config("1",4096,4096,4096,0);
         try(var cache=new VitCache(settings,metrics)) {
             var claims=cache.acquire(List.of("shared","shared"));
@@ -85,26 +102,23 @@ class VitTest {
             metrics.started();
             cache.publish(claims.getFirst(),null,error);
             for(var claim:claims) {
-                assertTrue(claim.result().isCompletedExceptionally());
+                assertTrue(claim.result().toCompletableFuture().isCompletedExceptionally());
                 metrics.error(error,claim);
                 metrics.error(Status.DEADLINE_EXCEEDED.asRuntimeException(),claim);
-                VitCache.release(claim);
+                claim.close();
             }
-            clock.set(TimeUnit.SECONDS.toNanos(1));
             String text=org.flexlb.mock.metrics.MetricTags.scrape(metrics.registry,Map.of());
-            assertEquals(1,sample(text,"py_rtp_vit_error_qps"));
-            assertEquals(0,sample(text,"py_rtp_vit_success_qps"));
+            assertEquals(1,sample(text,"py_rtp_vit_error_qps_total"));
+            assertEquals(0,sample(text,"py_rtp_vit_success_qps_total"));
         }
     }
 
     @Test void gpuEvictionWithoutHostRoomStillCountsLogicalRemoval() throws Exception {
-        var clock=new java.util.concurrent.atomic.AtomicLong();
-        var metrics=new VitMetrics(clock::get);
+        var metrics=new VitMetrics();
         try(var service=new VitService(config("1",40,0,4096,0),metrics)) {
             for(String key:List.of("first","second"))
                 VitTest.<MultimodalOutputPB>response(out->service.remoteMultimodalEmbedding(input(key),out)).get(3,TimeUnit.SECONDS);
-            clock.set(TimeUnit.SECONDS.toNanos(1));
-            assertEquals(1,sample(service.metrics(),"py_rtp_vit_embedding_cache_eviction_qps"));
+            assertEquals(1,sample(service.metrics(),"py_rtp_vit_embedding_cache_eviction_qps_total"));
         }
     }
 
@@ -165,7 +179,7 @@ class VitTest {
                 String metrics=java.net.http.HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(java.net.URI.create((String)node.endpoints().get("metrics"))).GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString()).body();
                 assertEquals(1, sample(metrics, "py_rtp_vit_embedding_forward_rt_count"));
                 assertEquals(6, sample(metrics, "mock_vit_theoretical_forward_rt_sum"));
-                for (String metric : List.of("py_rtp_vit_qps", "py_rtp_vit_success_qps", "py_rtp_vit_image_count_sum",
+                for (String metric : List.of("py_rtp_vit_qps_total", "py_rtp_vit_success_qps_total", "py_rtp_vit_image_count_sum",
                         "py_rtp_vit_embedding_length_sum", "py_rtp_vit_embedding_queue_wait_rt_sum", "py_rtp_vit_embedding_queue_size",
                         "py_rtp_vit_embedding_cache_tokens", "py_rtp_vit_embedding_batch_size_sum"))
                     assertTrue(Double.isFinite(sample(metrics, metric)), metrics);
@@ -188,10 +202,10 @@ class VitTest {
     @Test void failedProducerReleasesTheClaimAndOldCompletionCannotPublishANewGeneration() throws Exception {
         try(var cache=new VitCache(config("1",16,16,1024,0))) {
             var image=new VitGeometry.Image("a",56,28,2);var first=cache.acquire(List.of(image.key())).getFirst();var joined=cache.acquire(List.of(image.key())).getFirst();
-            assertFalse(joined.producer());assertSame(first.result(),joined.result());
-            cache.publish(first,null,new IllegalStateException("failed"));assertTrue(joined.result().isCompletedExceptionally());
-            var fresh=cache.acquire(List.of(image.key())).getFirst();cache.publish(first,image,null);assertFalse(fresh.result().isDone());
-            cache.publish(fresh,image,null);assertEquals(image,fresh.result().join());
+            assertFalse(joined.producer());assertFalse(joined.result().toCompletableFuture().isDone());
+            cache.publish(first,null,new IllegalStateException("failed"));assertTrue(joined.result().toCompletableFuture().isCompletedExceptionally());
+            var fresh=cache.acquire(List.of(image.key())).getFirst();cache.publish(first,image,null);assertFalse(fresh.result().toCompletableFuture().isDone());
+            cache.publish(fresh,image,null);assertEquals(image,fresh.result().toCompletableFuture().join());
         }
     }
     @Test void oneWaiterDeadlineDoesNotCancelAnotherWaiterOrTheSharedForward() throws Exception {
@@ -239,24 +253,21 @@ class VitTest {
             assertEquals(Status.Code.RESOURCE_EXHAUSTED,assertThrows(StatusRuntimeException.class,
                 ()->scheduler.submit(new VitGeometry.Image("c",28,28,1))).getStatus().getCode());
             scheduler.close();
-            assertThrows(ExecutionException.class,()->first.result().get(2,TimeUnit.SECONDS));
-            assertThrows(ExecutionException.class,()->second.result().get(2,TimeUnit.SECONDS));
+            assertThrows(ExecutionException.class,()->first.result().toCompletableFuture().get(2,TimeUnit.SECONDS));
+            assertThrows(ExecutionException.class,()->second.result().toCompletableFuture().get(2,TimeUnit.SECONDS));
         }
     }
 
     @Test void embeddingTpsCountsComputedRowsAndExcludesExpiredWork() throws Exception {
-        var clock = new java.util.concurrent.atomic.AtomicLong();
-        var metrics = new VitMetrics(clock::get);
+        var metrics = new VitMetrics();
         try(var scheduler = new VitScheduler(config("1", 1024, 1024, 1024, 0), metrics)) {
             var expired = scheduler.submit(new VitGeometry.Image("expired", 28, 28, 100), System.nanoTime() - 1);
-            assertThrows(ExecutionException.class, () -> expired.result().get(2, TimeUnit.SECONDS));
+            assertThrows(ExecutionException.class, () -> expired.result().toCompletableFuture().get(2, TimeUnit.SECONDS));
             var first = scheduler.submit(new VitGeometry.Image("first", 28, 28, 10));
             var second = scheduler.submit(new VitGeometry.Image("second", 28, 28, 22));
-            first.result().get(2, TimeUnit.SECONDS); second.result().get(2, TimeUnit.SECONDS);
-            clock.set(2_000_000_000L);
-            assertEquals(16, sample(org.flexlb.mock.metrics.MetricTags.scrape(metrics.registry, Map.of()), "py_rtp_vit_embedding_tps"));
-            clock.set(3_000_000_000L);
-            assertEquals(0, sample(org.flexlb.mock.metrics.MetricTags.scrape(metrics.registry, Map.of()), "py_rtp_vit_embedding_tps"));
+            first.result().toCompletableFuture().get(2, TimeUnit.SECONDS); second.result().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals(32, sample(org.flexlb.mock.metrics.MetricTags.scrape(metrics.registry, Map.of()), "py_rtp_vit_embedding_tps_total"));
+            assertEquals(32, sample(org.flexlb.mock.metrics.MetricTags.scrape(metrics.registry, Map.of()), "py_rtp_vit_embedding_tps_total"));
         }
     }
 
@@ -271,7 +282,7 @@ class VitTest {
                 assertTrue(hit.getHashHit());assertFalse(hit.getEmbeddingHit());
                 String metrics=java.net.http.HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(java.net.URI.create((String)node.endpoints().get("metrics"))).GET().build(),java.net.http.HttpResponse.BodyHandlers.ofString()).body();
                 assertEquals(1, sample(metrics, "py_rtp_vit_embedding_forward_rt_count"));
-                assertEquals(0, sample(metrics, "py_rtp_vit_embedding_cache_eviction_qps"));
+                assertEquals(0, sample(metrics, "py_rtp_vit_embedding_cache_eviction_qps_total"));
                 rpc.remoteMultimodalEmbedding(input("x"));
                 assertEquals(Status.Code.INVALID_ARGUMENT,assertThrows(StatusRuntimeException.class,()->rpc.getMultimodalHashes(request.toBuilder().clearKeys().addKeys("wrong").build())).getStatus().getCode());
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }
@@ -285,8 +296,8 @@ class VitTest {
             while(scheduler.snapshot().get("mock_vit_running_image_count")==0) { assertTrue(System.nanoTime()<end);Thread.sleep(2); }
             var abandoned=scheduler.submit(new VitGeometry.Image("b",28,28,1));
             assertTrue(scheduler.cancel(abandoned)); assertFalse(scheduler.cancel(first));
-            first.result().get(2,TimeUnit.SECONDS);
-            assertThrows(ExecutionException.class,()->abandoned.result().get(2,TimeUnit.SECONDS));
+            first.result().toCompletableFuture().get(2,TimeUnit.SECONDS);
+            assertThrows(ExecutionException.class,()->abandoned.result().toCompletableFuture().get(2,TimeUnit.SECONDS));
             assertEquals(0,scheduler.snapshot().get("mock_vit_running_image_count"));
         }
     }
@@ -309,11 +320,11 @@ class VitTest {
                 assertEquals(Status.Code.RESOURCE_EXHAUSTED,assertThrows(StatusRuntimeException.class,
                     ()->preparation.submit(input("second"))).getStatus().getCode());
             } finally { finishPublication.countDown(); }
-            notified.get(2,TimeUnit.SECONDS); claims.forEach(VitCache::release);
+            notified.toCompletableFuture().get(2,TimeUnit.SECONDS); claims.forEach(VitCache.Claim::close);
             long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
             while(preparation.inflight()!=0) { assertTrue(System.nanoTime()<until);Thread.sleep(2); }
             var next=preparation.submit(input("second"));
-            next.getFirst().result().get(2,TimeUnit.SECONDS);next.forEach(VitCache::release);
+            next.getFirst().result().toCompletableFuture().get(2,TimeUnit.SECONDS);next.forEach(VitCache.Claim::close);
         }
     }
 

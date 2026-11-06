@@ -2,35 +2,26 @@ package org.flexlb.mock.metrics;
 
 import io.prometheus.client.*;
 import java.util.*;
-import java.util.function.LongSupplier;
 
-/** One event API: Prometheus retains sum/count; an installed SDK receives original observations. */
+/** One event API: Prometheus retains counters and sum/count; an installed SDK receives original observations. */
 public final class EventMetrics extends Collector {
     private static final System.Logger LOG = System.getLogger(EventMetrics.class.getName());
-    private record Series(String name, Map<String, String> tags) {}
     private final String role;
-    private final LongSupplier clock;
     private final MetricReporter reporter;
     private final Map<String, String> identityTags;
     private final CollectorRegistry registry = new CollectorRegistry();
     private final Map<String, Set<String>> labelNames = new HashMap<>();
     private final Map<String, Summary> summaries = new LinkedHashMap<>();
-    private final Map<Series, Double> qps = new LinkedHashMap<>();
-    private long started;
+    private final Map<String, Counter> counters = new HashMap<>();
 
-    public EventMetrics(String role) { this(role, System::nanoTime); }
-    public EventMetrics(String role, LongSupplier clock) {
-        this(role, clock, MetricTags.fromEnvironment(System.getenv()));
+    public EventMetrics(String role) { this(role, MetricTags.fromEnvironment(System.getenv())); }
+    public EventMetrics(String role, Map<String, String> identityTags) {
+        this(role, MetricsOutput.eventReporter(), identityTags);
     }
-    public EventMetrics(String role, LongSupplier clock, Map<String, String> identityTags) {
-        this(role, clock, MetricsOutput.eventReporter(), identityTags);
-    }
-    EventMetrics(String role, LongSupplier clock, MetricReporter reporter, Map<String, String> identityTags) {
+    EventMetrics(String role, MetricReporter reporter, Map<String, String> identityTags) {
         this.role = Objects.requireNonNull(role);
-        this.clock = Objects.requireNonNull(clock);
         this.reporter = reporter;
         this.identityTags = Map.copyOf(identityTags);
-        started = clock.getAsLong();
     }
 
     public void observe(String name, double value) { observe(name, value, Map.of()); }
@@ -48,12 +39,15 @@ public final class EventMetrics extends Collector {
             catch (RuntimeException error) { LOG.log(System.Logger.Level.ERROR, "Engine metric observation failed: " + name, error); }
             return;
         }
-        if (isRate(name)) {
-            qps.merge(new Series(name, Map.copyOf(ordered)), value, Double::sum);
-            return;
-        }
         var names = new ArrayList<>(List.of("role")); names.addAll(ordered.keySet());
         var labels = new ArrayList<>(List.of(role)); labels.addAll(ordered.values());
+        if (isRate(name)) {
+            counters.computeIfAbsent(name, ignored -> Counter.build().name(name + "_total")
+                .help("Cumulative events; use rate() for events per second.")
+                .labelNames(names.toArray(String[]::new)).register(registry))
+                .labels(labels.toArray(String[]::new)).inc(value);
+            return;
+        }
         summaries.computeIfAbsent(name, ignored -> Summary.build().name(name)
             .help("Original event observations; aggregate sum and count before division.")
             .labelNames(names.toArray(String[]::new)).register(registry))
@@ -66,25 +60,8 @@ public final class EventMetrics extends Collector {
     public void increment(String name) { observe(name, 1); }
 
     @Override public List<MetricFamilySamples> collect() {
-        if (reporter != null) return List.of();
-        Map<Series, Double> counts;
-        long elapsed;
-        synchronized (this) {
-            long now = clock.getAsLong(); elapsed = now - started;
-            counts = elapsed > 0 ? new LinkedHashMap<>(qps) : Map.of();
-            if (elapsed > 0) { qps.replaceAll((key, value) -> 0.0); started = now; }
-        }
         var result = new ArrayList<MetricFamilySamples>();
         registry.metricFamilySamples().asIterator().forEachRemaining(result::add);
-        var rates = new LinkedHashMap<String, GaugeMetricFamily>();
-        for (var entry : counts.entrySet()) {
-            var tags = new TreeMap<>(entry.getKey().tags());
-            var names = new ArrayList<>(List.of("role")); names.addAll(tags.keySet());
-            var labels = new ArrayList<>(List.of(role)); labels.addAll(tags.values());
-            rates.computeIfAbsent(entry.getKey().name(), name -> new GaugeMetricFamily(name,
-                "Events per wall second.", names)).addMetric(labels, entry.getValue() * 1e9 / elapsed);
-        }
-        result.addAll(rates.values());
         return result;
     }
 }

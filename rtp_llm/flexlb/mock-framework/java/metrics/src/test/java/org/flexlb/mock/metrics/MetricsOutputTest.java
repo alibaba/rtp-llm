@@ -62,7 +62,7 @@ class MetricsOutputTest {
         };
         var sender = new MetricsOutput.Sender(sdk, 128);
         try {
-            var events = new EventMetrics("prefill", System::nanoTime, sender, Map.of());
+            var events = new EventMetrics("prefill", sender, Map.of());
             events.observe("input_length", 10);
             assertTrue(entered.await(1, TimeUnit.SECONDS));
             assertTimeoutPreemptively(java.time.Duration.ofSeconds(1), () -> {
