@@ -1951,15 +1951,18 @@ class VLLMEngineObserver:
                 # r50 coalesces allocation across requests. Attribute missing
                 # candidates after it assigns shared objects to their owner.
                 for request_id, groups in source._navi_sched_store_candidates.items():
-                    state = source._request_states[request_id]
+                    pending_hashes = source.navi_sched_inflight_hashes(request_id)
                     for group_id, candidates in groups.items():
                         missing = set(candidates).difference(
-                            state.storing_hashes.get(group_id, ())
+                            pending_hashes.get(group_id, ())
                         )
                         if missing:
                             self._v6d_unpublished_candidates.setdefault(
                                 str(request_id), {}
                             ).setdefault(group_id, set()).update(missing)
+                for job, failed in source.navi_sched_take_allocation_failures():
+                    if hasattr(job, "_navi_sched_publication_reporter"):
+                        self._report_v6d_job_failure(job, failed)
                 return result
 
             source._get_reqs_to_store = get_reqs_to_store
@@ -2047,7 +2050,7 @@ class VLLMEngineObserver:
                 job._navi_sched_publication_reporter = [
                     (
                         reporters[str(job.req_id)].make_cache_publication_reporter(),
-                        job.hashes,
+                        source.navi_sched_job_hashes(job),
                         str(job.req_id),
                     )
                 ]
@@ -2060,7 +2063,7 @@ class VLLMEngineObserver:
                 reporter = reporters[request_id].make_cache_publication_reporter()
                 for job in source._store_jobs.values():
                     shared = {
-                        group: set(hashes).intersection(job.hashes.get(group, ()))
+                        group: set(hashes).intersection(source.navi_sched_job_hashes(job).get(group, ()))
                         for group, hashes in groups.items()
                     }
                     shared = {
