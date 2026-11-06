@@ -177,7 +177,10 @@ std::string ProfilingDebugLoggingConfig::to_string() const {
         << "debug_start_fake_process: " << debug_start_fake_process << "\n"
         << "enable_detail_log: " << enable_detail_log << "\n"
         << "check_nan: " << check_nan << "\n"
-        << "enable_model_inputs_log: " << enable_model_inputs_log << "\n";
+        << "enable_model_inputs_log: " << enable_model_inputs_log << "\n"
+        << "enable_batch_record: " << enable_batch_record << "\n"
+        << "record_queue_size: " << record_queue_size << "\n"
+        << "record_decode_sample_rate: " << record_decode_sample_rate << "\n";
     return oss.str();
 }
 

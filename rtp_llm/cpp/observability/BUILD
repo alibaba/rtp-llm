@@ -3,7 +3,9 @@ cc_library(
     srcs = ["ExecutionRecorder.cc"],
     hdrs = ["ExecutionRecorder.h"],
     deps = [
+        "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/utils:core_utils",
+        "@havenask//aios/autil:env_util",
         "@havenask//aios/alog:alog",
         "@havenask//aios/autil:json",
     ],
@@ -16,5 +18,9 @@ cc_test(
     data = ["//rtp_llm:alog_config"],
     copts = ["-UNDEBUG"],
     srcs = ["ExecutionRecorderTest.cc"],
-    deps = [":execution_recorder", "//rtp_llm/cpp/utils:core_utils"],
+    deps = [
+        ":execution_recorder",
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
 )

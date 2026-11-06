@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/config/ConfigModules.h"
 #include "alog/Logger.h"
+#include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
 
 #include <chrono>
@@ -10,24 +12,6 @@
 #include <unistd.h>
 
 namespace rtp_llm {
-namespace {
-std::string env(const char* name, const std::string& fallback = "") {
-    const auto* value = std::getenv(name);
-    return value ? value : fallback;
-}
-size_t positiveEnv(const char* name, size_t fallback) {
-    const auto text = env(name);
-    if (text.empty())
-        return fallback;
-    try {
-        size_t     end   = 0;
-        const auto value = std::stoull(text, &end);
-        return text[0] != '-' && end == text.size() && value > 0 ? value : fallback;
-    } catch (...) {
-        return fallback;
-    }
-}
-}  // namespace
 
 int64_t ExecutionRecorder::unixNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch())
@@ -40,27 +24,25 @@ std::string ExecutionRecorder::toJson(const JsonValue& value) {
     return autil::legacy::ToJsonString(value, /*isCompact=*/true);
 }
 
-ExecutionRecorder& ExecutionRecorder::instance() {
-    // A shared explicit session ID is required for cross-rank correlation.
-    static ExecutionRecorder recorder(env("RTP_LLM_RECORD_DIR"),
-                                      env("RTP_LLM_RECORD_SESSION"),
-                                      positiveEnv("RTP_LLM_RECORD_QUEUE_SIZE", 4096),
-                                      positiveEnv("RTP_LLM_RECORD_TOTAL_BYTES", 1024ULL * 1024 * 1024));
+ExecutionRecorder& ExecutionRecorder::instance(const ProfilingDebugLoggingConfig* config) {
+    std::string directory;
+    size_t      capacity = 4096;
+    if (config && config->enable_batch_record) {
+        // Manifest lives next to the alog batch_schedule sink (LOG_PATH).
+        directory = autil::EnvUtil::getEnv("LOG_PATH", std::string("logs")) + "/batch_record";
+        if (config->record_queue_size > 0)
+            capacity = static_cast<size_t>(config->record_queue_size);
+    }
+    static ExecutionRecorder recorder(directory, capacity);
     return recorder;
 }
 
-ExecutionRecorder::ExecutionRecorder(std::string directory,
-                                     std::string session,
-                                     size_t      capacity,
-                                     size_t      max_total_bytes):
+ExecutionRecorder::ExecutionRecorder(std::string directory, size_t capacity):
     directory_(std::move(directory)),
-    session_(std::move(session)),
-    capacity_(capacity),
-    max_total_bytes_(max_total_bytes) {
-    if (directory_.empty() || session_.empty() || !capacity_)
+    capacity_(capacity) {
+    if (directory_.empty() || !capacity_)
         return;
-    owner_   = std::to_string(getpid()) + "-" + std::to_string(unixNs());
-    replica_ = env("RTP_LLM_RECORD_REPLICA");
+    owner_ = std::to_string(getpid()) + "-" + std::to_string(unixNs());
     next_id_ = unixNs();
     directory_ += "/owner-" + owner_;
     state_.store(State::Unconfigured, std::memory_order_release);
@@ -91,8 +73,8 @@ bool ExecutionRecorder::configure(int rank, int dp_rank, Json metadata) {
 }
 ExecutionRecorder::Json ExecutionRecorder::identity() const {
     return {{"schema_version", 1},
-            {"session_id", session_},
-            {"replica_id", replica_.empty() ? "dp" + std::to_string(dp_rank_) : replica_},
+            {"session_id", std::string("")},
+            {"replica_id", "dp" + std::to_string(dp_rank_)},
             {"dp_rank", dp_rank_},
             {"world_rank", rank_},
             {"owner_id", owner_}};
@@ -140,7 +122,6 @@ void ExecutionRecorder::manifest(bool closed) {
                    {"scope", std::string("engine")},
                    {"request_sampling", false},
                    {"engine", metadata_},
-                   {"max_total_bytes", max_total_bytes_},
                    {"bytes_written", JsonValue()},
                    {"bytes_submitted", total_bytes_}});
     out << toJson(record) << '\n';
@@ -165,13 +146,6 @@ void ExecutionRecorder::run() {
                 continue;
             }
             const auto line = task();
-            if (line.size() >= max_total_bytes_ || total_bytes_ > max_total_bytes_ - line.size() - 1) {
-                ++dropped_;
-                ++errors_;
-                state_.store(State::Failed, std::memory_order_release);
-                manifest(false);
-                continue;
-            }
             // Sink configuration, asynchronous flush and rotation belong to alog.conf.
             // Submission does not imply durable delivery.
             batch_logger->logBinaryMessage(alog::LOG_LEVEL_INFO, line);

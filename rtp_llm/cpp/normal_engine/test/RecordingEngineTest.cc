@@ -16,15 +16,17 @@ public:
     void runLifecycleAndSnapshot();
     void runEmptyAlignmentRoundNotRecorded();
     void runFakeOnlyBatchNotRecorded();
+    void runDecodeSampleRateThinsDecodeRecords();
 };
 
 void RecordingEngineTest::runLifecycleAndSnapshot() {
     DeviceTestBase::SetUp();
     char directory[] = "/tmp/rtp-recording-engine-XXXXXX";
     ASSERT_NE(mkdtemp(directory), nullptr);
-    setenv("RTP_LLM_RECORD_DIR", directory, 1);
-    setenv("RTP_LLM_RECORD_SESSION", "engine-test", 1);
-    auto       engine = createMockEngine(CustomConfig{});
+    setenv("LOG_PATH", directory, 1);
+    CustomConfig config;
+    config.enable_batch_record = true;
+    auto       engine          = createMockEngine(config);
     const auto batch_config =
         std::string("alog.max_msg_len=0\nalog.logger.batch_schedule=INFO, batchScheduleAppender\n")
         + "inherit.batch_schedule=false\nalog.appender.batchScheduleAppender=FileAppender\n"
@@ -80,17 +82,18 @@ void RecordingEngineTest::runLifecycleAndSnapshot() {
     EXPECT_NE(batches.find("\"kv_len\":0"), std::string::npos) << batches;
     EXPECT_NE(batches.find("\"ttft_us\":"), std::string::npos) << batches;
     EXPECT_EQ(batches.find("\"ttft_us\":null"), std::string::npos) << batches;
-    const auto* decode_env    = std::getenv("RTP_LLM_RECORD_DECODE");
-    const bool  record_decode = decode_env && std::string(decode_env) == "1";
-    if (record_decode) {
-        EXPECT_NE(batches.find("\"phase\":\"decode\""), std::string::npos) << batches;
-        EXPECT_NE(batches.find("\"q_len\":1"), std::string::npos) << batches;
-    } else {
-        EXPECT_EQ(batches.find("\"phase\":\"decode\""), std::string::npos) << batches;
-        EXPECT_EQ(batches.find("\"q_len\":1"), std::string::npos) << batches;
+    // Decode recording follows enable_batch_record (rate defaults to 1.0):
+    // a 4-token streaming request records its prefill plus every decode step.
+    EXPECT_NE(batches.find("\"phase\":\"decode\""), std::string::npos) << batches;
+    EXPECT_NE(batches.find("\"q_len\":1"), std::string::npos) << batches;
+    // Config-driven enablement publishes the manifest under LOG_PATH.
+    bool manifest_found = false;
+    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(directory) / "batch_record")) {
+        if (entry.path().filename().string().rfind("owner-", 0) == 0
+            && std::filesystem::exists(entry.path() / "manifest.json"))
+            manifest_found = true;
     }
-    unsetenv("RTP_LLM_RECORD_DIR");
-    unsetenv("RTP_LLM_RECORD_SESSION");
+    EXPECT_TRUE(manifest_found);
 }
 
 TEST_F(RecordingEngineTest, LifecycleAndSnapshot) {
@@ -115,9 +118,9 @@ void RecordingEngineTest::runEmptyAlignmentRoundNotRecorded() {
     DeviceTestBase::SetUp();
     char directory[] = "/tmp/rtp-recording-empty-XXXXXX";
     ASSERT_NE(mkdtemp(directory), nullptr);
-    setenv("RTP_LLM_RECORD_DIR", directory, 1);
-    setenv("RTP_LLM_RECORD_SESSION", "engine-empty-test", 1);
+    setenv("LOG_PATH", directory, 1);
     CustomConfig config;
+    config.enable_batch_record     = true;
     config.enable_ffn_disaggregate = true;
     auto       engine              = createMockEngine(config);
     const auto batch_config =
@@ -153,8 +156,6 @@ void RecordingEngineTest::runEmptyAlignmentRoundNotRecorded() {
     const std::string batches((std::istreambuf_iterator<char>(file)), {});
     trace << "---- batch_schedule.log ----\n" << batches << "---- end ----\n";
     EXPECT_EQ(batches.find("\"requests\""), std::string::npos) << batches;
-    unsetenv("RTP_LLM_RECORD_DIR");
-    unsetenv("RTP_LLM_RECORD_SESSION");
 }
 
 TEST_F(RecordingEngineTest, EmptyAlignmentRoundIsNotRecorded) {
@@ -177,9 +178,9 @@ void RecordingEngineTest::runFakeOnlyBatchNotRecorded() {
     DeviceTestBase::SetUp();
     char directory[] = "/tmp/rtp-recording-fake-XXXXXX";
     ASSERT_NE(mkdtemp(directory), nullptr);
-    setenv("RTP_LLM_RECORD_DIR", directory, 1);
-    setenv("RTP_LLM_RECORD_SESSION", "engine-fake-test", 1);
+    setenv("LOG_PATH", directory, 1);
     CustomConfig config;
+    config.enable_batch_record = true;
     // PREFILL keeps the fake filler stream a context stream; PDFUSION/DECODE
     // roles would turn it into a decode stream, which the decode gate already
     // excludes by default, masking the bug under test.
@@ -218,8 +219,6 @@ void RecordingEngineTest::runFakeOnlyBatchNotRecorded() {
     const std::string batches((std::istreambuf_iterator<char>(file)), {});
     trace << "---- batch_schedule.log ----\n" << batches << "---- end ----\n";
     EXPECT_EQ(batches.find("\"requests\""), std::string::npos) << batches;
-    unsetenv("RTP_LLM_RECORD_DIR");
-    unsetenv("RTP_LLM_RECORD_SESSION");
 }
 
 TEST_F(RecordingEngineTest, FakeOnlyBatchIsNotRecorded) {
@@ -228,6 +227,75 @@ TEST_F(RecordingEngineTest, FakeOnlyBatchIsNotRecorded) {
     ASSERT_EXIT(
         {
             runFakeOnlyBatchNotRecorded();
+            _exit(::testing::Test::HasFailure() ? 1 : 0);
+        },
+        ::testing::ExitedWithCode(0),
+        "");
+}
+
+// record_decode_sample_rate deterministically thins decode-step recording:
+// the credit accumulator records exactly floor(steps * rate) decode steps
+// with even spacing (rate 0.5 -> every second step), while prefill batches
+// stay fully recorded regardless of the rate.
+void RecordingEngineTest::runDecodeSampleRateThinsDecodeRecords() {
+    DeviceTestBase::SetUp();
+    char directory[] = "/tmp/rtp-recording-sample-XXXXXX";
+    ASSERT_NE(mkdtemp(directory), nullptr);
+    setenv("LOG_PATH", directory, 1);
+    CustomConfig config;
+    config.enable_batch_record       = true;
+    config.record_decode_sample_rate = 0.5;
+    auto       engine                = createMockEngine(config);
+    const auto batch_config =
+        std::string("alog.max_msg_len=0\nalog.logger.batch_schedule=INFO, batchScheduleAppender\n")
+        + "inherit.batch_schedule=false\nalog.appender.batchScheduleAppender=FileAppender\n"
+        + "alog.appender.batchScheduleAppender.fileName=" + directory + "/batch_schedule.log\n"
+        + "alog.appender.batchScheduleAppender.layout=PatternLayout\n"
+        + "alog.appender.batchScheduleAppender.layout.LogPattern=%%m\n"
+        + "alog.appender.batchScheduleAppender.async_flush=true\n";
+    alog::Configurator::configureLoggerFromString(batch_config.c_str());
+    auto input                             = std::make_shared<GenerateInput>();
+    input->input_ids                       = torch::tensor({1, 2, 3}, torch::kInt32);
+    input->generate_config                 = std::make_shared<GenerateConfig>();
+    input->generate_config->max_new_tokens = 9;
+    input->generate_config->is_streaming   = true;
+    auto stream                            = engine->enqueue(input);
+    for (int i = 0; i < 9; ++i) {
+        ASSERT_TRUE(stream->nextOutput().ok());
+    }
+    ASSERT_FALSE(stream->nextOutput().ok());
+    ASSERT_TRUE(engine->stop().ok());
+    ExecutionRecorder::instance().close();
+    std::ifstream file(std::string(directory) + "/batch_schedule.log");
+    ASSERT_TRUE(file.good());
+    const std::string  batches((std::istreambuf_iterator<char>(file)), {});
+    size_t             prefill_rows = 0, decode_rows = 0;
+    std::istringstream lines(batches);
+    for (std::string line; std::getline(lines, line);) {
+        if (line.empty())
+            continue;
+        const auto record = autil::legacy::AnyCast<ExecutionRecorder::Json>(autil::legacy::json::ParseJson(line));
+        for (const auto& row : autil::legacy::AnyCast<ExecutionRecorder::JsonArray>(record.at("requests"))) {
+            const auto parsed = autil::legacy::AnyCast<ExecutionRecorder::Json>(row);
+            const auto phase  = autil::legacy::AnyCast<std::string>(parsed.at("phase"));
+            if (phase == "decode")
+                ++decode_rows;
+            else
+                ++prefill_rows;
+        }
+    }
+    // One 3-token prefill step is always recorded. The remaining 8 decode
+    // steps halve to exactly floor(8 * 0.5) = 4 recorded decode steps.
+    EXPECT_EQ(prefill_rows, 1u) << batches;
+    EXPECT_EQ(decode_rows, 4u) << batches;
+}
+
+TEST_F(RecordingEngineTest, DecodeSampleRateThinsDecodeRecords) {
+    // Re-exec for the same reasons as LifecycleAndSnapshot.
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    ASSERT_EXIT(
+        {
+            runDecodeSampleRateThinsDecodeRecords();
             _exit(::testing::Test::HasFailure() ? 1 : 0);
         },
         ::testing::ExitedWithCode(0),

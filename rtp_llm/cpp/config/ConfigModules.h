@@ -166,12 +166,12 @@ struct KVCacheConfig {
     int64_t                                 block_tree_transfer_worker_count                = 4;
     int64_t                                 block_tree_business_queue_max_size              = 10000;
     int64_t                                 block_tree_transfer_queue_max_size              = 10000;
-    double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
-    double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
-    double block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
-    double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
-    double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
-    double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    double   block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
+    double   block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
+    double   block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
+    double   block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
+    double   block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
+    double   block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
     int      reuse_cache_tail_blocks                      = std::numeric_limits<int>::max();
     uint32_t linear_pool_blocks                           = 0;
     uint32_t swa_pool_blocks                              = 0;
@@ -257,6 +257,21 @@ struct ProfilingDebugLoggingConfig {
     bool        enable_detail_log         = false;
     bool        check_nan                 = false;
     bool        enable_model_inputs_log   = false;
+    // Batch recording (ExecutionRecorder) switch and tuning knobs. Enabled
+    // only by the switch; queue size falls back to the default below when
+    // non-positive. Disk footprint is bounded by alog rotation (256MB x 160
+    // per process), not by a recorder-side budget. Manifest lands under
+    // LOG_PATH/batch_record.
+    // Decode-step sampling ratio applied only to batches containing decode
+    // streams (recording itself follows enable_batch_record): each decode
+    // step adds the ratio to a per-executor credit; crossing 1.0 records
+    // that step and spends the credit (deterministic, exact long-run
+    // fraction). 1.0 keeps every decode step, 0.0 records none.
+    // Out-of-range values are clamped at the consumer; prefill-only batches
+    // are never sampled.
+    bool    enable_batch_record       = false;
+    int64_t record_queue_size         = 4096;
+    double  record_decode_sample_rate = 1.0;
 
     std::string to_string() const;
 };
@@ -632,7 +647,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
