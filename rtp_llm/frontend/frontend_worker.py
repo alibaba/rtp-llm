@@ -118,6 +118,7 @@ class FrontendWorker:
             master_config=py_env_configs.master_config,
             parallelism_config=engine_config.parallelism_config,
             prefill_cp_config=py_env_configs.prefill_cp_config,
+            model_config=model_config,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config

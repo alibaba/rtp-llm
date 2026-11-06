@@ -112,6 +112,7 @@ class BackendRPCServerVisitor:
             master_config: Optional MasterConfig for master client configuration
             parallelism_config: Optional ParallelismConfig for page-RR route cache keys
             prefill_cp_config: Optional PrefillCPConfig for page-RR route cache keys
+            model_config: Optional ModelConfig providing the cache-key hash seed
             source_role: Caller role used for request-info correlation fields.
         """
         self.cache_key_seed = (
@@ -173,6 +174,12 @@ class BackendRPCServerVisitor:
             if kv_cache_sharded and page_rr_cp_size > 1:
                 self._page_rr_route_cache_keys = True
                 self._page_rr_cp_size = page_rr_cp_size
+        route_logger.info(
+            "cache routing keys: seed=%d page_rr=%s cp_size=%d",
+            self.cache_key_seed,
+            self._page_rr_route_cache_keys,
+            self._page_rr_cp_size,
+        )
         self.master_client = MasterClient(
             host_service=self.host_service,
             server_config=server_config,

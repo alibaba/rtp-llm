@@ -25,6 +25,22 @@ py_test(
 )
 
 py_test(
+    name = "cache_key_seed_wiring_test",
+    srcs = ["cache_key_seed_wiring_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:frontend",
+        "//rtp_llm:pipeline",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/server:server",
+    ],
+)
+
+py_test(
     name = "backend_rpc_server_visitor_validate_input_test",
     size = "small",
     srcs = ["backend_rpc_server_visitor_validate_input_test.py"],
