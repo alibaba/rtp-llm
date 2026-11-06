@@ -6,11 +6,15 @@ import triton
 from rtp_llm.models_py.triton_kernels.common.gated_residual_medium_up_mix_triton import (
     _hc_medium_up_mix,
 )
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 def try_fp8_prefill_up_mix(x, weight, scale, normed, branches):
+    # The capability check leads the conjunction: it is process-constant and
+    # False on every SM90 device, so the remaining conditions never run there.
     if not (
-        x.is_cuda
+        cached_device_capability(x.device) == (12, 0)
+        and x.is_cuda
         and torch.version.hip is None
         and x.ndim >= 2
         and x.shape[-1] == 320
@@ -28,7 +32,6 @@ def try_fp8_prefill_up_mix(x, weight, scale, normed, branches):
             t.is_contiguous() and not t.requires_grad
             for t in (x, weight, scale, normed)
         )
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
     ):
         return None
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import scaled_fp8_per_tensor_quant

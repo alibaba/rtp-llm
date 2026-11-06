@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
+
 try:
     from .gdn_prefill_norm_gluon import flat_head_norm
     from .gdn_prefill_norm_quant_gluon import norm_quant
@@ -98,8 +100,12 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
 
     def _supports_prefill(self, x, gate):
         width = x.shape[-1] if x.ndim == 2 else 0
+        # The capability check leads the conjunction: it is process-constant
+        # and False on every SM90 device, so the remaining conditions (and the
+        # module attribute reads) never run there.
         return (
-            self.role in ("PREFILL", "PDFUSION")
+            cached_device_capability(x.device) == (12, 0)
+            and self.role in ("PREFILL", "PDFUSION")
             and x.is_cuda
             and torch.version.hip is None
             and x.ndim == 2
@@ -119,7 +125,6 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             and gate.stride(0) > 0
             and self.weight.is_contiguous()
             and not any(t.requires_grad for t in (x, gate, self.weight))
-            and torch.cuda.get_device_capability(x.device) == (12, 0)
         )
 
     def forward(self, x, gate):

@@ -5,6 +5,7 @@ import math
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 @triton.jit
@@ -95,7 +96,7 @@ def _norm_fp8_scale(AMAX, SCALE, N: tl.constexpr, BLOCK: tl.constexpr):
 def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
     if not (
         is_supported(x, gamma, group_size)
-        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
+        and cached_device_capability(x.device) in ((9, 0), (12, 0))
         and x.shape[-1] == 10240
         and group_size == 2560
         and 1 <= x.numel() // 10240 <= 12288

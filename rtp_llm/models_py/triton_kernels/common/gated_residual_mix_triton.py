@@ -3,6 +3,7 @@
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 @triton.jit
@@ -55,7 +56,7 @@ def fused_mix_reduce(
         (*logits.shape[:-1], hidden), device=logits.device, dtype=logits.dtype
     )
     block, warps = 128, 4
-    if hidden == 2560 and torch.cuda.get_device_capability(logits.device) == (12, 0):
+    if hidden == 2560 and cached_device_capability(logits.device) == (12, 0):
         # Fewer CTAs for the bandwidth-bound prefill consumer. The four BF16
         # products and their sequential FP32 sum keep the original boundaries.
         if 4093 <= rows <= 4096:
