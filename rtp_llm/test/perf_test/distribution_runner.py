@@ -24,6 +24,7 @@ class DistributionRunner:
         decode_test_length: int = 10,
         generate_config: Optional[Dict[str, Any]] = None,
         num_measures: int = 3,
+        log_path: str = "",
     ):
         self._port = port
         self._dp_size = dp_size
@@ -33,6 +34,7 @@ class DistributionRunner:
         self._decode_test_length = decode_test_length
         self._generate_config = generate_config or {}
         self._num_measures = num_measures
+        self._log_path = log_path
         self._title = "Distribution Decode Result"
 
     def warmup(self) -> None:
@@ -50,6 +52,7 @@ class DistributionRunner:
             self._decode_test_length,
             False,
             self._generate_config,
+            log_path=self._log_path,
         ).run()
 
     def run(self) -> List[DistributionMetricState]:
@@ -91,6 +94,7 @@ class DistributionRunner:
                     True,
                     self._generate_config,
                     trace_name,
+                    log_path=self._log_path,
                 ).run(num_measures=self._num_measures)
 
                 metrics_list.append(
