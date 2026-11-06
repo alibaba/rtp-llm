@@ -31,6 +31,7 @@ from .VLLMCachePolicy import (
     is_vllm_eagle_block_drop_enabled,
     is_vllm_native_pd_prefill,
 )
+from .VLLMForwardProtocol import forward_outputs_fields, forward_request_type
 from .VLLMImageCacheMap import VLLMImageCacheMap
 
 logger = logging.getLogger("vllm.navi_sched.agent")
@@ -2110,11 +2111,10 @@ class VLLMEngineObserver:
             asyncio.run(self._forward_render_batches())
             return
         import msgspec
-
         from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
         from vllm.v1.serial_utils import MsgpackDecoder
 
-        decoder = MsgpackDecoder(EngineCoreRequest)
+        decoder = MsgpackDecoder(forward_request_type(EngineCoreRequest))
         while True:
             self._poll_v6d_cache_source()
             if not self._drain_cancelled_requests(EngineCoreRequestType):
@@ -2234,11 +2234,10 @@ class VLLMEngineObserver:
 
     async def _forward_render_batches(self) -> None:
         import msgspec
-
         from vllm.v1.engine import EngineCoreRequest, EngineCoreRequestType
         from vllm.v1.serial_utils import MsgpackDecoder
 
-        decoder = MsgpackDecoder(EngineCoreRequest)
+        decoder = MsgpackDecoder(forward_request_type(EngineCoreRequest))
         pending = set()
         try:
             while not self._forward_stop.is_set():
@@ -3115,7 +3114,9 @@ class VLLMEngineObserver:
                     response_outputs.outputs.append(projected)
             frames = [
                 bytes(value)
-                for value in self._response_encoder.encode(response_outputs)
+                for value in self._response_encoder.encode(
+                    forward_outputs_fields(response_outputs)
+                )
             ]
             published = self._bridge.publish_forward_response(
                 request_id, frames, terminal

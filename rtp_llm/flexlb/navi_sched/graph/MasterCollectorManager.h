@@ -3,8 +3,10 @@
 #include "aios/navi_sched/resource/MasterStateR.h"
 #include "autil/Log.h"
 #include "navi/engine/Navi.h"
+#include "navi/engine/NaviUserResult.h"
 #include <autil/Lock.h>
 #include <atomic>
+#include <functional>
 #include <map>
 #include <set>
 #include <vector>
@@ -21,8 +23,31 @@ class LoopThread;
 
 namespace navi_sched {
 
-class CollectorResultClosure;
 class GraphVisRecorder;
+
+class CollectorResultClosure : public navi::NaviUserResultClosure {
+public:
+    // The notification runs under the completion mutex and must not reenter this closure.
+    CollectorResultClosure(const std::shared_ptr<GraphVisRecorder> &recorder,
+                           std::function<void()> onCompleted);
+    void run(navi::NaviUserResultPtr userResult,
+             const std::shared_ptr<navi::ComputeScope> &) override;
+    bool isCompleted() const;
+    bool hasError() const;
+    bool agentStopped() const;
+    void waitAndSave() const;
+
+private:
+    void consumeToEof(const navi::NaviUserResultPtr &userResult);
+
+private:
+    std::shared_ptr<GraphVisRecorder> _recorder;
+    std::function<void()> _onCompleted;
+    mutable autil::ThreadCond _cond;
+    navi::NaviUserResultPtr _userResult;
+    bool _completed = false;
+    bool _agentStopped = false;
+};
 
 class MasterCollectorManager {
 public:
@@ -39,7 +64,6 @@ public:
     size_t size() const;
 
 private:
-    friend class CollectorResultClosure;
     struct Collector {
         std::string collectorId;
         std::string agentId;
@@ -83,7 +107,8 @@ private:
     multi_call::SearchServicePtr _searchService;
     uint64_t _snapshotChangeListenerId = 0;
     std::atomic<bool> _stopping{false};
-    std::atomic<bool> _retryRequested{false};
+    std::shared_ptr<std::atomic<bool>> _retryRequested =
+        std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<autil::LoopThread> _retryThread;
     mutable autil::ThreadMutex _topologyLock;
     mutable autil::ThreadMutex _mutex;

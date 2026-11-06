@@ -26,95 +26,79 @@ struct CollectorRoute {
 
 }
 
-class CollectorResultClosure : public navi::NaviUserResultClosure {
-public:
-    explicit CollectorResultClosure(const GraphVisRecorderPtr &recorder,
-                                    MasterCollectorManager *manager,
-                                    bool refreshTopologyOnCompleted)
-        : _recorder(recorder)
-        , _manager(manager)
-        , _refreshTopologyOnCompleted(refreshTopologyOnCompleted)
-    {
-        waitDestruct = true;
-    }
+CollectorResultClosure::CollectorResultClosure(const GraphVisRecorderPtr &recorder,
+                                               std::function<void()> onCompleted)
+    : _recorder(recorder), _onCompleted(std::move(onCompleted))
+{
+    waitDestruct = true;
+}
 
-    void run(navi::NaviUserResultPtr userResult,
-             const std::shared_ptr<navi::ComputeScope> &) override
-    {
-        consumeToEof(userResult);
-        {
-            autil::ScopedLock lock(_cond);
-            _userResult = std::move(userResult);
-            _completed = true;
-            _cond.broadcast();
-        }
-        if (_refreshTopologyOnCompleted && _manager) {
-            _manager->requestRetry();
-        }
-    }
-
-    bool isCompleted() const
+void CollectorResultClosure::run(navi::NaviUserResultPtr userResult,
+                                 const std::shared_ptr<navi::ComputeScope> &)
+{
+    consumeToEof(userResult);
     {
         autil::ScopedLock lock(_cond);
-        return _completed;
+        _userResult = std::move(userResult);
+        // Publish completion only after the last callback access. Retry checks
+        // take this same lock before examining the completed collector.
+        if (_onCompleted) {
+            _onCompleted();
+        }
+        _completed = true;
+        _cond.broadcast();
     }
+}
 
-    bool hasError() const
+bool CollectorResultClosure::isCompleted() const
+{
+    autil::ScopedLock lock(_cond);
+    return _completed;
+}
+
+bool CollectorResultClosure::hasError() const
+{
+    autil::ScopedLock lock(_cond);
+    auto result = _userResult ? _userResult->getNaviResult() : nullptr;
+    return result && result->hasError();
+}
+
+bool CollectorResultClosure::agentStopped() const
+{
+    autil::ScopedLock lock(_cond);
+    return _agentStopped;
+}
+
+void CollectorResultClosure::waitAndSave() const
+{
+    navi::NaviUserResultPtr userResult;
     {
         autil::ScopedLock lock(_cond);
-        auto result = _userResult ? _userResult->getNaviResult() : nullptr;
-        return result && result->hasError();
-    }
-
-    bool agentStopped() const
-    {
-        autil::ScopedLock lock(_cond);
-        return _agentStopped;
-    }
-
-    void waitAndSave() const
-    {
-        navi::NaviUserResultPtr userResult;
-        {
-            autil::ScopedLock lock(_cond);
-            while (!_completed) {
-                _cond.wait();
-            }
-            userResult = _userResult;
+        while (!_completed) {
+            _cond.wait();
         }
-        if (_recorder) {
-            _recorder->record(userResult ? userResult->getNaviResult() : nullptr);
-        }
+        userResult = _userResult;
     }
+    if (_recorder) {
+        _recorder->record(userResult ? userResult->getNaviResult() : nullptr);
+    }
+}
 
-private:
-    void consumeToEof(const navi::NaviUserResultPtr &userResult)
-    {
-        if (!userResult) {
-            return;
-        }
-        bool eof = false;
-        while (!eof) {
-            navi::NaviUserData data;
-            userResult->nextData(data, eof);
-            auto update =
-                std::dynamic_pointer_cast<AgentUpdateToMasterData>(data.data);
-            if (update &&
-                NaviSchedAgentEvent::AGENT_STOPPING == update->event) {
-                _agentStopped = true;
-            }
+void CollectorResultClosure::consumeToEof(const navi::NaviUserResultPtr &userResult)
+{
+    if (!userResult) {
+        return;
+    }
+    bool eof = false;
+    while (!eof) {
+        navi::NaviUserData data;
+        userResult->nextData(data, eof);
+        auto update = std::dynamic_pointer_cast<AgentUpdateToMasterData>(data.data);
+        if (update && NaviSchedAgentEvent::AGENT_STOPPING == update->event) {
+            _agentStopped = true;
         }
     }
-
-private:
-    GraphVisRecorderPtr _recorder;
-    MasterCollectorManager *_manager = nullptr;
-    bool _refreshTopologyOnCompleted = false;
-    mutable autil::ThreadCond _cond;
-    navi::NaviUserResultPtr _userResult;
-    bool _completed = false;
-    bool _agentStopped = false;
-};
+}
 
 AUTIL_LOG_SETUP(navi_sched, MasterCollectorManager);
 
@@ -131,8 +115,7 @@ bool MasterCollectorManager::isAgentOffline(const MasterStateRPtr &masterStateR,
         return false;
     }
     std::string nodeId;
-    if (!masterStateR->getAgentCollectorNodeId(collectorId, nodeId) ||
-        nodeId.empty()) {
+    if (!masterStateR->getAgentCollectorNodeId(collectorId, nodeId) || nodeId.empty()) {
         return false;
     }
     auto node = masterStateR->getNodeState(
@@ -154,10 +137,11 @@ std::unique_ptr<navi::GraphDef> MasterCollectorManager::buildAgentCollectorGraph
         builder.subGraph(agentGraphId)
             .directLocation(agentBizName, directHost, grpcStreamPort);
     }
-    auto sourceNode = builder.node(AGENT_SOURCE_NODE)
-                          .kernel("navi_sched.agent_report_source_k")
-                          .attr("collector_id", collectorId)
-                          .integerAttr("ordered_report_version", NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION);
+    auto sourceNode =
+        builder.node(AGENT_SOURCE_NODE)
+            .kernel("navi_sched.agent_report_source_k")
+            .attr("collector_id", collectorId)
+            .integerAttr("ordered_report_version", NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION);
     auto ackNode = builder.node(agentGraphId, "navi_sched_agent_stop_ack")
                        .kernel("navi_sched.agent_stop_ack_k");
     auto pendingSyncNode =
@@ -203,12 +187,13 @@ void MasterCollectorManager::abortAndWait(
     closure->waitAndSave();
 }
 
-MasterCollectorManager::MasterCollectorManager(const navi::NaviPtr &navi,
-                                               const MasterStateRPtr &masterStateR,
-                                               const std::string &masterBizName,
-                                               bool enableVis,
-                                               const std::vector<std::string> &taskQueueNames)
-    : _navi(navi), _masterStateR(masterStateR), _masterBizName(masterBizName)
+MasterCollectorManager::MasterCollectorManager(
+    const navi::NaviPtr &navi, const MasterStateRPtr &masterStateR,
+    const std::string &masterBizName, bool enableVis,
+    const std::vector<std::string> &taskQueueNames)
+    : _navi(navi)
+    , _masterStateR(masterStateR)
+    , _masterBizName(masterBizName)
     , _taskQueueNames(taskQueueNames)
 {
     if (enableVis) {
@@ -254,7 +239,8 @@ bool MasterCollectorManager::openRoute(const std::string &routeId,
     }
     navi::RunGraphParams params;
     if (!_taskQueueNames.empty()) {
-        const auto hash = autil::HashAlgorithm::hashString64(agentId.data(), agentId.size());
+        const auto hash =
+            autil::HashAlgorithm::hashString64(agentId.data(), agentId.size());
         params.setTaskQueueName(_taskQueueNames[hash % _taskQueueNames.size()]);
     }
     params.setResourceBuildMode(navi::RBM_PARALLEL);
@@ -262,8 +248,17 @@ bool MasterCollectorManager::openRoute(const std::string &routeId,
         params.setCollectMetric(true);
         params.addParamTopoTreeStr("edge_key=*;edge_query=2");
     }
-    auto closure = std::make_shared<CollectorResultClosure>(
-        _visRecorder, automatic ? this : nullptr, automatic);
+    std::function<void()> onCompleted;
+    if (automatic) {
+        const std::weak_ptr<std::atomic<bool>> retryRequested = _retryRequested;
+        onCompleted = [retryRequested]() {
+            if (auto requested = retryRequested.lock()) {
+                requested->store(true, std::memory_order_release);
+            }
+        };
+    }
+    auto closure =
+        std::make_shared<CollectorResultClosure>(_visRecorder, std::move(onCompleted));
     auto userResult =
         _navi->runLocalGraphAsync(graphDef.release(), params, {}, closure.get());
     if (!userResult) {
@@ -360,11 +355,13 @@ void MasterCollectorManager::stop()
         _retryThread->stop();
         _retryThread.reset();
     }
-    autil::ScopedLock topologyLock(_topologyLock);
+    // GIG invokes the listener under its callback lock; unregister without
+    // holding the topology lock that the listener itself needs.
     if (_searchService && 0 != _snapshotChangeListenerId) {
         _searchService->removeSnapshotChangeListener(_snapshotChangeListenerId);
         _snapshotChangeListenerId = 0;
     }
+    autil::ScopedLock topologyLock(_topologyLock);
     std::map<std::string, Collector> collectors;
     {
         autil::ScopedLock lock(_mutex);
@@ -377,8 +374,7 @@ void MasterCollectorManager::stop()
             auto bound =
                 _masterStateR->getAgentCollectorNodeId(pair.second.collectorId, nodeId);
             if (bound) {
-                _masterStateR->closeAgentCollector(nodeId,
-                                                   pair.second.collectorId);
+                _masterStateR->closeAgentCollector(nodeId, pair.second.collectorId);
             }
             _masterStateR->unbindAgentCollector(pair.second.collectorId);
         }
@@ -387,7 +383,7 @@ void MasterCollectorManager::stop()
         _visRecorder->save();
     }
     _searchService.reset();
-    _retryRequested.store(false, std::memory_order_release);
+    _retryRequested->store(false, std::memory_order_release);
 }
 
 size_t MasterCollectorManager::size() const
@@ -412,13 +408,13 @@ std::string MasterCollectorManager::makeCollectorId(const std::string &routeId)
 void MasterCollectorManager::requestRetry()
 {
     if (!_stopping.load(std::memory_order_acquire)) {
-        _retryRequested.store(true, std::memory_order_release);
+        _retryRequested->store(true, std::memory_order_release);
     }
 }
 
 void MasterCollectorManager::retryFailedCollectors()
 {
-    if (_retryRequested.exchange(false, std::memory_order_acq_rel)) {
+    if (_retryRequested->exchange(false, std::memory_order_acq_rel)) {
         refreshTopology();
     }
 }
@@ -494,8 +490,7 @@ void MasterCollectorManager::syncRoutes(
             } else if (collector.second.closure &&
                        collector.second.closure->isCompleted() &&
                        !collector.second.closure->agentStopped() &&
-                       !isAgentOffline(_masterStateR,
-                                       collector.second.collectorId)) {
+                       !isAgentOffline(_masterStateR, collector.second.collectorId)) {
                 if (collector.second.closure->hasError()) {
                     AUTIL_LOG(ERROR,
                               "restart failed automatic collector, routeId [%s], "

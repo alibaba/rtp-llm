@@ -13,6 +13,11 @@ from .NaviSchedAdapterConfig import NaviSchedAdapterConfig
 from .NaviSchedClient import NaviSchedClient
 from .VLLMAdapterUtils import NAVI_SCHED_MEDIA_ERROR_PREFIX, make_kmon_tags
 from .VLLMCachePolicy import get_vllm_hash_block_size, is_vllm_native_pd_prefill
+from .VLLMForwardProtocol import (
+    forward_outputs_type,
+    forward_request_fields,
+    restore_cache_statistics,
+)
 
 logger = logging.getLogger("vllm.navi_sched.client")
 
@@ -108,7 +113,9 @@ class VLLMEngineTransport:
         if not self._hybrid_cache:
             self._initialize_client(get_vllm_hash_block_size(vllm_config))
         self._encoder = MsgpackEncoder()
-        self._decoder = MsgpackDecoder(EngineCoreOutputs)
+        self._decoder = MsgpackDecoder(
+            forward_outputs_type(EngineCoreOutput, EngineCoreOutputs)
+        )
         self._engine_core_output_type = EngineCoreOutput
         self._engine_core_outputs_type = EngineCoreOutputs
         self._finish_reason = FinishReason
@@ -116,6 +123,7 @@ class VLLMEngineTransport:
         self._outputs: asyncio.Queue[Any] = asyncio.Queue()
         self._request_ids: dict[str, int] = {}
         self._external_request_ids: dict[int, str] = {}
+        self._remote_cache_stats: dict[str, tuple[int | None, int, int]] = {}
         self._local_output_task: asyncio.Task | None = None
         self._remote_output_task: asyncio.Task | None = None
         self._response_poll_lock = threading.Lock()
@@ -230,10 +238,16 @@ class VLLMEngineTransport:
             return
         request_id = self._allocate_graph_request_id()
         self._ensure_remote_output_task()
-        frames = [bytes(value) for value in self._encoder.encode(request)]
+        frames = [
+            bytes(value)
+            for value in self._encoder.encode(forward_request_fields(request))
+        ]
         payload = self._msgspec.msgpack.encode(frames)
         self._request_ids[external_request_id] = request_id
         self._external_request_ids[request_id] = external_request_id
+        self._remote_cache_stats[external_request_id] = (
+            len(request.prompt_token_ids or ()), 0, 0
+        )
         routing_token_ids = self._routing_prompt_token_ids(request)
         checkpoint = self._routing_explicit_cache_checkpoint_position(
             request, len(routing_token_ids)
@@ -320,6 +334,7 @@ class VLLMEngineTransport:
         self._response_executor.shutdown(wait=True, cancel_futures=True)
         self._request_ids.clear()
         self._external_request_ids.clear()
+        self._remote_cache_stats.clear()
         continuation = getattr(self, "_render_continuation", None)
         if continuation is not None:
             continuation.close()
@@ -341,6 +356,7 @@ class VLLMEngineTransport:
     def _forget_request(self, external_request_id: str, request_id: int) -> None:
         if self._request_ids.get(external_request_id) == request_id:
             self._request_ids.pop(external_request_id, None)
+            self._remote_cache_stats.pop(external_request_id, None)
         if self._external_request_ids.get(request_id) == external_request_id:
             self._external_request_ids.pop(request_id, None)
 
@@ -501,6 +517,22 @@ class VLLMEngineTransport:
         if bool(response.terminal) != terminal:
             raise ValueError("NaviSched response terminal state does not match payload")
         for value in output.outputs:
+            prompt_tokens, cached_tokens, external_cached_tokens = (
+                self._remote_cache_stats.get(external_request_id, (None, 0, 0))
+            )
+            cached_tokens, external_cached_tokens = restore_cache_statistics(
+                value,
+                self._engine_core_output_type,
+                prompt_tokens,
+                cached_tokens,
+                external_cached_tokens,
+            )
+            if external_request_id in self._remote_cache_stats:
+                self._remote_cache_stats[external_request_id] = (
+                    None,
+                    cached_tokens,
+                    external_cached_tokens,
+                )
             value.request_id = external_request_id
         if output.finished_requests:
             output.finished_requests = {external_request_id}

@@ -515,6 +515,7 @@ py_library(
         "navi_sched/adapters/vllm/VLLMEngineObserver.py",
         "navi_sched/adapters/vllm/VLLMExecutionGeometry.py",
         "navi_sched/adapters/vllm/VLLMEngineTransport.py",
+        "navi_sched/adapters/vllm/VLLMForwardProtocol.py",
         "navi_sched/adapters/vllm/VLLMImageCacheMap.py",
         "navi_sched/adapters/vllm/VLLMNativePreparation.py",
         "navi_sched/adapters/vllm/VLLMWorkerObserver.py",
@@ -920,6 +921,14 @@ py_test(
 )
 
 py_test(
+    name = "navi_sched_vllm_forward_protocol_test",
+    srcs = ["test/vllm/VLLMForwardProtocolTest.py"],
+    main = "test/vllm/VLLMForwardProtocolTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
+)
+
+py_test(
     name = "navi_sched_vllm_image_cache_map_test",
     srcs = ["test/vllm/VLLMImageCacheMapTest.py"],
     main = "test/vllm/VLLMImageCacheMapTest.py",
@@ -1006,8 +1015,11 @@ py_test(
 
 py_test(
     name = "navi_sched_vllm_adapter_end_to_end_test",
-    srcs = ["test/vllm/VLLMAdapterEndToEndTest.py"],
-    main = "test/vllm/VLLMAdapterEndToEndTest.py",
+    srcs = [
+        "test/vllm/DashServingAdapterEndToEndTest.py",
+        "test/vllm/VLLMAdapterEndToEndTest.py",
+    ],
+    main = "test/vllm/DashServingAdapterEndToEndTest.py",
     python_version = "PY3",
     env = {
         "LD_LIBRARY_PATH": "/opt/conda310/lib",
