@@ -94,9 +94,11 @@ def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
-            from internal_source.rtp_llm.utils.ssrf_check import safe_request_get
+            from internal_source.rtp_llm.utils.download_proxy import (
+                safe_proxy_request_get,
+            )
 
-            REQUEST_GET = safe_request_get
+            REQUEST_GET = safe_proxy_request_get
         except ImportError:
             REQUEST_GET = _default_request_get
 

@@ -95,6 +95,7 @@ def get_mm_cache_metadata(
     cancellation_event=None,
     binary_hashes=False,
     external_request_id="",
+    region=None,
 ):
     if engine is None or engine.is_proxy_mode:
         # Routing metadata belongs to the exact worker selected by FlexLB.
@@ -151,6 +152,7 @@ def get_mm_cache_metadata(
         user_id=user_id,
         service_name=service_name,
         external_request_id=external_request_id,
+        region=region,
         **kwargs,
     )
     if len(results) != len(missing_keys):

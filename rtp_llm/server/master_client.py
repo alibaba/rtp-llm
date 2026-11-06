@@ -42,7 +42,11 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
 from rtp_llm.server.mm_cache_metadata import MAX_METADATA_BYTES, metadata_from_proto
-from rtp_llm.server.request_headers import dashscope_greennet_metadata, extract_qos_priority
+from rtp_llm.server.request_headers import (
+    dashscope_greennet_metadata,
+    extract_qos_priority,
+    extract_workspace_region,
+)
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import start_client_span
@@ -618,6 +622,10 @@ class MasterClient:
         # The cache-hit probe carries no URLs. On a miss serialize each distinct
         # missing input once, without copying image/video data into embeddings.
         inputs = MultimodalInputsPB(request_id=input.request_id)
+        region = extract_workspace_region(input.headers)
+        if region:
+            # Request-level: one value for every multimodal input submitted below.
+            inputs.region = region
         submitted = set()
         for key, item in zip(
             keys, iter_multimodal_inputs(input, input.generate_config)

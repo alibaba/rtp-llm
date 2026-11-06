@@ -41,6 +41,29 @@ _worker_preprocess_func: Optional[Callable] = None
 _worker_inspection = None
 
 
+def _set_download_region(region: Optional[str]):
+    """Expose the passthrough workspace region to the downloader for one task.
+
+    Returns a context token, or None when the internal download proxy is
+    unavailable (open-source build) or the request carries no region.
+    """
+    if not region:
+        return None
+    try:
+        from internal_source.rtp_llm.utils.download_proxy import current_download_region
+    except ImportError:
+        return None
+    return current_download_region.set(region)
+
+
+def _reset_download_region(token) -> None:
+    if token is None:
+        return
+    from internal_source.rtp_llm.utils.download_proxy import current_download_region
+
+    current_download_region.reset(token)
+
+
 class _PreprocessTaskError(Exception):
     """Keep task I/O failures distinct from broken pool communication."""
 
@@ -68,13 +91,20 @@ def _run_preprocess_task(
     mm_inputs: List[MultimodalInput],
     vit_config: VitConfig,
     preprocess_params: dict,
+    region: Optional[str] = None,
 ) -> PreprocessTaskResult:
     """Run preprocessing and return total and media-load durations in ms."""
     started_at = time.monotonic()
     with collect_vit_preprocess_metrics() as preprocess_metrics:
         with collect_download_timing() as download_timing:
             with Timer() as route_timer:
-                result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
+                # Expose the passthrough workspace region to the downloader
+                # for this task only; concurrent tasks keep their own value.
+                region_token = _set_download_region(region)
+                try:
+                    result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
+                finally:
+                    _reset_download_region(region_token)
     return PreprocessTaskResult(
         result,
         route_timer.cost_ms(),
@@ -141,6 +171,7 @@ def _worker_process_task(
     capture_inspection_sources: bool = False,
     deadline: Optional[float] = None,
     inspection_task=None,
+    region: Optional[str] = None,
 ) -> PreprocessTaskResult:
     """
     只接收变化的 `mm_inputs` 参数。
@@ -159,7 +190,11 @@ def _worker_process_task(
             raise TimeoutError("ViT request expired before CPU preprocessing")
         try:
             payload = _run_preprocess_task(
-                _worker_preprocess_func, mm_inputs, _worker_vit_config, params
+                _worker_preprocess_func,
+                mm_inputs,
+                _worker_vit_config,
+                params,
+                region=region,
             )
         except (OSError, EOFError) as error:
             # For example, PIL's UnidentifiedImageError is an OSError. Letting it
@@ -312,6 +347,7 @@ class LocalPreprocessExecutor(PreprocessExecutor):
                 work_item.mm_inputs,
                 self.vit_config,
                 params,
+                region=work_item.region,
             )
             result, preprocess_time, download_time, samples = payload
             self._set_result(work_item, result)
@@ -516,6 +552,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     work_item.capture_inspection_sources,
                     work_item.deadline,
                     inspection_task,
+                    work_item.region,
                 ),
                 callback=completed,
                 error_callback=completed,

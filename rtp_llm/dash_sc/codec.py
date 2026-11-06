@@ -1376,9 +1376,7 @@ def parse_request_controls(
         raw_support = _lookup_ds_request_control(
             ds_attrs, _SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER
         )
-    support_frontend_estimated_usage = (
-        _parse_optional_bool(raw_support) is True
-    )
+    support_frontend_estimated_usage = _parse_optional_bool(raw_support) is True
     enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
     if enable_thinking is None:
         enable_thinking = _parse_optional_bool(
@@ -1451,6 +1449,7 @@ def parse_request_controls(
         "x-dashscope-service",
         "x-dashscope-apikeyid",
         "x-dashscope-inner-qos-level",
+        "x_dashscope_inner_workspace_meta",
     ):
         value = _normalize_non_empty_str(ds_attrs.get(header_name))
         if value is not None:

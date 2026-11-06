@@ -199,6 +199,10 @@ message MultimodalInputsPB {
     int64 timeout_ms = 4;
     reserved 5;
     reserved "v41_inputs";
+    // Request-level download region parsed by the sender from the
+    // gateway-injected x_dashscope_inner_workspace_meta header. One value
+    // applies to every multimodal_inputs entry of this request.
+    string region = 6;
 }
 
 enum TensorDataTypePB {
