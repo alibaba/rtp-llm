@@ -4,9 +4,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fcntl.h>
@@ -14,6 +17,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 #include <sys/stat.h>
@@ -28,10 +32,41 @@
 namespace rtp_llm {
 namespace {
 constexpr int64_t     kSchemaVersion   = 1;
-constexpr size_t      kChunkMaxBytes   = 64ULL * 1024ULL * 1024ULL;
+constexpr size_t      kDefaultRecordBytes   = 64ULL * 1024ULL * 1024ULL;
 constexpr size_t      kChunkMaxRecords = 256;
-constexpr size_t      kQueueMaxBytes   = 256ULL * 1024ULL * 1024ULL;
+constexpr size_t      kDefaultQueueBytes    = 256ULL * 1024ULL * 1024ULL;
+constexpr size_t      kMinimumCapacityBytes = 64ULL * 1024ULL;
+constexpr size_t      kMaximumRecordBytes   = 128ULL * 1024ULL * 1024ULL;
+constexpr size_t      kMaximumQueueBytes    = 512ULL * 1024ULL * 1024ULL;
 std::atomic<uint64_t> g_file_sequence{0};
+
+struct DumpCapacities {
+    size_t record_bytes;
+    size_t queue_bytes;
+};
+size_t readCapacity(const char* name, size_t fallback, size_t maximum) {
+    const auto* text = std::getenv(name);
+    if (text == nullptr) {
+        return fallback;
+    }
+    size_t      value  = 0;
+    const auto* end    = text + std::strlen(text);
+    const auto  result = std::from_chars(text, end, value);
+    if (result.ec != std::errc{} || result.ptr != end || value < kMinimumCapacityBytes || value > maximum) {
+        throw std::invalid_argument(std::string(name) + " must be a decimal byte count in ["
+                                    + std::to_string(kMinimumCapacityBytes) + "," + std::to_string(maximum) + "]");
+    }
+    return value;
+}
+DumpCapacities readCapacities() {
+    DumpCapacities limits{
+        readCapacity("RTP_LLM_MODEL_INPUTS_LOG_MAX_RECORD_BYTES", kDefaultRecordBytes, kMaximumRecordBytes),
+        readCapacity("RTP_LLM_MODEL_INPUTS_LOG_MAX_QUEUE_BYTES", kDefaultQueueBytes, kMaximumQueueBytes)};
+    if (limits.queue_bytes < limits.record_bytes) {
+        throw std::invalid_argument("model-input log queue capacity must be at least its record/chunk capacity");
+    }
+    return limits;
+}
 // clang-format off
 #define MODEL_INPUT_TENSORS(X)                                                                                       \
     X(combo_tokens) X(input_lengths) X(sequence_lengths) X(lm_output_indexes) X(custom_output_indexes) X(lm_output_lengths) X(prefix_lengths) \
@@ -53,44 +88,44 @@ const char* executionStage(const GptModelInputs& inputs) {
     const bool decode  = inputs.sequence_lengths.defined() && inputs.sequence_lengths.numel() > 0;
     return prefill && decode ? "mixed" : prefill ? "prefill" : decode ? "decode" : "unknown";
 }
-void addBytes(size_t& total, size_t bytes) {
-    if (total <= kChunkMaxBytes) {
-        total = bytes > kChunkMaxBytes - total ? kChunkMaxBytes + 1 : total + bytes;
+void addBytes(size_t& total, size_t bytes, size_t limit) {
+    if (total <= limit) {
+        total = bytes > limit - total ? limit + 1 : total + bytes;
     }
 }
-void addTensorBytes(size_t& total, const torch::Tensor& tensor) {
+void addTensorBytes(size_t& total, const torch::Tensor& tensor, size_t limit) {
     if (!tensor.defined()) {
         return;
     }
     const auto element_size = tensor.element_size();
     const auto numel        = static_cast<size_t>(tensor.numel());
-    addBytes(total, element_size && numel > kChunkMaxBytes / element_size ? kChunkMaxBytes + 1 : numel * element_size);
+    addBytes(total, element_size && numel > limit / element_size ? limit + 1 : numel * element_size, limit);
 }
-void addTensorListBytes(size_t& total, const std::optional<std::vector<torch::Tensor>>& tensors) {
+void addTensorListBytes(size_t& total, const std::optional<std::vector<torch::Tensor>>& tensors, size_t limit) {
     if (tensors) {
         for (const auto& tensor : *tensors) {
-            addBytes(total, 256);
-            addTensorBytes(total, tensor);
+            addBytes(total, 256, limit);
+            addTensorBytes(total, tensor, limit);
         }
     }
 }
-size_t estimateBytes(const GptModelInputs& inputs) {
+size_t estimateBytes(const GptModelInputs& inputs, size_t limit) {
     size_t bytes = 16 * 1024;
     for (const auto& trace_id : inputs.trace_ids) {
-        addBytes(bytes, sizeof(std::string) + sizeof(uint64_t) + trace_id.size());
+        addBytes(bytes, sizeof(std::string) + sizeof(uint64_t) + trace_id.size(), limit);
     }
     for (const auto& tag : inputs.kv_cache_group_tags) {
-        addBytes(bytes, sizeof(std::string) + sizeof(uint64_t) + tag.size());
+        addBytes(bytes, sizeof(std::string) + sizeof(uint64_t) + tag.size(), limit);
     }
-#define ADD_TENSOR_BYTES(field) addTensorBytes(bytes, inputs.field);
+#define ADD_TENSOR_BYTES(field) addTensorBytes(bytes, inputs.field, limit);
     MODEL_INPUT_TENSORS(ADD_TENSOR_BYTES)
 #undef ADD_TENSOR_BYTES
-    addTensorListBytes(bytes, inputs.multimodal_features);
-    addTensorListBytes(bytes, inputs.mm_extra_input);
-    addTensorListBytes(bytes, inputs.input_embeddings);
-    addTensorListBytes(bytes, inputs.all_input_token_ids);
+    addTensorListBytes(bytes, inputs.multimodal_features, limit);
+    addTensorListBytes(bytes, inputs.mm_extra_input, limit);
+    addTensorListBytes(bytes, inputs.input_embeddings, limit);
+    addTensorListBytes(bytes, inputs.all_input_token_ids, limit);
     if (inputs.request_is_multimodal) {
-        addBytes(bytes, inputs.request_is_multimodal->size());
+        addBytes(bytes, inputs.request_is_multimodal->size(), limit);
     }
     return bytes;
 }
@@ -221,7 +256,8 @@ c10::IValue valueForDump(const c10::IValue& value) {
 }
 class DumpWriter {
 public:
-    DumpWriter(int64_t rank_id, int backup_count): backup_count_(std::max(backup_count, 1)) {
+    DumpWriter(int64_t rank_id, int backup_count, size_t max_bytes):
+        backup_count_(std::max(backup_count, 1)), max_bytes_(max_bytes) {
         const auto log_path  = std::filesystem::path(autil::EnvUtil::getEnv("LOG_PATH", std::string("logs")));
         const auto server_id = autil::EnvUtil::getEnv("FRONTEND_SERVER_ID", 0);
         prefix_              = "model_inputs_r" + std::to_string(rank_id) + "_s" + std::to_string(server_id) + "_p"
@@ -254,13 +290,16 @@ public:
         return valid_;
     }
     bool write(c10::impl::GenericDict payload, size_t bytes) {
-        if (!records_.empty() && (records_.size() >= kChunkMaxRecords || bytes > kChunkMaxBytes - pending_bytes_)
+        if (bytes > max_bytes_) {
+            return false;
+        }
+        if (!records_.empty() && (records_.size() >= kChunkMaxRecords || bytes > max_bytes_ - pending_bytes_)
             && !flush()) {
             return false;
         }
         pending_bytes_ += bytes;
         records_.emplace_back(std::move(payload));
-        return (records_.size() < kChunkMaxRecords && pending_bytes_ < kChunkMaxBytes) || flush();
+        return (records_.size() < kChunkMaxRecords && pending_bytes_ < max_bytes_) || flush();
     }
     bool flush() {
         if (records_.empty()) {
@@ -331,6 +370,7 @@ private:
     std::filesystem::path               output_dir_;
     std::string                         prefix_;
     int                                 backup_count_  = 1;
+    const size_t                        max_bytes_;
     int                                 dir_fd_        = -1;
     bool                                valid_         = false;
     size_t                              pending_bytes_ = 0;
@@ -345,7 +385,15 @@ struct PendingRecord {
 }  // namespace
 class ModelInputsLogger::Worker {
 public:
-    Worker(int64_t rank_id, int backup_count): writer_(rank_id, backup_count), disabled_(!writer_.valid()) {
+    Worker(int64_t rank_id, int backup_count):
+        capacities_(readCapacities()),
+        writer_(rank_id, backup_count, capacities_.record_bytes),
+        disabled_(!writer_.valid()) {
+        if (capacities_.record_bytes != kDefaultRecordBytes || capacities_.queue_bytes != kDefaultQueueBytes) {
+            RTP_LLM_LOG_INFO("Model inputs logger diagnostic capacities: record_chunk_bytes=%zu queue_bytes=%zu",
+                             capacities_.record_bytes,
+                             capacities_.queue_bytes);
+        }
         thread_ = std::thread([this]() { run(); });
     }
     ~Worker() {
@@ -362,8 +410,8 @@ public:
             return;
         }
         const auto sequence = next_sequence_.fetch_add(1, std::memory_order_relaxed);
-        const auto bytes    = estimateBytes(inputs);
-        if (disabled_ || bytes > kChunkMaxBytes || !reserve(bytes)) {
+        const auto bytes    = estimateBytes(inputs, capacities_.record_bytes);
+        if (disabled_ || bytes > capacities_.record_bytes || !reserve(bytes)) {
             drop("record exceeds limits or writer is unavailable");
             return;
         }
@@ -386,7 +434,7 @@ public:
 private:
     bool reserve(size_t bytes) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (stopping_ || bytes > kQueueMaxBytes - pending_bytes_) {
+        if (stopping_ || pending_bytes_ > capacities_.queue_bytes || bytes > capacities_.queue_bytes - pending_bytes_) {
             return false;
         }
         pending_bytes_ += bytes;
@@ -480,6 +528,7 @@ private:
         ready_cv_.notify_one();
     }
 
+    const DumpCapacities                  capacities_;
     DumpWriter                            writer_;
     std::thread                           thread_;
     std::mutex                            mutex_;

@@ -358,6 +358,9 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
+    // Optional stable scheduler identities for eager speculative transactions.
+    // CacheStore publication continues to use PyCacheStoreInputs separately.
+    torch::Tensor request_id;
     torch::Tensor        engram_token_windows;
     // CP-local CPU history owned by normal prefill; undefined for decode and graphs.
     torch::Tensor engram_token_windows_host;

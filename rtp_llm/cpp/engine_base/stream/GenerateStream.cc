@@ -1281,25 +1281,37 @@ size_t GenerateStream::maxTokenNum() const {
 }
 
 bool GenerateStream::needFinish() {
-    return seqLength() >= maxTokenNum() || needFinishBySPTokens();
+    return needFinish(*complete_token_ids_, sub_generate_status_);
+}
+
+bool GenerateStream::needFinish(CompleteTokenIds& tokens, std::vector<StreamState>& states) const {
+    return tokens.seqLength() >= maxTokenNum() || needFinishBySPTokens(tokens, states);
 }
 
 bool GenerateStream::needFinishBySPTokens() {
+    return needFinishBySPTokens(*complete_token_ids_, sub_generate_status_);
+}
+
+bool GenerateStream::needFinishBySPTokens(CompleteTokenIds& tokens, std::vector<StreamState>& states) const {
     if (hasNumBeams()) {
         // update sub_generate_status to RUNNING for beam search,
         // as the same batch_id may refers to different beams between steps
-        fillSubGenerateStatus(StreamState::RUNNING);
+        std::fill(states.begin(), states.end(), StreamState::RUNNING);
     }
 
-    if (seqLength() >= generate_input_->generate_config->min_new_tokens + inputLength()) {
-        matchEosToken();
-        matchStopWordsList();
+    if (tokens.seqLength() >= generate_input_->generate_config->min_new_tokens + inputLength()) {
+        for (int i = 0; i < batchSize(tokens.seqLength() - inputLength()); ++i) {
+            matchEosToken(tokens, states, i);
+        }
+        if (tokens.seqLength() != inputLength()) {
+            for (int i = 0; i < batchSize(tokens.seqLength() - inputLength()); ++i) {
+                matchStopWordsList(tokens, states, i);
+            }
+        }
     }
 
     // check if all batch finished
-    return std::all_of(sub_generate_status_.begin(), sub_generate_status_.end(), [](StreamState state) {
-        return state == StreamState::FINISHED;
-    });
+    return std::all_of(states.begin(), states.end(), [](StreamState state) { return state == StreamState::FINISHED; });
 }
 
 void GenerateStream::matchEosToken() {
@@ -1309,9 +1321,13 @@ void GenerateStream::matchEosToken() {
 }
 
 void GenerateStream::matchEosToken(int batch_id) {
+    matchEosToken(*complete_token_ids_, sub_generate_status_, batch_id);
+}
+
+void GenerateStream::matchEosToken(CompleteTokenIds& tokens, std::vector<StreamState>& states, int batch_id) const {
     if ((!generate_input_->generate_config->ignore_eos)
-        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id)) {
-        sub_generate_status_[batch_id] = StreamState::FINISHED;
+        && tokens.matchEosToken(batch_id, special_tokens_.eos_token_id)) {
+        states[batch_id] = StreamState::FINISHED;
     }
 }
 
@@ -1329,6 +1345,12 @@ void GenerateStream::matchStopWordsList() {
 }
 
 void GenerateStream::matchStopWordsList(int batch_id) {
+    matchStopWordsList(*complete_token_ids_, sub_generate_status_, batch_id);
+}
+
+void GenerateStream::matchStopWordsList(CompleteTokenIds&         tokens,
+                                        std::vector<StreamState>& states,
+                                        int                       batch_id) const {
     RTP_LLM_PROFILE_FUNCTION();
     // note: stop_words_list in generate_config contains stop_words_list in special_tokens
     bool match = false;
@@ -1337,14 +1359,55 @@ void GenerateStream::matchStopWordsList(int batch_id) {
             && stop_words[0] == special_tokens_.eos_token_id) {
             continue;
         }
-        if (complete_token_ids_->matchStopWordsList(batch_id, stop_words)) {
+        if (tokens.matchStopWordsList(batch_id, stop_words)) {
             match = true;
             break;
         }
     }
     if (match) {
-        sub_generate_status_[batch_id] = StreamState::FINISHED;
+        states[batch_id] = StreamState::FINISHED;
     }
+}
+
+int GenerateStream::previewSpeculativeCommitRows(const StreamSpecUpdateInfo& update_info) const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if ((update_info.error_info.has_value() && update_info.error_info->hasError())
+        || ((hasErrorWithoutLock() || isFinished()) && !update_info.force_update_info)) {
+        return 0;
+    }
+    const auto& new_tokens = update_info.new_tokens;
+    RTP_LLM_CHECK_WITH_INFO(!hasNumBeams() && currentBatchSize() == 1 && nextBatchSize() == 1,
+                            "speculative commit preview requires a single non-beam sequence");
+    RTP_LLM_CHECK_WITH_INFO(new_tokens.defined() && new_tokens.device().is_cpu()
+                                && new_tokens.scalar_type() == torch::kInt32 && new_tokens.dim() == 2
+                                && new_tokens.size(0) == 1 && new_tokens.is_contiguous(),
+                            "speculative commit preview requires contiguous CPU int32 [1, tokens]");
+    RTP_LLM_CHECK_WITH_INFO(update_info.num_new_tokens >= 0 && update_info.num_new_tokens <= new_tokens.size(1),
+                            "speculative commit preview count exceeds candidate packet");
+    const int  old_seq_length = seqLength();
+    const auto max_token_num  = maxTokenNum();
+    if (update_info.num_new_tokens == 0 || old_seq_length >= max_token_num) {
+        return 0;
+    }
+    // Never share the real token buffer: update/matchers may append and truncate.
+    CompleteTokenIds tokens(*complete_token_ids_, false);
+    auto             states         = sub_generate_status_;
+    const auto       candidate      = isPerfTest() ? torch::zeros_like(new_tokens) : new_tokens;
+    int              error_token_id = 0;
+    if (!tokens.update(candidate,
+                       begin_time_us_,
+                       update_info.num_new_tokens,
+                       inputLength(),
+                       max_token_num,
+                       vocab_size_,
+                       false,
+                       streamId(),
+                       error_token_id)) {
+        return 0;
+    }
+    // Exactly the real post-append max-first/min-packet/EOS/stop-word policy.
+    needFinish(tokens, states);
+    return std::max(0, tokens.seqLength() - old_seq_length);
 }
 
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {

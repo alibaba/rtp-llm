@@ -121,6 +121,14 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         help="控制是否check nan, 为了排查。可选值: True (启用), False (禁用)。默认为 False",
     )
     profile_debug_logging_group.add_argument(
+        "--log_file_backup_count",
+        env_name="LOG_FILE_BACKUP_COUNT",
+        bind_to=(profiling_debug_config, "log_file_backup_count"),
+        type=int,
+        default=16,
+        help="日志备份文件保留数量；模型输入日志按进程保留对应数量的分块文件。默认为 16。",
+    )
+    profile_debug_logging_group.add_argument(
         "--enable_model_inputs_log",
         env_name="ENABLE_MODEL_INPUTS_LOG",
         bind_to=(profiling_debug_config, "enable_model_inputs_log"),

@@ -220,11 +220,15 @@ class NativeCacheBridge:
                 packed = cache._gather(key, slots)
                 self._copy_rows(key, row, positions, packed)
         if publish:
-            if self.device is not None and torch.device(self.device).type == "cuda":
-                torch.cuda.synchronize(self.device)
-            for (owner, tag), pool in self.pools.items():
-                inputs = self.inputs[pool.framework_tag]
-                writer = getattr(inputs, "cache_store_writer", None)
-                params = getattr(inputs, "cache_store_inputs", None)
-                if writer is not None and params is not None:
-                    writer.write(params, pool.handle)
+            self.publish()
+
+    def publish(self):
+        """Publish this model's own tagged pools after their final writes."""
+        if self.device is not None and torch.device(self.device).type == "cuda":
+            torch.cuda.synchronize(self.device)
+        for pool in self.pools.values():
+            inputs = self.inputs[pool.framework_tag]
+            writer = getattr(inputs, "cache_store_writer", None)
+            params = getattr(inputs, "cache_store_inputs", None)
+            if writer is not None and params is not None:
+                writer.write(params, pool.handle)

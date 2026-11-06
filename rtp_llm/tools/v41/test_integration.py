@@ -184,7 +184,8 @@ class IntegrationTest(unittest.TestCase):
             {"max_seq_len": 0},
             {"kv_sharded": True},
             {"cuda_graph": True},
-            {"speculative": "DSPARK"},
+            {"speculative": "MTP"},
+            {"speculative": "DSPARK", "cuda_graph": True},
             {"eplb": "DYNAMIC"},
             {"low_latency": True},
             {"bounded_replay": True},
@@ -223,6 +224,31 @@ class IntegrationTest(unittest.TestCase):
                         self.assertEqual(
                             V41RuntimeConfig.from_env(explicit).max_seq_len, length
                         )
+
+    def test_dspark_presets_keep_role_budget_and_existing_topologies(self):
+        for gamma in (1, 3, 5):
+            for parallel in ("cp", "dp"):
+                for role in ("prefill", "decode"):
+                    env = preset_env(
+                        role,
+                        "/weights",
+                        parent={},
+                        dspark_gamma=gamma,
+                        dspark_confidence="bounded",
+                        dspark_verify_mode="packed",
+                        dspark_verify_budget=gamma // 2,
+                        dspark_budget_mode="adaptive",
+                        prefill_parallel=parallel,
+                    )
+                    runtime = V41RuntimeConfig.from_env(env)
+                    self.assertEqual(runtime.speculative, "DSPARK")
+                    self.assertEqual(env["GEN_NUM_PER_CIRCLE"], str(gamma))
+                    self.assertEqual(env["SP_MODEL_TYPE"], "deepseek_v41_dspark")
+                    self.assertEqual(
+                        env["SP_DSPARK_VERIFY_MODE"],
+                        "packed" if role == "decode" else "dense",
+                    )
+                    self.assertEqual(env["ENABLE_CUDA_GRAPH"], "0")
 
     def test_launcher_prints_the_effective_long_context_capacity(self):
         from rtp_llm.tools.v41.launch import main

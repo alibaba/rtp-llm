@@ -768,6 +768,9 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
             .view({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
 
     torch::Tensor markov_embedding;
+#if USE_PPU
+    const auto ppu_markov_w2 = markov_w2.to(torch::kFloat32);
+#endif
 #if USING_CUDA
     // Each step consumes this FP32 bias before the next same-stream GEMM
     // overwrites it. Keep the Markov weights in their loaded BF16 dtype.
@@ -788,7 +791,13 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
         } else
 #endif
         {
+#if USE_PPU
+            // CUDA's BF16 input GEMM accumulates into FP32 before the bias is
+            // added to logits. Keep that boundary on the PPU eager path too.
+            markov_bias = torch::mm(markov_embedding.to(torch::kFloat32), ppu_markov_w2.transpose(0, 1));
+#else
             markov_bias = torch::mm(markov_embedding, markov_w2.transpose(0, 1));
+#endif
         }
 
 #if USING_CUDA
@@ -824,11 +833,23 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
             } else
 #endif
             {
+#if USE_PPU
+                if (force_topk > 0 && force_topk <= 4096 && force_topk < static_cast<int64_t>(draft_vocab_size)) {
+                    auto combined = proposal_logits.select(1, step) + markov_bias;
+                    auto selected = combined.topk(force_topk, -1);
+                    auto capped = torch::full_like(combined, -std::numeric_limits<float>::infinity());
+                    capped.scatter_(1, std::get<1>(selected), std::get<0>(selected));
+                    execMarkovSoftmaxStep({capped, torch::zeros_like(markov_bias), temperature,
+                                           all_probabilities.select(1, step), sampling_probabilities});
+                } else
+#endif
+                {
                 execMarkovSoftmaxStep({proposal_logits.select(1, step),
                                        markov_bias,
                                        temperature,
                                        all_probabilities.select(1, step),
                                        sampling_probabilities});
+                }
                 draft_q = sample_from_strided_q ? all_probabilities.select(1, step) : sampling_probabilities;
             }
             if (filter_draft) {

@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -177,8 +178,143 @@ private:
     RuntimeConfig runtime_config_;
 };
 
+class SpeculativePreviewProcessorProbe: public BaseLogitsProcessor {
+public:
+    std::optional<ErrorInfo> process(const SamplerInputs&, size_t, size_t) override {
+        ++process_calls;
+        return std::nullopt;
+    }
+    void updateMultiSeqStatus(const std::vector<int>&) override {
+        ++multi_seq_calls;
+    }
+    std::optional<ErrorInfo> updateStatus(const torch::Tensor&, int32_t) override {
+        ++update_calls;
+        return std::nullopt;
+    }
+    int process_calls   = 0;
+    int multi_seq_calls = 0;
+    int update_calls    = 0;
+};
+
 class GenerateStreamTest: public DeviceTestBase {
 protected:
+    std::shared_ptr<NormalGenerateStream>
+    makeSpeculativePreviewStream(int                                  max_new_tokens,
+                                 int                                  min_new_tokens,
+                                 bool                                 ignore_eos  = false,
+                                 int                                  max_seq_len = 65536,
+                                 const std::vector<std::vector<int>>& stop_words  = {}) {
+        autil::EnvGuard perf_scope("PERF_TEST", "0");
+        ModelConfig     model_config;
+        model_config.max_seq_len                      = max_seq_len;
+        model_config.vocab_size                       = 20000;
+        model_config.special_tokens.eos_token_id      = 1;
+        auto input                                    = std::make_shared<GenerateInput>();
+        input->input_ids                              = torch::full({129}, 42, torch::kInt32);
+        input->begin_time_us                          = autil::TimeUtility::currentTimeInMicroSeconds();
+        input->generate_config                        = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens        = max_new_tokens;
+        input->generate_config->min_new_tokens        = min_new_tokens;
+        input->generate_config->ignore_eos            = ignore_eos;
+        input->generate_config->stop_words_list       = stop_words;
+        input->generate_config->can_use_pd_separation = false;
+        input->generate_config->is_streaming          = false;
+        ResourceContext resources;
+        resources.cache_manager =
+            std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(3, 9, 2, rtp_llm::DataType::TYPE_INT8));
+        const bool initialized = resources.cache_manager->init();
+        EXPECT_TRUE(initialized);
+        if (!initialized) {
+            return nullptr;
+        }
+        auto stream = std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, resources, nullptr);
+        stream->setIsContextStream(false);
+        // Match native05's pre-final-packet history, including an earlier EOS
+        // that the stream retained below its whole-packet minimum gate.
+        auto storage = stream->completeTokenIds();
+        storage.fill_(-7);
+        std::fill_n(storage.data_ptr<int32_t>(), 129, 42);
+        const std::vector<int32_t> previous{1, 19513, 201, 1, 19513};
+        std::copy(previous.begin(), previous.end(), storage.data_ptr<int32_t>() + 129);
+        stream->setSeqLength(134);
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        auto speculative          = std::make_shared<SpeculativeExecutorStreamOutput>();
+        speculative->propose_step = 5;
+        speculative->tokens       = torch::tensor(std::vector<int32_t>{19513, -1}, torch::kInt32).reshape({1, 2});
+        stream->setSPOutputBuffer(speculative);
+        stream->setReserveStep(5);
+        return stream;
+    }
+
+    void expectSpeculativePreviewMatchesUpdate(const std::shared_ptr<NormalGenerateStream>& stream,
+                                               const std::vector<int32_t>&                  packet,
+                                               int                                          raw_accept_len,
+                                               int                                          expected,
+                                               const std::optional<ErrorInfo>&              error = std::nullopt) {
+        ASSERT_NE(stream, nullptr);
+        auto processor = std::make_shared<SpeculativePreviewProcessorProbe>();
+        stream->logits_processor_list_.push_back(processor);
+        const auto candidates = torch::tensor(packet, torch::kInt32).reshape({1, static_cast<int64_t>(packet.size())});
+        StreamSpecUpdateInfo update{candidates, raw_accept_len, -1, torch::Tensor(), torch::Tensor()};
+        update.error_info                                           = error;
+        update.speculative_propose_step                             = 5;
+        update.accepted_draft_tokens                                = std::max(0, raw_accept_len - 1);
+        const auto                                 before_tokens    = stream->completeTokenIds().clone();
+        const auto                                 before_packet    = candidates.clone();
+        const auto                                 before_proposal  = stream->getSPOutputBuffer()->tokens.clone();
+        const auto                                 before_substates = stream->sub_generate_status_;
+        const auto                                 before_status    = stream->getStatus();
+        const std::vector<StreamEvents::EventType> events{StreamEvents::LoadInitiated,
+                                                          StreamEvents::CanRun,
+                                                          StreamEvents::GenerateDone,
+                                                          StreamEvents::Error,
+                                                          StreamEvents::NeedRemoteGenerate,
+                                                          StreamEvents::CachePrepared};
+        std::vector<bool>                          before_events;
+        for (const auto event : events) {
+            before_events.push_back(stream->hasEvent(event));
+        }
+        const auto before_error      = stream->hasError();
+        const auto before_output     = stream->hasOutput();
+        const auto before_rounds     = stream->spIterCount();
+        const auto before_acceptance = stream->speculativeAcceptedTokensPerPos();
+        const auto before_cache      = stream->kvCachePtr();
+        const auto before_seq        = stream->seqLength();
+        const auto before_time       = stream->getTimeInfo();
+        EXPECT_EQ(stream->previewSpeculativeCommitRows(update), expected);
+        EXPECT_EQ(stream->previewSpeculativeCommitRows(update), expected);
+        EXPECT_TRUE(torch::equal(stream->completeTokenIds(), before_tokens));
+        EXPECT_TRUE(torch::equal(candidates, before_packet));
+        EXPECT_TRUE(torch::equal(stream->getSPOutputBuffer()->tokens, before_proposal));
+        EXPECT_EQ(stream->sub_generate_status_, before_substates);
+        EXPECT_EQ(stream->getStatus(), before_status);
+        for (size_t i = 0; i < events.size(); ++i) {
+            EXPECT_EQ(stream->hasEvent(events[i]), before_events[i]);
+        }
+        EXPECT_EQ(stream->hasError(), before_error);
+        EXPECT_EQ(stream->hasOutput(), before_output);
+        EXPECT_EQ(stream->spIterCount(), before_rounds);
+        EXPECT_EQ(stream->speculativeAcceptedTokensPerPos(), before_acceptance);
+        EXPECT_EQ(stream->kvCachePtr(), before_cache);
+        EXPECT_EQ(stream->seqLength(), before_seq);
+        const auto after_time = stream->getTimeInfo();
+        EXPECT_EQ(after_time.first_token_committed, before_time.first_token_committed);
+        EXPECT_EQ(after_time.first_token_time_us, before_time.first_token_time_us);
+        EXPECT_EQ(after_time.generation_done, before_time.generation_done);
+        EXPECT_EQ(after_time.generation_done_time_us, before_time.generation_done_time_us);
+        EXPECT_EQ(processor->process_calls, 0);
+        EXPECT_EQ(processor->multi_seq_calls, 0);
+        EXPECT_EQ(processor->update_calls, 0);
+        // The expected count is checked against the real append and finish
+        // machinery, not another implementation of its boundary arithmetic.
+        stream->specUpdate(update);
+        EXPECT_EQ(stream->seqLength() - before_seq, expected);
+        const auto actual = stream->completeTokenIdsVec();
+        for (int row = 0; row < expected; ++row) {
+            EXPECT_EQ(actual[before_seq + row], packet[row]);
+        }
+    }
+
     std::shared_ptr<GrammarLogitsProcessor> makeTimeoutGrammarProcessor() {
         std::vector<std::string> vocab;
         for (int i = 0; i < 128; ++i) {
@@ -200,6 +336,108 @@ protected:
         return processor;
     }
 };
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewMaxFirstKeepsPacketEOS) {
+    for (const int minimum : {0, 8}) {
+        for (const int raw : {3, 6}) {
+            SCOPED_TRACE(minimum);
+            SCOPED_TRACE(raw);
+            auto stream = makeSpeculativePreviewStream(8, minimum);
+            expectSpeculativePreviewMatchesUpdate(stream, {201, 1, 19513, 7, 8, 9}, raw, 3);
+            ASSERT_NE(stream, nullptr);
+            EXPECT_EQ(stream->outputTokenLen(), 8);
+            EXPECT_EQ(stream->seqLength() - 1, 136);
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewBelowWholePacketMinKeepsEOS) {
+    expectSpeculativePreviewMatchesUpdate(makeSpeculativePreviewStream(12, 10), {201, 1, 19513}, 3, 3);
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewCrossingMinUsesWholePacketGate) {
+    // The EOS itself is output7, but post-packet output8 enables the existing
+    // whole-packet scan. A per-column minimum would incorrectly keep 3 rows.
+    expectSpeculativePreviewMatchesUpdate(makeSpeculativePreviewStream(12, 8), {201, 1, 19513}, 3, 2);
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewOrdinaryEOSMatchesStream) {
+    expectSpeculativePreviewMatchesUpdate(makeSpeculativePreviewStream(12, 0), {201, 1, 19513}, 3, 2);
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewIgnoreEOSPreservesOtherStopWords) {
+    expectSpeculativePreviewMatchesUpdate(
+        makeSpeculativePreviewStream(12, 0, true, 65536, {{1}}), {201, 1, 19513}, 3, 3);
+    expectSpeculativePreviewMatchesUpdate(
+        makeSpeculativePreviewStream(12, 0, true, 65536, {{1}, {201}}), {201, 1, 19513}, 3, 1);
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewPhysicalCapacityUsesSpeculativeReserve) {
+    for (const bool asynchronous : {false, true}) {
+        SCOPED_TRACE(asynchronous);
+        autil::EnvGuard async_scope("RTP_LLM_STREAM_ASYNC", asynchronous ? "1" : "0");
+        // gamma5 reserves5 synchronously and11 with the existing async reserve.
+        // Both capacities make the effective max136, below config's141.
+        auto stream = makeSpeculativePreviewStream(12, 0, false, asynchronous ? 147 : 141);
+        ASSERT_NE(stream, nullptr);
+        EXPECT_EQ(stream->maxTokenNum(), 136);
+        expectSpeculativePreviewMatchesUpdate(stream, {1, 201, 19513}, 3, 2);
+    }
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewCrossPacketStopWordUsesHistory) {
+    expectSpeculativePreviewMatchesUpdate(
+        makeSpeculativePreviewStream(12, 0, false, 65536, {{19513, 201}}), {201, 1, 19513}, 3, 1);
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewStopWordOrderMatchesStream) {
+    // Keep the first configured matching word, not the globally earliest end.
+    expectSpeculativePreviewMatchesUpdate(
+        makeSpeculativePreviewStream(12, 0, true, 65536, {{201, 1, 19513}, {19513, 201}}), {201, 1, 19513}, 3, 3);
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewFinishedCancelledAndErroredDoNotAppend) {
+    for (const int terminal : {0, 1, 2}) {
+        SCOPED_TRACE(terminal);
+        auto stream = makeSpeculativePreviewStream(12, 0);
+        ASSERT_NE(stream, nullptr);
+        if (terminal == 0) {
+            stream->generate_status_->status.store(StreamState::FINISHED);
+        } else {
+            stream->reportError(terminal == 1 ? ErrorCode::CANCELLED : ErrorCode::EXECUTION_EXCEPTION,
+                                "terminal preview regression");
+        }
+        expectSpeculativePreviewMatchesUpdate(stream, {201, 1, 19513}, 3, 0);
+    }
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewPendingProcessorErrorDoesNotReportIt) {
+    auto stream = makeSpeculativePreviewStream(12, 0);
+    ASSERT_NE(stream, nullptr);
+    expectSpeculativePreviewMatchesUpdate(
+        stream,
+        {201, 1, 19513},
+        3,
+        0,
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "pending speculative processor error"));
+    EXPECT_TRUE(stream->hasError());  // Only the real update reports the error.
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewNoRemainingCapacity) {
+    autil::EnvGuard async_scope("RTP_LLM_STREAM_ASYNC", "0");
+    auto            stream = makeSpeculativePreviewStream(12, 0, false, 139);
+    ASSERT_NE(stream, nullptr);
+    EXPECT_EQ(stream->maxTokenNum(), stream->seqLength());
+    expectSpeculativePreviewMatchesUpdate(stream, {201, 1, 19513}, 3, 0);
+}
+
+TEST_F(GenerateStreamTest, testSpeculativeCommitPreviewIsReadOnlyUntilRealUpdate) {
+    auto stream = makeSpeculativePreviewStream(8, 8);
+    ASSERT_NE(stream, nullptr);
+    expectSpeculativePreviewMatchesUpdate(stream, {201, 1, 19513}, 3, 3);
+    EXPECT_TRUE(stream->hasOutput());
+    EXPECT_EQ(stream->spIterCount(), 1);
+}
 
 template<typename T>
 void waitForConsumer(std::future<T>& future, const std::shared_ptr<NormalGenerateStream>& stream) {

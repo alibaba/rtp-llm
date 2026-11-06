@@ -126,8 +126,14 @@ class V41RuntimeConfig:
             or self.moe_precision != "w4a4"
         ):
             errors.append("PPU Graph requires DP8 DECODE with MegaMoE/W4A4")
-        if self.speculative != "NONE" or self.eplb != "NONE":
-            errors.append("speculative execution and dynamic EPLB must be NONE")
+        if self.speculative not in ("NONE", "DSPARK"):
+            errors.append("PPU speculative execution supports DSpark or NONE")
+        if self.speculative == "DSPARK" and self.cuda_graph:
+            errors.append(
+                "PPU DSpark requires explicit eager mode; Graph support belongs to S4"
+            )
+        if self.eplb != "NONE":
+            errors.append("dynamic EPLB must be NONE")
         if self.redundant_experts != 0 or not self.normal_ep or self.all_gather_moe:
             errors.append(
                 "normal DeepEP without redundant experts or all-gather MoE is required"
@@ -229,10 +235,8 @@ def validate_v41_server_config(config):
         return
     if v41_backend_for_config() != "ppu":
         return
-    if model_type != "deepseek_v41":
-        raise ValueError(
-            "V4.1 PPU release supports the text target model only; DSpark is disabled"
-        )
+    if model_type not in ("deepseek_v41", "deepseek_v41_dspark"):
+        raise ValueError("V4.1 PPU supports the text target and its DSpark draft only")
     runtime = V41RuntimeConfig.from_server(config)
     logging.info("V4.1 actual topology and strategies: %s", runtime.summary())
     from rtp_llm.models_py.modules.dsv41.backend import get_v41_backend

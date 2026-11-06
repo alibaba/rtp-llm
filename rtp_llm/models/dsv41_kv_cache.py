@@ -172,4 +172,11 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         )
 
         # PPU logical/planar bytes and NV token-interleaved bytes cannot share keys.
-        model_config.cache_key_hash_seed = native_cache_key_hash_seed()
+        identity = dict(
+            getattr(model_config, "deepseek_v41_config", {}) or {},
+            ppu_model_identity="dspark-draft" if draft else "target",
+            ppu_target_capture_layer_ids=list(
+                getattr(model_config, "capture_aux_hidden_layer_ids", None) or ()
+            ),
+        )
+        model_config.cache_key_hash_seed = native_cache_key_hash_seed(identity)

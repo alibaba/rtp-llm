@@ -40,6 +40,8 @@ from typing import Any, Optional, Tuple
 
 import torch
 
+from rtp_llm.device.device_type import is_cuda
+
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
@@ -88,7 +90,7 @@ def map_context_rows(
     if batch_size == 0:
         raise ValueError("cannot map non-empty DSpark context without requests")
 
-    if device.type == "cuda":
+    if device.type == "cuda" and is_cuda():
         from rtp_llm.models_py.speculative._dspark_prepare_triton import (
             try_map_context_rows,
         )
@@ -384,6 +386,7 @@ class DSparkProposerMixin:
         prepared = None
         if (
             device.type == "cuda"
+            and is_cuda()
             and inputs.input_ids.device == device
             and prefix_lengths_source is not None
             and prefix_lengths_source.device == device

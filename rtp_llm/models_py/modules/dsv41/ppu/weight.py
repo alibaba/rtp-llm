@@ -758,12 +758,14 @@ def _load_routed_experts(
     geometry: V41Geometry,
     ep_rank: int,
     ep_size: int,
+    *,
+    layer_prefix: str = "layers",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Stack this rank's local experts: w13=[w1;w3] rows, w2, with scales."""
     local = geometry.num_local_experts(ep_size)
     start, end = ep_rank * local, (ep_rank + 1) * local
     inter, hidden = geometry.moe_inter_dim, geometry.hidden_size
-    prefix = f"layers.{layer_id}.ffn.experts"
+    prefix = f"{layer_prefix}.{layer_id}.ffn.experts"
     stacked = source.get(f"{prefix}.w13.weight")
     if stacked is not None:
         w13_w = _require(stacked, f"{prefix}.w13.weight")
@@ -879,6 +881,9 @@ def load_ppu_weights(
     enp_size: Optional[int] = None,
     enp_rank: Optional[int] = None,
     device: Optional[torch.device] = None,
+    layer_prefix: str = "layers",
+    final_norm_name: str = "norm.weight",
+    load_lm_head: bool = True,
 ) -> PPUWeightBundle:
     """Build the rank's :class:`PPUWeightBundle` from a config + checkpoint.
 
@@ -895,8 +900,10 @@ def load_ppu_weights(
     source = _CheckpointSource(checkpoint)
 
     embedding = _require(source.get("embed.weight"), "embed.weight").to(torch.bfloat16)
-    final_norm = _require(source.get("norm.weight"), "norm.weight").to(torch.bfloat16)
-    lm_head = source.get("head.weight")
+    final_norm = _require(source.get(final_norm_name), final_norm_name).to(
+        torch.bfloat16
+    )
+    lm_head = source.get("head.weight") if load_lm_head else None
     if lm_head is not None:
         lm_head = lm_head.to(torch.bfloat16)
 
@@ -905,7 +912,7 @@ def load_ppu_weights(
     layers: Dict[int, PPULayerWeights] = {}
     engram_shards: Dict[int, Tuple[HostShard, EngramShardLayout]] = {}
     for layer_id in range(geometry.num_layers):
-        prefix = f"layers.{layer_id}"
+        prefix = f"{layer_prefix}.{layer_id}"
         ratio = geometry.ratio(layer_id)
         is_kv_source = layer_id in geometry.kv_source_layer_ids
         is_index_source = layer_id in geometry.index_source_layer_ids
@@ -998,7 +1005,9 @@ def load_ppu_weights(
             layer.routed_w13_scale,
             layer.routed_w2_weight,
             layer.routed_w2_scale,
-        ) = _load_routed_experts(source, layer_id, geometry, ep_rank, ep_size)
+        ) = _load_routed_experts(
+            source, layer_id, geometry, ep_rank, ep_size, layer_prefix=layer_prefix
+        )
         if layer_id in geometry.engram_layer_ids:
             layer.engram_wkv = _load_dense(source, f"{prefix}.engram.wkv")
             layer.engram_q_weight = _require(

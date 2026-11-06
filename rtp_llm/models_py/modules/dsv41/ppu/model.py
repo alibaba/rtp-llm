@@ -62,6 +62,7 @@ class PPUModelCore:
         )
         # L3 decode seam: assigned by the decode orchestrator (ppu/decode.py).
         self.decode_impl: Optional[Callable[..., object]] = None
+        self.capture_layer_ids = ()
 
     # ---------------------------------------------------------------- prefill
 
@@ -94,6 +95,7 @@ class PPUModelCore:
             policy=self.prefill_policy,
             allow_ced=allow_ced,
             replay_prefix_lengths=replay_prefix_lengths,
+            capture_layer_ids=self.capture_layer_ids,
         )
 
     # ---------------------------------------------------------------- decode
@@ -142,6 +144,9 @@ class DeepSeekV41PPUModel(torch.nn.Module):
     ):
         super().__init__()
         config = _v41_config_from_model_config(model_config)
+        config["ppu_target_capture_layer_ids"] = list(
+            getattr(model_config, "capture_aux_hidden_layer_ids", None) or ()
+        )
         ep_size = int(getattr(parallelism_config, "ep_size", 1) or 1)
         ep_rank = int(getattr(parallelism_config, "ep_rank", 0) or 0)
         device = (
@@ -227,6 +232,9 @@ class DeepSeekV41PPUModel(torch.nn.Module):
                 int(config["max_position_embeddings"]), runtime_max_seq_len
             )
         self._decode_graph_runner = None
+        self._target_capture_layer_ids = tuple(
+            map(int, getattr(model_config, "capture_aux_hidden_layer_ids", None) or ())
+        )
         logger.info(
             "[DeepSeekV41PPUModel] layers=%d hidden=%d heads=%d experts=%d/%d "
             "topk=%d kv_sources=%s engram=%s ep=%d/%d",
@@ -254,6 +262,8 @@ class DeepSeekV41PPUModel(torch.nn.Module):
             raise RuntimeError(
                 "V4.1 native PPU requires rebuilt bindings with is_fake_stream/warmup"
             )
+        if bool(getattr(resources, "is_speculative", False)):
+            self.core.capture_layer_ids = self._target_capture_layer_ids
         return self.runner.initialize(resources)
 
     def prepare_fmha_impl(self, inputs, is_cuda_graph=False, **kwargs):
@@ -316,6 +326,17 @@ class DeepSeekV41PPUModel(torch.nn.Module):
     def note_native_graph_replay(self):
         self.runner.note_graph_replay()
 
+    def finish_speculative_forward(self, request_ids, prefixes, accepted_rows):
+        self.runner.finish_speculative_forward(request_ids, prefixes, accepted_rows)
+
+    def abort_speculative_forward(self):
+        self.runner.abort_speculative_forward()
+
+    def has_mtp_hidden_buffer(self):
+        # CP admission asks for a rank-local feature producer. Values travel
+        # through each forward's PyModelOutputs, never a mutable accessor.
+        return bool(self.core.capture_layer_ids)
+
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl=None):
         """``forward(PyModelInputs) -> PyModelOutputs`` (pre-lm-head hidden)."""
@@ -330,4 +351,7 @@ class DeepSeekV41PPUModel(torch.nn.Module):
             and self.runner.kv_cache is not None
         ):
             raise RuntimeError("DP8 PPU decode Graph input missed its captured bucket")
-        return PyModelOutputs(self.runner.forward(inputs))
+        hidden, aux = self.runner.forward(inputs, return_aux=True)
+        return (
+            PyModelOutputs(hidden, aux) if aux is not None else PyModelOutputs(hidden)
+        )

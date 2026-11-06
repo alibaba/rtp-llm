@@ -200,6 +200,10 @@ public:
     }
     void update(const StreamUpdateInfo& update_info);
     void specUpdate(const StreamSpecUpdateInfo& update_info);
+    // CPU token-boundary preview for a single-sequence speculative update. It
+    // assumes successful logits-processor validation and never advances it.
+    // The locked snapshot is not an atomic preview-to-dispatch transaction.
+    int  previewSpeculativeCommitRows(const StreamSpecUpdateInfo& update_info) const;
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
@@ -943,6 +947,10 @@ protected:
 
     int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
     bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    bool                     needFinish(CompleteTokenIds& tokens, std::vector<StreamState>& states) const;
+    bool                     needFinishBySPTokens(CompleteTokenIds& tokens, std::vector<StreamState>& states) const;
+    void matchEosToken(CompleteTokenIds& tokens, std::vector<StreamState>& states, int batch_id) const;
+    void matchStopWordsList(CompleteTokenIds& tokens, std::vector<StreamState>& states, int batch_id) const;
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
     void                     updateLogprobsContentStarted(int old_seq_length);

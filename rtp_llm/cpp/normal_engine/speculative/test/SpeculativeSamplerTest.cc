@@ -2024,6 +2024,156 @@ TEST(DSparkConfidenceStatsTest, ZeroValidLengthAndEmptyBatchHaveNoObservations) 
     EXPECT_TRUE(torch::equal(empty, torch::zeros({3, 6}, torch::kFloat32)));
 }
 
+#if USE_PPU
+TEST(PpuDSparkSamplerTest, NativeRejectionMatchesIndependentScalarCdf) {
+    constexpr int64_t batch = 8, vocab = 4;
+    const auto ints = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    const auto floats = ints.dtype(torch::kFloat32);
+    ASSERT_TRUE(execRejectionSamplingSupportsFinalize());
+    for (const int64_t gamma : {1, 3, 5}) {
+        for (const int64_t budget : {int64_t{0}, gamma / 2, gamma}) {
+            for (const bool stochastic : {false, true}) {
+                for (const bool point_mass : {false, true}) {
+                    for (const bool bounded : {false, true}) {
+                        auto q = torch::tensor({0.6f, 0.2f, 0.15f, 0.05f}, floats)
+                                     .view({1, 1, vocab}).expand({batch, gamma, vocab}).contiguous();
+                        auto p = torch::tensor({0.1f, 0.3f, 0.2f, 0.4f}, floats)
+                                     .view({1, 1, vocab}).expand({batch, gamma + 1, vocab}).contiguous();
+                        auto drafts = torch::zeros({batch, gamma}, ints);
+                        auto targets_h = torch::zeros({batch, gamma + 1}, torch::kInt32);
+                        auto uniforms_h = torch::full({batch, gamma + 1}, 0.05f, torch::kFloat32);
+                        auto expected = torch::zeros({batch, gamma + 1}, torch::kInt32);
+                        auto expected_count = torch::empty({batch}, torch::kInt32);
+                        const auto limit = bounded ? budget : gamma;
+                        for (int64_t row = 0; row < batch; ++row) {
+                            const auto reject_at = row % 3 == 0 ? gamma : (row % 3 == 1 ? gamma / 2 : 0);
+                            for (int64_t step = 0; step <= gamma; ++step) {
+                                targets_h[row][step] = step < reject_at ? 0 : 3;
+                                uniforms_h[row][step] = step < reject_at ? 0.05f : 0.95f;
+                            }
+                            int64_t position = limit;
+                            for (int64_t step = 0; step < limit; ++step) {
+                                const int target = targets_h[row][step].item<int>();
+                                const float qa = point_mass ? 1.0f : 0.6f;
+                                const float pa = point_mass ? (target == 0 ? 1.0f : 0.0f) : 0.1f;
+                                const bool accept = stochastic ? uniforms_h[row][step].item<float>() * qa < pa : target == 0;
+                                if (accept) {
+                                    expected[row][step] = 0;
+                                    continue;
+                                }
+                                position = step;
+                                int replacement = target;
+                                if (stochastic) {
+                                    const float qs[] = {0.6f, 0.2f, 0.15f, 0.05f};
+                                    const float ps[] = {0.1f, 0.3f, 0.2f, 0.4f};
+                                    float residual[vocab], total = 0;
+                                    for (int token = 0; token < vocab; ++token) {
+                                        const float qv = point_mass ? (token == 0 ? 1.0f : 0.0f) : qs[token];
+                                        const float pv = point_mass ? (token == target ? 1.0f : 0.0f) : ps[token];
+                                        residual[token] = std::max(0.0f, pv - qv);
+                                        total += residual[token];
+                                    }
+                                    const auto column = bounded ? gamma : std::min(step + 1, gamma);
+                                    const float draw = uniforms_h[row][column].item<float>() * total;
+                                    float cumulative = 0;
+                                    replacement = 0;
+                                    for (int token = 0; token < vocab; ++token) {
+                                        cumulative += residual[token];
+                                        if (cumulative > draw) {
+                                            replacement = token;
+                                            break;
+                                        }
+                                    }
+                                }
+                                expected[row][step] = replacement;
+                                break;
+                            }
+                            if (position == limit) {
+                                expected[row][limit] = targets_h[row][limit];
+                            }
+                            expected_count[row] = position + 1;
+                            if (row == batch - 1) {
+                                expected[row].zero_();
+                                expected[row][limit] = targets_h[row][limit];
+                                expected_count[row] = limit + 1;
+                            }
+                        }
+                        auto force = torch::zeros({batch}, ints.dtype(torch::kBool));
+                        force[batch - 1] = true;
+                        auto output = torch::empty({batch, gamma + 1}, ints);
+                        auto counts = torch::empty({batch}, ints);
+                        execRejectionSampling({q, drafts, uniforms_h.to(floats), p,
+                                                targets_h.reshape({batch * (gamma + 1), 1}).to(ints),
+                                                output, counts,
+                                                torch::full({batch}, stochastic, ints.dtype(torch::kBool)),
+                                                point_mass, point_mass, force, true,
+                                                bounded ? torch::full({batch}, budget, ints) : torch::Tensor(), {}, {}});
+                        EXPECT_TRUE(torch::equal(output.cpu(), expected)) << "gamma=" << gamma << " budget=" << budget
+                                                                          << " stochastic=" << stochastic;
+                        EXPECT_TRUE(torch::equal(counts.cpu(), expected_count));
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(PpuDSparkSamplerTest, NativeMarkovConfidenceAndProbabilityContracts) {
+    constexpr int64_t batch = 2, gamma = 3, vocab = 5, rank = 3;
+    const auto floats = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto w1_h = torch::arange(vocab * rank, torch::kFloat32).reshape({vocab, rank}).sub(5).mul(0.0625).to(torch::kBFloat16);
+    auto w2_h = torch::arange(vocab * rank, torch::kFloat32).reshape({vocab, rank}).flip({0}).sub(7).mul(0.125).to(torch::kBFloat16);
+    auto logits_h = torch::arange(batch * gamma * vocab, torch::kFloat32)
+                        .reshape({batch * gamma, vocab}).remainder(7).mul(0.1f);
+    auto confidence_h = torch::tensor({{0.1f, -0.2f, 0.3f, 0.25f, -0.5f, 0.125f}});
+    auto hidden_h = torch::arange(batch * gamma, torch::kFloat32).reshape({batch * gamma, 1}).mul(0.1f);
+    auto anchors_h = torch::tensor({1, 3}, torch::kInt32);
+    SpeculativeSampler sampler({}, gamma);
+    for (const bool greedy : {false, true}) {
+        auto temperature = torch::full({batch}, greedy ? 1.0e-6f : 0.8f, floats);
+        auto output = sampler.sampleDSparkDraft(logits_h.to(floats), anchors_h.to(floats.dtype(torch::kInt32)),
+                                                temperature, {}, {}, w1_h.to(torch::kCUDA), w2_h.to(torch::kCUDA),
+                                                vocab, greedy, 0, 0, false, hidden_h.to(floats),
+                                                confidence_h.to(floats), 1.5);
+        auto tokens = output.token_ids.cpu().to(torch::kLong);
+        auto rates = output.confidence_rates.cpu();
+        auto probs = greedy ? torch::Tensor() : output.all_probs.cpu();
+        for (int64_t row = 0; row < batch; ++row) {
+            int64_t previous = anchors_h[row].item<int32_t>();
+            for (int64_t step = 0; step < gamma; ++step) {
+                std::vector<float> scores(vocab);
+                float max_score = -std::numeric_limits<float>::infinity();
+                for (int64_t token = 0; token < vocab; ++token) {
+                    float bias = 0;
+                    for (int64_t k = 0; k < rank; ++k) {
+                        bias += w1_h[previous][k].item<float>() * w2_h[token][k].item<float>();
+                    }
+                    scores[token] = (logits_h[row * gamma + step][token].item<float>() + bias)
+                                    / (greedy ? 1.0e-6f : 0.8f);
+                    max_score = std::max(max_score, scores[token]);
+                }
+                if (greedy) {
+                    EXPECT_EQ(tokens[row][step].item<int64_t>(),
+                              std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
+                } else {
+                    float total = 0;
+                    for (auto& score : scores) { score = std::exp(score - max_score); total += score; }
+                    for (int64_t token = 0; token < vocab; ++token) {
+                        EXPECT_NEAR(probs[row][step][token].item<float>(), scores[token] / total, 2.0e-6);
+                    }
+                }
+                float confidence = hidden_h[row * gamma + step][0].item<float>();
+                for (int64_t k = 0; k < rank; ++k) {
+                    confidence += w1_h[previous][k].item<float>() * confidence_h[0][rank + k].item<float>();
+                }
+                EXPECT_NEAR(rates[row][step].item<float>(), 1.0f / (1.0f + std::exp(-confidence / 1.5f)), 2.0e-6);
+                previous = tokens[row][step].item<int64_t>();
+            }
+        }
+    }
+}
+#endif
+
 }  // namespace
 }  // namespace speculative
 }  // namespace rtp_llm

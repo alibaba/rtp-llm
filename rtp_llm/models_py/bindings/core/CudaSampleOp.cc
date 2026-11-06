@@ -1700,6 +1700,29 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         return GreedyOutput{};
     }
 
+#if USE_PPU
+    // The CUDA sampler caps candidates for mixed controls or pure top-p.
+    // Keep the same distribution in a dense PPU probability tensor; packed
+    // VERIFY rows are independent of this sampling storage choice.
+    if (params.force_topk > 0 && params.force_topk <= 4096 && params.force_topk < vocab_size_padded
+        && params.skip_logits_probs_restore && !params.return_original_all_probs) {
+        const auto* ks = params.top_k.data_ptr<int32_t>();
+        const auto* ps = params.top_p.data_ptr<float>();
+        const auto normalize_p = [](float p) { return std::abs(p) < 1.0e-7f ? 1.0f : p; };
+        bool mixed = false, no_top_k = true, has_top_p = false;
+        for (int64_t row = 0; row < batch_size; ++row) {
+            mixed = mixed || ks[row] != ks[0] || std::abs(normalize_p(ps[row]) - normalize_p(ps[0])) >= 1.0e-7f;
+            no_top_k = no_top_k && ks[row] <= 0;
+            has_top_p = has_top_p || std::abs(normalize_p(ps[row]) - 1.0f) >= 1.0e-7f;
+        }
+        if (mixed || (no_top_k && has_top_p)) {
+            auto selected = params.logits.topk(params.force_topk, -1);
+            auto capped = torch::full_like(params.logits, -std::numeric_limits<float>::infinity());
+            capped.scatter_(1, std::get<1>(selected), std::get<0>(selected));
+            params.logits.copy_(capped);
+        }
+    }
+#endif
     auto probs = torch::softmax(params.logits, -1);
     params.logits.copy_(probs);
     auto filtered_probs = probs.clone();
@@ -1783,14 +1806,124 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return GreedyOutput{};
 }
 
+#if USE_PPU
+torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
+    RTP_LLM_CHECK_WITH_INFO(probabilities.dim() == 2 && probabilities.scalar_type() == torch::kFloat32,
+                            "PPU probability sampling requires FP32 [batch,vocab]");
+    return torch::multinomial(probabilities, 1, false).squeeze(-1).to(torch::kInt32);
+}
+#endif
+
 void rejectionSampling(const RejectionSamplingParams& params) {
+#if USE_PPU
+    // Eager ATen dispatch on the active PPU device. Match the existing RTP
+    // rejection contract, including the reserved bounded residual RNG column.
+    RTP_LLM_CHECK_WITH_INFO(params.draft_token_ids_d.defined() && params.draft_token_ids_d.dim() == 2
+                                && params.draft_token_ids_d.scalar_type() == torch::kInt32,
+                            "PPU rejection draft token IDs must be int32 [B,gamma]");
+    RTP_LLM_CHECK_WITH_INFO(params.target_probs_d.defined() && params.target_probs_d.dim() == 3
+                                && params.target_probs_d.scalar_type() == torch::kFloat32,
+                            "PPU rejection target probabilities must be FP32 [B,gamma+1,V]");
+    const auto batch = params.draft_token_ids_d.size(0);
+    const auto gamma = params.draft_token_ids_d.size(1);
+    const auto vocab = params.target_probs_d.size(2);
+    const auto device = params.draft_token_ids_d.device();
+    RTP_LLM_CHECK_WITH_INFO(params.target_probs_d.dim() == 3 && params.target_probs_d.size(0) == batch
+                                && params.target_probs_d.size(1) == gamma + 1 && vocab > 0
+                                && params.target_token_ids_d.size(0) == batch * (gamma + 1),
+                            "PPU rejection target geometry must be [B,gamma+1,V]");
+    RTP_LLM_CHECK_WITH_INFO(params.uniform_samples_d.sizes() == c10::IntArrayRef({batch, gamma + 1})
+                                && params.uniform_samples_d.scalar_type() == torch::kFloat32
+                                && params.target_token_ids_d.dim() == 2 && params.target_token_ids_d.size(1) > 0
+                                && params.target_token_ids_d.scalar_type() == torch::kInt32
+                                && params.do_sample_d.dim() == 1 && params.do_sample_d.numel() == batch
+                                && params.do_sample_d.scalar_type() == torch::kBool,
+                            "PPU rejection uniforms/target IDs/sampling mask have invalid shapes or dtypes");
+    RTP_LLM_CHECK_WITH_INFO(params.output_token_ids_d.sizes() == c10::IntArrayRef({batch, gamma + 1})
+                                && params.output_token_ids_d.scalar_type() == torch::kInt32
+                                && params.output_accepted_token_num_d.sizes() == c10::IntArrayRef({batch})
+                                && params.output_accepted_token_num_d.scalar_type() == torch::kInt32,
+                            "PPU rejection outputs require int32 [B,gamma+1] and [B]");
+    for (const auto& tensor : {params.target_probs_d, params.uniform_samples_d, params.target_token_ids_d,
+                               params.do_sample_d, params.output_token_ids_d, params.output_accepted_token_num_d}) {
+        RTP_LLM_CHECK_WITH_INFO(tensor.device() == device && tensor.is_contiguous(),
+                                "PPU rejection tensors must be contiguous on the same device");
+    }
+    RTP_LLM_CHECK_WITH_INFO(!params.valid_draft_lengths_d.defined()
+                                || (params.valid_draft_lengths_d.sizes() == c10::IntArrayRef({batch})
+                                    && params.valid_draft_lengths_d.scalar_type() == torch::kInt32
+                                    && params.valid_draft_lengths_d.device() == device
+                                    && params.valid_draft_lengths_d.is_contiguous()),
+                            "PPU valid draft lengths require contiguous int32 [B] on the sampling device");
+    RTP_LLM_CHECK_WITH_INFO(params.draft_probs_point_mass
+                                || (params.draft_probs_d.sizes() == c10::IntArrayRef({batch, gamma, vocab})
+                                    && params.draft_probs_d.scalar_type() == torch::kFloat32
+                                    && params.draft_probs_d.device() == device),
+                            "PPU rejection draft probabilities must be FP32 [B,gamma,V]");
+    RTP_LLM_CHECK_WITH_INFO(!params.target_probs_indices_d.defined() && !params.draft_probs_indices_d.defined(),
+                            "PPU eager rejection requires dense sampling probabilities");
+    auto targets = params.target_token_ids_d.select(1, params.target_token_ids_d.size(1) - 1)
+                       .reshape({batch, gamma + 1}).to(torch::kLong);
+    auto drafts = params.draft_token_ids_d.to(torch::kLong);
+    auto limits = params.valid_draft_lengths_d.defined() ?
+                      params.valid_draft_lengths_d.to(torch::kLong).clamp(0, gamma) :
+                      torch::full({batch}, gamma, drafts.options());
+    auto alive = torch::ones({batch}, drafts.options().dtype(torch::kBool));
+    auto counts = limits + 1;
+    auto output = torch::zeros({batch, gamma + 1}, drafts.options());
+    const auto sample = params.do_sample_d.to(device).to(torch::kBool);
+    auto vocabulary = torch::arange(vocab, drafts.options()).unsqueeze(0);
+    for (int64_t step = 0; step < gamma; ++step) {
+        const auto draft_id = drafts.select(1, step);
+        const auto target_id = targets.select(1, step);
+        auto q = params.draft_probs_point_mass ? vocabulary.eq(draft_id.unsqueeze(1)).to(torch::kFloat32) :
+                                                  params.draft_probs_d.select(1, step);
+        auto p = params.target_probs_point_mass ? vocabulary.eq(target_id.unsqueeze(1)).to(torch::kFloat32) :
+                                                   params.target_probs_d.select(1, step);
+        auto q_at = q.gather(1, draft_id.unsqueeze(1)).squeeze(1);
+        auto p_at = p.gather(1, draft_id.unsqueeze(1)).squeeze(1);
+        auto accepted = torch::where(sample, params.uniform_samples_d.select(1, step) * q_at < p_at,
+                                      draft_id.eq(target_id));
+        auto current = alive.logical_and(limits.gt(step));
+        auto reject = current.logical_and(~accepted);
+        auto residual = (p - q).clamp_min(0);
+        const int64_t uniform_column = params.valid_draft_lengths_d.defined() ? gamma : std::min(step + 1, gamma);
+        auto threshold = params.uniform_samples_d.select(1, uniform_column).unsqueeze(1) * residual.sum(-1, true);
+        auto replacement = residual.cumsum(-1).gt(threshold).to(torch::kInt32).argmax(-1);
+        replacement = torch::where(sample, replacement, target_id);
+        output.select(1, step).copy_(torch::where(current, torch::where(accepted, draft_id, replacement),
+                                                  torch::zeros_like(draft_id)));
+        counts = torch::where(reject, torch::full_like(counts, step + 1), counts);
+        alive.logical_and_(~reject);
+    }
+    auto bonus = targets.gather(1, limits.unsqueeze(1)).squeeze(1);
+    auto old = output.gather(1, limits.unsqueeze(1)).squeeze(1);
+    output.scatter_(1, limits.unsqueeze(1), torch::where(alive, bonus, old).unsqueeze(1));
+    if (params.finalize_outputs && params.force_mask_d.defined()) {
+        auto forced = torch::zeros_like(output);
+        auto columns = torch::arange(gamma, drafts.options()).unsqueeze(0);
+        forced.narrow(1, 0, gamma).copy_(torch::where(columns.lt(limits.unsqueeze(1)), drafts,
+                                                                    torch::zeros_like(drafts)));
+        forced.scatter_(1, limits.unsqueeze(1), bonus.unsqueeze(1));
+        const auto mask = params.force_mask_d.to(torch::kBool);
+        output = torch::where(mask.unsqueeze(1), forced, output);
+        counts = torch::where(mask, limits + 1, counts);
+    }
+    params.output_token_ids_d.copy_(output);
+    params.output_accepted_token_num_d.copy_(counts);
+#else
     RTP_LLM_CHECK_WITH_INFO(!params.valid_draft_lengths_d.defined(),
                             "bounded rejection sampling (valid_draft_lengths_d) is CUDA-only");
     RTP_LLM_CHECK_WITH_INFO(false, "rejection sampling is not supported on this device");
+#endif
 }
 
 bool rejectionSamplingSupportsFinalize() {
+#if USE_PPU
+    return true;
+#else
     return false;
+#endif
 }
 
 void markovSoftmaxStep(const MarkovSoftmaxStepParams& params) {

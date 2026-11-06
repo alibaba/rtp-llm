@@ -77,6 +77,11 @@ public:
         sampler_ = std::move(sampler);
     }
 
+    void setStopControl(std::function<bool()> requested, std::function<void()> observed) {
+        stop_requested_ = std::move(requested);
+        stop_observed_  = std::move(observed);
+    }
+
 public:
     static GenerateStreamPtr createMinFakePrefillStream(int                    max_new_tokens,
                                                         const ModelConfig&     model_config,
@@ -363,6 +368,8 @@ private:
     TensorHolder buffer_holder_;
 
     RoleType role_type_;
+    std::function<bool()> stop_requested_;
+    std::function<void()> stop_observed_;
     // True when any KV-cache group is CacheGroupType::LINEAR (RWKV / Mamba /
     // hybrid linear+full). Per-step state advances every token, so the page
     // table must be re-gathered between draft propose and target verify.

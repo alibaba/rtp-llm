@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import weakref
 
 import torch
+
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import primary_attention_inputs
 from rtp_llm.models_py.modules.dsv41.ppu.cache import PPUKVCache
 from rtp_llm.models_py.modules.dsv41.ppu.cp import (
@@ -40,6 +42,9 @@ def drain_native_parallel():
     if dist.is_initialized():
         torch.cuda.synchronize()
         dist.barrier(group=_native_shutdown_group())
+        for runner in _NATIVE_RUNNERS:
+            if runner.observer is not None:
+                runner.observer.close()
         _write_perf_evidence()
         logger.info("V4.1 native role engine device work drained")
 
@@ -54,6 +59,7 @@ def _write_perf_evidence():
     from pathlib import Path
 
     import torch.distributed as dist
+
     from rtp_llm.models_py.modules.dsv41.ppu.moe import PPUMoE
 
     directory = Path(evidence)
@@ -131,6 +137,16 @@ class NativeModelRunner:
         self._stopped = False
         self._graph_step_prepared = False
         self.graph_replays = 0
+        self._pending_verify = None
+        self._pending_idle_verify = False
+        self.observer = None
+        observation_dir = os.environ.get("RTP_V41_DSPARK_OBSERVE_DIR")
+        if observation_dir:
+            from rtp_llm.models_py.modules.dsv41.ppu.dspark_observation import (
+                create_observer,
+            )
+
+            self.observer = create_observer(self, observation_dir)
         _NATIVE_RUNNERS.add(self)
 
     def bind_native_stop(self, requested, observed):
@@ -154,12 +170,18 @@ class NativeModelRunner:
         if self._stopped:
             return False
         stopping = bool(self._stop_requested())
+        if self.observer is not None:
+            local_count, local_stopping = count, stopping
         if dist.is_available() and dist.is_initialized():
             value = torch.tensor(
                 [count, int(stopping)], dtype=torch.int64, device=self.core.device
             )
             dist.all_reduce(value, group=self.group)
             count, stopping = value.cpu().tolist()
+        if self.observer is not None:
+            self.observer.vote(
+                local_count, count, local_stopping, stopping, self.observer.warmup
+            )
         if stopping:
             self._stopped = True
             self._stop_observed()
@@ -175,11 +197,14 @@ class NativeModelRunner:
             device=self.core.device,
             dp_rank=self.dp_rank,
             dp_size=self.dp_size,
+            capture_layer_ids=getattr(self.core, "capture_layer_ids", ()),
         )
 
     def prepare_graph_step(self, inputs):
         self._graph_step_prepared = False
         count = 0 if bool(inputs.is_fake_stream) else int(inputs.input_ids.numel())
+        if self.observer is not None:
+            self.observer.warmup = bool(getattr(inputs, "warmup", False))
         available = self._work_available(count)
         self._graph_step_prepared = available
         return available
@@ -195,7 +220,7 @@ class NativeModelRunner:
                 self.core.geometry.num_layers,
             )
 
-    def forward(self, inputs):
+    def forward(self, inputs, *, return_aux=False):
         primary = primary_attention_inputs(inputs.attention_inputs, self.kv_cache)
         fake = bool(inputs.is_fake_stream)
         rows = int(inputs.input_ids.numel())
@@ -203,23 +228,196 @@ class NativeModelRunner:
         # any layer collective; an entirely idle world skips ENP/EP uniformly.
         prepared = self._graph_step_prepared
         self._graph_step_prepared = False
+        if self.observer is not None:
+            self.observer.warmup = bool(getattr(inputs, "warmup", False))
         if not prepared and not self._work_available(0 if fake else rows):
-            return self.core.weights.embedding.new_zeros(
+            if bool(getattr(primary, "is_target_verify", False)):
+                self._pending_idle_verify = True
+            hidden = self.core.weights.embedding.new_zeros(
                 (rows, self.core.geometry.hidden_size)
             )
+            aux = self._empty_aux(rows)
+            return (hidden, aux) if return_aux else hidden
+        if bool(getattr(primary, "is_target_verify", False)):
+            return self._verify(inputs, primary, return_aux=return_aux)
         if fake:
             cache = PPUKVCache(self.core.config, device=self.core.device)
             self._orchestrator(cache).step({}, placeholders=max(1, rows))
-            return self.core.weights.embedding.new_zeros(
+            hidden = self.core.weights.embedding.new_zeros(
                 (rows, self.core.geometry.hidden_size)
             )
+            return (hidden, self._empty_aux(rows)) if return_aux else hidden
         if self.decode_role and not bool(inputs.warmup):
-            return self._decode(inputs, primary)
+            return self._decode(inputs, primary, return_aux=return_aux)
         if bool(primary.is_prefill):
-            return self._prefill(inputs, primary)
-        return self._decode(inputs, primary)
+            return self._prefill(inputs, primary, return_aux=return_aux)
+        return self._decode(inputs, primary, return_aux=return_aux)
 
-    def _decode(self, inputs, primary):
+    def _empty_aux(self, rows):
+        layers = getattr(self.core, "capture_layer_ids", ())
+        return (
+            self.core.weights.embedding.new_zeros(
+                (rows, len(layers) * self.core.geometry.hidden_size)
+            )
+            if layers
+            else None
+        )
+
+    def _verify(self, inputs, primary, *, return_aux=False):
+        import torch.distributed as dist
+
+        from rtp_llm.models_py.modules.dsv41.ppu.verify import (
+            VerifyLayout,
+            VerifyTransaction,
+        )
+
+        if self._pending_verify is not None or self._pending_idle_verify:
+            self.abort_speculative_forward()
+            raise RuntimeError("previous target verify was not accepted or aborted")
+        layout = VerifyLayout.from_inputs(primary, inputs.input_ids.numel())
+        fake = bool(inputs.is_fake_stream)
+        width = max(layout.lengths, default=0) if not fake else 0
+        stage_count = torch.tensor(width, dtype=torch.int32, device=self.core.device)
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(stage_count, op=dist.ReduceOp.MAX, group=self.group)
+        width = int(stage_count)
+        hidden = self.core.weights.embedding.new_zeros(
+            (layout.rows, self.core.geometry.hidden_size)
+        )
+        aux = self._empty_aux(layout.rows)
+        bridge = (
+            None
+            if fake
+            else NativeCacheBridge(
+                self.core.config,
+                self.kv_cache,
+                inputs.attention_inputs,
+                device=self.core.device,
+            )
+        )
+        cache = (
+            PPUKVCache(self.core.config, device=self.core.device)
+            if fake
+            else bridge.import_requests(layout.prefixes)
+        )
+        orchestrator = self._orchestrator(cache)
+        windows = inputs.engram_token_windows
+        ids = inputs.input_ids.reshape(-1)
+        tx = None
+        if not fake:
+            tx = VerifyTransaction(bridge, inputs.request_id, layout)
+            if self.observer is not None and not bool(inputs.warmup):
+                tx.observer = self.observer
+                tx.observation = self.observer.begin(
+                    "verify",
+                    bridge,
+                    list(tx.request_ids),
+                    layout.prefixes,
+                    layout.lengths,
+                    cache=cache,
+                )
+            if self.core.geometry.engram_enabled() and (
+                windows is None
+                or tuple(windows.shape)
+                != (layout.rows, self.core.geometry.engram_max_ngram_size)
+            ):
+                raise ValueError(
+                    "causal verify requires every scheduler Engram token window"
+                )
+            for request, (prefix, start) in enumerate(
+                zip(layout.prefixes, layout.starts)
+            ):
+                recent = (
+                    [
+                        int(t)
+                        for t in windows[start, 1:].cpu().tolist()[::-1]
+                        if int(t) >= 0
+                    ]
+                    if self.core.geometry.engram_enabled()
+                    else []
+                )
+                orchestrator.resume_request(request, prefix, recent)
+        try:
+            for stage in range(width):
+                active = (
+                    [row for row, length in enumerate(layout.lengths) if stage < length]
+                    if not fake
+                    else []
+                )
+                tokens = {row: int(ids[layout.starts[row] + stage]) for row in active}
+                if self.core.geometry.engram_enabled() and not fake:
+                    for row in active:
+                        offset = layout.starts[row] + stage
+                        expected = [tokens[row]] + orchestrator.requests[row].history[
+                            -(self.core.geometry.engram_max_ngram_size - 1) :
+                        ][::-1]
+                        expected += [-1] * (
+                            self.core.geometry.engram_max_ngram_size - len(expected)
+                        )
+                        if windows[offset].cpu().tolist() != expected:
+                            raise ValueError(
+                                "verify Engram history contains future/mismatched tokens"
+                            )
+                result = orchestrator.step(tokens, placeholders=0 if active else 1)
+                if tx is not None and tx.observer is not None:
+                    tx.observer.compute_stage(
+                        tx.observation,
+                        result.row_request_ids,
+                        result.row_positions,
+                        [tokens[row] for row in result.row_request_ids],
+                    )
+                for index, row in enumerate(active):
+                    offset = layout.starts[row] + stage
+                    hidden[offset] = result.hidden[index]
+                    if aux is not None:
+                        aux[offset] = result.mtp_target_hidden_states[index]
+                    tx.record(cache, row, layout.prefixes[row] + stage + 1)
+        except Exception:
+            if tx is not None:
+                tx.abort()
+            raise
+        if tx is not None and tx.observer is not None:
+            tx.observer.verified(tx.observation)
+        self._pending_verify = tx
+        self._pending_idle_verify = fake
+        logger.info(
+            "PPU target VERIFY dp=%d rows=%d lengths=%s prefixes=%s causal_stages=%d native_writes=deferred",
+            self.dp_rank,
+            layout.rows,
+            layout.lengths,
+            layout.prefixes,
+            width,
+        )
+        return (hidden, aux) if return_aux else hidden
+
+    def finish_speculative_forward(self, request_ids, prefixes, accepted_rows):
+        tx, self._pending_verify = self._pending_verify, None
+        if tx is None:
+            # Idle owners have collective work, but no business cache versions.
+            if self._pending_idle_verify:
+                self._pending_idle_verify = False
+                return
+            raise RuntimeError("no pending verify round (already finalized or aborted)")
+        try:
+            tx.finish(request_ids, prefixes, accepted_rows)
+            logger.info(
+                "PPU target ACCEPT dp=%d request_ids=%s prefixes=%s input_rows=%s",
+                self.dp_rank,
+                request_ids.cpu().tolist(),
+                prefixes.cpu().tolist(),
+                accepted_rows.cpu().tolist(),
+            )
+        finally:
+            if not tx.closed:
+                tx.abort()
+
+    def abort_speculative_forward(self):
+        tx, self._pending_verify = self._pending_verify, None
+        self._pending_idle_verify = False
+        if tx is not None:
+            tx.abort()
+
+    def _decode(self, inputs, primary, *, return_aux=False):
         if self.kv_cache is None:
             raise RuntimeError("native decode requires initialized framework pools")
         lengths = [int(n) for n in primary.sequence_lengths.cpu().tolist()]
@@ -265,9 +463,13 @@ class NativeModelRunner:
             lengths,
             updated,
         )
-        return result.hidden
+        return (
+            (result.hidden, result.mtp_target_hidden_states)
+            if return_aux
+            else result.hidden
+        )
 
-    def _prefill(self, inputs, primary):
+    def _prefill(self, inputs, primary, *, return_aux=False):
         cp_info = getattr(primary, "context_parallel_info", None)
         context = None
         group = None
@@ -402,13 +604,35 @@ class NativeModelRunner:
             ),
             replay_prefix_lengths=prefixes if replaying else None,
         )
+        if getattr(self.core, "capture_layer_ids", ()):
+            logger.info(
+                "PPU target capture_features=true ced_compaction=false reason=complete_draft_features "
+                "layers=%s local_rows=%d output_rows=%d cp=%d/%d",
+                self.core.capture_layer_ids,
+                ids.numel(),
+                result.hidden.shape[0],
+                self.cp_rank,
+                self.cp_size,
+            )
         if bridge is not None:
+            observation = None
+            if self.observer is not None and not bool(inputs.warmup):
+                observation = self.observer.begin(
+                    "prefill",
+                    bridge,
+                    self.observer.input_request_ids(inputs, len(prefixes)),
+                    prefixes,
+                    lengths,
+                )
             bridge.export_requests(
                 cache,
                 [a + b for a, b in zip(prefixes, lengths)],
                 publish=not bool(inputs.warmup),
             )
+            if self.observer is not None:
+                self.observer.finish(observation, "accept", lengths, cache=cache)
         hidden = result.hidden
+        aux = getattr(result, "mtp_target_hidden_states", None)
         if replaying:
             hidden = torch.cat(
                 [
@@ -416,6 +640,13 @@ class NativeModelRunner:
                     for row, prefix in enumerate(prefixes)
                 ]
             )
+            if aux is not None:
+                aux = torch.cat(
+                    [
+                        aux[int(replay_cu[row]) + prefix : int(replay_cu[row + 1])]
+                        for row, prefix in enumerate(prefixes)
+                    ]
+                )
             logger.info(
                 "PPU encoder SWA rebuilt cp=%d/%d prefix=%s query_rows=%s "
                 "append_rows=%s global_prefix_readonly=true",
@@ -433,6 +664,8 @@ class NativeModelRunner:
                 sl = slice(split.local_offset, split.local_offset + split.chunk)
                 indices[sl] = cu[row] + plan.local_positions[sl] - split.prefix
             hidden = hidden.index_select(0, indices.to(hidden.device))
+            if aux is not None:
+                aux = aux.index_select(0, indices.to(aux.device))
         logger.info(
             "V4.1 native PREFILL cp=%d/%d requests=%d tokens=%d CacheStore=%s",
             self.cp_rank,
@@ -441,4 +674,4 @@ class NativeModelRunner:
             sum(lengths),
             bridge is not None,
         )
-        return hidden
+        return (hidden, aux) if return_aux else hidden

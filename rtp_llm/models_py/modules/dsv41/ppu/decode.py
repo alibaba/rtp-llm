@@ -226,6 +226,7 @@ class DecodeStepResult:
     valid_mask: torch.Tensor  # [T_total] over real+placeholder rows
     num_placeholders: int
     logits: Optional[torch.Tensor] = None  # [T_valid, vocab] if lm_head bound
+    mtp_target_hidden_states: Optional[torch.Tensor] = None
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +256,7 @@ class DecodeStepOrchestrator:
         device=None,
         dp_rank: int = 0,
         dp_size: int = 1,
+        capture_layer_ids=(),
     ) -> None:
         self.ops = ops
         self.bundle = bundle
@@ -269,6 +271,12 @@ class DecodeStepOrchestrator:
         )
         self.dp_rank = int(dp_rank)
         self.dp_size = int(dp_size)
+        self.capture_layer_ids = tuple(map(int, capture_layer_ids))
+        if len(set(self.capture_layer_ids)) != len(self.capture_layer_ids) or any(
+            layer < 0 or layer >= self.geometry.num_layers
+            for layer in self.capture_layer_ids
+        ):
+            raise ValueError("target capture layers must be unique valid layer ids")
         if self.geometry.engram_enabled() and bundle.engram_hash_params is None:
             raise RuntimeError(
                 "Engram layers require bundle.engram_hash_params; refusing to "
@@ -431,7 +439,10 @@ class DecodeStepOrchestrator:
         # layer attn pre -> ...).
         prev_mix = None
         shared_topk: Dict[int, torch.Tensor] = {}
+        captured = {}
         for layer_id in range(self.geometry.num_layers):
+            if layer_id in self.capture_layer_ids:
+                captured[layer_id] = h.mean(dim=-2)
             h, prev_mix = self._forward_layer(
                 layer_id,
                 h,
@@ -467,6 +478,13 @@ class DecodeStepOrchestrator:
             row_positions=list(positions),
             valid_mask=valid_mask,
             num_placeholders=int(placeholders),
+            mtp_target_hidden_states=(
+                torch.cat(
+                    [captured[layer] for layer in self.capture_layer_ids], dim=-1
+                )[mask]
+                if self.capture_layer_ids
+                else None
+            ),
         )
         lm_head = self.bundle.lm_head
         if lm_head is not None:

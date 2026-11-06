@@ -12,6 +12,21 @@ from pathlib import Path
 from rtp_llm.config.v41_runtime import PPU_STRATEGY, V41RuntimeConfig
 from rtp_llm.tools.v41.preflight import collect_report
 
+DEFAULT_PREFILL_WAIT_TIMEOUT_MS = 1800000
+MAX_PREFILL_WAIT_TIMEOUT_MS = 86400000
+
+
+def bounded_prefill_wait_timeout_ms(value):
+    if type(value) not in (int, str):
+        raise ValueError("prefill wait timeout must be integer milliseconds")
+    try:
+        result = int(value)
+    except (ValueError, OverflowError) as error:
+        raise ValueError("prefill wait timeout must be integer milliseconds") from error
+    if not 1 <= result <= MAX_PREFILL_WAIT_TIMEOUT_MS:
+        raise ValueError("prefill wait timeout must be in [1, 86400000] milliseconds")
+    return result
+
 
 def preset_env(
     role,
@@ -26,15 +41,47 @@ def preset_env(
     ced_mode="off",
     encoder_swa_replay=False,
     max_seq_len=None,
+    prefill_wait_timeout_ms=DEFAULT_PREFILL_WAIT_TIMEOUT_MS,
+    dspark_gamma=0,
+    dspark_confidence="off",
+    dspark_verify_mode="dense",
+    dspark_verify_budget=-1,
+    dspark_budget_mode="fixed",
 ):
     if role not in ("prefill", "decode"):
         raise ValueError("role must be prefill or decode")
+    prefill_wait_timeout_ms = bounded_prefill_wait_timeout_ms(prefill_wait_timeout_ms)
     if prefill_parallel not in ("cp", "dp"):
         raise ValueError("prefill_parallel must be cp or dp")
     if ced_mode not in ("off", "exact", "bounded"):
         raise ValueError("ced_mode must be off, exact or bounded")
     if encoder_swa_replay and ced_mode != "bounded":
         raise ValueError("encoder SWA recovery requires --ced-mode bounded")
+    if dspark_gamma < 0:
+        raise ValueError("DSpark gamma must be nonnegative (zero disables it)")
+    if dspark_confidence not in ("off", "observe", "bounded"):
+        raise ValueError("invalid DSpark confidence mode")
+    if dspark_verify_mode not in ("dense", "packed") or dspark_budget_mode not in (
+        "fixed",
+        "adaptive",
+    ):
+        raise ValueError("invalid DSpark verification/budget mode")
+    if not -1 <= dspark_verify_budget <= dspark_gamma:
+        raise ValueError("DSpark budget must be -1 or between 0 and gamma")
+    if (
+        dspark_verify_budget != -1
+        or dspark_verify_mode == "packed"
+        or dspark_budget_mode == "adaptive"
+    ) and dspark_confidence != "bounded":
+        raise ValueError(
+            "DSpark budget/packed verification requires bounded confidence"
+        )
+    if dspark_verify_mode == "packed" and dspark_verify_budget < 0:
+        raise ValueError("packed verification requires an explicit budget")
+    if dspark_budget_mode == "adaptive" and dspark_verify_mode != "packed":
+        raise ValueError("adaptive budget requires packed verification")
+    if not dspark_gamma and (dspark_confidence != "off" or dspark_verify_budget != -1):
+        raise ValueError("DSpark options require positive gamma")
     cp_prefill = prefill_parallel == "cp"
     env = dict(os.environ if parent is None else parent)
     env.update(
@@ -71,6 +118,12 @@ def preset_env(
             "ENABLE_CUDA_GRAPH": "0",
             "SP_TYPE": "",
             "SP_MODEL_TYPE": "",
+            "SP_CHECKPOINT_PATH": "",
+            "GEN_NUM_PER_CIRCLE": "0",
+            "SP_DSPARK_CONFIDENCE_MODE": "off",
+            "SP_DSPARK_VERIFY_MODE": "dense",
+            "SP_DSPARK_VERIFY_BUDGET": "-1",
+            "SP_DSPARK_VERIFY_BUDGET_MODE": "fixed",
             "EPLB_MODE": "NONE",
             "REUSE_CACHE": "1" if encoder_swa_replay else "0",
             "DSV41_CED": "0" if ced_mode == "off" else "1",
@@ -98,7 +151,7 @@ def preset_env(
             "MAX_CONTEXT_BATCH_SIZE": "1",
             "PREFILL_CHUNK_SIZE": "0",
             "LOAD_CACHE_TIMEOUT_MS": "600000",
-            "PREFILL_MAX_WAIT_TIMEOUT_MS": "1800000",
+            "PREFILL_MAX_WAIT_TIMEOUT_MS": str(prefill_wait_timeout_ms),
             "DIST_COMM_TIMEOUT": "1800",
             "DECODE_RETRY_TIMES": "0",
             "DECODE_ENTRANCE": "0",
@@ -107,6 +160,22 @@ def preset_env(
             "GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS": "500",
         }
     )
+    if dspark_gamma:
+        env.update(
+            SP_TYPE="dspark",
+            SP_MODEL_TYPE="deepseek_v41_dspark",
+            SP_CHECKPOINT_PATH=str(checkpoint),
+            GEN_NUM_PER_CIRCLE=str(dspark_gamma),
+            # P runs commit-only and does not rank proposals or verify rows.
+            SP_DSPARK_CONFIDENCE_MODE=dspark_confidence if role == "decode" else "off",
+            SP_DSPARK_VERIFY_MODE=dspark_verify_mode if role == "decode" else "dense",
+            SP_DSPARK_VERIFY_BUDGET=(
+                str(dspark_verify_budget) if role == "decode" else "-1"
+            ),
+            SP_DSPARK_VERIFY_BUDGET_MODE=(
+                dspark_budget_mode if role == "decode" else "fixed"
+            ),
+        )
     if bool(prefill_address) != bool(decode_address):
         raise ValueError("both prefill and decode addresses are required")
     if prefill_address:
@@ -175,6 +244,23 @@ def main():
     )
     parser.add_argument("--start-port", type=int)
     parser.add_argument(
+        "--prefill-wait-timeout-ms",
+        type=bounded_prefill_wait_timeout_ms,
+        default=DEFAULT_PREFILL_WAIT_TIMEOUT_MS,
+        help="Prefill queue wait limit in [1, 86400000] ms; default30 minutes",
+    )
+    parser.add_argument("--dspark-gamma", type=int, default=0)
+    parser.add_argument(
+        "--dspark-confidence", choices=("off", "observe", "bounded"), default="off"
+    )
+    parser.add_argument(
+        "--dspark-verify-mode", choices=("dense", "packed"), default="dense"
+    )
+    parser.add_argument("--dspark-verify-budget", type=int, default=-1)
+    parser.add_argument(
+        "--dspark-budget-mode", choices=("fixed", "adaptive"), default="fixed"
+    )
+    parser.add_argument(
         "--ced-mode",
         choices=("off", "exact", "bounded"),
         default="off",
@@ -220,6 +306,12 @@ def main():
         ced_mode=args.ced_mode,
         encoder_swa_replay=args.encoder_swa_replay,
         max_seq_len=args.max_seq_len,
+        prefill_wait_timeout_ms=args.prefill_wait_timeout_ms,
+        dspark_gamma=args.dspark_gamma,
+        dspark_confidence=args.dspark_confidence,
+        dspark_verify_mode=args.dspark_verify_mode,
+        dspark_verify_budget=args.dspark_verify_budget,
+        dspark_budget_mode=args.dspark_budget_mode,
     )
     env = preset_env(args.role, args.checkpoint_path, **options)
     if args.token_map_cache:

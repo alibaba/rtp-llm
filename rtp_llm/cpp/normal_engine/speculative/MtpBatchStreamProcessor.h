@@ -293,7 +293,8 @@ public:
 
     void updateDecodePostDSparkCommitInput(GptModelInputs&      model_input,
                                            const torch::Tensor& target_features,
-                                           size_t               batch_size);
+                                           size_t               batch_size,
+                                           const torch::Tensor& accepted_rows = torch::Tensor());
 
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,

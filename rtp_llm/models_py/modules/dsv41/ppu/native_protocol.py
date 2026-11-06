@@ -22,6 +22,26 @@ def framework_pool_tag(owner, tag, *, geometry, policy):
 
 def native_cache_key_hash_seed(config=None):
     policy = PrefillPolicy.from_config(config)
+    config = config or {}
+    identity = config.get("ppu_model_identity", "target")
+    capture = tuple(config.get("ppu_target_capture_layer_ids") or ())
+    if identity == "dspark-draft" or capture:
+        payload = json.dumps(
+            {
+                "base": NATIVE_CACHE_KEY_HASH_SEED,
+                "policy": [policy.ced, policy.bounded_replay, policy.encoder_replay],
+                "model": identity,
+                "features": list(
+                    capture or config.get("dspark_target_layer_ids") or ()
+                ),
+                "draft_layers": int(config.get("num_nextn_predict_layers", 3)),
+                "layout": "independent-feature-swa-v1",
+            },
+            sort_keys=True,
+        ).encode()
+        return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") & (
+            (1 << 63) - 1
+        )
     if policy.encoder_replay:
         return 0x4453563431504531
     if policy.bounded_replay:
@@ -41,6 +61,7 @@ def native_cache_protocol(config=None):
         "csa_state_elements": 1024,
         "source_layout": "replicated-logical-cp-cache",
         "cache_key_hash_seed": native_cache_key_hash_seed(config),
+        "model_identity": (config or {}).get("ppu_model_identity", "target"),
     }
     if policy.bounded_replay:
         contract["decoder_swa_tag"] = "decoder_swa_kv"

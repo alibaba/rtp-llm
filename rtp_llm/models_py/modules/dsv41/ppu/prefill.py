@@ -94,6 +94,7 @@ class PrefillResult:
     cache: PPUKVCache
     slots: Dict[int, PPURequestSlots]  # request id -> handles
     ced_info: Optional[dict] = None
+    mtp_target_hidden_states: Optional[torch.Tensor] = None
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +698,7 @@ def run_prefill(
     allow_ced: bool = True,
     compact_ced: bool = True,
     replay_prefix_lengths=None,
+    capture_layer_ids=(),
 ) -> PrefillResult:
     """Run the full single-rank prefill over one flat token batch.
 
@@ -725,6 +727,16 @@ def run_prefill(
             on every rank).
     """
     geometry = bundle.geometry
+    capture_layer_ids = tuple(map(int, capture_layer_ids))
+    if len(set(capture_layer_ids)) != len(capture_layer_ids) or any(
+        layer < 0 or layer >= geometry.num_layers for layer in capture_layer_ids
+    ):
+        raise ValueError("target capture layers must be unique valid layer ids")
+    # DSpark consumes real features for every committed prompt row. CED's
+    # scatter-to-original output contains holes before its retained tail.
+    if capture_layer_ids:
+        allow_ced = False
+    captured = {}
     policy = (policy or cache.prefill_policy).validate()
     cp_ctx: Optional[CPPrefillContext] = cp_context_of(parallel_context)
     input_ids = input_ids.reshape(-1)
@@ -959,6 +971,8 @@ def run_prefill(
                 ),
             )
             logging.getLogger(__name__).info("PPU CED compacted %s", ced.info)
+        if layer_id in capture_layer_ids:
+            captured[layer_id] = h.mean(dim=-2)
         layer = bundle.layers[layer_id]
         freqs = bundle.freqs_for(layer_id)
         rope_positions = positions.clamp_max(freqs.shape[0] - 1)
@@ -1180,6 +1194,11 @@ def run_prefill(
     hidden = _rms_norm(step_head.hidden, bundle.final_norm, geometry.norm_eps)
     if cp_ctx is not None:
         hidden = cp_ctx.all_gather_restore(hidden)
+    aux = None
+    if capture_layer_ids:
+        aux = torch.cat([captured[layer] for layer in capture_layer_ids], dim=-1)
+        if cp_ctx is not None:
+            aux = cp_ctx.all_gather_restore(aux)
     if compacted:
         hidden = ced.restore_global(hidden)
     logits = None
@@ -1199,5 +1218,10 @@ def run_prefill(
         }
     )
     return PrefillResult(
-        hidden=hidden, logits=logits, cache=cache, slots=slots, ced_info=info
+        hidden=hidden,
+        logits=logits,
+        cache=cache,
+        slots=slots,
+        ced_info=info,
+        mtp_target_hidden_states=aux,
     )

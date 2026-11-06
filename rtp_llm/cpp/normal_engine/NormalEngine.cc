@@ -300,8 +300,14 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 void NormalEngine::initExecutor(const EngineInitParams&                        params,
                                 std::unique_ptr<ProposeModelEngineInitParams>& propose_params) {
     if (propose_params_) {
-        executor_.reset(new MtpExecutor(
-            params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
+        auto mtp_executor = std::make_unique<MtpExecutor>(
+            params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_);
+        if (ppu_loop_stop_ && parallelism_config.tp_size > 1 && parallelism_config.dp_size == 1) {
+            auto state = ppu_loop_stop_;
+            mtp_executor->setStopControl([state]() { return state->requested.load(); },
+                                         [state]() { state->observed = true; });
+        }
+        executor_ = std::move(mtp_executor);
     } else {
         auto normal_executor = std::make_unique<NormalExecutor>(
             params,

@@ -92,6 +92,10 @@ public:
     }
     GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
     void                       releaseBuffers() override;
+    void                       finishSpeculativeForward(const torch::Tensor& request_ids,
+                                                          const torch::Tensor& prefixes,
+                                                          const torch::Tensor& accepted_rows) override;
+    void                       abortSpeculativeForward() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
     bool                       hasMtpTargetHiddenBuffer() const override;

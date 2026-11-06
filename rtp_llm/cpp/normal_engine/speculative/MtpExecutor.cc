@@ -1670,7 +1670,17 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        model_input.stop_run  = stop_requested_ && stop_requested_();
+        model_input.skip_run  = model_input.skip_run || model_input.stop_run;
         tpSyncModelInputs(model_input, parallelism_config_);
+        // Every CP rank acknowledges the root's ordered input frame before
+        // leaving the engine loop. No model or CacheStore work follows it.
+        if (model_input.stop_run) {
+            if (stop_observed_) {
+                stop_observed_();
+            }
+            return absl::OkStatus();
+        }
         target_only = model_input.skip_lm_head;
         if (model_input.skip_run) {
             return absl::OkStatus();
@@ -2072,6 +2082,28 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input = std::move(model_input_status.value());
         executor_collector.gather_model_input_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
+#if USE_PPU
+    if (is_dspark_) {
+        // D's verify/commit is local continuation, never a new P publication.
+        // request_id below is for transaction identity, not CacheStore work.
+        model_input.pd_separation = false;
+    }
+    struct PpuVerifyAbortGuard {
+        ModelBase* model;
+        ~PpuVerifyAbortGuard() {
+            if (model) {
+                try {
+                    model->abortSpeculativeForward();
+                } catch (const std::exception& error) {
+                    RTP_LLM_LOG_ERROR("PPU speculative abort failed: %s", error.what());
+                } catch (...) {
+                    RTP_LLM_LOG_ERROR("PPU speculative abort failed with unknown exception");
+                }
+            }
+        }
+    } ppu_verify_abort_guard{is_dspark_ ? model_.get() : nullptr};
+    torch::Tensor ppu_verify_position_ids;
+#endif
     const auto engram_anchor_windows = model_input.engram_token_windows;
 
     if (isTpRank0() && shouldSyncDecodeInputOnRank0(alignment_only)) {
@@ -2473,8 +2505,28 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // buffer inside the (possibly graphed) forward; replay does not
             // advance the Python-side row count, so pass the explicit verify
             // geometry.
+#if USE_PPU
+            auto accepted = speculative_sampler_output.accept_len.to(torch::kCPU).to(torch::kInt32).clone();
+            auto emitted = speculative_sampler_output.accept_tokens.to(torch::kCPU).to(torch::kInt32).contiguous();
+            int64_t row = 0;
+            for (const auto& stream : stream_groups.allStreams()) {
+                auto& count = accepted.data_ptr<int32_t>()[row];
+                StreamSpecUpdateInfo update_info{
+                    emitted.narrow(0, row, 1), count, -1, torch::Tensor(), torch::Tensor()};
+                if (row < static_cast<int64_t>(speculative_sampler_output.processor_errors.size())) {
+                    update_info.error_info = speculative_sampler_output.processor_errors[row];
+                }
+                count = stream->previewSpeculativeCommitRows(update_info);
+                ++row;
+            }
+            model_->finishSpeculativeForward(model_input.request_id, model_input.prefix_lengths, accepted);
+            ppu_verify_position_ids = model_input.combo_position_ids;
+            batch_stream_processor_->updateDecodePostDSparkCommitInput(
+                model_input, model_output.all_hidden_states, batch_size, accepted);
+#else
             batch_stream_processor_->updateDecodePostDSparkCommitInput(
                 model_input, model_output.all_hidden_states, batch_size);
+#endif
         } else {
             batch_stream_processor_->updateDecodePostDraftModelInput(
                 model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
@@ -2642,13 +2694,19 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     torch::Tensor next_history;
+    auto dispatch_position_ids = packed_target_layout.packed_to_dense.defined() ?
+                                     packed_target_layout.dense_position_ids : model_input.combo_position_ids;
+#if USE_PPU
+    if (is_dspark_ && !packed_target_layout.packed_to_dense.defined()) {
+        dispatch_position_ids = ppu_verify_position_ids;
+    }
+#endif
     auto          dispatch_result =
         dispatchDecodeOutput(stream_groups,
                              streams,
                              speculative_sampler_output,
                              std::move(target_logprobs),
-                             packed_target_layout.packed_to_dense.defined() ? packed_target_layout.dense_position_ids :
-                                                                              model_input.combo_position_ids,
+                             dispatch_position_ids,
                              model_input.kv_cache_block_id,
                              model_input.kv_cache_kernel_block_id,
                              std::move(draft_prefill_model_output),
@@ -2818,6 +2876,13 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
 }
 
 void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
+#if USE_PPU
+    if (is_dspark_) {
+        // Acceptance compacts commit rows; preparing the full rejected tail
+        // here would retain stale row boundaries in the eager model wrapper.
+        return;
+    }
+#endif
     if (!useAsyncPrepare()) {
         return;
     }
@@ -2848,6 +2913,15 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
                                   model_input.is_fake_stream);
     maybePrintModelInput(model_input, "decode target model");
     model_input.is_target_verify = true;
+#if USE_PPU
+    if (is_dspark_) {
+        std::vector<int64_t> identities;
+        for (const auto& stream : stream_groups.allStreams()) {
+            identities.push_back(stream->streamId());
+        }
+        model_input.request_id = torch::tensor(identities, torch::TensorOptions().dtype(torch::kLong));
+    }
+#endif
     RTP_LLM_LOG_DEBUG(
         "[MTP decode] target model verify forward start, input_lengths_size=%ld, prefix_lengths_size=%ld, seq_lengths_size=%ld",
         model_input.input_lengths.size(0),

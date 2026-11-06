@@ -1,15 +1,20 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <pybind11/embed.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -17,6 +22,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
@@ -39,6 +45,8 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include <ATen/cuda/CUDAContext.h>
 #endif
+
+extern char** environ;
 
 namespace rtp_llm {
 
@@ -1002,6 +1010,69 @@ public:
         executor->setSampler(std::move(fake_sampler));
     }
 
+    void runPrefillStopScenario(bool queued, bool requested, bool expect_observed, int tp_rank = 0, int tp_size = 1) {
+        MtpExecutorTestConfig test_config;
+        test_config.role_type            = RoleType::PREFILL;
+        test_config.sp_type              = SP_TYPE_DSPARK;
+        test_config.dspark_mask_token_id = 0;
+        auto  components                 = createMtpExecutorComponents(test_config);
+        auto* target                     = components.fake_target_model.get();
+        auto* draft                      = components.fake_draft_model.get();
+        auto* commit                     = components.fake_draft_prefill_model.get();
+        auto* draft_sampler              = components.fake_fast_topk_sampler.get();
+        auto* speculative_sampler        = components.fake_speculative_sampler.get();
+        auto* target_sampler             = components.fake_sampler.get();
+        auto  publication_events         = std::make_shared<std::vector<std::string>>();
+        target->setEventLog(publication_events, "target");
+        draft->setEventLog(publication_events, "draft");
+        commit->setEventLog(publication_events, "commit");
+        setupFakeModels(components.executor.get(),
+                        std::move(components.fake_target_model),
+                        std::move(components.fake_draft_model),
+                        std::move(components.fake_fast_topk_sampler),
+                        std::move(components.fake_speculative_sampler),
+                        std::move(components.fake_sampler),
+                        std::move(components.fake_draft_prefill_model));
+        auto& executor                          = *components.executor;
+        executor.tp_rank_                       = tp_rank;
+        executor.parallelism_config_.tp_rank    = tp_rank;
+        executor.parallelism_config_.tp_size    = tp_size;
+        executor.parallelism_config_.dp_size    = 1;
+        executor.parallelism_config_.world_size = tp_size;
+        int request_checks = 0, acknowledgments = 0, publication_reductions = 0;
+        executor.setStopControl(
+            [&]() {
+                ++request_checks;
+                return requested;
+            },
+            [&]() { ++acknowledgments; });
+        executor.dspark_cache_store_status_reducer_for_test_ = [&](bool local_ok) {
+            ++publication_reductions;
+            return local_ok;
+        };
+        std::list<GenerateStreamPtr> streams;
+        if (queued && tp_rank == 0) {
+            streams.push_back(createContextStream(
+                components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3}));
+        }
+        const auto status = executor.process(streams);
+        ASSERT_TRUE(status.ok()) << status.ToString();
+        EXPECT_EQ(request_checks, 1);
+        EXPECT_EQ(acknowledgments, expect_observed ? 1 : 0);
+        EXPECT_EQ(target->forwardCount(), 0);
+        EXPECT_EQ(draft->forwardCount(), 0);
+        EXPECT_EQ(commit->forwardCount(), 0);
+        EXPECT_EQ(draft_sampler->forwardCount(), 0);
+        EXPECT_EQ(speculative_sampler->forwardCount(), 0);
+        EXPECT_EQ(target_sampler->forwardCount(), 0);
+        EXPECT_TRUE(publication_events->empty());
+        EXPECT_EQ(publication_reductions, 0);
+        for (const auto& stream : streams) {
+            EXPECT_FALSE(stream->hasError());
+            EXPECT_EQ((std::vector<int>{0, 1, 2, 3}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
+        }
+    }
+
     void runTargetOnlyPrefillScenario(RoleType                   role_type,
                                       bool                       enable_ffn_disaggregate,
                                       bool                       simulate_multi_dp,
@@ -1236,6 +1307,94 @@ public:
         return output;
     }
 };
+
+TEST_F(MtpExecutorTest, testPpuPrefillStopAcknowledgesEmptyBatch) {
+    runPrefillStopScenario(/*queued=*/false, /*requested=*/true, /*expect_observed=*/true);
+}
+
+TEST_F(MtpExecutorTest, testPpuPrefillStopSkipsQueuedModelAndPublicationWork) {
+    runPrefillStopScenario(/*queued=*/true, /*requested=*/true, /*expect_observed=*/true);
+}
+
+TEST_F(MtpExecutorTest, testPpuPrefillStopDoesNotAcknowledgeUnrequestedIdleStep) {
+    runPrefillStopScenario(/*queued=*/false, /*requested=*/false, /*expect_observed=*/false);
+}
+
+// The child exercises the actual executor -> TP input frame -> acknowledgment
+// path. Its follower never requests a stop locally. Model numerics and CP8
+// teardown remain separate native-role gates.
+TEST_F(MtpExecutorTest, DISABLED_testPpuPrefillStopTpRank) {
+    const auto rank_env = std::getenv("RTP_V41_MTP_STOP_TEST_RANK");
+    const auto base_env = std::getenv("RTP_V41_MTP_STOP_TEST_BASE");
+    ASSERT_NE(rank_env, nullptr);
+    ASSERT_NE(base_env, nullptr);
+    ::alarm(90);
+    const int rank        = std::atoi(rank_env);
+    auto&     broadcaster = CpuTpBroadcaster::instance();
+    broadcaster.initialize(rank, 2, base_env);
+    runPrefillStopScenario(false, false, false, rank, 2);
+    runPrefillStopScenario(false, rank == 0, true, rank, 2);
+    runPrefillStopScenario(true, rank == 0, true, rank, 2);
+    broadcaster.reset();
+    ::alarm(0);
+}
+
+TEST(MtpExecutorStopTpTest, RootStopFrameIsAcknowledgedByBothExecutorRanks) {
+    const auto        tmpdir  = std::getenv("TMPDIR");
+    std::string       pattern = std::string(tmpdir ? tmpdir : "/tmp") + "/mtp_stop.XXXXXX";
+    std::vector<char> directory(pattern.begin(), pattern.end());
+    directory.push_back('\0');
+    ASSERT_NE(::mkdtemp(directory.data()), nullptr);
+    const std::string  base = std::string(directory.data()) + "/b";
+    std::vector<pid_t> children;
+    for (int rank = 0; rank < 2; ++rank) {
+        std::vector<std::string> env_strings;
+        for (char** entry = environ; *entry != nullptr; ++entry) {
+            const std::string value(*entry);
+            if (value.rfind("GTEST_", 0) != 0 && value.rfind("RTP_V41_MTP_STOP_TEST_", 0) != 0) {
+                env_strings.push_back(value);
+            }
+        }
+        env_strings.push_back("RTP_V41_MTP_STOP_TEST_RANK=" + std::to_string(rank));
+        env_strings.push_back("RTP_V41_MTP_STOP_TEST_BASE=" + base);
+        std::vector<char*> child_env;
+        for (auto& value : env_strings) {
+            child_env.push_back(value.data());
+        }
+        child_env.push_back(nullptr);
+        std::vector<std::string> args = {"/proc/self/exe",
+                                         "--gtest_filter=MtpExecutorTest.DISABLED_testPpuPrefillStopTpRank",
+                                         "--gtest_also_run_disabled_tests",
+                                         "--gtest_output="};
+        std::vector<char*>       child_args;
+        for (auto& arg : args) {
+            child_args.push_back(arg.data());
+        }
+        child_args.push_back(nullptr);
+        pid_t     pid    = -1;
+        const int result = ::posix_spawn(&pid, "/proc/self/exe", nullptr, nullptr, child_args.data(), child_env.data());
+        EXPECT_EQ(result, 0);
+        if (result == 0) {
+            children.push_back(pid);
+        }
+    }
+    for (const auto pid : children) {
+        int   status = 0;
+        pid_t waited;
+        do {
+            waited = ::waitpid(pid, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        EXPECT_EQ(waited, pid);
+        if (waited == pid) {
+            EXPECT_TRUE(WIFEXITED(status)) << "MTP stop TP child failed: " << status;
+            if (WIFEXITED(status)) {
+                EXPECT_EQ(WEXITSTATUS(status), 0);
+            }
+        }
+    }
+    ::unlink((base + "_0.sock").c_str());
+    ::rmdir(directory.data());
+}
 
 class MtpCacheStrideTest: public MtpExecutorTest, public ::testing::WithParamInterface<int> {};
 

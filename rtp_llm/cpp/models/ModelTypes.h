@@ -209,6 +209,13 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    // Eager backends may keep speculative cache writes private until acceptance.
+    // accepted_rows counts verified INPUT rows (anchor + accepted drafts),
+    // excluding the newly sampled bonus whose target features do not exist yet.
+    virtual void finishSpeculativeForward(const torch::Tensor& request_ids,
+                                           const torch::Tensor& prefixes,
+                                           const torch::Tensor& accepted_rows) {}
+    virtual void abortSpeculativeForward() {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         return std::nullopt;
     }

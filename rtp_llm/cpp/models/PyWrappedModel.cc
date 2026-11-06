@@ -192,6 +192,22 @@ torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     return result.is_none() ? torch::Tensor() : result.cast<torch::Tensor>();
 }
 
+void PyWrappedModel::finishSpeculativeForward(const torch::Tensor& request_ids,
+                                              const torch::Tensor& prefixes,
+                                              const torch::Tensor& accepted_rows) {
+    py::gil_scoped_acquire gil;
+    if (py_model_ && py::hasattr(py_model_, "finish_speculative_forward")) {
+        py_model_.attr("finish_speculative_forward")(request_ids, prefixes, accepted_rows);
+    }
+}
+
+void PyWrappedModel::abortSpeculativeForward() {
+    py::gil_scoped_acquire gil;
+    if (py_model_ && py::hasattr(py_model_, "abort_speculative_forward")) {
+        py_model_.attr("abort_speculative_forward")();
+    }
+}
+
 torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
     if (!py_model_) {
         return torch::Tensor();
@@ -1227,6 +1243,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                               bert_embedding_inputs});
 
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
+        py_model_inputs.request_id            = inputs.request_id;
         py_model_inputs.is_fake_stream         = inputs.is_fake_stream;
         py_model_inputs.warmup                 = inputs.warmup;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;

@@ -266,6 +266,7 @@ void registerPyOpDefs(pybind11::module& m) {
                        "CP-local host history retained only for normal prefill")
         .def_readwrite("expert_token_counts", &PyModelInputs::expert_token_counts)
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
+        .def_readwrite("request_id", &PyModelInputs::request_id, "Optional scheduler identities for speculative state")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")
         .def_readwrite("embedding_inputs", &PyModelInputs::embedding_inputs, "Embedding inputs structure")
