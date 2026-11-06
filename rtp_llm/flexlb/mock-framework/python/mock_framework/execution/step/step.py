@@ -1,9 +1,11 @@
 """Bound Case steps and the common execution lifecycle."""
-from abc import ABC, abstractmethod
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 import time
-from typing import Any, ClassVar
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .step_registry import StepDefinition
 
 from ...config.validation import duration, validate
 from .. import ExecutionError
@@ -38,8 +40,8 @@ class Expect:
 
 
 @dataclass(frozen=True)
-class Step(ABC):
-    definition: ClassVar
+class Step:
+    action: InitVar['StepDefinition'] = field(kw_only=True)
     id: str
     describe: str
     interface: str
@@ -49,10 +51,13 @@ class Step(ABC):
     wait_after: str = '0s'
     background: bool = False
 
-    @staticmethod
-    @abstractmethod
-    async def execute(context, arguments):
-        """Implement the action for one set of validated arguments."""
+    def __post_init__(self, action):
+        # The bound callable is runtime wiring, not part of the saved Case configuration.
+        object.__setattr__(self, '_definition', action)
+
+    @property
+    def definition(self) -> 'StepDefinition':
+        return self._definition
 
     async def run(self, context):
         with context.records.step(context.phase_id, self.id, self.interface):

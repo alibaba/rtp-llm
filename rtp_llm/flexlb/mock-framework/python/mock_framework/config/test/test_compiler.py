@@ -4,10 +4,10 @@ from pathlib import Path
 from typing import Annotated
 import pytest
 from mock_framework.config import ConfigError, compile_case
-from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.execution.step.step import Step
 from mock_framework.execution.step.step import Reference
-from mock_framework.execution.step.registry import register_step, Bounds
+from mock_framework.execution.step.step_registry import register_step, Bounds
 from mock_framework.config.compiler import expand_config
 
 
@@ -74,14 +74,12 @@ class ExtensionArgs:
 
 
 @register_step('extension/queue', effect='read')
-class queue(Step):
-    @staticmethod
-    async def execute(ctx, args: ExtensionArgs) -> int:
-        return args.threshold
+async def queue(ctx, args: ExtensionArgs) -> int:
+    return args.threshold
 
 
 def test_function_registration_defines_contract_without_compiler_changes(case_data, compile_data):
-    registry = Registry((queue,))
+    registry = StepRegistry((queue,))
     case_data['phases'][0]['steps'] = [{'id': 'extension', 'describe': 'Python extension',
         'interface': 'extension/queue', 'args': {'threshold': 4}, 'expect': {'lte': 8}}]
     assert compile_data(case_data, interfaces=registry).phases[0].steps[0].args == {'threshold': 4}
@@ -163,7 +161,7 @@ def test_component_config_file_rejects_missing_empty_or_remote_paths(path, case_
 
 def test_nullable_reference_preserves_both_possible_types():
     from mock_framework.config.validation import compatible
-    from mock_framework.execution.step.registry import schema
+    from mock_framework.execution.step.step_registry import schema
     assert compatible(schema(list[str] | None), schema(list[str] | None))
     assert not compatible(schema(list[str] | None), schema(list[str]))
 
@@ -171,11 +169,9 @@ def test_nullable_reference_preserves_both_possible_types():
 def test_typed_records_inside_result_collections_remain_referenceable_values():
     import asyncio
     @register_step('extension/records', effect='read')
-    class records(Step):
-        @staticmethod
-        async def execute(ctx, args: ExtensionArgs) -> dict[str, list[ExtensionArgs]]:
-            return {'records': [args]}
-    registry = Registry((records,))
+    async def records(ctx, args: ExtensionArgs) -> dict[str, list[ExtensionArgs]]:
+        return {'records': [args]}
+    registry = StepRegistry((records,))
     assert asyncio.run(registry.get('extension/records').invoke(None, {'threshold': 4})) == {'records': [{'threshold': 4}]}
 
 
@@ -214,12 +210,10 @@ def test_nested_references_keep_static_sibling_constraints_and_error_paths(case_
         targets: list[str] | None = None
 
     @register_step('extension/nested', effect='read')
-    class nested(Step):
-        @staticmethod
-        async def execute(ctx, args: NestedArgs) -> int:
-            return len(args.items)
+    async def nested(ctx, args: NestedArgs) -> int:
+        return len(args.items)
 
-    registry = Registry((queue, nested))
+    registry = StepRegistry((queue, nested))
     steps = [
         {'id': 'source', 'describe': 'value', 'interface': 'extension/queue', 'args': {'threshold': 4}},
         {'id': 'nested', 'describe': 'nested refs', 'interface': 'extension/nested',
@@ -247,11 +241,50 @@ def test_union_preserves_nested_constructor_failure():
         item: Positive | None
 
     @register_step('extension/choice', effect='read')
-    class choice(Step):
-        @staticmethod
-        async def execute(ctx, args: Choice) -> int:
-            return 1
+    async def choice(ctx, args: Choice) -> int:
+        return 1
 
-    interface = Registry((choice,)).get('extension/choice')
+    interface = StepRegistry((choice,)).get('extension/choice')
     with pytest.raises(ConfigError, match=r'extension/choice\.args\.item: value must be positive'):
         interface.arguments({'item': {'value': 0}})
+
+
+def test_registered_actions_are_functions_and_compiled_steps_share_only_the_definition(case_data, compile_data):
+    from inspect import iscoroutinefunction
+    from mock_framework.execution.step.step_registry import StepDefinition
+    registry = StepRegistry((queue,))
+    definition = registry.get('extension/queue')
+    assert isinstance(definition, StepDefinition)
+    assert definition.handler is queue and iscoroutinefunction(queue)
+    case_data['phases'][0]['steps'] = [
+        {'id': 'one', 'describe': 'first call', 'interface': 'extension/queue', 'args': {'threshold': 1}},
+        {'id': 'two', 'describe': 'second call', 'interface': 'extension/queue', 'args': {'threshold': 2}}]
+    first, second = compile_data(case_data, interfaces=registry).phases[0].steps
+    assert type(first) is Step and type(second) is Step
+    assert first.definition is second.definition is definition
+    assert first.args == {'threshold': 1} and second.args == {'threshold': 2}
+    from dataclasses import asdict
+    assert set(asdict(first)) == {'id', 'describe', 'interface', 'args', 'expect', 'within', 'wait_after', 'background'}
+    assert 'handler' not in asdict(first) and 'definition' not in asdict(first)
+
+
+def test_action_registration_rejects_classes_sync_functions_and_wrong_signatures():
+    class LegacyAction:
+        @staticmethod
+        async def execute(ctx, args: ExtensionArgs) -> int:
+            return args.threshold
+
+    def synchronous(ctx, args: ExtensionArgs) -> int:
+        return args.threshold
+
+    async def missing_types(ctx, args):
+        return 1
+
+    async def keyword_only(ctx, *, args: ExtensionArgs) -> int:
+        return args.threshold
+
+    for invalid in (LegacyAction, synchronous, missing_types, keyword_only):
+        with pytest.raises(ConfigError):
+            register_step('extension/invalid', effect='read')(invalid)
+    with pytest.raises(ConfigError):
+        StepRegistry((synchronous,))

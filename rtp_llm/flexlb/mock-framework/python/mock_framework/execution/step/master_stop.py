@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Literal
-from .registry import register_step
-from .step import Step, StepContext
+from .step_registry import register_step
+from .step import StepContext
 from ._targets import Targets
 
 
@@ -11,8 +11,6 @@ class Stop(Targets):
 
 
 @register_step('master/stop', effect='write')
-class MasterStop(Step):
-    @staticmethod
-    async def execute(ctx: StepContext, args: Stop) -> list[str]:
-        """Stop selected Master JVMs, or all active Masters when targets is omitted."""
-        return await ctx.runtime.masters.stop(args.targets, args.mode)
+async def master_stop(ctx: StepContext, args: Stop) -> list[str]:
+    """Stop selected Master JVMs, or all active Masters when targets is omitted."""
+    return await ctx.runtime.masters.stop(args.targets, args.mode)

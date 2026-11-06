@@ -30,7 +30,7 @@ def write_json(path, value):
 _step_identity = ContextVar('step_identity', default=None)
 
 
-class RunTrace:
+class StepTrace:
     def __init__(self, directory, case, launch):
         self.run_id = uuid4().hex
         self._seq = 0

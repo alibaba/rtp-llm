@@ -1,11 +1,11 @@
 from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
 from mock_framework.execution.test.helpers import FRAMEWORK
-from mock_framework.execution.step.client_qps import ClientQps
+from mock_framework.execution.step.client_qps import client_qps
 import asyncio
 from types import SimpleNamespace
 from pathlib import Path
 import pytest
-from mock_framework.execution.step.registry import Registry
+from mock_framework.execution.step.step_registry import StepRegistry
 from mock_framework.config import ConfigError
 from mock_framework.execution.step import _metrics as metrics
 from mock_framework.execution import ExecutionError
@@ -39,14 +39,14 @@ def test_start_only_calls_client_zero_and_does_not_multiply_total_rate(monkeypat
         calls.append((url, body)); return {'accepted': True}
     monkeypatch.setattr(client_runtime, 'post', post)
     ctx = context()
-    assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, args())) is True
+    assert asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, args())) is True
     assert len(calls) == 1 and calls[0][0] == 'http://c:1'
     assert calls[0][1]['args']['qps'] == 10
     assert calls[0][1]['args']['concurrency'] == 2
     assert calls[0][1]['args']['masters'] == ['master:1']
     assert 'master' not in calls[0][1]['args'] and ctx.runtime.clients.pending
     with pytest.raises(ExecutionError, match='previous'):
-        asyncio.run(Registry.standard().get('client/start').invoke(ctx, args()))
+        asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, args()))
 
 
 def test_unknown_start_response_is_still_cleaned_up(monkeypatch):
@@ -55,7 +55,7 @@ def test_unknown_start_response_is_still_cleaned_up(monkeypatch):
     monkeypatch.setattr(client_runtime, 'post', post)
     ctx = context()
     with pytest.raises(OSError):
-        asyncio.run(Registry.standard().get('client/start').invoke(ctx, args()))
+        asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, args()))
     assert ctx.runtime.clients.pending
 
 
@@ -70,7 +70,7 @@ def test_stop_collects_all_original_clients_without_task_id(monkeypatch, tmp_pat
         return {'clients': {'http://c:1': state(), 'http://c:2': state()}, 'errors': []}
     monkeypatch.setattr(client_runtime, 'post', post)
     ctx = context(); ctx.runtime.clients.pending = True; ctx.records.directory = tmp_path
-    result = asyncio.run(Registry.standard().get('client/stop').invoke(ctx, {}))
+    result = asyncio.run(StepRegistry.standard().get('client/stop').invoke(ctx, {}))
     assert set(result) == {'c:1', 'c:2'} and not ctx.runtime.clients.pending
     assert calls[0]['args'] == {} and ctx.events[0]['event'] == 'client_result'
 
@@ -85,14 +85,14 @@ def test_stop_does_not_hide_missing_workers_or_execution_errors(monkeypatch, bad
     async def post(*a): return value
     monkeypatch.setattr(client_runtime, 'post', post)
     with pytest.raises(ExecutionError):
-        asyncio.run(Registry.standard().get('client/stop').invoke(context(), {}))
+        asyncio.run(StepRegistry.standard().get('client/stop').invoke(context(), {}))
 
 
 @pytest.mark.parametrize('changes', [{'qps': 0}, {'qps': float('inf')}, {'masters': []}, {'masters': ['a', 'a']},
                                       {'queue_capacity': 0}, {'request_timeout': '0s'}, {'requests_file': ''}, {'requests_file': None}])
 def test_invalid_plans_fail_at_python_boundary(changes):
     with pytest.raises(ConfigError):
-        Registry.standard().get('client/start').arguments(args() | changes)
+        StepRegistry.standard().get('client/start').arguments(args() | changes)
 
 
 def test_qps_reuses_metric_aggregation_and_measures_issued_not_finished(monkeypatch):
@@ -100,7 +100,7 @@ def test_qps_reuses_metric_aggregation_and_measures_issued_not_finished(monkeypa
         assert role == 'client' and numerator == 'mock_client_requests_issued_total'
         return 123.0
     monkeypatch.setattr(metrics, 'metric', metric)
-    assert asyncio.run(ClientQps.execute(context(), metrics.MetricArgs())) == 123.0
+    assert asyncio.run(client_qps(context(), metrics.MetricArgs())) == 123.0
 
 
 @pytest.mark.parametrize('replicas,large_input', [(2, False), (1, True), (2, True)], ids=['small-two', 'large-one', 'large-two'])
@@ -147,7 +147,7 @@ def test_client_playback_through_real_master(tmp_path, replicas, large_input):
     data['phases'][0]['steps'].append({'id': 'records', 'describe': 'Read sealed Client evidence',
         'interface': 'client/requests', 'args': {'limit': 2}})
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(data))
-    registry = Registry.standard(); case = compile_case(path, registry)
+    registry = StepRegistry.standard(); case = compile_case(path, registry)
     components = {'master': {'command': [java, '-XX:ActiveProcessorCount=2', '-cp', master_classpath, 'org.flexlb.MasterNode'], 'startup_timeout': '60s'},
                   'client': {'command': [java, '-jar', str(root / 'java/client/target/mock-client-1.0-SNAPSHOT-all.jar')]}}
     for role in ('prefill', 'decode'):
@@ -241,7 +241,7 @@ def test_master_selection_is_forwarded_without_freezing_default_discovery(monkey
     ctx.nodes.append({'id': 'master-1', 'role': 'master', 'rpc': 'master:2'})
     values = args(); values.pop('masters')
     if selection is not None: values['masters'] = selection
-    assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, values))
+    assert asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, values))
     assert calls[0].get('masters') == selection
     if selection is None: assert 'masters' not in calls[0]
 
@@ -251,7 +251,7 @@ def test_unknown_master_selection_is_rejected_before_start(monkeypatch):
     monkeypatch.setattr(client_runtime, 'post', post)
     ctx = context()
     with pytest.raises(ExecutionError, match='Unknown Master'):
-        asyncio.run(Registry.standard().get('client/start').invoke(ctx, args() | {'masters': ['master:1', 'missing:2']}))
+        asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, args() | {'masters': ['master:1', 'missing:2']}))
     assert not ctx.runtime.clients.pending
 
 
@@ -263,25 +263,25 @@ def test_file_input_resolves_against_case_and_only_sends_metadata(tmp_path, monk
     async def post(url, body): calls.append(body['args']); return {'accepted': True}
     monkeypatch.setattr(client_runtime, 'post', post)
     value = args(); value['requests_file'] = source.name
-    assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, value))
+    assert asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, value))
     assert calls[0]['requests_file'] == str(source) and 'requests' not in calls[0]
 
 
 @pytest.mark.parametrize('source', ['', 'https://example.com/data', None])
 def test_missing_or_invalid_input_source_fails_contract(source):
     value = args(); value['requests_file'] = source
-    with pytest.raises(ConfigError): Registry.standard().get('client/start').arguments(value)
+    with pytest.raises(ConfigError): StepRegistry.standard().get('client/start').arguments(value)
 
 
 def test_removed_inline_input_is_rejected():
-    with pytest.raises(ConfigError): Registry.standard().get('client/start').arguments(args() | {'requests': [{'token_ids': [1], 'max_new_tokens': 2}]})
+    with pytest.raises(ConfigError): StepRegistry.standard().get('client/start').arguments(args() | {'requests': [{'token_ids': [1], 'max_new_tokens': 2}]})
 
 
 def test_non_file_source_is_rejected_before_marking_client_pending(tmp_path):
     ctx = context(); ctx.runtime.case = SimpleNamespace(directory=tmp_path)
     value = args(); value['requests_file'] = str(tmp_path)
     with pytest.raises(ExecutionError, match='regular file'):
-        asyncio.run(Registry.standard().get('client/start').invoke(ctx, value))
+        asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, value))
     assert not ctx.runtime.clients.pending
 
 
@@ -293,7 +293,7 @@ def test_replay_speed_replaces_qps_and_is_forwarded_without_timestamp_conversion
         return True
     monkeypatch.setattr(ctx.runtime.clients, 'start_playback', start)
     values = args(); values.pop('qps'); values['replay_speed'] = 5
-    assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, values))
+    assert asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, values))
     assert calls[0]['replay_speed'] == 5 and 'qps' not in calls[0]
 
 
@@ -302,7 +302,7 @@ def test_replay_speed_replaces_qps_and_is_forwarded_without_timestamp_conversion
 def test_playback_requires_exactly_one_finite_positive_rate(rate):
     values = args(); values.pop('qps'); values.update(rate)
     with pytest.raises(ConfigError):
-        Registry.standard().get('client/start').arguments(values)
+        StepRegistry.standard().get('client/start').arguments(values)
 
 
 def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tmp_path):
@@ -317,4 +317,4 @@ def test_shared_requests_resolve_independently_of_case_directory(monkeypatch, tm
         return True
     monkeypatch.setattr(ctx.runtime.clients, 'start_playback', start)
     values = args() | {'requests_file': 'data/traffic/example.binpb.zst'}
-    assert asyncio.run(Registry.standard().get('client/start').invoke(ctx, values))
+    assert asyncio.run(StepRegistry.standard().get('client/start').invoke(ctx, values))

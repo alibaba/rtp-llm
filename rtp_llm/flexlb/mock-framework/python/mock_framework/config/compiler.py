@@ -8,7 +8,7 @@ import re
 
 from ..execution.step.step import Expect, Reference, Step
 from .yaml_loader import load_yaml
-from ..execution.step.registry import Registry
+from ..execution.step.step_registry import StepRegistry
 from .validation import ConfigError, compatible, duration, fields, number, text, validate
 
 @dataclass(frozen=True)
@@ -143,7 +143,7 @@ def _compile_step(raw, registry, ids, previous):
     if result_type.get('variants') == [{'type': 'number'}, {'type': 'array', 'items': {'type': 'number'}}]:
         result_type = result_type['variants'][1 if args.get('mode', 'interval') == 'series' else 0]
     previous[step_id] = None if background else result_type
-    return interface.step_type(step_id, description, interface.name, args, expect, within, wait_after, background)
+    return Step(step_id, description, interface.name, args, expect, within, wait_after, background, action=interface)
 
 
 def _compile_phase(raw, registry, ids, previous):
@@ -160,12 +160,12 @@ def _compile_phase(raw, registry, ids, previous):
     return Phase(phase_id, description, raw['timeout'], tuple(steps))
 
 
-def compile_case(path: str | Path, registry: Registry | None = None, *, shared_root=None) -> CompiledCase:
+def compile_case(path: str | Path, registry: StepRegistry | None = None, *, shared_root=None) -> CompiledCase:
     path = Path(path).resolve()
     raw = load_yaml(path)
     fields(raw, {'id', 'name', 'describe', 'environment', 'phases', 'view'},
            {'id', 'describe', 'environment', 'phases'}, where='case')
-    registry = registry or Registry.standard()
+    registry = registry or StepRegistry.standard()
     ids = {'globals', 'steps'}
     previous = {}
     case_id = _identity(raw['id'], ids)

@@ -1,10 +1,8 @@
 """Register typed Python Case steps and validate their arguments and results."""
-from .step import Step
-
 from dataclasses import MISSING, asdict, dataclass, fields as data_fields, is_dataclass
 from inspect import iscoroutinefunction, signature
 from types import UnionType
-from typing import Annotated, Literal, Union, get_args, get_origin, get_type_hints
+from typing import Annotated, Awaitable, Callable, Literal, Union, get_args, get_origin, get_type_hints
 
 from ...config.validation import ConfigError, validate
 
@@ -104,18 +102,18 @@ def _result_value(value):
 
 
 @dataclass(frozen=True)
-class Interface:
+class StepDefinition:
     name: str
     effect: str
     unit: str
-    step_type: type[Step]
+    handler: Callable[..., Awaitable[object]]
     argument_type: object
     args: dict
     returns: dict
 
     def describe(self):
         return {'effect': self.effect, 'unit': self.unit, 'args': self.args, 'returns': self.returns,
-                'description': self.step_type.execute.__doc__ or ''}
+                'description': self.handler.__doc__ or ''}
 
     def arguments(self, value):
         where = self.name + '.args'
@@ -124,7 +122,7 @@ class Interface:
 
     async def call(self, context, arguments):
         """Execute arguments already prepared by the Runner; validate the returned value."""
-        result = await self.step_type.execute(context, arguments)
+        result = await self.handler(context, arguments)
         result = _result_value(result)
         validate(result, self.returns, self.name + '.result')
         return result
@@ -135,39 +133,37 @@ class Interface:
 
 
 def register_step(name, *, effect, unit=''):
-    def decorate(step_type):
-        if not isinstance(step_type, type) or not issubclass(step_type, Step):
-            raise ConfigError('Case actions must inherit Step')
-        function = step_type.execute
-        if effect not in ('read', 'write') or not name or not iscoroutinefunction(function) or step_type.__abstractmethods__:
-            raise ConfigError('Case steps need a name, read/write effect and async execute method')
-        parameters = list(signature(function).parameters.values())
-        hints = get_type_hints(function, include_extras=True)
-        if len(parameters) != 2 or parameters[1].name not in hints or 'return' not in hints:
-            raise ConfigError('Interface signature must be (context, typed_args) -> typed_result')
+    def decorate(handler):
+        if effect not in ('read', 'write') or not isinstance(name, str) or not name or not iscoroutinefunction(handler):
+            raise ConfigError('Case actions need a name, read/write effect and an async function')
+        parameters = list(signature(handler).parameters.values())
+        hints = get_type_hints(handler, include_extras=True)
+        if (len(parameters) != 2 or any(p.kind not in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) for p in parameters)
+                or parameters[1].name not in hints or 'return' not in hints):
+            raise ConfigError('Step action signature must be (context, typed_args) -> typed_result')
         argument_type = hints[parameters[1].name]
-        if not is_dataclass(argument_type):
-            raise ConfigError('Interface arguments must be a dataclass')
-        step_type.definition = Interface(
-            name=name, effect=effect, unit=unit, step_type=step_type, argument_type=argument_type,
+        if not isinstance(argument_type, type) or not is_dataclass(argument_type):
+            raise ConfigError('Step action arguments must be a dataclass type')
+        handler.definition = StepDefinition(
+            name=name, effect=effect, unit=unit, handler=handler, argument_type=argument_type,
             args=schema(argument_type), returns=schema(hints['return']))
-        return step_type
+        return handler
     return decorate
 
 
-class Registry:
+class StepRegistry:
     def __init__(self, steps=()):
-        self._interfaces = {}
+        self._definitions = {}
         for step in steps:
             self.register(step)
 
     def register(self, step):
         definition = getattr(step, 'definition', None)
-        if definition is None:
-            raise ConfigError('Missing interface decorator')
-        if definition.name in self._interfaces:
+        if not isinstance(definition, StepDefinition) or definition.handler is not step:
+            raise ConfigError('Missing step action decorator')
+        if definition.name in self._definitions:
             raise ConfigError(f'duplicate interface name: {definition.name}')
-        self._interfaces[definition.name] = definition
+        self._definitions[definition.name] = definition
 
     @classmethod
     def standard(cls):
@@ -176,10 +172,10 @@ class Registry:
 
     @property
     def interfaces(self):
-        return {name: item.describe() for name, item in self._interfaces.items()}
+        return {name: item.describe() for name, item in self._definitions.items()}
 
     def get(self, name):
         try:
-            return self._interfaces[name]
+            return self._definitions[name]
         except (KeyError, TypeError) as error:
             raise ConfigError(f'Unknown or unimplemented Case interface: {name!r}') from error

@@ -7,7 +7,7 @@ from .roles.zookeeper import ZooKeeperRole
 from .processes import ProcessSupervisor
 import copy
 
-from .run_trace import write_json
+from .step_trace import write_json
 from . import ExecutionError
 
 

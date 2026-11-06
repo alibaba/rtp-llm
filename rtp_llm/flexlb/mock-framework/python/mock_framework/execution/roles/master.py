@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from ...config.validation import ConfigError, text
 
 from ..processes import launch_component
-from ..run_trace import write_json
+from ..step_trace import write_json
 from .. import ExecutionError
 from ..transport import post
 

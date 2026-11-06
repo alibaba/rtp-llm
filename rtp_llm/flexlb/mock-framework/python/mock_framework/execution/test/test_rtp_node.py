@@ -1,5 +1,4 @@
 from mock_framework.execution.test.helpers import FRAMEWORK
-from mock_framework.execution.step.step import Step
 import asyncio
 from dataclasses import dataclass
 import json
@@ -9,8 +8,8 @@ import subprocess
 import urllib.request
 
 from mock_framework.config import compile_case
-from mock_framework.execution.step.registry import Registry
-from mock_framework.execution.step.registry import register_step
+from mock_framework.execution.step.step_registry import StepRegistry
+from mock_framework.execution.step.step_registry import register_step
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 
@@ -23,10 +22,8 @@ class ProbeArgs:
 
 
 @register_step('probe/addresses', effect='read')
-class addresses(Step):
-    @staticmethod
-    async def execute(ctx, args: ProbeArgs) -> list[str]:
-        return ctx.globals()['prefill']
+async def addresses(ctx, args: ProbeArgs) -> list[str]:
+    return ctx.globals()['prefill']
 
 
 def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(tmp_path):
@@ -44,7 +41,7 @@ def test_runner_starts_isolated_packaged_rtp_nodes_and_native_client_reads_them(
                         'steps': [{'id': 'addresses', 'describe': '检查发现地址后保留节点供测试客户端读取',
                                    'interface': 'probe/addresses', 'expect': {'count': 1}, 'wait_after': '8s'}]}]}
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(data, allow_unicode=True))
-    registry = Registry.standard(); registry.register(addresses)
+    registry = StepRegistry.standard(); registry.register(addresses)
     case = compile_case(path, registry)
     launch = prepare_launch({'components': {role: {'command': [str(java), '-cp', str(jar), 'org.flexlb.mock.engine.EngineMain'], 'startup_timeout': '10s'}
                                             for role in ('prefill', 'decode')}}, case, tmp_path)

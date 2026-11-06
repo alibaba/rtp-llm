@@ -12,8 +12,8 @@ from urllib.request import Request, urlopen
 import pytest
 
 from mock_framework.config import compile_case
-from mock_framework.execution.step.registry import Registry
-from mock_framework.execution.run_trace import RunTrace
+from mock_framework.execution.step.step_registry import StepRegistry
+from mock_framework.execution.step_trace import StepTrace
 from mock_framework.view.service import handler, serve
 from mock_framework.view.grafana import dashboard, provision
 from mock_framework.view.records import experiment, gate_text
@@ -87,30 +87,30 @@ def test_running_output_is_rejected(completed):
 
 
 def test_case_without_view_saves_framework_default_dashboard(tmp_path):
-    case = compile_case(ROOT / 'cases/master_ha_failover/case.yaml', Registry.standard())
+    case = compile_case(ROOT / 'cases/master_ha_failover/case.yaml', StepRegistry.standard())
     assert case.view == ROOT / 'views/default.json'
-    records = RunTrace(tmp_path / 'result', case, {})
+    records = StepTrace(tmp_path / 'result', case, {})
     records.close({'status': 'PASS'})
     assert json.loads((records.directory / 'view.json').read_text()) == json.loads(case.view.read_text())
 
 
 def test_case_saves_its_view_without_retaining_a_dependency_on_source(tmp_path):
-    case = compile_case(ROOT / 'cases/basic/case.yaml', Registry.standard())
+    case = compile_case(ROOT / 'cases/basic/case.yaml', StepRegistry.standard())
     view = tmp_path / 'view.json'
     original = {'title': 'Original', 'panels': []}
     write(view, original)
-    records = RunTrace(tmp_path / 'result', replace(case, view=view), {})
+    records = StepTrace(tmp_path / 'result', replace(case, view=view), {})
     records.close({'status': 'PASS'})
     write(view, {'title': 'Changed', 'panels': []})
     assert json.loads((records.directory / 'view.json').read_text()) == original
 
 
 def test_invalid_native_dashboard_is_rejected_before_component_start(tmp_path):
-    case = compile_case(ROOT / 'cases/basic/case.yaml', Registry.standard())
+    case = compile_case(ROOT / 'cases/basic/case.yaml', StepRegistry.standard())
     view = tmp_path / 'view.json'
     write(view, {'title': 'Invalid', 'panels': 'wrong'})
     with pytest.raises(ValueError, match='Grafana'):
-        RunTrace(tmp_path / 'result', replace(case, view=view), {})
+        StepTrace(tmp_path / 'result', replace(case, view=view), {})
 
 
 def test_dashboard_rebinds_nested_panels_without_mutating_the_source_or_future_views(tmp_path):

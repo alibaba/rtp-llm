@@ -1,6 +1,5 @@
 from mock_framework.execution.test.helpers.zookeeper import command as zookeeper_command
 from mock_framework.execution.test.helpers import FRAMEWORK
-from mock_framework.execution.step.step import Step
 import asyncio
 from dataclasses import dataclass
 import json
@@ -12,8 +11,8 @@ import pytest
 import yaml
 
 from mock_framework.config import compile_case
-from mock_framework.execution.step.registry import Registry
-from mock_framework.execution.step.registry import register_step
+from mock_framework.execution.step.step_registry import StepRegistry
+from mock_framework.execution.step.step_registry import register_step
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 from mock_framework.execution.processes import ProcessSupervisor
@@ -54,7 +53,7 @@ time.sleep(120)
         environment={'master': {'deployment': {'replicas': replicas}, 'config': {}}},
         phases=[dict(id='lifecycle', describe='lifecycle', timeout='15s', steps=steps)])
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(document))
-    registry = Registry.standard(); case = compile_case(path, registry)
+    registry = StepRegistry.standard(); case = compile_case(path, registry)
     launch = prepare_launch({'components': {'master': {'command': [sys.executable, str(peer)]}}}, case, tmp_path)
     return case, registry, launch
 
@@ -113,7 +112,7 @@ def test_partial_stop_failure_aborts_and_keeps_completed_operations(tmp_path, mo
 
 def test_master_cleanup_waits_for_peer_exit_and_slow_graceful_shutdown(tmp_path):
     from mock_framework.execution.roles.master import MasterRole
-    from mock_framework.execution.run_trace import RunTrace
+    from mock_framework.execution.step_trace import StepTrace
     case, _, launch = generic(tmp_path, [step('masters', 'master/get')])
     output = tmp_path / 'run'
     peer = tmp_path / 'shutdown.py'
@@ -131,7 +130,7 @@ signal.signal(signal.SIGTERM, stop)
 while True: time.sleep(1)
 ''')
     async def exercise():
-        records = RunTrace(output, case, launch)
+        records = StepTrace(output, case, launch)
         supervisor = ProcessSupervisor(records)
         group = MasterRole(component=None, recipe=None, election={},
             supervisor=supervisor, topology=None, records=records, monitoring=None)
@@ -165,16 +164,14 @@ class Empty:
 
 
 @register_step('test/client_progress', effect='read')
-class progress(Step):
-    @staticmethod
-    async def execute(ctx, args: Empty) -> int:
-        successes = 0
-        for node in ctx.runtime.topology.active():
-            if node['role'] == 'client':
-                value = await post(node['control'], {'interface': 'worker/state', 'args': {'sequence': 1},
-                    'context': {'run': 'foreground', 'query_time': ctx.query_time, 'observation': None, 'timeout_ms': 1000}})
-                successes += value['outcomes']['success']
-        return successes
+async def progress(ctx, args: Empty) -> int:
+    successes = 0
+    for node in ctx.runtime.topology.active():
+        if node['role'] == 'client':
+            value = await post(node['control'], {'interface': 'worker/state', 'args': {'sequence': 1},
+                'context': {'run': 'foreground', 'query_time': ctx.query_time, 'observation': None, 'timeout_ms': 1000}})
+            successes += value['outcomes']['success']
+    return successes
 
 
 @pytest.mark.parametrize('batched', [False, True], ids=['direct', 'batch'])
@@ -216,7 +213,7 @@ def test_real_master_replacement_with_uninterrupted_client_plan(tmp_path, batche
                      'client': {'deployment': {'replicas': 2}, 'config': {}}},
         phases=[dict(id='replace', describe='replace', timeout='150s', steps=steps)])
     path = tmp_path / 'case.yaml'; path.write_text(yaml.safe_dump(document))
-    registry = Registry.standard(); registry.register(progress); case = compile_case(path, registry)
+    registry = StepRegistry.standard(); registry.register(progress); case = compile_case(path, registry)
     try:
         master_port(3)
     except ExecutionError as error:
@@ -297,7 +294,7 @@ def test_native_restart_preserves_address_and_refreshes_only_current_discovery(t
             step('leader', 'master/get', args={'is_leader': True}, expect={'eq': {'ref': 'steps.a'}}),
             step('added', 'engine/scale', args={'direction': 'out', 'role': 'prefill', 'count': 1}, expect={'count': 1})])])
     source = tmp_path / 'case.yaml'; source.write_text(yaml.safe_dump(document))
-    registry = Registry.standard(); case = compile_case(source, registry)
+    registry = StepRegistry.standard(); case = compile_case(source, registry)
     launch = local_launch(case, Path(os.environ['JAVA_HOME']) / 'bin/java', os.environ['PROMETHEUS_BIN'], framework=root)
     output = tmp_path / 'run'
     result = asyncio.run(run_case(case, registry, launch, output))

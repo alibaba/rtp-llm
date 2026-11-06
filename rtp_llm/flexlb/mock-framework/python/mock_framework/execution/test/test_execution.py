@@ -1,4 +1,3 @@
-from mock_framework.execution.step.step import Step
 import asyncio
 from dataclasses import dataclass
 import json
@@ -13,8 +12,8 @@ import pytest
 import yaml
 
 from mock_framework.config import compile_case
-from mock_framework.execution.step.registry import Registry
-from mock_framework.execution.step.registry import register_step, Bounds
+from mock_framework.execution.step.step_registry import StepRegistry
+from mock_framework.execution.step.step_registry import register_step, Bounds
 from mock_framework.execution.step.step import Reference
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.launch import prepare_launch
@@ -31,22 +30,18 @@ class Args:
 
 
 @register_step('probe/read', effect='read')
-class read(Step):
-    @staticmethod
-    async def execute(ctx, args: Args) -> int:
-        await asyncio.sleep(args.delay)
-        return 'invalid' if args.invalid else args.value
+async def read(ctx, args: Args) -> int:
+    await asyncio.sleep(args.delay)
+    return 'invalid' if args.invalid else args.value
 
 
 @register_step('probe/write', effect='write')
-class write(Step):
-    @staticmethod
-    async def execute(ctx, args: Args) -> int:
-        ctx.records.emit(event='mutation')
-        if args.crash:
-            ctx.runtime.supervisor.children[0][1].kill()
-        await asyncio.sleep(args.delay)
-        return args.value
+async def write(ctx, args: Args) -> int:
+    ctx.records.emit(event='mutation')
+    if args.crash:
+        ctx.runtime.supervisor.children[0][1].kill()
+    await asyncio.sleep(args.delay)
+    return args.value
 
 
 def step(name='read', **kw):
@@ -56,7 +51,7 @@ def step(name='read', **kw):
 @pytest.fixture
 def setup(tmp_path):
     def make(steps, timeout='2s', child='ready'):
-        registry = Registry.standard()
+        registry = StepRegistry.standard()
         registry.register(read); registry.register(write)
         # Real subprocess ownership and teardown, independent of any Java Case catalog.
         script = tmp_path / 'peer.py'
@@ -329,12 +324,10 @@ def test_runner_constructs_arguments_once_per_step(case_data, compile_data, tmp_
             constructions.append(self.value)
 
     @register_step('probe/counted', effect='read')
-    class counted(Step):
-        @staticmethod
-        async def execute(ctx, args: Counted) -> int:
-            return args.value
+    async def counted(ctx, args: Counted) -> int:
+        return args.value
 
-    registry = Registry((counted,))
+    registry = StepRegistry((counted,))
     case_data['environment'] = {}
     case_data.pop('view', None)
     case_data['phases'][0]['steps'] = [
@@ -361,19 +354,15 @@ def test_constructor_failure_after_reference_resolution_is_not_an_unknown_write(
                 raise ValueError('value must be positive')
 
     @register_step('probe/zero', effect='read')
-    class zero(Step):
-        @staticmethod
-        async def execute(ctx, args: Args) -> int:
-            return 0
+    async def zero(ctx, args: Args) -> int:
+        return 0
 
     @register_step('probe/positive', effect='write')
-    class positive(Step):
-        @staticmethod
-        async def execute(ctx, args: Positive) -> int:
-            mutations.append(args.value)
-            return args.value
+    async def positive(ctx, args: Positive) -> int:
+        mutations.append(args.value)
+        return args.value
 
-    registry = Registry((zero, positive))
+    registry = StepRegistry((zero, positive))
     case_data['environment'] = {}
     case_data.pop('view', None)
     case_data['phases'][0]['steps'] = [

@@ -2,8 +2,8 @@ from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from ._targets import Targets
-from .registry import Bounds, register_step
-from .step import Step, StepContext
+from .step_registry import Bounds, register_step
+from .step import StepContext
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -19,11 +19,9 @@ class Scale(Targets):
 
 
 @register_step('engine/scale', effect='write')
-class EngineScale(Step):
-    @staticmethod
-    async def execute(ctx: StepContext, args: Scale) -> list[str]:
-        """Scale the selected Engine role in or out and return the affected service addresses."""
-        engines = ctx.runtime.engines
-        if args.direction == 'in':
-            return await engines.scale_in(args.role, args.targets, args.count)
-        return await engines.scale_out(args.role, 1 if args.count is None else args.count)
+async def engine_scale(ctx: StepContext, args: Scale) -> list[str]:
+    """Scale the selected Engine role in or out and return the affected service addresses."""
+    engines = ctx.runtime.engines
+    if args.direction == 'in':
+        return await engines.scale_in(args.role, args.targets, args.count)
+    return await engines.scale_out(args.role, 1 if args.count is None else args.count)
