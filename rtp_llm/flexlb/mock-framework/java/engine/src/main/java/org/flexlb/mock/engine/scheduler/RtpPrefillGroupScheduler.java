@@ -7,8 +7,8 @@ import static org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure.Re
 
 /** Explicit-group admission, isolated from ordinary FIFO scheduling. */
 final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
-    private final ArrayDeque<ArrayDeque<Entry>> groups = new ArrayDeque<>();
-    private final Map<Entry, ArrayDeque<Entry>> memberships = new IdentityHashMap<>();
+    private final ArrayDeque<ArrayDeque<GenerateStream>> groups = new ArrayDeque<>();
+    private final Map<GenerateStream, ArrayDeque<GenerateStream>> memberships = new IdentityHashMap<>();
     private boolean preferGroup;
 
     RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCacheManager cache) {
@@ -24,24 +24,24 @@ final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
         if (!prefill()) throw new RequestFailure(INVALID, "Explicit batches belong to Prefill");
         batch = List.copyOf(batch);
         var results = new ArrayList<InputResult>();
-        var group = new ArrayDeque<Entry>();
+        var group = new ArrayDeque<GenerateStream>();
         for (var item : batch) {
             try {
-                var entry = (Entry) enqueue(item.input(), item.listener());
-                waiting.remove(entry); group.addLast(entry);
-                results.add(new InputResult(entry, null));
+                var stream = (GenerateStream) enqueue(item.input(), item.listener());
+                waiting.remove(stream); group.addLast(stream);
+                results.add(new InputResult(stream, null));
             } catch (RequestFailure failure) { results.add(new InputResult(null, failure)); }
         }
         if (group.size() > config.maxGenerateBatchSize()
                 || config.maxInitedKvStreams() > 0 && group.size() > config.maxInitedKvStreams()) {
             waiting.addAll(group); // RTP falls oversized groups back to ordinary FIFO admission.
         } else if (!group.isEmpty()) {
-            group.forEach(entry -> memberships.put(entry, group)); groups.addLast(group);
+            group.forEach(stream -> memberships.put(stream, group)); groups.addLast(group);
         }
         return List.copyOf(results);
     }
 
-    @Override protected void selectPrefill(List<Entry> selected) {
+    @Override protected void selectPrefill(List<GenerateStream> selected) {
         boolean groupFirst = !groups.isEmpty() && (preferGroup || waiting.isEmpty());
         if (groupFirst) {
             selectGroup(selected);
@@ -54,24 +54,24 @@ final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
         selected.forEach(memberships::remove);
     }
 
-    private void selectGroup(List<Entry> selected) {
+    private void selectGroup(List<GenerateStream> selected) {
         if (groups.isEmpty()) return;
         var group = groups.getFirst();
         admitPrefill(group, selected, 0);
         if (group.isEmpty()) groups.remove(group);
     }
 
-    @Override protected void removeWaiting(Entry entry) {
-        super.removeWaiting(entry);
-        var group = memberships.remove(entry);
+    @Override protected void removeWaiting(GenerateStream stream) {
+        super.removeWaiting(stream);
+        var group = memberships.remove(stream);
         if (group != null) {
-            group.remove(entry);
+            group.remove(stream);
             if (group.isEmpty()) groups.remove(group);
         }
     }
 
-    @Override protected Set<Entry> waitingEntries() {
-        var entries = super.waitingEntries();
+    @Override protected Set<GenerateStream> waitingStreams() {
+        var entries = super.waitingStreams();
         groups.forEach(entries::addAll);
         return entries;
     }

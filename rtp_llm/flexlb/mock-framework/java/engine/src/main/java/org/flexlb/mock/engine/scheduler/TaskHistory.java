@@ -8,13 +8,13 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler.Task;
 public final class TaskHistory {
     private static final Logger LOG = Logger.getLogger(TaskHistory.class.getName());
     public static final int LIMIT = 1024;
-    private record Entry(long version, Task task) {}
-    private final ArrayDeque<Entry> finished = new ArrayDeque<>();
+    private record FinishedTask(long version, Task task) {}
+    private final ArrayDeque<FinishedTask> finished = new ArrayDeque<>();
     private long version, droppedThrough, nextWarning;
     private String pendingWarning;
 
     public synchronized void add(Task task) {
-        finished.add(new Entry(++version, task));
+        finished.add(new FinishedTask(++version, task));
         if (finished.size() > LIMIT) droppedThrough = finished.removeFirst().version();
     }
     public synchronized EngineScheduler.Status snapshot(long latest, List<Task> tasks, int waiting, int running) {
@@ -24,7 +24,7 @@ public final class TaskHistory {
                 + " latest_version=" + version + " retained=" + finished.size();
             nextWarning = now + java.util.concurrent.TimeUnit.SECONDS.toNanos(1);
         }
-        return new EngineScheduler.Status(List.copyOf(tasks), finished.stream().filter(e -> e.version() > latest).map(Entry::task).toList(), Math.max(latest, version), waiting, running);
+        return new EngineScheduler.Status(List.copyOf(tasks), finished.stream().filter(e -> e.version() > latest).map(FinishedTask::task).toList(), Math.max(latest, version), waiting, running);
     }
     /** RPC calls this after releasing execution/history locks; slow handlers cannot block scheduling. */
     public void reportGaps() {
