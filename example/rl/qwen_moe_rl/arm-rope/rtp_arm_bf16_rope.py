@@ -56,6 +56,14 @@ def _no_quant(kv_cache_scale, store_qkv_fp8=False):
            'KV scales/quantized KV caches are unsupported')
 
 
+def _optional_positions(position_ids):
+    # Native metadata can represent absent positions with an empty Tensor.
+    # Its physical cache lengths remain authoritative in that case.
+    if isinstance(position_ids, torch.Tensor) and position_ids.numel() == 0:
+        return None
+    return position_ids
+
+
 def _style(style):
     value = getattr(style, 'name', None)
     value = value() if callable(value) else value
@@ -182,6 +190,7 @@ def prefill_fused_rope_kvcache(qkv,cu_seqlens,batch_size,max_seq_len,head_num,kv
               else _ints(prefix_prompt_lengths,'prefix_prompt_lengths',qkv.device,(batch_size,)))
     _check(prefix >= 0, 'Negative prefix lengths')
     physical = tokens-cu[sequence]+prefix[sequence]
+    position_ids = _optional_positions(position_ids)
     positions = position_ids if position_ids is not None else physical
     if _style(rope_style) == 'mrope' and position_ids is None:
         positions = physical[:,None].expand(-1,3)
@@ -218,6 +227,7 @@ def decode_fused_rope_kvcache(qkv,position_ids=None,*,sequence_lengths,batch_siz
            'RoPE extrapolation/mscale is unsupported')
     _check(qkv.shape[0] == int(batch_size), 'Decode requires exactly one token per sequence')
     physical = _ints(sequence_lengths,'sequence_lengths',qkv.device,(int(batch_size),))
+    position_ids = _optional_positions(position_ids)
     positions = position_ids if position_ids is not None else physical
     if _style(rope_style) == 'mrope' and position_ids is None:
         positions = physical[:,None].expand(-1,3)
