@@ -7,7 +7,6 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-import numpy as np
 import torch
 from transformers import Qwen3VLVideoProcessor
 
@@ -846,12 +845,12 @@ class GpuVideoTest(unittest.TestCase):
             mock.patch.object(gpu_video, "_load_nvcodec", return_value=object()),
             mock.patch.object(gpu_video, "_decode_on_stream", side_effect=error),
             mock.patch.object(
-                gpu_video, "_decode_video_cpu", return_value=expected
+                gpu_video, "decode_video", return_value=(expected, None)
             ) as cpu,
         ):
             actual = gpu_video.decode_video_cuda(data, device)
         self.assertIs(actual, expected)
-        cpu.assert_called_once_with(data, device)
+        cpu.assert_called_once()
 
     def test_nvdec_non_decoder_error_is_not_swallowed(self):
         device = torch.device("cuda", torch.cuda.current_device())
@@ -861,31 +860,11 @@ class GpuVideoTest(unittest.TestCase):
             mock.patch.object(
                 gpu_video, "_decode_on_stream", side_effect=RuntimeError("broken")
             ),
-            mock.patch.object(gpu_video, "_decode_video_cpu") as cpu,
+            mock.patch.object(gpu_video, "decode_video") as cpu,
         ):
             with self.assertRaisesRegex(RuntimeError, "broken"):
                 gpu_video.decode_video_cuda(data, device)
         cpu.assert_not_called()
-
-    def test_cpu_fallback_repeats_last_frame_for_estimated_indices(self):
-        device = torch.device("cuda", torch.cuda.current_device())
-        frames = [
-            SimpleNamespace(
-                to_ndarray=lambda format, value=value: np.full(
-                    (2, 2, 3), value, dtype=np.uint8
-                )
-            )
-            for value in (10, 20)
-        ]
-        container = mock.MagicMock()
-        container.__enter__.return_value.streams.video = [mock.MagicMock()]
-        container.__enter__.return_value.decode.return_value = iter(frames)
-        data = GpuVideoInput(b"video", 4, (0, 1, 3), 2, 2, 2, 2, 2, 2)
-        with mock.patch("av.open", return_value=container):
-            video = gpu_video._decode_video_cpu(data, device)
-        self.assertEqual(tuple(video.shape), (3, 3, 2, 2))
-        # Index 3 is past the decoded stream; it repeats the last frame.
-        self.assertEqual(video[:, 0, 0, 0].tolist(), [10, 20, 20])
 
 
 class DecoderReconfigurationTest(unittest.TestCase):

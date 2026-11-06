@@ -173,11 +173,15 @@ def read_video_metadata(video_data):
     return len(reader), reader.get_avg_fps(), height, width
 
 
-def _decode_video_pyav(video_data, configs, vit_config):
+def _decode_video_pyav(video_data, configs, vit_config, frame_indices=None):
     import av
 
     total, fps, _, _ = _pyav_video_info(video_data)
-    indices = sample_frame_indices(total, fps, configs, vit_config=vit_config)
+    indices = (
+        list(frame_indices)
+        if frame_indices is not None
+        else sample_frame_indices(total, fps, configs, vit_config=vit_config)
+    )
     wanted = set(indices)
     frames = []
     with av.open(video_data) as container:
@@ -197,15 +201,27 @@ def _decode_video_pyav(video_data, configs, vit_config):
     )
 
 
-def decode_video(video_data: Any, configs: Any, *, vit_config: Any = None):
+def decode_video(
+    video_data: Any,
+    configs: Any,
+    *,
+    vit_config: Any = None,
+    frame_indices: Any = None,
+):
     """Decode sampled native RGB frames; resize only after the video policy resolves."""
     try:
         from decord import VideoReader, cpu
     except ImportError:
-        return _decode_video_pyav(video_data, configs, vit_config)
+        return _decode_video_pyav(
+            video_data, configs, vit_config, frame_indices=frame_indices
+        )
     reader = VideoReader(video_data, ctx=cpu(0), num_threads=1)
     total, fps = len(reader), reader.get_avg_fps()
-    indices = sample_frame_indices(total, fps, configs, vit_config=vit_config)
+    indices = (
+        list(frame_indices)
+        if frame_indices is not None
+        else sample_frame_indices(total, fps, configs, vit_config=vit_config)
+    )
     video = torch.from_numpy(reader.get_batch(indices).asnumpy()).permute(0, 3, 1, 2)
     metadata = VideoMetadata(
         total_num_frames=total, fps=fps, duration=total / fps, frames_indices=indices

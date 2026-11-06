@@ -23,6 +23,7 @@ import torch
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.qwen3_vl_video import (
+    decode_video,
     resize_video_to_shape,
     resolve_video_size,
     sample_frame_indices,
@@ -446,7 +447,10 @@ def decode_video_cuda(data: GpuVideoInput, device):
                     "decode for this video",
                     exc,
                 )
-                return _decode_video_cpu(data, device)
+                video, _ = decode_video(
+                    io.BytesIO(data.encoded), None, frame_indices=data.frame_indices
+                )
+                return video.to(device=device)
 
 
 def _is_nvdec_decoder_creation_error(exc):
@@ -458,38 +462,6 @@ def _is_nvdec_decoder_creation_error(exc):
         or "HandleVideoSequence" in text
         or "cuvidCreateDecoder" in text
     )
-
-
-def _decode_video_cpu(data: GpuVideoInput, device):
-    """Decode the sampled frames with PyAV when NVDEC cannot open the stream."""
-    import av
-    import numpy as np
-
-    if not data.frame_indices:
-        raise ValueError("video sampling produced no frame indices")
-    wanted = set(data.frame_indices)
-    last = max(data.frame_indices)
-    decoded = {}
-    with av.open(io.BytesIO(data.encoded)) as container:
-        if not container.streams.video:
-            raise ValueError("video input has no video stream")
-        stream = container.streams.video[0]
-        # Single-threaded decode keeps frame order deterministic for sampling.
-        stream.thread_type = "NONE"
-        stream.codec_context.thread_count = 1
-        for index, frame in enumerate(container.decode(stream)):
-            if index in wanted:
-                decoded[index] = frame.to_ndarray(format="rgb24")
-            if index >= last:
-                break
-    if not decoded:
-        raise ValueError("CPU fallback decoded no frames")
-    # nb_frames is an estimate; repeat the last decoded frame for sampled
-    # indices past the end so the patch grid matches the sampling plan.
-    last_frame = decoded[max(decoded)]
-    frames = [decoded.get(index, last_frame) for index in data.frame_indices]
-    video = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2)
-    return video.to(device=device)
 
 
 def _get_video_decoder(data, device, nvc, stream, codec):
