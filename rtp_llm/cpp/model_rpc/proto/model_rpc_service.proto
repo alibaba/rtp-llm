@@ -350,6 +350,14 @@ message RlControlRequestPB {
     bytes cuda_ipc_metadata = 6;
     uint64 max_buffer_bytes = 7;
     int64 global_step = 8;
+    // Protocol 3 binds every control ACK to one complete world, not a TP group.
+    // Protocol 2 pure-TP callers may leave these added fields at their defaults.
+    uint32 protocol_version = 9;
+    int32 expected_world_rank = 10;
+    int32 expected_world_size = 11;
+    int32 expected_tp_size = 12;
+    int32 expected_dp_size = 13;
+    int32 expected_ep_size = 14;
 }
 
 message RlControlResponsePB {
@@ -367,6 +375,12 @@ message RlControlResponsePB {
     uint64 kv_cache_bytes = 12;
     uint64 torch_allocated_bytes = 13;
     uint64 torch_reserved_bytes = 14;
+    int32 world_rank = 15;
+    int32 world_size = 16;
+    int32 dp_rank = 17;
+    int32 dp_size = 18;
+    int32 ep_rank = 19;
+    int32 ep_size = 20;
 }
 
 // return to python client

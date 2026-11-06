@@ -116,15 +116,53 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         RTP_LLM_CHECK_WITH_INFO(run_id && std::strlen(run_id) > 0, "RL mode requires an incarnation ID");
         const bool rl_model_supported =
             (model_config_.model_type == "qwen_3" && !model_config_.moe_style)
-            || ((model_config_.model_type == "qwen35_moe_text" || model_config_.model_type == "qwen36_moe_text")
+            || ((model_config_.model_type == "qwen35_moe_text" || model_config_.model_type == "qwen36_moe_text"
+                 || model_config_.model_type == "qwen38_moe_text")
                 && model_config_.moe_style == 2);
         RTP_LLM_CHECK_WITH_INFO(rl_model_supported && model_config_.data_type == DataType::TYPE_BF16
                                     && !model_config_.quant_algo.isQuant(),
                                 "RL mode requires unquantized Qwen3 dense or Qwen3.5 text MoE BF16");
-        RTP_LLM_CHECK_WITH_INFO(parallelism_config.dp_size == 1 && parallelism_config.ep_size == 1
-                                    && parallelism_config.pp_size == 1
-                                    && parallelism_config.world_size == parallelism_config.tp_size,
-                                "RL mode currently supports single-node pure TP only");
+        const bool pure_tp = parallelism_config.dp_size == 1 && parallelism_config.ep_size == 1
+                             && parallelism_config.pp_size == 1
+                             && parallelism_config.world_size == parallelism_config.tp_size;
+        const char* world72 = std::getenv("RTP_LLM_RL_WORLD72");
+        rl_world72_        = world72 && std::strcmp(world72, "1") == 0;
+        if (rl_world72_) {
+            const char* layout = std::getenv("RTP_FIXED_PHYSICAL_EP_LAYOUT");
+            RTP_LLM_CHECK_WITH_INFO(
+                model_config_.model_type == "qwen38_moe_text" && parallelism_config.world_size == 72
+                    && parallelism_config.tp_size == 8 && parallelism_config.dp_size == 9
+                    && parallelism_config.ep_size == 72 && parallelism_config.pp_size == 1
+                    && parallelism_config.ffn_sp_size == 8 && parallelism_config.get_ffn_tp_size() == 1
+                    && parallelism_config.world_rank >= 0 && parallelism_config.world_rank < 72
+                    && parallelism_config.tp_rank == parallelism_config.world_rank % 8
+                    && parallelism_config.dp_rank == parallelism_config.world_rank / 8
+                    && parallelism_config.ep_rank == parallelism_config.world_rank,
+                "RL world control requires the explicit TP8/DP9/EP72 rank layout");
+            RTP_LLM_CHECK_WITH_INFO(
+                model_config_.expert_num == 512 && model_config_.moe_k == 10
+                    && eplb_config.phy_exp_num(model_config_.expert_num) == 576 && !eplb_config.enable_eplb()
+                    && layout && std::strcmp(layout, "balanced_v1") == 0,
+                "RL world control requires the validated fixed 512-logical/576-physical expert map");
+            RTP_LLM_CHECK_WITH_INFO(
+                params.moe_config.moe_strategy == "nccl_bf16_reference" && !params.moe_config.fake_balance_expert
+                    && !params.moe_config.hack_moe_expert && !parallelism_config.prefill_cp_config.is_enabled()
+                    && !params.hw_kernel_config.enable_cuda_graph && !runtime_config.warm_up
+                    && params.device_resource_config.enable_layer_micro_batch == 0,
+                "RL world control requires the eager BF16 NCCL reference router, without CP, warmup or layer microbatch");
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(pure_tp, "RL mode requires pure TP or the explicit RL world72 profile");
+        }
+        const char* bootstrap = std::getenv("RTP_LLM_RL_START_PAUSED");
+        if (bootstrap && std::strcmp(bootstrap, "1") == 0) {
+            RTP_LLM_CHECK_WITH_INFO(rl_world72_, "RL bootstrap is restricted to the world72 profile");
+            // The model buffers may have been allocated from pinned metadata.
+            // The first loop checkpoint pauses every EP rank before process().
+            // Neither admission nor RESUME can expose them until a complete
+            // weight transaction publishes the first real model version.
+            rl_pause_requested_     = true;
+            rl_weights_initialized_ = false;
+        }
         RTP_LLM_CHECK_WITH_INFO(
             !propose_params_ && sp_config.type == SP_TYPE_NONE && !ffn_disaggregate_config.enable_ffn_disaggregate
                 && pd_sep_config.role_type == RoleType::PDFUSION && !runtime_config.use_batch_decode_scheduler
@@ -710,7 +748,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
 }
 
 bool NormalEngine::rlAdmitStream(const GenerateStreamPtr& stream) {
-    if (rl_pause_requested_ || rl_failed_) {
+    if (rl_pause_requested_ || rl_failed_ || !rl_weights_initialized_) {
         stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "RL engine admission is closed");
         return false;
     }
@@ -1006,8 +1044,8 @@ absl::Status NormalEngine::rlPause(int64_t timeout_ms) {
 
 absl::Status NormalEngine::rlResume(int64_t timeout_ms) {
     std::unique_lock<std::mutex> lock(rl_mutex_);
-    if (!rl_enabled_ || !rl_paused_ || rl_failed_ || !rl_kv_ready_) {
-        return absl::FailedPreconditionError("RL engine is not safely paused with resident KV cache");
+    if (!rl_enabled_ || !rl_paused_ || rl_failed_ || !rl_kv_ready_ || !rl_weights_initialized_) {
+        return absl::FailedPreconditionError("RL engine requires a safely paused initialized policy with resident KV cache");
     }
     rl_pause_requested_ = false;
     rl_cv_.notify_all();
@@ -1089,6 +1127,7 @@ absl::Status NormalEngine::rlSetModelVersion(const std::string& version, int64_t
     }
     rl_model_version_ = version;
     rl_global_step_   = global_step;
+    rl_weights_initialized_ = true;
     return absl::OkStatus();
 }
 
@@ -1102,6 +1141,15 @@ absl::Status NormalEngine::rlCheckpoint() {
     // Independent rank pause flags must never interrupt matching TP collectives.
     if (parallelism_config.tp_size > 1) {
         execBroadcastCpu({{decision}, 0});
+    }
+    if (rl_world72_) {
+        // Every DP group keeps entering the engine loop, including idle groups
+        // (the FIFO scheduler's DP idle wait is bounded). A TP-local pause could
+        // strand the other groups inside an EP collective. Pause only after all
+        // nine leaders have closed admission and drained their real streams.
+        auto vote = decision.to(getTorchCudaDevice());
+        vote = execAllReduce({vote, ReduceOp::Min, false, ParallelMode::DP_AND_TP}).buffer;
+        decision = vote.to(torch::kCPU);
     }
     if (!decision.item<int64_t>()) {
         return absl::OkStatus();

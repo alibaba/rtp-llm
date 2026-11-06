@@ -38,6 +38,10 @@ void registerEmbeddingOutput(const py::module& m) {
 }
 
 PYBIND11_MODULE(libth_transformer, m) {
+    // Metadata-only RL buffers are safe only with the matching native initial
+    // pause and pre-COMMIT admission/RESUME guards. Python checks this before
+    // allocating a bootstrap model; an environment flag alone proves nothing.
+    m.attr("_rl_world72_initial_pause_version") = 1;
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingOutput(m);

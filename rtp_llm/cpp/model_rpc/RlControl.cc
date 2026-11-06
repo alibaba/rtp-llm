@@ -2,6 +2,8 @@
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #if USING_CUDA
 #include <c10/cuda/CUDACachingAllocator.h>
@@ -18,10 +20,38 @@ grpc::Status LocalRpcServer::RlControl(grpc::ServerContext*      context,
     // Exactly one state-changing operation per rank. No Python GIL is held
     // while waiting for the engine loop or for another control RPC.
     std::lock_guard<std::mutex> lock(rl_control_mutex_);
+    const auto& parallel = maga_init_params_.parallelism_config;
+    const bool world_control = parallel.ep_size > 1 || parallel.dp_size > 1;
+    // Validate the target incarnation's complete rank layout before changing
+    // any state. A TP-group endpoint accidentally routed to this world must
+    // never acknowledge a partial pause or a partial weight transaction.
+    if (world_control) {
+        if (parallel.world_size != 72 || parallel.tp_size != 8 || parallel.dp_size != 9
+            || parallel.ep_size != 72 || parallel.pp_size != 1 || parallel.ffn_sp_size != 8
+            || parallel.get_ffn_tp_size() != 1 || parallel.world_rank < 0 || parallel.world_rank >= 72
+            || parallel.tp_rank != parallel.world_rank % 8 || parallel.dp_rank != parallel.world_rank / 8
+            || parallel.ep_rank != parallel.world_rank || request->protocol_version() != 3
+            || request->expected_world_rank() != parallel.world_rank
+            || request->expected_world_size() != parallel.world_size
+            || request->expected_tp_size() != parallel.tp_size || request->expected_dp_size() != parallel.dp_size
+            || request->expected_ep_size() != parallel.ep_size) {
+            return {grpc::StatusCode::FAILED_PRECONDITION, "RL protocol-3 world rank or topology mismatch"};
+        }
+    } else if (request->protocol_version() != 0 && request->protocol_version() != 2) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "pure-TP RL requires protocol 2"};
+    }
+    const char* initial_pause = std::getenv("RTP_LLM_RL_START_PAUSED");
+    if (world_control && initial_pause && std::strcmp(initial_pause, "1") == 0
+        && rl_version_sequence_ == 0 && rl_phase_ == "running") {
+        if (!engine_->rlPaused()) {
+            return {grpc::StatusCode::UNAVAILABLE, "RL bootstrap is waiting for complete-world quiescence"};
+        }
+        rl_phase_ = "paused";
+    }
     const auto                  op      = request->operation();
     const auto                  version = engine_->rlModelVersion();
     if (op != RlControlRequestPB::STATUS && rl_phase_ == "failed") {
-        return {grpc::StatusCode::FAILED_PRECONDITION, "RL replica failed; restart all TP ranks"};
+        return {grpc::StatusCode::FAILED_PRECONDITION, "RL replica failed; restart every replica rank"};
     }
     if (op != RlControlRequestPB::STATUS && request->expected_version() != version) {
         return {grpc::StatusCode::FAILED_PRECONDITION, "stale or missing expected model version"};
@@ -133,13 +163,19 @@ grpc::Status LocalRpcServer::RlControl(grpc::ServerContext*      context,
         return {grpc::StatusCode::INTERNAL,
                 std::string("RL control failed: ") + std::string(error.what()).substr(0, 2048)};
     }
-    response->set_protocol_version(2);
+    response->set_protocol_version(world_control ? 3 : 2);
     response->set_phase(rl_phase_);
     response->set_model_version(engine_->rlModelVersion());
     response->set_update_id(rl_update_id_);
     response->set_global_step(rl_global_step_);
     response->set_tp_rank(maga_init_params_.parallelism_config.tp_rank);
     response->set_tp_size(maga_init_params_.parallelism_config.tp_size);
+    response->set_world_rank(parallel.world_rank);
+    response->set_world_size(parallel.world_size);
+    response->set_dp_rank(parallel.dp_rank);
+    response->set_dp_size(parallel.dp_size);
+    response->set_ep_rank(parallel.ep_rank);
+    response->set_ep_size(parallel.ep_size);
     response->set_received_weights(rl_received_weights_);
     response->set_applied_weights(rl_applied_weights_);
     response->set_quiescent(engine_->rlPaused());
