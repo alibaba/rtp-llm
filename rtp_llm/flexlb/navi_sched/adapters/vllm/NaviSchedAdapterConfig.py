@@ -12,6 +12,7 @@ class NaviSchedAdapterConfig:
     client_biz_name: str = "vllm_router"
     master_addresses: tuple[str, ...] = ()
     master_vip_domain: str = ""
+    master_spectrum_service_id: str = ""
     master_vip_jmenv: str = "jmenv.tbsite.net"
     master_vip_grpc_port_diff: int = 2
     timeout_ms: int = 1000
@@ -42,6 +43,9 @@ class NaviSchedAdapterConfig:
             master_vip_domain=values.get(
                 "VLLM_NAVI_SCHED_MASTER_VIP_DOMAIN", ""
             ).strip(),
+            master_spectrum_service_id=values.get(
+                "VLLM_NAVI_SCHED_MASTER_SPECTRUM_SERVICE_ID", ""
+            ).strip(),
             master_vip_jmenv=values.get(
                 "VLLM_NAVI_SCHED_MASTER_VIP_JMENV", "jmenv.tbsite.net"
             ).strip(),
@@ -71,8 +75,23 @@ class NaviSchedAdapterConfig:
             raise ValueError("VLLM_NAVI_SCHED_CLIENT_BIZ_NAME is required")
         if not self.master_biz_name:
             raise ValueError("VLLM_NAVI_SCHED_MASTER_BIZ_NAME is required")
-        if bool(self.master_addresses) == bool(self.master_vip_domain):
+        if (
+            sum(
+                bool(mode)
+                for mode in (
+                    self.master_addresses,
+                    self.master_vip_domain,
+                    self.master_spectrum_service_id,
+                )
+            )
+            != 1
+        ):
             raise ValueError("exactly one NaviSched Master discovery mode is required")
+        if (
+            self.master_spectrum_service_id
+            and not self.master_spectrum_service_id.startswith("v-")
+        ):
+            raise ValueError("Master Spectrum service ID must start with v-")
         if not -65535 <= self.master_vip_grpc_port_diff <= 65535:
             raise ValueError(
                 "VLLM_NAVI_SCHED_MASTER_GRPC_PORT_DIFF must be between "
