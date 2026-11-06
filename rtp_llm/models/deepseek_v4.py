@@ -208,7 +208,11 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         # ``model.layers.*``.  The original RTP conversion emits split FP4
         # experts under ``layers.*``.  Keep both layouts available and let the
         # runtime quantization setting decide which kernels consume them.
-        self._raw_hf_stacked = any(
+        # The loader calls this once per checkpoint list (pretrain, then
+        # finetune/ptuning); the layout is a property of the base weights, so
+        # a stacked pretrain detection must survive the finetune pass, whose
+        # adapter-only keys never contain routed-expert projections.
+        self._raw_hf_stacked = bool(getattr(self, "_raw_hf_stacked", False)) or any(
             ".mlp.experts.gate_up_proj" in key for key in weight_keys
         )
         # V4 has no LoRA q-projection split (we use ``wq_a`` / ``wq_b`` directly)

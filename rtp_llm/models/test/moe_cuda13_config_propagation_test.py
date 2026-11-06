@@ -628,6 +628,36 @@ class Dsv4MoeConfigTest(unittest.TestCase):
             "model.layers.0.mlp.experts.down_proj",
         )
 
+    def test_raw_hf_stacked_flag_survives_finetune_meta_pass(self):
+        # The loader calls _process_meta once per checkpoint list (pretrain,
+        # then finetune/ptuning). The raw-HF layout is a property of the base
+        # weights, so an adapter-only finetune pass must not flip it back to
+        # the converted layout keys.
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+        from rtp_llm.ops import HWKernelConfig, ParallelismConfig
+
+        model_config = self._load_minimal_model_config(1)
+
+        def _builder() -> DeepSeekV4Weight:
+            return DeepSeekV4Weight(
+                model_config=model_config,
+                parallelism_config=ParallelismConfig(),
+                hw_kernel_config=HWKernelConfig(),
+                kv_cache_config=KVCacheConfig(),
+            )
+
+        raw_hf = _builder()
+        raw_hf._process_meta({}, {"model.layers.0.mlp.experts.gate_up_proj"})
+        self.assertTrue(raw_hf._raw_hf_stacked)
+        raw_hf._process_meta({}, {"ptuning.0.lm_head.weight"})
+        self.assertTrue(raw_hf._raw_hf_stacked)
+
+        converted = _builder()
+        converted._process_meta({}, {"layers.0.mlp.experts.w13_w"})
+        self.assertFalse(converted._raw_hf_stacked)
+        converted._process_meta({}, {"ptuning.0.lm_head.weight"})
+        self.assertFalse(converted._raw_hf_stacked)
+
     def test_public_strategy_is_forwarded_to_the_shared_registry(self):
         from rtp_llm.server.server_args import server_args
 
