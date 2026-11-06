@@ -93,7 +93,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {
-        "TEST_USING_DEVICE": "CUDA",
+        "GPU_COUNT": "0",
+        "CUDA_VISIBLE_DEVICES": "",
     },
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],

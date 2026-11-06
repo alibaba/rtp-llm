@@ -31,6 +31,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
 done
 
 base_paths=(/opt/rh/gcc-toolset-12/root/usr/lib64 /usr/local/cuda/lib64 /opt/conda310/lib /usr/local/nvidia/lib64 /usr/lib64)
+# Toolkit stub last: on driver-less workers the stub libcuda.so satisfies the
+# DT_NEEDED of device-linked test binaries so CPU-only tests (GPU_COUNT=0)
+# can load and run; real driver paths above win wherever a driver exists.
+for _stub in /usr/local/cuda/lib64/stubs /usr/local/cuda-13.2/lib64/stubs; do
+    [ -d "$_stub" ] && base_paths+=("$_stub")
+done
 prefix="$(IFS=:; echo "${base_paths[*]}")"
 if [ "${#wheel_lib_dirs[@]}" -gt 0 ]; then
     prefix="$(IFS=:; echo "${wheel_lib_dirs[*]}"):$prefix"

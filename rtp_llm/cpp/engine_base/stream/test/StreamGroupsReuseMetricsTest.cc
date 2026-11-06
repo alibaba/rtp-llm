@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
-#include "rtp_llm/cpp/testing/TestBase.h"
 
 #include <list>
 #include <memory>
@@ -41,7 +40,12 @@ GenerateStreamPtr makeReuseContextStream(const std::vector<int32_t>& input_ids, 
 // a chunked (multi-step) context request must contribute its KV-reused prefix
 // exactly ONCE to context_execute_token_size_with_cache_ and to the per-priority
 // context_with_cache accounting, not once per executor step.
-class StreamGroupsReuseMetricsTest: public DeviceTestBase {
+//
+// The assertions exercise pure CPU accounting (stream construction + counter
+// reads), so the fixture intentionally avoids DeviceTestBase/initRuntime and
+// runs with GPU_COUNT=0: executor-less CI lanes can verify it on CPU workers
+// (the driver lib is satisfied by the CUDA toolkit stub).
+class StreamGroupsReuseMetricsTest: public ::testing::Test {
 protected:
     std::list<GenerateStreamPtr> oneStreamGroup(GenerateStreamPtr stream) {
         return {stream};
