@@ -530,8 +530,8 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
 inline CacheConfig
 makeSingleGroupCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, int layer_num, int block_num) {
     CacheConfig config;
-    config.dtype     = spec->memoryLayoutDType();
-    config.layer_num = static_cast<uint32_t>(layer_num);
+    config.main_config.dtype     = spec->memoryLayoutDType();
+    config.main_config.layer_num = static_cast<uint32_t>(layer_num);
 
     config.seq_size_per_block = spec->seq_size_per_block;
 
@@ -575,12 +575,12 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   uint32_t          local_head_num_kv = 1,
                                                   uint32_t          size_per_head     = 1) {
     CacheConfig config;
-    config.dtype     = dtype;
-    config.layer_num = static_cast<uint32_t>(layer_num);
+    config.main_config.dtype     = dtype;
+    config.main_config.layer_num = static_cast<uint32_t>(layer_num);
 
-    config.seq_size_per_block            = tokens_per_block;
-    config.reuse_cache_tail_blocks       = 2;
-    const int normalized_group_layer_num = std::max(group_layer_num, 1);
+    config.seq_size_per_block                  = tokens_per_block;
+    config.main_config.reuse_cache_tail_blocks = 2;
+    const int normalized_group_layer_num       = std::max(group_layer_num, 1);
 
     if (layer_num <= 0 || (layer_num % normalized_group_layer_num) != 0
         || (layer_num / normalized_group_layer_num) < 2) {

@@ -28,9 +28,10 @@ struct PyCacheStoreInputs;
 namespace rtp_llm {
 
 class CacheConfig;
+struct CacheModuleConfig;
 class CacheStore;
 
-using CacheStoreCompletionCallback = std::function<void(std::exception_ptr)>;
+using CacheStoreCompletionCallback  = std::function<void(std::exception_ptr)>;
 using CacheStoreCompletionRegistrar = std::function<CacheStoreCompletionCallback(
     const std::vector<int64_t>&, const std::vector<int32_t>&, const std::string&)>;
 
@@ -140,7 +141,8 @@ std::shared_ptr<torch::Event> runtimeCreateEvent();
 
 void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                             const torch_ext::LayerKVCache&       layer_kv,
-                            const CacheConfig&                   cache_config,
+                            const CacheModuleConfig&             cache_config,
+                            size_t                               base_seq_size_per_block,
                             std::shared_ptr<CacheStore>          cache_store,
                             size_t                               cache_model_id,
                             int                                  cp_rank,

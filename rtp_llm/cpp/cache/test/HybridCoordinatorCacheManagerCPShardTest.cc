@@ -30,22 +30,23 @@ namespace {
 // Two-group hybrid: group_id=0 linear (won't be exercised here), group_id=1 full (the CP-shard target).
 CacheConfig makeCPHybridConfig() {
     CacheConfig config;
-    config.dtype              = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num          = 4;
-    config.seq_size_per_block = 4;
-    config.reuse_cache_tail_blocks = 2;
+    config.main_config.dtype                   = rtp_llm::DataType::TYPE_FP16;
+    config.main_config.layer_num               = 4;
+    config.seq_size_per_block                  = 4;
+    config.main_config.reuse_cache_tail_blocks = 2;
 
-    auto linear_spec = makeResolvedLinearSpec(config.dtype,
+    auto linear_spec = makeResolvedLinearSpec(config.dtype(),
                                               1,
                                               1,
                                               1,
                                               1,
                                               2,
                                               static_cast<uint32_t>(config.seq_size_per_block),
-                                              config.dtype,
-                                              config.dtype,
+                                              config.dtype(),
+                                              config.dtype(),
                                               "linear");
-    auto full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
+    auto full_spec =
+        makeResolvedMhaSpec(config.dtype(), 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
     full_spec->kernel_seq_size_per_block = 2;
 
     config.fromGroupedSpecs(
@@ -90,8 +91,8 @@ protected:
 };
 
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, PrefillNeedBlocksUsesEachGroupsReuseLength) {
-    auto config                    = makeCPHybridConfig();
-    config.reuse_cache_tail_blocks = 3;
+    auto config                                = makeCPHybridConfig();
+    config.main_config.reuse_cache_tail_blocks = 3;
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));

@@ -2,22 +2,19 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <map>
-#include <memory>
 #include <limits>
-#include <sstream>
+#include <memory>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/CacheModuleConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
-#include "rtp_llm/cpp/utils/StringUtil.h"
 
 namespace rtp_llm {
 
@@ -31,45 +28,41 @@ inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std:
         static_cast<int>(policy.memory_placement));
 }
 
+// Module container: one main module plus N MTP modules, plus the cross-module
+// shared runtime fields. `module_id == 0` is the main model; API callers only
+// pass an explicit `module` argument when operating on MTP state.
 struct CacheConfig {
-private:
-    std::shared_ptr<const CacheTopology> cache_topology;
+    // === Module configs ===
+    CacheModuleConfig              main_config;
+    std::vector<CacheModuleConfig> mtp_sub_configs;
 
-public:
+    // === Shared fields (cross-module invariants) ===
     int     cache_min_replay_tokens = 1;
     int64_t cache_key_hash_seed     = 0;
+    // Global cache-key block granularity (tokens/base cache-key block).
+    // Main and MTP share one token sequence, so the block granularity must be
+    // identical across modules — kept here as a shared invariant, not per-module.
+    size_t seq_size_per_block = 1;
+
+    CacheConfig() {}
+
+    // === Module access (0=main, 1..N=mtp) ===
+    size_t moduleCount() const {
+        return 1 + mtp_sub_configs.size();
+    }
+
+    const CacheModuleConfig& moduleConfig(size_t module_id) const {
+        RTP_LLM_CHECK_WITH_INFO(
+            module_id <= mtp_sub_configs.size(), "cache module id %zu out of range [0, %zu]", module_id, moduleCount());
+        return module_id == 0 ? main_config : mtp_sub_configs[module_id - 1];
+    }
 
     int maxPrefixReuseTokens(int prompt_tokens) const {
         return std::max(0, prompt_tokens - std::max(1, cache_min_replay_tokens));
     }
 
-    bool use_typed_cache_regions                  = false;
-    bool use_opaque_kv_cache_store                = false;
-    bool disable_decode_first_malloc_device_reuse = false;
-
-    rtp_llm::DataType dtype     = rtp_llm::DataType::TYPE_INVALID;
-    uint32_t          layer_num = 0;  // the number of main model layers
-    bool              use_mla   = false;
-    bool              is_sparse = false;
-
-    // Block configuration
-    size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
-
-    // Attention-specific configuration
-    int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-
-    // mtp-model configurations
-    std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
-
-    CacheConfig() {}
-
-    uint32_t layer_all_num() const {
-        if (cache_topology == nullptr) {
-            return layer_num;
-        }
-        RTP_LLM_CHECK_WITH_INFO(cache_topology->layers().size() <= std::numeric_limits<uint32_t>::max(),
-                                "CacheConfig layer count exceeds uint32_t range");
-        return static_cast<uint32_t>(cache_topology->layers().size());
+    uint32_t layer_all_num(size_t module = 0) const {
+        return moduleConfig(module).layer_all_num();
     }
 
     static uint32_t
@@ -85,45 +78,54 @@ public:
         return global_layer_id < invalid ? static_cast<uint32_t>(global_layer_id) : invalid;
     }
 
-    int groupNums() const {
-        return cache_topology == nullptr ? 0 : static_cast<int>(cache_topology->groups().size());
+    // === Topology accessors (module=0 default; old signatures unchanged) ===
+    int groupNums(size_t module = 0) const {
+        return moduleConfig(module).groupNums();
     }
 
-    const CacheTopology& topology() const {
-        RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");
-        return *cache_topology;
+    const CacheTopology& topology(size_t module = 0) const {
+        return moduleConfig(module).topology();
     }
 
-    const std::shared_ptr<const CacheTopology>& topologyPtr() const {
-        RTP_LLM_CHECK_WITH_INFO(cache_topology != nullptr, "CacheConfig topology is not initialized");
-        return cache_topology;
+    const std::shared_ptr<const CacheTopology>& topologyPtr(size_t module = 0) const {
+        return moduleConfig(module).topologyPtr();
     }
 
-    const GroupBase& group(const std::string& tag) const {
-        return topology().group(tag);
+    const GroupBase& group(const std::string& tag, size_t module = 0) const {
+        return moduleConfig(module).group(tag);
     }
 
-    const std::vector<GroupBase>& groups() const {
-        return topology().groups();
+    const std::vector<GroupBase>& groups(size_t module = 0) const {
+        return moduleConfig(module).groups();
     }
 
-    CacheTopology::GroupRefs groupsForLayer(int layer_id) const {
-        return topology().groupsForLayer(layer_id);
+    CacheTopology::GroupRefs groupsForLayer(int layer_id, size_t module = 0) const {
+        return moduleConfig(module).groupsForLayer(layer_id);
     }
 
-    const GroupBase& groupForLayer(int layer_id, const std::string& tag) const {
-        return topology().groupForLayer(layer_id, tag);
+    const GroupBase& groupForLayer(int layer_id, const std::string& tag, size_t module = 0) const {
+        return moduleConfig(module).groupForLayer(layer_id, tag);
     }
 
-    const GroupBase& soleGroupForLayer(int layer_id) const {
-        return topology().soleGroupForLayer(layer_id);
+    const GroupBase& soleGroupForLayer(int layer_id, size_t module = 0) const {
+        return moduleConfig(module).soleGroupForLayer(layer_id);
     }
 
-    std::vector<int> layerIdsForGroup(std::string_view group_tag) const {
-        return topology().layerIdsForGroup(group_tag);
+    std::vector<int> layerIdsForGroup(std::string_view group_tag, size_t module = 0) const {
+        return moduleConfig(module).layerIdsForGroup(group_tag);
     }
 
-    size_t blockSizeBytesForGroup(std::string_view group_tag) const {
+    const std::vector<std::string>& groupTags(size_t module = 0) const {
+        return moduleConfig(module).groupTags();
+    }
+
+    // === Block sizing ===
+    // module 0 keeps the merged main+MTP semantics (physical byte layout is
+    // resolved through the MTP children); module > 0 is a single module.
+    size_t blockSizeBytesForGroup(std::string_view group_tag, size_t module = 0) const {
+        if (module != 0) {
+            return moduleConfig(module).blockSizeBytesForGroup(group_tag);
+        }
         size_t      total = 0;
         const auto& tag   = topology().group(group_tag).tag;
         for (int layer_id : layerIdsForGroup(group_tag)) {
@@ -143,7 +145,10 @@ public:
         return total;
     }
 
-    size_t totalGroupBlockSizeBytes() const {
+    size_t totalGroupBlockSizeBytes(size_t module = 0) const {
+        if (module != 0) {
+            return moduleConfig(module).totalGroupBlockSizeBytes();
+        }
         size_t total = 0;
         for (const auto& group : topology().groups()) {
             const size_t group_bytes = blockSizeBytesForGroup(group.tag);
@@ -168,8 +173,30 @@ public:
     // on demand instead of copying a second geometry table into the topology.
     const GroupBase& physicalGroupForLayer(int layer_id, const std::string& tag) const;
 
-    const std::vector<std::string>& groupTags() const {
-        return topology().groupTags();
+    // === Field accessors (module=0 default; earlier public fields) ===
+    uint32_t layer_num(size_t module = 0) const {
+        return moduleConfig(module).layer_num;
+    }
+    rtp_llm::DataType dtype(size_t module = 0) const {
+        return moduleConfig(module).dtype;
+    }
+    bool use_mla(size_t module = 0) const {
+        return moduleConfig(module).use_mla;
+    }
+    bool is_sparse(size_t module = 0) const {
+        return moduleConfig(module).is_sparse;
+    }
+    int reuse_cache_tail_blocks(size_t module = 0) const {
+        return moduleConfig(module).reuse_cache_tail_blocks;
+    }
+    bool use_typed_cache_regions(size_t module = 0) const {
+        return moduleConfig(module).use_typed_cache_regions;
+    }
+    bool use_opaque_kv_cache_store(size_t module = 0) const {
+        return moduleConfig(module).use_opaque_kv_cache_store;
+    }
+    bool disable_decode_first_malloc_device_reuse(size_t module = 0) const {
+        return moduleConfig(module).disable_decode_first_malloc_device_reuse;
     }
 
     void setGroupBlockLayout(const std::vector<std::string>& group_tags,
@@ -177,8 +204,7 @@ public:
                              const std::vector<size_t>&      kv_block_stride_bytes,
                              const std::vector<size_t>&      kv_scale_stride_bytes);
 
-    std::shared_ptr<CacheConfig>
-    mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
+    CacheModuleConfig mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 

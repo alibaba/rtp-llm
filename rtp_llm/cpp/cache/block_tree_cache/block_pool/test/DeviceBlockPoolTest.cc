@@ -77,7 +77,7 @@ CacheConfig makeMtpCacheConfig() {
     for (int module = 0; module < 2; ++module) {
         const auto draft = std::make_shared<CacheConfig>(rtp_llm::test::makeSimpleMhaCacheConfig(
             /*layer_num=*/1, /*block_num=*/4 + module, /*seq_size_per_block=*/1, TYPE_FP16, 1, 64));
-        main.mtp_sub_configs.push_back(main.mergeMTPModule(*draft, module, main.layer_num));
+        main.mtp_sub_configs.push_back(main.mergeMTPModule(*draft, module, main.layer_num()));
     }
     main.finalizeBlockNums(/*baseline_block_num=*/3, rtp_llm::RuntimeConfig{});
     return main;
@@ -149,8 +149,8 @@ TEST(DeviceBlockPoolTest, MultiLayoutMtpConfigUsesMainBlockCountAndGlobalLayerMa
     CacheConfig cache_config = makeMtpCacheConfig();
     ASSERT_EQ(cache_config.group("default").block_num, 3u);
     ASSERT_EQ(cache_config.mtp_sub_configs.size(), 2u);
-    ASSERT_EQ(cache_config.mtp_sub_configs[0]->group("default").block_num, 3u);
-    ASSERT_EQ(cache_config.mtp_sub_configs[1]->group("default").block_num, 3u);
+    ASSERT_EQ(cache_config.mtp_sub_configs[0].group("default").block_num, 3u);
+    ASSERT_EQ(cache_config.mtp_sub_configs[1].group("default").block_num, 3u);
 
     auto config = std::make_shared<DeviceBlockPoolConfig>(
         DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front()));

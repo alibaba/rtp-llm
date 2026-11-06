@@ -78,7 +78,7 @@ public:
         }
     }
 
-    ScopedDeviceResetForTest(const ScopedDeviceResetForTest&) = delete;
+    ScopedDeviceResetForTest(const ScopedDeviceResetForTest&)            = delete;
     ScopedDeviceResetForTest& operator=(const ScopedDeviceResetForTest&) = delete;
 
 private:
@@ -92,21 +92,21 @@ class CacheStoreAsyncWriterTest: public ::testing::Test {};
 
 static CacheConfig makeWriterTestCacheConfig(const std::string& tag, size_t kv_stride, uint32_t block_num = 1) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_BF16;
-    config.layer_num          = 1;
-    config.seq_size_per_block = 1;
+    config.main_config.dtype     = DataType::TYPE_BF16;
+    config.main_config.layer_num = 1;
+    config.seq_size_per_block    = 1;
 
     AttentionConfigs attn_config;
     attn_config.kv_head_num   = 1;
-    attn_config.size_per_head = static_cast<int>(kv_stride / (2 * getTypeSize(config.dtype)));
+    attn_config.size_per_head = static_cast<int>(kv_stride / (2 * getTypeSize(config.dtype())));
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
     KVCacheSpecDesc desc;
     desc.tag        = tag;
     desc.cache_type = KVCacheSpecType::MultiHeadAttention;
-    desc.dtype      = config.dtype;
+    desc.dtype      = config.dtype();
     SpecBuildContext ctx;
-    ctx.dtype              = config.dtype;
+    ctx.dtype              = config.dtype();
     ctx.seq_size_per_block = 1;
     ctx.attn_config        = &attn_config;
     ctx.parallelism_config = &parallelism_config;
@@ -327,8 +327,7 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
 
 TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
     auto main_config = makeWriterTestCacheConfig("main", /*kv_stride=*/16);
-    main_config.mtp_sub_configs.push_back(
-        std::make_shared<CacheConfig>(makeWriterTestCacheConfig("draft", /*kv_stride=*/32)));
+    main_config.mtp_sub_configs.push_back(makeWriterTestCacheConfig("draft", /*kv_stride=*/32).main_config);
     auto cache_manager = std::make_shared<KVCacheManager>(main_config, /*warmup=*/true);
 
     CacheStoreAsyncWriter writer(

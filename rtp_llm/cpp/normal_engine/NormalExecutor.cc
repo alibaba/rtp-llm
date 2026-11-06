@@ -23,7 +23,6 @@ namespace rtp_llm {
 
 namespace {
 
-
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
     const bool  on  = (env != nullptr && std::string(env) == "1");
@@ -142,18 +141,16 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
-        const auto& model_cache_config =
-            is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) : cache_manager->cacheConfig();
-        const size_t runtime_tokens_per_block = model_cache_config.seq_size_per_block;
+        const size_t runtime_tokens_per_block = cache_manager->cacheConfig().seq_size_per_block;
         const size_t max_reserved_step        = params.sp_config.speculativeReserveStep();
         const auto&  topology                 = model_init_params.kv_cache_layer_layout->topology();
         RTP_LLM_CHECK_WITH_INFO(params.model_config_.max_seq_len > 0,
@@ -196,10 +193,11 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
 
     // when warmup, cache manager maybe nullptr
-    const auto& cache_config = cache_manager ?
-                                   (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
-                                                  cache_manager->cacheConfig()) :
-                                   CacheConfig();
+    const auto&  cache_config       = cache_manager ?
+                                          (is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) :
+                                                         cache_manager->cacheConfig().main_config) :
+                                          CacheModuleConfig();
+    const size_t seq_size_per_block = cache_manager ? cache_manager->cacheConfig().seq_size_per_block : 1u;
 
     const int async_worker_count =
         tp_rank_ > 0 || warm_up_ || is_propose_ ? 0 : params.runtime_config.output_dispatcher_worker_count;
@@ -207,6 +205,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                                  params.pd_sep_config,
                                                                  params.profiling_debug_logging_config,
                                                                  cache_config,
+                                                                 seq_size_per_block,
                                                                  warm_up_,
                                                                  async_worker_count));
     LogitsProcessorFactory::init(params.model_config_,

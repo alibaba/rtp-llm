@@ -558,7 +558,7 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
     }
 }
 
-static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
+static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheModuleConfig& cache_config) {
     model_input.kv_block_stride_bytes = 0;
     model_input.kv_scale_stride_bytes = 0;
     if (cache_config.groupNums() == 1) {
@@ -712,9 +712,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
-    data_type_                  = params.model_config_.data_type;
-    hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
-    propose_step_               = propose_params->gen_num_per_circle;
+    data_type_    = params.model_config_.data_type;
+    hidden_size_  = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    propose_step_ = propose_params->gen_num_per_circle;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
     vocab_size_                 = params.model_config_.vocab_size;
@@ -827,10 +827,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -872,7 +872,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     batch_stream_processor_.reset(new MtpBatchStreamProcessor(params.model_config_,
                                                               params.pd_sep_config,
                                                               params.profiling_debug_logging_config,
-                                                              cache_config,
+                                                              cache_config.main_config,
+                                                              cache_config.seq_size_per_block,
                                                               params.sp_config,
                                                               warm_up_));
 
@@ -910,7 +911,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              role_type_,
                                              warm_up_,
                                              mtp_params->model_config_.hidden_state_capture_layer_ids);
-        model_params.hidden_state_capture_dtype     = mtp_params->model_config_.hidden_state_capture_dtype;
+        model_params.hidden_state_capture_dtype = mtp_params->model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
         if (params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
             const auto& topology = model_params.kv_cache_layer_layout->topology();
@@ -1577,7 +1578,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     {static_cast<int64_t>(batch_size), static_cast<int64_t>(propose_step_ + 1)});
                 ensureModelInputsOnCuda(model_input, "decode.prepare_dspark_target_verify");
             }
-            applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+            applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig().main_config);
             tpSyncModelInputs(model_input, parallelism_config_);
             ensureModelInputsOnCuda(model_input, "decode.dspark_target_verify_after_tp_sync");
         }
@@ -1810,8 +1811,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 #if USE_PPU
     // PPU host rejection selects rows from the normalized target output.
     // Reading the raw buffer's prefix again would undo that selection.
-    preserve_compacted_hidden = model_input.last_hidden_states.defined()
-                                && model_output.all_hidden_states.defined()
+    preserve_compacted_hidden = model_input.last_hidden_states.defined() && model_output.all_hidden_states.defined()
                                 && model_input.last_hidden_states.dim() == 2
                                 && model_output.all_hidden_states.dim() == 2
                                 && model_input.last_hidden_states.size(0) < model_output.all_hidden_states.size(0);
@@ -1920,7 +1920,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
-    const auto& cache_cfg = cache_manager_->cacheConfig();
+    const auto& cache_cfg = cache_manager_->cacheConfig().main_config;
     // NOTE: combo_tokens never used in prepare stage, so it is safe to use shallow copy
     auto model_input_copy = model_input;
     applyCacheStrideToModelInput(model_input_copy, cache_cfg);
@@ -2080,7 +2080,7 @@ absl::Status MtpExecutor::runDecodeAlignmentOnly(GptModelInputs& model_input) {
         }
     }
 
-    applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+    applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig().main_config);
     model_input.is_target_verify = true;
     ensureModelInputsOnCuda(model_input, "decode.alignment_target_verify");
     forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
@@ -2778,7 +2778,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             execBroadcast({broadcast_tensors, 0});
         }
 
-        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig().main_config);
     }
 }
 

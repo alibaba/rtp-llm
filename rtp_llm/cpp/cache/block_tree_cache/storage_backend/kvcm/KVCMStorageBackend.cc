@@ -469,7 +469,7 @@ private:
         auto [location_infos, location_groups] = genLocationSpecs();
 
         const std::string model_name = runtime_config_.model_name;
-        const std::string dtype      = getDataTypeStr(cache_config_.dtype);
+        const std::string dtype      = getDataTypeStr(cache_config_.dtype());
         std::string       extra      = kv_cache_config_.kvcm_model_extra_info;
         extra += '/' + autil::EnvUtil::getEnv("BIZ_NAME", std::string("")) + '/'
                  + std::to_string(hashString(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""))));
@@ -480,7 +480,7 @@ private:
         std::stringstream identity;
         identity << "instance_group: " << kv_cache_config_.kvcm_instance_group
                  << ";block_size:" << cache_config_.seq_size_per_block << ";model_name:" << model_name
-                 << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.use_mla
+                 << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.use_mla()
                  << ";fp8_kv_cache:" << kv_cache_config_.fp8_kv_cache << ";tp_size:" << parallelism_config_.tp_size
                  << ";dp_size:" << parallelism_config_.dp_size << ";extra_info:" << extra
                  << ";location_spec_info:" << autil::legacy::ToJsonString(location_infos, true)
@@ -504,7 +504,7 @@ private:
                                                location_groups,
                                                kvcm::ModelDeployment(model_name,
                                                                      dtype,
-                                                                     cache_config_.use_mla,
+                                                                     cache_config_.use_mla(),
                                                                      static_cast<int32_t>(parallelism_config_.tp_size),
                                                                      static_cast<int32_t>(parallelism_config_.dp_size),
                                                                      1,
@@ -796,16 +796,16 @@ private:
     }
 
 private:
-    CacheConfig                          cache_config_;
-    KVCacheConfig                        kv_cache_config_;
-    RuntimeConfig                        runtime_config_;
-    ParallelismConfig                    parallelism_config_;
-    SpeculativeExecutionConfig           sp_config_;
-    std::shared_ptr<BroadcastManager>    broadcast_manager_;
+    CacheConfig                                         cache_config_;
+    KVCacheConfig                                       kv_cache_config_;
+    RuntimeConfig                                       runtime_config_;
+    ParallelismConfig                                   parallelism_config_;
+    SpeculativeExecutionConfig                          sp_config_;
+    std::shared_ptr<BroadcastManager>                   broadcast_manager_;
     std::shared_ptr<kmonitor::MetricsReporter>          metrics_reporter_;
-    std::unique_ptr<kvcm::GroupPolicy>   group_policy_;
-    std::shared_ptr<kvcm::ClientWrapper> client_wrapper_;
-    std::vector<std::string>             registration_tags_;
+    std::unique_ptr<kvcm::GroupPolicy>                  group_policy_;
+    std::shared_ptr<kvcm::ClientWrapper>                client_wrapper_;
+    std::vector<std::string>                            registration_tags_;
     std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag_;
     size_t                                              total_device_block_count_{0};
     double                                              quarantine_abort_ratio_{0.0};

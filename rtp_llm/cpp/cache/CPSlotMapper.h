@@ -11,6 +11,7 @@
 namespace rtp_llm {
 
 struct CacheConfig;
+struct CacheModuleConfig;
 
 struct CpGroupLayout {
     CpBlockMappingMode mapping            = CpBlockMappingMode::NONE;
@@ -51,7 +52,7 @@ public:
         return virtual_block_size_;
     }
 
-    CpGroupLayout layoutForGroup(const CacheConfig& config, std::string_view tag) const;
+    CpGroupLayout layoutForGroup(const CacheModuleConfig& config, std::string_view tag) const;
     bool          blockRoundRobinGroup(const CacheConfig& config, std::string_view tag) const;
     bool          compactLastRankGroup(const CacheConfig& config, std::string_view tag) const;
 
@@ -79,10 +80,10 @@ public:
                                                     size_t                  reuse_block_size,
                                                     bool                    use_hybrid) const;
 
-    std::vector<BlockInfo> sliceBlockForPeer(const CacheConfig&     config,
-                                             std::string_view       tag,
-                                             std::vector<BlockInfo> parts,
-                                             size_t                 peer_idx) const;
+    std::vector<BlockInfo> sliceBlockForPeer(const CacheModuleConfig& config,
+                                             std::string_view         tag,
+                                             std::vector<BlockInfo>   parts,
+                                             size_t                   peer_idx) const;
 
 private:
     int cp_rank_            = 0;

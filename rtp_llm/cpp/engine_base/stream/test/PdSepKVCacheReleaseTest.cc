@@ -236,7 +236,7 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
     // BF16 keeps the prototype spec scale-free, so a caller asking for
     // kv_scale_stride == 0 really gets a scale-less group (an INT8/FP8 prototype
     // would have CacheConfig::setTopology backfill a non-zero scale stride).
-    auto config                      = test::makeSingleGroupCacheConfig(test::makeMhaSpec(tag,
+    auto config                                  = test::makeSingleGroupCacheConfig(test::makeMhaSpec(tag,
                                                                      static_cast<size_t>(tokens_per_block),
                                                                      rtp_llm::DataType::TYPE_BF16,
                                                                      /*local_head_num_kv=*/1,
@@ -244,7 +244,7 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
                                                    CacheGroupType::FULL,
                                                    /*layer_num=*/1,
                                                    /*block_num=*/static_cast<int>(kBlockNum));
-    config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
+    config.main_config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
     rtp_llm::test::setGroupBlockLayout(config, {tag}, {kBlockNum}, {kv_stride}, {kv_scale_stride});
     return config;
 }
@@ -263,7 +263,7 @@ torch_ext::PyCacheStoreInputs makeDsv4WriteInputs(int64_t                       
     inputs.request_id            = torch::tensor({request_id}, torch::kInt64);
     inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
     inputs.cache_keys            = torch::from_blob(const_cast<CacheKeyType*>(cache_keys.data()),
-                                         {1, (int64_t)cache_keys.size()},
+                                                    {1, (int64_t)cache_keys.size()},
                                          torch::TensorOptions(torch::kInt64))
                             .clone();
     return inputs;
@@ -702,7 +702,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
         const auto&  blocks = resource.kvCache().blocks(0, tag);
         const auto&  policy = config.group(tag).policy;
         const size_t tail   = policy.enable_prefix_reuse ?
-                                  std::min(blocks.size(), static_cast<size_t>(config.reuse_cache_tail_blocks)) :
+                                  std::min(blocks.size(), static_cast<size_t>(config.reuse_cache_tail_blocks())) :
                                   std::min(blocks.size(), static_cast<size_t>(policy.active_tail_blocks));
         for (size_t pos = 0; pos < blocks.size(); ++pos) {
             const bool expected = policy.active_tail_blocks == 0 || pos >= blocks.size() - tail;
@@ -807,7 +807,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
     constexpr size_t  model_id       = 76;
 
     auto config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1, /*block_num=*/16, spb, DataType::TYPE_BF16);
-    config.use_opaque_kv_cache_store = true;
+    config.main_config.use_opaque_kv_cache_store = true;
 
     auto makeResource = [](const std::shared_ptr<KVCacheManager>& manager) {
         auto resource = std::make_shared<BatchKVCacheResource>();
@@ -882,7 +882,8 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
         layer_cache.tag                = "default";
         runtimeWriteCacheStore(inputs,
                                layer_cache,
-                               manager->cacheConfig(),
+                               manager->cacheConfig().main_config,
+                               manager->cacheConfig().seq_size_per_block,
                                cache_store,
                                model_id,
                                cp_rank,
@@ -1060,7 +1061,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
 
             runtimeWriteCacheStore(inputs,
                                    layer_cache,
-                                   cache_config,
+                                   cache_config.main_config,
+                                   cache_config.seq_size_per_block,
                                    cache_store,
                                    model_id,
                                    /*cp_rank=*/0,
@@ -1203,7 +1205,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
 
             runtimeWriteCacheStore(inputs,
                                    layer_cache,
-                                   cache_config,
+                                   cache_config.main_config,
+                                   cache_config.seq_size_per_block,
                                    cache_store,
                                    model_id,
                                    /*cp_rank=*/0,
@@ -1355,7 +1358,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
 
             runtimeWriteCacheStore(inputs,
                                    layer_cache,
-                                   cache_config,
+                                   cache_config.main_config,
+                                   cache_config.seq_size_per_block,
                                    cache_store,
                                    model_id,
                                    /*cp_rank=*/0,
@@ -1485,7 +1489,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
     // --- Call runtimeWriteCacheStore (event->synchronize() inside) ---
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto block_ids   = torch::from_blob(const_cast<int*>(resource->blocks(0, "default").data()),
-                                      {1, (int64_t)resource->blocks(0, "default").size()},
+                                        {1, (int64_t)resource->blocks(0, "default").size()},
                                       torch::kInt32)
                          .clone();
 
@@ -1506,7 +1510,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
 
         runtimeWriteCacheStore(inputs,
                                layer_cache,
-                               cache_config,
+                               cache_config.main_config,
+                               cache_config.seq_size_per_block,
                                cache_store,
                                /*cache_model_id=*/0,
                                /*cp_rank=*/0,
@@ -1554,7 +1559,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     runtimeWriteCacheStore(inputs,
                            layer_cache,
-                           config,
+                           config.main_config,
+                           config.seq_size_per_block,
                            cache_store,
                            /*cache_model_id=*/0,
                            /*cp_rank=*/0,
@@ -1665,7 +1671,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStorePreservesCpSwaOpaqueByteSlice
                 auto cache_store               = std::make_shared<MemoryBackedCacheStore>();
                 runtimeWriteCacheStore(inputs,
                                        layer_cache,
-                                       prefill_config,
+                                       prefill_config.main_config,
+                                       prefill_config.seq_size_per_block,
                                        cache_store,
                                        model_id,
                                        cp_rank,
@@ -1732,7 +1739,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKv
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     runtimeWriteCacheStore(inputs,
                            layer_cache,
-                           config,
+                           config.main_config,
+                           config.seq_size_per_block,
                            cache_store,
                            /*cache_model_id=*/0,
                            /*cp_rank=*/0,
@@ -1787,7 +1795,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     runtimeWriteCacheStore(inputs,
                            layer_cache,
-                           config,
+                           config.main_config,
+                           config.seq_size_per_block,
                            cache_store,
                            /*cache_model_id=*/0,
                            /*cp_rank=*/0,

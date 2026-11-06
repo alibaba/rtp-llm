@@ -54,7 +54,7 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
         size_t      group_bytes    = 0;
-        const auto  append_segment = [&](const CacheConfig& source, const GroupBase& segment, bool main) {
+        const auto  append_segment = [&](const CacheModuleConfig& source, const GroupBase& segment, bool main) {
             const auto   layer_ids = source.layerIdsForGroup(segment.tag);
             const size_t layer_count =
                 main ? std::count_if(
@@ -67,17 +67,16 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
         };
         // Exactly the physical segments assembled by BlockPoolConfigHelper:
         // target layers use the target Spec, draft layers use their own Specs.
-        append_segment(config, group, true);
+        append_segment(config.main_config, group, true);
         for (const auto& sub : config.mtp_sub_configs) {
-            RTP_LLM_CHECK_WITH_INFO(sub != nullptr, "MTP cache configuration is null for tag=%s", group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(gid < sub->topology().groups().size(),
+            RTP_LLM_CHECK_WITH_INFO(gid < sub.topology().groups().size(),
                                     "MTP cache configuration is missing group index=%zu for tag=%s",
                                     gid,
                                     group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(sub->topology().groups()[gid].tag == group.tag,
+            RTP_LLM_CHECK_WITH_INFO(sub.topology().groups()[gid].tag == group.tag,
                                     "MTP group order is inconsistent for tag=%s",
                                     group.tag.c_str());
-            append_segment(*sub, sub->topology().groups()[gid], false);
+            append_segment(sub, sub.topology().groups()[gid], false);
         }
         const auto& policy = group.policy;
         if (policy.explicit_block_num > 0) {
@@ -223,8 +222,8 @@ void populateGroups(CacheConfig&                 config,
     };
     std::map<std::string, BuildState> groups_by_tag;
     std::vector<std::string>          ordered_tags;
-    std::vector<LayerBase>            layers(static_cast<size_t>(config.layer_num));
-    for (uint32_t layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+    std::vector<LayerBase>            layers(static_cast<size_t>(config.layer_num()));
+    for (uint32_t layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
         layers[layer_id].layer_id = static_cast<int>(layer_id);
         const auto& descs         = descs_by_layer[layer_id];
         const auto& specs         = specs_by_layer[layer_id];
@@ -295,23 +294,23 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
         CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
 
     CacheConfig config;
-    config.dtype                   = ctx.dtype;
-    config.layer_num               = static_cast<uint32_t>(model_config.num_layers);
+    config.main_config.dtype       = ctx.dtype;
+    config.main_config.layer_num   = static_cast<uint32_t>(model_config.num_layers);
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
 
-    config.seq_size_per_block = seq_size;
-    config.use_mla            = model_config.attn_config.use_mla;
-    config.is_sparse          = model_config.attn_config.is_sparse;
+    config.seq_size_per_block    = seq_size;
+    config.main_config.use_mla   = model_config.attn_config.use_mla;
+    config.main_config.is_sparse = model_config.attn_config.is_sparse;
     populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config);
     for (const auto& group : config.topology().groups()) {
         const bool opaque =
             group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
-        config.use_typed_cache_regions |= opaque;
-        config.use_opaque_kv_cache_store |= opaque;
-        config.is_sparse |= group.spec->type == KVCacheSpecType::OpaqueKV;
+        config.main_config.use_typed_cache_regions |= opaque;
+        config.main_config.use_opaque_kv_cache_store |= opaque;
+        config.main_config.is_sparse |= group.spec->type == KVCacheSpecType::OpaqueKV;
     }
-    config.disable_decode_first_malloc_device_reuse |= config.use_opaque_kv_cache_store;
+    config.main_config.disable_decode_first_malloc_device_reuse |= config.main_config.use_opaque_kv_cache_store;
     return config;
 }
 
@@ -359,10 +358,10 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
                                                   int                      gen_num_per_cycle) {
-    auto config        = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    auto config = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
-    config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
-    auto groups                    = config.topology().groups();
+    config.main_config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
+    auto groups                                = config.topology().groups();
     for (auto& group : groups) {
         const uint32_t override_blocks =
             group.policy.group_type == CacheGroupType::LINEAR ? kv_cache_config.linear_pool_blocks :
@@ -425,7 +424,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
         for (int module = 0; module < num_mtp_modules; ++module) {
-            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num()));
         }
     }
 

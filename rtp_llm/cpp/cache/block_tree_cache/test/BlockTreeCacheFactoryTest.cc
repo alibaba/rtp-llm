@@ -100,16 +100,16 @@ CacheConfig makeHeterogeneousMtpConfig() {
                                                 DataType::TYPE_FP16,
                                                 /*local_head_num_kv=*/1,
                                                 /*size_per_head=*/4);
-    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, /*module_index=*/0, target.layer_num));
-    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, /*module_index=*/1, target.layer_num));
+    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, /*module_index=*/0, target.layer_num()));
+    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, /*module_index=*/1, target.layer_num()));
     return target;
 }
 
 CacheConfig makeSwaConfig(int block_size = 4) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 2;
-    config.seq_size_per_block = block_size;
+    config.main_config.dtype     = DataType::TYPE_FP16;
+    config.main_config.layer_num = 2;
+    config.seq_size_per_block    = block_size;
 
     auto spec = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/block_size);
@@ -124,10 +124,10 @@ CacheConfig makeSwaConfig(int block_size = 4) {
 
 CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 4;
-    config.seq_size_per_block = 4;
-    config.reuse_cache_tail_blocks = 2;
+    config.main_config.dtype                   = DataType::TYPE_FP16;
+    config.main_config.layer_num               = 4;
+    config.seq_size_per_block                  = 4;
+    config.main_config.reuse_cache_tail_blocks = 2;
 
     auto linear_spec = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
                                                     /*local_num_k_heads=*/1,
@@ -183,11 +183,11 @@ CacheConfig makeIndependentWatermarkConfig() {
 
 CacheConfig makeTierRatioConfig() {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 4;
-    config.seq_size_per_block = 4;
-    auto full_spec            = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 8, 4);
-    auto swa_spec             = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 16, 4);
+    config.main_config.dtype     = DataType::TYPE_FP16;
+    config.main_config.layer_num = 4;
+    config.seq_size_per_block    = 4;
+    auto full_spec               = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 8, 4);
+    auto swa_spec                = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 16, 4);
     auto linear_spec =
         test::makeResolvedLinearSpec(DataType::TYPE_FP16, 1, 1, 1, 1, 2, 4, DataType::TYPE_FP16, DataType::TYPE_FP16);
     auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
@@ -214,9 +214,9 @@ CacheConfig makeTierRatioConfig() {
 
 CacheConfig makeDifferentFullGroupsConfig(uint32_t second_seq_size_per_block, CpBlockSliceMode second_cp_slice) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 2;
-    config.seq_size_per_block = 4;
+    config.main_config.dtype     = DataType::TYPE_FP16;
+    config.main_config.layer_num = 2;
+    config.seq_size_per_block    = 4;
 
     std::shared_ptr<MHAKVCacheSpec> first = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/4, /*seq_size_per_block=*/4);
@@ -251,9 +251,9 @@ CacheConfig makeLogicallyIncompatibleFullGroupsConfig() {
 
 CacheConfig makeCompatibleFullGroupsConfig() {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 2;
-    config.seq_size_per_block = 4;
+    config.main_config.dtype     = DataType::TYPE_FP16;
+    config.main_config.layer_num = 2;
+    config.seq_size_per_block    = 4;
 
     auto first = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
@@ -306,9 +306,9 @@ CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
                                           uint32_t           second_active_tail_blocks,
                                           CpBlockMappingMode second_cp_mapping) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 2;
-    config.seq_size_per_block = 4;
+    config.main_config.dtype     = DataType::TYPE_FP16;
+    config.main_config.layer_num = 2;
+    config.seq_size_per_block    = 4;
 
     auto first = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
@@ -332,10 +332,10 @@ CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
 
 CacheConfig makeCompatibleLinearGroupsConfig(uint32_t second_active_tail_blocks) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 2;
-    config.seq_size_per_block = 4;
-    config.reuse_cache_tail_blocks = 2;
+    config.main_config.dtype                   = DataType::TYPE_FP16;
+    config.main_config.layer_num               = 2;
+    config.seq_size_per_block                  = 4;
+    config.main_config.reuse_cache_tail_blocks = 2;
 
     std::shared_ptr<LinearKVCacheSpec> first         = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
                                                                             /*local_num_k_heads=*/1,
@@ -371,9 +371,9 @@ CacheConfig makeCompatibleLinearGroupsConfig(uint32_t second_active_tail_blocks)
 
 CacheConfig makeReusableGroupsAroundDisabledConfig() {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 3;
-    config.seq_size_per_block = 4;
+    config.main_config.dtype     = DataType::TYPE_FP16;
+    config.main_config.layer_num = 3;
+    config.seq_size_per_block    = 4;
 
     std::vector<std::shared_ptr<KVCacheSpec>> specs;
     std::vector<CacheGroupPolicy>             policies;
@@ -2421,9 +2421,9 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     }
 
     CacheConfig cache_config;
-    cache_config.dtype              = TYPE_FP16;
-    cache_config.layer_num          = 3;
-    cache_config.seq_size_per_block = 1;
+    cache_config.main_config.dtype     = TYPE_FP16;
+    cache_config.main_config.layer_num = 3;
+    cache_config.seq_size_per_block    = 1;
 
     std::vector<KVCacheSpecPtr> specs;
     for (size_t group_id = 0; group_id < 3; ++group_id) {

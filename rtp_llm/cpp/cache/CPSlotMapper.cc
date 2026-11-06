@@ -28,7 +28,7 @@ CPSlotMapper::CPSlotMapper(int cp_rank, int cp_size, int block_size):
     virtual_block_size_ = block_size * cp_size;
 }
 
-CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, std::string_view tag) const {
+CpGroupLayout CPSlotMapper::layoutForGroup(const CacheModuleConfig& config, std::string_view tag) const {
     CpGroupLayout layout;
     const auto&   group       = config.topology().group(tag);
     const auto&   policy      = group.policy;
@@ -44,11 +44,11 @@ CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, std::strin
 }
 
 bool CPSlotMapper::blockRoundRobinGroup(const CacheConfig& config, std::string_view tag) const {
-    return layoutForGroup(config, tag).mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    return layoutForGroup(config.main_config, tag).mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 }
 
 bool CPSlotMapper::compactLastRankGroup(const CacheConfig& config, std::string_view tag) const {
-    return layoutForGroup(config, tag).mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
+    return layoutForGroup(config.main_config, tag).mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
 }
 
 int CPSlotMapper::localBlockCount(int seq_len) const {
@@ -137,10 +137,10 @@ std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheGroupPo
     return buildCacheStorePlan(policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_rank_, cp_size_);
 }
 
-std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     config,
-                                                       std::string_view       tag,
-                                                       std::vector<BlockInfo> parts,
-                                                       size_t                 peer_idx) const {
+std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheModuleConfig& config,
+                                                       std::string_view         tag,
+                                                       std::vector<BlockInfo>   parts,
+                                                       size_t                   peer_idx) const {
     const auto layout = layoutForGroup(config, tag);
     if (!isSharded() || layout.slice == CpBlockSliceMode::NONE) {
         return parts;

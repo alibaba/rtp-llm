@@ -332,7 +332,7 @@ protected:
 
     static std::vector<uint8_t> readDeviceBytes(const void* src_device, size_t bytes) {
         auto        device_tensor = torch::from_blob(const_cast<void*>(src_device),
-                                              {static_cast<int64_t>(bytes)},
+                                                     {static_cast<int64_t>(bytes)},
                                               torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
         auto        host_tensor   = device_tensor.cpu();
         const auto* data          = host_tensor.data_ptr<uint8_t>();
@@ -1279,7 +1279,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ConvertIndexToAddr) {
     allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
     allocator_->init();
 
-    for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+    for (int layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
         for (int block_id = 0; block_id < 3; ++block_id) {
             auto addr_info = allocator_->convertIndexToAddr(layer_id, block_id);
             EXPECT_NE(addr_info.kv_addr, nullptr);
@@ -1345,7 +1345,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, SingleLayerMtpConfigSlicesDescript
     config.kv_cache_spec_descs[1][0].tag                   = "layer1";
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
-                                                             HybridAttentionType::SLIDING_WINDOW};
+                                                              HybridAttentionType::SLIDING_WINDOW};
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
 
@@ -1479,8 +1479,8 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, LayerCacheBase) {
     EXPECT_EQ(layout.topology().group("default").policy.group_type, CacheGroupType::FULL);
     EXPECT_EQ(publishedGroupTags(layout.topology()), std::vector<std::string>{"default"});
     const auto& default_layout = layout.group("default");
-    EXPECT_EQ(default_layout.size(), config.layer_num);
-    EXPECT_EQ(default_layout.activeLayerCount(), config.layer_num);
+    EXPECT_EQ(default_layout.size(), config.layer_num());
+    EXPECT_EQ(default_layout.activeLayerCount(), config.layer_num());
     for (size_t i = 0; i < default_layout.size(); ++i) {
         ASSERT_TRUE(default_layout.hasLayer(i));
         EXPECT_GT(default_layout.at(i).kv_addr.nbytes(), 0u);
@@ -1634,7 +1634,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, BlockCopySingle) {
     size_t v_block_size = spec->v_block_size();
     size_t block_size   = k_block_size + v_block_size;
 
-    for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+    for (int layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
         auto src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
         ASSERT_NE(src_addr.kv_addr, nullptr) << "KV addr is null for layer " << layer_id << ", block " << src_block;
 
@@ -1653,7 +1653,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, BlockCopySingle) {
 
     EXPECT_NO_THROW(allocator_->blockCopy(src_block, dst_block));
 
-    for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+    for (int layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
         auto src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
         auto dst_addr = allocator_->convertIndexToAddr(layer_id, dst_block);
 
@@ -1685,7 +1685,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, BlockBatchCopyVector) {
     size_t block_size   = k_block_size + v_block_size;
 
     for (const auto& pair : copy_mapping) {
-        for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+        for (int layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
             auto src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
             ASSERT_NE(src_addr.kv_addr, nullptr);
 
@@ -1704,7 +1704,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, BlockBatchCopyVector) {
 
     // Verify data correctness for each block
     for (const auto& pair : copy_mapping) {
-        for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+        for (int layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
             auto src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
             auto dst_addr = allocator_->convertIndexToAddr(layer_id, pair.dst);
 
@@ -1733,7 +1733,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, BlockBatchCopyCopiesCompleteQuanti
     auto config                = CacheConfigCreator::createWarmupConfig(model_config, parallelism_config, 0);
     config.finalizeBlockNums(/*global_block_num=*/5, RuntimeConfig{});
 
-    ASSERT_FALSE(config.is_sparse);
+    ASSERT_FALSE(config.is_sparse());
     ASSERT_GT(config.topology().groups()[0].kvScaleStrideBytes(), 0u);
 
     allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
@@ -1814,7 +1814,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, BlockBatchCopyPointers) {
     size_t block_size   = k_block_size + v_block_size;
 
     for (const auto& pair : pairs) {
-        for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+        for (int layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
             auto                 src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
             std::vector<uint8_t> pattern(block_size);
             for (size_t i = 0; i < k_block_size; ++i) {
@@ -1830,7 +1830,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, BlockBatchCopyPointers) {
     EXPECT_NO_THROW(allocator_->blockBatchCopy(pairs, pairs + 2));
 
     for (const auto& pair : pairs) {
-        for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+        for (int layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
             auto src_addr = allocator_->convertIndexToAddr(layer_id, pair.src);
             auto dst_addr = allocator_->convertIndexToAddr(layer_id, pair.dst);
 
@@ -1864,7 +1864,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, BlockBatchCopyBuffer) {
 
     for (size_t i = 0; i < data.size(); i += 2) {
         int src_block = data[i];
-        for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+        for (int layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
             auto                 src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
             std::vector<uint8_t> pattern(block_size);
             for (size_t j = 0; j < k_block_size; ++j) {
@@ -1882,7 +1882,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, BlockBatchCopyBuffer) {
     for (size_t i = 0; i < data.size(); i += 2) {
         int src_block = data[i];
         int dst_block = data[i + 1];
-        for (int layer_id = 0; layer_id < config.layer_num; ++layer_id) {
+        for (int layer_id = 0; layer_id < config.layer_num(); ++layer_id) {
             auto src_addr = allocator_->convertIndexToAddr(layer_id, src_block);
             auto dst_addr = allocator_->convertIndexToAddr(layer_id, dst_block);
 

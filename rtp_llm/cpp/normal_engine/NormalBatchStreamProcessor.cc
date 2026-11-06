@@ -6,7 +6,8 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     const ModelConfig&                 model_config,
     const PDSepConfig&                 pd_sep_config,
     const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
-    const CacheConfig&                 cache_config,
+    const CacheModuleConfig&           cache_config,
+    size_t                             seq_size_per_block,
     bool                               warm_up,
     int                                async_worker_count) {
     model_input_gatherer_config_.num_layers              = model_config.num_layers;
@@ -20,8 +21,8 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.position_id_len_factor     = model_config.attn_config.rope_config.index_factor;
     model_input_gatherer_config_.role_type                  = pd_sep_config.role_type;
     model_input_gatherer_config_.decode_entrance            = pd_sep_config.decode_entrance;
-    model_input_gatherer_config_.seq_size_per_block         = cache_config.seq_size_per_block;
-    model_input_gatherer_config_.kernel_seq_size_per_block  = cache_config.seq_size_per_block;
+    model_input_gatherer_config_.seq_size_per_block         = seq_size_per_block;
+    model_input_gatherer_config_.kernel_seq_size_per_block  = seq_size_per_block;
     model_input_gatherer_config_.kernel_blocks_per_kv_block = 1;
     model_input_gatherer_config_.kv_cache_group_nums        = cache_config.groupNums();
     model_input_gatherer_config_.use_opaque_kv_cache_store  = cache_config.use_opaque_kv_cache_store;

@@ -117,19 +117,19 @@ TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
 
 TEST(CacheTopologyTest, PhysicalGroupResolvesMultipleMtpModuleLayerRanges) {
     CacheConfig config;
-    config.layer_num = 1;
+    config.main_config.layer_num = 1;
     config.setTopology({makeGroup("full")}, {{0, {"full"}}});
 
     for (int module = 0; module < 2; ++module) {
         CacheConfig draft;
-        draft.layer_num = 2;
+        draft.main_config.layer_num = 2;
         draft.setTopology({makeGroup("full")}, {{0, {"full"}}, {1, {"full"}}});
-        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num()));
     }
 
     EXPECT_EQ(&config.physicalGroupForLayer(0, "full"), &config.group("full"));
     for (int module = 0; module < 2; ++module) {
-        const auto& group = config.mtp_sub_configs[module]->group("full");
+        const auto& group = config.mtp_sub_configs[module].group("full");
         EXPECT_EQ(&config.physicalGroupForLayer(1 + module * 2, "full"), &group);
         EXPECT_EQ(&config.physicalGroupForLayer(2 + module * 2, "full"), &group);
     }
@@ -152,7 +152,7 @@ TEST(CacheTopologyTest, TaggedLayoutPreservesOrderAndRetainedTopology) {
     auto        first  = makeLayoutGroup("zeta", 2);
     auto        second = makeLayoutGroup("alpha", 3);
     CacheConfig config;
-    config.layer_num = 1;
+    config.main_config.layer_num = 1;
     config.setTopology({first, second}, {{0, {"zeta", "alpha"}}});
     const auto  retained      = config.topologyPtr();
     const auto& retained_tags = retained->groupTags();
@@ -174,10 +174,10 @@ TEST(CacheTopologyTest, TaggedLayoutPreservesOrderAndRetainedTopology) {
 
 TEST(CacheTopologyTest, TaggedLayoutKeepsMtpPhysicalGeometry) {
     CacheConfig config;
-    config.layer_num = 1;
+    config.main_config.layer_num = 1;
     config.setTopology({makeLayoutGroup("full", 2)}, {{0, {"full"}}});
     CacheConfig draft;
-    draft.layer_num = 1;
+    draft.main_config.layer_num = 1;
     draft.setTopology({makeLayoutGroup("full", 5)}, {{0, {"full"}}});
     const auto child = config.mergeMTPModule(draft, 0, 1);
     config.mtp_sub_configs.push_back(child);
@@ -189,12 +189,12 @@ TEST(CacheTopologyTest, TaggedLayoutKeepsMtpPhysicalGeometry) {
     EXPECT_EQ(config.group("full").block_num, 23u);
     EXPECT_EQ(config.physicalGroupForLayer(1, "full").kvBlockStrideBytes(), draft_stride);
     EXPECT_EQ(config.blockSizeBytesForGroup("full"), total_bytes);
-    EXPECT_EQ(config.mtp_sub_configs.front(), child);
+    EXPECT_EQ(config.mtp_sub_configs.front().topologyPtr(), child.topologyPtr());
 }
 
 TEST(CacheTopologyTest, InvalidTaggedLayoutsNeverPublishPartialUpdates) {
     CacheConfig config;
-    config.layer_num = 1;
+    config.main_config.layer_num = 1;
     config.setTopology({makeLayoutGroup("first", 2), makeLayoutGroup("second", 2)}, {{0, {"first", "second"}}});
     const auto original = config.topologyPtr();
     const auto kv       = config.group("first").kvBlockStrideBytes();

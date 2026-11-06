@@ -737,13 +737,13 @@ public:
         ResourceContext            resource_context;
         SpeculativeExecutionConfig sp_config;
 
-        model_config.max_seq_len                           = test_config.max_seq_len;
-        model_config.vocab_size                            = test_config.vocab_size;
-        model_config.num_layers                            = test_config.num_layers;
-        model_config.attn_config.rope_config.index_factor  = test_config.position_id_len_factor;
-        sp_config.type                                     = test_config.sp_type;
-        sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
-        sp_config.sp_dspark_mask_token_id                  = test_config.dspark_mask_token_id;
+        model_config.max_seq_len                          = test_config.max_seq_len;
+        model_config.vocab_size                           = test_config.vocab_size;
+        model_config.num_layers                           = test_config.num_layers;
+        model_config.attn_config.rope_config.index_factor = test_config.position_id_len_factor;
+        sp_config.type                                    = test_config.sp_type;
+        sp_config.gen_num_per_cycle                       = test_config.gen_num_per_cycle;
+        sp_config.sp_dspark_mask_token_id                 = test_config.dspark_mask_token_id;
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -778,12 +778,12 @@ public:
         test_kv_cache_config.kernel_seq_size_per_block = 2;
 
         auto configure_cache_model = [](ModelConfig& cache_model_config) {
-            cache_model_config.data_type                    = rtp_llm::TYPE_INT8;
-            cache_model_config.attn_config.kv_head_num      = 128;
-            cache_model_config.attn_config.size_per_head    = 256;
+            cache_model_config.data_type                           = rtp_llm::TYPE_INT8;
+            cache_model_config.attn_config.kv_head_num             = 128;
+            cache_model_config.attn_config.size_per_head           = 256;
             cache_model_config.attn_config.tokens_per_block        = 2;
             cache_model_config.attn_config.kernel_tokens_per_block = 2;
-            cache_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            cache_model_config.attn_config.kv_cache_dtype          = KvCacheDataType::BASE;
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
@@ -1133,11 +1133,11 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         auto full   = test::makeMhaSpec("full", 4, TYPE_FP16, 1, head_size);
         auto config = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 8);
         if (with_linear) {
-            config.layer_num = single_layer ? 1 : 2;
+            config.main_config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                    {{0}, {single_layer ? 0 : 1}},
-                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                    {"linear", "full"});
+                                               {{0}, {single_layer ? 0 : 1}},
+                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                               {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -1150,11 +1150,11 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     };
     auto target = make_config(multiple_groups, 3);
     auto draft  = make_config(draft_has_linear, 1, true);
-    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num));
+    target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num()));
     target.finalizeBlockNums(8, RuntimeConfig{});
     if (multiple_groups && !draft_has_linear) {
-        EXPECT_TRUE(target.mtp_sub_configs[0]->layerIdsForGroup("linear").empty());
-        EXPECT_EQ(target.mtp_sub_configs[0]->groupNums(), 2);  // groups, including placeholder
+        EXPECT_TRUE(target.mtp_sub_configs[0].layerIdsForGroup("linear").empty());
+        EXPECT_EQ(target.mtp_sub_configs[0].groupNums(), 2);  // groups, including placeholder
     }
 
     auto         components         = createMtpExecutorComponents(MtpExecutorTestConfig{}, &target);
@@ -1659,21 +1659,21 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
     // Use the real CP splitter with fake model forwards and TP collectives.
     for (const bool explicit_position_ids : {false, true}) {
         for (const bool middle_chunk : {false, true}) {
-            SCOPED_TRACE(testing::Message() << "explicit_position_ids=" << explicit_position_ids
-                                           << ", middle_chunk=" << middle_chunk);
+            SCOPED_TRACE(testing::Message()
+                         << "explicit_position_ids=" << explicit_position_ids << ", middle_chunk=" << middle_chunk);
             MtpExecutorTestConfig test_config;
-            test_config.gen_num_per_cycle      = 2;
-            test_config.mm_position_ids_style  = explicit_position_ids ? MROPE : DEFAULT;
-            test_config.position_id_len_factor = explicit_position_ids ? 3 : 1;
-            auto  components = createMtpExecutorComponents(test_config);
-            auto& executor = *components.executor;
+            test_config.gen_num_per_cycle                         = 2;
+            test_config.mm_position_ids_style                     = explicit_position_ids ? MROPE : DEFAULT;
+            test_config.position_id_len_factor                    = explicit_position_ids ? 3 : 1;
+            auto  components                                      = createMtpExecutorComponents(test_config);
+            auto& executor                                        = *components.executor;
             executor.parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
             executor.warm_up_ = true;  // Stop after draft forward, before draft sampling.
 
             constexpr int prefix_len = 4;
             constexpr int chunk_len  = 8;
             const int     prompt_len = prefix_len + chunk_len + (middle_chunk ? 2 : 0);
-            vector<int> prompt{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
+            vector<int>   prompt{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
             prompt.resize(prompt_len);
             auto stream = createContextStream(
                 components.model_config, components.runtime_config, components.resource_context, prompt);
@@ -1684,8 +1684,9 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
 
             torch::Tensor prompt_positions;
             if (explicit_position_ids) {
-                prompt_positions = (torch::arange(prompt_len, torch::kInt32).unsqueeze(1) * 10
-                                    + torch::arange(3, torch::kInt32)).flatten();
+                prompt_positions =
+                    (torch::arange(prompt_len, torch::kInt32).unsqueeze(1) * 10 + torch::arange(3, torch::kInt32))
+                        .flatten();
                 stream->setContextPositionIds(prompt_positions);
             }
 
@@ -1719,14 +1720,14 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
                 input.combo_position_ids = local_positions;
             };
 
-            GptModelInputs draft_input = target_input;
+            GptModelInputs draft_input     = target_input;
             draft_input.combo_tokens       = torch::tensor({1, 2, 3, 0, 1, 2, 3, middle_chunk ? 0 : 2}, torch::kInt32);
             draft_input.last_hidden_states = target_output.all_hidden_states;
             if (explicit_position_ids) {
                 auto tail = middle_chunk ? torch::tensor({120, 121, 122}, torch::kInt32) :
                                            torch::tensor({112, 112, 112}, torch::kInt32);
-                draft_input.combo_position_ids = torch::cat(
-                    {prompt_positions.narrow(0, (prefix_len + 1) * 3, (chunk_len - 1) * 3), tail});
+                draft_input.combo_position_ids =
+                    torch::cat({prompt_positions.narrow(0, (prefix_len + 1) * 3, (chunk_len - 1) * 3), tail});
             }
             components.fake_draft_model->setInputs({draft_input});
             components.fake_draft_model->setOutputs({GptModelOutputs{}});

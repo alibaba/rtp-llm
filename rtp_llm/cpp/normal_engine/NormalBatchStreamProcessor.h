@@ -21,7 +21,8 @@ public:
     NormalBatchStreamProcessor(const ModelConfig&                 model_config,
                                const PDSepConfig&                 pd_sep_config,
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
-                               const CacheConfig&                 cache_config,
+                               const CacheModuleConfig&           cache_config,
+                               size_t                             seq_size_per_block,
                                bool                               warm_up,
                                int                                async_worker_count = 0);
 

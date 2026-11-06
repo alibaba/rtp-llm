@@ -673,13 +673,12 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdHybridWithMt
     ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
     for (size_t mtp_id = 0; mtp_id < config.mtp_sub_configs.size(); ++mtp_id) {
         const auto& sub = config.mtp_sub_configs[mtp_id];
-        ASSERT_NE(sub, nullptr);
-        ASSERT_EQ(sub->groupNums(), 2);
+        ASSERT_EQ(sub.groupNums(), 2);
         std::vector<std::string> expected_tags{"linear", "full"};
-        EXPECT_EQ(publishedGroupTags(sub->topology()), expected_tags);
-        ASSERT_EQ(sub->layerIdsForGroup("full").size(), 1u);
-        EXPECT_EQ(sub->layerIdsForGroup("full")[0], 0);
-        EXPECT_TRUE(sub->layerIdsForGroup("linear").empty());
+        EXPECT_EQ(publishedGroupTags(sub.topology()), expected_tags);
+        ASSERT_EQ(sub.layerIdsForGroup("full").size(), 1u);
+        EXPECT_EQ(sub.layerIdsForGroup("full")[0], 0);
+        EXPECT_TRUE(sub.layerIdsForGroup("linear").empty());
     }
 
     EXPECT_EQ(allocator->convertToGlobalLayerId(/*model_id=*/0, /*local_layer_id=*/2), 2u);
@@ -696,15 +695,14 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, EagleMapsSoleDefaultFullDraftGroup
 
     ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     const auto& sub_config = config.mtp_sub_configs[0];
-    ASSERT_NE(sub_config, nullptr);
-    EXPECT_EQ(publishedGroupTags(sub_config->topology()), publishedGroupTags(config.topology()));
+    EXPECT_EQ(publishedGroupTags(sub_config.topology()), publishedGroupTags(config.topology()));
 
-    EXPECT_EQ(sub_config->groupForLayer(0, "full").tag, "full");
-    EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().group("full").tag), std::vector<int>({0}));
-    EXPECT_EQ(sub_config->group("full").spec->tag, "full");
-    EXPECT_EQ(sub_config->group("full").spec->type, KVCacheSpecType::MultiHeadAttention);
+    EXPECT_EQ(sub_config.groupForLayer(0, "full").tag, "full");
+    EXPECT_EQ(sub_config.layerIdsForGroup(sub_config.topology().group("full").tag), std::vector<int>({0}));
+    EXPECT_EQ(sub_config.group("full").spec->tag, "full");
+    EXPECT_EQ(sub_config.group("full").spec->type, KVCacheSpecType::MultiHeadAttention);
 
-    EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().group("linear").tag).empty());
+    EXPECT_TRUE(sub_config.layerIdsForGroup(sub_config.topology().group("linear").tag).empty());
 
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
@@ -720,10 +718,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MtpMapsDefaultFullDraftGroupForEve
     EXPECT_EQ(config.layerIdsForGroup(config.topology().group("full").tag), std::vector<int>({2, 3, 4, 5}));
     for (size_t module_index = 0; module_index < config.mtp_sub_configs.size(); ++module_index) {
         const auto& sub_config = config.mtp_sub_configs[module_index];
-        ASSERT_NE(sub_config, nullptr);
-        EXPECT_EQ(publishedGroupTags(sub_config->topology()), publishedGroupTags(config.topology()));
-        EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().group("full").tag), std::vector<int>({0}));
-        EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().group("linear").tag).empty());
+        EXPECT_EQ(publishedGroupTags(sub_config.topology()), publishedGroupTags(config.topology()));
+        EXPECT_EQ(sub_config.layerIdsForGroup(sub_config.topology().group("full").tag), std::vector<int>({0}));
+        EXPECT_TRUE(sub_config.layerIdsForGroup(sub_config.topology().group("linear").tag).empty());
         EXPECT_EQ(config.groupForLayer(static_cast<int>(4 + module_index), "full").tag, "full");
     }
 }
@@ -781,10 +778,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateSpConfigPreservesQwenPacking
     EXPECT_EQ(config.groupForLayer(9, "full").tag, "full");
 
     for (const auto& sub_config : config.mtp_sub_configs) {
-        ASSERT_NE(sub_config, nullptr);
-        EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"linear", "full"}));
-        EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().group("full").tag), std::vector<int>({0}));
-        EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().group("linear").tag).empty());
+        EXPECT_EQ(publishedGroupTags(sub_config.topology()), std::vector<std::string>({"linear", "full"}));
+        EXPECT_EQ(sub_config.layerIdsForGroup(sub_config.topology().group("full").tag), std::vector<int>({0}));
+        EXPECT_TRUE(sub_config.layerIdsForGroup(sub_config.topology().group("linear").tag).empty());
     }
 
     auto manager = std::make_shared<KVCacheManager>(config);
@@ -825,17 +821,16 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpAliasesCompatibleDefaultMl
                                                      CacheGroupType::FULL);
 
     const auto sub_config = main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1);
-    ASSERT_NE(sub_config, nullptr);
-    EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"full"}));
-    EXPECT_EQ(sub_config->group("full").spec->type, KVCacheSpecType::MultiHeadLatentAttention);
-    EXPECT_EQ(sub_config->group("full").spec->tag, "full");
-    EXPECT_EQ(sub_config->layerIdsForGroup("full"), std::vector<int>({0}));
+    EXPECT_EQ(publishedGroupTags(sub_config.topology()), std::vector<std::string>({"full"}));
+    EXPECT_EQ(sub_config.group("full").spec->type, KVCacheSpecType::MultiHeadLatentAttention);
+    EXPECT_EQ(sub_config.group("full").spec->tag, "full");
+    EXPECT_EQ(sub_config.layerIdsForGroup("full"), std::vector<int>({0}));
     EXPECT_EQ(main_config.layerIdsForGroup("full"), std::vector<int>({0, 1}));
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpRejectsAmbiguousDefaultFullGroupAlias) {
     CacheConfig main_config;
-    main_config.layer_num = 2;
+    main_config.main_config.layer_num = 2;
     main_config.fromGroupedSpecs(
         {makeMhaSpec("full0", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("full1", 4, DataType::TYPE_FP16, 1, 1)},
         {{0}, {1}},
@@ -932,7 +927,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpRejectsIncompatibleDefault
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpPrefersExactDefaultGroupMatch) {
     CacheConfig main_config;
-    main_config.layer_num = 2;
+    main_config.main_config.layer_num = 2;
     main_config.fromGroupedSpecs(
         {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
         {{0}, {1}},
@@ -947,10 +942,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpPrefersExactDefaultGroupMa
                                                      CacheGroupType::FULL);
 
     const auto sub_config = main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/2);
-    ASSERT_NE(sub_config, nullptr);
-    EXPECT_EQ(publishedGroupTags(sub_config->topology()), std::vector<std::string>({"default", "aux"}));
-    EXPECT_EQ(sub_config->layerIdsForGroup(sub_config->topology().group("default").tag), std::vector<int>({0}));
-    EXPECT_TRUE(sub_config->layerIdsForGroup(sub_config->topology().group("aux").tag).empty());
+    EXPECT_EQ(publishedGroupTags(sub_config.topology()), std::vector<std::string>({"default", "aux"}));
+    EXPECT_EQ(sub_config.layerIdsForGroup(sub_config.topology().group("default").tag), std::vector<int>({0}));
+    EXPECT_TRUE(sub_config.layerIdsForGroup(sub_config.topology().group("aux").tag).empty());
     EXPECT_EQ(main_config.layerIdsForGroup(main_config.topology().group("default").tag), std::vector<int>({0, 2}));
     EXPECT_EQ(main_config.layerIdsForGroup(main_config.topology().group("aux").tag), std::vector<int>({1}));
 }
@@ -980,7 +974,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpAliasErrorIdentifiesSource
         /*block_num=*/4);
     auto propose_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, DataType::TYPE_FP16);
-    propose_config.layer_num = 3;
+    propose_config.main_config.layer_num = 3;
 
     try {
         main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/2);
@@ -998,7 +992,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpDoesNotAliasMultiGroupProp
         CacheGroupType::FULL);
 
     CacheConfig propose_config;
-    propose_config.layer_num = 1;
+    propose_config.main_config.layer_num = 1;
     propose_config.fromGroupedSpecs(
         {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
         {{0}, {0}},
@@ -1015,7 +1009,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpDoesNotAliasMultiGroupProp
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpAllowsUnequalIndependentGroupLayerCounts) {
     CacheConfig main_config;
-    main_config.layer_num = 5;
+    main_config.main_config.layer_num = 5;
     main_config.fromGroupedSpecs(
         {makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
         {{0, 1, 2}, {3, 4}},
@@ -1025,9 +1019,8 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpAllowsUnequalIndependentGr
     auto propose_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
     auto sub_config = main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/5);
-    ASSERT_NE(sub_config, nullptr);
     EXPECT_EQ(main_config.layerIdsForGroup("linear"), (std::vector<int>{3, 4, 5}));
-    EXPECT_EQ(sub_config->layerIdsForGroup("linear"), (std::vector<int>{0}));
+    EXPECT_EQ(sub_config.layerIdsForGroup("linear"), (std::vector<int>{0}));
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpRejectsPartialSourceAndDerivesOrderedLayers) {
@@ -1035,7 +1028,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, MergeMtpRejectsPartialSourceAndDer
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
 
     CacheConfig partial_source;
-    partial_source.layer_num = 2;
+    partial_source.main_config.layer_num = 2;
     partial_source.fromGroupedSpecs(
         {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
         {{0}, {1}},
@@ -1269,9 +1262,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, TieredJoinedLoadMapsTargetsAcrossF
 TEST_F(HybridTypeCoordinatorCacheManagerTest, DeviceLoadSourceMatchRefBecomesRequestRef) {
     for (bool fail_load : {false, true}) {
         SCOPED_TRACE(fail_load);
-        auto config      = makeTinyHybridConfig();
+        auto config = makeTinyHybridConfig();
         setGroupBlockCounts(config, 32, 32);
-        auto allocator   = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
 
         KVCacheConfig tiered_config;
         tiered_config.enable_memory_cache  = true;
@@ -2069,8 +2062,8 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheInsertsOnlyFullBloc
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCachePreservesLinearHoleAndPublishesLaterState) {
-    auto config    = makeTinyHybridConfig();
-    config.reuse_cache_tail_blocks = 10000;
+    auto config                                = makeTinyHybridConfig();
+    config.main_config.reuse_cache_tail_blocks = 10000;
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
@@ -2206,7 +2199,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertIndexToBufferAndAllLayerCac
 
     auto layout = allocator->allLayerCacheBase();
     EXPECT_EQ(layout.groups().size(), static_cast<size_t>(config.groupNums()));
-    ASSERT_EQ(layout.topology().layers().size(), static_cast<size_t>(config.layer_num));
+    ASSERT_EQ(layout.topology().layers().size(), static_cast<size_t>(config.layer_num()));
     for (size_t i = 0; i < layout.topology().layers().size(); ++i) {
         for (const auto& tag : layout.topology().layer(static_cast<int>(i)).group_tags) {
             EXPECT_TRUE(layout.group(tag).hasLayer(i));
@@ -2312,9 +2305,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillReuseTailAllocatesExactCapa
     for (const int tail : {3, std::numeric_limits<int>::max()}) {
         for (const int reuse_slots : {2, 4, 5}) {
             SCOPED_TRACE(::testing::Message() << "tail=" << tail << " reuse_slots=" << reuse_slots);
-            auto config                    = makeTinyHybridConfig();
-            config.reuse_cache_tail_blocks = tail;
-            const int new_blocks           = std::min(tail, 6 - reuse_slots);
+            auto config                                = makeTinyHybridConfig();
+            config.main_config.reuse_cache_tail_blocks = tail;
+            const int new_blocks                       = std::min(tail, 6 - reuse_slots);
             setGroupBlockCounts(config, new_blocks + 2, 7);
             auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
             ASSERT_TRUE(allocator->init());
@@ -2355,8 +2348,8 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PrefillReuseTailAllocatesExactCapa
 // The allocator is invoked on an already-populated resource, so malloc() dispatches directly
 // to incrMalloc(). Cleanup retains the decode read state and current state independently of n.
 TEST_F(HybridTypeCoordinatorCacheManagerTest, DecodeIncrMallocAppliesSparseCleanupOnLinearGroups) {
-    auto config = makeTinyHybridConfig();
-    config.reuse_cache_tail_blocks = 10000;
+    auto config                                = makeTinyHybridConfig();
+    config.main_config.reuse_cache_tail_blocks = 10000;
     setGroupBlockCounts(config, 7, 7);  // Six usable blocks per independent pool.
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
@@ -2458,8 +2451,8 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocks) {
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocksUsesLinearTailConfiguration) {
-    auto config                    = makeTinyHybridConfig();
-    config.reuse_cache_tail_blocks = 4;
+    auto config                                = makeTinyHybridConfig();
+    config.main_config.reuse_cache_tail_blocks = 4;
     EXPECT_EQ(config.group("linear").policy.active_tail_blocks, 1u);
 
     auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);

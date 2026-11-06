@@ -52,8 +52,8 @@ public:
         return parallelism_config_.tp_rank == 0;
     }
 
-    const CacheConfig& cacheConfig() const;
-    const CacheConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
+    const CacheConfig&       cacheConfig() const;
+    const CacheModuleConfig& getMTPModuleCacheConfig(int mtp_module_id) const;
 
     // 显存管理和缓存分配
     MallocResult malloc(const MallocInfo& malloc_info);
@@ -151,9 +151,9 @@ public:
     }
 
 private:
-    std::function<void()> allocationChangeCallback() const;
-    void                  reportMetricsLoop();
-    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    std::function<void()>             allocationChangeCallback() const;
+    void                              reportMetricsLoop();
+    void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量

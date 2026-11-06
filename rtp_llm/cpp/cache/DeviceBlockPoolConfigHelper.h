@@ -60,17 +60,16 @@ public:
         const auto& group_layer_ids = cache_config.layerIdsForGroup(group.tag);
         const auto  main_layer_num  = static_cast<uint32_t>(
             std::count_if(group_layer_ids.begin(), group_layer_ids.end(), [&cache_config](int layer_id) {
-                return layer_id >= 0 && static_cast<uint32_t>(layer_id) < cache_config.layer_num;
+                return layer_id >= 0 && static_cast<uint32_t>(layer_id) < cache_config.layer_num();
             }));
         if (main_layer_num > 0) {
             append_layout(group, main_layer_num);
         }
 
         for (size_t module_index = 0; module_index < cache_config.mtp_sub_configs.size(); ++module_index) {
-            const auto& mtp_config = cache_config.mtp_sub_configs[module_index];
-            RTP_LLM_CHECK_WITH_INFO(mtp_config != nullptr, "mtp_sub_configs[%zu] is null", module_index);
-            const auto& mtp_group     = mtp_config->topology().group(group.tag);
-            const auto  mtp_layer_num = static_cast<uint32_t>(mtp_config->layerIdsForGroup(mtp_group.tag).size());
+            const auto& mtp_config    = cache_config.mtp_sub_configs[module_index];
+            const auto& mtp_group     = mtp_config.topology().group(group.tag);
+            const auto  mtp_layer_num = static_cast<uint32_t>(mtp_config.layerIdsForGroup(mtp_group.tag).size());
             if (mtp_layer_num > 0) {
                 append_layout(mtp_group, mtp_layer_num);
             }
@@ -112,8 +111,8 @@ private:
         cfg.local_head_num_kv       = local_kv_head_num;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla                     = cache_config.use_mla || cache_config.is_sparse;
-        cfg.use_mla                    = cache_config.use_mla;
+        cfg.is_mla                     = cache_config.use_mla() || cache_config.is_sparse();
+        cfg.use_mla                    = cache_config.use_mla();
         cfg.seq_size_per_block         = seq_size_per_block;
         cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;
 

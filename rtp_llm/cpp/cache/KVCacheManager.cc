@@ -223,8 +223,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
         RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "cache manager requires capacity-complete cache groups");
     }
     for (const auto& child : config_.mtp_sub_configs) {
-        RTP_LLM_CHECK_WITH_INFO(child != nullptr, "null MTP cache configuration");
-        for (const auto& group : child->topology().groups()) {
+        for (const auto& group : child.topology().groups()) {
             RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "cache manager requires capacity-complete MTP cache groups");
         }
     }
@@ -255,7 +254,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     }
 
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_size=%dB, seq_size_per_block=%zu",
-                     config_.layer_num,
+                     config_.layer_num(),
                      config_.totalGroupBlockSizeBytes(),
                      config_.seq_size_per_block);
 }
@@ -379,14 +378,12 @@ const CacheConfig& KVCacheManager::cacheConfig() const {
     return config_;
 }
 
-const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
+const CacheModuleConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) const {
     RTP_LLM_CHECK_WITH_INFO(mtp_module_id >= 0 && static_cast<size_t>(mtp_module_id) < config_.mtp_sub_configs.size(),
                             "Invalid mtp_module_id: %d, must be in range [0, %zu)",
                             mtp_module_id,
                             config_.mtp_sub_configs.size());
-    RTP_LLM_CHECK_WITH_INFO(
-        config_.mtp_sub_configs[mtp_module_id] != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    return *config_.mtp_sub_configs[mtp_module_id];
+    return config_.mtp_sub_configs[mtp_module_id];
 }
 
 // 显存管理和缓存分配
@@ -607,7 +604,7 @@ GroupedCacheLayerLayout KVCacheManager::allLayerCacheBase() const {
 
 GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() const {
     const auto          all_layout = coordinator_manager_->allLayerCacheBase();
-    std::vector<size_t> global_layer_ids(config_.layer_num);
+    std::vector<size_t> global_layer_ids(config_.layer_num());
     std::iota(global_layer_ids.begin(), global_layer_ids.end(), 0);
     auto main_topology = projectTopology(all_layout.topology(), global_layer_ids);
     return projectLayout(all_layout, std::move(main_topology), global_layer_ids);
@@ -619,23 +616,22 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
                             mtp_module_id,
                             config_.mtp_sub_configs.size());
 
-    const auto& mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
-    RTP_LLM_CHECK_WITH_INFO(mtp_sub_config != nullptr, "mtp_sub_configs[%d] is null", mtp_module_id);
-    const uint32_t      mtp_layer_num = mtp_sub_config->layer_num;
+    const auto&         mtp_sub_config = config_.mtp_sub_configs[mtp_module_id];
+    const uint32_t      mtp_layer_num  = mtp_sub_config.layer_num;
     std::vector<size_t> global_layer_ids;
     global_layer_ids.reserve(mtp_layer_num);
     for (uint32_t local_layer_id = 0; local_layer_id < mtp_layer_num; ++local_layer_id) {
         const auto global_layer_id = CacheConfig::mtpGlobalLayerId(
-            config_.layer_num, mtp_module_id, mtp_layer_num, static_cast<int>(local_layer_id));
+            config_.layer_num(), mtp_module_id, mtp_layer_num, static_cast<int>(local_layer_id));
         RTP_LLM_CHECK_WITH_INFO(global_layer_id != std::numeric_limits<uint32_t>::max(),
                                 "invalid MTP global layer: main=%u module=%d module_layers=%u local=%u",
-                                config_.layer_num,
+                                config_.layer_num(),
                                 mtp_module_id,
                                 mtp_layer_num,
                                 local_layer_id);
         global_layer_ids.push_back(global_layer_id);
     }
-    return projectLayout(coordinator_manager_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
+    return projectLayout(coordinator_manager_->allLayerCacheBase(), mtp_sub_config.topologyPtr(), global_layer_ids);
 }
 
 // 资源统计和信息查询
@@ -854,7 +850,7 @@ void KVCacheManager::initCacheEventPublisher() {
         publisher_context.instance_id       = kv_cache_config_.kv_cache_event_instance_id;
         publisher_context.host_ip_port      = kv_cache_config_.kv_cache_event_host_ip_port;
         publisher_context.model_name        = runtime_config_.model_name;
-        publisher_context.dtype             = getDataTypeStr(config_.dtype);
+        publisher_context.dtype             = getDataTypeStr(config_.dtype());
         publisher_context.spec_name         = "rtp_llm_hbm_" + std::to_string(config_.seq_size_per_block);
         publisher_context.location_uri      = "rtp-llm://" + publisher_context.host_ip_port + "/hbm";
         publisher_context.block_size_tokens = static_cast<int32_t>(config_.seq_size_per_block);
@@ -866,7 +862,7 @@ void KVCacheManager::initCacheEventPublisher() {
         publisher_context.dp_size = static_cast<int32_t>(parallelism_config_.dp_size);
         publisher_context.pp_size = static_cast<int32_t>(parallelism_config_.pp_size);
         publisher_context.dp_rank = static_cast<int32_t>(parallelism_config_.dp_rank);
-        publisher_context.use_mla = config_.use_mla;
+        publisher_context.use_mla = config_.use_mla();
 
         std::weak_ptr<BlockTreeCache> weak_shared_cache = block_tree_cache_;
         auto                          snapshot_provider = [weak_shared_cache]() {

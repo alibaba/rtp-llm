@@ -161,8 +161,8 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
 
 TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     CacheConfig config;
-    config.seq_size_per_block = 8;
-    config.layer_num          = 1;
+    config.seq_size_per_block    = 8;
+    config.main_config.layer_num = 1;
 
     auto full_spec = std::make_shared<MHAKVCacheSpec>();
     full_spec->tag = "full";
@@ -184,9 +184,9 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
 
     CPSlotMapper mapper(0, 2, 8);
 
-    EXPECT_EQ(mapper.layoutForGroup(config, "full").mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
-    EXPECT_EQ(mapper.layoutForGroup(config, "full").slice, CpBlockSliceMode::NONE);
-    EXPECT_EQ(mapper.layoutForGroup(config, "swa").slice, CpBlockSliceMode::EQUAL_BYTES);
+    EXPECT_EQ(mapper.layoutForGroup(config.main_config, "full").mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
+    EXPECT_EQ(mapper.layoutForGroup(config.main_config, "full").slice, CpBlockSliceMode::NONE);
+    EXPECT_EQ(mapper.layoutForGroup(config.main_config, "swa").slice, CpBlockSliceMode::EQUAL_BYTES);
 }
 
 }  // namespace test

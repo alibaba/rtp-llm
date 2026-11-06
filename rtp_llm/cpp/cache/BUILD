@@ -90,10 +90,12 @@ cc_library(
     name = "cache_config",
     srcs = [
         "CacheConfig.cc",
+        "CacheModuleConfig.cc",
         "CacheTopology.cc",
     ],
     hdrs = [
         "CacheConfig.h",
+        "CacheModuleConfig.h",
         "CacheTopology.h",
     ],
     copts = copts(),
