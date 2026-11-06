@@ -151,7 +151,7 @@ class Qwen35TokenLengthTest(unittest.TestCase):
                     nvdec_length = token_length(
                         item, service, self.processor, 32, video_backend="nvdec"
                     )
-                    pixels, grid, timestamps = (
+                    cpu_plan, grid, timestamps = (
                         Qwen3_5MoeImageEmbedding.preprocess_input(
                             [item], service, self.processor, 32, video_backend="cpu"
                         )
@@ -162,6 +162,7 @@ class Qwen35TokenLengthTest(unittest.TestCase):
                         )
                     )
                     self.assertEqual(len(plan.frame_indices), expected_frames)
+                    self.assertEqual(len(cpu_plan.frame_indices), expected_frames)
                     self.assertEqual(int(grid[0, 0]), (expected_frames + 1) // 2)
                     self.assertTrue(torch.equal(grid, planned_grid))
                     self.assertEqual(timestamps, planned_timestamps)
@@ -170,8 +171,12 @@ class Qwen35TokenLengthTest(unittest.TestCase):
                         length,
                         int(grid.prod()) // 4 + sum(len(t) + 2 for t in timestamps),
                     )
-                    self.assertEqual(pixels.shape[0], int(grid.prod()))
-                    # Explicit old-style requests produce the exact same pixels.
+                    self.assertEqual(cpu_plan.shape[0], int(grid.prod()))
+                    self.assertEqual(
+                        cpu_plan.frames.shape, (expected_frames, 3, 64, 96)
+                    )
+                    self.assertEqual(cpu_plan.frames.dtype, torch.uint8)
+                    # Explicit old-style requests produce the exact same frames.
                     explicit = MultimodalInput(
                         "fixture.mp4",
                         MMUrlType.VIDEO,
@@ -195,7 +200,7 @@ class Qwen35TokenLengthTest(unittest.TestCase):
                             video_backend="cpu",
                         )
                     )
-                    self.assertTrue(torch.equal(pixels, reference))
+                    self.assertTrue(torch.equal(cpu_plan.frames, reference.frames))
                     self.assertTrue(torch.equal(grid, reference_grid))
                     self.assertEqual(timestamps, reference_timestamps)
                     self.assertEqual(config.fps, fps)

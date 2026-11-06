@@ -243,27 +243,34 @@ class GpuVideoMetricTest(unittest.TestCase):
 
     def test_cpu_video_counts_sampled_frames_without_temporal_padding(self):
         grid = torch.tensor([[3, 4, 4]])
-        metadata = SimpleNamespace(frames_indices=[0, 20, 40, 59, 79], fps=30)
-        pixels = torch.empty(48, 1536)
-        item = SimpleNamespace(mm_type=MMUrlType.VIDEO)
+        plan = GpuVideoInput(b"", 80, (0, 20, 40, 59, 79), 64, 64, 64, 64, 16, 2)
+        item = SimpleNamespace(
+            mm_type=MMUrlType.VIDEO, url="fixture.mp4", mm_preprocess_config=object()
+        )
+        processor = SimpleNamespace(
+            video_processor=SimpleNamespace(
+                size={"shortest_edge": 4096, "longest_edge": 25165824}
+            )
+        )
         with (
             mock.patch.object(
-                qwen35.Qwen3_VLImageEmbedding,
-                "preprocess_input",
-                return_value=(pixels, grid, metadata),
+                qwen35, "get_bytes_io_from_url", return_value=io.BytesIO(b"video")
             ),
+            mock.patch.object(qwen35, "prepare_cpu_video", return_value=(plan, grid)),
             mock.patch.object(qwen35, "video_timestamp_tokens", return_value=[[1]] * 3),
         ):
             with collect_vit_preprocess_metrics() as metrics:
                 qwen35.Qwen3_5MoeImageEmbedding.preprocess_input(
-                    [item], VitConfig(), object(), video_backend="cpu"
+                    [item], VitConfig(), processor, video_backend="cpu"
                 )
-        self.assertEqual(len(metrics.samples), 1)
-        self.assertEqual(
-            metrics.samples[0].metric, GaugeMetrics.VIT_VIDEO_FRAME_COUNT_METRIC
-        )
-        self.assertEqual(metrics.samples[0].value, 5)
-        self.assertEqual(metrics.samples[0].tags["backend"], "cpu")
+        frame_samples = [
+            sample
+            for sample in metrics.samples
+            if sample.metric == GaugeMetrics.VIT_VIDEO_FRAME_COUNT_METRIC
+        ]
+        self.assertEqual(len(frame_samples), 1)
+        self.assertEqual(frame_samples[0].value, 5)
+        self.assertEqual(frame_samples[0].tags["backend"], "cpu")
 
 
 class GpuVideoTest(unittest.TestCase):
@@ -693,9 +700,7 @@ class GpuVideoTest(unittest.TestCase):
                 [item], config, processor
             )
         self.assertIs(actual, expected)
-        parent.assert_called_once_with(
-            [item], config, processor, 32, return_video_metadata=True
-        )
+        parent.assert_called_once_with([item], config, processor, 32)
 
     def test_unknown_frame_count_is_rejected_before_gpu(self):
         container = mock.MagicMock()

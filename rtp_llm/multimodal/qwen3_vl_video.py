@@ -7,6 +7,7 @@ all sampled frames; do not apply Qwen2-VL's implicit per-frame pixel cap.
 
 import inspect
 import math
+import os
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -215,7 +216,11 @@ def decode_video(
         return _decode_video_pyav(
             video_data, configs, vit_config, frame_indices=frame_indices
         )
-    reader = VideoReader(video_data, ctx=cpu(0), num_threads=1)
+    # Frame extraction dominates CPU preprocessing and scales near-linearly up
+    # to ~16 FFmpeg threads before saturating on core-rich hosts; cap at 32.
+    reader = VideoReader(
+        video_data, ctx=cpu(0), num_threads=min(32, os.cpu_count() or 1)
+    )
     total, fps = len(reader), reader.get_avg_fps()
     indices = (
         list(frame_indices)

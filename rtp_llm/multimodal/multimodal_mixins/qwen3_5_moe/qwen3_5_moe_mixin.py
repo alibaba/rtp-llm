@@ -20,6 +20,7 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.gpu_video import (
     GpuVideoInput,
     PreparedGpuVideo,
     VideoDecodePool,
+    prepare_cpu_video,
     prepare_gpu_video,
 )
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_vit import (
@@ -107,11 +108,7 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
     def preprocess_input(
         mm_inputs, vit_config, processor, factor=32, video_backend="nvdec"
     ):
-        if (
-            video_backend == "nvdec"
-            and len(mm_inputs) == 1
-            and mm_inputs[0].mm_type == MMUrlType.VIDEO
-        ):
+        if len(mm_inputs) == 1 and mm_inputs[0].mm_type == MMUrlType.VIDEO:
             item = mm_inputs[0]
             with vit_preprocess_timer(
                 GaugeMetrics.VIT_IMAGE_FETCH_RT_US_METRIC,
@@ -122,40 +119,47 @@ class Qwen3_5MoeImageEmbedding(Qwen3_VLImageEmbedding):
                     vit_config.download_headers,
                     max_file_size_kb=vit_config.mm_video_max_file_size_kb,
                 )
-            data, grid = prepare_gpu_video(
-                source.getvalue(),
-                item.mm_preprocess_config,
+            size = resolve_video_size(
                 processor.video_processor,
-                factor,
-                size=resolve_video_size(
-                    processor.video_processor,
-                    vit_config.mm_video_total_min_pixels,
-                    vit_config.mm_video_total_max_pixels,
-                ),
-                vit_config=vit_config,
+                vit_config.mm_video_total_min_pixels,
+                vit_config.mm_video_total_max_pixels,
             )
+            if video_backend == "nvdec":
+                data, grid = prepare_gpu_video(
+                    source.getvalue(),
+                    item.mm_preprocess_config,
+                    processor.video_processor,
+                    factor,
+                    size=size,
+                    vit_config=vit_config,
+                )
+            else:
+                # The CPU backend differs from NVDEC only in this decode/cut
+                # step; resize, normalization, and patchify run on the GPU.
+                with vit_preprocess_timer(
+                    GaugeMetrics.VIT_IMAGE_DECODE_RT_US_METRIC,
+                    {"model": "qwen35", "mm_type": "video", "backend": "cpu"},
+                ):
+                    data, grid = prepare_cpu_video(
+                        source.getvalue(),
+                        item.mm_preprocess_config,
+                        processor.video_processor,
+                        factor,
+                        size=size,
+                        vit_config=vit_config,
+                    )
+                record_vit_preprocess_value(
+                    GaugeMetrics.VIT_VIDEO_FRAME_COUNT_METRIC,
+                    len(data.frame_indices),
+                    {"model": "qwen35", "mm_type": "video", "backend": "cpu"},
+                )
             timestamps = video_timestamp_tokens(
                 grid, data.frame_indices, data.source_fps, processor
             )
             return data, grid, timestamps
-        data = Qwen3_VLImageEmbedding.preprocess_input(
-            mm_inputs, vit_config, processor, factor, return_video_metadata=True
+        return Qwen3_VLImageEmbedding.preprocess_input(
+            mm_inputs, vit_config, processor, factor
         )
-        if mm_inputs[0].mm_type == MMUrlType.VIDEO:
-            pixels, grid, metadata = data
-            record_vit_preprocess_value(
-                GaugeMetrics.VIT_VIDEO_FRAME_COUNT_METRIC,
-                len(metadata.frames_indices),
-                {"model": "qwen35", "mm_type": "video", "backend": "cpu"},
-            )
-            return (
-                pixels,
-                grid,
-                video_timestamp_tokens(
-                    grid, metadata.frames_indices, metadata.fps, processor
-                ),
-            )
-        return data
 
     def estimate_work(self, data, mm_type=None) -> MMWorkEstimate:
         grid = data[1]

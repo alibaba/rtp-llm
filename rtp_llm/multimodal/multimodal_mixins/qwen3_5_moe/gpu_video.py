@@ -15,7 +15,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import _imp
 import torch
@@ -199,7 +199,13 @@ def _cuda_video_timer(
 
 @dataclass(frozen=True)
 class GpuVideoInput:
-    """Compressed media and CPU metadata, safe to return from a spawn worker."""
+    """Preprocessed video input, safe to return from a spawn worker.
+
+    NVDEC requests carry compressed media and decode in the embedding process;
+    CPU-backend requests carry the already-cut native RGB frames and skip the
+    decode step entirely. Everything downstream (resize/normalize/patchify)
+    runs on the GPU for both backends.
+    """
 
     encoded: bytes
     total_frames: int
@@ -214,6 +220,8 @@ class GpuVideoInput:
     source_fps: float = 0.0
     full_range: bool = False
     bit_depth: int = 8
+    # CPU-backend frames, native resolution RGB uint8 on CPU; NVDEC leaves it None.
+    frames: Optional[torch.Tensor] = None
 
     @property
     def shape(self):
@@ -227,6 +235,12 @@ class GpuVideoInput:
 
     @property
     def workspace_bytes(self):
+        if self.frames is not None:
+            # CPU-cut frames H2D (native RGB uint8) plus float resize buffers.
+            return len(self.frame_indices) * (
+                12 * self.height * self.width
+                + 36 * self.resized_height * self.resized_width
+            )
         # NVDEC surfaces, expanded integer color-conversion intermediates,
         # selected frames, and float resize/processor buffers.
         return 48 * self.height * self.width + len(self.frame_indices) * (
@@ -329,6 +343,53 @@ def prepare_gpu_video(
         fps,
         full_range,
         bit_depth,
+    )
+    grid = torch.tensor(
+        [
+            [
+                math.ceil(count / processor.temporal_patch_size),
+                out_h // processor.patch_size,
+                out_w // processor.patch_size,
+            ]
+        ],
+        dtype=torch.int64,
+    )
+    return data, grid
+
+
+def prepare_cpu_video(
+    encoded, configs, processor, factor, size=None, *, vit_config=None
+):
+    """Cut frames on CPU and plan the same grid as the NVDEC path.
+
+    The CPU backend differs from NVDEC only in this step: decord samples the
+    native-resolution RGB frames in the spawn worker and they cross IPC as a
+    uint8 tensor. Resize, normalization, and patchify still run on the GPU.
+    """
+    video, metadata = decode_video(io.BytesIO(encoded), configs, vit_config=vit_config)
+    indices = tuple(metadata.frames_indices)
+    count = len(indices)
+    height, width = video.shape[-2], video.shape[-1]
+    out_h, out_w = video_resize_shape(
+        configs,
+        count,
+        height,
+        width,
+        processor,
+        size if size is not None else resolve_video_size(processor),
+    )
+    data = GpuVideoInput(
+        b"",
+        metadata.total_num_frames,
+        indices,
+        height,
+        width,
+        out_h,
+        out_w,
+        processor.patch_size,
+        processor.temporal_patch_size,
+        source_fps=metadata.fps,
+        frames=video,
     )
     grid = torch.tensor(
         [
@@ -729,8 +790,14 @@ def _preprocess_video_ready(data, processor, device, dtype):
             _decode_state.processor_source = processor
             _decode_state.processor_device = device
         with torch.cuda.stream(stream), torch.profiler.record_function("video_prepare"):
+            if data.frames is not None:
+                # CPU backend: frames were cut in the worker; only the GPU tail
+                # remains (H2D -> resize -> normalize/patchify), identical to NVDEC.
+                video = data.frames.to(device=device)
+            else:
+                video = decode_video_cuda(data, device)
             pixels = preprocess_video_cuda(
-                data, _decode_state.preprocess_processor, device
+                data, _decode_state.preprocess_processor, device, video=video
             ).to(dtype=dtype)
             ready = torch.cuda.Event()
             ready.record(stream)
