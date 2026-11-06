@@ -15,7 +15,7 @@ constexpr int kStatsColumns = 6;
 
 struct DraftCommitParams {
     const int32_t* sampled;
-    const int64_t* candidates;
+    const void*    candidates;
     const float*   probabilities;
     const int64_t* map;
     int32_t*       tokens_out;
@@ -28,15 +28,16 @@ struct DraftCommitParams {
     int64_t        width, output_width, embedding_rows, embedding_width, embedding_row_stride, embedding_col_stride;
 };
 
-template<typename Bits>
+template<typename Bits, typename Candidate>
 __global__ void dsparkDraftStepCommitKernel(DraftCommitParams p) {
     const int64_t      row = blockIdx.x;
+    const auto*        candidates = static_cast<const Candidate*>(p.candidates);
     __shared__ int32_t next_token;
     if (threadIdx.x == 0) {
         int64_t token = p.sampled[row * p.sampled_stride];
         if (p.candidates) {
             CUDA_KERNEL_ASSERT(token >= 0 && token < p.width);
-            token = p.candidates[row * p.candidate_stride + token];
+            token = candidates[row * p.candidate_stride + token];
         }
         if (p.map) {
             CUDA_KERNEL_ASSERT(token >= 0 && token < p.map_size);
@@ -62,7 +63,7 @@ __global__ void dsparkDraftStepCommitKernel(DraftCommitParams p) {
         if (p.probabilities_out) {
             int64_t output_column = column;
             if (scatter_probabilities) {
-                output_column = p.candidates[row * p.candidate_stride + column];
+                output_column = candidates[row * p.candidate_stride + column];
                 CUDA_KERNEL_ASSERT(output_column >= 0 && output_column < p.output_width);
             }
             p.probabilities_out[row * p.output_probability_stride + output_column] =
@@ -70,7 +71,7 @@ __global__ void dsparkDraftStepCommitKernel(DraftCommitParams p) {
         }
         if (p.candidates_out) {
             p.candidates_out[row * p.output_candidate_stride + column] =
-                static_cast<int32_t>(p.candidates[row * p.candidate_stride + column]);
+                static_cast<int32_t>(candidates[row * p.candidate_stride + column]);
         }
     }
     if (p.next_embedding) {
@@ -290,7 +291,8 @@ bool tryDSparkDraftStepCommit(const torch::Tensor& sampled_tokens,
                           candidate_ids.defined() ? candidate_ids.size(1) :
                                                     0;
     if ((probabilities.defined() && !rows_on_device(probabilities, torch::kFloat32, width))
-        || (candidate_ids.defined() && !rows_on_device(candidate_ids, torch::kInt64, width))
+        || (candidate_ids.defined() && !rows_on_device(candidate_ids, torch::kInt64, width)
+            && !rows_on_device(candidate_ids, torch::kInt32, width))
         || (d2t_map.defined()
             && (!d2t_map.is_cuda() || d2t_map.device() != device || d2t_map.dim() != 1
                 || d2t_map.scalar_type() != torch::kInt64))
@@ -312,7 +314,7 @@ bool tryDSparkDraftStepCommit(const torch::Tensor& sampled_tokens,
     const c10::cuda::CUDAGuard guard(device);
     DraftCommitParams          params{
         sampled_tokens.data_ptr<int32_t>(),
-        candidate_ids.defined() ? candidate_ids.data_ptr<int64_t>() : nullptr,
+        candidate_ids.defined() ? candidate_ids.data_ptr() : nullptr,
         probabilities.defined() ? probabilities.data_ptr<float>() : nullptr,
         d2t_map.defined() ? d2t_map.data_ptr<int64_t>() : nullptr,
         output_tokens.data_ptr<int32_t>(),
@@ -335,10 +337,18 @@ bool tryDSparkDraftStepCommit(const torch::Tensor& sampled_tokens,
         markov_w1.stride(0),
         markov_w1.stride(1)};
     const auto stream = at::cuda::getCurrentCUDAStream();
-    if (markov_w1.element_size() == 4) {
-        dsparkDraftStepCommitKernel<uint32_t><<<static_cast<int>(batch), 256, 0, stream>>>(params);
+    const auto launch = [&](auto candidate_type) {
+        using Candidate = decltype(candidate_type);
+        if (markov_w1.element_size() == 4) {
+            dsparkDraftStepCommitKernel<uint32_t, Candidate><<<static_cast<int>(batch), 256, 0, stream>>>(params);
+        } else {
+            dsparkDraftStepCommitKernel<uint16_t, Candidate><<<static_cast<int>(batch), 256, 0, stream>>>(params);
+        }
+    };
+    if (candidate_ids.defined() && candidate_ids.scalar_type() == torch::kInt32) {
+        launch(int32_t{});
     } else {
-        dsparkDraftStepCommitKernel<uint16_t><<<static_cast<int>(batch), 256, 0, stream>>>(params);
+        launch(int64_t{});
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return true;
