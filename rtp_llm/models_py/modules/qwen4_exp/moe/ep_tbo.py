@@ -13,6 +13,7 @@ def _communication_stream(device_index):
 
 class QwenEpTwoBatch:
     def __init__(self, layer):
+        self.tp_size = layer.parallelism_config.tp_size
         # Handles belong to individual in-flight calls. Both routers retain the
         # same DeepEP buffer, whose two slots are consumed in D0,D1,C0,C1 order.
         self.routers = tuple(copy.copy(layer.fused_moe.router) for _ in range(2))
@@ -24,10 +25,10 @@ class QwenEpTwoBatch:
         self.compute_a_ready = torch.cuda.Event()
         self.compute_b_ready = torch.cuda.Event()
 
-    @staticmethod
-    def supports(x):
-        # Equal TP slices avoid introducing padding or empty partitions.
-        return 4 <= x.shape[0] <= 32 and x.shape[0] % 4 == 0
+    def supports(self, x):
+        # Both microbatches need equal nonempty slices across every TP rank.
+        partition = 2 * self.tp_size
+        return partition <= x.shape[0] <= 32 and x.shape[0] % partition == 0
 
     def forward(self, layer, x):
         main = torch.cuda.current_stream(x.device)
