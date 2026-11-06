@@ -535,13 +535,8 @@ public class EngineHealthReporter {
         return value == null ? "" : value;
     }
 
-    public void reportBalancingService(BalanceContext ctx) {
-        if (ctx == null || ctx.getResponse() == null) {
-            return;
-        }
-
-        FlexMetricTags metricTags = FlexMetricTags.of(
-                "code", String.valueOf(ctx.getResponse().getCode()),
+    public void reportBalancingService(BalanceContext ctx, int code) {
+        FlexMetricTags metricTags = FlexMetricTags.of("phase", ctx.getSchedulePhase(), "code", String.valueOf(code),
                 "priority", String.valueOf(ctx.getPriority()));
         monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
         monitor.report(ENGINE_BALANCING_MASTER_ALL_RT, metricTags, System.currentTimeMillis() - ctx.getStartTime());
@@ -549,8 +544,6 @@ public class EngineHealthReporter {
         // Report server selection results aggregated by role and outcome.
         if (ctx.getResponse() != null && CollectionUtils.isNotEmpty(ctx.getResponse().getServerStatus())) {
             boolean isSuccess = ctx.getResponse().isSuccess();
-            int code = ctx.getResponse().getCode();
-
             for (ServerStatus serverStatus : ctx.getResponse().getServerStatus()) {
                 if (serverStatus != null && serverStatus.getRole() != null) {
                     FlexMetricTags legacySelectionTags = FlexMetricTags.of(

@@ -60,6 +60,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -631,7 +632,7 @@ class FlexlbServiceImplTest {
             BalanceContext context = invocation.getArgument(0);
             observedResponse.set(context.getResponse());
             return null;
-        }).when(engineHealthReporter).reportBalancingService(any());
+        }).when(engineHealthReporter).reportBalancingService(any(), anyInt());
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestIdStr("metric-response-1").build(), mock(StreamObserver.class));
@@ -642,6 +643,48 @@ class FlexlbServiceImplTest {
 
         assertSame(response, observedResponse.get());
         verify(engineHealthReporter).reportRequestPayload(any());
+        verify(engineHealthReporter).reportBalancingService(any(), org.mockito.ArgumentMatchers.eq(200));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ENCODER", "GENERATION", "VIT"})
+    void failedLocalScheduleReportsPhaseAndActualCode(String phase) {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(routeService.route(any()))
+                .thenReturn(CompletableFuture.failedFuture(new IllegalStateException("scheduler failed")));
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("failed-" + phase);
+        if (phase.equals("ENCODER")) {
+            request.addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER);
+        }
+        request.setVitRouteOnly(phase.equals("VIT"));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(request.build(), observer);
+
+        var response = ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        var context = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(engineHealthReporter).reportBalancingService(context.capture(),
+                org.mockito.ArgumentMatchers.eq(response.getValue().getCode()));
+        assertFalse(response.getValue().getSuccess());
+        assertNull(context.getValue().getResponse());
+        assertEquals(phase, context.getValue().getSchedulePhase());
+    }
+
+    @Test
+    void responseDeliveryFailureStillReportsScheduleOutcomeOnce() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(response));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        doThrow(new IllegalStateException("client disconnected")).when(observer).onCompleted();
+
+        service.schedule(
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("delivery-failed").build(),
+                observer);
+
+        verify(engineHealthReporter).reportBalancingService(any(), org.mockito.ArgumentMatchers.eq(200));
     }
 
     @Test
@@ -943,6 +986,7 @@ class FlexlbServiceImplTest {
         assertTrue(resp.getEnqueuedByMaster());
         assertTrue(pvAppender.list.isEmpty());
         verify(engineHealthReporter, never()).reportRequestPayload(any());
+        verify(engineHealthReporter, never()).reportBalancingService(any(), anyInt());
     }
 
     @Test
@@ -1221,8 +1265,8 @@ class FlexlbServiceImplTest {
 
     @ParameterizedTest
     @MethodSource("forwardFailureCases")
-    void unknownForwardOutcomeMustNotPermitFrontendReplay(
-            CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> result, int expectedCode) {
+    void unknownForwardOutcomeMustNotPermitFrontendReplay(CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> result,
+                                                          int expectedCode) {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(result);
@@ -1238,6 +1282,7 @@ class FlexlbServiceImplTest {
         verify(observer).onCompleted();
         verify(observer, never()).onError(any());
         verifyNoInteractions(routeService);
+        verify(engineHealthReporter).reportBalancingService(any(), org.mockito.ArgumentMatchers.eq(expectedCode));
     }
 
     @Test

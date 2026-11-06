@@ -1,6 +1,7 @@
 package org.flexlb.service.monitor;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -28,7 +29,6 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREEMPTION_TARGET_INVA
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREFILL_QUEUE_DEPTH;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PRIORITY_PREEMPT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_REQUEST_COUNT;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
@@ -76,7 +76,6 @@ public class RequestSchedulerReporter {
     @PostConstruct
     public void init() {
         monitor.register(AUTO_TPM_REQUEST_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
-        monitor.register(AUTO_TPM_SCHEDULE_LATENCY_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_EVICTION_PLAN_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
         monitor.register(AUTO_TPM_EVICTION_COMMIT_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
         monitor.register(AUTO_TPM_VICTIM_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
@@ -101,22 +100,11 @@ public class RequestSchedulerReporter {
     }
 
     /**
-     * Report request arrival by normalized priority.
+     * Report request arrival by scheduling phase and normalized priority.
      */
-    public void reportRequest(int priority) {
-        monitor.report(AUTO_TPM_REQUEST_COUNT, priorityTags(priority), 1.0);
-    }
-
-    /**
-     * Report end-to-end schedule latency via {@code auto_tpm.schedule.latency_ms}.
-     *
-     * @param priority  normalized priority
-     * @param result    schedule result label (e.g. success / no_available_worker)
-     * @param latencyMs milliseconds from request arrival to schedule response
-     */
-    public void reportScheduleLatency(int priority, String result, long latencyMs) {
-        monitor.report(AUTO_TPM_SCHEDULE_LATENCY_MS,
-                FlexMetricTags.of("priority", String.valueOf(priority), "result", result), latencyMs);
+    public void reportRequest(BalanceContext context) {
+        monitor.report(AUTO_TPM_REQUEST_COUNT, FlexMetricTags.of("phase", context.getSchedulePhase(), "priority",
+                String.valueOf(context.getPriority())), 1.0);
     }
 
     /**

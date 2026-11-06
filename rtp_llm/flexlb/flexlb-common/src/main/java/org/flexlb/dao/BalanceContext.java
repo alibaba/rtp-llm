@@ -173,6 +173,14 @@ public class BalanceContext {
     }
 
     /**
+     * Phase used by schedule-call metrics. VIT identifies the route-only call;
+     * ENCODER and GENERATION follow the request's scheduling phase.
+     */
+    public String getSchedulePhase() {
+        return request.isVitRouteOnly() ? "VIT" : requestPhase.name();
+    }
+
+    /**
      * Normalized priority of the request (1-100, higher = more important).
      * Immutable scheduling metadata is authoritative; the request fallback
      * supports manually constructed internal contexts.

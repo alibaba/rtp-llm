@@ -16,6 +16,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
@@ -28,6 +29,7 @@ import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
@@ -233,7 +235,8 @@ class EngineHealthReporterTest {
                 RoleType.PREFILL, "LEAST_RECENTLY_USED_IN_POOL");
         context.setResponse(response);
 
-        reporter.reportBalancingService(context);
+        context.setRequest(new Request());
+        reporter.reportBalancingService(context, 200);
 
         verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL,
                 FlexMetricTags.of("role", "PREFILL", "success", "true", "code", "200"), 1.0);
@@ -245,22 +248,22 @@ class EngineHealthReporterTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {200, 8431, 8433, 8434})
-    void shouldReportScheduleOutcomeWithRequestPriorityWithoutSelectedWorkers(int code) {
+    @CsvSource({"ENCODER,200", "ENCODER,8431", "ENCODER,8511", "GENERATION,200", "GENERATION,8433", "GENERATION,8434",
+            "GENERATION,8511", "VIT,200", "VIT,8408"})
+    void reportsScheduleOutcomeByPhaseWithoutRoutingResponse(String phase, int code) {
         Request request = new Request();
         request.setPriority(20);
-        Response response = new Response();
-        response.setSuccess(code == 200);
-        response.setCode(code);
+        request.setVitRouteOnly(phase.equals("VIT"));
         BalanceContext context = new BalanceContext(new FlexlbConfig());
         context.setRequest(request);
-        context.setResponse(response);
+        if (!phase.equals("VIT")) {
+            context.setRequestPhase(RequestPhase.valueOf(phase));
+        }
         context.setStartTime(System.currentTimeMillis() - 10L);
 
-        reporter.reportBalancingService(context);
+        reporter.reportBalancingService(context, code);
 
-        FlexMetricTags expectedTags = FlexMetricTags.of(
-                "code", String.valueOf(code), "priority", "20");
+        FlexMetricTags expectedTags = FlexMetricTags.of("phase", phase, "code", String.valueOf(code), "priority", "20");
         verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS, expectedTags, 1.0);
         verify(monitor).report(eq(MetricConstant.ENGINE_BALANCING_MASTER_ALL_RT),
                 eq(expectedTags), doubleThat(value -> value >= 10.0));
@@ -280,11 +283,14 @@ class EngineHealthReporterTest {
         response.setServerStatus(Arrays.asList(null, new ServerStatus(), selectedWorker));
         BalanceContext context = new BalanceContext(new FlexlbConfig());
         context.setResponse(response);
+        Request request = new Request();
+        request.setPriority(50);
+        context.setRequest(request);
 
-        reporter.reportBalancingService(context);
+        reporter.reportBalancingService(context, 200);
 
         verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS,
-                FlexMetricTags.of("code", "200", "priority", "50"), 1.0);
+                FlexMetricTags.of("phase", "GENERATION", "code", "200", "priority", "50"), 1.0);
         verify(monitor).report(MetricConstant.ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL, FlexMetricTags.of(
                 "role", "PREFILL",
                 "reason", "UNKNOWN",

@@ -769,11 +769,6 @@ public class MetricConstant {
     public static final String AUTO_TPM_REQUEST_SLO_MS = "auto_tpm.request.slo_ms";
 
     /**
-     * Auto-TPM schedule latency in ms (timer), tags: priority, result
-     */
-    public static final String AUTO_TPM_SCHEDULE_LATENCY_MS = "auto_tpm.schedule.latency_ms";
-
-    /**
      * Auto-TPM eviction plan generation count (QPS), tags: priority, case, result
      */
     public static final String AUTO_TPM_EVICTION_PLAN_COUNT = "auto_tpm.eviction_plan.count";

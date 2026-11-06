@@ -761,12 +761,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             } finally {
                 if (ctx != null) {
                     logPvRecord(ctx, response, origin);
+                    if (origin != ScheduleOrigin.FORWARDED_TO_MASTER) {
+                        engineHealthReporter.reportBalancingService(ctx, response.getCode());
+                    }
+                    reportPrioritySchedule(ctx, response);
                 }
             }
-        }
-        if (ctx != null) {
-            engineHealthReporter.reportBalancingService(ctx);
-            reportPrioritySchedule(ctx, response);
         }
     }
 
@@ -824,17 +824,14 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     /**
-     * Per-request schedule summary plus
-     * {@code auto_tpm.schedule.latency_ms} for every scheduler mode.
+     * Per-request schedule summary and TTFT proxy for every scheduler mode.
      */
-    private void reportPrioritySchedule(BalanceContext ctx,
-                                       FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
+    private void reportPrioritySchedule(BalanceContext ctx, FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
         try {
             long now = System.currentTimeMillis();
             long latencyMs = now - ctx.getStartTime();
             boolean success = response.getSuccess();
             String result = success ? "success" : "error_" + response.getCode();
-            requestSchedulerReporter.reportScheduleLatency(ctx.getPriority(), result, latencyMs);
             // Approximate TTFT: schedule-complete minus arrival, as seen by
             // FlexLB. The true TTFT (first token emitted by the engine) is not
             // observable here, so this proxy omits engine-side prefill
@@ -1023,7 +1020,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setPriority(schedulingMetadata.priority());
         ctx.setRequest(request);
         ctx.setSchedulingMetadata(schedulingMetadata);
-        requestSchedulerReporter.reportRequest(schedulingMetadata.priority());
+        requestSchedulerReporter.reportRequest(ctx);
 
         if (!pb.getGenerateInput().isEmpty()) {
             ctx.setGenerateInputPb(pb.getGenerateInput());

@@ -3541,8 +3541,8 @@ def atpm_observability_integrity(ctx: CaseContext):
         EVERY request regardless of outcome (FlexlbServiceImpl:723), the
         metric-plane normalization evidence crossing prio_normalize's
         behaviour plane;
-      * auto_tpm.schedule.latency_ms{result="success"} present (the
-        TIMER family; result is "success" | "error_<code>");
+      * app.engine.balancing.master.all.rt{phase="GENERATION",code="200"}
+        TIMER samples are present;
       * auto_tpm.victim.count == 1 — matching the client-side 8400
         count exactly (exclusive env, absolute value);
       * master log contains [priority-scheduler] lines (debug level —
@@ -3657,7 +3657,7 @@ def atpm_observability_integrity(ctx: CaseContext):
             for p in expected_buckets
         )
         latency_success = _metric_sum(
-            samples, "auto_tpm_schedule", {"result": "success"}
+            samples, "engine_balancing_master_all_rt", {"phase": "GENERATION", "code": "200"}
         )
         latency_ok = latency_success is not None
         # [EV-1-FIXED]: no eviction ever fires under the pull model (no
@@ -3695,7 +3695,7 @@ def atpm_observability_integrity(ctx: CaseContext):
                 f"30a-before-90 dispatch={dispatch_pair_ok}; "
                 f"request.count buckets={ {p: buckets[p] for p in buckets} } "
                 f"(expected {expected_buckets}); "
-                f"schedule.latency success={'present' if latency_ok else 'MISSING'}; "
+                f"master.all.rt success={'present' if latency_ok else 'MISSING'}; "
                 f"victim.count total={victim_total} (expected 0.0 — no "
                 f"eviction under the pull model, matches zero client-side "
                 f"8400); "

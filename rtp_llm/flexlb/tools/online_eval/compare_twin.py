@@ -144,11 +144,9 @@ PROM_RATIO_PAIRS = {
 GAUGE_METRIC_HINTS = ("batch_size",)
 
 # master-side schedule latency (supplementary caliber, never gates): the
-# auto_tpm.schedule.latency_ms timer family.
+# app.engine.balancing.master.all.rt timer family.
 PROM_SCHEDULE_NAMES = (
-    "auto_tpm_schedule_latency_ms",
-    "auto_tpm.ttft",
-    "auto_tpm_ttft",
+    "flexlb_app_engine_balancing_master_all_rt",
 )
 
 # per-request row field aliases -> internal name (JavaLoadClient
@@ -984,7 +982,7 @@ def _load_prom_series(side, prom_path):
         else:
             side.series["master_schedule_latency_ms"] = pts
         side.series_sources["master_schedule_latency_ms"] = f"prom:{sched_name}"
-    # auto_tpm schedule timer as (sum, count) pair -> per-second mean
+    # Schedule timer as (sum, count) pair -> mean per export interval
     sum_name = _find_prom_series(parsed, [n + "_sum" for n in PROM_SCHEDULE_NAMES])
     cnt_name = _find_prom_series(parsed, [n + "_count" for n in PROM_SCHEDULE_NAMES])
     if sum_name and cnt_name:
@@ -1004,7 +1002,7 @@ def _load_prom_series(side, prom_path):
             )
     if not sched_name and not sum_name:
         side.warnings.append(
-            "real prom: no auto_tpm schedule-latency family — supplementary "
+            "real prom: no master.all.rt schedule-latency family — supplementary "
             "master caliber unavailable (client schedule_ms remains primary)"
         )
 
@@ -1213,7 +1211,7 @@ def synthesize_real_inputs(side, out_dir):
         wide_col(col, pts)
         series_out[f"dispatch_batch_size_{reason}"] = col
 
-    # supplementary master schedule latency series (per-second mean)
+    # supplementary master schedule latency series (mean per export interval)
     msched = side.series.get("master_schedule_latency_ms")
     if not msched:
         # synthesize from per_second sched summaries when the mock side
@@ -1221,7 +1219,7 @@ def synthesize_real_inputs(side, out_dir):
         # available; steady mean scalar keeps the round-trip lossless.
         pass
     wide_col(
-        "auto_tpm_schedule_latency_ms",
+        "flexlb_app_engine_balancing_master_all_rt",
         side.series.get("master_schedule_latency_ms") or [],
     )
 

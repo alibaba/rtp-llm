@@ -446,6 +446,16 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 - 线程池、graceful lifecycle；
 - request payload、optimizer trace 与 PV decision 数据。
 
+`app.engine.balancing.master.all.qps` 与 `app.engine.balancing.master.all.rt` 使用相同的
+`phase`、`code`、`priority` 标签，分别记录调度完成速率与包含排队的调度响应耗时（毫秒）。
+`phase=ENCODER` 表示 Encoder 独立调度，`GENERATION` 表示 Prefill、Decode 或 PDFusion 调度，
+`VIT` 表示只返回 ViT 地址的选路调用。每次完成按实际返回码上报；已转发到 Master 并取得响应的
+调用由决策 Master 上报，转发节点只记录自身的转发指标。正常 KMonitor 聚合窗口为 20 秒。
+
+`auto_tpm.request.count{phase,priority}` 在调度上下文构造完成后记录接入速率。同一业务请求可以
+产生多次 Encoder 和 Generation 调度调用，各阶段 QPS 表示调度调用次数。不同阶段的平均耗时
+分别展示；跨阶段汇总使用耗时总和除以样本数。
+
 QUEUE + NON_BATCH 的两层排队监控复用 `app.routing.queue.length{type=mainQueue}` 展示
 GlobalQueue 深度，`app.routing.queue.max.length{type=mainQueue}` 展示总排队上限 M。
 `app.flexlb.batcher.queue.size{role,engineIp}` 展示每个 PREFILL/PDFUSION 逻辑端点尚未交付的

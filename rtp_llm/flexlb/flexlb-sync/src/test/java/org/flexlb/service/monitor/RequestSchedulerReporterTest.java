@@ -1,5 +1,8 @@
 package org.flexlb.service.monitor;
 
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -7,6 +10,8 @@ import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -112,7 +117,7 @@ class RequestSchedulerReporterTest {
     }
 
     @Test
-    void onlyScheduleLatencyKeepsOneSecondAggregation() {
+    void registersMetricsWithNormalAggregation() {
         reporter.init();
         for (var invocation : org.mockito.Mockito.mockingDetails(monitor).getInvocations()) {
             if (!invocation.getMethod().getName().equals("register")) {
@@ -120,10 +125,27 @@ class RequestSchedulerReporterTest {
             }
             String metric = invocation.getArgument(0);
             FlexPriorityType priority = invocation.getArgument(2);
-            org.junit.jupiter.api.Assertions.assertEquals(
-                    metric.equals("auto_tpm.schedule.latency_ms") ? FlexPriorityType.PRECISE : FlexPriorityType.NORMAL,
-                    priority, metric);
+            org.junit.jupiter.api.Assertions.assertEquals(FlexPriorityType.NORMAL, priority, metric);
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ENCODER", "GENERATION", "VIT"})
+    void reportsRequestIntakeByPhaseAndPriority(String phase) {
+        BalanceContext context = new BalanceContext();
+        Request request = new Request();
+        request.setPriority(30);
+        request.setVitRouteOnly(phase.equals("VIT"));
+        context.setRequest(request);
+        if (!phase.equals("VIT")) {
+            context.setRequestPhase(RequestPhase.valueOf(phase));
+        }
+
+        reporter.reportRequest(context);
+
+        verify(monitor).report(org.flexlb.constant.MetricConstant.AUTO_TPM_REQUEST_COUNT,
+                FlexMetricTags.of("phase", phase, "priority", "30"), 1.0);
+        verifyNoMoreInteractions(monitor);
     }
 
     @Test

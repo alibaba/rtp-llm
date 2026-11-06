@@ -282,6 +282,29 @@ class PromParsingTests(unittest.TestCase):
 class SelfConsistencyTests(unittest.TestCase):
     """同数据自洽断言：mock 侧数据喂成 real 侧输入 → 可比指标全 ALIGNED。"""
 
+    def test_schedule_timer_weights_encoder_and_generation_samples(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = write_run(tmp, "mini", make_mini_aggregate())
+            mock = ct.load_mock_side(str(run))
+            real_dir = Path(tmp) / "real"
+            ct.synthesize_real_inputs(mock, str(real_dir))
+            rows = []
+            name = "flexlb_app_engine_balancing_master_all_rt"
+            for t in (0, 20):
+                for phase, total, count in (("ENCODER", 50000, 1), ("GENERATION", 6, 3)):
+                    for suffix, value in (("_sum", total), ("_count", count)):
+                        rows.append({
+                            "t": t, "metric": name + suffix, "phase": phase,
+                            "value": value if t else 0,
+                        })
+            prom = real_dir / "prom_export.jsonl"
+            prom.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+            real = ct.load_real_side(str(real_dir / "client_events.jsonl"), str(prom))
+
+            self.assertEqual(real.series["master_schedule_latency_ms"], [(20.0, 12501.5)])
+            self.assertIn(name, real.series_sources["master_schedule_latency_ms"])
+
     def test_round_trip_all_comparable_aligned(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = write_run(tmp, "mini", make_mini_aggregate())
