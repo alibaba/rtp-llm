@@ -1476,6 +1476,7 @@ py_test(
         "packaging/dashllm_r50/stage_prefill.py",
         "packaging/dashllm_r50/stage_master.py",
         "packaging/dashllm_r50/test_stage_master.py",
+        "packaging/dashllm_r50/native_release_contract.py",
         "packaging/dashllm_r50/migrate_master_pool.py",
         "packaging/dashllm_r50/test_migrate_master_pool.py",
     ],

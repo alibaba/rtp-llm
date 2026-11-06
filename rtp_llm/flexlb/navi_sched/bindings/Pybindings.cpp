@@ -5,6 +5,7 @@
 #include "aios/navi_sched/common/NaviSchedScheduleData.h"
 #include "aios/navi_sched/data/BlockHashUtil.h"
 #include "aios/navi_sched/data/AgentLatencyToMasterData.h"
+#include "aios/navi_sched/data/AgentUpdateToMasterData.h"
 #include "aios/navi_sched/data/AgentResponseToClientData.h"
 #include "aios/navi_sched/debug/NaviSchedScheduleReplayJson.h"
 #include "aios/navi_sched/service/NaviSchedAgent.h"
@@ -973,6 +974,13 @@ NaviSchedBlockHashesConstPtr blockHashesFromPython(const py::iterable &values)
 
 void bindNaviSchedData(py::module_ &m)
 {
+    m.def("native_wire_versions", []() {
+        py::dict versions;
+        versions["agent_update_protocol"] = NAVI_SCHED_AGENT_UPDATE_VERSION;
+        versions["agent_update_batch_protocol"] = NAVI_SCHED_AGENT_UPDATE_BATCH_VERSION;
+        versions["request_data"] = NAVI_SCHED_DATA_VERSION;
+        return versions;
+    });
     py::class_<VLLMAgentBridge::ForwardBatch,
                std::shared_ptr<VLLMAgentBridge::ForwardBatch>>(m, "_VLLMForwardBatch")
         .def_readonly("batch_id", &VLLMAgentBridge::ForwardBatch::localBatchId)
