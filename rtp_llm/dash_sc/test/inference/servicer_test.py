@@ -166,6 +166,9 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
     def test_non_default_exception_groups(self) -> None:
         cases = (
             (ExceptionType.INVALID_PARAMS, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.MM_DOWNLOAD_FAILED, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.MM_PROCESS_ERROR, DASH_ERROR_INTERNAL),
+            (ExceptionType.MM_REMOTE_RPC_FAILED, DASH_ERROR_INTERNAL),
             (ExceptionType.LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
             (ExceptionType.UNSUPPORTED_OPERATION, DASH_ERROR_UNSUPPORTED),
             (ExceptionType.MASTER_NO_AVAILABLE_WORKER, DASH_ERROR_CAPACITY),
@@ -800,7 +803,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("backend down", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
 
-    async def test_multimodal_download_failure_is_internal_error(self) -> None:
+    async def test_multimodal_download_failure_is_bad_request(self) -> None:
         req = self._minimal_request()
 
         class _DownloadFailedVisitor:
@@ -823,9 +826,12 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chunks), 1)
         self.assertFalse(chunks[0].error_message)
         error_no, payload = _dash_error_payload(chunks[0])
-        self.assertEqual(error_no, 19)
-        self.assertEqual(payload["status_code"], 500)
-        self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.INNER_ENGINE_ERROR)
+        self.assertEqual(error_no, LLMFinishReason.STOP_ENGINE_PARAM)
+        self.assertEqual(payload["status_code"], 400)
+        self.assertEqual(payload["status_name"], "InvalidParameter")
+        self.assertEqual(
+            _finish_reason(chunks[0]), LLMFinishReason.USE_PARAMETER_STATUS
+        )
         self.assertIn(
             "Failed to download multimodal content", payload["status_message"]
         )
