@@ -1763,7 +1763,7 @@ TEST_F(StreamCacheResourceTest, WritebackAccountingUsesCanonicalCpBlocks) {
     EXPECT_EQ(stream_->initialReuseLength(), 4);
 }
 
-TEST_F(StreamCacheResourceTest, OnlySuccessfulPrefillReleaseRequestsAccountingCommit) {
+TEST_F(StreamCacheResourceTest, SuccessfulReleaseCommitsCacheForPrefillAndDecode) {
     for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
         prepareResource(true, role);
         auto& resource = stream_->streamCacheResource();
@@ -1772,7 +1772,6 @@ TEST_F(StreamCacheResourceTest, OnlySuccessfulPrefillReleaseRequestsAccountingCo
         auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
         EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_))
             .WillOnce(testing::Invoke([&](const InsertInfo& info, size_t& resident_prefix_length) {
-                EXPECT_EQ(info.account_for_prefill, role == RoleType::PREFILL);
                 actual_allocator->insertIntoCache(info, resident_prefix_length);
             }));
         EXPECT_CALL(*allocator, free(testing::_)).WillOnce(testing::Invoke([&](const FreeInfo& info) {

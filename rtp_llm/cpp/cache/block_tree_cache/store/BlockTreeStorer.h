@@ -42,7 +42,6 @@ public:
                                  bool                                              is_resident,
                                  size_t&                                           resident_prefix_length,
                                  bool                                              is_writeback = false,
-                                 bool                                              account_for_prefill = false,
                                  std::optional<int64_t>                            request_id = {});
     void             stopAdmissionLocked();
 
@@ -54,16 +53,14 @@ private:
                                        const std::vector<std::vector<GroupSetResource>>& resources,
                                        bool                                              is_resident,
                                        size_t&                                           resident_prefix_length,
-                                       bool                                              is_writeback,
-                                       bool                                              account_for_prefill);
+                                       bool                                              is_writeback);
     StorageRequest makeStorageRequest(const CacheKeysType&                              cache_keys,
                                       const std::vector<std::vector<GroupSetResource>>& resources,
                                       const std::optional<int64_t>&                     request_id) const;
     void           submitLowerTierLocked(const CacheKeysType&                              cache_keys,
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          Tier                                              target_tier,
-                                         std::optional<int64_t>                            request_id,
-                                         bool                                              account_for_prefill);
+                                         std::optional<int64_t>                            request_id);
     void           runStoreTask(const StoreTaskPtr& task);
     void           scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error);
     bool           settleTask(const StoreTask& task, const CompletionStageContext& observation);

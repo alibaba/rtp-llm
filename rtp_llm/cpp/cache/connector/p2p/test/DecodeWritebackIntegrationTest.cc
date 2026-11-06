@@ -612,7 +612,6 @@ TEST_F(DecodeWritebackCpIntegrationTest, TcpScatterPublishesCanonicalPrefixAndRe
         }
     }
     InsertInfo insert_info{reused, ids, false, Tier::DEVICE};
-    insert_info.account_for_prefill = true;
     size_t resident_prefix_length = 0;
     prefill_->insertIntoCache(insert_info, resident_prefix_length);
     const auto cache = target_->blockTreeCacheOwner();

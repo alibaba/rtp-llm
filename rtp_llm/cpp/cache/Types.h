@@ -149,7 +149,6 @@ struct InsertInfo {
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
     std::optional<int64_t>  request_id{std::nullopt};
-    bool                    account_for_prefill{false};
 };
 
 }  // namespace rtp_llm

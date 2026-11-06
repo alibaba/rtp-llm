@@ -1369,8 +1369,7 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
         resident_prefix_length += block_tree_cache_->insert(
-            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id,
-            insert_info.account_for_prefill);
+            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id);
     }
 }
 

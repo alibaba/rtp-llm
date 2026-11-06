@@ -68,11 +68,12 @@ public:
 
     bool isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const;
 
+    // Normal inserts account the visited path; writeback only leaves new nodes unaccounted.
     BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
                                      const std::vector<std::vector<GroupSetResource>>& resources,
                                      bool                                              collect_path,
                                      bool                                              is_resident,
-                                     bool                                              account_for_prefill = false);
+                                     bool                                              is_writeback = false);
 
     bool      isRemovable(TreeNode* node) const;
     void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
@@ -122,7 +123,7 @@ private:
                                          const std::vector<std::vector<GroupSetResource>>& resources,
                                          bool                                              collect_path,
                                          bool                                              is_resident,
-                                         bool                                              account_for_prefill);
+                                         bool                                              is_writeback);
 
     void      removeNode(TreeNode* node);
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
