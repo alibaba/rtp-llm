@@ -181,7 +181,9 @@ class KimiK31DSA(KimiK3MLA):
                 encoded, scale = self.indexer.indexer_op.encode_query(
                     self.indexer.project_query(q, original_rows=rows))
                 weights = self.indexer.project_head_weights(
-                    chunk, scale, is_prefill=True, original_rows=rows)
+                    chunk, scale, is_prefill=True, original_rows=rows,
+                    tile_decode_output=not index_fmha.fmha_params.is_prefill,
+                )
                 if single_chunk:
                     index_query, head_weights = encoded, weights
                 else:

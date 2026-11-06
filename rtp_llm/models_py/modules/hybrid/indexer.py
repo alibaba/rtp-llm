@@ -147,13 +147,14 @@ class Indexer(nn.Module):
                 return output.view(-1, self.index_n_heads, self.index_head_dim)
         return self.wq_b(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
 
-    def project_head_weights(self, hidden, q_scale, *, is_prefill=False, original_rows=None):
+    def project_head_weights(self, hidden, q_scale, *, is_prefill=False, original_rows=None,
+                             tile_decode_output=False):
         return self._get_logits_head_gate(hidden, q_scale, is_prefill=is_prefill,
-                                          original_rows=original_rows)
+                                          original_rows=original_rows, tile_decode_output=tile_decode_output)
 
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor, *, is_prefill: bool = False,
-        original_rows=None,
+        original_rows=None, tile_decode_output=False,
     ) -> torch.Tensor:
         if is_prefill and self._fp32_head_weight is not None:
             from rtp_llm.models_py.kernels.cuda.dsa_head_weights_fp32 import fused_logits_head_gate
@@ -163,6 +164,7 @@ class Indexer(nn.Module):
                 self.softmax_scale * self.weights_scale,
                 fallback_proj=self.weights_proj,
                 original_rows=original_rows,
+                tile_decode_output=tile_decode_output,
             )
         x = x.float()
         weights = self.weights_proj(x)
@@ -285,7 +287,8 @@ class Indexer(nn.Module):
             query, key, kv_cache, fmha_params, attention_inputs, cp_params
         )
         weights = self._get_logits_head_gate(
-            hidden_states, q_scale, is_prefill=attention_inputs.is_prefill
+            hidden_states, q_scale, is_prefill=attention_inputs.is_prefill,
+            tile_decode_output=bool(getattr(attention_inputs, "is_target_verify", False)),
         )
         return self._compute_topk(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params

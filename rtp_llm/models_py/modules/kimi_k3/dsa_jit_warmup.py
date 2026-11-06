@@ -77,7 +77,7 @@ def _warmup_native64(page, device):
     pack_indexer_pages64(cache, table, 0, output)
 
 
-def _warmup_native_score(score, device, max_queries):
+def _warmup_native_score(score, device, max_queries, physical_page=64):
     # SM10 native MQA specializes on heads/dim/mode, not M, N or batch.
     # Paged MQA and its metadata additionally specialize on query width.
     query = torch.zeros((4, 32, 128), device=device, dtype=torch.float8_e4m3fn)
@@ -89,14 +89,16 @@ def _warmup_native_score(score, device, max_queries):
     positions = torch.arange(256, device=device, dtype=torch.int32)
     score.dense(query, keys, scales, weights, starts, ends, positions)
 
-    cache = torch.zeros((5, 64, 1, 132), device=device, dtype=torch.uint8)
-    cache.view(5, -1)[:, 64 * 128 :].view(torch.float32).fill_(1)
-    table = torch.arange(1, 5, device=device, dtype=torch.int32)[None]
+    page = 128 if physical_page == 128 and score.supports_direct_pages(128, device) else 64
+    pages = 256 // page
+    cache = torch.zeros((1 + pages, page, 1, 132), device=device, dtype=torch.uint8)
+    cache.view(1 + pages, -1)[1:, page * 128 :].view(torch.float32).fill_(1)
+    table = torch.arange(1, 1 + pages, device=device, dtype=torch.int32)[None]
     for queries in range(1, max_queries + 1):
         context = torch.full((1, queries), 256, device=device, dtype=torch.int32)
         metadata = score.prepare_paged_metadata(
             context,
-            num_sms=torch.cuda.get_device_properties(device).multi_processor_count,
+            num_sms=torch.cuda.get_device_properties(device).multi_processor_count, page_size=page,
         )
         query = torch.zeros(
             (1, queries, 32, 128), device=device, dtype=torch.float8_e4m3fn
@@ -173,7 +175,7 @@ def warmup_kimi_k31_dsa_jit(model, init_resource):
                 _run_deepgemm_warmup_launches_serialized(
                     "K3.1 DSA Indexer",
                     lambda: _warmup_native_score(
-                        op.native_score, view.device, queries
+                        op.native_score, view.device, queries, physical_page=page
                     ),
                 )
             torch.cuda.synchronize(view.device)
