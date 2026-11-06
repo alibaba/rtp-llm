@@ -128,11 +128,12 @@ final class PrefillRpcServer implements AutoCloseable {
     Session submit(Session session, MediaInput.Prepared prepared) {
         try {
             requirePrepared(prepared.input());
+            var input = RpcMessages.input(prepared, Long.toString(session.id), session.started,
+                session.deadline, session.retained, config.blockSize(), config.cacheKeySeed());
             synchronized (executionLock) {
                 requirePending(session, prepared.input());
                 session.input = prepared.input();
-                session.request = engine.input(RpcMessages.input(prepared, Long.toString(session.input.getRequestId()), session.started,
-                    session.deadline, session.retained, config.blockSize(), config.cacheKeySeed()), session);
+                session.request = engine.input(input, session);
             }
         } catch (RuntimeException error) {
             var nativeError = error instanceof RequestFailure f ? rpcFailure(f) : error;
@@ -153,25 +154,36 @@ final class PrefillRpcServer implements AutoCloseable {
         var admittedSessions = new ArrayList<Session>();
         var positions = new ArrayList<Integer>();
         var results = new ArrayList<Admission>(Collections.nCopies(batch.size(), null));
+        for (int i = 0; i < batch.size(); i++) {
+            var item = batch.get(i);
+            Session session = item.session();
+            try {
+                if (session == null) validate(item.input(), true);
+                requirePrepared(item.input());
+                long started = System.nanoTime();
+                if (session == null) session = new Session(item.input(), true, started,
+                    RpcMessages.deadline(item.input(), started, item.deadline()));
+                var input = RpcMessages.input(item.prepared(), Long.toString(session.id),
+                    session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed());
+                admittedSessions.add(session); positions.add(i); items.add(new EngineScheduler.InputItem(input, session));
+            } catch (RuntimeException error) {
+                var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;
+                if (session != null) session.fail(failure);
+                results.set(i, new Admission(null, failure));
+            }
+        }
         synchronized (executionLock) {
-            for (int i = 0; i < batch.size(); i++) {
-                var item = batch.get(i);
-                Session session = item.session();
+            // Input hashing may race cancellation; revalidate every session before atomic batch admission.
+            for (int i = items.size() - 1; i >= 0; i--) {
+                var session = admittedSessions.get(i);
                 try {
-                    if (session == null) validate(item.input(), true);
-                    requirePrepared(item.input());
-                    long started = System.nanoTime();
-                    if (session == null) session = new Session(item.input(), true, started,
-                        RpcMessages.deadline(item.input(), started, item.deadline()));
-                    requirePending(session, item.input());
-                    var input = RpcMessages.input(item.prepared(), Long.toString(session.id),
-                        session.started, session.deadline, true, config.blockSize(), config.cacheKeySeed());
-                    session.input = item.input();
-                    admittedSessions.add(session); positions.add(i); items.add(new EngineScheduler.InputItem(input, session));
-                } catch (RuntimeException error) {
+                    var input = batch.get(positions.get(i)).input();
+                    requirePending(session, input); session.input = input;
+                }
+                catch (RuntimeException error) {
                     var failure = error instanceof RequestFailure f ? rpcFailure(f) : error;
-                    if (session != null) session.fail(failure);
-                    results.set(i, new Admission(null, failure));
+                    session.fail(failure); results.set(positions.get(i), new Admission(null, failure));
+                    items.remove(i); admittedSessions.remove(i); positions.remove(i);
                 }
             }
             if (!items.isEmpty()) {
