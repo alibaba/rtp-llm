@@ -204,13 +204,13 @@ class RTPServer:
                 process.terminate()
             except psutil.NoSuchProcess:
                 pass
-        _, alive = psutil.wait_procs(targets, timeout=20)
+        exited, alive = psutil.wait_procs(targets, timeout=20)
         for process in alive:
             try:
                 process.kill()
             except psutil.NoSuchProcess:
                 pass
-        _, survivors = psutil.wait_procs(alive, timeout=10)
+        killed_exited, survivors = psutil.wait_procs(alive, timeout=10)
         survivors = [process.pid for process in survivors if self._running(process)]
         if survivors:
             raise RuntimeError(f"owned RTP readers did not terminate: {survivors}")
@@ -225,9 +225,15 @@ class RTPServer:
                 continue
         if unknown_group_members:
             raise RuntimeError(f"unacknowledged processes remain in the original RTP group; refusing unsafe IPC release: {unknown_group_members}")
+        # psutil may already have reaped our direct Popen child. Preserve its
+        # observed returncode before subprocess treats ECHILD as status zero.
+        for observed in exited + killed_exited:
+            if observed.pid == self.process.pid and getattr(observed, "returncode", None) is not None:
+                self.process.returncode = observed.returncode
         self.process.wait(timeout=10)
         self._cleanup_receipt = {
             "process_tree_terminated": True,
+            "leader_actual_returncode": self.process.returncode,
             "pid": self.process.pid,
             "owned_pids": sorted(self._owned_processes),
             "pgid": identity["pgid"], "create_time": identity["create_time"],

@@ -231,6 +231,9 @@ def cleanup_owned_rtp_processes(audit_dir):
     If Ray is unavailable, process cleanup uses PID AND creation time. A durable
     driver-cleanup.json is written on success and failure; failures are not hidden.
     """
+    if os.environ.get("RTP_LLM_RL_WORLD72") == "1":
+        from qwen38_owned_cleanup import cleanup_owned_world72
+        return cleanup_owned_world72(audit_dir)
     root = Path(audit_dir).resolve()
     configured = os.environ.get('RLLM_RTP_ACCEPTANCE_DIR')
     if configured is None or root != Path(configured).resolve():
