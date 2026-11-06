@@ -2139,18 +2139,9 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
 
 class PrependToGeneratedIdsTensorTest(TestCase):
     def _build_infer_with_generated_ids(self, ids: list[int]):
-        out = GenerateOutput(
-            output_ids=torch.tensor(ids, dtype=torch.int32) if ids else None,
-            finished=True,
-            aux_info=AuxInfo(input_len=0, reuse_len=0),
-        )
-        go = GenerateOutputs(generate_outputs=[out])
-        resp = StreamResponseBuilder(
-            dash_sc_request_id="r",
-            model_name="m",
-            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
-        ).build(go)
-        return resp.infer_response
+        infer = predict_v2_pb2.ModelInferResponse()
+        codec._append_generated_ids_output(infer, ids)
+        return infer
 
     def test_prepend_list_success(self) -> None:
         infer = self._build_infer_with_generated_ids([7, 8, 9])
@@ -2164,6 +2155,45 @@ class PrependToGeneratedIdsTensorTest(TestCase):
         )
         gen_out = next(o for o in infer.outputs if o.name == "generated_ids")
         self.assertEqual(list(gen_out.shape), [1, 5])
+        self.assertNotIn("logprobs", infer.parameters)
+
+    def test_echo_logprobs_identify_unscored_prefix_and_preserve_body(self) -> None:
+        generated_ids = [4052, 40]
+        body_logprobs = [
+            {"4052": -0.5, "40": -1.25},
+            {"40": -0.25, "4052": -1.5},
+        ]
+        prefix = [163587, 39964, 163589]
+        infer = self._build_infer_with_generated_ids(generated_ids)
+        infer.parameters["logprobs"].string_param = json.dumps(body_logprobs)
+
+        self.assertTrue(prepend_to_generated_ids_tensor(infer, prefix))
+
+        gen_index = next(
+            i for i, out in enumerate(infer.outputs) if out.name == "generated_ids"
+        )
+        emitted_ids = _unpack_int32_le(infer.raw_output_contents[gen_index])
+        rows = json.loads(infer.parameters["logprobs"].string_param)
+        self.assertEqual(emitted_ids, prefix + generated_ids)
+        self.assertEqual(list(infer.outputs[gen_index].shape), [1, 5])
+        self.assertEqual(len(rows), len(emitted_ids))
+        # The receiver matches prefix rows by token ID before removing
+        # them. Prompt tokens have no generated logprob to report.
+        for token_id, row in zip(prefix, rows[: len(prefix)]):
+            self.assertIn(str(token_id), row)
+            self.assertIsNone(row[str(token_id)])
+            self.assertEqual(len(row), 1)
+        self.assertEqual(rows[len(prefix) :], body_logprobs)
+
+    def test_invalid_logprobs_alignment_does_not_mutate_response(self) -> None:
+        infer = self._build_infer_with_generated_ids([7, 8])
+        for payload in ([], [{"7": -0.5}], {"7": -0.5}):
+            with self.subTest(payload=payload):
+                infer.parameters["logprobs"].string_param = json.dumps(payload)
+                original = infer.SerializeToString()
+                with self.assertRaisesRegex(ValueError, "logprobs rows must match"):
+                    prepend_to_generated_ids_tensor(infer, [100, 200])
+                self.assertEqual(infer.SerializeToString(), original)
 
     def test_prepend_empty_list_noop(self) -> None:
         infer = self._build_infer_with_generated_ids([7, 8, 9])

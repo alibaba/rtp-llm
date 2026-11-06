@@ -1502,10 +1502,10 @@ def prepend_to_generated_ids_tensor(
             ):
                 raise ValueError("logprobs rows must match generated_ids before echo")
             # Echoed tokens belong to the prompt and have no model-generated
-            # probability. Preserve one row per generated_ids token without
-            # inventing a score for the echoed prefix.
+            # probability. Keep their IDs so the receiver can identify and
+            # strip the prefix rows without inventing probability scores.
             prefixed_logprobs = json.dumps(
-                [{} for _ in token_ids] + probability_rows,
+                [{str(token_id): None} for token_id in token_ids] + probability_rows,
                 ensure_ascii=False,
                 allow_nan=False,
                 separators=(",", ":"),
