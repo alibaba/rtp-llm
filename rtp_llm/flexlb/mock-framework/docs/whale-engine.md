@@ -100,3 +100,20 @@ ENV 路径始终使用入口传入的环境，包括模型下载和 DSV4.1 names
 例如 `TEST_BLOCK_NUM=1025 MOCK_CACHE_TOTAL_BLOCKS=4096` 表示 device 最多容纳 1024 个不同的活动 KV block，统一索引最多保留 4096 个 block。缓存命中同样需要 device 额度，初次容量不足等待重试，Decode 增长不足失败；不模拟 Host/device 搬运耗时。
 
 `device_blocks`、`reserve_blocks` 仅为派生输出。旧 `mock.cache.memory.blocks`、`capacity.*` 和 `device_eviction_policy` 不再接受，LRU 固定；不要为扩大统一池配置 `enable_memory_cache`。`memory_cache_size_mb` 及真实 GPU 显存预算不用于推算 block 数。Mock Case 应只保留实际消费的参数。
+
+
+### 真实 Frontend 的 CP 缓存布局
+
+Whale 的 Frontend 是真实组件，不使用本地 Mock Client。需要对齐 Frontend 与 Mock P 的基础哈希参数及 CP 分片开关，例如：
+
+```text
+SEQ_SIZE_PER_BLOCK=128
+TP_SIZE=4
+CP_ROTATE_METHOD=ALL_GATHER
+PREFILL_CP_KV_CACHE_SHARDED=1
+PREFILL_CP_SIZE=4
+```
+
+该组合使 Mock P 上报 K4、K8 等 canonical keys，CacheStatus 的逻辑块为 512；基础哈希及 KVCM 注册仍按 128。Frontend 侧也必须使用相同 seed、基础块及 CP4 分片配置。参数需要显式配置并重启生效，代码升级不会自动改变部署配置。
+
+D 的 `PREFILL_CP_SIZE` 表示上游布局，不把 D 的本地 FULL KV 容量再乘 CP4。P→D 传完整语义输入和媒体身份，不增加 CP 协议字段。本地 Client/Case 可保持不分片，无需把 CP 写进数据集。具体范围见 [CP 缓存布局](component-reference.md#cp只模拟缓存布局不模拟-rank-通信)。

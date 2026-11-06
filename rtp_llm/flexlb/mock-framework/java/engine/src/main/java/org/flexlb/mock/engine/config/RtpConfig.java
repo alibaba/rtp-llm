@@ -71,6 +71,16 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         int tpSize = nativeInt(config, "tp_size", 1, 1, Integer.MAX_VALUE);
         int dpSize = nativeInt(config, "dp_size", 1, 1, Integer.MAX_VALUE);
         String cpMethod = cpMethod(config);
+        boolean sharded=nativeBool(config,"prefill_cp_kv_cache_sharded",false);
+        int upstreamCp=nativeInt(config,"prefill_cp_size",0,0,Integer.MAX_VALUE);
+        if(role==Role.prefill && sharded) {
+            if(tpSize>1 && Set.of("DISABLED","UNKNOWN").contains(cpMethod))
+                throw new IllegalArgumentException("Sharded Prefill KV requires an enabled cp_rotate_method");
+            if(upstreamCp>0 && upstreamCp!=tpSize)
+                throw new IllegalArgumentException("Prefill prefill_cp_size must match tp_size for sharded KV");
+            Math.multiplyExact(blockSize,tpSize);
+        }
+        config=((ObjectNode)config).put("prefill_cp_kv_cache_sharded",sharded).put("prefill_cp_size",upstreamCp);
         // PrefillCPConfig.is_enabled(): general CP uses the TP group.
         boolean cpEnabled = Set.of("ALL_GATHER", "ALL_GATHER_WITH_OVERLAP", "ALLTOALL").contains(cpMethod);
         int cpSize = cpEnabled ? tpSize : 1;
@@ -93,6 +103,12 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             ConfigInput.signedLong(config, "cache_key_hash_seed", 0));
     }
 
+    // Like real KVCacheManager: Decode's CP flag describes upstream P, never local FULL sharding.
+    public int cacheKeyStride() {
+        return role==Role.prefill && business.path("prefill_cp_kv_cache_sharded").asBoolean(false) ? tpSize : 1;
+    }
+    public int cacheBlockSize() { return Math.multiplyExact(blockSize,cacheKeyStride()); }
+
     public boolean forceSinglePrefill() { return cpEnabled && business.path("cp_force_single_prefill").asBoolean(true); }
 
     public boolean groupScheduling() {
@@ -110,6 +126,9 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
             .put("max_seq_len", maxSeqLen).put("max_batch_tokens_size", maxBatchTokens)
             .put("max_context_batch_size", business.path("max_context_batch_size").asInt())
             .put("cp_force_single_prefill", business.path("cp_force_single_prefill").asBoolean())
+            .put("prefill_cp_kv_cache_sharded",business.path("prefill_cp_kv_cache_sharded").asBoolean())
+            .put("prefill_cp_size",business.path("prefill_cp_size").asInt())
+            .put("cache_key_block_size",cacheBlockSize())
             .put("dp_size", dpSize).put("tp_size", tpSize).put("cp_rotate_method", cpMethod(business));
         if (role == Role.prefill) {
             result.put("max_inited_kv_cache_streams", maxInitedKvStreams).put("max_batch_tokens_without_cache", maxUncachedBatchTokens); }
@@ -187,7 +206,7 @@ public record RtpConfig(String id, Role role, int blockSize, int deviceBlocks, i
         "RECO_VIPSERVER_DOMAIN", "kvcm_vipserver_domain",
         "RECO_SERVER_ADDRESS", "kvcm_server_address");
     private static final Set<String> COMMON = Set.of(
-        "image_token_id", "cache_key_hash_seed", "test_block_num", "reserve_block_ratio", "seq_size_per_block", "reuse_cache",
+        "prefill_cp_kv_cache_sharded", "prefill_cp_size", "image_token_id", "cache_key_hash_seed", "test_block_num", "reserve_block_ratio", "seq_size_per_block", "reuse_cache",
         "enable_device_cache", "disable_decode_first_malloc_device_reuse", "max_seq_len", "max_batch_tokens_size", "max_context_batch_size", "cp_force_single_prefill",
         "kv_cache_event_publisher_type", "kv_cache_event_manager_endpoint", "kv_cache_event_instance_id",
         "kv_cache_event_instance_group", "kv_cache_event_host_ip_port", "kv_cache_event_snapshot_interval_ms",
