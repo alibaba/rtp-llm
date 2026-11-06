@@ -1019,44 +1019,100 @@ TEST_F(CudaSamplerTest, testLogprobDistributionIncludesTemperaturePenaltyAndJoin
 }
 
 TEST_F(CudaSamplerTest, testCompactAndDenseLogprobDistributionsFromFusedTargetSampling) {
-    for (bool compact : {false, true}) {
-        SCOPED_TRACE(compact);
-        GreedyParams params;
-        params.logits = torch::full(
-            {2, 2048}, -std::numeric_limits<float>::infinity(), torch::TensorOptions().device(torch::kCUDA));
-        params.logits.select(1, 7).fill_(.5f * std::log(.6f));
-        params.logits.select(1, 91).fill_(.5f * std::log(.3f));
-        params.logits.select(1, 109).fill_(.5f * std::log(.1f));
-        params.input_lengths    = cudaIntTensor({1, 1}, {2});
-        params.sequence_lengths = cudaIntTensor({1, 1}, {2});
-        params.token_ids        = cudaIntTensor({0, 0, 0, 0}, {2, 2});
-        params.step             = 1;
-        params.top_k            = pinnedIntTensor({0, 0});
-        params.top_p            = pinnedFloatTensor({.75f, .75f});
-        params.temperature      = pinnedFloatTensor({.5f, .5f});
-        params.output_all_probs = torch::empty({2, compact ? 1024 : 2048}, params.logits.options());
-        if (compact) {
-            params.output_all_probs_indices = torch::empty({2, 1024}, params.logits.options().dtype(torch::kInt32));
+    for (int64_t width : {512, 1024, 4096}) {
+        SCOPED_TRACE(width);
+        for (bool compact : {false, true}) {
+            SCOPED_TRACE(compact);
+            GreedyParams params;
+            params.logits = torch::full(
+                {2, 8192}, -std::numeric_limits<float>::infinity(), torch::TensorOptions().device(torch::kCUDA));
+            params.logits.select(1, 7).fill_(.5f * std::log(.6f));
+            params.logits.select(1, 91).fill_(.5f * std::log(.3f));
+            params.logits.select(1, 109).fill_(.5f * std::log(.1f));
+            params.input_lengths    = cudaIntTensor({1, 1}, {2});
+            params.sequence_lengths = cudaIntTensor({1, 1}, {2});
+            params.token_ids        = cudaIntTensor({0, 0, 0, 0}, {2, 2});
+            params.step             = 1;
+            params.top_k            = pinnedIntTensor({0, 0});
+            params.top_p            = pinnedFloatTensor({.75f, .75f});
+            params.temperature      = pinnedFloatTensor({.5f, .5f});
+            params.output_all_probs = torch::empty({2, compact ? width : 8192}, params.logits.options());
+            if (compact) {
+                params.output_all_probs_indices =
+                    torch::empty({2, width}, params.logits.options().dtype(torch::kInt32));
+            }
+            params.skip_logits_probs_restore = true;
+            params.force_topk                = width;
+            params.return_sampling_probs     = true;
+            params.generator                 = {torch::make_generator<at::CUDAGeneratorImpl>(),
+                                                torch::make_generator<at::CUDAGeneratorImpl>()};
+            auto output                      = execSampleGreedy(params);
+            assertAllValid(output.success);
+            EXPECT_EQ(output.sampling_probs.data_ptr(), params.output_all_probs->data_ptr());
+            auto actual = output.sampling_probs;
+            if (compact) {
+                actual = torch::zeros({2, 8192}, params.logits.options());
+                actual.scatter_(1, params.output_all_probs_indices->to(torch::kLong), output.sampling_probs);
+            }
+            auto expected = torch::zeros_like(actual);
+            expected.select(1, 7).fill_(2.f / 3);
+            expected.select(1, 91).fill_(1.f / 3);
+            EXPECT_TRUE(torch::allclose(actual, expected, 1e-5, 1e-6));
+            EXPECT_TRUE(
+                actual.gather(1, params.token_ids.select(1, 1).to(torch::kLong).unsqueeze(1)).gt(0).all().item<bool>());
         }
-        params.skip_logits_probs_restore = true;
-        params.force_topk                = 1024;
-        params.return_sampling_probs     = true;
-        params.generator                 = {torch::make_generator<at::CUDAGeneratorImpl>(),
-                                            torch::make_generator<at::CUDAGeneratorImpl>()};
-        auto output                      = execSampleGreedy(params);
-        assertAllValid(output.success);
-        EXPECT_EQ(output.sampling_probs.data_ptr(), params.output_all_probs->data_ptr());
-        auto actual = output.sampling_probs;
-        if (compact) {
-            actual = torch::zeros({2, 2048}, params.logits.options());
-            actual.scatter_(1, params.output_all_probs_indices->to(torch::kLong), output.sampling_probs);
+    }
+}
+
+TEST_F(CudaSamplerTest, testTemperatureFoldAtZeroAndOneMatchesFullLogits) {
+    // Mixed zero/unit rows used to send the entire batch through the full-vocabulary temperature kernel.
+    for (const std::vector<float>& temperatures :
+         {std::vector<float>{0.f, 1.f, .5f}, std::vector<float>{1.f, 1.f, 1.f}}) {
+        for (int64_t width : {512, 1024, 4096}) {
+            SCOPED_TRACE(width);
+            auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+            auto logits  = torch::full({3, 8192}, -std::numeric_limits<float>::infinity(), options);
+            logits.select(1, 7).fill_(std::log(.6f));
+            logits.select(1, 91).fill_(std::log(.3f));
+            logits.select(1, 109).fill_(std::log(.1f));
+            torch::Tensor reference;
+            for (bool compact : {false, true}) {
+                GreedyParams params;
+                params.logits           = logits.clone();
+                params.input_lengths    = cudaIntTensor({1, 1, 1}, {3});
+                params.sequence_lengths = cudaIntTensor({1, 1, 1}, {3});
+                params.token_ids        = torch::zeros({3, 2}, options.dtype(torch::kInt32));
+                params.step             = 1;
+                params.top_k            = pinnedIntTensor({0, 0, 0});
+                params.top_p            = pinnedFloatTensor({.95f, .95f, .95f});
+                params.temperature      = pinnedFloatTensor(temperatures);
+                params.output_all_probs = torch::empty({3, compact ? width : 8192}, options);
+                if (compact) {
+                    params.output_all_probs_indices = torch::empty({3, width}, options.dtype(torch::kInt32));
+                }
+                params.skip_logits_probs_restore = true;
+                params.force_topk                = compact ? width : 0;
+                params.return_sampling_probs     = true;
+                for (int i = 0; i < 3; ++i) {
+                    params.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+                }
+                auto output = execSampleGreedy(params);
+                assertAllValid(output.success);
+                if (!compact) {
+                    reference = output.sampling_probs.clone();
+                    continue;
+                }
+                auto actual = torch::zeros_like(logits);
+                actual.scatter_(1, params.output_all_probs_indices->to(torch::kLong), output.sampling_probs);
+                EXPECT_TRUE(torch::allclose(actual, reference, 1e-5, 1e-6));
+                // Proves that selection scaled only the candidates, not the input logits.
+                EXPECT_TRUE(torch::equal(params.logits, logits));
+                EXPECT_TRUE(actual.gather(1, params.token_ids.select(1, 1).to(torch::kLong).unsqueeze(1))
+                                .gt(0)
+                                .all()
+                                .item<bool>());
+            }
         }
-        auto expected = torch::zeros_like(actual);
-        expected.select(1, 7).fill_(2.f / 3);
-        expected.select(1, 91).fill_(1.f / 3);
-        EXPECT_TRUE(torch::allclose(actual, expected, 1e-5, 1e-6));
-        EXPECT_TRUE(
-            actual.gather(1, params.token_ids.select(1, 1).to(torch::kLong).unsqueeze(1)).gt(0).all().item<bool>());
     }
 }
 

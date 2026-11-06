@@ -3,6 +3,9 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+// Shared sampling-temperature policy: the same predicate the CUDA sampler uses
+// to decide that this round's temperature is folded into the force_topk
+// candidates, so the logits-ownership decision below cannot drift from it.
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -16,6 +19,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <map>
 #include <numeric>
@@ -992,6 +996,8 @@ AcceptedMtpLogprobSelection collectAcceptedMtpLogprobRows(const StreamGroups&  s
     return selection;
 }
 
+
+
 }  // namespace
 
 torch::Tensor MtpBatchStreamProcessor::collectDSparkPositionBases(const StreamGroups& stream_groups,
@@ -1468,20 +1474,16 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     bool sampler_token_matrix_dead = false;
 #if USING_CUDA
     {
-        auto*      repetition_ptr = sampler_inputs.repetition_penalty.data_ptr<float>();
-        auto*      presence_ptr   = sampler_inputs.presence_penalty.data_ptr<float>();
-        auto*      frequency_ptr  = sampler_inputs.frequency_penalty.data_ptr<float>();
-        auto*      ngram_ptr      = sampler_inputs.no_repeat_ngram_size.data_ptr<int32_t>();
-        auto*      beams_in_ptr   = sampler_inputs.num_beams_in.data_ptr<int64_t>();
-        auto*      beams_out_ptr  = sampler_inputs.num_beams_out.data_ptr<int64_t>();
-        const auto count          = static_cast<int64_t>(total_batch_size);
+        auto*      beams_in_ptr  = sampler_inputs.num_beams_in.data_ptr<int64_t>();
+        auto*      beams_out_ptr = sampler_inputs.num_beams_out.data_ptr<int64_t>();
+        const auto count         = static_cast<int64_t>(total_batch_size);
+        // The four penalty arrays are undefined when no stream can run a penalty
+        // kernel (see NormalSamplerInputGatherer::allocateSamplerInputs). That is
+        // the all-default state and counts as "no history reader", exactly like
+        // the per-row identity values the arrays used to hold.
         sampler_token_matrix_dead =
-            !spec_logits_result.has_active_processor
-            && sampler_inputs.logits_processor_states_ptr == nullptr
-            && std::all_of(repetition_ptr, repetition_ptr + count, [](float v) { return v == 1.0f; })
-            && std::all_of(presence_ptr, presence_ptr + count, [](float v) { return v == 0.0f; })
-            && std::all_of(frequency_ptr, frequency_ptr + count, [](float v) { return v == 0.0f; })
-            && std::all_of(ngram_ptr, ngram_ptr + count, [](int32_t v) { return v == 0; })
+            !spec_logits_result.has_active_processor && sampler_inputs.logits_processor_states_ptr == nullptr
+            && !NormalSamplerInputGatherer::anyPenaltyRowActive(sampler_inputs)
             && std::all_of(beams_in_ptr, beams_in_ptr + count, [](int64_t n) { return n == 1; })
             && std::all_of(beams_out_ptr, beams_out_ptr + count, [](int64_t n) { return n == 1; });
     }

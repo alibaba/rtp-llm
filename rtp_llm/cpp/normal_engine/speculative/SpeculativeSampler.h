@@ -14,7 +14,8 @@ namespace speculative {
 struct DSparkSamplingGraphs;
 struct RejectionSamplingGraphs;
 
-// Shared DSpARK Target/Draft setting. Zero disables fixed-width truncation.
+// Shared DSpARK target/draft setting: default 1024; accepts 0, 512, 1024 or 4096.
+// Zero disables fixed-width truncation; other values are rejected at this boundary.
 int dsparkForceTopK();
 // Compare effective sampling controls, not temperature, which is always per row.
 bool dsparkHasMixedSamplingParams(const std::list<GenerateStreamPtr>& streams);

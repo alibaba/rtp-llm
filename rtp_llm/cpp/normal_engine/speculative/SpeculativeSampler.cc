@@ -28,17 +28,18 @@
 namespace rtp_llm {
 namespace speculative {
 
+// Fixed-width truncation changes target support; zero disables it.
 int dsparkForceTopK() {
     const char* value = std::getenv("RTP_LLM_DSPARK_FORCE_TOPK");
     if (value == nullptr) {
-        return 4096;
+        return 1024;
     }
     char* end = nullptr;
     errno     = 0;
     long topk = std::strtol(value, &end, 10);
-    RTP_LLM_CHECK_WITH_INFO(errno == 0 && end != value && *end == '\0' && topk >= 0
-                                && topk <= std::numeric_limits<int>::max(),
-                            "RTP_LLM_DSPARK_FORCE_TOPK must be an integer in [0, INT_MAX], got '%s'",
+    RTP_LLM_CHECK_WITH_INFO(errno == 0 && end != value && *end == '\0'
+                                && (topk == 0 || topk == 512 || topk == 1024 || topk == 4096),
+                            "RTP_LLM_DSPARK_FORCE_TOPK must be 0 (disabled), 512, 1024 or 4096, got '%s'",
                             value);
     return static_cast<int>(topk);
 }
@@ -78,7 +79,6 @@ struct DSparkSamplingGraphs {
     c10::cuda::CUDAStream  replay_stream  = at::cuda::getCurrentCUDAStream();
     c10::cuda::MempoolId_t pool           = at::cuda::graph_pool_handle();
     std::unordered_map<int64_t, std::unique_ptr<Entry>> entries;
-
     ~DSparkSamplingGraphs() {
         try {
             const c10::cuda::CUDAGuard guard(logits.device());
@@ -398,6 +398,7 @@ void SpeculativeSampler::prepareDSparkDraftGraphs(const torch::Tensor&    logits
         graphs->capture_stream.synchronize();
         graphs->entries.emplace(batch, std::move(entry));
     }
+
 #endif
 }
 
@@ -782,6 +783,21 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
             torch::empty({batch_size, sampling_width},
                          torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device())) :
             torch::Tensor();
+#if USING_CUDA
+    // One-kernel softmax + top-p + sampling for the compact pure-top-p draft shape,
+    // which is what DSpARK production runs. Capability dispatch only: every other
+    // shape (explicit top-k, joint top-k/top-p, non-compact) keeps the three
+    // reference kernels.
+    const bool fuse_draft_sampling = torch_ext::deepselect_fp32_candidate_width_supported(compact_width) && filter_draft
+                                     && top_p.defined() && !top_k.defined() && joint_max_top_k == 0;
+#else
+    const bool fuse_draft_sampling = false;
+#endif
+    // Reused across steps: each step's fused kernel fully rewrites it before use.
+    torch::Tensor fused_tokens =
+        fuse_draft_sampling ?
+            torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(base_logits.device())) :
+            torch::Tensor();
     std::vector<torch::Tensor> token_columns;
     token_columns.reserve(propose_step_);
     // lm_head shards are padded to a TP alignment before gather. Sampling
@@ -842,9 +858,10 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
 #if USING_CUDA
             if (compact_width > 0) {
                 auto step_logits = proposal_logits.select(1, step);
-                auto selected    = torch_ext::draft_markov_topk(step_logits, markov_bias, temperature, compact_width);
-                compact_indices  = std::get<1>(selected);
-                draft_q          = torch::softmax(std::get<0>(selected), -1);
+                auto selected   = torch_ext::draft_markov_topk(step_logits, markov_bias, temperature, compact_width);
+                compact_indices = std::get<1>(selected);
+                // The fused sampler consumes scaled logits and writes the filtered distribution.
+                draft_q = fuse_draft_sampling ? std::get<0>(selected) : torch::softmax(std::get<0>(selected), -1);
             } else
 #endif
             {
@@ -855,41 +872,65 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
                                        sampling_probabilities});
                 draft_q = sample_from_strided_q ? all_probabilities.select(1, step) : sampling_probabilities;
             }
-            if (filter_draft) {
+            if (fuse_draft_sampling) {
 #if USING_CUDA
-                const auto stream = reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream());
-                if (joint_max_top_k > 0) {
-                    torch_ext::deepselect_fp32_joint_topk_topp(
-                        draft_q, filtered_probabilities, top_k, top_p, joint_max_top_k);
-                } else if (top_k.defined() && top_p.defined()) {
-                    top_k_renorm_probs(draft_q, topk_probabilities, top_k, 0, stream);
-                    top_p_renorm_probs(draft_q, filtered_probabilities, top_p, 1.0, stream);
-                    filtered_probabilities.masked_fill_(topk_probabilities.eq(0), 0.0);
-                    filtered_probabilities.div_(filtered_probabilities.sum(-1, true).clamp_min_(1e-10));
-                } else if (top_k.defined()) {
-                    top_k_renorm_probs(draft_q, filtered_probabilities, top_k, 0, stream);
-                } else {
-                    top_p_renorm_probs(draft_q, filtered_probabilities, top_p, 1.0, stream);
-                }
-#else
-                auto sorted = draft_q.sort(-1, true);
-                auto values = std::get<0>(sorted);
-                auto keep   = torch::ones_like(values, torch::TensorOptions().dtype(torch::kBool));
-                if (top_k.defined()) {
-                    auto kth = values.gather(1, top_k.clamp(1, sampling_width).to(torch::kLong).sub(1).unsqueeze(1));
-                    keep.logical_and_(values.ge(kth));
-                }
-                if (top_p.defined()) {
-                    auto nucleus = values.cumsum(-1).sub(values).lt(top_p.unsqueeze(1));
-                    auto cutoff  = values.masked_fill(~nucleus, std::numeric_limits<float>::infinity()).amin(-1, true);
-                    keep.logical_and_(values.ge(cutoff));
-                }
-                filtered_probabilities.zero_().scatter_(1, std::get<1>(sorted), values.masked_fill(~keep, 0.0));
-                filtered_probabilities.div_(filtered_probabilities.sum(-1, true).clamp_min_(1e-10));
+                const auto [step_seed, step_offset] = get_seed_and_offset(/*increment_size=*/4);
+                fused_softmax_top_p_sampling(
+                    draft_q,
+                    filtered_probabilities,
+                    fused_tokens,
+                    top_p,
+                    /*top_p_val=*/-1.0,
+                    /*maybe_logit_scale=*/std::nullopt,
+                    /*logit_scale_val=*/1.0f,
+                    std::nullopt,
+                    step_seed,
+                    std::nullopt,
+                    step_offset,
+                    /*maybe_success_out=*/std::nullopt,
+                    static_cast<int64_t>(reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream())));
+                draft_q              = filtered_probabilities;
+                sampled_draft_tokens = fused_tokens;
 #endif
-                draft_q = filtered_probabilities;
+            } else {
+                if (filter_draft) {
+#if USING_CUDA
+                    const auto stream = reinterpret_cast<uintptr_t>(at::cuda::getCurrentCUDAStream().stream());
+                    if (joint_max_top_k > 0) {
+                        torch_ext::deepselect_fp32_joint_topk_topp(
+                            draft_q, filtered_probabilities, top_k, top_p, joint_max_top_k);
+                    } else if (top_k.defined() && top_p.defined()) {
+                        top_k_renorm_probs(draft_q, topk_probabilities, top_k, 0, stream);
+                        top_p_renorm_probs(draft_q, filtered_probabilities, top_p, 1.0, stream);
+                        filtered_probabilities.masked_fill_(topk_probabilities.eq(0), 0.0);
+                        filtered_probabilities.div_(filtered_probabilities.sum(-1, true).clamp_min_(1e-10));
+                    } else if (top_k.defined()) {
+                        top_k_renorm_probs(draft_q, filtered_probabilities, top_k, 0, stream);
+                    } else {
+                        top_p_renorm_probs(draft_q, filtered_probabilities, top_p, 1.0, stream);
+                    }
+#else
+                    auto sorted = draft_q.sort(-1, true);
+                    auto values = std::get<0>(sorted);
+                    auto keep   = torch::ones_like(values, torch::TensorOptions().dtype(torch::kBool));
+                    if (top_k.defined()) {
+                        auto kth =
+                            values.gather(1, top_k.clamp(1, sampling_width).to(torch::kLong).sub(1).unsqueeze(1));
+                        keep.logical_and_(values.ge(kth));
+                    }
+                    if (top_p.defined()) {
+                        auto nucleus = values.cumsum(-1).sub(values).lt(top_p.unsqueeze(1));
+                        auto cutoff =
+                            values.masked_fill(~nucleus, std::numeric_limits<float>::infinity()).amin(-1, true);
+                        keep.logical_and_(values.ge(cutoff));
+                    }
+                    filtered_probabilities.zero_().scatter_(1, std::get<1>(sorted), values.masked_fill(~keep, 0.0));
+                    filtered_probabilities.div_(filtered_probabilities.sum(-1, true).clamp_min_(1e-10));
+#endif
+                    draft_q = filtered_probabilities;
+                }
+                sampled_draft_tokens = execSampleFromProbs(draft_q).to(torch::kInt32);
             }
-            sampled_draft_tokens = execSampleFromProbs(draft_q).to(torch::kInt32);
 #if USING_CUDA
             if (fused_sampled_output) {
                 auto output_probabilities =

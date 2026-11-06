@@ -4298,7 +4298,24 @@ TEST_F(MtpExecutorTest, testDSparkDraftMixedBatchKeepsDenseQForStochasticRow) {
         output.all_probs.select(0, 1), torch::softmax(base_logits.select(0, 1) / 0.5f, -1), 1e-5, 1e-6));
 }
 
+TEST_F(MtpExecutorTest, testDSparkForceTopKValidatesSupportedWidths) {
+    {
+        autil::EnvGuard restore_env("RTP_LLM_DSPARK_FORCE_TOPK", "4096");
+        unsetenv("RTP_LLM_DSPARK_FORCE_TOPK");
+        EXPECT_EQ(speculative::dsparkForceTopK(), 1024);
+    }
+    for (const auto* value : {"0", "512", "1024", "4096"}) {
+        autil::EnvGuard force_topk("RTP_LLM_DSPARK_FORCE_TOPK", value);
+        EXPECT_EQ(speculative::dsparkForceTopK(), std::stoi(value));
+    }
+    for (const auto* value : {"", "-1", "1", "513", "2048", "8192", "1024x", "999999999999999999999999"}) {
+        autil::EnvGuard force_topk("RTP_LLM_DSPARK_FORCE_TOPK", value);
+        EXPECT_ANY_THROW(speculative::dsparkForceTopK());
+    }
+}
+
 TEST_F(MtpExecutorTest, testDSparkDraftPureExplicitTopKUsesFullAndMixedUsesCap) {
+    autil::EnvGuard       target_cap("RTP_LLM_DSPARK_FORCE_TOPK", "4096");
     constexpr int         vocab = 8192;
     MtpExecutorTestConfig test_config;
     test_config.vocab_size           = vocab;
@@ -4334,6 +4351,13 @@ TEST_F(MtpExecutorTest, testDSparkDraftPureExplicitTopKUsesFullAndMixedUsesCap) 
         auto anchors = torch::zeros({batch}, ints);
         return test_components.executor->sampleDSparkDraft(StreamGroups(streams), logits, anchors);
     };
+    for (const auto* cap : {"0", "512", "1024", "4096"}) {
+        autil::EnvGuard force_topk("RTP_LLM_DSPARK_FORCE_TOPK", cap);
+        const int       width   = std::stoi(cap);
+        auto            sampled = run(components, vocab, 16, 0, 0, true, .95f);
+        EXPECT_EQ(sampled.all_probs.size(2), width ? width : vocab);
+        EXPECT_EQ(sampled.all_probs_indices.defined(), width != 0);
+    }
     auto small_pure = run(components, vocab, 16, 1024, 1024);
     EXPECT_EQ(small_pure.all_probs.size(2), vocab);
     EXPECT_FALSE(small_pure.all_probs_indices.defined());

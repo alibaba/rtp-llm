@@ -21,6 +21,29 @@ void get_sampling_seed_offsets(const std::vector<at::Generator>& generators,
                                int64_t*                          seeds,
                                int64_t*                          offsets);
 
+// Fused softmax + top-p filtering + sampling for target and draft.
+// Inputs/outputs are contiguous on the same CUDA device: FP32 logits/probs
+// [rows, K] with K in {512,1024,4096}, int32 sampled candidate IDs [rows],
+// optional bool success [rows].
+// top_p and logit_scale are FP32 [rows] arrays or scalars.
+// RNG follows sampling_from_probs: int64 [rows] arrays use subsequence 0;
+// scalar seed/offset values use subsequence=row. Output probabilities describe
+// the actual sampling distribution, including top-p filtering. Softmax reduction
+// order can change support at a floating-point top-p boundary relative to ATen.
+void fused_softmax_top_p_sampling(torch::Tensor                scaled_logits,
+                                  torch::Tensor                q_out,
+                                  torch::Tensor                token_out,
+                                  std::optional<torch::Tensor> maybe_top_p_arr,
+                                  double                       top_p_val,
+                                  std::optional<torch::Tensor> maybe_logit_scale,
+                                  double                       logit_scale_val,
+                                  std::optional<torch::Tensor> maybe_seed_arr,
+                                  uint64_t                     seed_val,
+                                  std::optional<torch::Tensor> maybe_offset_arr,
+                                  uint64_t                     offset_val,
+                                  std::optional<torch::Tensor> maybe_success_out,
+                                  int64_t                      cuda_stream);
+
 void sampling_from_probs(torch::Tensor                probs,
                          torch::Tensor                output,
                          torch::Tensor                valid,

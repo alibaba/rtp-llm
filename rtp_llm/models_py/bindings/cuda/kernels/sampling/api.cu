@@ -18,6 +18,254 @@
 #include "flashinfer/air_top_p.cuh"
 #include "flashinfer/sampling.cuh"
 
+namespace flashinfer {
+namespace sampling {
+
+// ---------------------------------------------------------------------------
+// Softmax, top-p filtering and sampling for 512, 1024 or 4096 candidates per row.
+// Reuses FlashInfer's nucleus search and CDF draw. Softmax reduction order can
+// differ from ATen, including the support at a floating-point top-p boundary.
+template<uint32_t BLOCK_THREADS, uint32_t WIDTH>
+__global__ void FusedSoftmaxTopPSamplingKernel(const float* __restrict__ scaled_logits,
+                                               float* __restrict__ q_out,
+                                               int32_t* __restrict__ token_out,
+                                               bool* __restrict__ success_out,
+                                               const float* __restrict__ top_p_arr,
+                                               float top_p_val,
+                                               const float* __restrict__ logit_scale_arr,
+                                               float logit_scale_val,
+                                               const uint64_t* __restrict__ seed_in,
+                                               uint64_t seed_val,
+                                               const uint64_t* __restrict__ offset_in,
+                                               uint64_t offset_val) {
+    constexpr uint32_t ITEMS = WIDTH / BLOCK_THREADS;
+    static_assert(WIDTH % BLOCK_THREADS == 0, "width must be a multiple of the block size");
+    using FloatReduce = cub::BlockReduce<float, BLOCK_THREADS>;
+
+    constexpr uint32_t VEC_SIZE = 16 / sizeof(float);  // 4: whole row in one helper call
+    static_assert(WIDTH == BLOCK_THREADS * VEC_SIZE, "the row must fit one sampling helper call");
+    using SampleStorage = flashinfer::sampling::SamplingTempStorage<BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO>;
+
+    __shared__ typename FloatReduce::TempStorage reduce_storage;
+    __shared__ float                             smem_broadcast;
+    __shared__ float                             search_results[4];
+    __shared__ __align__(16) float smem_probs[WIDTH];
+    __shared__ SampleStorage       sample_storage;
+
+    const uint32_t row = blockIdx.x, lane = threadIdx.x;
+    const float    top_p = top_p_arr == nullptr ? top_p_val : top_p_arr[row];
+    // Target rows fold the temperature into a per-row scale; the draft path passes
+    // no scale (its logits are already divided by the temperature).
+    const float  logit_scale = logit_scale_arr == nullptr ? logit_scale_val : logit_scale_arr[row];
+    const float* logits      = scaled_logits + static_cast<size_t>(row) * WIDTH;
+    float*       q_row       = q_out + static_cast<size_t>(row) * WIDTH;
+
+    // ---- softmax -----------------------------------------------------------
+    float values[ITEMS];
+    float local_max = -cuda::std::numeric_limits<float>::infinity();
+#pragma unroll
+    for (uint32_t i = 0; i < ITEMS; ++i) {
+        // softmax(x * scale): scale first, then subtract the max of the scaled row.
+        values[i] = logits[i * BLOCK_THREADS + lane] * logit_scale;
+        local_max = fmaxf(local_max, values[i]);
+    }
+    float row_max = FloatReduce(reduce_storage).Reduce(local_max, MaxReduceOp{});
+    if (lane == 0) {
+        smem_broadcast = row_max;
+    }
+    __syncthreads();
+    row_max = smem_broadcast;
+    __syncthreads();
+
+    float exp_values[ITEMS];
+    float local_sum = 0.0f;
+#pragma unroll
+    for (uint32_t i = 0; i < ITEMS; ++i) {
+        exp_values[i] = __expf(values[i] - row_max);
+        local_sum += exp_values[i];
+    }
+    float row_sum = FloatReduce(reduce_storage).Sum(local_sum);
+    if (lane == 0) {
+        smem_broadcast = row_sum;
+    }
+    __syncthreads();
+    row_sum = smem_broadcast;
+    if (!(row_sum > 0.0f) || !isfinite(row_sum)) {
+        // Degenerate row: emit zeros and token 0 rather than NaN.
+        if (lane == 0) {
+            token_out[row] = 0;
+            if (success_out != nullptr) {
+                success_out[row] = false;
+            }
+        }
+        for (uint32_t i = 0; i < ITEMS; ++i) {
+            q_row[i * BLOCK_THREADS + lane] = 0.0f;
+        }
+        return;
+    }
+#pragma unroll
+    for (uint32_t i = 0; i < ITEMS; ++i) {
+        smem_probs[i * BLOCK_THREADS + lane] = exp_values[i] / row_sum;
+    }
+    __syncthreads();
+
+    // ---- top-p nucleus (port of TopPRenormProbKernel) ----------------------
+    // `low` ends up as the largest threshold whose surviving mass still reaches
+    // top_p, and the support is exactly {prob > low}.
+    float normalizer = 1.0f;
+    if (top_p >= 1.0f) {
+        // Reference fast path: renormalise the row by its own sum.
+        float thread_sum = 0.0f;
+#pragma unroll
+        for (uint32_t i = 0; i < ITEMS; ++i) {
+            thread_sum += smem_probs[i * BLOCK_THREADS + lane];
+        }
+        float renorm_sum = FloatReduce(reduce_storage).Sum(thread_sum);
+        if (lane == 0) {
+            smem_broadcast = renorm_sum;
+        }
+        __syncthreads();
+        renorm_sum        = smem_broadcast;
+        const float denom = (renorm_sum <= 1e-8f) ? 1.0f : renorm_sum;
+        normalizer        = math::ptx_rcp(denom);
+#pragma unroll
+        for (uint32_t i = 0; i < ITEMS; ++i) {
+            const uint32_t idx = i * BLOCK_THREADS + lane;
+            smem_probs[idx]    = smem_probs[idx] * normalizer;
+        }
+        __syncthreads();
+    } else {
+        float thread_max_prob = 0.0f;
+#pragma unroll
+        for (uint32_t i = 0; i < ITEMS; ++i) {
+            thread_max_prob = fmaxf(thread_max_prob, smem_probs[i * BLOCK_THREADS + lane]);
+        }
+        float max_prob = FloatReduce(reduce_storage).Reduce(thread_max_prob, MaxReduceOp{});
+        if (lane == 0) {
+            smem_broadcast = max_prob;
+        }
+        __syncthreads();
+        max_prob = smem_broadcast;
+
+        float low = 0.0f, high = max_prob;
+        float min_gt_low = 0.0f, max_le_high = 0.0f;
+        float sum_low = 1.0f;
+        // Defensive bound only: the reference search converges in <32 rounds for
+        // these widths (measured <=20 over 1536 rows), but a non-converging input
+        // must never spin a production stream forever.
+        int search_rounds = 0;
+        do {
+            // Same pivots and the same IEEE-754 helpers as the reference so the
+            // search visits identical thresholds (fast-math cannot flush them).
+            const float pivot_0           = ieee_div(ieee_add(high, ieee_mul(2.f, low)), 3.f);
+            const float pivot_1           = ieee_div(ieee_add(ieee_mul(2.f, high), low), 3.f);
+            float       thread_gt_pivot_0 = 0.0f, thread_gt_pivot_1 = 0.0f;
+            float       thread_min_gt_low = high, thread_max_le_high = low;
+#pragma unroll
+            for (uint32_t i = 0; i < ITEMS; ++i) {
+                const float v = smem_probs[i * BLOCK_THREADS + lane];
+                if (v > pivot_0) {
+                    thread_gt_pivot_0 += v;
+                }
+                if (v > pivot_1) {
+                    thread_gt_pivot_1 += v;
+                }
+                if (v > low) {
+                    thread_min_gt_low = fminf(thread_min_gt_low, v);
+                }
+                if (v <= high) {
+                    thread_max_le_high = fmaxf(thread_max_le_high, v);
+                }
+            }
+            float aggregate_gt_pivot_0 = FloatReduce(reduce_storage).Sum(thread_gt_pivot_0);
+            __syncthreads();
+            float aggregate_gt_pivot_1 = FloatReduce(reduce_storage).Sum(thread_gt_pivot_1);
+            __syncthreads();
+            float next_min_gt_low = FloatReduce(reduce_storage).Reduce(thread_min_gt_low, MinReduceOp{});
+            __syncthreads();
+            float next_max_le_high = FloatReduce(reduce_storage).Reduce(thread_max_le_high, MaxReduceOp{});
+            if (lane == 0) {
+                search_results[0] = aggregate_gt_pivot_0;
+                search_results[1] = aggregate_gt_pivot_1;
+                search_results[2] = next_min_gt_low;
+                search_results[3] = next_max_le_high;
+            }
+            __syncthreads();
+            aggregate_gt_pivot_0 = search_results[0];
+            aggregate_gt_pivot_1 = search_results[1];
+            min_gt_low           = search_results[2];
+            max_le_high          = search_results[3];
+
+            if (aggregate_gt_pivot_1 >= top_p) {
+                low     = pivot_1;
+                sum_low = aggregate_gt_pivot_1;
+            } else if (aggregate_gt_pivot_0 >= top_p) {
+                low     = pivot_0;
+                high    = fminf(pivot_1, max_le_high);
+                sum_low = aggregate_gt_pivot_0;
+            } else {
+                high = fminf(pivot_0, max_le_high);
+            }
+            __syncthreads();
+        } while (min_gt_low != max_le_high && ++search_rounds < 64);
+
+        normalizer = math::ptx_rcp(fmaxf(sum_low, 1e-8f));
+#pragma unroll
+        for (uint32_t i = 0; i < ITEMS; ++i) {
+            const uint32_t idx = i * BLOCK_THREADS + lane;
+            const float    v   = smem_probs[idx];
+            smem_probs[idx]    = (v > low) ? v * normalizer : 0.0f;
+        }
+        __syncthreads();
+    }
+
+    // ---- CDF sampling: the reference helper, not a re-implementation --------
+    // Match flashinfer: scalar seeds use subsequence=row, per-row arrays use 0.
+    curandStatePhilox4_32_10_t state;
+    const uint64_t             philox_seed   = seed_in == nullptr ? seed_val : seed_in[row];
+    const uint64_t             philox_offset = offset_in == nullptr ? offset_val : offset_in[row];
+    curand_init(philox_seed,
+                seed_in == nullptr && offset_in == nullptr ? static_cast<uint64_t>(row) : 0ull,
+                philox_offset,
+                &state);
+    sample_storage.sampled_id    = WIDTH;
+    sample_storage.last_valid_id = -1;
+    __syncthreads();
+    const float            u = curand_uniform(&state);
+    vec_t<float, VEC_SIZE> probs_vec;
+    probs_vec.fill(0.0f);
+    probs_vec.cast_load(smem_probs + lane * VEC_SIZE);
+    float aggregate = 0.0f;
+    flashinfer::sampling::
+        DeviceSamplingFromProb<VEC_SIZE, BLOCK_THREADS, SCAN_ALGO, REDUCE_ALGO, /*DETERMINISTIC=*/true>(
+            0, WIDTH, [](float x) { return x > 0; }, u, probs_vec, aggregate, &sample_storage);
+    __syncthreads();
+    if (lane == 0) {
+        int  sampled_id = sample_storage.sampled_id;
+        bool valid      = true;
+        if (sampled_id == static_cast<int>(WIDTH)) {
+            // u landed past the row total through rounding: fall back to the last
+            // positive candidate, exactly like the reference kernel.
+            valid      = sample_storage.last_valid_id != -1;
+            sampled_id = valid ? sample_storage.last_valid_id : 0;
+        }
+        token_out[row] = sampled_id;
+        if (success_out != nullptr) {
+            success_out[row] = valid;
+        }
+    }
+    __syncthreads();
+
+    // ---- write the top-p renormalised distribution -------------------------
+#pragma unroll
+    for (uint32_t i = 0; i < ITEMS; ++i) {
+        q_row[i * BLOCK_THREADS + lane] = smem_probs[i * BLOCK_THREADS + lane];
+    }
+}
+
+}  // namespace sampling
+}  // namespace flashinfer
+
 namespace rtp_llm {
 namespace {
 
@@ -177,6 +425,89 @@ void get_sampling_seed_offsets(const std::vector<at::Generator>& generators,
         }
         begin = end;
     }
+}
+
+void fused_softmax_top_p_sampling(torch::Tensor                scaled_logits,
+                                  torch::Tensor                q_out,
+                                  torch::Tensor                token_out,
+                                  std::optional<torch::Tensor> maybe_top_p_arr,
+                                  double                       top_p_val,
+                                  std::optional<torch::Tensor> maybe_logit_scale,
+                                  double                       logit_scale_val,
+                                  std::optional<torch::Tensor> maybe_seed_arr,
+                                  uint64_t                     seed_val,
+                                  std::optional<torch::Tensor> maybe_offset_arr,
+                                  uint64_t                     offset_val,
+                                  std::optional<torch::Tensor> maybe_success_out,
+                                  int64_t                      cuda_stream) {
+    TORCH_CHECK(scaled_logits.is_cuda() && scaled_logits.scalar_type() == torch::kFloat32 && scaled_logits.dim() == 2
+                    && scaled_logits.is_contiguous(),
+                "fused softmax/top-p sampling expects contiguous CUDA FP32 [rows, K] scaled logits");
+    const auto width = scaled_logits.size(1);
+    TORCH_CHECK(width == 512 || width == 1024 || width == 4096,
+                "fused softmax/top-p sampling requires K in {512, 1024, 4096}, got ",
+                width);
+    const auto rows = scaled_logits.size(0);
+    TORCH_CHECK(q_out.is_cuda() && q_out.scalar_type() == torch::kFloat32 && q_out.sizes() == scaled_logits.sizes()
+                    && q_out.is_contiguous() && q_out.device() == scaled_logits.device(),
+                "q_out must be a contiguous FP32 tensor matching the scaled logits shape");
+    TORCH_CHECK(token_out.is_cuda() && token_out.scalar_type() == torch::kInt32 && token_out.dim() == 1
+                    && token_out.numel() == rows && token_out.is_contiguous()
+                    && token_out.device() == scaled_logits.device(),
+                "token_out must be a contiguous CUDA int32 tensor with one entry per row");
+
+    at::cuda::CUDAGuard device_guard(scaled_logits.device());
+    auto                stream = resolve_stream(cuda_stream);
+
+    auto seed   = prepare_optional_param(maybe_seed_arr, rows, scaled_logits.device(), at::kLong, "seed");
+    auto offset = prepare_optional_param(maybe_offset_arr, rows, scaled_logits.device(), at::kLong, "offset");
+    auto top_p  = prepare_optional_param(maybe_top_p_arr, rows, scaled_logits.device(), at::kFloat, "top_p");
+    auto scale  = prepare_optional_param(maybe_logit_scale, rows, scaled_logits.device(), at::kFloat, "logit_scale");
+    TORCH_CHECK(!maybe_success_out.has_value()
+                    || (maybe_success_out->is_cuda() && maybe_success_out->scalar_type() == at::kBool
+                        && maybe_success_out->dim() == 1 && maybe_success_out->numel() == rows
+                        && maybe_success_out->is_contiguous() && maybe_success_out->device() == scaled_logits.device()),
+                "success_out must be a contiguous CUDA bool tensor with one entry per row");
+
+    const float*    logits_ptr  = scaled_logits.data_ptr<float>();
+    float*          q_ptr       = q_out.data_ptr<float>();
+    int32_t*        token_ptr   = token_out.data_ptr<int32_t>();
+    bool*           success_ptr = maybe_success_out.has_value() ? maybe_success_out->data_ptr<bool>() : nullptr;
+    const float*    top_p_ptr   = top_p.defined() ? top_p.data_ptr<float>() : nullptr;
+    float           top_p_v     = static_cast<float>(top_p_val);
+    const float*    scale_ptr   = scale.defined() ? scale.data_ptr<float>() : nullptr;
+    float           scale_v     = static_cast<float>(logit_scale_val);
+    const uint64_t* seed_ptr = seed.defined() ? reinterpret_cast<const uint64_t*>(seed.data_ptr<int64_t>()) : nullptr;
+    const uint64_t* offset_ptr =
+        offset.defined() ? reinterpret_cast<const uint64_t*>(offset.data_ptr<int64_t>()) : nullptr;
+
+    void* kernel;
+    switch (width) {
+        case 512:
+            kernel = reinterpret_cast<void*>(flashinfer::sampling::FusedSoftmaxTopPSamplingKernel<128, 512>);
+            break;
+        case 1024:
+            kernel = reinterpret_cast<void*>(flashinfer::sampling::FusedSoftmaxTopPSamplingKernel<256, 1024>);
+            break;
+        default:
+            kernel = reinterpret_cast<void*>(flashinfer::sampling::FusedSoftmaxTopPSamplingKernel<1024, 4096>);
+            break;
+    }
+    void*             args[] = {&logits_ptr,
+                                &q_ptr,
+                                &token_ptr,
+                                &success_ptr,
+                                &top_p_ptr,
+                                &top_p_v,
+                                &scale_ptr,
+                                &scale_v,
+                                &seed_ptr,
+                                &seed_val,
+                                &offset_ptr,
+                                &offset_val};
+    const cudaError_t status = cudaLaunchKernel(
+        kernel, dim3(static_cast<uint32_t>(rows)), dim3(static_cast<uint32_t>(width / 4)), args, 0, stream);
+    TORCH_CHECK(status == cudaSuccess, "fused softmax/top-p sampling launch failed: ", cudaGetErrorString(status));
 }
 
 void sampling_from_probs(torch::Tensor                probs,

@@ -64,6 +64,8 @@ cc_library(
     name = "common_defines",
     hdrs = [
         "CommonDefines.h",
+        # Header-only policy used by the CUDA sampler and its CPU tests.
+        "SampleTemperature.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
