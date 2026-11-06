@@ -50,6 +50,11 @@ public class RequestWorkerSelector {
 
     public int currentPrefillWorkerCount(String group) { return prefillSelector.currentPrefillWorkerCount(group); }
 
+    PrefillDeadlineBudget.Fleet deadlineBudgetFleet(String group) {
+        return requiredRoles.stream().filter(RoleType::supportsPrefill).findFirst()
+                .map(role -> prefillSelector.deadlineBudgetFleet(role, group)).orElse(null);
+    }
+
     public List<RequestRoute> hotspotMigrationCandidates(int limit) {
         return prefillSelector.hotspotMigrationCandidates(limit);
     }
@@ -89,7 +94,8 @@ public class RequestWorkerSelector {
                     Logger.debug("Failed to select {} worker for request {}", role.getCode(), context.data().getRequestId());
                     return switch (result.status()) {
                         case REJECTED -> PlacementResult.rejected(result.failure(), result.diagnostics());
-                        case BLOCKED -> PlacementResult.blocked(new PlacementKey(result.blocker(), group, null),
+                        case BLOCKED -> PlacementResult.blocked(new PlacementKey(result.blocker(), group, null,
+                                result.blocker().supportsPrefill() ? routing.prefillCacheWorkers() : java.util.Set.of()),
                                 result.failure(), result.diagnostics());
                         default -> throw new IllegalStateException("unexpected selector result: " + result.status());
                     };

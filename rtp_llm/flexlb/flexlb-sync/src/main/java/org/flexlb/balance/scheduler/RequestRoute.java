@@ -39,6 +39,14 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     private ServerStatus vit;
     private long prefillWorkMs;
     private boolean coldTokenBalance;
+    private java.util.Set<String> prefillCacheWorkers = java.util.Set.of();
+
+    public void setPrefillCacheWorkers(java.util.Set<String> workers) {
+        prefillCacheWorkers = java.util.Set.copyOf(workers);
+    }
+
+    java.util.Set<String> prefillCacheWorkers() { return prefillCacheWorkers; }
+
 
     public void setColdTokenBalance(boolean cold) {
         checkState(constructionState == BUILDING, "routing policy is frozen after selection");

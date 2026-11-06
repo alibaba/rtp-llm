@@ -400,6 +400,14 @@ public final class PrefillState {
         };
     }
     private java.util.function.BooleanSupplier engineQueueAdmission = () -> false;
+    private boolean enforceColdTokenLimit;
+
+    void enforceColdTokenLimit(boolean enabled) { enforceColdTokenLimit = enabled; }
+
+    private boolean coldTokenCapacityAvailable(RequestRoute route) {
+        return !enforceColdTokenLimit || !route.coldTokenBalance() || tokenWorkload == null
+                || tokenWorkloadLocked().pendingTokens() < pendingTokenLimit;
+    }
 
     /** Installed before this endpoint generation is published. */
     void enableTokenWorkload(long pendingTokenLimit) {
@@ -739,7 +747,8 @@ public final class PrefillState {
         try {
             if (requests.containsKey(route.requestId()) || unconfirmedDispatches.containsKey(new EngineWorkKey(route.requestId(), 0L))) { return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null); }
             if (batches.containsKey(batchId)) { return new ReservationResult<>(CapacityStatus.BATCH_ID_ALREADY_RESERVED, null); }
-            if (batches.size() >= maximum || !admissionCapacityAvailable(tokenCapacityAvailable())) { return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null); }
+            if (batches.size() >= maximum || !coldTokenCapacityAvailable(route)
+                    || !admissionCapacityAvailable(tokenCapacityAvailable())) { return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null); }
             var entry = new RequestEntry(route, OwnershipStage.DIRECT_RESERVED);
             var lease = new BatchReservation(this, entry, batchId, handoff);
             entry.reservation = lease;
@@ -871,7 +880,8 @@ public final class PrefillState {
             if (requests.containsKey(item.requestId()) || unconfirmedDispatches.containsKey(new EngineWorkKey(item.requestId(), 0L))) {
                 return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
             }
-            if ((maxOutstandingRequests > 0L && outstandingRequestCount >= maxOutstandingRequests) || !admissionCapacityAvailable(tokenCapacityAvailable())) {
+            if ((maxOutstandingRequests > 0L && outstandingRequestCount >= maxOutstandingRequests)
+                    || !coldTokenCapacityAvailable(item) || !admissionCapacityAvailable(tokenCapacityAvailable())) {
                 return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
             }
             RequestEntry entry = new RequestEntry(item, OwnershipStage.DIRECT_RESERVED);

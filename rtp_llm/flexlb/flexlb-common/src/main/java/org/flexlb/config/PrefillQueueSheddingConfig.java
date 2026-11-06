@@ -21,6 +21,24 @@ public final class PrefillQueueSheddingConfig {
      */
     private double minAcceptingWorkerPercent = DEFAULT_MIN_ACCEPTING_WORKER_PERCENT;
 
+    /** Opt-in deadline budgeting with explicitly calibrated uncached throughput.
+     * Also preserves maxPendingComputeTokens for cold admission despite low Engine queue reports,
+     * keeping excess work globally cancellable during delayed status feedback.
+     */
+    private DeadlineBudgetConfig deadlineBudget;
+
+    @Getter
+    @Setter
+    public static final class DeadlineBudgetConfig {
+        /** Per-worker aggregate uncached tokens/second; deliberately has no guessed default. */
+        private double tokensPerSecond;
+        private double capacityFactor = 0.9;
+        private double saturatedWorkerPercent = 90.0;
+        private long saturationHoldMs = 2_000L;
+        /** Leave time for status/dispatch transport and the next control round. */
+        private long dispatchSlackMs = 1_000L;
+    }
+
     @Getter
     @Setter
     public static final class RecoveryConfig {

@@ -18,6 +18,64 @@ class PlacementCapacityWaitQueueTest {
     private static final PlacementKey A = PlacementKey.exact(RoleType.PREFILL, "g", "a:8000");
     private static final PlacementKey B = PlacementKey.exact(RoleType.PREFILL, "g", "b:8000");
 
+    private static PlacementKey affinity(String... workers) {
+        return new PlacementKey(RoleType.PREFILL, "g", null, java.util.Set.of(workers));
+    }
+
+    @Test
+    void hotCacheCohortsWakeOnlyForTheirOwnCapacityAndRetainOrdering() {
+        var a = entry(90);
+        var b = entry(10);
+        var both = entry(50);
+        queue.park(a, affinity(A.endpoint()), 0);
+        queue.park(b, affinity(B.endpoint()), 0);
+        queue.park(both, affinity(A.endpoint(), B.endpoint()), 0);
+        queue.capacityChanged(B);
+        assertEquals(List.of(both, b), drain(8));
+        queue.park(both, affinity(A.endpoint(), B.endpoint()), 0);
+        queue.remove(b);
+        assertTrue(drain(8).isEmpty());
+        queue.capacityChanged(A);
+        assertEquals(List.of(a, both), drain(8));
+    }
+
+    @Test
+    void sharedAffinityIsOneBoundedRetryEvenForLargeBacklogs() {
+        var first = entry(50);
+        queue.park(first, affinity(A.endpoint(), B.endpoint()), 0);
+        for (int i = 0; i < 10_000; i++) {
+            queue.park(entry(50), affinity(B.endpoint(), A.endpoint()), 0);
+        }
+        queue.capacityChanged(A);
+        assertEquals(List.of(first), drain(16));
+        queue.park(first, affinity(A.endpoint(), B.endpoint()), 0);
+        assertTrue(drain(16).isEmpty());
+    }
+
+    @Test
+    void cacheChangeAndRetirementReevaluateAffinityAndRemoveOldSubscriptions() {
+        var request = entry(50);
+        queue.park(request, affinity(A.endpoint()), 0);
+        queue.capacityChanged(new PlacementKey(RoleType.PREFILL, "g", null));
+        assertEquals(List.of(request), drain(1));
+        queue.park(request, affinity(B.endpoint()), 0);
+        queue.capacityChanged(A);
+        assertTrue(drain(1).isEmpty());
+        queue.capacityChanged(B);
+        assertEquals(List.of(request), drain(1));
+        queue.remove(request);
+        queue.capacityChanged(PlacementKey.anyGroup(RoleType.PREFILL));
+        assertTrue(drain(1).isEmpty());
+        assertTrue(((java.util.Map<?, ?>) org.springframework.test.util.ReflectionTestUtils
+                .getField(queue, "affinityDomains")).isEmpty());
+    }
+
+    @Test
+    void affinityParkCannotMissAnEdgeDuringPlanning() {
+        availability.changed(B);
+        assertFalse(queue.park(entry(50), affinity(B.endpoint()), 0));
+    }
+
     @Test
     void rescueIsBoundedAndRequiresAnIdleMatchingDomain() {
         List<GlobalQueueEntry> backlog = new ArrayList<>();
@@ -94,6 +152,60 @@ class PlacementCapacityWaitQueueTest {
         queue.park(backlog.get(1), A, 0);
         assertTrue(drain(16).isEmpty(), "the confirming failure ends this capacity round");
         assertTrue(queue.isWaiting(backlog.getLast()));
+    }
+
+    @Test
+    void coldFailureDoesNotConsumeTheHotRetryFromTheSameCapacityEdge() {
+        var cold = entry(50);
+        cold.knownColdRequest = true;
+        var hot = entry(50);
+        queue.park(cold, A, 0);
+        queue.park(hot, A, 0);
+        queue.capacityChanged(A);
+        assertEquals(List.of(cold), drain(1));
+        queue.park(cold, A, 0);
+        assertEquals(List.of(hot), drain(1));
+        assertTrue(queue.isWaiting(cold));
+        queue.park(hot, A, 0);
+        assertTrue(drain(10).isEmpty(), "both failed classes wait for new capacity");
+    }
+
+    @Test
+    void changingCacheClassificationMovesTheWaiterWithoutLosingAnAvailablePeer() {
+        var cold = entry(50);
+        cold.knownColdRequest = true;
+        var hot = entry(50);
+        queue.park(cold, A, 0);
+        queue.park(hot, A, 0);
+        queue.capacityChanged(A);
+        assertEquals(List.of(cold), drain(1));
+        cold.knownColdRequest = false;
+        queue.park(cold, A, 0);
+        assertEquals(List.of(cold), drain(1), "the hot class still has its independent opportunity");
+        queue.remove(cold);
+        assertEquals(List.of(hot), drain(1));
+        queue.remove(hot);
+        assertTrue(drain(10).isEmpty());
+    }
+
+    @Test
+    void coldAndHotRetriesKeepPriorityOrderAndRemainBoundedWithLargeBacklogs() {
+        var cold = entry(10);
+        cold.knownColdRequest = true;
+        var hot = entry(90);
+        queue.park(cold, A, 0);
+        queue.park(hot, A, 0);
+        for (int i = 0; i < 10_000; i++) {
+            var next = entry(50);
+            next.knownColdRequest = i % 2 == 0;
+            queue.park(next, A, 0);
+        }
+        queue.capacityChanged(A);
+        var resumed = drain(16);
+        assertEquals(2, resumed.size(), "one retry per admission class, not per request");
+        assertEquals(hot, resumed.getFirst());
+        assertTrue(resumed.getLast().knownColdRequest);
+        assertTrue(drain(16).isEmpty());
     }
 
     @Test

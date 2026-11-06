@@ -134,6 +134,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             }
 
             long successfulIntervalUs;
+            boolean cacheIndexed = false;
             workerStatus.lock.lock();
             try {
                 if (!endpointRegistry.isCurrentStatus(
@@ -154,6 +155,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         if (updateLocalKvCache()) {
                             workerStatus.publishCacheIndexedVersion(
                                     newCacheStatus.getVersion());
+                            cacheIndexed = true;
                         }
                     }
                     logCacheStatusUpdate(newCacheStatus, startTime);
@@ -164,6 +166,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 workerStatus.lock.unlock();
             }
 
+            if (cacheIndexed) { endpointRegistry.publishCacheAvailability(workerStatus); }
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(
                     modelName, roleType.name(), startTime);
             engineHealthReporter.reportCacheStatusCheckerSuccess(

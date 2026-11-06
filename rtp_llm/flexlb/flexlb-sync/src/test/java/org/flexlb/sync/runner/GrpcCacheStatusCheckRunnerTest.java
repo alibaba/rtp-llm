@@ -110,7 +110,7 @@ class GrpcCacheStatusCheckRunnerTest {
     void failedCacheIndexUpdateRetriesTheSameWorkerVersion() {
         String ipPort = "127.0.0.1:8080";
         WorkerStatus workerStatus = workerStatus();
-        EndpointRegistry directory = directory(workerStatus);
+        EndpointRegistry directory = Mockito.spy(directory(workerStatus));
         EngineRpcService.CacheStatusPB firstResponse =
                 EngineRpcService.CacheStatusPB.newBuilder()
                         .setVersion(1)
@@ -143,13 +143,16 @@ class GrpcCacheStatusCheckRunnerTest {
 
         runCachePoll(ipPort, workerStatus, directory, false);
         assertEquals(1L, workerStatus.cacheIndexSnapshot().indexedVersion());
+        verify(directory, times(1)).publishCacheAvailability(workerStatus);
 
         runCachePoll(ipPort, workerStatus, directory, false);
         assertEquals(1L, workerStatus.cacheIndexSnapshot().indexedVersion());
+        verify(directory, times(1)).publishCacheAvailability(workerStatus);
         assertEquals(2L, workerStatus.getCacheStatus().getVersion());
 
         runCachePoll(ipPort, workerStatus, directory, false);
         assertEquals(2L, workerStatus.cacheIndexSnapshot().indexedVersion());
+        verify(directory, times(2)).publishCacheAvailability(workerStatus);
         verify(workerStatusRpcClient).getCacheStatusAsync(
                 eq("127.0.0.1"), eq(8081),
                 eq(-1L), eq(20L), eq(RoleType.PREFILL));

@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 3,
+  "scheduler": {
+    "type": "QUEUE",
+    "decision": {
+      "type": "SINGLE"
+    },
+    "queueTimeoutMs": 120000,
+    "prefillQueueShedding": {
+      "expectedWaitThresholdMs": 60000,
+      "maxWaitMs": 120000,
+      "deadlineBudget": {
+        "tokensPerSecond": 70000,
+        "capacityFactor": 0.9,
+        "saturatedWorkerPercent": 90,
+        "saturationHoldMs": 2000,
+        "dispatchSlackMs": 1000
+      }
+    }
+  },
+  "dispatcher": {
+    "type": "NON_BATCH",
+    "maxInflightPerPrefillWorker": 256
+  },
+  "requestLifecycle": {
+    "request": {
+      "timeoutMs": 100000
+    }
+  },
+  "router": {
+    "roles": {
+      "prefill": {
+        "tokenBalance": {
+          "hotspotRescue": {
+            "maxInputTokens": 32768,
+            "maxIdlePendingTokens": 64768,
+            "migrationIntervalMs": 1000
+          },
+          "minPrefixHitPercent": 5,
+          "enableWindow": false,
+          "engineQueueAdmissionThreshold": 30,
+          "maxPendingComputeTokens": 200000
+        }
+      }
+    }
+  }
+}

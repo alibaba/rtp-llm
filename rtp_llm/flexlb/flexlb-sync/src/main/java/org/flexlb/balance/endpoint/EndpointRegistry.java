@@ -168,6 +168,15 @@ public class EndpointRegistry {
                 placementAvailability, "placementAvailability");
     }
 
+    /** Cache ownership can open a new maximum-hit route without releasing Engine capacity. */
+    public void publishCacheAvailability(WorkerStatus status) {
+        if (status.getRole().supportsPrefill() && status.isActiveGeneration()
+                && isCurrentStatus(status.getRole(), status.getIpPort(), status)) {
+            placementAvailability.changed(new org.flexlb.balance.scheduler.PlacementKey(
+                    status.getRole(), status.getGroup(), null));
+        }
+    }
+
     public record DiagnosticDirectory(List<PrefillRoutingEntry> prefill,
                                       List<Map.Entry<String, DecodeEndpoint>> decode) { }
 

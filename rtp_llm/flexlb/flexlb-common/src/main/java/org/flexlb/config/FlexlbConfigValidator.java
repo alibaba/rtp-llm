@@ -128,6 +128,10 @@ final class FlexlbConfigValidator {
             validateQueue(config.queueScheduler());
         }
         if (config.isQueue() && config.queueScheduler().getPrefillQueueShedding() != null) {
+            if (config.queueScheduler().getPrefillQueueShedding().getDeadlineBudget() != null) {
+                require(config.getRouter().getRoles().getPrefill().getTokenBalance() != null,
+                        "scheduler.prefillQueueShedding.deadlineBudget", "requires tokenBalance work accounting");
+            }
             require(config.getRouter().getRoles().getPrefill().getTokenBalance() != null
                             || config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
                             && config.decisionPolicy().getType() == DecisionPolicyConfig.Type.SINGLE,
@@ -160,6 +164,18 @@ final class FlexlbConfigValidator {
                             && shedding.getMinAcceptingWorkerPercent() <= 100.0,
                     "scheduler.prefillQueueShedding.minAcceptingWorkerPercent", "must be finite and in (0, 100]");
             var recovery = shedding.getRecovery();
+            var budget = shedding.getDeadlineBudget();
+            if (budget != null) {
+                String path = "scheduler.prefillQueueShedding.deadlineBudget.";
+                require(Double.isFinite(budget.getTokensPerSecond()) && budget.getTokensPerSecond() > 0,
+                        path + "tokensPerSecond", "must be finite and positive");
+                range(budget.getCapacityFactor(), 0.1, 1.0, path + "capacityFactor");
+                range(budget.getSaturatedWorkerPercent(), 50.0, 100.0, path + "saturatedWorkerPercent");
+                positive(budget.getSaturationHoldMs(), path + "saturationHoldMs");
+                positive(budget.getDispatchSlackMs(), path + "dispatchSlackMs");
+                require(budget.getDispatchSlackMs() < shedding.getMaxWaitMs(),
+                        path + "dispatchSlackMs", "must be less than maxWaitMs");
+            }
             if (recovery != null) {
                 positive(recovery.getWindowMs(), "scheduler.prefillQueueShedding.recovery.windowMs");
                 require(recovery.getWindowMs() <= Long.MAX_VALUE / 4,
