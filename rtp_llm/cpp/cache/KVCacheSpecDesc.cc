@@ -112,6 +112,9 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
         if (desc.tail->validate_tail_blocks.has_value()) {
             policy.validate_tail_blocks = *desc.tail->validate_tail_blocks;
         }
+        if (desc.tail->prefix_checkpoint_stride_blocks.has_value()) {
+            policy.prefix_checkpoint_stride_blocks = *desc.tail->prefix_checkpoint_stride_blocks;
+        }
     }
     if (desc.cp.has_value()) {
         if (desc.cp->mapping.has_value()) {

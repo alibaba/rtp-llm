@@ -2,17 +2,6 @@ workspace(name = "rtp_llm")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-# ATOM's RTP plugin is packaged only for ROCm image builds.  Pin source and
-# checksum so the image cannot silently pick up an incompatible ATOM main.
-http_archive(
-    name = "atom_source",
-    sha256 = "62c375d2b9edb6e130de52abd912c30ae48278470b0761208084146632f520b7",
-    strip_prefix = "ATOM-9af739efc20572c998cad401efea025a9057bed8",
-    type = "tar.gz",
-    build_file = "//:BUILD.atom",
-    urls = ["https://codeload.github.com/junna2016/ATOM/tar.gz/9af739efc20572c998cad401efea025a9057bed8"],
-)
-
 http_archive(
     name = "io_opentelemetry_cpp",
     # v1.21.0 tag commit: b9cf499ff5715433848b316059714b5c59af1f2c

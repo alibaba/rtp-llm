@@ -564,6 +564,30 @@ TEST_F(DeviceLinearCacheManagerTest, SmallPrefillTailPreservesActiveBlocksThroug
     group.unreference(blocks.blocks());
 }
 
+TEST_F(DeviceLinearCacheManagerTest, PrefixCheckpointsSurviveDecodeTailCleanup) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    auto policy                              = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    policy.prefix_checkpoint_stride_blocks = 4;
+    DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 3, policy);
+    BlockIds                 blocks;
+    ASSERT_TRUE(group.malloc(blocks, 64, true));
+    ASSERT_EQ(blocks.blocksNum(), 16u);
+    for (int checkpoint : {3, 7, 11, 15}) {
+        EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[checkpoint]));
+    }
+    EXPECT_EQ(group.getNeedBlocks(64, 64, 0, 0, true).common_blocks, 6);
+
+    ASSERT_TRUE(group.mallocForDecode(blocks, 65, true));
+    group.removeSkippedBlocks(blocks, true);
+    for (int checkpoint : {3, 7, 11, 15}) {
+        EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[checkpoint]));
+    }
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[16]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[13]));
+    group.unreference(blocks.blocks());
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

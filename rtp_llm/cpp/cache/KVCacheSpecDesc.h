@@ -42,6 +42,8 @@ struct CacheMemoryPolicyDesc {
 struct CacheTailPolicyDesc {
     std::optional<uint32_t> active_tail_blocks;
     std::optional<bool>     validate_tail_blocks;
+    // Keep a reusable LINEAR state at every Nth block boundary. Zero disables it.
+    std::optional<uint32_t> prefix_checkpoint_stride_blocks;
 };
 
 struct CacheCpPolicyDesc {

@@ -18,10 +18,9 @@ namespace rtp_llm {
 
 namespace {
 
-// Kernel blocks feeding a compressed (OpaqueKV) pool must be a whole number of
-// 128-token units: 128 is the HCA compression unit and also FlashMLA's block
-// quantum. Divisibility alone (the generic check) is not enough -- a 64-token
-// kernel block passes it and then produces a partial compression unit.
+// HCA and FlashMLA compressed pools require a 128-token kernel quantum.
+// Qwen4Exp's indexer_kv instead compresses groups of four tokens and supports
+// the existing 64-token ATOM page size without a partial group.
 constexpr uint32_t kCompressedKernelSeqSizeAlignment = 128;
 
 bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget) {
@@ -193,7 +192,10 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
                                         desc.tag.c_str(),
                                         desc.compression_ratio,
                                         kernel_tokens_per_block);
-                if (desc.compression_ratio > 1) {
+                const bool qwen4_atom_indexer = (model_config.model_type == "atom_qwen4_exp"
+                                                 || model_config.model_type == "atom_qwen4_exp_mtp")
+                                                 && desc.tag == "indexer_kv" && desc.compression_ratio == 4;
+                if (desc.compression_ratio > 1 && !qwen4_atom_indexer) {
                     RTP_LLM_CHECK_WITH_INFO(
                         kernel_tokens_per_block >= kCompressedKernelSeqSizeAlignment
                             && kernel_tokens_per_block % kCompressedKernelSeqSizeAlignment == 0,

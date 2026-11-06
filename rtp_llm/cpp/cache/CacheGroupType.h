@@ -57,6 +57,7 @@ struct CacheGroupPolicy {
     CacheMemoryPlacement memory_placement       = CacheMemoryPlacement::DEVICE;
     uint32_t             active_tail_blocks     = 0;
     bool                 validate_tail_blocks   = true;
+    uint32_t             prefix_checkpoint_stride_blocks = 0;
     CpBlockMappingMode   cp_mapping             = CpBlockMappingMode::NONE;
     CpBlockSliceMode     cp_slice               = CpBlockSliceMode::NONE;
     // Model-derived SWA attention window in tokens. Zero means no bounded

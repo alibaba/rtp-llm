@@ -108,8 +108,8 @@ aiosignal==1.3.1 \
     --hash=sha256:54cd96e15e1649b75d6c87526a6ff0b6c1b0dd3459f43d9ca11d48c339b68cfc \
     --hash=sha256:f8376fb07dd1e86a584e4fcdec80b36b7f81aac666ebc724e2c090300dd83b17
     # via aiohttp
-amd-aiter==0.1.23.dev134+g8449f416b \
-    --hash=sha256:47840027132b1caf0e0985a8376d3e6d24f31c994983482378a5caf46ad6c50f
+amd-aiter @ https://search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com/xingjunna/qwen4/amd_aiter-0.1.26.dev12%2Bgcbccc02fd.qsaimagev1-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:02fb3a71bce15b6e874355f2f28b7a6d9e212238cefe94331e376b9ca4880ea1
     # via -r internal_source/deps/requirements_rocm.txt
 aliyun-python-sdk-core==2.15.1 \
     --hash=sha256:518550d07f537cd3afac3b6c93b5c997ce3440e4d0c054e3acbdaa8261e90adf
@@ -146,6 +146,9 @@ attrs==24.2.0 \
     --hash=sha256:5cfb1b9148b5b086569baec03f20d7b6bf3bcacc9a42bebf87ffaaca362f6346 \
     --hash=sha256:81921eb96de3191c8258c199618104dd27ac608d9366f5e35d011eae1867ede2
     # via aiohttp
+atom @ https://search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com/xingjunna/qwen4/atom-0.1.8%2Bg9af739efc-py3-none-any.whl \
+    --hash=sha256:601c72462dc17a4c84585ea33f8faadac01ec781eacaf65d76597cda1c5b4641
+    # via -r internal_source/deps/requirements_rocm.txt
 audioread==3.0.1 \
     --hash=sha256:4cdce70b8adc0da0a3c9e0d85fb10b3ace30fbdf8d1670fd443929b61d117c33 \
     --hash=sha256:ac5460a5498c48bdf2e8e767402583a4dcd13f4414d286f42ce4379e8b35066d
@@ -532,7 +535,7 @@ filelock==3.20.0 \
     #   huggingface-hub
     #   torch
     #   transformers
-flydsl==0.3.4.1 \
+flydsl @ https://mirrors.aliyun.com/pypi/packages/ea/65/3752be0c2a6a05ee373511ac2dec8bf336b26c23e1ad21a4febbb3f856ce/flydsl-0.3.4.1-cp310-cp310-manylinux_2_27_x86_64.whl \
     --hash=sha256:64903d7d328f1f6f9834e0bbc057106148706db290cc71daa4fcfabfd627eb32
     # via
     #   -r internal_source/deps/requirements_rocm.txt

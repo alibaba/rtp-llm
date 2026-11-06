@@ -134,7 +134,9 @@ def pip_deps():
         name = "pip_gpu_rocm_torch",
         requirements_lock = "@rtp_pip_deps//:requirements_lock_rocm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
-        extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS,
+        # The pinned private AITER and ATOM wheels use an internal OSS host.
+        # rules_python invokes pip --isolated, so PIP_TRUSTED_HOST is ignored.
+        extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS + ["--trusted-host=search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com"],
         envsubst = PIP_INDEX_ENVSUBST,
         timeout = 12000,
     )

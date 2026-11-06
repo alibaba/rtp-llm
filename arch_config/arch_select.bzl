@@ -237,9 +237,10 @@ def whl_deps():
         "@rtp_llm//:using_rocm": [
             "pyrsmi==0.2.0",
             "amdsmi@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/rocm/amd_smi.tar",
-            # Keep the ROCm AITER/FlyDSL pins synchronized with
+            # Keep the ROCm ATOM/AITER/FlyDSL pins synchronized with
             # deps/requirements{,_lock}_rocm.txt.
-            "amd-aiter==0.1.23.dev134+g8449f416b",
+            "amd-aiter==0.1.26.dev12+gcbccc02fd.qsaimagev1",
+            "atom==0.1.8+g9af739efc",
             "flydsl==0.3.4.1",
             "triton==3.8.0+amd.rocm7.2.0.git111ff227",
             "triton-kernels==1.0.0+amd.rocm7.2.0.git111ff227",

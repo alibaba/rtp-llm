@@ -1976,16 +1976,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("active_tail_blocks", &CacheTailPolicyDesc::active_tail_blocks)
         .def_readwrite("validate_tail_blocks", &CacheTailPolicyDesc::validate_tail_blocks)
+        .def_readwrite("prefix_checkpoint_stride_blocks", &CacheTailPolicyDesc::prefix_checkpoint_stride_blocks)
         .def(py::pickle(
             [](const CacheTailPolicyDesc& self) {
-                return py::make_tuple(self.active_tail_blocks, self.validate_tail_blocks);
+                return py::make_tuple(self.active_tail_blocks, self.validate_tail_blocks,
+                                      self.prefix_checkpoint_stride_blocks);
             },
             [](py::tuple t) {
                 CacheTailPolicyDesc c;
-                if (t.size() != 2)
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid CacheTailPolicyDesc state!");
                 c.active_tail_blocks   = t[0].cast<std::optional<uint32_t>>();
                 c.validate_tail_blocks = t[1].cast<std::optional<bool>>();
+                if (t.size() == 3)
+                    c.prefix_checkpoint_stride_blocks = t[2].cast<std::optional<uint32_t>>();
                 return c;
             }));
 

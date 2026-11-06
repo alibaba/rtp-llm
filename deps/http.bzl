@@ -136,9 +136,10 @@ def http_deps():
 
     http_archive(
         name = "aiter",
-        sha256 = "47840027132b1caf0e0985a8376d3e6d24f31c994983482378a5caf46ad6c50f",
+        sha256 = "02fb3a71bce15b6e874355f2f28b7a6d9e212238cefe94331e376b9ca4880ea1",
         urls = [
-            "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/rocm/amd_aiter-0.1.23.dev134%2Bg8449f416b-cp310-cp310-linux_x86_64.whl",
+            "https://search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com/xingjunna/qwen4/amd_aiter-0.1.26.dev12%2Bgcbccc02fd.qsaimagev1-cp310-cp310-linux_x86_64.whl",
+            "http://search-ad.cn-hangzhou-k.oss-internal.aliyun-inc.com/xingjunna/qwen4/amd_aiter-0.1.26.dev12%2Bgcbccc02fd.qsaimagev1-cp310-cp310-linux_x86_64.whl",
         ],
         type = "zip",
         build_file = clean_dep("@rtp_llm//:BUILD.aiter"),
