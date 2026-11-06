@@ -123,7 +123,8 @@ public class GlobalCacheIndex {
             return Collections.emptyMap();
         }
         // TEMPORARY DIAGNOSTIC (cached-prefill campaign): sample every 200th call.
-        if (matchDiagCounter.incrementAndGet() % 200 == 1) {
+        matchDiagCounter.increment();
+        if (matchDiagCounter.sum() % 200 == 1) {
             Set<String> firstOwners = getEnginesForBlock(blockCacheKeys.getFirst());
             log.info("CacheMatchDiag reqKeys={} firstKey={} firstOwners={} totalMappings={} candidates={}",
                     blockCacheKeys.size(), blockCacheKeys.getFirst(),
