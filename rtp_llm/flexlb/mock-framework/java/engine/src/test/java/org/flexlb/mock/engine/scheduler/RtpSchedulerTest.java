@@ -906,4 +906,24 @@ class RtpSchedulerTest {
         }
     }
 
+    @Test void largerLogicalCacheDoesNotLetFifoOrGroupOverfillDeviceBatch() throws Exception {
+        var config = config("prefill", "1", 4, 100);
+        for (boolean group : List.of(false, true))
+            try (var cache = new KvCache(2, 3, 12, 0, true, null);
+                 var scheduler = group ? new RtpPrefillGroupScheduler(new Object(), config, cache)
+                                       : new RtpFifoScheduler(new Object(), config, cache)) {
+                if (group) scheduler.input(batch(sized(1, 5), sized(2, 5)));
+                else { scheduler.input(sized(1, 5), new Listener()); scheduler.input(sized(2, 5), new Listener()); }
+                var first = scheduler.schedule();
+                assertEquals(List.of(1L), ids(first));
+                assertEquals(0, cache.snapshot(0, false).availableBlocks());
+                complete(scheduler, first, config); drain(scheduler);
+                var second = scheduler.schedule();
+                assertEquals(List.of(2L), ids(second));
+                complete(scheduler, second, config); drain(scheduler);
+                assertTrue(scheduler.requests().isEmpty());
+                assertEquals(3, cache.snapshot(0, false).availableBlocks());
+            }
+    }
+
 }

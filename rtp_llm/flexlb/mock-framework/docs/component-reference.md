@@ -45,7 +45,7 @@ environment:
       mock.compute.forward.expression: "param(baseMs, 1) + 0.01*totalComputeTokens"
 ```
 
-原生配置保留 real 的名称和单位，例如 `concurrency_limit`、`seq_size_per_block`、`test_block_num`；同一字段同时写大小写两种形式会报错。P/D 的 `concurrency_limit` 默认 32，范围 1–1024，控制每轮请求数。Mock 必须显式提供 `seq_size_per_block`、`max_seq_len`、`test_block_num`：本地没有 GPU/模型配置，不能复用 real 的硬件探测和自动容量推导。一个 Engine 表示完整计算体，不创建 CP/TP/DP rank 或模拟通信，不根据并行度隐式换算容量、block size 或已校准的公式。具体支持项和输入规则见下文“Engine 配置规则”。
+原生配置保留 real 的名称和单位，例如 `concurrency_limit`、`seq_size_per_block`、`test_block_num`；同一字段同时写大小写两种形式会报错。P/D 的 `concurrency_limit` 默认 32，必须为正整数，控制每轮请求数。Mock 必须显式提供 `test_block_num`；`seq_size_per_block` 缺省或为 0 时取 64，`max_seq_len` 缺省或为 0 时取 8192。本地没有 GPU 探测，不自动推导物理 KV 容量。一个 Engine 表示完整计算体，不创建 CP/TP/DP rank 或模拟通信，不根据并行度隐式换算容量、block size 或已校准的公式。具体支持项和输入规则见下文“Engine 配置规则”。
 
 RTP 请求公共支持范围集中在 `RequestValidation`，本地单 token、P/D Prefill 及 Decode ALLOCATE 均使用它：adapter/unique_key、多 beam/多返回、stop words、sp_edit/sp_input_lookup、额外 logits/hidden/prob/loss 输出明确拒绝。路径只保留自身角色、长度、路由和协议阶段规则。测试通过实际 gRPC 同时验证 max_new_tokens=1/2 和 D ALLOCATE，防止参数只在一条路径被拒绝。
 
@@ -73,7 +73,11 @@ WorkerStatus 报真实等待/执行任务、finished/version，available_concurr
 
 ## Block 容量与 RTP 缓存
 
-每个 P/D Engine 有一个本地逻辑池。容量为 `test_block_num - 1`，首次分配仍受 `reserve_block_ratio` 约束。EngineScheduler 同步申请容量并取得完整 Block 前缀的复用量。等待中的请求可以在容量释放后重试，运行中的 Decode 增长失败按容量错误结束。
+每个 P/D Engine 有一个统一 KV 索引和 LRU，分别约束缓存保留容量与 device 驻留容量。`test_block_num - 1` 是 device 可用总块数；`mock.cache.total.blocks` 是统一池总块数，默认等于 device 块数且不得更小，不包含 null block。首次分配的 `reserve_block_ratio` 只按 device 容量计算，Decode 增长可使用预留块。
+
+所有活动请求的不同物理块占用 device 额度，包括缓存命中、KV Loading 和等待 PD 交接的请求；共享前缀只计一次。命中也必须取得 device 额度才返回 Ready。最后一个活动引用释放后归还额度，缓存 key 可继续留在统一池。仅在统一池需要空间时执行 LRU，不因 device 暂时不足驱逐历史缓存。未持有 device 额度的缓存恢复视为瞬时，不模拟 Host/device 数据搬运、带宽、层级归属或额外队列。
+
+Scheduler 接口保持 `Ready / Loading / Failed`；初次申请临时容量不足时等待容量变化，单请求超过 device 减预留后的容量立即失败；Decode 每轮增长前检查 device，增长失败按容量错误结束。WorkerStatus、CacheStatus 容量和现有 DEVICE 指标始终报告 device 约束，key 列表及 item num 报告统一索引，可大于 device 总块数。free 按已分配块优先填满空闲 device 的瞬时模型计数，available 表示可供活动请求使用的额度，不等同于未缓存空槽。
 
 容量不足时，按 LRU 淘汰可回收的前缀树叶子。请求持有的块不会被淘汰。成功终态只发布已计算的完整块，失败或取消只释放占用。Master CacheStatus 与 KVCM Reporter 使用同一份有效块状态。P/D 网络交接仍走原生协议。
 
@@ -190,19 +194,20 @@ Case 的 `component.config` 可内联 YAML，或引用相对 Case 目录的配�
 
 已实现且语义对齐的 real 参数沿用 real 命名。未实现的 real 参数直接忽略，值不参与校验，也不进入 effective-config。例如磁盘/远端缓存、独立加载/重试超时、异步传输队列、模型路径、设备与尚未模拟的并行通信参数；出现这些参数不代表 Mock 实现了对应能力。原生参数拼写错误也会被忽略，因此复用 real 配置后应核对 effective-config 中真正生效的字段。
 
-Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.expression`；也可写成嵌套 YAML。未知 Mock 参数、大小写错误、空对象、null、路径冲突和重复输入均报错。Mock 不接受旧的 compute/memory_cache_blocks 等别名作为覆盖入口。
+Mock 专用参数使用小写点号名称，例如 `mock.compute.forward.expression`；也可写成嵌套 YAML。未知 Mock 参数、大小写错误、空对象、null、路径冲突和重复输入均报错。Mock 不接受旧的 compute/memory_cache_blocks 等别名作为覆盖入口。`capacity.*`、`mock.cache.memory.blocks` 等旧容量入口和 `device_eviction_policy` 均不支持；LRU 固定。`device_blocks`、`reserve_blocks` 只是 effective-config 的派生输出，不能用于配置覆盖。不要在 Mock Case 放入不生效的 `memory_cache_size_mb`、`enable_disk_cache`、`block_tree_*_queue_max_size` 或独立加载/重试超时。`enable_memory_cache=true` 和 `enable_remote_cache=true` 仍拒绝启动；扩大统一池无需打开这些开关。
 
 ### 已实现的 real 参数
 
 | 参数 | 默认值/约束 | 行为 |
 | --- | --- | --- |
-| seq_size_per_block / max_seq_len / test_block_num | 必填；正数，test_block_num ≥ 2 | 逻辑分配粒度、序列上限、Device 物理块数（含 null block）。 |
+| seq_size_per_block / max_seq_len / test_block_num | 64 / 8192 / 必填；前两者为 0 时用默认值，test_block_num ≥ 2 | KV 分配粒度、单请求序列上限、Device 物理块数（含 null block）。 |
 | concurrency_limit | 32，正整数 | P/D 每轮请求数上限；real 的 ConcurrencyConfig 输入经 engine_config.py 写入内部 max_generate_batch_size。 |
 | reserve_block_ratio | 5，0–100 | 首次分配预留百分比。 |
 | reuse_cache / enable_device_cache | false / true | 前缀复用和 Device 索引。 |
 | tp_size / dp_size | 1 / 1，正整数 | real 并行配置；tp_size 用于原生状态/接入元数据，二者分别绑定公式 tpSize/dpSize，不模拟 rank 间执行。 |
 | cp_rotate_method | DISABLED | 沿用 real PrefillCPConfig；ALL_GATHER、ALL_GATHER_WITH_OVERLAP、ALLTOALL 开启通用 CP，cpSize=tp_size、cpEnabled=1，否则为 1/0。PREFILL_CP 是独立策略，当前未模拟，prefill_cp_size 等专用参数忽略。 |
-| max_batch_tokens_size | 0 | P 的 batch token/矩形准入；0 仍可执行 singleton。 |
+| max_batch_tokens_size | 0，启动时解析为 max_context_batch_size × max_seq_len | P 的 batch token/矩形准入；合法 singleton 可超过预算。D 不使用该预算选批，仍通过 WorkerStatus 报告。 |
+| max_context_batch_size | 1，正整数 | 只在 max_batch_tokens_size 缺省或为 0 时参与预算推导，不直接限制 batch 请求数。 |
 | max_batch_tokens_without_cache / max_inited_kv_cache_streams | 0 / 0 | 仅 P 生效；0 不启用对应限制。 |
 | disable_decode_first_malloc_device_reuse | false | real 内部 CacheConfig 属性，文件输入；不杜撰公开 ENV 名。 |
 | gpu_max_batch_size / gpu_batch_wait_ms | 1 / 10 ms | 仅 V；batch=1 为逐请求执行且等待为 0；>1 同时限制 Forward 工作块数与媒体数，较大图片组分轮执行。 |
@@ -216,6 +221,7 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 
 | 参数 | 含义 |
 | --- | --- |
+| mock.cache.total.blocks | 统一池总块数，不含 null block；默认 test_block_num - 1，不得小于 device 可用总块数。ENV：MOCK_CACHE_TOTAL_BLOCKS。 |
 | mock.scheduler.mode | P 调度方式，默认 `fifo` 按单请求入队、自主组 Forward batch，拒绝 `EnqueueBatch`/`EnqueueGroup`；`group` 显式启用组语义。ENV 为 `MOCK_SCHEDULER_MODE`；D 始终使用普通调度。 |
 | mock.vit.skip.download | 默认 false；true 时只跳过实际图片读取，使用输入宽高，其余异步调度不变。 |
 | mock.compute.forward.expression | 必填，Forward 公式，结果单位 ms。 |
@@ -246,11 +252,11 @@ V 仍按 URL/预处理 key 缓存和合并在途请求，命中时不重新下�
 
 P 在 GENERATE 阶段发送 `prefill_kv_handoff.computed_kv_end`，为已计算 prompt 的排他边界，不包含首个采样 token。D 校验请求身份、已 LOAD 阶段和边界；缺省字段保留原生旧调用兼容，显式错误断言拒绝。未实现的 logprobs 请求明确返回 UNIMPLEMENTED，不伪造概率输出。
 
-本地块池固定采用 LRU。旧 Case 中显式写的 `device_eviction_policy: lru` 仍可读取。
+本地统一池固定采用 LRU；不再接受 `device_eviction_policy`。
 
 缓存元信息由 `engine/cache/CacheMetadata` 描述，来自 KvCache/BlockTree 已提交的本地有效块。提交、淘汰和清空推进版本。Master 的原生 GetCacheStatus 返回可复用集合与容量，版本未改变时省略 key。
 
-`engine/cache/KvcmReporter` 使用同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 仅发布本地 HBM 有效块。RTP 装配方提供注册模型、布局和 spec，Reporter 管理发现与传输资源。
+`engine/cache/KvcmReporter` 使用同一来源，按 real Meta HTTP `/api/registerInstance`、`/api/reportEvent` 编码注册、NODE_REGISTER、HEARTBEAT、BLOCK_SNAPSHOT、BLOCK_ADD、BLOCK_DELETE 和 HOST_DOWN。当前 Full-KV 沿用本地 HBM 元信息命名空间发布统一池的有效块；扩大统一池后，这些事件表示本实例可恢复的逻辑缓存，不表示每个 key 都实际驻留 device，也不模拟分层位置。RTP 装配方提供注册模型、布局和 spec，Reporter 管理发现与传输资源。
 
 变更使用有界内存队列（100000 条），每次最多取 1000 条，按同 key 最后一次转换合并，避免 Meta 先处理 ADD 再处理 DELETE 导致结果逆序。注册和增量由同一个执行者每 20ms 处理，快照与心跳分别使用独立执行者，慢快照不阻塞 ADD/DELETE 或心跳。它们均不占用 EngineLoop 线程。
 

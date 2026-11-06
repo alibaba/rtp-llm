@@ -118,7 +118,9 @@ class RtpConfigTest {
         assertFalse(load(root).effective().has("device_eviction_policy"));
         config.put("device_eviction_policy", "lfu");
         assertThrows(IllegalArgumentException.class, () -> load(root));
-        config.put("device_eviction_policy", "LRU").put("enable_memory_cache", true);
+        config.put("device_eviction_policy", "LRU");
+        assertThrows(IllegalArgumentException.class, () -> load(root));
+        config.remove("device_eviction_policy"); config.put("enable_memory_cache", true);
         assertThrows(IllegalArgumentException.class, () -> load(root));
         config.put("enable_memory_cache", false);
         assertFalse(load(root).effective().has("device_eviction_policy"));
@@ -248,6 +250,26 @@ class RtpConfigTest {
         var root = root();
         ((ObjectNode) root.path("component").path("config")).put("concurrency_limit", 2048);
         assertEquals(2048, load(root).maxGenerateBatchSize());
+    }
+
+    @Test void totalCacheCapacityDefaultsToDeviceAndHasOneFileAndEnvironmentSetting() throws Exception {
+        var root = root(); var settings = (ObjectNode) root.path("component").path("config");
+        var original = load(root);
+        assertEquals(original.deviceBlocks(), original.totalCacheBlocks());
+        int total = original.deviceBlocks() + 100;
+        settings.put("mock.cache.total.blocks", total);
+        var expanded = load(root);
+        assertEquals(original.deviceBlocks(), expanded.deviceBlocks());
+        assertEquals(original.reserveBlocks(), expanded.reserveBlocks());
+        assertEquals(total, expanded.totalCacheBlocks());
+        assertEquals(total, expanded.effective().path("mock.cache.total.blocks").intValue());
+        assertEquals(expanded.effective(), RtpConfig.fromEnvironment(expanded.id(), expanded.role(), environmentOf(expanded.business())).effective());
+        ((ObjectNode) root.path("component")).set("config", expanded.effective());
+        assertEquals(expanded.effective(), load(root).effective());
+        for (int invalid : java.util.List.of(0, original.deviceBlocks() - 1)) {
+            ((ObjectNode) root.path("component").path("config")).put("mock.cache.total.blocks", invalid);
+            assertThrows(IllegalArgumentException.class, () -> load(root));
+        }
     }
 
 }
