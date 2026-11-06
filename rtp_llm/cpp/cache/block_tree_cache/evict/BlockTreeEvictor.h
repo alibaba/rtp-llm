@@ -67,7 +67,7 @@ public:
     ~BlockTreeEvictor();
 
     // ---- Semantic events (must be called while holding BlockTreeCache mutex) ----
-    void onInserted(const BlockTreeInsertResult& result);
+    void                   onInserted(const BlockTreeInsertResult& result);
     uint64_t               nextAccessSeq();
     void                   onMatched(TreeNode* node, size_t group_set_id);
     CandidateStats         candidateStats() const;
@@ -169,19 +169,19 @@ private:
     void   completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, ErrorInfo error) noexcept;
     BatchEvictResult batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
     void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
-    void             runDropTask(TransferDescriptor    eviction_desc,
-                                 bool                  notify_settled         = true,
-                                 const char*           trigger_type           = "force_drop",
-                                 EvictionBatchContext* eviction_batch_context = nullptr);
+    void runDropTask(TransferDescriptor    eviction_desc,
+                     bool                  notify_settled         = true,
+                     const char*           trigger_type           = "force_drop",
+                     EvictionBatchContext* eviction_batch_context = nullptr);
     void rollbackTransferLocked(const std::vector<TransferDescriptor>& descs);
     void updateFullCandidate(TreeNode* node, size_t group_set_id);
     void updateFullCandidate(TreeNode* parent);
 
     void selectUpwardCascades(EvictionDropTask& task, EvictionBatchContext* eviction_batch_context) const;
-    void                            collectFullPrune(const TransferDescriptor&                  eviction_desc,
-                                                     EvictionDropTask&                          task,
-                                                     std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
-    void                            reserveSource(const std::vector<TransferDescriptor>& eviction_descs);
+    void collectFullPrune(const TransferDescriptor&                  eviction_desc,
+                          EvictionDropTask&                          task,
+                          std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
+    void reserveSource(const std::vector<TransferDescriptor>& eviction_descs);
     std::vector<TransferDescriptor> restoreSource(const std::vector<TransferDescriptor>& eviction_descs);
     void                            releaseTargetBlocks(const std::vector<TransferDescriptor>& descs);
     void                            completeDrop(const TransferDescriptor& desc);
@@ -204,7 +204,7 @@ private:
     std::unique_ptr<EvictionTaskRunner> task_runner_;
     int                                 host_timeout_ms_{0};
     int                                 disk_timeout_ms_{0};
-    size_t                              max_descriptors_per_batch_{8};
+    size_t                              max_descriptors_per_batch_{32};
 
     // Heap ownership: vector index is the declared group_set_id.
     std::vector<GroupSetTierHeaps>          heaps_;
