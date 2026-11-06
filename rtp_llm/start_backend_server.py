@@ -151,6 +151,44 @@ def _get_cuda_device_list() -> List[str]:
 def _validate_dp_configuration(py_env_configs: PyEnvConfigs):
     """Validate data parallelism configuration"""
     pc = py_env_configs.parallelism_config
+    if os.environ.get("RTP_LLM_RL_WORLD72") == "1":
+        # This opt-in deployment spans each attention-TP group across two
+        # four-GPU nodes. The parent owns four consecutive global ranks, so
+        # its TP rank may be 0 or 4. Children derive DP/TP/EP ranks from their
+        # global rank in local_rank_start; they do not require a local DP group.
+        required_env = {
+            "RTP_LLM_RL_MODE": "1",
+            "RTP_LLM_RL_START_PAUSED": "1",
+            "RTP_LLM_RL_METADATA_BOOTSTRAP": "1",
+            "RTP_FIXED_PHYSICAL_EP_LAYOUT": "balanced_v1",
+            "RTP_RL_BORROW_SINGLETON_HF_SOURCES": "1",
+        }
+        if any(os.environ.get(name) != value for name, value in required_env.items()):
+            raise ValueError("RL world72 rank spawning requires the guarded metadata bootstrap profile")
+        sizes = {
+            "world_size": 72,
+            "tp_size": 8,
+            "dp_size": 9,
+            "ep_size": 72,
+            "pp_size": 1,
+            "local_world_size": 4,
+            "ffn_sp_size": 8,
+            "ffn_tp_size": 1,
+        }
+        if any(getattr(pc, name, None) != value for name, value in sizes.items()):
+            raise ValueError("RL world72 rank spawning requires TP8/DP9/EP72/PP1 with four local ranks")
+        parent_rank = pc.world_rank
+        if not 0 <= parent_rank < 72 or parent_rank % 4 != 0:
+            raise ValueError("RL world72 backend parent must own an aligned four-rank span in [0, 72)")
+        if (
+            pc.local_rank != 0
+            or pc.tp_rank != parent_rank % 8
+            or pc.dp_rank != parent_rank // 8
+            or pc.ep_rank != parent_rank
+            or pc.ffn_tp_rank != 0
+        ):
+            raise ValueError("RL world72 backend parent has inconsistent derived ranks")
+        return
     if pc.dp_size > 1:
         # tp must on one device when dp
         assert pc.world_rank % pc.tp_size == 0
