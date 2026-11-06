@@ -1,0 +1,219 @@
+{
+  "schema": "q38-world72-code-source-port-v1",
+  "base_commit": "6fd1d2618573af5d826fe79cacf2c450560515c0",
+  "production_source_freeze_sha256": "159588c1dd4691190a7647c7de664f068dfbc69ecf7c69fd79a6422b76b84930",
+  "scope": "Source integration and CPU qualification only; no full-model GPU or RL acceptance claim",
+  "files": [
+    {
+      "path": "example/rl/qwen_moe_rl/adapter/qwen38_world_contract.py",
+      "sha256": "7f1d6eaaa3431d153cff091b40f67d53ad444f14e88fd6a95ff8c5bad8a3430f",
+      "production_source_sha256": "7f1d6eaaa3431d153cff091b40f67d53ad444f14e88fd6a95ff8c5bad8a3430f",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/adapter/qwen38_refit_contract.py",
+      "sha256": "09afb1a717a618f80dccd04e3e279645bb80a2359e8b19390b40ec95d46129bf",
+      "production_source_sha256": "09afb1a717a618f80dccd04e3e279645bb80a2359e8b19390b40ec95d46129bf",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/adapter/qwen38_world_server.py",
+      "sha256": "cd5376b963b061e62bf68087f41cebf2506a8170ae4233dddfa8d68aaa9e428d",
+      "production_source_sha256": "cd5376b963b061e62bf68087f41cebf2506a8170ae4233dddfa8d68aaa9e428d",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/adapter/qwen38_verl_backend.py",
+      "sha256": "0ef27b1db51282dc8b1505e68fb5befea7fef76f5382248826129abd51d1f661",
+      "production_source_sha256": "0ef27b1db51282dc8b1505e68fb5befea7fef76f5382248826129abd51d1f661",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/adapter/qwen38_owned_cleanup.py",
+      "sha256": "d1b01a18791c733aae66d2806c98842e831e77d9456a01697eec95c746b10133",
+      "production_source_sha256": "d1b01a18791c733aae66d2806c98842e831e77d9456a01697eec95c746b10133",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/adapter/serve_rtp_world72.sh",
+      "sha256": "f41490822ca3f2b84a0724733e7cf9a66afaf6798b2e943879f167f6d1b7fa90",
+      "production_source_sha256": "f41490822ca3f2b84a0724733e7cf9a66afaf6798b2e943879f167f6d1b7fa90",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/adapter/rtp_native_server.py",
+      "sha256": "38e70d63042266f7e28ed70195e5d36ad034a955ac3d9507bc869a7330c8758c",
+      "production_source_sha256": "38e70d63042266f7e28ed70195e5d36ad034a955ac3d9507bc869a7330c8758c",
+      "base_sha256": "05d8c09678e59a99d07b0289a850175d149211493cd8eebf0a8517a31b823b54",
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/adapter/install_rtp_bridge.py",
+      "sha256": "be2ad56d0b6e57ed68566101738b94b3998ccc25fb376a5376795b88834ec76d",
+      "production_source_sha256": "be2ad56d0b6e57ed68566101738b94b3998ccc25fb376a5376795b88834ec76d",
+      "base_sha256": "70bfd7f21b57c6999f645c07dae76dd9684c87fc57dcfcf548ca1e1bfa5a3c65",
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/adapter/rtp_cleanup.py",
+      "sha256": "7bf07fd5eaa2b27a7409aeff11273af52a8cd79a7e3ab08573070fe70016d68b",
+      "production_source_sha256": "7bf07fd5eaa2b27a7409aeff11273af52a8cd79a7e3ab08573070fe70016d68b",
+      "base_sha256": "d76da440b6806efa8de73a60f442730aac594f369cfc21f4bb0fe928c2af4d2f",
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/adapter/qwen36_trace_enrichment.py",
+      "sha256": "bc63aa5d1aa182cfad4ee14b38e70784e6cabf15fc192e471ceb8773822e3c4b",
+      "production_source_sha256": "bc63aa5d1aa182cfad4ee14b38e70784e6cabf15fc192e471ceb8773822e3c4b",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/agent/python_math_agent.py",
+      "sha256": "07b85e07920541e11fcf0b66d67766f386d04cd4751b06c9c8409f8c13a71e11",
+      "production_source_sha256": "07b85e07920541e11fcf0b66d67766f386d04cd4751b06c9c8409f8c13a71e11",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/agent/sandbox_worker.py",
+      "sha256": "b53b81e16baaa4401c17ef0ad470a1207fe3cafda0f0a3af2ae66573990b142b",
+      "production_source_sha256": "b53b81e16baaa4401c17ef0ad470a1207fe3cafda0f0a3af2ae66573990b142b",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/data/deepscaler-world72-18.manifest.json",
+      "sha256": "ef95fee64a0dfba7e1f644d98b92d76433df87121eb86cad35fa4ff33af6ee2a",
+      "production_source_sha256": "ef95fee64a0dfba7e1f644d98b92d76433df87121eb86cad35fa4ff33af6ee2a",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/training/run_world72_bf16_recipe.sh",
+      "sha256": "ad1f6d43eee45acfb89bf94ef3773281b1a5410465e320332a5231782234582b",
+      "production_source_sha256": "000daddee7b85853903a79f8a8e57afdd88d546e959b54194b39837cbf099994",
+      "base_sha256": null,
+      "portable_changes": [
+        "Allow explicit Q38_MODEL_PATH override while preserving the existing platform default."
+      ]
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/prepare_world72_dataset.py",
+      "sha256": "626e9c45c3ec40664285b9cc9aca616649af42f4752af574c7e756768abdc863",
+      "production_source_sha256": "2d3bf0a5b90abcda47b6965e882385a20bf66d827842815882ee2010086a3921",
+      "base_sha256": null,
+      "portable_changes": [
+        "Reconstruct the exact earlier eight rows directly from fixed official indices; retain its pinned byte SHA and optional --previous-eight cross-check.",
+        "Reproduces the exact original18 JSONL and manifest bytes without a historical local fixture."
+      ]
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/ACCEPTANCE-PLAN.json",
+      "sha256": "d1217763a413afdee7c19404f7db466f9539470d088c0ba88cf874c6dbd49871",
+      "production_source_sha256": "d1217763a413afdee7c19404f7db466f9539470d088c0ba88cf874c6dbd49871",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/test_qwen38_world_cpu.py",
+      "sha256": "449b98f805d2aff4679876573ac1ce9e9ef2dd4f718d99eb60ad693f327ab064",
+      "production_source_sha256": "8891b362338ef19210c9c5f3105352655487c25d1de4f6843047fc0c74c798ce",
+      "base_sha256": null,
+      "portable_changes": [
+        "Resolve adapter paths relative to the project; remove personal /Users default and preserve optional RTP_BASE_ADAPTER override."
+      ]
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/validate_world72_core_evidence.py",
+      "sha256": "e40824f858852a57538d2491fdfce1481fcb141b59751b053e2b82165438643a",
+      "production_source_sha256": "e40824f858852a57538d2491fdfce1481fcb141b59751b053e2b82165438643a",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/validate_world72_trajectories.py",
+      "sha256": "a447ca57791bf1d63d21bb9e65402aa301c3660d8a08fd84602049a82b413839",
+      "production_source_sha256": "a447ca57791bf1d63d21bb9e65402aa301c3660d8a08fd84602049a82b413839",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/qualify_launcher_stdlib.py",
+      "sha256": "5a31f2e3a7ea2da59880d1e32c08d9221cb72239a7e6aba27a587ffb1d5ff0a5",
+      "production_source_sha256": "5a31f2e3a7ea2da59880d1e32c08d9221cb72239a7e6aba27a587ffb1d5ff0a5",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/native-metadata/qwen38_native_metadata_preflight.py",
+      "sha256": "c08c57468dc73b1ba52954c491b3d1295f76415db753fde1291e45a0e97e9559",
+      "production_source_sha256": "c08c57468dc73b1ba52954c491b3d1295f76415db753fde1291e45a0e97e9559",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/native-metadata/build_native_metadata_preflight_inputs.py",
+      "sha256": "9419485fb4b92ff99db1ffd9936b6c2ff5d19feaecdc48a0323feffc518addf7",
+      "production_source_sha256": "5b07795f79c3fbb3fe67cecf0f6f8c4a0869da253b7d551b02f4173cdf00cf29",
+      "base_sha256": null,
+      "portable_changes": [
+        "Resolve world contract from repository-relative adapter directory.",
+        "Require explicit --model-path; allow --start-port; validate the complete topology using the production World72Topology."
+      ]
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/native-metadata/run_native_metadata_preflight.sh",
+      "sha256": "b437377c384c414f0616268c84b299a45b47d3a17cec026e7820ab9d553ae529",
+      "production_source_sha256": "12e0bbf8973a4729046f205e4a4151f8b27a368f71458fd86dce2d33f034808e",
+      "base_sha256": null,
+      "portable_changes": [
+        "Allow explicit Q38_MODEL_PATH override while preserving the existing platform default."
+      ]
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/native-metadata/RESULT-SCHEMA.json",
+      "sha256": "fb9fa2dd6ab64fba4e896af2dda36a5d6c27677504be1d07889dad9baded8da0",
+      "production_source_sha256": "fb9fa2dd6ab64fba4e896af2dda36a5d6c27677504be1d07889dad9baded8da0",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/validation/qualify_recipe_native_chain_cpu.py",
+      "sha256": "c6fcdd39f3a35b208b8ee6b501ad4d6581051f6dc0bd3a19df98c64b2f977d24",
+      "production_source_sha256": "c6fcdd39f3a35b208b8ee6b501ad4d6581051f6dc0bd3a19df98c64b2f977d24",
+      "base_sha256": null,
+      "portable_changes": []
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/WORLD72.md",
+      "sha256": "780812b8b5e94a590316c338abf0acc3c90d09019028cecf8b2b888e70de4f34",
+      "production_source_sha256": null,
+      "base_sha256": null,
+      "portable_changes": [
+        "Document explicit paths, source-only acceptance boundaries and current-identity input handling."
+      ]
+    },
+    {
+      "path": "example/rl/qwen_moe_rl/.gitignore",
+      "sha256": "60e60aa112dee729761c90bb6145265465fac1c897eede4425288f522298a4b2",
+      "production_source_sha256": null,
+      "base_sha256": "03629f307fa5a1ec1c5690e00510b4fe55bc592d9c7d383aeb5c8c5c7eb832a3",
+      "portable_changes": [
+        "Exclude generated dataset payloads and private machine input from accidental versioning."
+      ]
+    }
+  ],
+  "excludes": [
+    "actual allocation inputs/IPs/UUIDs/CIDs",
+    "whole source dataset and generated fixture payloads",
+    "run evidence/logs/receipts",
+    "weights/checkpoints/native binaries"
+  ]
+}

@@ -6,3 +6,8 @@ logs/
 cache/
 runs/
 training/data/
+
+# Generated benchmark input and private allocation records
+data/*.jsonl
+data/deepscaler.json
+validation/native-metadata/INPUT.json
