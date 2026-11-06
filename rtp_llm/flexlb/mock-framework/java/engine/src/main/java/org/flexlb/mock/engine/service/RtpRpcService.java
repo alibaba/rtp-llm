@@ -1,0 +1,195 @@
+package org.flexlb.mock.engine.service;
+
+import io.grpc.Status;
+import io.prometheus.client.Collector.MetricFamilySamples;
+import io.prometheus.client.CollectorRegistry;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import org.flexlb.mock.metrics.MetricTags;
+import org.flexlb.mock.metrics.EventMetrics;
+import io.grpc.stub.ServerCallStreamObserver;
+import io.grpc.stub.StreamObserver;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
+import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.mock.engine.cache.KvCache;
+import org.flexlb.mock.engine.config.RtpConfig;
+import org.flexlb.mock.engine.forward.ComputeModel;
+import org.flexlb.mock.protocol.Role;
+import org.flexlb.mock.engine.execution.RtpEngineLoop;
+import org.flexlb.mock.engine.scheduler.TaskHistory;
+
+/** Native RPC adapter; P and D owners manage request state and KV independently. */
+public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase implements AutoCloseable {
+    public record Config(String id, Role role, int blockSize, int tpSize, int dpSize, int maxSeqLen,
+                         int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed) {
+        public Config {
+            if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
+                    || blockSize < 1 || tpSize < 1 || dpSize < 1 || maxSeqLen < 1 || maxBatchTokens < 0)
+                throw new IllegalArgumentException("Invalid RTP endpoint configuration");
+            Objects.requireNonNull(compute);
+        }
+
+        public static Config from(RtpConfig config) {
+            return new Config(config.id(), config.role(), config.blockSize(), config.tpSize(), config.dpSize(),
+                config.maxSeqLen(), config.maxBatchTokens(), config.compute(), config.imageToken(), config.cacheKeySeed());
+        }
+    }
+
+    private final CollectorRegistry rpcRegistry = new CollectorRegistry();
+    private final EventMetrics rpcMetrics;
+    private final Map<String, String> metricTags;
+    private final Config config;
+    private final KvCache cache;
+    private final PrefillRpcServer prefill;
+    private final DecodeRpcServer decode;
+    private final boolean groups;
+    private final AtomicLong statusVersion = new AtomicLong();
+    private volatile boolean closed;
+
+    public RtpRpcService(Config config, KvCache cache, Object executionLock, TaskHistory finished,
+                         RtpEngineLoop engine, boolean groups) {
+        this.config = config;
+        this.groups = groups;
+        this.cache = cache;
+        var tags = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
+        tags.put("dp_rank", "0");
+        metricTags = Map.copyOf(tags);
+        rpcMetrics = new EventMetrics(config.role().name(), System::nanoTime, metricTags);
+        rpcMetrics.register(rpcRegistry);
+        prefill = config.role() == Role.prefill
+            ? new PrefillRpcServer(config, executionLock, finished, engine, this::recordCancellation) : null;
+        decode = prefill == null ? new DecodeRpcServer(config, executionLock, engine, this::recordCancellation) : null;
+    }
+    public void close() {
+        closed = true;
+        RuntimeException failure = null;
+        for (AutoCloseable component : new AutoCloseable[]{prefill, decode}) {
+            if (component == null) continue;
+            try { component.close(); }
+            catch (Exception error) {
+                if (failure == null) failure = new IllegalStateException("Cannot close RTP component", error);
+                else failure.addSuppressed(error);
+            }
+        }
+        if (failure != null) throw failure;
+    }
+    public void checkHealthy() {
+        if (closed) throw new IllegalStateException("Engine closed");
+        if (prefill == null) decode.checkHealthy(); else prefill.checkHealthy();
+    }
+    @Override public void executeFunction(FunctionRequestPB input, StreamObserver<FunctionResponsePB> response) {
+        if (input.hasRemoteRequest()) {
+            var operation = input.getRemoteRequest().getOp();
+            if (operation == RemoteOpType.REMOTE_OPERATION_READ || operation == RemoteOpType.REMOTE_OPERATION_WRITE) {
+                // No SDK or external I/O was submitted: the operation fails before touching any payload.
+                response.onNext(FunctionResponsePB.newBuilder().setRemoteResponse(RemoteOperationResponsePB.newBuilder()
+                    .setTransferStatus(RemoteTransferStatusPB.REMOTE_TRANSFER_STATUS_FAILED)).build());
+                response.onCompleted(); return;
+            }
+        }
+        response.onError(Status.UNIMPLEMENTED.withDescription("KVCM payload SDK and metadata backend operations are not simulated").asRuntimeException());
+    }
+
+    @Override public StreamObserver<GenerateRequestPB> remoteGenerate(StreamObserver<GenerateOutputsPB> observer) {
+        return decode == null ? super.remoteGenerate(observer) : decode.open(observer);
+    }
+
+    @Override public void enqueueBatch(EnqueueBatchRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
+        if (prefill == null || !groups) { super.enqueueBatch(request, response); return; }
+        PrefillEnqueueHandler.enqueue(prefill, request, response);
+    }
+
+    @Override public void enqueueGroup(EnqueueGroupRequestPB request, StreamObserver<EnqueueBatchResponsePB> response) {
+        if (prefill == null || !groups) { super.enqueueGroup(request, response); return; }
+        var slot = EnqueueBatchDpSlotPB.newBuilder().setDpRank(request.getDpRank());
+        for (var item : request.getRequestsList()) {
+            var external = EnqueueBatchExternalInputPB.newBuilder();
+            if (item.hasInput()) external.setInput(item.getInput());
+            slot.addRequests(external);
+        }
+        PrefillEnqueueHandler.enqueue(prefill, EnqueueBatchRequestPB.newBuilder().setBatchId(request.getBatchId())
+            .setFetchAttachTimeoutMs(request.getFetchAttachTimeoutMs()).addDpSlots(slot).build(), response);
+    }
+
+    @Override public void fetchResponse(FetchRequestPB request, StreamObserver<GenerateOutputsPB> response) {
+        if (prefill == null) { super.fetchResponse(request, response); return; }
+        prefill.fetch(request.getRequestId(), response);
+    }
+
+    @Override public void cancel(CancelRequestPB request, StreamObserver<CancelResponsePB> response) {
+        if (prefill == null) { super.cancel(request, response); return; }
+        reply(response, () -> CancelResponsePB.newBuilder().setStatus(prefill.cancel(request.getRequestId())).build());
+    }
+
+    @Override public void generateStreamCall(GenerateInputPB request, StreamObserver<GenerateOutputsPB> observer) {
+        if (prefill == null) { super.generateStreamCall(request, observer); return; }
+        prefill.generate(request, observer);
+    }
+
+    @Override public void checkHealth(EmptyPB request, StreamObserver<CheckHealthResponsePB> response) {
+        reply(response, () -> { checkHealthy(); return CheckHealthResponsePB.newBuilder().setHealth("OK").build(); });
+    }
+
+    @Override public void getWorkerStatus(StatusVersionPB request, StreamObserver<WorkerStatusPB> response) {
+        statusReply("worker_status", response, () -> {
+            var snapshot = cache.snapshot(request.getLatestCacheVersion(), false);
+            String role = config.role().name().toUpperCase(java.util.Locale.ROOT);
+            long micros = Math.multiplyExact(System.currentTimeMillis(), 1000);
+            long version = statusVersion.updateAndGet(previous -> Math.max(previous + 1, micros));
+            var tasks = prefill == null ? decode.snapshot(request.getLatestFinishedVersion()) : prefill.snapshot(request.getLatestFinishedVersion());
+            return WorkerStatusPB.newBuilder().setRole("RoleType." + role)
+                .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true).setKvCacheGroupMode(KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
+                .setBlockSize(config.blockSize()).setBlockHashLookaheadTokens(0).setCacheMatchRollbackBlocks(0)
+                .setDpSize(config.dpSize()).setDpRank(0).setTpSize(config.tpSize()).setPrecision("FP16")
+                .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())
+                .setTotalKvCache(tokens(snapshot.totalBlocks())).setAvailableKvCache(tokens(snapshot.availableBlocks()))
+                .addAllRunningTaskInfo(tasks.tasks().stream().map(RpcMessages::task).toList())
+                .addAllFinishedTaskList(tasks.finished().stream().map(RpcMessages::task).toList()).setLatestFinishedVersion(tasks.finishedVersion())
+                .build();
+        });
+    }
+
+    @Override public void getCacheStatus(CacheVersionPB request, StreamObserver<CacheStatusPB> response) {
+        statusReply("cache_status", response, () -> {
+            var snapshot = cache.snapshot(request.getLatestCacheVersion(), request.getNeedCacheKeys());
+            var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
+                .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.blockSize()).setVersion(snapshot.version());
+            for (long key : snapshot.keys()) result.putCacheKeys(key, true);
+            return result.build();
+        });
+    }
+
+    private void recordCancellation() {
+        rpcMetrics.increment("rtp_llm_rpc_cancel_qps");
+    }
+
+    public List<MetricFamilySamples> collectMetrics() {
+        return MetricTags.collect(rpcRegistry, metricTags);
+    }
+
+    private <T> void statusReply(String kind, StreamObserver<T> observer, Supplier<T> read) {
+        long started = System.nanoTime();
+        try {
+            reply(observer, read);
+        } finally {
+            synchronized (rpcMetrics) {
+                rpcMetrics.increment("rtp_llm_rpc_" + kind + "_qps");
+                rpcMetrics.observe("rtp_llm_rpc_" + kind + "_total_rt_us", (System.nanoTime() - started) / 1000.0);
+            }
+        }
+    }
+
+    private long tokens(int blocks) { return (long) blocks * config.blockSize(); }
+    private <T> void reply(StreamObserver<T> observer, Supplier<T> read) {
+        if (closed) { observer.onError(Status.UNAVAILABLE.withDescription("RTP node is closed").asRuntimeException()); return; }
+        T value;
+        try { value = read.get(); }
+        catch (io.grpc.StatusRuntimeException error) { observer.onError(error); return; }
+        catch (RuntimeException error) { observer.onError(Status.INTERNAL.withCause(error).withDescription(error.getMessage()).asRuntimeException()); return; }
+        observer.onNext(value); observer.onCompleted();
+    }
+}

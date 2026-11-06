@@ -1,0 +1,564 @@
+package org.flexlb.mock.engine.scheduler;
+
+import io.prometheus.client.Collector;
+import java.util.*;
+import java.util.function.Supplier;
+import org.flexlb.mock.protocol.Role;
+import org.flexlb.mock.engine.*;
+import org.flexlb.mock.engine.cache.KvCache;
+import org.flexlb.mock.engine.config.RtpConfig;
+import org.flexlb.mock.engine.forward.*;
+import static org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure.Reason.*;
+import static org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.Phase.*;
+
+/** Shared RTP request, KV, PD and Forward lifecycle; admission policies own their queues. */
+public abstract class AbstractRtpScheduler implements EngineScheduler {
+    public static Supplier<List<Collector.MetricFamilySamples>> metricsFor(EngineScheduler scheduler) {
+        return scheduler instanceof AbstractRtpScheduler rtp ? rtp.metrics()::collect : null;
+    }
+
+    public static EngineScheduler.Factory factory(RtpConfig config) {
+        Objects.requireNonNull(config);
+        return (lock, cache, finished) -> config.groupScheduling()
+            ? new RtpPrefillGroupScheduler(lock, config, cache, finished) : new RtpFifoScheduler(lock, config, cache, finished);
+    }
+
+    /** Native P/D handoff events carried across the engine loop. */
+    public enum RtpControl implements Control {
+        TRANSFER_ACKNOWLEDGED, PREFILL_COMPLETE;
+
+        /** The first sampled token is also the repeated synthetic Decode output. */
+        public record Generate(int tokenId) implements Control {}
+    }
+    public record RtpTransferResult(boolean prefillFinished, RequestFailure failure) implements TransferResult {}
+
+
+    enum Phase { QUEUED, CAPACITY, KV_PREPARING, WAITING_LOAD, TRANSFERRING, TRANSFERRED, RUNNING, FORWARD, READY }
+    private final TaskHistory history;
+    private final Object lock;
+    protected final RtpConfig config;
+    private final KvCache cache;
+    private final RtpMetrics metrics;
+    private final Map<String, Entry> active = new LinkedHashMap<>();
+    protected final ArrayDeque<Entry> waiting = new ArrayDeque<>();
+    private final Set<Entry> running = new LinkedHashSet<>();
+    private final Set<Entry> notifications = new LinkedHashSet<>();
+    private Work executing;
+    private long batchSequence;
+    protected boolean closed;
+
+    protected final class Entry implements Request {
+        final Input input;
+        final Listener listener;
+        final RequestState state;
+        final ArrayDeque<Notice> notices = new ArrayDeque<>();
+        KvCache.Lease lease;
+        KvCache.Preparation preparation;
+        long preparationStarted;
+        boolean cacheMatchRequested;
+
+        int reused, remoteReused, outputToken;
+        boolean prefillFinished;
+        final long begun = System.nanoTime();
+        long enqueuedAt = begun, waitNanos, firstToken;
+        long timingStarted, canRun, firstRunning;
+        Phase phase = QUEUED;
+        ReportedPhase finalPhase;
+        boolean loaded, generating, notifying, transferBegun;
+        Progress progress = new Progress(0, 0, false);
+        volatile RequestFailure terminalFailure;
+        ComputeModel.Plan nextStep;
+
+        Entry(Input input, Listener listener) {
+            this.input = input;
+            timingStarted = input.started();
+            this.listener = listener;
+            this.state = new RequestState(input.deadline(), failure -> terminal(this, failure));
+        }
+        AbstractRtpScheduler owner() { return AbstractRtpScheduler.this; }
+        @Override public Input input() { return input; }
+        @Override public RequestState.Snapshot snapshot() { synchronized (lock) { return state.snapshot(); } }
+        @Override public Progress progress() { synchronized (lock) { return progress; } }
+        @Override public int reused() { synchronized (lock) { return reused; } }
+        @Override public int remoteReused() { synchronized (lock) { return remoteReused; } }
+
+    }
+    private record Member(Entry request, RequestState.Use use, ComputeModel.Plan step) {}
+    private record Batch(List<Member> members, long scheduleStarted, long stepStarted, long inputStarted) {}
+    private record Notice(Runnable action, boolean terminal, boolean progress) {}
+
+    AbstractRtpScheduler(Object lock, RtpConfig config, KvCache cache, TaskHistory history) {
+        this.history = Objects.requireNonNull(history);
+        this.lock = Objects.requireNonNull(lock);
+        this.config = Objects.requireNonNull(config);
+        this.cache = Objects.requireNonNull(cache);
+        this.metrics = new RtpMetrics(config.role().name(), this::metricState, System::nanoTime, cache::itemCount);
+        cache.onEvictionLifetime(metrics::blockEvicted);
+    }
+
+    @Override public Request input(Input input, Listener listener) {
+        if (closed) throw new RequestFailure(CLOSED, "Engine is closing");
+        if (input.tokens() >= config.maxSeqLen())
+            throw new RequestFailure(INVALID, "Prompt exceeds the context limit");
+        if (input.tokens() > cache.maxRequestTokens())
+            throw new RequestFailure(RequestFailure.Reason.CAPACITY, "Prompt exceeds the maximum KV capacity");
+        if (active.containsKey(input.identity())) throw new RequestFailure(DUPLICATE, "Active request identity already exists");
+        var entry = new Entry(input, Objects.requireNonNull(listener));
+        active.put(input.identity(), entry);
+        metrics.started();
+        if (prefill()) waiting.addLast(entry);
+        else entry.phase = Phase.CAPACITY;
+        return entry;
+    }
+
+    @Override public void control(Request handle, Control control) {
+        var entry = entry(handle);
+        if (entry.state.terminating()) return;
+        if (entry.state.expired()) { finish(entry, new RequestFailure(TIMEOUT, "Control arrived after deadline")); return; }
+        if (control instanceof RtpControl.Generate generate) {
+            if (prefill() || !entry.loaded || entry.generating || entry.prefillFinished || generate.tokenId() < 0)
+                throw new RequestFailure(INVALID, "Generation requires loaded KV and a new generation permit");
+            entry.timingStarted = System.nanoTime();
+            entry.waitNanos = 0; entry.canRun = entry.firstRunning = 0;
+            entry.outputToken = generate.tokenId();
+            entry.generating = true;
+            entry.state.transferred(1);
+            // The first P token may already reach D's context/output limit. No Decode forward is needed.
+            if (entry.state.snapshot().generated() >= outputLimit(entry)) { emit(entry, true); return; }
+            entry.phase = QUEUED; entry.enqueuedAt = entry.timingStarted; waiting.addLast(entry);
+            return;
+        }
+        if (!(control instanceof RtpControl event)) throw new RequestFailure(INVALID, "Foreign RTP control");
+        switch (event) {
+            case PREFILL_COMPLETE -> {
+                if (prefill() || !entry.loaded || entry.generating)
+                    throw new RequestFailure(INVALID, "Unexpected Prefill-only completion");
+                entry.prefillFinished = true;
+                entry.state.transferred(1);
+                finish(entry, null);
+            }
+            case TRANSFER_ACKNOWLEDGED -> {
+                if (!prefill() || !entry.input.retained() || !entry.transferBegun || entry.phase != TRANSFERRING)
+                    throw new RequestFailure(INVALID, "Transfer acknowledgement without a readable Prefill source");
+                finish(entry, null);
+            }
+        }
+    }
+
+    @Override public void maintain() {
+        for (var entry : List.copyOf(active.values())) {
+            if (!live(entry)) continue;
+            if (entry.preparation instanceof KvCache.Loading loading) {
+                var result = loading.poll();
+                if (result instanceof KvCache.Loading) continue;
+                entry.preparation = null;
+                entry.phase = prefill() ? QUEUED : Phase.CAPACITY;
+                completePreparation(entry, result);
+            } else if (!prefill() && entry.lease == null) {
+                prepare(entry);
+            }
+        }
+    }
+
+    @Override public Work schedule() {
+        long scheduleStarted = System.nanoTime();
+        if (closed) return null;
+        if (executing != null) throw new IllegalStateException("Forward already in flight");
+        int limit = config.maxGenerateBatchSize();
+        var selected = new ArrayList<Entry>();
+        if (prefill()) {
+            selectPrefill(selected);
+        } else {
+            for (var entry : List.copyOf(running)) {
+                if (selected.size() >= limit) break;
+                if (workTokens(entry) > 0 && reserve(entry)) selected.add(entry);
+            }
+            int queued = waiting.size();
+            while (queued-- > 0 && selected.size() < limit && running.size() < limit) {
+                var entry = waiting.removeFirst();
+                if (!live(entry)) continue;
+                if (workTokens(entry) <= 0 || !reserve(entry)) {
+                    if (!entry.state.terminating()) waiting.addLast(entry);
+                    continue;
+                }
+                running.add(entry); selected.add(entry);
+            }
+        }
+        if (selected.isEmpty()) return null;
+        var members = new ArrayList<Member>();
+        for (var entry : selected) {
+            members.add(new Member(entry, entry.state.forward(), entry.nextStep));
+            long now = System.nanoTime();
+            if (entry.firstRunning == 0) {
+                entry.waitNanos = Math.max(0, now - entry.timingStarted);
+                entry.firstRunning = now;
+            }
+            entry.phase = FORWARD;
+        }
+        // Real prepares streams before starting its step timer, then gathers model input.
+        long prepareStarted = System.nanoTime();
+        var items = new ArrayList<ForwardBatch.Request>();
+        for (var member : members) {
+            var entry = member.request();
+            int tokens = prefill() ? entry.input.tokens() - entry.reused : 1;
+            items.add(new ForwardBatch.Request(entry.input.identity(), entry.input.tokens(), entry.reused,
+                prefill() ? 1 : entry.input.maxNewTokens(), member.step().request().generated(), tokens, entry.input.priority(), List.of()));
+        }
+        var batch = new ForwardBatch(config.id() + "/" + ++batchSequence, List.of(new ForwardBatch.Partition(0, items)));
+        executing = new Work(new Batch(List.copyOf(members), scheduleStarted, System.nanoTime(), prepareStarted), batch);
+        metrics.computeStarted();
+        metrics.batchPrepared(System.nanoTime() - prepareStarted);
+        return executing;
+    }
+
+    protected abstract void selectPrefill(List<Entry> selected);
+
+    protected final void admitPrefill(ArrayDeque<Entry> queue, List<Entry> selected, int uncachedLimit) {
+        long uncached = 0;
+        var admitted = new ArrayList<Entry>();
+        for (var entry : List.copyOf(queue)) {
+            if (!live(entry) || entry.preparation instanceof KvCache.Loading) continue;
+            if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
+            if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
+            if (entry.lease == null && config.maxInitedKvStreams() > 0
+                    && active.values().stream().filter(e -> e.lease != null || e.preparation instanceof KvCache.Loading).count() >= config.maxInitedKvStreams()) continue;
+            if (workTokens(entry) <= 0 || !fitsPrefill(admitted, entry)) continue;
+            if (!reserve(entry)) continue;
+            admitted.add(entry);
+            queue.remove(entry); running.add(entry); selected.add(entry);
+            uncached += uncachedTokens(entry);
+        }
+    }
+    protected void removeWaiting(Entry entry) { waiting.remove(entry); }
+
+    protected Set<Entry> waitingEntries() { return new HashSet<>(waiting); }
+
+    private long uncachedTokens(Entry entry) {
+        long tokens = entry.input.tokens() - entry.reused;
+        long alignment = 2L * config.cpSize();
+        return config.cpSize() > 1 ? (tokens + alignment - 1) / alignment * alignment : tokens;
+    }
+
+    private boolean fitsPrefill(List<Entry> selected, Entry candidate) {
+        if (selected.isEmpty()) return candidate.input.tokens() < config.maxSeqLen();
+        long sum = candidate.input.tokens(), longest = candidate.input.tokens();
+        for (var entry : selected) {
+            sum += entry.input.tokens(); longest = Math.max(longest, entry.input.tokens());
+        }
+        // Native prefill-only means max_new_tokens == 0; this Mock currently accepts positive output lengths only.
+        long budget = (long) config.maxBatchTokens() - 1;
+        return sum <= budget && longest * (selected.size() + 1L) <= budget;
+    }
+
+    private int outputLimit(Entry entry) {
+        return Math.min(entry.input.maxNewTokens(),
+            config.maxSeqLen() - entry.input.tokens());
+    }
+
+    private int workTokens(Entry entry) {
+        if (!live(entry)) return 0;
+        var progress = entry.state.snapshot();
+        if (entry.nextStep == null)
+            entry.nextStep = config.compute().prepare(config.role(), new ComputeModel.Request(
+                Long.toString(entry.input.requestId()), progress.iterations(), entry.input.tokens(), progress.generated(),
+                entry.input.minNewTokens(), entry.input.maxNewTokens(),
+                config.maxSeqLen(), entry.input.ignoreEos()));
+        if (prefill()) return entry.input.tokens();
+        return 1;
+    }
+
+    private boolean reserve(Entry entry) {
+        if (entry.canRun == 0) entry.canRun = System.nanoTime();
+        if (prefill()) {
+            return prepare(entry);
+        }
+        long tokens = (long) entry.input.tokens() + entry.state.snapshot().generated() + entry.nextStep.additionalKvTokens();
+        var failure = entry.lease.ensureCapacity(tokens);
+        if (failure != null) {
+            // RTP running streams fail KV growth; only admission waits for capacity.
+            finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "Decode KV growth failed: " + failure));
+            return false;
+        }
+        entry.phase = RUNNING;
+        return true;
+    }
+
+    @Override public void computeCompleted(Work work, SimulatedCompute.Outcome outcome) {
+        var batch = completedBatch(work);
+        long input = 0, computed = 0, output = 0, maxSequence = 0;
+        // Like Real's staged accept_len, this describes the completed computation,
+        // before cancellation filtering and EOS/max-length output truncation.
+        long tpotStepNanos = System.nanoTime() - batch.inputStarted();
+        long acceptedTokens = 0;
+        var byPriority = new TreeMap<Integer, RtpMetrics.TokenCounts>();
+        try {
+            for (var member : batch.members()) {
+                var entry = member.request();
+                maxSequence = Math.max(maxSequence, (long) entry.input.tokens() + member.step().request().generated());
+                input += prefill() ? entry.input.tokens() : 1;
+                computed += prefill() ? entry.input.tokens() - entry.reused : 1;
+                acceptedTokens += member.step().candidates();
+                long context = prefill() ? entry.input.tokens() - entry.reused : 0;
+                long generated = prefill() ? 0 : member.step().candidates();
+                byPriority.merge(entry.input.priority(), new RtpMetrics.TokenCounts(context,
+                    prefill() ? entry.input.tokens() : 0, generated, context + generated), RtpMetrics.TokenCounts::plus);
+                if (!live(entry)) continue;
+                if (outcome.state() != SimulatedCompute.State.COMPLETED) {
+                    finish(entry, new RequestFailure(CANCELLED, "Forward cancelled"));
+                    continue;
+                }
+                var result = config.compute().completed(member.step());
+                int committed = result.committedTokens();
+                entry.state.commit(committed, outcome.elapsedNanos());
+                if (committed > 0 && entry.firstToken == 0) entry.firstToken = System.nanoTime();
+                entry.nextStep = null;
+                output += committed;
+                if (prefill()) { running.remove(entry); entry.phase = READY; entry.prefillFinished = result.finished(); }
+                emit(entry, result.finished());
+            }
+            if (outcome.state() == SimulatedCompute.State.COMPLETED) {
+                long completed = System.nanoTime();
+                int size = batch.members().size();
+                metrics.stepCompleted(new RtpMetrics.StepStats(prefill() ? size : 0, prefill() ? 0 : size,
+                    maxSequence, completed - batch.scheduleStarted(), completed - batch.stepStarted(),
+                    outcome.elapsedNanos(), outcome.sample().planned().toNanos(), input, computed, output, acceptedTokens, tpotStepNanos), byPriority);
+            }
+        } finally { metrics.computeFinished(); batch.members().forEach(member -> member.use().close()); }
+    }
+
+    @Override public void failed(Work work, RuntimeException error) {
+        var batch = completedBatch(work);
+        var failure = error instanceof RequestFailure known ? known : new RequestFailure(INTERNAL, "Forward failed", error);
+        try { batch.members().forEach(member -> finish(member.request(), failure)); }
+        finally { metrics.computeFinished(); batch.members().forEach(member -> member.use().close()); }
+    }
+    @Override public boolean cancelled(Work work) {
+        return work == executing && ((Batch) work.owner()).members().stream().allMatch(member -> member.request().state.terminating());
+    }
+    private Batch completedBatch(Work work) {
+        if (work != executing) throw new IllegalStateException("Stale/foreign Forward completion");
+        executing = null;
+        return (Batch) work.owner();
+    }
+
+    private void emit(Entry entry, boolean done) {
+        var snapshot = entry.state.snapshot();
+        entry.progress = new Progress(snapshot.generated(), snapshot.iterations(), done);
+        // A notification carries no token data. A slow consumer sees the latest cumulative progress.
+        entry.notices.removeIf(Notice::progress);
+        entry.notices.addLast(new Notice(() -> {
+            if (entry.terminalFailure == null) entry.listener.progressed(entry);
+        }, false, true));
+        notifications.add(entry);
+        if ((prefill() || done) && !entry.input.retained()) finish(entry, null);
+    }
+
+    @Override public RequestState.Use beginTransfer(Request request) {
+        var entry = entry(request);
+        if (!live(entry) || entry.transferBegun || (prefill() ? entry.phase != READY : entry.phase != WAITING_LOAD))
+            throw new RequestFailure(INVALID, "Request is not ready for a new KV transfer");
+        entry.transferBegun = true;
+        entry.phase = TRANSFERRING;
+        return entry.state.pin();
+    }
+    @Override public void transferCompleted(Request request, TransferResult result) {
+        var entry = entry(request);
+        if (!live(entry)) return;
+        if (!(result instanceof RtpTransferResult transferred)) throw new RequestFailure(INVALID, "Foreign RTP transfer result");
+        if (transferred.failure() != null) { finish(entry, transferred.failure()); return; }
+        if (!entry.transferBegun || entry.phase != TRANSFERRING)
+            throw new RequestFailure(INVALID, "Stale or duplicate transfer completion");
+        if (prefill() || entry.lease == null || entry.loaded || entry.generating)
+            throw new RequestFailure(INVALID, "Unexpected Decode KV load completion");
+        entry.loaded = true;
+        entry.prefillFinished = transferred.prefillFinished();
+        entry.phase = TRANSFERRED;
+    }
+    @Override public void finish(Request request, RequestFailure failure) {
+        var entry = entry(request);
+        if (entry.state.terminating()) return;
+        entry.finalPhase = reportedPhase(entry);
+        long now = System.nanoTime();
+        if (waitingEntries().contains(entry) || entry.phase == Phase.CAPACITY)
+            entry.waitNanos = Math.max(0, now - entry.timingStarted);
+        removeWaiting(entry);
+        running.remove(entry);
+        if (entry.preparation instanceof KvCache.Loading loading) loading.close();
+        entry.preparation = null;
+        entry.state.finish(failure);
+    }
+    private void terminal(Entry entry, RequestFailure failure) {
+        entry.terminalFailure = failure;
+        long now = System.nanoTime();
+        history.add(task(entry, now, System.currentTimeMillis(), failure));
+        var outcome = failure == null ? RtpMetrics.Outcome.success : switch (failure.reason()) {
+            case CANCELLED -> RtpMetrics.Outcome.cancelled;
+            case TIMEOUT -> RtpMetrics.Outcome.timeout;
+            default -> RtpMetrics.Outcome.error;
+        };
+        var progress = entry.state.snapshot();
+        metrics.requestFinished(outcome, new RtpMetrics.RequestStats(
+            Math.max(0, now - entry.timingStarted), entry.waitNanos,
+            entry.canRun == 0 ? 0 : Math.max(0, entry.canRun - entry.enqueuedAt),
+            entry.canRun == 0 || entry.firstRunning == 0 ? 0 : Math.max(0, entry.firstRunning - entry.canRun),
+            entry.firstToken == 0 ? -1 : entry.firstToken - entry.begun,
+            entry.input.tokens(), progress.generated(), progress.iterations(), entry.reused),
+            prefill() || canReuseLocalKv(entry));
+        metrics.streamingFinished(entry.input.streaming());
+        active.remove(entry.input.identity(), entry);
+        enqueue(entry, () -> entry.listener.terminal(entry, failure), true);
+    }
+    private void enqueue(Entry entry, Runnable notification, boolean terminal) {
+        // At most admission, one coalesced progress signal, and terminal per request.
+        if (entry.notices.size() >= 3) throw new IllegalStateException("Request notification overflow");
+        entry.notices.addLast(new Notice(notification, terminal, false));
+        notifications.add(entry);
+    }
+    @Override public List<Runnable> takeNotifications() {
+        var result = new ArrayList<Runnable>();
+        for (var entry : List.copyOf(notifications)) {
+            if (entry.notifying) continue;
+            notifications.remove(entry);
+            var notification = entry.notices.removeFirst();
+            entry.notifying = true;
+            result.add(() -> {
+                try { notification.action().run(); }
+                catch (RuntimeException error) {
+                    synchronized (lock) {
+                        if (notification.terminal()) throw error;
+                        finish(entry, new RequestFailure(CANCELLED, "Request consumer failed", error));
+                    }
+                } finally {
+                    synchronized (lock) {
+                        entry.notifying = false;
+                        if (!entry.notices.isEmpty()) notifications.add(entry);
+                    }
+                }
+            });
+        }
+        return result;
+    }
+
+    private boolean liveForDelivery(Entry entry) { synchronized (lock) { return live(entry); } }
+    protected final boolean live(Entry entry) {
+        if (entry.state.terminating()) return false;
+        if (entry.state.expired()) finish(entry, new RequestFailure(TIMEOUT, "Request budget expired"));
+        return !entry.state.terminating();
+    }
+    private Entry entry(Request request) {
+        if (!(request instanceof AbstractRtpScheduler.Entry entry) || entry.owner() != this)
+            throw new IllegalArgumentException("Foreign request handle");
+        return entry;
+    }
+    protected final boolean prefill() { return config.role() == Role.prefill; }
+    private boolean canReuseLocalKv(Entry entry) {
+        return config.reuseCache() && config.deviceCache() && entry.input.reuse()
+            && (prefill() || !config.disableDecodeFirstReuse());
+    }
+
+    private boolean prepare(Entry entry) {
+        if (entry.lease != null) return true;
+        entry.preparationStarted = System.nanoTime();
+        if (entry.preparation instanceof KvCache.Failed failed)
+            return completePreparation(entry, failed.retry());
+        boolean reuse = canReuseLocalKv(entry);
+        var keys = entry.input.keys();
+        if (prefill())
+            metrics.recordPrefillCacheKeys(keys, entry.input.tokens(), config.blockSize());
+        int matched = Math.min(keys.size(), (entry.input.tokens() - 1) / config.blockSize());
+        entry.cacheMatchRequested = reuse && matched > 0;
+        return completePreparation(entry,
+            cache.prepare(entry.input.tokens(), reuse ? keys.subList(0, matched) : List.of()));
+    }
+
+    private boolean completePreparation(Entry entry, KvCache.Preparation result) {
+        if (result instanceof KvCache.Loading loading) {
+            entry.preparation = loading;
+            entry.phase = KV_PREPARING;
+            entry.canRun = 0;
+            return false;
+        }
+        if (result instanceof KvCache.Failed failed) {
+            entry.preparation = failed;
+            if (failed.failure() == KvCache.Failure.PERMANENT)
+                finish(entry, new RequestFailure(RequestFailure.Reason.CAPACITY, "KV allocation exceeds capacity"));
+            return false;
+        }
+        entry.preparation = null;
+        var ready = (KvCache.Ready) result;
+        entry.waitNanos = Math.max(0, System.nanoTime() - entry.timingStarted);
+        entry.lease = ready.lease();
+        entry.reused = Math.toIntExact(entry.lease.reusedTokens());
+        entry.remoteReused = ready.remoteReusedTokens();
+        entry.state.attach(entry.lease, () -> {
+            if (!config.reuseCache() || !config.deviceCache() || !entry.input.reuse()) return;
+            // The final sampled token has not entered a Forward and owns no computed KV.
+            int computedOutput = !prefill() && entry.generating ? Math.max(0, entry.state.snapshot().generated() - 1) : 0;
+            entry.lease.publish(entry.input.cacheSequence().keys(computedOutput, entry.outputToken),
+                (long) entry.input.tokens() + computedOutput);
+        });
+        metrics.cacheLookup(entry.input.tokens(), entry.reused);
+        if (entry.cacheMatchRequested) metrics.cacheMatched(ready.matchNanos());
+        if (config.reuseCache() && entry.input.reuse())
+            metrics.prepared((long) (entry.input.tokens() / config.blockSize()) * config.blockSize(),
+                entry.reused - entry.remoteReused, System.nanoTime() - entry.preparationStarted);
+        if (!prefill()) {
+            entry.phase = WAITING_LOAD;
+            enqueue(entry, () -> { if (liveForDelivery(entry)) entry.listener.allocated(entry); }, false);
+        }
+        return true;
+    }
+    @Override public List<Request> requests() { return new ArrayList<>(active.values()); }
+    @Override public QueueSnapshot queues() {
+        int queued = 0, executing = 0, loading = 0, ready = 0;
+        var waitingMembers = waitingEntries();
+        for (var entry : active.values()) {
+            if (entry.state.terminating()) continue;
+            if (running.contains(entry)) executing++;
+            else if (entry.phase == KV_PREPARING) loading++;
+            else if (waitingMembers.contains(entry) || entry.phase == Phase.CAPACITY) queued++;
+            else if (entry.phase == READY || entry.phase == TRANSFERRING || entry.phase == TRANSFERRED) ready++;
+            else loading++;
+        }
+        return new QueueSnapshot(queued, executing, loading, ready);
+    }
+    @Override public long nextDeadline() {
+        return active.values().stream().filter(entry -> !entry.state.terminating())
+            .mapToLong(entry -> entry.input.deadline()).min().orElse(Long.MAX_VALUE);
+    }
+    @Override public List<Task> tasks() {
+        long now = System.nanoTime();
+        return active.values().stream().map(entry -> task(entry, now, -1, null)).toList();
+    }
+    private Task task(Entry entry, long now, long endTimeMillis, RequestFailure failure) {
+        var progress = entry.state.snapshot();
+        var phase = endTimeMillis >= 0 && entry.finalPhase != null ? entry.finalPhase : reportedPhase(entry);
+        boolean finished = endTimeMillis >= 0;
+        // Native runtime metadata publishes final timings only on dequeue. Live execution is -1.
+        long waitMillis = finished ? entry.waitNanos / 1_000_000 : 0;
+        long executionMillis = finished ? Math.max(0, (now - entry.timingStarted) / 1_000_000 - waitMillis) : -1;
+        return new Task(entry.input.requestId(), entry.input.groupId(), entry.input.tokens(), entry.reused,
+            entry.input.priority(), phase, progress.iterations(), waitMillis, executionMillis,
+            endTimeMillis, failure, entry.lease != null);
+    }
+    private ReportedPhase reportedPhase(Entry entry) {
+        return entry.phase == FORWARD || entry.phase == RUNNING
+            ? ReportedPhase.RUNNING : entry.lease != null
+                ? ReportedPhase.KV_ALLOCATED : ReportedPhase.RECEIVED;
+    }
+    private RtpMetrics.State metricState() {
+        synchronized (lock) {
+            var counts = queues();
+            var kv = cache.snapshot(0, false);
+            long block = config.blockSize();
+            return new RtpMetrics.State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
+                kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, config.blockSize());
+        }
+    }
+    RtpMetrics metrics() { return metrics; }
+    @Override public void close() {
+        if (closed) return;
+        closed = true;
+        for (var entry : List.copyOf(active.values())) finish(entry, new RequestFailure(CLOSED, "Engine closed"));
+    }
+}

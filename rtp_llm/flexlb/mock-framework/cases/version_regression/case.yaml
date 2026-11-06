@@ -1,0 +1,171 @@
+# 初始门禁阈值，尚待目标机器上完成完整规模校准。
+id: version_regression
+name: 固定流量性能门禁
+describe: 固定 DeepSeek 回放、P/D 计算模型和部署规模，以绝对阈值检查各版本的吞吐、延迟、复用和成功率。
+environment:
+  master:
+    deployment:
+      replicas: 2
+    config: configs/master.yaml
+  prefill:
+    engine: rtp
+    deployment:
+      replicas: 48
+    config: configs/prefill.yaml
+  decode:
+    engine: rtp
+    deployment:
+      replicas: 192
+    config: configs/decode.yaml
+  client:
+    config: {}
+    deployment:
+      replicas: 2
+phases:
+- id: startup
+  describe: 确认唯一主 Master，等待发现传播。
+  timeout: 120s
+  steps:
+  - id: check_master_leader
+    describe: 两个 Master 中恰有一个主节点。
+    interface: master/get
+    args:
+      is_leader: true
+    expect:
+      count: 1
+    wait_after: 10s
+- id: performance
+  describe: 先预热，随后在稳定流量中检查过去 60 秒的区间汇总指标。
+  timeout: 600s
+  steps:
+  - id: start_client
+    describe: 两 Client 按总 0.1 倍速回放 DeepSeek，启用请求级缓存复用。等待 180 秒，前 120 秒用于预热。
+    interface: client/start
+    args:
+      requests_file: data/traffic/deepseek.binpb.zst
+      reuse_cache: true
+      replay_speed: 0.1
+      concurrency: 4096
+      queue_capacity: 4096
+      request_timeout: 120s
+      drain_timeout: 150s
+    within: 300s
+    wait_after: 180s
+  - id: check_client_qps
+    describe: 已发请求速率，避免未施加足够负载时通过性能门禁。
+    interface: client/qps
+    args:
+      range:
+      - -65s
+      - -5s
+    expect:
+      gte: 70
+      lte: 110
+    within: 30s
+  - id: check_prefill_tps
+    describe: 集群原生 Prefill TPS，按各 Worker 的区间平均求和。
+    interface: engine/prefill/tps
+    args:
+      range:
+      - -65s
+      - -5s
+    expect:
+      gte: 100000
+    within: 30s
+  - id: check_prefill_tps_with_cache
+    describe: 集群原生含缓存 Prefill TPS，包含输入中的复用 token。
+    interface: engine/prefill/tps_with_cache
+    args:
+      range:
+      - -65s
+      - -5s
+    expect:
+      gte: 100000
+    within: 30s
+  - id: check_output_tps
+    describe: 集群已提交输出 token 的墙钟吞吐。
+    interface: engine/decode/tps
+    args:
+      range:
+      - -65s
+      - -5s
+    expect:
+      gte: 1000
+    within: 30s
+  - id: check_client_ttft_mean
+    describe: Client 首 token 延迟的请求加权均值。
+    interface: client/ttft
+    args:
+      range:
+      - -65s
+      - -5s
+      statistic: mean
+    expect:
+      lte: 10s
+    within: 30s
+  - id: check_client_ttft_p95
+    describe: 合并 Client Histogram 后计算 P95。
+    interface: client/ttft
+    args:
+      range:
+      - -65s
+      - -5s
+      statistic: p95
+    expect:
+      lte: 30s
+    within: 30s
+  - id: check_client_tpot_mean
+    describe: 成功且输出多于一个 token 的 Client TPOT 均值。
+    interface: client/tpot
+    args:
+      range:
+      - -65s
+      - -5s
+      statistic: mean
+    expect:
+      lte: 200ms
+    within: 30s
+  - id: check_client_tpot_p95
+    describe: 成功多 token 请求的 Client TPOT P95。
+    interface: client/tpot
+    args:
+      range:
+      - -65s
+      - -5s
+      statistic: p95
+    expect:
+      lte: 500ms
+    within: 30s
+  - id: check_prefill_cache_hit_rate
+    describe: Prefill 实际复用 token / 输入 token 的区间增量比值。
+    interface: engine/cache/hit_rate
+    args:
+      range:
+      - -65s
+      - -5s
+    expect:
+      gte: 0.01
+    within: 30s
+  - id: check_client_success_rate
+    describe: 已完成请求成功率的区间增量比值。
+    interface: client/success_rate
+    args:
+      range:
+      - -65s
+      - -5s
+    expect:
+      gte: 0.99
+    within: 30s
+  - id: stop_client
+    describe: 停止回放并收齐全部已发请求的终态，队列/在途/结果不完整时报错。
+    interface: client/stop
+    within: 180s
+    wait_after: 5s
+  - id: check_client_success_rate_after_drain
+    describe: 排空后检查本次运行全部终态的成功率，包含预热和排空阶段的失败。
+    interface: client/success_rate
+    args:
+      range: [-600s, 0s]
+    expect:
+      gte: 0.99
+    within: 30s

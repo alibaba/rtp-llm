@@ -1,0 +1,18 @@
+max_seq_len: 1048576
+tp_size: 1
+dp_size: 1
+seq_size_per_block: 128
+reuse_cache: false
+enable_device_cache: true
+reserve_block_ratio: 8
+concurrency_limit: 128
+max_batch_tokens_size: 1048576
+test_block_num: 221485
+mock.compute:
+  forward:
+    expression: 19.5 + 0.175 * batchSize
+  decode:
+    tokens.per.step: 2.6
+  eos:
+    probability: 0.0025
+    seed: 20260922
