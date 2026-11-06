@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -70,6 +71,8 @@ struct TokenCountReport {
     std::string priority;
     int64_t     context_tokens;
     int64_t     context_tokens_with_cache;
+    int64_t     report_window_us = 0;
+    bool        zero_report      = false;
 };
 
 class RecordingTokenCountMetrics: public kmonitor::MetricsGroup {
@@ -80,9 +83,13 @@ public:
 
     void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector) {
         std::lock_guard<std::mutex> lock(mutex_);
-        TokenCountReport           report{
-            tags->FindTag("priority"), collector->contextTokens(), collector->contextTokensWithCache()};
-        last_report_was_idle_ = collector->reportZeroTPS();
+        TokenCountReport            report{tags->FindTag("priority"),
+                                collector->contextTokens(),
+                                collector->contextTokensWithCache(),
+                                collector->reportWindowUs(),
+                                collector->reportZeroTPS()};
+        all_reports_.push_back(report);
+        last_report_was_idle_ = report.zero_report;
         if (last_report_was_idle_) {
             idle_report_ = report;
         } else {
@@ -104,10 +111,48 @@ public:
         return true;
     }
 
+    // Wait until `zero_count` idle-marked zero samples for `priority` were observed after the
+    // first data sample of the same priority, then snapshot every ordered report.
+    bool waitZeroFillAfterData(const std::string&             priority,
+                               size_t                         zero_count,
+                               std::vector<TokenCountReport>& reports,
+                               std::chrono::milliseconds      timeout = std::chrono::seconds(5)) {
+        return waitPredicate(
+            [&](const std::vector<TokenCountReport>& all) {
+                bool   seen_data = false;
+                size_t zeros     = 0;
+                for (const auto& report : all) {
+                    if (report.priority != priority) {
+                        continue;
+                    }
+                    if (!seen_data) {
+                        seen_data = !report.zero_report;
+                    } else if (report.zero_report) {
+                        ++zeros;
+                    }
+                }
+                return seen_data && zeros >= zero_count;
+            },
+            reports,
+            timeout);
+    }
+
+    bool waitPredicate(const std::function<bool(const std::vector<TokenCountReport>&)>& predicate,
+                       std::vector<TokenCountReport>&                                   reports,
+                       std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!cv_.wait_for(lock, timeout, [&] { return predicate(all_reports_); })) {
+            return false;
+        }
+        reports = all_reports_;
+        return true;
+    }
+
 private:
     std::mutex                    mutex_;
     std::condition_variable       cv_;
     std::vector<TokenCountReport> data_reports_;
+    std::vector<TokenCountReport> all_reports_;
     TokenCountReport              idle_report_{};
     bool                          last_report_was_idle_ = false;
 };
@@ -609,6 +654,195 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, IgnoresNonPositiveContextTokenCounts) {
     EXPECT_FALSE(collector.hasMetrics());
     EXPECT_EQ(collector.priorityCollectorsForReport().at(30).contextTokens(), 0);
     EXPECT_EQ(collector.priorityCollectorsForReport().at(30).contextTokensWithCache(), 0);
+}
+
+namespace {
+
+// Drives a real WallClockMetricsLoopReporter thread at a 1ms interval against the recording
+// metrics group so sample density, ordering and windows can be asserted deterministically.
+struct WallReporterFixture {
+    WallReporterFixture(const char* monitor_name):
+        monitor(std::make_shared<kmonitor::KMonitor>(monitor_name)),
+        metrics_reporter(std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags())),
+        recording(metrics_reporter->getMetricsGroup<RecordingTokenCountMetrics>()),
+        wall(metrics_reporter, 1) {}
+
+    kmonitor::KMonitorPtr        monitor;
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    RecordingTokenCountMetrics*  recording = nullptr;
+    // Declared last so the reporter thread joins before the kmonitor objects are released.
+    WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector> wall;
+};
+
+RtpLLMTokenPSMetricsCollector makePriorityCollector(int32_t priority, int64_t context_tokens, int64_t with_cache) {
+    RtpLLMTokenPSMetricsCollector collector;
+    collector.addTokenSize(context_tokens, with_cache, 0, context_tokens, 1000000);
+    collector.addPriorityTokenSize(priority, context_tokens, with_cache, 0, context_tokens, 1000000);
+    return collector;
+}
+
+}  // namespace
+
+TEST(RtpLLMWallClockReporterDensityTest, ZeroFillsRememberedPriorities) {
+    WallReporterFixture fixture("wall_zero_fill_test");
+    ASSERT_NE(fixture.recording, nullptr);
+
+    auto data = makePriorityCollector(50, 400, 600);
+    fixture.wall.report(&data);
+
+    std::vector<TokenCountReport> reports;
+    ASSERT_TRUE(fixture.recording->waitZeroFillAfterData("50", 3, reports))
+        << "silent windows must zero-fill the remembered priority series";
+
+    bool   seen_data = false;
+    size_t zeros     = 0;
+    for (const auto& report : reports) {
+        if (report.priority != "50") {
+            continue;
+        }
+        if (!seen_data) {
+            seen_data = !report.zero_report;
+            if (seen_data) {
+                EXPECT_EQ(report.context_tokens, 400);
+                EXPECT_EQ(report.context_tokens_with_cache, 600);
+            }
+            continue;
+        }
+        ASSERT_TRUE(report.zero_report) << "unexpected second data sample for priority 50";
+        ++zeros;
+        EXPECT_EQ(report.context_tokens, 0);
+        EXPECT_EQ(report.context_tokens_with_cache, 0);
+        EXPECT_GT(report.report_window_us, 0) << "zero samples must carry the honest window";
+    }
+    EXPECT_TRUE(seen_data);
+    EXPECT_GE(zeros, 3u);
+}
+
+TEST(RtpLLMWallClockReporterDensityTest, ConservesTokensAcrossDenseWindows) {
+    WallReporterFixture fixture("wall_token_conservation_test");
+    ASSERT_NE(fixture.recording, nullptr);
+
+    auto data = makePriorityCollector(50, 400, 600);
+    fixture.wall.report(&data);
+
+    std::vector<TokenCountReport> reports;
+    ASSERT_TRUE(fixture.recording->waitZeroFillAfterData("50", 5, reports));
+
+    int64_t tokens            = 0;
+    int64_t tokens_with_cache = 0;
+    size_t  samples           = 0;
+    for (const auto& report : reports) {
+        if (report.priority != "50") {
+            continue;
+        }
+        ++samples;
+        tokens += report.context_tokens;
+        tokens_with_cache += report.context_tokens_with_cache;
+    }
+    // Zero-fill must not lose or duplicate merged tokens: the series sums to the merged counts.
+    EXPECT_EQ(tokens, 400);
+    EXPECT_EQ(tokens_with_cache, 600);
+    EXPECT_GE(samples, 6u) << "expected the data window plus at least five zero-filled windows";
+}
+
+TEST(RtpLLMWallClockReporterDensityTest, KeepsIdleZeroMarkerAfterTraffic) {
+    WallReporterFixture fixture("wall_idle_marker_test");
+    ASSERT_NE(fixture.recording, nullptr);
+
+    auto data = makePriorityCollector(50, 100, 150);
+    fixture.wall.report(&data);
+
+    std::vector<TokenCountReport> reports;
+    ASSERT_TRUE(fixture.recording->waitZeroFillAfterData("50", 2, reports));
+
+    size_t data_index = reports.size();
+    for (size_t i = 0; i < reports.size(); ++i) {
+        if (reports[i].priority == "50" && !reports[i].zero_report) {
+            data_index = i;
+            break;
+        }
+    }
+    ASSERT_LT(data_index, reports.size()) << "priority 50 data sample missing";
+    bool idle_marker_after_traffic = false;
+    for (size_t i = data_index + 1; i < reports.size(); ++i) {
+        if (reports[i].priority == "0" && reports[i].zero_report) {
+            idle_marker_after_traffic = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(idle_marker_after_traffic) << "legacy priority-0 idle marker must survive zero-fill";
+}
+
+TEST(RtpLLMWallClockReporterDensityTest, MultiPriorityUnionAndReplacement) {
+    WallReporterFixture fixture("wall_multi_priority_test");
+    ASSERT_NE(fixture.recording, nullptr);
+
+    RtpLLMTokenPSMetricsCollector both;
+    both.addTokenSize(400, 600, 0, 400, 1000000);
+    both.addPriorityTokenSize(30, 100, 150, 0, 100, 1000000);
+    both.addPriorityTokenSize(50, 300, 450, 0, 300, 1000000);
+    fixture.wall.report(&both);
+
+    std::vector<TokenCountReport> reports;
+    ASSERT_TRUE(fixture.recording->waitZeroFillAfterData("30", 2, reports));
+    ASSERT_TRUE(fixture.recording->waitZeroFillAfterData("50", 2, reports));
+
+    // A priority-50-only window replaces the remembered set; priority 30 stops being zero-filled.
+    auto only50 = makePriorityCollector(50, 20, 30);
+    fixture.wall.report(&only50);
+
+    ASSERT_TRUE(fixture.recording->waitPredicate(
+        [](const std::vector<TokenCountReport>& all) {
+            for (size_t i = 0; i < all.size(); ++i) {
+                if (all[i].priority == "50" && !all[i].zero_report && all[i].context_tokens == 20) {
+                    // Leave headroom so replaced-set windows had a chance to (wrongly) emit.
+                    return all.size() >= i + 6;
+                }
+            }
+            return false;
+        },
+        reports));
+
+    size_t replacement_index = reports.size();
+    for (size_t i = 0; i < reports.size(); ++i) {
+        if (reports[i].priority == "50" && !reports[i].zero_report && reports[i].context_tokens == 20) {
+            replacement_index = i;
+            break;
+        }
+    }
+    ASSERT_LT(replacement_index, reports.size());
+    for (size_t i = replacement_index + 1; i < reports.size(); ++i) {
+        EXPECT_NE(reports[i].priority, "30") << "replaced priority must not be zero-filled anymore";
+    }
+}
+
+TEST(RtpLLMWallClockReporterDensityTest, WindowsTileTimeline) {
+    const auto          construction = std::chrono::steady_clock::now();
+    WallReporterFixture fixture("wall_window_tiling_test");
+    ASSERT_NE(fixture.recording, nullptr);
+
+    auto data = makePriorityCollector(50, 400, 600);
+    fixture.wall.report(&data);
+
+    std::vector<TokenCountReport> reports;
+    ASSERT_TRUE(fixture.recording->waitZeroFillAfterData("50", 20, reports));
+
+    const auto elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - construction).count();
+    int64_t window_sum_us = 0;
+    size_t  samples       = 0;
+    for (const auto& report : reports) {
+        if (report.priority != "50") {
+            continue;
+        }
+        ++samples;
+        window_sum_us += report.report_window_us;
+    }
+    // Successive priority-50 windows advance monotonically from the loop clock: their sum covers
+    // the observed span once (no silent gaps losing wall time, no overlapping double counts).
+    EXPECT_GE(window_sum_us, elapsed_us / 3) << "windows must not leave large silent gaps";
+    EXPECT_LE(window_sum_us, elapsed_us * 2) << "windows must not overlap or double count";
+    EXPECT_GE(samples, 21u);
 }
 
 }  // namespace rtp_llm

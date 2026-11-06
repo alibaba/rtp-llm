@@ -8,9 +8,12 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 namespace kmonitor {
 class MetricsTags;
@@ -915,32 +918,55 @@ private:
 
     void reportLoop() {
         while (metrics_reporter_ && !stop_.load(std::memory_order_acquire)) {
-            bool        should_report = false;
-            CollectType report_collector;
+            std::vector<std::pair<std::string, CollectType>> samples;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                auto                        now = std::chrono::steady_clock::now();
-                if (collector_.hasMetrics()) {
-                    should_report = takeReportCollector(now, report_collector);
-                } else if (active_count_ == 0) {
-                    // Idle service reports 0 wall TPS with priority="0". In-flight long steps stay
-                    // silent so their eventual wall window includes the full in-flight time since
-                    // the last wall report.
-                    collector_.markIdleWindow();
-                    should_report = takeReportCollector(now, report_collector);
-                }
-            }
-            if (should_report) {
-                auto priority_collectors = report_collector.priorityCollectorsForReport();
-                if (priority_collectors.empty()) {
-                    kmonitor::MetricsTags tags("priority", "0");
-                    metrics_reporter_->report<MetricsType, CollectType>(&tags, &report_collector);
-                } else {
+                // Consume every window so successive report windows tile the timeline. Merged
+                // tokens are preserved in the taken collector, and windows without tokens become
+                // explicit zero samples below. Skipping silent windows instead would make
+                // consumers that average this gauge over elapsed time (kmonitor bucket averages,
+                // 1m-avg queries) divide by the active-window count, overestimating the wall TPS
+                // rate by elapsed/active-time (observed 1.01x-1.57x under bursty prefill load).
+                CollectType report_collector;
+                takeReportCollector(std::chrono::steady_clock::now(), report_collector);
+                auto          priority_collectors = report_collector.priorityCollectorsForReport();
+                const int64_t window_us           = report_collector.reportWindowUs();
+                if (!priority_collectors.empty()) {
+                    last_priorities_.clear();
                     for (auto& [priority, collector] : priority_collectors) {
-                        kmonitor::MetricsTags tags("priority", std::to_string(priority));
-                        metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector);
+                        last_priorities_.insert(priority);
+                        samples.emplace_back(std::to_string(priority), std::move(collector));
                     }
                 }
+                // Keep previously reported priority series dense: a remembered priority without
+                // tokens in this window reports an idle-marked zero over the same window, so the
+                // per-series average over any span equals Sigma(tokens)/elapsed for that span.
+                for (int32_t priority : last_priorities_) {
+                    if (priority_collectors.count(priority) != 0) {
+                        continue;
+                    }
+                    CollectType zero_collector;
+                    zero_collector.setReportWindowUs(window_us);
+                    zero_collector.markIdleWindow();
+                    samples.emplace_back(std::to_string(priority), std::move(zero_collector));
+                }
+                if (priority_collectors.empty()) {
+                    if (report_collector.hasMetrics()) {
+                        // Legacy untagged path: tokens without priority buckets report as priority "0".
+                        samples.emplace_back("0", std::move(report_collector));
+                    } else if (active_count_ == 0) {
+                        // Legacy idle marker: an idle service reports 0 wall TPS with priority "0".
+                        // Emitted last so the well-known idle tag closes each idle window.
+                        report_collector.markIdleWindow();
+                        samples.emplace_back("0", std::move(report_collector));
+                    }
+                    // A silent in-flight window before the first token-bearing report stays
+                    // sample-free; its tokens land in a later window at their honest rate.
+                }
+            }
+            for (auto& [priority, collector] : samples) {
+                kmonitor::MetricsTags tags("priority", priority);
+                metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
         }
@@ -952,6 +978,9 @@ private:
     CollectType                           collector_;
     int                                   active_count_ = 0;
     int                                   interval_ms_  = 1000;
+    // Priorities observed in the last token-bearing window; zero-filled while silent so each
+    // per-priority wall TPS series stays dense (guarded by mutex_).
+    std::set<int32_t>                     last_priorities_;
     std::chrono::steady_clock::time_point last_report_time_;
     std::thread                           metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
