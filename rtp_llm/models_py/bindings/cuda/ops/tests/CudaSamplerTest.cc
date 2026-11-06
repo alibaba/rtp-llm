@@ -942,6 +942,124 @@ TEST_F(CudaSamplerTest, testTopKTopPAllProbsMatchesJointSamplingSupport) {
     assertTokenIn(toHostInt(output_token_ids_t), step, {0, 1});
 }
 
+TEST_F(CudaSamplerTest, testLogprobDistributionIncludesTemperaturePenaltyAndJointFilters) {
+    // Temperature yields weights [.5, .3, .19, .01]. Penalizing history token 0
+    // halves its weight; joint top-k/top-p retains tokens 1 and 0, with odds 6:5.
+    auto raw      = cudaTensor({2 * std::log(.5f),
+                                2 * std::log(.3f),
+                                2 * std::log(.19f),
+                                2 * std::log(.01f),
+                                100,
+                                100,
+                                2 * std::log(.5f),
+                                2 * std::log(.3f),
+                                2 * std::log(.19f),
+                                2 * std::log(.01f),
+                                100,
+                                100},
+                               {2, 6});
+    auto expected = cudaTensor({5.f / 11, 6.f / 11, 0, 0, 5.f / 11, 6.f / 11, 0, 0}, {2, 4});
+    for (int mode : {0, 1, 2}) {  // no public output, normalized output, ORIGINAL output
+        SCOPED_TRACE(mode);
+        torch::Tensor reference_tokens, reference_rng;
+        for (bool return_scores : {false, true}) {
+            GreedyParams params;
+            auto         backing             = raw.clone();
+            params.logits                    = backing.narrow(1, 0, 4);
+            params.input_lengths             = cudaIntTensor({1, 1}, {2});
+            params.sequence_lengths          = cudaIntTensor({1, 1}, {2});
+            params.token_ids                 = cudaIntTensor({0, 0, 0, 0}, {2, 2});
+            params.step                      = 1;
+            params.top_k                     = pinnedIntTensor({2, 2});
+            params.top_p                     = pinnedFloatTensor({.55f, .55f});
+            params.temperature               = pinnedFloatTensor({2, 2});
+            params.repetition_penalty        = pinnedFloatTensor({1, 1});
+            params.presence_penalty          = pinnedFloatTensor({std::log(2.f), std::log(2.f)});
+            params.frequency_penalty         = pinnedFloatTensor({0, 0});
+            params.return_original_all_probs = mode == 2;
+            if (mode != 0) {
+                params.output_all_probs = torch::empty({2, 4}, raw.options());
+                params.cum_log_probs    = torch::zeros({2}, raw.options());
+            }
+            params.return_sampling_probs = return_scores;
+            params.generator             = {torch::make_generator<at::CUDAGeneratorImpl>(),
+                                            torch::make_generator<at::CUDAGeneratorImpl>()};
+            for (auto& generator : params.generator) {
+                generator.set_current_seed(20261105);
+            }
+            auto output = execSampleGreedy(params);
+            assertAllValid(output.success);
+            auto tokens = params.token_ids.select(1, 1).to(torch::kLong);
+            if (!return_scores) {
+                reference_tokens = tokens.clone();
+                reference_rng    = params.generator[0].get_state();
+                EXPECT_FALSE(output.sampling_probs.defined());
+            } else {
+                EXPECT_TRUE(torch::equal(tokens, reference_tokens));
+                EXPECT_TRUE(torch::equal(params.generator[0].get_state(), reference_rng));
+                EXPECT_TRUE(torch::allclose(output.sampling_probs, expected, 1e-5, 1e-6));
+                if (mode == 1) {
+                    EXPECT_EQ(output.sampling_probs.data_ptr(), params.output_all_probs->data_ptr());
+                }
+            }
+            if (mode != 0) {
+                auto public_probs = expected;
+                if (mode == 2) {
+                    auto processed = raw.narrow(1, 0, 4) / (2.f + 1e-6f);
+                    processed.select(1, 0).sub_(std::log(2.f));
+                    public_probs = torch::softmax(processed, -1);
+                }
+                EXPECT_TRUE(torch::allclose(*params.output_all_probs, public_probs, 1e-5, 1e-6));
+                EXPECT_TRUE(torch::allclose(
+                    *params.cum_log_probs, public_probs.gather(1, tokens.unsqueeze(1)).squeeze(1).log(), 1e-5, 1e-6));
+            }
+            EXPECT_TRUE(backing.narrow(1, 4, 2).eq(100).all().item<bool>());
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testCompactAndDenseLogprobDistributionsFromFusedTargetSampling) {
+    for (bool compact : {false, true}) {
+        SCOPED_TRACE(compact);
+        GreedyParams params;
+        params.logits = torch::full(
+            {2, 2048}, -std::numeric_limits<float>::infinity(), torch::TensorOptions().device(torch::kCUDA));
+        params.logits.select(1, 7).fill_(.5f * std::log(.6f));
+        params.logits.select(1, 91).fill_(.5f * std::log(.3f));
+        params.logits.select(1, 109).fill_(.5f * std::log(.1f));
+        params.input_lengths    = cudaIntTensor({1, 1}, {2});
+        params.sequence_lengths = cudaIntTensor({1, 1}, {2});
+        params.token_ids        = cudaIntTensor({0, 0, 0, 0}, {2, 2});
+        params.step             = 1;
+        params.top_k            = pinnedIntTensor({0, 0});
+        params.top_p            = pinnedFloatTensor({.75f, .75f});
+        params.temperature      = pinnedFloatTensor({.5f, .5f});
+        params.output_all_probs = torch::empty({2, compact ? 1024 : 2048}, params.logits.options());
+        if (compact) {
+            params.output_all_probs_indices = torch::empty({2, 1024}, params.logits.options().dtype(torch::kInt32));
+        }
+        params.skip_logits_probs_restore = true;
+        params.force_topk                = 1024;
+        params.return_sampling_probs     = true;
+        params.generator                 = {torch::make_generator<at::CUDAGeneratorImpl>(),
+                                            torch::make_generator<at::CUDAGeneratorImpl>()};
+        auto output                      = execSampleGreedy(params);
+        assertAllValid(output.success);
+        EXPECT_EQ(output.sampling_probs.data_ptr(), params.output_all_probs->data_ptr());
+        auto actual = output.sampling_probs;
+        if (compact) {
+            actual = torch::zeros({2, 2048}, params.logits.options());
+            actual.scatter_(1, params.output_all_probs_indices->to(torch::kLong), output.sampling_probs);
+        }
+        auto expected = torch::zeros_like(actual);
+        expected.select(1, 7).fill_(2.f / 3);
+        expected.select(1, 91).fill_(1.f / 3);
+        EXPECT_TRUE(torch::allclose(actual, expected, 1e-5, 1e-6));
+        EXPECT_TRUE(
+            actual.gather(1, params.token_ids.select(1, 1).to(torch::kLong).unsqueeze(1)).gt(0).all().item<bool>());
+    }
+}
+
 TEST_F(CudaSamplerTest, testUnrestrictedTopPReturnsOriginalDistributionForRejection) {
     constexpr int64_t  vocab_size = 4096;
     std::vector<float> logits(vocab_size, -20.0f);

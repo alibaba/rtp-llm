@@ -186,13 +186,6 @@ protected:
                               const torch::Tensor&                         confidence_rates         = torch::Tensor(),
                               const torch::Tensor&                         confidence_valid_lengths = torch::Tensor(),
                               int64_t                                      verify_draft_token_num   = -1);
-    std::shared_ptr<MtpTargetLogprobs>
-                 launchEarlyMtpTargetLogprobsFinalize(const StreamGroups&                          stream_groups,
-                                                      const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                                      MtpTargetLogprobs                            target_logprobs,
-                                                      std::shared_ptr<torch::Event>                rejection_event);
-    void         finishEarlyMtpTargetLogprobsFinalize(std::shared_ptr<MtpTargetLogprobs>& early_finalize_state,
-                                                      MtpTargetLogprobs&                  target_logprobs);
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,

@@ -12,7 +12,6 @@
 #include <cstring>
 #include <vector>
 #if USING_CUDA
-#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
 #include "ATen/cuda/CUDAContext.h"
 #endif
@@ -200,46 +199,27 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         }
     }
 
-    // Map requested output rows back to the compact raw-input snapshot. This
-    // mapping covers context tiling and beam reordering without doing any
-    // full-vocabulary work for rows that did not request logprobs.
-    std::vector<int64_t> expected_raw_row_indices;
+    // Probabilities use sampler-input coordinates, including context tiling.
     std::vector<int64_t> requested_output_row_indices;
-    std::vector<int64_t> requested_output_model_rows;
-    int64_t              model_batch_idx  = 0;
-    int64_t              output_batch_idx = 0;
+    std::vector<int64_t> requested_input_row_indices;
+    int64_t              input_batch_idx = 0, output_batch_idx = 0;
     if (need_return_logprobs) {
         for (const auto& stream : all_streams) {
-            const int64_t cur_batch_size  = stream->currentBatchSize();
-            const int64_t next_batch_size = stream->nextBatchSize();
+            const int64_t input_rows =
+                stream->needTilingForSampling() ? stream->nextBatchSize() : stream->currentBatchSize();
+            const int64_t output_rows = stream->nextBatchSize();
             if (stream->shouldComputeLogprobs()) {
-                for (int64_t i = 0; i < cur_batch_size; ++i) {
-                    expected_raw_row_indices.push_back(model_batch_idx + i);
-                }
-
-                const bool    has_beam_search = stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1;
-                const bool    has_var_batch   = cur_batch_size != next_batch_size;
-                torch::Tensor src_batch_indices;
-                if (has_beam_search) {
-                    RTP_LLM_CHECK(sampler_output.beam_index.defined());
-                    RTP_LLM_CHECK(!sampler_output.beam_index.is_cuda());
-                    src_batch_indices = sampler_output.beam_index.narrow(0, output_batch_idx, next_batch_size);
-                }
-                for (int64_t i = 0; i < next_batch_size; ++i) {
-                    int64_t src_idx = i;
-                    if (src_batch_indices.defined()) {
-                        src_idx = src_batch_indices.data_ptr<int32_t>()[i];
-                    } else if (has_var_batch) {
-                        // Context-to-decode tiling duplicates the single model row.
-                        src_idx = 0;
-                    }
-                    RTP_LLM_CHECK(src_idx >= 0 && src_idx < cur_batch_size);
+                const bool has_beams = stream->currentNumBeams() > 1 || stream->nextNumBeams() > 1;
+                for (int64_t i = 0; i < output_rows; ++i) {
+                    const int64_t src =
+                        has_beams ? sampler_output.beam_index.data_ptr<int32_t>()[output_batch_idx + i] : i;
+                    RTP_LLM_CHECK(src >= 0 && src < input_rows);
                     requested_output_row_indices.push_back(output_batch_idx + i);
-                    requested_output_model_rows.push_back(model_batch_idx + src_idx);
+                    requested_input_row_indices.push_back(input_batch_idx + src);
                 }
             }
-            model_batch_idx += cur_batch_size;
-            output_batch_idx += next_batch_size;
+            input_batch_idx += input_rows;
+            output_batch_idx += output_rows;
         }
     }
 
@@ -256,121 +236,31 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
         return device_tensor;
     };
     if (need_return_logprobs) {
-        RTP_LLM_CHECK(!expected_raw_row_indices.empty());
-        RTP_LLM_CHECK(!requested_output_row_indices.empty());
-
-        const int64_t real_vocab_size = all_streams.front()->vocabSize();
-        RTP_LLM_CHECK(real_vocab_size > 0);
-        for (const auto& stream : all_streams) {
-            RTP_LLM_CHECK(stream->vocabSize() == real_vocab_size);
+        const auto& probs = sampler_output.sampling_probs;
+        RTP_LLM_CHECK_WITH_INFO(probs.defined(), "generation logprobs require the sampler's processed probabilities");
+        auto input_rows  = make_device_index(requested_input_row_indices, probs.device());
+        auto output_rows = make_device_index(requested_output_row_indices, sampler_output.token_ids.device());
+        auto tokens =
+            sampler_output.token_ids.select(1, sampler_output.token_ids.size(1) - 1).index_select(0, output_rows);
+        if (probs.is_cuda() && !tokens.is_cuda()) {
+            tokens = tokens.pin_memory();
+            index_host_buffers.push_back(tokens);
         }
-
-        torch::Tensor raw_logits      = sampler_output.raw_logprobs_logits;
-        torch::Tensor raw_row_indices = sampler_output.raw_logprobs_row_indices;
-        if (!raw_logits.defined()) {
-            // Compatibility for direct dispatcher tests/callers. Production
-            // normal sampling always carries the pre-sampler compact snapshot.
-            RTP_LLM_CHECK(model_output.logits.defined());
-            RTP_LLM_CHECK(model_output.logits.dim() == 2);
-            RTP_LLM_CHECK(real_vocab_size <= model_output.logits.size(1));
-            raw_row_indices = makeHostInt64IndexTensor(expected_raw_row_indices, model_output.logits.is_cuda());
-            auto raw_row_indices_device = copyHostIndexToDeviceAsync(raw_row_indices, model_output.logits.device());
-            index_host_buffers.emplace_back(raw_row_indices);
-            raw_logits = model_output.logits.narrow(1, 0, real_vocab_size).index_select(0, raw_row_indices_device);
-        }
-
-        RTP_LLM_CHECK(raw_logits.dim() == 2);
-        RTP_LLM_CHECK(raw_logits.size(1) >= real_vocab_size);
-        raw_logits = raw_logits.narrow(1, 0, real_vocab_size);
-        RTP_LLM_CHECK(raw_row_indices.defined());
-        RTP_LLM_CHECK(!raw_row_indices.is_cuda());
-        RTP_LLM_CHECK(raw_row_indices.scalar_type() == torch::kInt64);
-        raw_row_indices = raw_row_indices.contiguous();
-        RTP_LLM_CHECK(raw_row_indices.dim() == 1);
-        RTP_LLM_CHECK(raw_row_indices.size(0) == raw_logits.size(0));
-        RTP_LLM_CHECK(raw_row_indices.size(0) == static_cast<int64_t>(expected_raw_row_indices.size()));
-
-        std::vector<int64_t> compact_index_by_model_row(model_batch_idx, -1);
-        for (int64_t compact_idx = 0; compact_idx < raw_row_indices.size(0); ++compact_idx) {
-            const int64_t model_row = raw_row_indices.data_ptr<int64_t>()[compact_idx];
-            RTP_LLM_CHECK(model_row >= 0 && model_row < model_batch_idx);
-            RTP_LLM_CHECK(compact_index_by_model_row[model_row] == -1);
-            compact_index_by_model_row[model_row] = compact_idx;
-        }
-        for (const int64_t expected_row : expected_raw_row_indices) {
-            RTP_LLM_CHECK(compact_index_by_model_row[expected_row] >= 0);
-        }
-
-        std::vector<int64_t> output_to_compact_indices;
-        output_to_compact_indices.reserve(requested_output_model_rows.size());
-        for (const int64_t model_row : requested_output_model_rows) {
-            const int64_t compact_idx = compact_index_by_model_row[model_row];
-            RTP_LLM_CHECK(compact_idx >= 0);
-            output_to_compact_indices.push_back(compact_idx);
-        }
-
-        auto output_to_compact     = make_device_index(output_to_compact_indices, raw_logits.device());
-        auto requested_output_rows = make_device_index(requested_output_row_indices, sampler_output.token_ids.device());
-        auto selected_token_ids    = sampler_output.token_ids.select(1, sampler_output.token_ids.size(1) - 1)
-                                      .index_select(0, requested_output_rows);
-        if (raw_logits.is_cuda() && !selected_token_ids.is_cuda()) {
-            selected_token_ids = selected_token_ids.pin_memory();
-            index_host_buffers.emplace_back(selected_token_ids);
-        }
-        auto sampled_token_ids =
-            selected_token_ids.to(raw_logits.device(), torch::kInt64, /*non_blocking=*/true, /*copy=*/true)
-                .contiguous();
-        // An invalid sampled ID is reported by GenerateStream::update. Clamp
-        // only the lookup index here so a padded/invalid ID cannot turn the
-        // bookkeeping gather into an asynchronous device-side OOB failure.
-        auto sampled_token_lookup_ids = sampled_token_ids.clamp(0, real_vocab_size - 1);
-
-        torch::Tensor row_max;
-        torch::Tensor row_shifted_logsumexp;
+        tokens = tokens.to(probs.device(), torch::kLong, /*non_blocking=*/true);
 #if USING_CUDA
-        if (raw_logits.is_cuda()) {
-            auto stats_options    = raw_logits.options().dtype(torch::kFloat32).requires_grad(false);
-            row_max               = torch::empty({raw_logits.size(0)}, stats_options);
-            row_shifted_logsumexp = torch::empty({raw_logits.size(0)}, stats_options);
-            invokeMtpRowLogSoftmaxStats(raw_logits,
-                                        row_max,
-                                        row_shifted_logsumexp,
-                                        real_vocab_size,
-                                        cuda_graph::graphGetCurrentStream().stream());
-        } else
+        if (probs.is_cuda()) {
+            probs.record_stream(cuda_graph::graphGetCurrentStream());
+        }
 #endif
-        {
-            // CPU fallback keeps the reference implementation. CUDA uses a
-            // row reduction above so half/bfloat16 inputs never materialize a
-            // full FP32 [requested_rows, vocab] temporary.
-            auto fp32_logits      = raw_logits.to(torch::kFloat32);
-            row_max               = std::get<0>(fp32_logits.max(/*dim=*/-1));
-            row_shifted_logsumexp = torch::logsumexp(fp32_logits - row_max.unsqueeze(1), /*dim=*/-1);
-        }
-        auto output_row_max               = row_max.index_select(0, output_to_compact).unsqueeze(1);
-        auto output_row_shifted_logsumexp = row_shifted_logsumexp.index_select(0, output_to_compact).unsqueeze(1);
-
-        auto flat_selected_indices = output_to_compact * real_vocab_size + sampled_token_lookup_ids;
-        auto selected_logits =
-            raw_logits.reshape({-1}).index_select(0, flat_selected_indices).to(torch::kFloat32).reshape({-1, 1});
-        compact_token_logprobs = (selected_logits - output_row_max) - output_row_shifted_logsumexp;
-
-        const int64_t max_top_logprobs =
-            std::min<int64_t>(std::max<int64_t>(max_content_top_logprobs, 0), real_vocab_size);
-        if (max_top_logprobs > 0) {
-            auto topk_result        = raw_logits.topk(max_top_logprobs, -1, true, true);
-            auto input_top_logprobs = (std::get<0>(topk_result).to(torch::kFloat32) - row_max.unsqueeze(1))
-                                      - row_shifted_logsumexp.unsqueeze(1);
-            compact_top_logprobs = input_top_logprobs.index_select(0, output_to_compact).unsqueeze(1).contiguous();
-            compact_top_logprob_token_ids =
-                std::get<1>(topk_result).to(torch::kInt32).index_select(0, output_to_compact).unsqueeze(1).contiguous();
-        } else {
-            const int64_t requested_output_count = static_cast<int64_t>(requested_output_row_indices.size());
-            compact_top_logprobs =
-                torch::empty({requested_output_count, 1, 0}, raw_logits.options().dtype(torch::kFloat32));
-            compact_top_logprob_token_ids =
-                torch::empty({requested_output_count, 1, 0}, raw_logits.options().dtype(torch::kInt32));
-        }
+        const auto configured_vocab = all_streams.front()->outputVocabSize() > 0 ?
+                                          all_streams.front()->outputVocabSize() :
+                                          all_streams.front()->vocabSize();
+        const auto vocab            = std::min<int64_t>(probs.size(1), configured_vocab);
+        auto       scores           = computeSamplingLogprobs(
+            probs.narrow(1, 0, vocab).index_select(0, input_rows), {}, {}, tokens, max_content_top_logprobs);
+        compact_token_logprobs        = scores.token_logprobs.unsqueeze(1);
+        compact_top_logprob_token_ids = scores.top_logprob_token_ids.unsqueeze(1);
+        compact_top_logprobs          = scores.top_logprobs.unsqueeze(1);
     }
 
     // token IDs, success, and all compact logprob results share one D2H wait.

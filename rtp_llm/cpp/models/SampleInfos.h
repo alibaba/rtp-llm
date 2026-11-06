@@ -62,11 +62,8 @@ public:
 
     bool return_original_all_probs = false;
 
-    // When true no writer touches the logits buffer for the rest of this
-    // sampling round (it is either a private per-round clone or a read-only
-    // view whose owners provably never read it back): the sampler may skip
-    // writing softmax probabilities back into it. Set only by the speculative
-    // (MTP) gather; every other path keeps the legacy in-place contract.
+    // Logits are disposable for this round; no consumer requires softmax
+    // probabilities written back into their storage.
     bool skip_logits_probs_restore = false;
     int  force_topk                = 0;  // DSpARK fixed-width sampling; 0 keeps full vocabulary.
 
@@ -83,13 +80,8 @@ public:
     mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size], or compact [batch_size, K]
     torch::Tensor all_probs_indices;      // optional CUDA int32 [batch_size, K] original vocabulary IDs
 
-    // Raw LM-head rows needed by return_logprobs requests. The gatherer snapshots
-    // only those rows before logits processors/sampling can mutate logits, and
-    // crops the columns to the model's real (unpadded) vocabulary. Row indices
-    // refer to the untiled model-output batch and make the compact mapping
-    // explicit across the sampler/async-dispatch boundary.
-    torch::Tensor raw_logprobs_logits;       // [logprobs_batch_size, real_vocab_size]
-    torch::Tensor raw_logprobs_row_indices;  // CPU int64 [logprobs_batch_size]
+    // Retain the processed sampling distribution for generation logprobs.
+    bool return_logprobs = false;
 
     std::vector<at::Generator> generator;
 };
@@ -106,8 +98,9 @@ public:
     // materialized as [batch, speculative_steps, vocab].
     bool          token_ids_are_point_mass = false;
     torch::Tensor all_probs_indices;  // original vocabulary IDs when all_probs is compact
-    torch::Tensor raw_logprobs_logits;
-    torch::Tensor raw_logprobs_row_indices;
+    // Normalized probabilities after temperature, penalties, masks and top-k/top-p.
+    // Uses sampler-input row coordinates (including tiled rows); beam_index maps outputs back.
+    torch::Tensor sampling_probs;
     // DSpARK per-position acceptance-rate prediction from the draft model
     // confidence head: [batch, propose_step] FP32 in [0, 1].  Undefined when
     // the sampler ran with confidence disabled. Enabled V4.1 requires its head.
@@ -119,6 +112,22 @@ public:
     // and gamma+1; confidence never changes the sampled draft distribution.
     torch::Tensor valid_draft_lengths;
 };
+
+struct SamplingLogprobs {
+    torch::Tensor token_logprobs;         // FP32 [rows]
+    torch::Tensor top_logprob_token_ids;  // INT32 [rows, min(requested_k, support_width)]
+    torch::Tensor top_logprobs;           // FP32, same shape as top_logprob_token_ids
+};
+
+// Read only the emitted token and requested top entries from a normalized distribution.
+// probs/candidate_ids are [rows, width]; emitted IDs and optional point-mass IDs are
+// [rows] on the same device. Candidate IDs are unique vocabulary IDs per row.
+// Point-mass rows do not read probs. Zero probability is reported as -inf.
+SamplingLogprobs computeSamplingLogprobs(const torch::Tensor& probs,
+                                         const torch::Tensor& candidate_ids,
+                                         const torch::Tensor& point_mass_token_ids,
+                                         const torch::Tensor& emitted_token_ids,
+                                         int64_t              max_top_logprobs);
 
 struct MergedOutput {
 public:

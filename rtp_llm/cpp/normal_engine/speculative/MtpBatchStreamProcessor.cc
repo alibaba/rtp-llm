@@ -363,10 +363,6 @@ int64_t maxMtpActiveContentTopLogprobs(const StreamGroups& stream_groups) {
     return max_top_logprobs;
 }
 
-bool shouldFinalizeMtpTargetLogprobsEarly(bool stream_async_enabled, const MtpTargetLogprobs& target_logprobs) {
-    return stream_async_enabled && target_logprobs.retainsFullLmHeadStorage();
-}
-
 namespace {
 
 // Fallback-hit counters. Each counter is incremented when a hot-path
@@ -1450,7 +1446,6 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     RTP_LLM_PROFILE_SCOPE("mtp_batch_stream_processor.gather_spec_sampler_input");
     RTP_LLM_CHECK(!stream_groups.empty());
     auto               all_streams      = stream_groups.allStreams();
-    ReturnAllProbsMode return_all_probs = stream_groups.needReturnAllProbs();
 
     for (auto& stream : all_streams) {
         RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1, "stream tile num must be 1 in ScoreExecutor");
@@ -1467,8 +1462,8 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     // Without history readers, only the final token column is live. The CUDA
     // sampler writes it directly before rejection sampling and accept-length
-    // capping read it. Penalties, ngram bans, processors, beams and the legacy
-    // top-k=1 path without all_probs still require the full history.
+    // capping read it. Penalties, ngram bans, processors and beams still
+    // require the full history.
     // Proposal columns share those readers and never include the final column.
     bool sampler_token_matrix_dead = false;
 #if USING_CUDA
@@ -1481,7 +1476,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         auto*      beams_out_ptr  = sampler_inputs.num_beams_out.data_ptr<int64_t>();
         const auto count          = static_cast<int64_t>(total_batch_size);
         sampler_token_matrix_dead =
-            return_all_probs != ReturnAllProbsMode::NONE && !spec_logits_result.has_active_processor
+            !spec_logits_result.has_active_processor
             && sampler_inputs.logits_processor_states_ptr == nullptr
             && std::all_of(repetition_ptr, repetition_ptr + count, [](float v) { return v == 1.0f; })
             && std::all_of(presence_ptr, presence_ptr + count, [](float v) { return v == 0.0f; })
@@ -1537,63 +1532,45 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
                             model_output.logits.dim() == 2 ? model_output.logits.size(1) : -1,
                             vocab_size_);
     sampler_inputs.vocab_size = vocab_size_;
-    // Set when the renormalized target distribution is provably a point mass
-    // at the sampled token for the whole batch (see below); also reused by the
-    // logits ownership elision under USING_CUDA further down.
     bool target_point_mass = false;
-    if (return_all_probs != ReturnAllProbsMode::NONE) {
-        const bool renorm_mode = (return_all_probs != ReturnAllProbsMode::ORIGINAL);
-        // Point-mass target contract. When renormalizing (not ORIGINAL) on a
-        // CUDA build, with no cum_log_probs consumer and every score row greedy
-        // (top_k == 1), the fused greedy top-1 path handles the whole batch and
-        // the one-hot [rows, vocab] matrix is never read: rejection sampling
-        // synthesizes q from target_token_ids instead (see batchSample). Skip
-        // both the FillFunctor zero-fill here and the kernel one-hot write by
-        // allocating uninitialized and declaring the contract. Any other
-        // configuration keeps the legacy zero-filled materialized matrix and
-        // full one-hot write byte-for-byte (and the sampler only honors the
-        // declaration when its own fused gate also passes, so a mismatch
-        // safely falls back to writing every column).
+    // Rejection always consumes the normalized target distribution, independently
+    // of the public return_all_probs setting. Greedy batches may elide its values.
 #if USING_CUDA
-        if (renorm_mode && !sampler_inputs.cum_log_probs.defined()) {
-            auto* top_k_ptr   = sampler_inputs.top_k.data_ptr<int32_t>();
-            target_point_mass = std::all_of(top_k_ptr, top_k_ptr + total_batch_size, [](int32_t k) { return k == 1; });
-        }
+    if (!sampler_inputs.cum_log_probs.defined()) {
+        auto* top_k_ptr   = sampler_inputs.top_k.data_ptr<int32_t>();
+        target_point_mass = std::all_of(top_k_ptr, top_k_ptr + total_batch_size, [](int32_t k) { return k == 1; });
+    }
 #endif
-        bool compact_target = false;
+    bool compact_target = false;
 #if USING_CUDA
-        const int force_topk = is_dspark_ ? speculative::dsparkForceTopK() : 0;
-        if (!target_point_mass && renorm_mode && !sampler_inputs.cum_log_probs.defined() && !has_draft_to_target_mapping
-            && force_topk > 0 && force_topk <= 4096 && force_topk < static_cast<int>(vocab_size_)) {
-            const auto* ks        = sampler_inputs.top_k.data_ptr<int32_t>();
-            const auto* ps        = sampler_inputs.top_p.data_ptr<float>();
-            const bool  any_top_p = std::any_of(
-                ps, ps + total_batch_size, [](float p) { return std::abs(p) >= 1e-7f && std::abs(p - 1.0f) >= 1e-7f; });
-            const bool no_explicit_top_k = std::all_of(ks, ks + total_batch_size, [](int32_t k) { return k <= 0; });
-            const bool mixed_sampling    = speculative::dsparkHasMixedSamplingParams(all_streams);
-            // Mixed requests use the fixed candidate cap, including explicit
-            // top-k above that cap. Pure top-p without top-k also uses compact
-            // candidates; pure explicit top-k stays full-width.
-            compact_target = mixed_sampling || (no_explicit_top_k && any_top_p);
-        }
+    const int force_topk = is_dspark_ ? speculative::dsparkForceTopK() : 0;
+    if (!target_point_mass && !sampler_inputs.cum_log_probs.defined() && !has_draft_to_target_mapping && force_topk > 0
+        && force_topk <= 4096 && force_topk < static_cast<int>(vocab_size_)) {
+        const auto* ks        = sampler_inputs.top_k.data_ptr<int32_t>();
+        const auto* ps        = sampler_inputs.top_p.data_ptr<float>();
+        const bool  any_top_p = std::any_of(
+            ps, ps + total_batch_size, [](float p) { return std::abs(p) >= 1e-7f && std::abs(p - 1.0f) >= 1e-7f; });
+        const bool no_explicit_top_k = std::all_of(ks, ks + total_batch_size, [](int32_t k) { return k <= 0; });
+        const bool mixed_sampling    = speculative::dsparkHasMixedSamplingParams(all_streams);
+        // Mixed requests use the fixed candidate cap, including explicit
+        // top-k above that cap. Pure top-p without top-k also uses compact
+        // candidates; pure explicit top-k stays full-width.
+        compact_target = mixed_sampling || (no_explicit_top_k && any_top_p);
+    }
 #endif
-        if (target_point_mass) {
-            sampler_inputs.all_probs            = torch::empty({(int64_t)total_batch_size, (int64_t)vocab_size_},
-                                                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-            sampler_inputs.all_probs_point_mass = true;
-        } else if (compact_target) {
-            const auto width                 = static_cast<int64_t>(speculative::dsparkForceTopK());
-            sampler_inputs.all_probs         = torch::empty({(int64_t)total_batch_size, width},
-                                                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-            sampler_inputs.all_probs_indices = torch::empty(
-                {(int64_t)total_batch_size, width}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-        } else {
-            sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size_},
-                                                    torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-            if (!renorm_mode) {
-                sampler_inputs.return_original_all_probs = true;
-            }
-        }
+    if (target_point_mass) {
+        sampler_inputs.all_probs            = torch::empty({(int64_t)total_batch_size, (int64_t)vocab_size_},
+                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        sampler_inputs.all_probs_point_mass = true;
+    } else if (compact_target) {
+        const auto width                 = static_cast<int64_t>(speculative::dsparkForceTopK());
+        sampler_inputs.all_probs         = torch::empty({(int64_t)total_batch_size, width},
+                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        sampler_inputs.all_probs_indices = torch::empty(
+            {(int64_t)total_batch_size, width}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    } else {
+        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size_},
+                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }
 
     const auto batch_size = static_cast<int64_t>(stream_groups.size());
@@ -1687,41 +1664,11 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     }
     sampler_inputs.token_ids = std::move(token_ids_gpu);
 
-    // lm_head shards may contain TP-alignment padding. Synthetic columns must
-    // not participate in target sampling or the rejection distribution.
-    //
-    // Alias only when all downstream logits writers are inactive and the
-    // fused top-1 path can consume the complete contiguous FP32 vocabulary.
-    // Masking, penalties, trimmed padding and other backends keep a clone.
-    sampler_inputs.logits          = model_output.logits.narrow(1, 0, static_cast<int64_t>(vocab_size_));
-    bool logits_alias_model_output = false;
-#if USING_CUDA
-    {
-        auto*      temperature_ptr = sampler_inputs.temperature.data_ptr<float>();
-        auto*      repetition_ptr  = sampler_inputs.repetition_penalty.data_ptr<float>();
-        auto*      presence_ptr    = sampler_inputs.presence_penalty.data_ptr<float>();
-        auto*      frequency_ptr   = sampler_inputs.frequency_penalty.data_ptr<float>();
-        auto*      ngram_ptr       = sampler_inputs.no_repeat_ngram_size.data_ptr<int32_t>();
-        auto*      beams_in_ptr    = sampler_inputs.num_beams_in.data_ptr<int64_t>();
-        auto*      beams_out_ptr   = sampler_inputs.num_beams_out.data_ptr<int64_t>();
-        const auto count           = static_cast<int64_t>(total_batch_size);
-        logits_alias_model_output =
-            target_point_mass && !spec_logits_result.has_active_processor && vocab_size_ < (1u << 24)
-            && model_output.logits.dim() == 2 && model_output.logits.size(1) == static_cast<int64_t>(vocab_size_)
-            && model_output.logits.is_cuda() && model_output.logits.is_contiguous()
-            && model_output.logits.scalar_type() == torch::kFloat32
-            && std::all_of(temperature_ptr, temperature_ptr + count, [](float v) { return v == 1.0f; })
-            && std::all_of(repetition_ptr, repetition_ptr + count, [](float v) { return v == 1.0f; })
-            && std::all_of(presence_ptr, presence_ptr + count, [](float v) { return v == 0.0f; })
-            && std::all_of(frequency_ptr, frequency_ptr + count, [](float v) { return v == 0.0f; })
-            && std::all_of(ngram_ptr, ngram_ptr + count, [](int32_t v) { return v == 0; })
-            && std::all_of(beams_in_ptr, beams_in_ptr + count, [](int64_t n) { return n == 1; })
-            && std::all_of(beams_out_ptr, beams_out_ptr + count, [](int64_t n) { return n == 1; });
-    }
-#endif
-    if (!logits_alias_model_output) {
-        sampler_inputs.logits = sampler_inputs.logits.clone();
-    }
+    // Sampling owns these per-round logits. Crop padding, then allow the mask
+    // and sampler to modify them; logprobs come from the processed distribution.
+    sampler_inputs.logits = model_output.logits.narrow(1, 0, static_cast<int64_t>(vocab_size_));
+    sampler_inputs.force_topk                = is_dspark_ ? speculative::dsparkForceTopK() : 0;
+    sampler_inputs.skip_logits_probs_restore = true;
     if (spec_logits_result.has_active_processor) {
         // The runner uploads packed masks on its own (worker) stream; order this
         // stream's mask application after the uploads, then apply on GPU.
@@ -1729,18 +1676,6 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
             spec_logits_result.ready_event->block(cuda_graph::graphGetCurrentStream());
         }
         SpecLogitsVerifyRunner::applyMaskToLogits(sampler_inputs.logits, spec_logits_result, sampler_inputs.vocab_size);
-    }
-    // The logits buffer above is either a per-round private clone or, under
-    // the elision gate, a read-only view of the model output. Either way no
-    // writer touches it for the rest of the round and nothing reads it after
-    // sampling on the MTP path (target all_probs feeds rejection sampling
-    // from its own tensor, streams consume the draft-side probabilities, and
-    // the next round recomputes logits from scratch). Declare it so the CUDA
-    // greedy sampler may skip the softmax-probs writeback into logits and
-    // take its fused top-1 path.
-    sampler_inputs.skip_logits_probs_restore = true;
-    if (is_dspark_) {
-        sampler_inputs.force_topk = speculative::dsparkForceTopK();
     }
 
     // TODO(async): debug formatting is CPU-only. Keep the .cpu() explicit
@@ -2787,7 +2722,6 @@ void MtpBatchStreamProcessor::finalizeDecodeTargetLogprobs(
         return;
     }
 
-    RTP_LLM_CHECK(target_logprobs.raw_logits.defined());
     spec_decode_output.transfer_done_event->synchronize();
     auto selection = collectAcceptedMtpLogprobRows(stream_groups,
                                                    spec_decode_output.accept_len_cpu,
@@ -2797,12 +2731,13 @@ void MtpBatchStreamProcessor::finalizeDecodeTargetLogprobs(
     // Decode cannot know which speculative rows become content until
     // acceptance. Recompute K from only streams that actually contributed a
     // content suffix before launching the selected-row reduction.
-    target_logprobs.requested_top_logprobs =
-        std::min<int64_t>(selection.max_top_logprobs, target_logprobs.raw_logits.size(1));
-    const auto& emitted_token_ids = target_logprobs.raw_logits.is_cuda() && spec_decode_output.accept_tokens.defined()
+    target_logprobs.requested_top_logprobs = selection.max_top_logprobs;
+    const auto& emitted_token_ids          = (target_logprobs.probs.defined() ? target_logprobs.probs.is_cuda() :
+                                                                                target_logprobs.point_mass_token_ids.is_cuda())
+                                            && spec_decode_output.accept_tokens.defined()
                                             && spec_decode_output.accept_tokens.is_cuda() ?
-                                        spec_decode_output.accept_tokens :
-                                        spec_decode_output.accept_tokens_cpu;
+                                                 spec_decode_output.accept_tokens :
+                                                 spec_decode_output.accept_tokens_cpu;
     finalizeSelectedMtpTargetLogprobs(target_logprobs, emitted_token_ids, selection.rows);
 }
 
@@ -2816,9 +2751,6 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         finalizeDecodeTargetLogprobs(stream_groups, spec_decode_output, target_logprobs);
     } else {
         // The regular bookkeeping path still consumes the CPU accept tensors.
-        // An early-finalized payload has already waited this event; repeating
-        // the completed event synchronization is cheap and keeps this method's
-        // standalone contract unchanged.
         spec_decode_output.transfer_done_event->synchronize();
     }
 

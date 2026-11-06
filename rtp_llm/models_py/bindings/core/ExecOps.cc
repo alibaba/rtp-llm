@@ -634,7 +634,18 @@ void execMultiMergeCopy(const MultiMergeCopyParams& params) {
 // === Sample ops ===
 
 GreedyOutput execSampleGreedy(const GreedyParams& params) {
-    return sampleGreedy(params);
+    if (params.logits.is_contiguous()) {
+        return sampleGreedy(params);
+    }
+    // Cropping padded vocabulary can leave strided rows. Penalty kernels
+    // consume dense rows, so normalize layout at the sampling boundary.
+    auto contiguous_params   = params;
+    contiguous_params.logits = params.logits.contiguous();
+    auto output              = sampleGreedy(contiguous_params);
+    if (!params.skip_logits_probs_restore) {
+        params.logits.copy_(contiguous_params.logits);
+    }
+    return output;
 }
 
 torch::Tensor execSampleFromProbs(const torch::Tensor& probabilities) {
