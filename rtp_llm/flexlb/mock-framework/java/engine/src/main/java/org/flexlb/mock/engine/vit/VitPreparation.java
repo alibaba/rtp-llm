@@ -70,6 +70,7 @@ final class VitPreparation implements AutoCloseable {
             VitGeometry.Image result=null; Throwable failure=null;
             try {
                 check();
+                metrics.started();
                 var image=source.prepare(media,deadline);
                 synchronized(this) { check(); prepared=true; work=scheduler.submit(image,deadline); }
                 result=work.result().get();

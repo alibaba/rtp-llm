@@ -34,7 +34,9 @@ final class VitImageSource implements AutoCloseable {
         } else {
             byte[] bytes=download(media.getMultimodalUrl(),Math.min(deadline,System.nanoTime()+TimeUnit.SECONDS.toNanos(60)));
             downloadNanos=System.nanoTime()-started;
-            metrics.events.observe("rtp_llm_vit_image_fetch_rt_us",downloadNanos/1e3);
+            // This image planner mirrors real DeepSeek V4.1 preprocessing.
+            metrics.events.observe("rtp_llm_vit_image_fetch_rt_us",downloadNanos/1e3,
+                java.util.Map.of("model","deepseek_v41","mm_type","image"));
             int[] size=dimensions(bytes); width=size[0]; height=size[1];
             identity=contentIdentity(bytes);
         }

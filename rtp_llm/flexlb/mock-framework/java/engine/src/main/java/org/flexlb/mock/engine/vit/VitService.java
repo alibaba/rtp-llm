@@ -13,46 +13,54 @@ import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 
 final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase implements AutoCloseable {
     private final VitConfig config;
-    private final VitMetrics metrics = new VitMetrics();
+    private final VitMetrics metrics;
     private final VitCache cache;
     private final VitScheduler scheduler;
     private final VitPreparation preparation;
     private final String instance=UUID.randomUUID().toString();
     private final ExecutorService replies=Executors.newVirtualThreadPerTaskExecutor();
     private volatile boolean closed;
-    VitService(VitConfig config) { this.config=config;cache=new VitCache(config,metrics);scheduler=new VitScheduler(config,metrics);preparation=new VitPreparation(config,cache,scheduler,metrics); }
+    VitService(VitConfig config) { this(config,new VitMetrics()); }
+    VitService(VitConfig config,VitMetrics metrics) { this.config=config;this.metrics=metrics;cache=new VitCache(config,metrics);scheduler=new VitScheduler(config,metrics);preparation=new VitPreparation(config,cache,scheduler,metrics); }
     private List<VitCache.Claim> submit(MultimodalInputsPB input) {
         if(closed) throw Status.UNAVAILABLE.withDescription("V stopped").asRuntimeException();
         return preparation.submit(input);
     }
     private List<VitGeometry.Image> compute(MultimodalInputsPB input, Context context) throws Exception {
         long started = System.nanoTime();
-        metrics.events.increment("py_rtp_vit_qps");
+        String status="error";
+        VitCache.Claim waiting=null;
         List<VitCache.Claim> claims=List.of();
         try {
+        VitGeometry.validate(input,config.skipDownload());
+        metrics.events.observe("py_rtp_vit_image_count", input.getMultimodalInputsCount());
         claims=submit(input);
-        metrics.events.observe("py_rtp_vit_image_count", claims.size());
         long budget=TimeUnit.MILLISECONDS.toNanos(input.getTimeoutMs()>0?input.getTimeoutMs():config.timeoutMs());
         if(context.getDeadline()!=null) budget=Math.min(budget,context.getDeadline().timeRemaining(TimeUnit.NANOSECONDS));
         long end=System.nanoTime()+Math.max(0,budget);
         var result=new ArrayList<VitGeometry.Image>();
         for(var claim:claims) {
+            waiting=claim;
             while(true) {
                 if(context.isCancelled()) throw Status.CANCELLED.withDescription("V result wait cancelled").asRuntimeException();
                 long left=end-System.nanoTime();if(left<=0) throw Status.DEADLINE_EXCEEDED.withDescription("V request timed out").asRuntimeException();
                 try { result.add(claim.result().get(Math.min(left,TimeUnit.MILLISECONDS.toNanos(25)),TimeUnit.NANOSECONDS));break; }
                 catch(TimeoutException retry) { /* A caller's deadline never cancels another caller's shared computation. */ }
-                catch(ExecutionException error) { throw Status.fromThrowable(error.getCause()).asRuntimeException(); }
+                catch(ExecutionException error) {
+                    if(error.getCause() instanceof Exception failure) throw failure;
+                    throw error;
+                }
             }
         }
         long rows=result.stream().mapToLong(VitGeometry.Image::rows).sum();
         metrics.events.observe("py_rtp_vit_embedding_length", rows);
-        metrics.events.increment("py_rtp_vit_success_qps");
+        status="success";
         return result;
-        } catch (Exception error) { metrics.events.increment("py_rtp_vit_error_qps"); throw error; }
+        } catch (Exception error) { metrics.error(error,waiting); throw error; }
         finally {
             claims.forEach(VitCache::release);
-            metrics.events.observe("py_rtp_vit_request_rt",(System.nanoTime()-started)/1e6);
+            metrics.events.observe("py_rtp_vit_request_rt",(System.nanoTime()-started)/1e6,
+                Map.of("source","get_embedding_result","status",status));
         }
     }
     private <T> void reply(StreamObserver<T> response, Callable<T> operation) {
@@ -111,7 +119,9 @@ final class VitService extends MultimodalRpcServiceGrpc.MultimodalRpcServiceImpl
     }
     @Override public void asyncSubmitEmbedding(MultimodalInputsPB input,StreamObserver<EmptyPB> response) {
         reply(response,()-> {
-            var claims = submit(input);
+            List<VitCache.Claim> claims;
+            try { claims=submit(input); }
+            catch(RuntimeException error) { metrics.error(error,null);throw error; }
             CompletableFuture.allOf(claims.stream().map(VitCache.Claim::result).toArray(CompletableFuture[]::new))
                 .whenComplete((value,error) -> claims.forEach(VitCache::release));
             return EmptyPB.getDefaultInstance();

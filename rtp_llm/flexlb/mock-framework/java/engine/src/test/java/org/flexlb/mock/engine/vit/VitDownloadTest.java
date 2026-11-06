@@ -157,6 +157,11 @@ class VitDownloadTest {
                     rpc.withDeadlineAfter(3,TimeUnit.SECONDS).remoteMultimodalEmbedding(urlOnly.build()); // Cache hit is still a request, not a Forward.
                     String snapshot=metrics(node);
                     assertEquals(6,VitTest.sample(snapshot,"py_rtp_vit_request_rt_count"));
+                    assertTrue(snapshot.lines().anyMatch(line->line.startsWith("py_rtp_vit_request_rt_count{")
+                        && line.contains("status=\"error\"") && line.endsWith(" 4.0")));
+                    assertTrue(snapshot.lines().anyMatch(line->line.startsWith("py_rtp_vit_request_rt_count{")
+                        && line.contains("status=\"success\"") && line.endsWith(" 2.0")));
+                    assertTrue(snapshot.contains("mm_type=\"image\",model=\"deepseek_v41\""));
                     assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_embedding_rt_count"));
                     assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_download_rt_count"));
                     assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_preprocess_rt_count"));

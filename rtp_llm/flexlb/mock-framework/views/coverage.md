@@ -346,3 +346,6 @@ TPS 以当前分支 Real 的 `RtpLLMMetrics.h/.cc` 和 `MtpExecutor.cc` 为合�
 | prefill | 273 | tensorflops used max | 待埋点 | pod_gpu_tensortflops_used |
 
 本地原生 TPS 面板先合并同实例 priority；generate/total 的标题明确标为报告窗口 token 数。一分钟墙钟 TPS 使用累计 token Counter，不复用这些窗口计数。ViT 新增源面板 10691 对应的 embedding TPS（本地 310691）。
+
+
+ViT 的“已上报”表示按 [ViT 指标口径](../docs/component-reference.md#vit-指标口径) 上报：工作 QPS 带 `source=mm_embedding`，请求耗时带 `source=get_embedding_result,status=success/error`；二者不共用计数单位。缓存量是形状计费的逻辑驻留量。预处理只测量 Mock 实际执行的下载、读尺寸和规划，不代表真实像素处理成本；CUDA Graph、GreenNet 和进程 IPC 未模拟，保留无数据。

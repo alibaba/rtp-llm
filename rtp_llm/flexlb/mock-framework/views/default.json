@@ -15635,7 +15635,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${vit_group})(py_rtp_vit_qps{instance=~\"${vit_instance}\",role=\"vit\"})",
+              "expr": "sum by(${vit_group})(py_rtp_vit_qps{instance=~\"${vit_instance}\",role=\"vit\",source=\"mm_embedding\"})",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -15684,7 +15684,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 449。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 449。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。\nsource=mm_embedding；去重后的内部 embedding 工作开始次数，包含异步提交，缓存命中和共享等待不重复计。不是多图 RPC 次数。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -15759,7 +15759,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 458。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 458。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。\n唯一内部 embedding 工作成功发布次数；缓存返回和共享消费者不重复计，无 source 标签。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -15834,7 +15834,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 457。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 457。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。\n首次观察到的错误；共享 entry 和重复异常去重，入口错误也可能计入。不是客户端请求错误率。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -16227,7 +16227,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10366。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10366。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -16452,7 +16452,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10353。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10353。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -16527,7 +16527,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10354。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10354。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -16602,7 +16602,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10355。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10355。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -16977,7 +16977,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10360。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10360。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -17052,7 +17052,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10361。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10361。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -17127,7 +17127,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10362。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10362。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -17202,7 +17202,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10367。\n已按 real 名称接入；事件 Gauge 为每次采集窗口的观测均值，QPS 为窗口事件数/实际秒数。无事件的耗时窗口不补零。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10367。\n保留原始事件样本；本地均值用 sum/count 加权计算，SDK 接收原始观测。QPS 为事件数/实际秒数，无事件不补耗时样本。",
           "links": [
             {
               "title": "RTP-LLM 原面板",
@@ -17603,7 +17603,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_request_rt_sum{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_request_rt_count{instance=~\"${vit_instance}\",role=\"vit\"}[$__rate_interval])) > 0)",
+              "expr": "(sum by(${vit_group})(rate(py_rtp_vit_request_rt_sum{instance=~\"${vit_instance}\",role=\"vit\",source=\"get_embedding_result\"}[$__rate_interval]))) / (sum by(${vit_group})(rate(py_rtp_vit_request_rt_count{instance=~\"${vit_instance}\",role=\"vit\",source=\"get_embedding_result\"}[$__rate_interval])) > 0)",
               "legendFormat": "ViT · {{${vit_group}}}",
               "datasource": {
                 "type": "prometheus",
@@ -17652,7 +17652,7 @@
               ]
             }
           },
-          "description": "参考 RTP-LLM 大盘 v514 / panel 10637。\n阻塞媒体请求从进入处理到完成或失败的总耗时，单位 ms；包含缓存等待、异步排队、下载、计算及结果发布，排除异步提交 ACK。",
+          "description": "参考 RTP-LLM 大盘 v514 / panel 10637。\n阻塞媒体请求从进入处理到完成或失败的总耗时，单位 ms；包含缓存等待、异步排队、下载、计算及结果发布，排除异步提交 ACK。\nsource=get_embedding_result，status=success/error；含下载和共享等待，不含异步 ACK、RPC 传输、输出编码。合并两种状态的原始 sum/count 求均值。",
           "links": [
             {
               "title": "RTP-LLM 原面板",

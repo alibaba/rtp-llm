@@ -66,7 +66,7 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 | 请求终态 | `rtp_llm_latency_us`、`wait_latency_us`、`first_token_latency_us`、`input_token_length`、`output_token_length`、`iterate_count`、`query_batch_size` | 如 real，仅 success/cancel/timeout 产生流统计；无首 Token 则不报首 Token 耗时；query batch 是 beam 数，当前为 1 |
 | D Loading | `rtp_llm_stream_loading_cache_latency_us` | 从实际 beginTransfer 到 transferCompleted，不含等待 P 计算；其他 loading 阶段不混用 |
 | ViT 调度 | `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `batch_size` / `forward_rt` | 队列项是提交的工作 chunk；运行图片数另为 Mock 辅助项 |
-| ViT 请求 | `py_rtp_vit_qps` / `success_qps` / `error_qps`，`image_count` / `embedding_length` / `embedding_rt` | 统计计算/等待调用；纯 metadata/hash 命中不产生新的计算请求；下载由异步准备执行器完成，没有 Tensor 数据搬运 |
+| ViT 请求 | `py_rtp_vit_qps` / `success_qps` / `error_qps`，`image_count` / `embedding_length` / `embedding_rt` | QPS（source=mm_embedding）与成功数按去重后的内部工作统计，含异步提交；缓存和共享消费者不重复计。错误按首次观察计数，也包含入口拒绝。图片数/长度按阻塞请求采样；request_rt 带 source=get_embedding_result、status=success/error。纯 hash 命中不产生计算请求，没有 Tensor 数据搬运 |
 | ViT 缓存 | `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps`、`tokens` / `bytes` | GPU+CPU 逻辑驻留合计，不能作为真实 GPU/JVM 物理占用 |
 
 事件耗时在 KMonitor 逐样本上报，Prometheus 由累计 `_sum` / `_count` 计算加权均值；无事件时不发新的耗时样本。QPS 按实际窗口秒数换算，空闲为零。它们与 KMonitor 的固定上报周期并非逐点相同；共享 JVM 不能导出可信的单 Engine CPU/堆/GPU 利用率，资源面板继续留空。
