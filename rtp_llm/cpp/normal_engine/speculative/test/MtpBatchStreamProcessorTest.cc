@@ -848,8 +848,8 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputConsumesLogitsWith
     }
 }
 
-// The packed allow-mask is applied directly to the consumable logits.
-TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAppliesMaskToConsumableLogits) {
+// Speculative masks do not read sampler history; penalties still do.
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputSkipsMaskedHistoryUnlessPenaltyNeedsIt) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -862,49 +862,70 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAppliesMaskToConsu
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 2;
 
-    ResourceContext   resource_context;
-    GenerateStreamPtr stream =
-        createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, {7}, {8, 9});
-    stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
-    stream->generateConfig()->top_k = 1;
+    for (bool with_penalty : {false, true}) {
+        SCOPED_TRACE(with_penalty);
+        ResourceContext   resource_context;
+        GenerateStreamPtr stream =
+            createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, {7}, {8, 9});
+        stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+        stream->generateConfig()->top_k            = 1;
+        stream->generateConfig()->presence_penalty = with_penalty ? 0.5f : 0.0f;
 
-    MtpBatchStreamProcessor processor(
-        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
-    StreamGroups stream_groups({stream});
+        MtpBatchStreamProcessor processor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+        StreamGroups stream_groups({stream});
 
-    GptModelOutputs model_output;
-    model_output.logits = torch::zeros({3, 16}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        GptModelOutputs model_output;
+        model_output.logits = torch::zeros({3, 16}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
 
-    SpecLogitsVerifyRunner             runner;
-    SpecLogitsVerifyRunner::LaunchTask task;
-    task.total_streams = 1;
-    task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
-    task.vocab_size    = model_config.vocab_size;
-    task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
-    for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
-        ASSERT_NE(processor_ptr, nullptr);
-        task.active.push_back({processor_ptr, /*stream_idx=*/0});
-    }
-    ASSERT_EQ(1u, task.active.size());
-    auto spec_result = runner.run(task);
-    ASSERT_TRUE(spec_result.has_active_processor);
+        model_output.logits.select(1, 7).fill_(2.0f);
+        model_output.logits.select(1, 3).fill_(1.0f);
 
-    auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result, task.draft_tokens);
-    ASSERT_TRUE(status.ok());
-    const auto& sampler_inputs = status.value();
+        SpecLogitsVerifyRunner             runner;
+        SpecLogitsVerifyRunner::LaunchTask task;
+        task.total_streams = 1;
+        task.propose_step  = static_cast<int>(sp_config.gen_num_per_cycle);
+        task.vocab_size    = model_config.vocab_size;
+        task.draft_tokens  = torch::tensor(std::vector<int32_t>{1, 2}, torch::kInt32).reshape({1, 2});
+        for (const auto& processor_ptr : stream->getAllLogitsProcessorPtr()) {
+            ASSERT_NE(processor_ptr, nullptr);
+            task.active.push_back({processor_ptr, /*stream_idx=*/0});
+        }
+        ASSERT_EQ(1u, task.active.size());
+        auto spec_result = runner.run(task);
+        ASSERT_TRUE(spec_result.has_active_processor);
 
-    // No clone is needed to preserve raw logits for logprobs.
-    EXPECT_EQ(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
-    EXPECT_TRUE(torch::equal(model_output.logits, sampler_inputs.logits));
-    const float neg_inf = -std::numeric_limits<float>::max();
-    for (int i = 0; i < 3; ++i) {
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
+        auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result, task.draft_tokens);
+        ASSERT_TRUE(status.ok());
+        const auto& sampler_inputs = status.value();
+
+#if USING_CUDA
+        EXPECT_EQ(processor.sampler_input_copy_stream_.has_value(), with_penalty);
+#endif
+        if (with_penalty) {
+            auto history = sampler_inputs.token_ids.narrow(1, 0, 4).cpu();
+            EXPECT_TRUE(
+                torch::equal(history, torch::tensor({{1, 2, 1, 2}, {1, 2, 1, 2}, {1, 2, 1, 2}}, torch::kInt32)));
+        }
+
+        // No clone is needed to preserve raw logits for logprobs.
+        EXPECT_EQ(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
+        EXPECT_TRUE(torch::equal(model_output.logits, sampler_inputs.logits));
+        const float neg_inf = -std::numeric_limits<float>::max();
+        for (int i = 0; i < 3; ++i) {
+            EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
+        }
+#if USING_CUDA
+        Sampler sampler({3});
+        auto    output = sampler.forward(sampler_inputs);
+        EXPECT_TRUE(output.token_ids.select(1, output.token_ids.size(1) - 1).eq(3).all().item<bool>());
+#endif
     }
 }
 
 // Dead sampler-input elision: with production-equivalent defaults
 // (return_all_probs DEFAULT as the MTP executor sets it, identity penalties,
-// no ngram ban, single beam, no logits processor) no consumer reads the
+// no ngram ban, single beam) no consumer reads the
 // history columns on device, so the gather skips the host snapshot fill,
 // full upload and proposal scatter. Only the matrix
 // geometry is defined; committed and proposal columns are don't-care (the
