@@ -27,7 +27,7 @@ def _sm90():
     torch.manual_seed(241017)
 
 
-@pytest.mark.parametrize("rows", [1, 8, 32])
+@pytest.mark.parametrize("rows", [1, 8, 32, 33, 40, 48])
 def test_native_shared_two_stream_graph_changed_inputs(rows):
     shared = _shared()
     with patch.dict(
@@ -76,7 +76,7 @@ def test_explicit_sequential_empty_and_large_batch():
         with patch.dict("os.environ", {"DSV4_SHARED_EXPERT_MODE": mode, "MOEDBG": "0"}):
             executor = MXFP8SharedExpertExecutor()
             executor.prepare(shared)
-            for rows in (0, 33):
+            for rows in ((0, 32, 33, 48, 49) if mode == "sequential" else (0, 49)):
                 x = torch.randn(rows, 512, device="cuda", dtype=torch.bfloat16)
                 executor.start(shared, x)
                 assert executor._active_stream is None

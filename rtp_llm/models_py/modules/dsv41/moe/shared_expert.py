@@ -504,12 +504,13 @@ class MXFP8SharedExpertExecutor(SequentialSharedExpertExecutor):
             return
         # Bounded decode schedule. Fork and join are both inside the graph;
         # replay therefore retains the input/output dependency edges. Larger
-        # batches remain sequential to avoid shared/routed GEMM contention.
+        # M<=48 covers BS8 with four draft tokens and BS12 with three. Larger
+        # batches remain sequential to bound shared/routed GEMM contention.
         if (
             self._stream is not None
             and x.is_cuda
             and x.device == self._stream.device
-            and x.shape[0] <= 32
+            and x.shape[0] <= 48
             and os.environ.get("MOEDBG", "0") == "0"
         ):
             stream = self._stream
