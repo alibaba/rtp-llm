@@ -33,6 +33,8 @@ TestGroupConfig makeTestGroupBase(CacheGroupPolicy policy    = defaultCacheGroup
 
 std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupConfig> groups);
 
+void encodeTestRecord(void* data, size_t payload_bytes);
+
 BackingLayout makeTestBackingLayout(size_t payload_bytes, bool enable_crc, bool physical_geometry = false);
 
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,

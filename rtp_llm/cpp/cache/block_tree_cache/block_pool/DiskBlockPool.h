@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -12,6 +13,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskMountGuard.h"
 
 namespace rtp_llm {
+
+class DiskIOExecutor;
 
 enum class BlockIOStatus {
     OK,
@@ -42,6 +45,8 @@ struct BlockTreeDiskBlockPoolConfig: public BlockPoolConfigBase {
 // the physical block index is valid, so the same rank-0 index can be used on workers.
 class BlockTreeDiskBlockPool: public IBlockPool {
 public:
+    using Callback = std::function<void(BlockIOStatus)>;
+
     explicit BlockTreeDiskBlockPool(std::shared_ptr<const BlockTreeDiskBlockPoolConfig> config,
                                     std::unique_ptr<DiskBlockIO>                        io = nullptr);
     ~BlockTreeDiskBlockPool() override;
@@ -52,6 +57,10 @@ public:
     // and marks the pool initialized. Always returns true; invariant violations are
     // enforced via RTP_LLM_CHECK.
     bool init();
+    // Owner serializes lifecycle calls and closes outside any worker/callback.
+    // Reject new async submissions, wait for this file's I/O, callback returns and
+    // capture release, then close the file without stopping the shared executor.
+    void close();
 
     // Single-block read/write. Only validBlock(block) is checked (not allocation/refCount);
     // block 0 and any out-of-range block return INVALID_BLOCK. bytes greater
@@ -59,11 +68,26 @@ public:
     BlockIOStatus read(BlockIdxType block, void* dst, size_t bytes);
     BlockIOStatus write(BlockIdxType block, const void* src, size_t bytes);
 
-    // Batch read/write. Every block is validated with validBlock() and bytes_per_block is
-    // validated against strideBytes() before any I/O is issued; on success the
-    // underlying DiskBlockIO batch call is driven in blocks[] order.
+    // Validates the batch, then issues I/O in input order until the first error.
     BlockIOStatus read(const BlockIdList& blocks, const std::vector<void*>& dsts, size_t bytes_per_block);
     BlockIOStatus write(const BlockIdList& blocks, const std::vector<const void*>& srcs, size_t bytes_per_block);
+
+    // Caller supplies the shared executor and keeps buffers alive until completion.
+    // Byte counters advance only after full-batch success.
+    BlockIOStatus asyncRead(DiskIOExecutor&           executor,
+                            const BlockIdList&        blocks,
+                            const std::vector<void*>& dsts,
+                            size_t                    bytes_per_block,
+                            Callback                  callback);
+    // Non-null buffers must cover bytes_per_block and stay leased until completion.
+    // Requires storage_bytes <= bytes_per_block <= strideBytes(), bytes_per_block > 0.
+    // Workers zero writable padding [storage_bytes, bytes_per_block) before I/O.
+    BlockIOStatus asyncWrite(DiskIOExecutor&           executor,
+                             const BlockIdList&        blocks,
+                             const std::vector<void*>& srcs,
+                             size_t                    bytes_per_block,
+                             size_t                    storage_bytes,
+                             Callback                  callback);
 
     size_t             payloadBytes() const;
     size_t             strideBytes() const;
@@ -87,7 +111,15 @@ private:
 
     static BlockIOStatus mapStatus(DiskBlockIOStatus status);
 
+    template<typename Request, typename Buffer>
+    BlockIOStatus prepareBatch(const BlockIdList&         blocks,
+                               const std::vector<Buffer>& buffers,
+                               size_t                     bytes_per_block,
+                               std::vector<Request>&      requests) const;
+
+    struct AsyncState;
     std::unique_ptr<DiskBlockIO> io_;
+    std::unique_ptr<AsyncState>  async_state_;
     std::string                  file_path_;
     std::atomic<size_t>          read_bytes_{0};
     std::atomic<size_t>          write_bytes_{0};

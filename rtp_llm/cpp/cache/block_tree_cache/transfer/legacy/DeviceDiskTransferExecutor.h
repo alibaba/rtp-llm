@@ -32,10 +32,7 @@ public:
     DeviceDiskTransferExecutor(const DeviceDiskTransferExecutor&)            = delete;
     DeviceDiskTransferExecutor& operator=(const DeviceDiskTransferExecutor&) = delete;
 
-    std::shared_ptr<TransferAsyncContext> executeDiskToDevice(TransferTask                        task,
-                                                              const std::vector<const GroupSet*>& group_sets);
-
-    std::shared_ptr<TransferAsyncContext> executeDeviceToDisk(TransferTask task, const GroupSet& group_set);
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task, const std::vector<const GroupSet*>& group_sets);
 
     void cancelPendingTransfers();
 

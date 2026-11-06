@@ -56,8 +56,82 @@ TEST(TransferStageStateTest, EmptyStageCompletesExactlyOnce) {
     EXPECT_EQ(callback_count, 1u);
 }
 
+TEST(TransferStageStateTest, SubmissionFailureWaitsForBatchesAndPreservesUnsubmittedBlocks) {
+    size_t             callback_count = 0;
+    TransferResult     result;
+    TransferStageState state(
+        [&](TransferResult completed) {
+            result = std::move(completed);
+            ++callback_count;
+        },
+        4);
+    state.addBatch();
+    state.addBatch();
+    state.completeBatch(TransferStatus::OK, {2});
+    state.finishSubmitting(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "batch preparation failed"));
+    state.finishSubmitting(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "duplicate close"));
+    EXPECT_EQ(callback_count, 0u);
+    state.completeBatch(TransferStatus::OK, {0});
+    EXPECT_EQ(callback_count, 1u);
+    EXPECT_EQ(result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(result.status.ToString(), "batch preparation failed");
+    EXPECT_EQ(
+        result.block_errors,
+        (std::vector<CacheCopyError>{
+            CacheCopyError::NONE, CacheCopyError::NOT_EXECUTED, CacheCopyError::NONE, CacheCopyError::NOT_EXECUTED}));
+    state.finishSubmitting();
+    state.completeBatch(TransferStatus::OK, {1});
+    EXPECT_EQ(callback_count, 1u);
+}
+
+TEST(TransferStageStateTest, SubmissionFailurePreservesUnknownCompletionInEitherOrder) {
+    for (bool finish_first : {false, true}) {
+        SCOPED_TRACE(finish_first);
+        size_t             callback_count = 0;
+        TransferResult     result;
+        TransferStageState state(
+            [&](TransferResult completed) {
+                result = std::move(completed);
+                ++callback_count;
+            },
+            2);
+        state.addBatch();
+        auto finish = [&] { state.finishSubmitting(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "preparation failed")); };
+        if (finish_first) {
+            finish();
+        }
+        state.completeBatch(
+            {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "RPC timeout"), CacheCopyError::RPC_FAILED}, {1});
+        EXPECT_EQ(callback_count, finish_first ? 1u : 0u);
+        if (!finish_first) {
+            finish();
+        }
+        EXPECT_EQ(callback_count, 1u);
+        EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_EQ(result.copy_error, CacheCopyError::RPC_FAILED);
+        EXPECT_NE(result.status.ToString().find("preparation failed"), std::string::npos);
+        EXPECT_NE(result.status.ToString().find("RPC timeout"), std::string::npos);
+        EXPECT_EQ(result.block_errors,
+                  (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED, CacheCopyError::RPC_FAILED}));
+    }
+}
+
+TEST(TransferStageStateTest, EmptyFailedSubmissionCompletesExactlyOnce) {
+    size_t             callback_count = 0;
+    TransferStageState state(
+        [&](TransferResult completed) {
+            ++callback_count;
+            EXPECT_FALSE(completed.ok());
+            EXPECT_EQ(completed.block_errors, std::vector<CacheCopyError>(2, CacheCopyError::NOT_EXECUTED));
+        },
+        2);
+    state.finishSubmitting(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "preparation failed"));
+    state.finishSubmitting();
+    EXPECT_EQ(callback_count, 1u);
+}
+
 TEST(TransferStageStateTest, ConcurrentBatchesCompleteExactlyOnce) {
-    constexpr size_t kBatchCount = 32;
+    constexpr size_t    kBatchCount = 32;
     std::atomic<size_t> callback_count{0};
     auto                state = std::make_shared<TransferStageState>([&](TransferResult error) {
         EXPECT_TRUE(error.ok());
@@ -138,7 +212,6 @@ TEST(TransferStageStateTest, ConcurrentFailuresPreserveHighestPriority) {
                                              CacheCopyError::INVALID_REQUEST,
                                              CacheCopyError::IO_FAILED,
                                              CacheCopyError::RPC_FAILED,
-                                             CacheCopyError::CRC_COMPUTE_FAILED,
                                              CacheCopyError::CRC_MISMATCH};
     std::atomic<size_t>               calls{0};
     TransferResult                    result;

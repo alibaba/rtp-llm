@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/TransferExecutor.h"
 
 #include <algorithm>
 #include <exception>
@@ -69,7 +69,7 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
         context->complete(TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"),
                                          CacheCopyError::NOT_EXECUTED));
     };
-    const auto task_class = target == Tier::DEVICE ? BlockTreeTaskClass::LOAD : BlockTreeTaskClass::BACKGROUND;
+    const auto task_class = isLoadTransfer(source, target) ? BlockTreeTaskClass::LOAD : BlockTreeTaskClass::BACKGROUND;
     auto&      task_pool  = task_class == BlockTreeTaskClass::LOAD ? *load_task_pool_ : transfer_task_pool_;
     const bool accepted   = task_pool.submit(
         task_class,

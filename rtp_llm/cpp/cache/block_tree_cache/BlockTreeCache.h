@@ -61,8 +61,10 @@ struct BlockTreeCacheConfig {
     int    task_pool_size{4};
     size_t business_queue_max_size{10000};
 
-    // ---- Per-rank TransferEngine task pools, one per direction ----
-    size_t transfer_worker_count{4};
+    // ---- Per-rank WorkLoop owners or legacy workers per direction ----
+    size_t transfer_worker_count{1};
+    size_t btc_crc_slot_count{8};
+    bool   btc_transfer_engine_async{true};
     size_t transfer_queue_max_size{10000};
 
     // ---- Transfer deadlines, including queue wait and cross-rank work ----
@@ -72,11 +74,11 @@ struct BlockTreeCacheConfig {
     // Outbound disk transfers from both eviction and store.
     int disk_cache_evict_timeout_ms{30000};
 
-    // Total max-stride staging blocks per rank, split evenly across Full/SWA pools.
-    // Default guarantees at least 64 Full blocks; actual capacities depend on payload sizes.
+    // Async: blocks per Load/Offload pair, split by direction and shared by groups.
+    // Legacy: rank-wide byte budget measured in maximum-stride blocks.
     size_t device_disk_staging_block_count{128};
     // Shared descriptor batching limit for watermark planning and all transfer directions.
-    size_t max_descriptors_per_transfer_batch{8};
+    size_t max_descriptors_per_transfer_batch{32};
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.

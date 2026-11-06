@@ -73,5 +73,49 @@ TEST(BenchmarkCliTest, DispatchesMixedCommonAndTreeOptions) {
     EXPECT_TRUE(result.ran);
     EXPECT_TRUE(result.error.empty());
 }
+TEST(BenchmarkCliTest, RejectsInsufficientQueueForOwnersBeforeLoadingProfile) {
+    const auto result = invoke({"transfer", "--transfer-worker-count=3", "--transfer-queue-max-size=2"});
+    EXPECT_EQ(result.code, 1);
+    EXPECT_FALSE(result.ran);
+    EXPECT_NE(result.error.find("Q must be >= worker count"), std::string::npos);
+}
+
+TEST(BenchmarkCliTest, WorkLoopDefaultsAndLegacyOnlyArgumentsAreExplicit) {
+    TransferOptions defaults;
+    EXPECT_TRUE(defaults.btc_transfer_engine_async);
+    EXPECT_TRUE(defaults.enable_crc);
+    EXPECT_EQ(defaults.btc_crc_slot_count, 8u);
+    for (const auto& argument : {"--copy-strategy=batch",
+                                 "--transfer-worker-count=0",
+                                 "--btc-transfer-engine-async=invalid",
+                                 "--btc-crc-slot-count=0",
+                                 "--enable-crc=false"}) {
+        const auto result = invoke({"transfer", argument});
+        EXPECT_EQ(result.code, 1);
+        EXPECT_FALSE(result.ran);
+    }
+    const char* runfiles  = std::getenv("TEST_SRCDIR");
+    const char* workspace = std::getenv("TEST_WORKSPACE");
+    ASSERT_NE(runfiles, nullptr);
+    ASSERT_NE(workspace, nullptr);
+    const std::string profile =
+        std::string(runfiles) + "/" + workspace
+        + "/rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles/deepseek_v4_pro_fp8_tp1_cp1.json";
+    for (const auto& mode : {"true", "false"}) {
+        std::vector<std::string> args{"transfer",
+                                      "--model-profile=" + profile,
+                                      std::string("--btc-transfer-engine-async=") + mode,
+                                      "--btc-crc-slot-count=3",
+                                      "--transfer-worker-count=2"};
+        if (std::string(mode) == "false") {
+            args.push_back("--copy-strategy=batch");
+            args.push_back("--enable-crc=false");
+        }
+        const auto result = invoke(args);
+        EXPECT_EQ(result.code, 0) << result.error;
+        EXPECT_TRUE(result.ran);
+    }
+}
+
 }  // namespace
 }  // namespace rtp_llm::benchmark

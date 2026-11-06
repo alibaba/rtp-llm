@@ -728,7 +728,6 @@ TEST(BlockTransferRequestConverterTest, ResponseCodePreservesEveryCopyFailure) {
                        CacheCopyError::COPY_FAILED,
                        CacheCopyError::INVALID_REQUEST,
                        CacheCopyError::IO_FAILED,
-                       CacheCopyError::CRC_COMPUTE_FAILED,
                        CacheCopyError::CRC_MISMATCH}) {
         SCOPED_TRACE(cacheCopyErrorName(error));
         TransferResult expected(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected transfer failure"), error);
@@ -752,23 +751,19 @@ TEST(BlockTransferRequestConverterTest, ResponseReportsHighestCopyErrorForEntire
     EXPECT_EQ(BlockTransferRequestConverter::encodeCode(CacheCopyError::COPY_FAILED),
               MemoryOperationResponsePB::COPY_FAILED);
     TransferResult result(failure, CacheCopyError::IO_FAILED);
-    result.merge({failure, CacheCopyError::CRC_COMPUTE_FAILED});
+    result.merge({failure, CacheCopyError::CRC_MISMATCH});
     MemoryOperationResponsePB response;
     BlockTransferRequestConverter::encodeTransferResult(response, result);
     MemoryOperationResponsePB received;
     ASSERT_TRUE(received.ParseFromString(response.SerializeAsString()));
-    EXPECT_EQ(received.code(), MemoryOperationResponsePB::CRC_COMPUTE_FAILED);
-    EXPECT_EQ(BlockTransferRequestConverter::decodeCode(received.code()), CacheCopyError::CRC_COMPUTE_FAILED);
-    result.merge({failure, CacheCopyError::CRC_MISMATCH});
-    EXPECT_EQ(BlockTransferRequestConverter::encodeCode(result.copy_error), MemoryOperationResponsePB::CRC_MISMATCH);
+    EXPECT_EQ(received.code(), MemoryOperationResponsePB::CRC_MISMATCH);
+    EXPECT_EQ(BlockTransferRequestConverter::decodeCode(received.code()), CacheCopyError::CRC_MISMATCH);
 }
 
 TEST(BlockTransferRequestConverterTest, ResponseRoundTripPreservesMixedBlockOutcomes) {
     TransferResult result(TransferStatus::CRC_MISMATCH);
-    result.block_errors = {CacheCopyError::NONE,
-                           CacheCopyError::NOT_EXECUTED,
-                           CacheCopyError::CRC_MISMATCH,
-                           CacheCopyError::CRC_COMPUTE_FAILED};
+    result.block_errors = {
+        CacheCopyError::NONE, CacheCopyError::NOT_EXECUTED, CacheCopyError::CRC_MISMATCH, CacheCopyError::IO_FAILED};
     MemoryOperationResponsePB response;
     BlockTransferRequestConverter::encodeTransferResult(response, result);
     MemoryOperationResponsePB received;
