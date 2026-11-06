@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -915,13 +916,17 @@ private:
 
     void reportLoop() {
         while (metrics_reporter_ && !stop_.load(std::memory_order_acquire)) {
-            bool        should_report = false;
-            CollectType report_collector;
+            bool                 should_report = false;
+            CollectType          report_collector;
+            std::set<int32_t>    seen_priorities;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 auto                        now = std::chrono::steady_clock::now();
                 if (collector_.hasMetrics()) {
                     should_report = takeReportCollector(now, report_collector);
+                    for (const auto& [priority, collector] : report_collector.priorityCollectorsForReport()) {
+                        seen_priorities_.insert(priority);
+                    }
                 } else {
                     // Every tick with no completed work emits a zero report, including ticks
                     // covered by in-flight steps. Holding the previous window's rate during
@@ -932,12 +937,24 @@ private:
                     collector_.markIdleWindow();
                     should_report = takeReportCollector(now, report_collector);
                 }
+                seen_priorities = seen_priorities_;
             }
             if (should_report) {
                 auto priority_collectors = report_collector.priorityCollectorsForReport();
                 if (priority_collectors.empty()) {
                     kmonitor::MetricsTags tags("priority", "0");
                     metrics_reporter_->report<MetricsType, CollectType>(&tags, &report_collector);
+                    // Monitoring holds each priority-tagged series' last value until that
+                    // series' next report, so zeros on the default tag alone never decay a
+                    // data-carrying series: on sparse traffic it would keep averaging the last
+                    // busy tick's rate. Emit the zero on every priority that carried data so
+                    // each series sees the true duty cycle.
+                    if (report_collector.reportZeroTPS()) {
+                        for (int32_t priority : seen_priorities) {
+                            kmonitor::MetricsTags zero_tags("priority", std::to_string(priority));
+                            metrics_reporter_->report<MetricsType, CollectType>(&zero_tags, &report_collector);
+                        }
+                    }
                 } else {
                     for (auto& [priority, collector] : priority_collectors) {
                         kmonitor::MetricsTags tags("priority", std::to_string(priority));
@@ -953,6 +970,7 @@ private:
     std::mutex                            mutex_;
     std::atomic_bool                      stop_{false};
     CollectType                           collector_;
+    std::set<int32_t>                     seen_priorities_;
     int                                   active_count_ = 0;
     int                                   interval_ms_  = 1000;
     std::chrono::steady_clock::time_point last_report_time_;

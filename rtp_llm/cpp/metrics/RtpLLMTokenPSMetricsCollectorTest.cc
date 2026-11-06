@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -85,6 +86,7 @@ public:
         last_report_was_idle_ = collector->reportZeroTPS();
         if (last_report_was_idle_) {
             idle_report_ = report;
+            idle_priorities_.insert(report.priority);
         } else {
             data_reports_.push_back(report);
         }
@@ -104,16 +106,31 @@ public:
         return true;
     }
 
+    bool waitForIdleOnPriority(const std::string& priority) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        // An idle (zero) report on the data-carrying priority proves the loop decays that
+        // series, not just the default "0" series.
+        return cv_.wait_for(lock, std::chrono::seconds(5), [&] {
+            return idle_priorities_.count(priority) > 0;
+        });
+    }
+
+    std::set<std::string> idle_priorities() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return idle_priorities_;
+    }
+
 private:
     std::mutex                    mutex_;
     std::condition_variable       cv_;
     std::vector<TokenCountReport> data_reports_;
     TokenCountReport              idle_report_{};
+    std::set<std::string>         idle_priorities_;
     bool                          last_report_was_idle_ = false;
 };
 
 template<typename Reporter>
-void checkReporterResetsTokenCounts() {
+void checkReporterResetsTokenCounts(bool per_priority_idle = false) {
     auto  monitor           = std::make_shared<kmonitor::KMonitor>("token_count_reset_test");
     auto  metrics_reporter  = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
     auto* recording_metrics = metrics_reporter->getMetricsGroup<RecordingTokenCountMetrics>();
@@ -134,9 +151,22 @@ void checkReporterResetsTokenCounts() {
                             .second);
         }
         EXPECT_EQ(actual, expected);
-        EXPECT_EQ(idle_report.priority, "0");
         EXPECT_EQ(idle_report.context_tokens, 0);
         EXPECT_EQ(idle_report.context_tokens_with_cache, 0);
+        if (per_priority_idle) {
+            // The wall-clock reporter must also decay every data-carrying priority series,
+            // otherwise monitoring holds that series' last busy-tick rate across idle ticks.
+            // The per-priority zeros of this tick are emitted right after the "0" one, so wait
+            // for each explicitly instead of reading a point-in-time snapshot.
+            for (const auto& [priority, counts] : expected) {
+                ASSERT_TRUE(recording_metrics->waitForIdleOnPriority(priority))
+                    << "missing idle report on priority " << priority;
+            }
+        } else {
+            auto idle_priorities = recording_metrics->idle_priorities();
+            EXPECT_TRUE(idle_priorities.count("0") > 0);
+            EXPECT_EQ(idle_report.priority, "0");
+        }
     };
 
     RtpLLMTokenPSMetricsCollector first;
@@ -303,7 +333,8 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, LoopReporterResetsTokenCountsAfterReport
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, WallClockReporterResetsTokenCountsAfterReport) {
     checkReporterResetsTokenCounts<
-        WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector>>();
+        WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector>>(
+        /*per_priority_idle=*/true);
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, WallClockReporterEmitsZeroReportsDuringActiveSilence) {
@@ -334,6 +365,30 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, WallClockReporterEmitsZeroReportsDuringA
     EXPECT_EQ(idle_report.priority, "0");
     EXPECT_EQ(idle_report.context_tokens, 0);
     EXPECT_EQ(idle_report.context_tokens_with_cache, 0);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, WallClockReporterDecaysDataPrioritySeriesDuringActiveSilence) {
+    // Monitoring holds each priority-tagged series' last value until that series' next
+    // report. Zero reports on the default "0" tag alone never decay a data-carrying series,
+    // so on sparse traffic the series average stays at the busy-tick rate. The reporter must
+    // emit the zero on every priority that carried data.
+    auto monitor          = std::make_shared<kmonitor::KMonitor>("wall_clock_priority_decay_test");
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto* recording_metrics = metrics_reporter->getMetricsGroup<RecordingTokenCountMetrics>();
+    ASSERT_NE(recording_metrics, nullptr);
+
+    WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector> reporter(
+        metrics_reporter, 1);
+    auto guard = reporter.makeActiveGuard();
+
+    RtpLLMTokenPSMetricsCollector burst;
+    burst.addTokenSize(1000000, 1000000, 0, 1000000, 1000000);
+    burst.addPriorityTokenSize(50, 1000000, 1000000, 0, 1000000, 1000000);
+    reporter.report(&burst);
+
+    ASSERT_TRUE(recording_metrics->waitForIdleOnPriority("50"))
+        << "no zero report arrived on the data-carrying priority while a step was in flight: "
+           "that series keeps displaying the last busy tick's rate";
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
