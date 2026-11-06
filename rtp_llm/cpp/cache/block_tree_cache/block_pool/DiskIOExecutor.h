@@ -18,6 +18,7 @@ struct DiskIOExecutorConfig {
     size_t max_batch_blocks{4096};
     size_t max_batch_bytes{256 * 1024 * 1024};
 
+    // Reads fan out up to read_thread_count tasks per batch; writes use one task per batch.
     // Converts queued batch budgets to worker-task budgets; rejects invalid/overflowing capacities.
     bool setQueueSizesFromBatchCapacity(size_t read_batches, size_t write_batches, size_t max_blocks_per_batch);
     bool valid() const;
@@ -40,6 +41,8 @@ public:
     // Owns the request vector; the caller keeps io open and buffers alive until all
     // accepted I/O and callbacks have returned, and orders conflicting accesses.
     // Empty batches complete asynchronously; failed batches may be partly applied.
+    // Reads share blocks across workers; each write batch is sorted by file offset
+    // and executed by one worker.
     DiskBlockIOStatus asyncRead(DiskBlockIO& io, std::vector<DiskRead> reads, Callback callback);
     DiskBlockIOStatus asyncWrite(DiskBlockIO& io, std::vector<DiskWrite> writes, Callback callback);
 

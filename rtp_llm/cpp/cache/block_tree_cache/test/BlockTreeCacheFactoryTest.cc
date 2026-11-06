@@ -2012,7 +2012,7 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
     EXPECT_EQ(cache->config().task_pool_size, 4);
     EXPECT_EQ(cache->config().transfer_worker_count, 1u);
     EXPECT_EQ(cache->config().device_disk_staging_block_count, 128u);
-    EXPECT_EQ(cache->config().max_descriptors_per_transfer_batch, 8u);
+    EXPECT_EQ(cache->config().max_descriptors_per_transfer_batch, 32u);
     EXPECT_DOUBLE_EQ(cache->config().watermark_device.low_ratio, 0.82);
     EXPECT_DOUBLE_EQ(cache->config().watermark_device.high_ratio, 0.90);
     EXPECT_DOUBLE_EQ(cache->config().watermark_host.low_ratio, 0.0);
@@ -2035,7 +2035,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskIOQueueBudgetsDeriveFromTransferQueueAndBa
         size_t  read_queue;
         size_t  write_queue;
     };
-    const QueueBudgetCase cases[]{{0, 5, 20000, 20000}, {37, 5, 370, 185}, {307, 32, 9824, 4912}};
+    const QueueBudgetCase cases[]{{0, 5, 20000, 20000}, {37, 5, 370, 37}, {307, 32, 9824, 307}};
     for (const auto& expected : cases) {
         auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_disk_io_queues");
@@ -2098,7 +2098,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentDiskThreadsPropagateBeforeQueueBudg
         EXPECT_EQ(io.read_thread_count, 3u);
         EXPECT_EQ(io.write_thread_count, 5u);
         EXPECT_EQ(io.read_queue_size, 42u);
-        EXPECT_EQ(io.write_queue_size, 35u);
+        EXPECT_EQ(io.write_queue_size, 7u);
     }
 }
 
