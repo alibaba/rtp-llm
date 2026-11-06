@@ -287,6 +287,12 @@ _STAGE3_SEND_DIAGNOSTIC = (
     "TPURaidenConnectorScheduler Stage-3 send req_id=%s uuid=%d "
     "num_tokens=%d source_pages=%d source_controller=%s"
 )
+_V6D_COMPONENT_SOURCE_DIGESTS = (
+    '3272b5e999be3e3126a4792eee9e8841b975bf70f74e85fe0da98e590554435f',
+    '442c78ded5ddddab834a6458d9cf818ca13e9410ee85f2af241c9e71c0416e90',
+)
+
+
 _PIPELINE_DIAGNOSTIC_SPECS = (
     (
         "vllm_torchtpu.distributed.kv_transfer.tpu_connector",
@@ -298,7 +304,7 @@ _PIPELINE_DIAGNOSTIC_SPECS = (
     (
         "kvs_connector.v6d_object_connector",
         "logger",
-        "03c02dc43fc0853629a183d96133b5a5ea9a10367755a6e5e5e15cda5cf735b7",
+        _V6D_COMPONENT_SOURCE_DIGESTS[0],
         "[build_connector_meta] meta: ",
         True,
     ),
@@ -418,10 +424,15 @@ def install_engine_runtime_diagnostic_logging():
         prefix,
     ) in _PIPELINE_DIAGNOSTIC_SPECS:
         module = sys.modules.get(module_name)
+        qualified_shas = (
+            _V6D_COMPONENT_SOURCE_DIGESTS
+            if expected_sha == _V6D_COMPONENT_SOURCE_DIGESTS[0]
+            else (expected_sha,)
+        )
         if (
             module is None
             or hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
-            != expected_sha
+            not in qualified_shas
         ):
             raise ValueError(
                 "Unqualified R64 runtime diagnostic source: " + module_name
@@ -935,6 +946,11 @@ class _NativeConnectorMetadataProbe(_NativeSchedulerComponentProbe):
     TARGETS = (("build_kv_connector_meta", None, "_build_kv_connector_meta"),)
 
 
+class _NativeR78ConnectorMetadataProbe(_NativeConnectorMetadataProbe):
+    VERSION = 3
+    SCOPE = "r78_composite_connector_metadata_with_delayed_allocation"
+
+
 def prepare_native_scheduler_component_probe(scheduler):
     """Qualify the actual fixed scheduler and its existing connector components.
 
@@ -952,7 +968,7 @@ def prepare_native_scheduler_component_probe(scheduler):
     if (
         module is None
         or hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()
-        != "03c02dc43fc0853629a183d96133b5a5ea9a10367755a6e5e5e15cda5cf735b7"
+        not in _V6D_COMPONENT_SOURCE_DIGESTS
     ):
         raise ValueError("Unqualified native V6D scheduler component source")
     # The deployed r64 TPUMultiConnector contains both Raiden and V6D.
@@ -984,6 +1000,13 @@ def prepare_native_scheduler_component_probe(scheduler):
         ("connector_mamba_protection", vendor, "_protect_mamba_store_blocks"),
         ("connector_info_log", module.logger, "info"),
     )
+    if hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest() == _V6D_COMPONENT_SOURCE_DIGESTS[1]:
+        extra += (
+            ("connector_store_planning", vendor, "_plan_stores"),
+            ("connector_allocation_submit", vendor, "_submit_store_allocation"),
+            ("connector_allocation_commit", vendor, "_take_ready_allocation"),
+        )
+        return _NativeR78ConnectorMetadataProbe(scheduler, extra)
     return _NativeConnectorMetadataProbe(scheduler, extra)
 
 
