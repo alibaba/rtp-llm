@@ -12,6 +12,10 @@ from rtp_llm.models.kimi_k3.kimi_k3 import (
     KimiK3, KimiK3Mtp, KimiK3ModelConfig, KimiK3RuntimeConfig,
 )
 from rtp_llm.models.kimi_k3.kimi_k31_weight import KimiK31Weight, KimiK31MtpWeight
+from rtp_llm.models.kimi_k3.nvfp4_config import (
+    parse_nvfp4_flag, selected_nvfp4_modules, reject_legacy_nvfp4,
+    validate_nvfp4_backend,
+)
 from rtp_llm.ops import (
     DataType,
     HybridAttentionType,
@@ -29,8 +33,13 @@ class KimiK31RuntimeConfig(KimiK3RuntimeConfig):
 
 
 class KimiK31ModelConfig(KimiK3ModelConfig):
-    _python_fields = KimiK3ModelConfig._python_fields | {"indexer_projection_quant_config"}
+    _python_fields = KimiK3ModelConfig._python_fields | {
+        "indexer_projection_quant_config", "k31_nvfp4_modules", "kda_nvfp4", "dsa_nvfp4",
+    }
     indexer_projection_quant_config = None
+    k31_nvfp4_modules = ()
+    kda_nvfp4 = False
+    dsa_nvfp4 = False
 
     def _bind_indexer_precision(self):
         enabled = self.k3_runtime_config.dsa.indexer_use_fp8
@@ -59,8 +68,12 @@ class KimiK31ModelConfig(KimiK3ModelConfig):
             "fp8_ds_mla" if self.attn_config.kv_cache_dtype == KvCacheDataType.FP8 else "BF16",
         )
 
+    def validate_nvfp4(self):
+        validate_nvfp4_backend(self.k31_nvfp4_modules)
+
     def apply_override_args(self, json_model_override_args):
         args = json.loads(json_model_override_args)
+        reject_legacy_nvfp4(args)
         if "indexer_use_fp8" in args:
             enabled = args["indexer_use_fp8"]
             if type(enabled) is not bool:
@@ -104,6 +117,11 @@ class KimiK31(KimiK3):
     @classmethod
     def _parse_kimi_runtime_config(cls, text, config):
         super()._parse_kimi_runtime_config(text, config)
+        if text.get("rtp_llm_nvfp4"):
+            raise ValueError("KDA_NVFP4/DSA_NVFP4 require the original native checkpoint, not a calibrated NVFP4 export")
+        config.kda_nvfp4 = parse_nvfp4_flag("KDA_NVFP4")
+        config.dsa_nvfp4 = parse_nvfp4_flag("DSA_NVFP4")
+        config.k31_nvfp4_modules = selected_nvfp4_modules(config.kda_nvfp4, config.dsa_nvfp4)
         config.k3_runtime_config = KimiK31RuntimeConfig(
             **vars(config.k3_runtime_config),
             dsa=replace(cls._dsa_config(text), indexer_use_fp8=cls.MODEL_TYPE != "kimi_k31_mtp"),
@@ -111,6 +129,17 @@ class KimiK31(KimiK3):
 
     @classmethod
     def _post_build_model_config(cls, config):
+        config.validate_nvfp4()
+        logging.info("K3.1 NVFP4 W4A4 target GEMMs: %s", config.k31_nvfp4_modules or "disabled")
+        types = config.hybrid_attention_config.hybrid_attention_types
+        for module in config.k31_nvfp4_modules:
+            present = (
+                any(t == HybridAttentionType.LINEAR for t in types) if module.startswith("kda.")
+                else any(t != HybridAttentionType.LINEAR for t in types) if module.startswith("dsa.")
+                else bool(config.moe_layer_index)
+            )
+            if not present:
+                raise ValueError(f"K3.1 NVFP4 module {module} has no layers in this model")
         super()._post_build_model_config(config)
         dsa = config.k3_runtime_config.dsa
         descs = config.kv_cache_spec_descs
@@ -149,10 +178,18 @@ class KimiK31(KimiK3):
 register_model("kimi_k31", KimiK31, ["KimiK31ForConditionalGeneration"])
 
 
+class KimiK31MtpModelConfig(KimiK3ModelConfig):
+    def apply_override_args(self, json_model_override_args):
+        args = json.loads(json_model_override_args)
+        reject_legacy_nvfp4(args)
+        super().apply_override_args(json_model_override_args)
+
+
 class KimiK31Mtp(KimiK3Mtp):
     """Trained K3 MLA nextn layer paired with a K3.1 sparse target."""
 
     MODEL_TYPE = "kimi_k31_mtp"
+    CONFIG_CLASS = KimiK31MtpModelConfig
     TARGET_MODEL_CLASS = KimiK31
 
     @classmethod

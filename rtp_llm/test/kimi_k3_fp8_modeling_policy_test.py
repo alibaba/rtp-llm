@@ -141,6 +141,14 @@ class ProjectionPolicyTest(unittest.TestCase):
         self.initialize_model(model)
         self.assertEqual(len(self.created), 1)
 
+    def test_selected_nvfp4_attention_uses_per_gemm_collectives(self):
+        for module in ("kda.input", "kda.forget", "dsa.query", "dsa.output"):
+            model = self.model()
+            model.config.k31_nvfp4_modules = (module,)
+            self.initialize_model(model)
+            self.assertIsNone(model._fp8_collective)
+        self.assertEqual(self.created, [])
+
     def test_indexer_hidden_contract_disables_verify_fp8_only_producer(self):
         model = self.model(role="DECODE", fp8_input=False)
         self.initialize_model(model)
@@ -473,7 +481,7 @@ class DsaFusionTest(unittest.TestCase):
                     self.assertEqual(hidden.dtype, "bf16")
                     return Tensor(qkv.shape[0], heads * 128)
 
-                layer = NS(prefill_query_cp=local_query, tp_size=8,
+                layer = NS(prefill_query_cp=local_query, tp_size=8, prologue="dev",
                            _bf16_collective=object(),
                            _mtp_bf16_collectives=None, q_rank=1536, kv_rank=512,
                            suffix_dim=64, heads=heads, v_dim=128, _input_padding=64,

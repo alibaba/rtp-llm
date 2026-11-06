@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -20,6 +21,7 @@ if __package__:
         LONG_INPUT_TOKENS,
         MAX_OUTPUT_TOKENS,
         MTP_RESERVE_TOKENS,
+        long_prefill_linear_minimum,
         fastsafetensors_proof,
     )
 else:
@@ -35,6 +37,7 @@ else:
         LONG_INPUT_TOKENS,
         MAX_OUTPUT_TOKENS,
         MTP_RESERVE_TOKENS,
+        long_prefill_linear_minimum,
         fastsafetensors_proof,
     )
 
@@ -73,9 +76,9 @@ def stage_configs(base, stages=STAGES):
         base.get("target_only", False) is False, "default smoke requires native MTP"
     )
     configs = []
-    for stage, decode_dp, block_count in (("regular", 2, 96), ("long", 1, 140)):
-        if stage not in stages:
-            continue
+    geometry = {"regular": (2, 96), "long": (1, 140)}
+    for stage in stages:
+        decode_dp, block_count = geometry[stage]
         if stage == "regular":
             decode_dp = base.get("decode_dp", decode_dp)
         config = copy.deepcopy(base)
@@ -91,13 +94,23 @@ def stage_configs(base, stages=STAGES):
         )
         config["prefill"]["test_block_num"] = block_count
         if stage == "long":
+            config["prefill"].setdefault(
+                "linear_pool_blocks", long_prefill_linear_minimum() + 1
+            )
+            config["prefill"].setdefault("request_capacity", 1)
+            # One load worker and one background worker keep CRC enabled
+            # with two scratch slots beside the dense 1M LINEAR pool.
+            config["prefill"].setdefault("block_tree_transfer_worker_count", 1)
+            # Bound the MoE symmetric staging pool alongside the dense FP32
+            # LINEAR inventory; one CP stripe still holds eight physical pages.
+            config["prefill"].setdefault("prefill_token_capacity", 8192)
             config["decode"].update(
                 test_block_num=block_count,
                 request_capacity=1,
                 decode_capture_batches="1",
             )
             for role in launcher.ROLES:
-                limit = config[role].get("max_seq_len", 2_097_152)
+                limit = config[role].setdefault("max_seq_len", LONG_INPUT_TOKENS + 4096)
                 require(
                     limit >= LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
                     f"{role} max_seq_len must admit the exact 1M continuation and generation reserve",
@@ -333,10 +346,11 @@ def audit_startup(config, output):
             f"{role}: readiness geometry differs",
         )
         receipts = ready.get("rank_prefill_kv_workspace_budget", {})
+        budget = float(config.get("prefill_kv_workspace_budget_gib", launcher.DEFAULT_KV_WORKSPACE_GIB))
         require(
             set(receipts) == {str(rank) for rank in range(8)}
-            and all(float(row["gib"]) == 10 for row in receipts.values()),
-            f"{role}: expected all eight 10 GiB workspace receipts",
+            and all(float(row["gib"]) == budget for row in receipts.values()),
+            f"{role}: expected all eight {budget:g} GiB workspace receipts",
         )
         checkpoints = {}
         for checkpoint in launcher.checkpoint_fields(config):
@@ -354,6 +368,23 @@ def audit_startup(config, output):
             geometry=geometry,
             checkpoints=checkpoints,
         )
+        workers = config[role].get("block_tree_transfer_worker_count")
+        if workers is not None:
+            engine_log = (directory / "logs/engine.log").read_text(errors="replace")
+            crc = re.findall(
+                r"\[RANK (\d+)\][^\n]*BlockTree CRC32C enabled: "
+                r"device=\d+ batch=(\d+) slots=(\d+) device_total=([\d.]+) MiB",
+                engine_log,
+            )
+            require(
+                len(crc) == 8 and {int(rank) for rank, *_ in crc} == set(range(8))
+                and all(int(slots) == workers * 2 for _, _, slots, _ in crc),
+                f"{role}: expected eight enabled CRC receipts with {workers * 2} slots",
+            )
+            proof[role]["crc_workspace"] = {
+                rank: dict(batch=int(batch), slots=int(slots), device_total_mib=float(mib))
+                for rank, batch, slots, mib in crc
+            }
     require(
         proof["prefill"]["checkpoints"] == proof["decode"]["checkpoints"],
         "PD checkpoints differ",
@@ -513,6 +544,13 @@ def run_stage(config, output, startup_timeout):
             launcher.atomic(output / "startup-proof.json", startup)
             record["checkpoints"] = startup["prefill"]["checkpoints"]
             record["request_counts"] = audit_stage(config, output)
+            if __package__:
+                from .nvfp4_evidence import audit_projection_precision
+            else:
+                from nvfp4_evidence import audit_projection_precision
+            record["projection_precision"] = {
+                role: audit_projection_precision(output / role, config) for role in launcher.ROLES
+            }
         except Exception as error:
             record["errors"].append(f"audit: {type(error).__name__}: {error}")
         record["passed"] = not record["errors"]
@@ -580,12 +618,18 @@ def main(argv=None):
     parser.add_argument("--output", type=Path)
     parser.add_argument("--startup-timeout", type=int, default=14400)
     parser.add_argument("--stages", nargs="+", choices=STAGES, default=list(STAGES))
+    parser.add_argument("--kda-nvfp4", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--dsa-nvfp4", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args(argv)
     if args.request_control:
         return run_requests(args.request_control)
     if args.output is None or args.startup_timeout < 1:
         parser.error("--config requires --output and a positive --startup-timeout")
-    return run(read_json(args.config), args.output.resolve(), args.startup_timeout, tuple(dict.fromkeys(args.stages)))
+    config = read_json(args.config)
+    for key in ("kda_nvfp4", "dsa_nvfp4"):
+        if getattr(args, key) is not None:
+            config[key] = getattr(args, key)
+    return run(config, args.output.resolve(), args.startup_timeout, tuple(dict.fromkeys(args.stages)))
 
 
 if __name__ == "__main__":

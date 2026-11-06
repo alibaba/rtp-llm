@@ -1,4 +1,28 @@
 py_test(
+    name = "kimi_k31_nvfp4_model_policy_test",
+    srcs = ["kimi_k31_nvfp4_model_policy_test.py"],
+    data = ["//rtp_llm:models", "//rtp_llm/models_py:models"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
+    name = "kimi_k31_nvfp4_cuda_test",
+    srcs = ["kimi_k31_nvfp4_cuda_test.py"],
+    main = "kimi_k31_nvfp4_cuda_test.py",
+    deps = ["//rtp_llm:testlib"],
+    data = ["//rtp_llm/models_py:models"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "B300", "gpu_count": "1"},
+)
+
+py_test(
+    name = "kimi_k31_nvfp4_test",
+    srcs = ["kimi_k31_nvfp4_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
     name = "kimi_k31_dsa_fused_buffers_test",
     srcs = ["kimi_k31_dsa_fused_buffers_test.py"],
     deps = ["//rtp_llm:testlib"],

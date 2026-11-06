@@ -31,6 +31,7 @@ from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
     CustomAtomicWeight,
+    QuantWeight,
     WeightModule,
 )
 from rtp_llm.ops import HybridAttentionType, KvCacheDataType, MlaOpsType, RoleType
@@ -852,6 +853,9 @@ class KimiK3Weight(ModelDeployWeightInfo):
 
         return KimiK3LoadFp8Weight
 
+    def _attention_projection_weights(self, attention):
+        return attention
+
     def _get_weight_info(self) -> ModelWeightInfo:
         layer_weights: List[List[WeightModule]] = []
         moe_layers = set(self.model_config.moe_layer_index)
@@ -870,6 +874,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 if layer_type == HybridAttentionType.LINEAR
                 else self._mla_weights()
             )
+            attention = self._attention_projection_weights(attention)
             if self.model_config.attention_projection_quant_config is not None:
                 fp8_weight = self._attention_fp8_weight_cls()
                 projection_tp = (
@@ -879,7 +884,8 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 )
                 converted = []
                 for source in attention:
-                    if source.name not in fp8_weight.w8a8_weight_list:
+                    if (source.name not in fp8_weight.w8a8_weight_list
+                            or isinstance(source, QuantWeight)):
                         converted.append(source)
                         continue
                     derive_mla = isinstance(source, _KimiK3MlaKVWeight)

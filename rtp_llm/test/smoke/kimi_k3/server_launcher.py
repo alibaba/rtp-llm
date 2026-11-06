@@ -33,7 +33,14 @@ def smoke_topology(args):
 
 
 def launch_config(args):
+    from rtp_llm.models.kimi_k3.nvfp4_config import parse_nvfp4_flag
+
     model_type = getattr(args, "model_type", "kimi_k3")
+    nvfp4 = {
+        key.upper(): str(int(model_type == "kimi_k31" and parse_nvfp4_flag(
+            key.upper(), getattr(args, key, None), default=True
+        ))) for key in ("kda_nvfp4", "dsa_nvfp4")
+    }
     fp8_gemm = getattr(args, "fp8_gemm", None)
     fp8_kv_cache = getattr(args, "fp8_kv_cache", None)
     fp8_gemm = model_type == "kimi_k31" if fp8_gemm is None else bool(fp8_gemm)
@@ -164,6 +171,8 @@ def launch_config(args):
             "1" if args.role == "DECODE" else os.environ.get("ENABLE_LINEAR_REPLAY", "0")
         ),
         "QUANTIZATION": "FP8_PER_BLOCK" if fp8_gemm else "",
+        **nvfp4,
+        "RTP_LLM_FP4_GEMM_BACKEND": "cutlass",
         "SP_QUANTIZATION": "",
         "FP8_KV_CACHE": str(int(fp8_kv_cache)),
         "FP8_MLA": "0" if model_type == "kimi_k31" else str(int(fp8_kv_cache)),
@@ -339,6 +348,16 @@ def launch_config(args):
         if args.test_block_num < 2:
             raise ValueError("test cache pool must include reserved block zero and a real block")
         options["test_block_num"] = args.test_block_num
+    linear_blocks = getattr(args, "linear_pool_blocks", None)
+    if linear_blocks is not None:
+        if type(linear_blocks) is not int or not 2 <= linear_blocks <= 2**31 - 1:
+            raise ValueError("linear pool blocks must be an integer in [2, INT_MAX]")
+        options["linear_pool_blocks"] = linear_blocks
+    transfer_workers = getattr(args, "block_tree_transfer_worker_count", None)
+    if transfer_workers is not None:
+        if type(transfer_workers) is not int or not 1 <= transfer_workers <= 64:
+            raise ValueError("BlockTree transfer workers must be an integer in [1, 64]")
+        options["block_tree_transfer_worker_count"] = transfer_workers
     if prefill_capacity is not None:
         # Explicit fixture admission/workspace capacity, not an in-model Q loop.
         # The caller must prove each complete physical query fits this capacity.
@@ -648,6 +667,8 @@ def main():
         help="Existing owned 0700 short directory for runtime temporary files; caller owns cleanup (default: run-dir/tmp)",
     )
     parser.add_argument("--print-config", action="store_true")
+    parser.add_argument("--kda-nvfp4", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--dsa-nvfp4", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument(
         "--fp8-gemm", action=argparse.BooleanOptionalAction, default=None,
         help="FP8 projection GEMM (default: enabled for K3.1)"
@@ -702,6 +723,8 @@ def main():
                         help="Record optional CPU execution evidence;disable for performance")
     parser.add_argument("--test-block-num", type=int,
                         help="Explicit bounded cache-pool size for reproducible tier-pressure smoke")
+    parser.add_argument("--linear-pool-blocks", type=int,
+                        help="Independent physical LINEAR pool size, including reserved block zero")
     parser.add_argument("--prefill-token-capacity", type=int,
                         help="K3.1 fixture-only page-aligned token/workspace capacity;default65536 unchanged")
     args = parser.parse_args()

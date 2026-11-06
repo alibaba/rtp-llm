@@ -291,6 +291,11 @@ py_library(
 )
 
 py_library(
+    name = "kimi_k31_nvfp4_config",
+    srcs = ["models/kimi_k3/nvfp4_config.py"],
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "models/*.py",

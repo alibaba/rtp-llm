@@ -40,6 +40,40 @@ class MtpExecutionAuditTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, 'unexplained native traffic'):
             resolve(stages, raw, p, d)
 
+    def test_rpc_identity_accounts_for_only_a_proven_post_terminal_verify(self):
+        stages = [dict(name='pair', passed=True, case_names=['a'])]
+        row = dict(input_len=9, prefill_total_reuse_len=0,
+                   decode_owner_rank=0, iter_count=2, output_len=5)
+        raw = dict(a=dict(passed=True, result=row, transport='pd_group_rpc', request_id=10))
+        p = {rank: [] for rank in range(8)}
+        p[0] = [dict(event='mtp_target_prefill_forward', fake=False, request_ids=[10],
+                     context_lengths=[9], reuse_lengths=[0], execution_step=1)]
+        d = {rank: [] for rank in range(8)}
+        forward = dict(event='mtp_target_verify_forward', fake=False, request_ids=[10],
+                       context_lengths=[1], execution_step=7, time_ns=100)
+        trailing = dict(forward, context_lengths=[5], execution_step=8, time_ns=200)
+        output = dict(event='terminal_generate_output', request_id=10,
+                      output_len=5, iter_count=2, time_ns=150)
+        d[0] = [forward, trailing]
+        with self.assertRaises(AssertionError):
+            resolve(stages, raw, p, d)
+        d[0] = [forward, output, trailing]
+        candidates, _, proofs = resolve(stages, raw, p, d)
+        self.assertEqual(candidates, {'a': [10]})
+        self.assertEqual(proofs[0]['post_terminal_verify_steps'], {10: 8})
+        row['iter_count'] = 3
+        d[0] = [forward, dict(output, iter_count=3), trailing,
+                dict(output, output_len=6, iter_count=3, time_ns=230)]
+        self.assertEqual(resolve(stages, raw, p, d)[0], {'a': [10]})
+        d[0][-1] = dict(d[0][-1], time_ns=190)
+        with self.assertRaisesRegex(AssertionError, 'trailing verify'):
+            resolve(stages, raw, p, d)
+        row['iter_count'] = 2
+        d[0] = [forward, output, trailing]
+        d[0][-1] = dict(trailing, context_lengths=[1])
+        with self.assertRaisesRegex(AssertionError, 'final context'):
+            resolve(stages, raw, p, d)
+
     def group(self):
         events = {}
         for rank in range(8):

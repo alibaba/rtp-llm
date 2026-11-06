@@ -35,8 +35,9 @@ class CudaFp4GEMMLinear(LinearBase):
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
         """Check if this strategy can handle the given configuration"""
-        if weight_scales is None or quant_config is None or \
-            weight_scale_2 is None or input_scale is None:
+        if weight_scales is None or quant_config is None or weight_scale_2 is None:
+            return False
+        if input_scale is None and getattr(quant_config, "activation_scheme", "static") != "dynamic":
             return False
 
         # Check quantization method
@@ -63,15 +64,23 @@ class CudaFp4GEMMLinear(LinearBase):
         self.weight_scale_2 = weight_scale_2
         self.input_scale = input_scales
         self.bias = bias
+        self.quant_config = quant_config
+        self.dynamic_input_scale = getattr(quant_config, "activation_scheme", "static") == "dynamic"
         self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cutlass")
-        self.alpha = self.weight_scale_2 * self.input_scale
-        self.input_scale_inv = 1 / self.input_scale
+        if self.dynamic_input_scale:
+            if self.backend != "cutlass":
+                raise ValueError("Dynamic NVFP4 Linear requires the cutlass backend")
+        else:
+            self.alpha = self.weight_scale_2 * self.input_scale
+            self.input_scale_inv = 1 / self.input_scale
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if input.ndim != 2 or input.shape[1] != self.hidden_size:
+            raise ValueError(f"FP4 GEMM expects [M,{self.hidden_size}], got {tuple(input.shape)}")
         # Get input dimensions
         input_m = input.shape[0]
         output_n = self.output_size
-        output_dtype = input.dtype
+        output_dtype = torch.bfloat16 if self.dynamic_input_scale else input.dtype
         output_shape = [input_m, output_n]
 
         # Check input dtype - accept BF16 and FP16
@@ -91,8 +100,23 @@ class CudaFp4GEMMLinear(LinearBase):
             logger.error(error_msg)
             raise ValueError(error_msg)
 
+        if input_m == 0:
+            return input.new_empty(output_shape, dtype=output_dtype)
+        # Fused Q/KV norms can return row-strided slices. FP4 quantization's
+        # column-major detection must see an ordinary row-major GEMM input.
+        input = input.contiguous()
+
+        if self.dynamic_input_scale:
+            # Device-only reduction is captured and recomputed on every Graph
+            # replay. No .item(), host scalar or persistent mutable scale.
+            input_scale = input.abs().amax().float().clamp_min(1e-8).reshape(1) / (6.0 * 448.0)
+            input_scale_inv = input_scale.reciprocal()
+            alpha = self.weight_scale_2 * input_scale
+        else:
+            input_scale_inv, alpha = self.input_scale_inv, self.alpha
+
         # Quantize BF16 or FP16 input to (FP4 and interleaved block scale)
-        input_fp4, input_scale_interleaved = fp4_quantize(input, self.input_scale_inv)
+        input_fp4, input_scale_interleaved = fp4_quantize(input, input_scale_inv)
         assert input_fp4.dtype == torch.uint8
          
         if self.backend == "sgl_cutlass":
@@ -101,7 +125,7 @@ class CudaFp4GEMMLinear(LinearBase):
                 self.weight,
                 input_scale_interleaved.view(torch.float8_e4m3fn),
                 self.weight_scales.view(torch.float8_e4m3fn),
-                self.alpha,
+                alpha,
                 output_dtype
             ).view(*output_shape)
         else:
@@ -110,7 +134,7 @@ class CudaFp4GEMMLinear(LinearBase):
                 self.weight.T,
                 input_scale_interleaved,
                 self.weight_scales.T,
-                self.alpha,
+                alpha,
                 output_dtype,
                 backend=self.backend
             ).view(*output_shape)

@@ -47,6 +47,22 @@ class KimiK31Weight(KimiK3Weight):
 
         return KimiK31LoadAttentionFp8Weight
 
+    def _nvfp4_projection(self, source):
+        modules = getattr(self.model_config, "k31_nvfp4_modules", ())
+        if not modules:
+            return source
+        from rtp_llm.models.kimi_k3.nvfp4_weight import (
+            KimiK31Nvfp4Weight, NVFP4_WEIGHT_MODULES,
+        )
+
+        module = NVFP4_WEIGHT_MODULES.get(source.name)
+        if module not in modules:
+            return source
+        return KimiK31Nvfp4Weight(source, module=module)
+
+    def _attention_projection_weights(self, attention):
+        return [self._nvfp4_projection(source) for source in attention]
+
     # Verified against the weight index at 546f79b5ee100f74d7ef432f0c078d92dc92bab6.
     _INDEXER_SUFFIXES = (
         "self_attn.indexer.wq_b.weight",

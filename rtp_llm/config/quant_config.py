@@ -846,6 +846,9 @@ class ModelOptFp4Config(QuantizationConfig):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
         self.mixed_attention = kwargs.get('mixed_attention', False)
         self.exclude_modules = set(kwargs.get("exclude_modules", []))
+        self.activation_scheme = kwargs.get("activation_scheme", "static")
+        if self.activation_scheme not in ("static", "dynamic"):
+            raise ValueError("ModelOpt FP4 activation_scheme must be static or dynamic")
 
     @classmethod
     def get_method(cls) -> str:

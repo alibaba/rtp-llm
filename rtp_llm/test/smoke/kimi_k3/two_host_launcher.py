@@ -24,6 +24,13 @@ import tempfile
 import time
 import urllib.request
 
+if not __package__:
+    # Role commands run this file by absolute path from outside the checkout.
+    # Append so an existing runfiles package keeps its generated RPC modules.
+    sys.path.append(str(Path(__file__).resolve().parents[4]))
+
+from rtp_llm.models.kimi_k3.nvfp4_config import parse_nvfp4_flag
+
 def decode_dp_size(config):
     return config.get("decode_dp", 2)
 
@@ -54,6 +61,10 @@ def checkpoint_fields(config):
 
 def validate(config):
     prefill_workspace_environment(config)
+    for key in ("kda_nvfp4", "dsa_nvfp4"):
+        if key in config and type(config[key]) is not bool:
+            raise ValueError(f"{key} must be boolean")
+        config[key] = parse_nvfp4_flag(key.upper(), config.get(key), default=True)
     if type(decode_dp_size(config)) is not int or decode_dp_size(config) not in (1, 2):
         raise ValueError("The smoke supports Decode DP1 or DP2")
     for key in ("fp8_gemm", "fp8_kv_cache", "cache_store_rdma_mode"):
@@ -321,12 +332,15 @@ def serve(config, role):
         enable_cuda_graph=host.get("enable_cuda_graph"), model_type="kimi_k31", expected_target_layers=93,
         tp_size=8 // dp, dp_size=dp, ep_size=8,
         fp8_gemm=config.get("fp8_gemm"), fp8_kv_cache=config.get("fp8_kv_cache"),
+        kda_nvfp4=config["kda_nvfp4"], dsa_nvfp4=config["dsa_nvfp4"],
         prefill_source_tp_size=8, peer_ip=peer["ip"], peer_port=peer["port"], start_port=host["port"],
         orthogonal_smoke=True, warm_up=config.get("check_jit_warmup", False),
         model_warm_up=config.get("check_jit_warmup", False),
         execution_evidence=True, reserve_runtime_mem_mb=host.get("reserve_runtime_mem_mb"),
         kv_cache_mem_mb=host.get("kv_cache_mem_mb"), memory_cache_size_mb=host.get("memory_cache_size_mb",32768),
         test_block_num=host.get("test_block_num"),
+        linear_pool_blocks=host.get("linear_pool_blocks"),
+        block_tree_transfer_worker_count=host.get("block_tree_transfer_worker_count"),
         prefill_token_capacity=host.get("prefill_token_capacity"),
         max_seq_len=host.get("max_seq_len"), request_capacity=host.get("request_capacity"),
         decode_capture_batches=host.get("decode_capture_batches"), cache_store_rdma_mode=rdma)
@@ -670,8 +684,14 @@ def main():
     parser.add_argument("--startup-timeout",type=int,default=14400)
     parser.add_argument("--keep-services",action="store_true")
     parser.add_argument("--dry-run",action="store_true")
+    parser.add_argument("--kda-nvfp4", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--dsa-nvfp4", action=argparse.BooleanOptionalAction, default=None)
     args=parser.parse_args()
-    config=validate(json.loads(sys.stdin.readline() if args.operation=="prepare" else args.config.read_text()))
+    config=json.loads(sys.stdin.readline() if args.operation=="prepare" else args.config.read_text())
+    for key in ("kda_nvfp4", "dsa_nvfp4"):
+        if getattr(args, key) is not None:
+            config[key] = getattr(args, key)
+    config=validate(config)
     if args.operation in ("launch","stop"):
         if args.operation=="launch" and not args.output and not args.dry_run: parser.error("launch requires --output")
         return controller(args,config)

@@ -108,14 +108,14 @@ time.sleep(120)
                 cache_geometry(path, "prefill", 8, long_case=True)
 
     def test_block_tree_capacity_uses_physical_spec_and_verified_cp_span(self):
-        def log(stride=1024, sharded="true"):
+        def log(stride=1024, sharded="true", blocks=96, linear_blocks=96):
             return "".join(
                 f"CP sharded KV cache enabled: cp_rank={rank}, cp_size=8, "
                 "block_size=1024, virtual_block_size=8192\n"
                 f"[RANK {rank}] cache manager initialized with config CacheConfig{{\n"
                 "  layer_num=93\n  layer_all_num=94\n"
                 f"  seq_size_per_block=1024\n  local_kv_cache_sharded={sharded}\n"
-                "  group_block_nums=96,96,96\n"
+                f"  group_block_nums={blocks},{blocks},{linear_blocks}\n"
                 "    kernel_seq_size_per_block=128\n"
                 "  LinearKVCacheSpec{\n"
                 f"    cache_key_token_stride={stride}\n  }}\n"
@@ -132,6 +132,13 @@ time.sleep(120)
                 path.write_text(text)
                 with self.assertRaisesRegex(ValueError, "eight-page"):
                     cache_geometry(path, "prefill", 8, long_case=False)
+            path.write_text(log(blocks=140, linear_blocks=1032))
+            proof = cache_geometry(path, "prefill", 8, long_case=True)
+            self.assertEqual(proof["usable_pages"]["0"]["linear"], 1031)
+            for linear_blocks in (140, 1031):
+                path.write_text(log(blocks=140, linear_blocks=linear_blocks))
+                with self.assertRaisesRegex(ValueError, "capacity"):
+                    cache_geometry(path, "prefill", 8, long_case=True)
 
     def test_block_tree_pool_counts_exclude_reserved_zero(self):
         from rtp_llm.test.smoke.kimi_k3.k31_smoke_capacity import device_pool_usable_blocks

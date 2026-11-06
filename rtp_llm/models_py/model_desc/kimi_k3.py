@@ -160,6 +160,9 @@ class KimiK3DecoderLayer(nn.Module):
             self.attention = KimiK31DSA(config, parallelism, weights, index, hardware)
         else:
             self.attention = KimiK3MLA(config, parallelism, weights, index, hardware)
+        from rtp_llm.models_py.modules.kimi_k3.projection import bind_projection_evidence
+
+        bind_projection_evidence(self.attention, config, parallelism, index)
         self.mlp = (
             KimiK3LatentMoE(
                 config, parallelism, weights, index, moe_config, hardware, moe_capacity
@@ -395,6 +398,11 @@ class KimiK3Model(KimiK31ModelAdapter, GptModelBase):
             return
         quant = getattr(self.config, "attention_projection_quant_config", None)
         if quant is None or quant.get_method() != "FP8_PER_BLOCK":
+            return
+        if any(name.startswith(("kda.", "dsa."))
+               for name in getattr(self.config, "k31_nvfp4_modules", ())):
+            # The per-GEMM fallback retains ordinary BF16 TP collectives. Do
+            # not feed a prequantized FP8 activation to a selected W4A4 GEMM.
             return
         decode_staging = self.parallelism_config.role_type == RoleType.DECODE
         # Projection precision selects its matching modeling path. Runtime

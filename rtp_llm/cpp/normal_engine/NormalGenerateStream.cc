@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 
 namespace rtp_llm {
 
@@ -315,7 +317,26 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     const bool split_output = isStreaming() && update_info.speculative_token_begin >= 0;
     do {
         const size_t output_end = split_output ? last_output_pos_ + 1 : seqLength();
-        enqueueGenerateOutput(prepareGenerateOutput(update_info, output_end));
+        auto outputs = prepareGenerateOutput(update_info, output_end);
+        static const bool smoke_evidence = [] {
+            const char* env = std::getenv("KIMI_K3_SMOKE_EVIDENCE");
+            return env != nullptr && std::strcmp(env, "1") == 0;
+        }();
+        if (smoke_evidence && generate_input_->generate_config->aux_info
+            && outputs.generate_outputs.size() == 1 && outputs.generate_outputs.front().finished) {
+            // Record the same terminal snapshot sent to the consumer, on the
+            // same host clock as the model forwards. An already scheduled
+            // verify may still run after this output has been prepared.
+            const auto& aux = outputs.generate_outputs.front().aux_info;
+            RTP_LLM_LOG_INFO(
+                "[K3_SMOKE_EVENT] {\"event\":\"terminal_generate_output\",\"request_id\":%ld,"
+                "\"iter_count\":%d,\"output_len\":%d,\"time_ns\":%ld}",
+                static_cast<long>(request_id_),
+                static_cast<int>(aux.iter_count),
+                static_cast<int>(aux.output_len),
+                static_cast<long>(autil::TimeUtility::currentTimeInMicroSeconds() * 1000));
+        }
+        enqueueGenerateOutput(std::move(outputs));
         if (hasErrorWithoutLock()) {
             return;
         }

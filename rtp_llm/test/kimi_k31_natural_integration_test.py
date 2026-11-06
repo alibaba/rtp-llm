@@ -31,6 +31,11 @@ def load_dsa():
         mod = ModuleType(name)
         mod.__dict__.update(values)
         modules[name] = mod
+    # Decode-only Triton definitions are imported alongside the natural path;
+    # this CPU contract never executes those kernels.
+    stub("triton.language", constexpr=object)
+    stub("triton", jit=lambda fn: fn, language=modules["triton.language"])
+    stub("rtp_llm.utils.model_weight", W=SimpleNamespace())
     stub("rtp_llm.models_py.distributed.collective_torch", Group=SimpleNamespace(TP=0),
          all_gather=None, reduce_scatter_bf16=None)
     stub("rtp_llm.models_py.modules.hybrid.indexer", Indexer=None)

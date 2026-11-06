@@ -57,6 +57,15 @@ class NaturalQGateProjection(torch.nn.Module):
         self.q_width = q.weight.shape[0]
         self.gate_width = gate.weight.shape[0]
         self.fp8 = isinstance(q, Fp8NaturalProjection)
+        self.nvfp4 = None
+        if getattr(q, "dynamic_input_scale", False):
+            from rtp_llm.models.kimi_k3.nvfp4_tensor import repack_nvfp4_projections
+
+            self.nvfp4 = repack_nvfp4_projections([
+                (q, 0, self.q_width), (gate, 0, self.gate_width),
+            ])
+            self.weight = self.nvfp4.weight
+            return
         # Preserve the backend's scale orientation, especially packed UE8M0's
         # MN-major stride. All packing is model initialization work.
         def pack(left, right):
@@ -78,7 +87,9 @@ class NaturalQGateProjection(torch.nn.Module):
             self._disable_ue8m0_cast = q._disable_ue8m0_cast
 
     def forward(self, hidden):
-        if self.fp8:
+        if self.nvfp4 is not None:
+            out = self.nvfp4(hidden)
+        elif self.fp8:
             from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_gemm_nt
 
             encoded = self._quantize_input(hidden)
@@ -99,6 +110,14 @@ def split_natural_projection(projection, q_width, kv_width, gate_width, padding)
     gate_start = kv_end + padding
     if projection.weight.shape[0] != gate_start + gate_width:
         raise ValueError("natural projection widths disagree with the fused input")
+    if getattr(projection, "dynamic_input_scale", False):
+        if padding:
+            raise ValueError("natural NVFP4 input does not use the FP8 KV alignment gap")
+        from rtp_llm.models.kimi_k3.nvfp4_tensor import repack_nvfp4_projections
+
+        return tuple(repack_nvfp4_projections([(projection, start, end)]) for start, end in (
+            (0, q_width), (q_width, kv_end), (gate_start, gate_start + gate_width),
+        ))
     if isinstance(projection, CudaFp8GEMMLinear):
         return (
             Fp8NaturalProjection(projection, 0, q_width, q_width),

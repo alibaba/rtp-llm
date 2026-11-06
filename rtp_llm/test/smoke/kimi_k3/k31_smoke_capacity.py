@@ -10,6 +10,13 @@ MAX_OUTPUT_TOKENS = 256
 MTP_RESERVE_TOKENS = 4
 
 
+def long_prefill_linear_minimum(page_size=1024):
+    # LINEAR allocation keeps physical-page slots. Canonical CP storage keys
+    # span eight pages, but do not reduce the allocator's physical inventory.
+    return (ceil((LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS) / page_size)
+            + 2 + 1 + (MTP_RESERVE_TOKENS - 1))
+
+
 def device_pool_usable_blocks(text, tag):
     legacy = re.findall(rf"kvc raw pool\[DEVICE/{re.escape(tag)}\]:[^\n]*?\btotal=(\d+)", text)
     physical = re.findall(
@@ -76,6 +83,7 @@ def cache_geometry(engine_log, role, local_tp, *, long_case):
 
     capacity = {}
     for rank, body in layouts.items():
+        physical_linear_pages = False
         if (field(body, "layer_num"), field(body, "layer_all_num")) != ("93", "94"):
             raise ValueError(f"{role} rank {rank}: expected the full target and native MTP")
         tags = [tag.strip() for tag in field(body, "group_tags").strip("[]").split(",")]
@@ -105,6 +113,7 @@ def cache_geometry(engine_log, role, local_tp, *, long_case):
                     and re.search(r"^    cache_key_token_stride=1024$", linear[1], re.MULTILINE)
                     is not None
                 )
+                physical_linear_pages = True
             if not valid_step:
                 raise ValueError(f"{role} rank {rank}: expected eight-page KDA checkpoints")
         usable = {tag: count - 1 for tag, count in zip(tags, blocks)}
@@ -113,11 +122,14 @@ def cache_geometry(engine_log, role, local_tp, *, long_case):
             # PageRR rounds up to a whole local page before the full-cache
             # manager adds the speculative reserve to that local length.
             paged_minimum = ceil(max_sequence / (1024 * local_tp)) + ceil(MTP_RESERVE_TOKENS / 1024)
-            # Prefill retains one checkpoint per stripe, up to two tail
+            # BlockTreeCache allocates physical LINEAR slots; the legacy
+            # allocator retains one checkpoint per stripe. Also reserve tail
             # states and the destination allocated before dropping old tails.
             # Decode's replay pool only needs a live tail and its replacement.
             linear_minimum = (
-                max_sequence // 8192 + 2 + 1 + (MTP_RESERVE_TOKENS - 1)
+                (long_prefill_linear_minimum(int(field(body, "seq_size_per_block")))
+                 if physical_linear_pages
+                 else max_sequence // 8192 + 2 + 1 + (MTP_RESERVE_TOKENS - 1))
                 if role == "prefill" else 3
             )
             if (min(usable["full"], usable["indexer_kv"]) < paged_minimum

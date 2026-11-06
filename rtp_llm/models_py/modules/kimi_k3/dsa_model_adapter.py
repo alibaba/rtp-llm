@@ -57,7 +57,8 @@ class KimiK31ModelAdapter:
                 attention = layer.attention
                 if any(
                     not ((isinstance(p, CudaF16Linear) and p.weight.dtype == torch.bfloat16)
-                         or (isinstance(p, CudaFp8GEMMLinear) and p.weight.dtype == torch.float8_e4m3fn))
+                         or (isinstance(p, CudaFp8GEMMLinear) and p.weight.dtype == torch.float8_e4m3fn)
+                         or (getattr(p, "dynamic_input_scale", False) and p.weight.dtype == torch.uint8))
                     or p.bias is not None for p in (attention.input, attention.f_b, attention.output)
                 ):
                     raise ValueError("natural outer requires supported CUDA KDA projections")

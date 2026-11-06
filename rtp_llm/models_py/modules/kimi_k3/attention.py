@@ -5,7 +5,6 @@ from functools import lru_cache
 import torch
 from torch import nn
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
@@ -26,6 +25,7 @@ from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
 from rtp_llm.models_py.utils.module_profiler import profile_scope
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.kimi_k3.projection import create_kimi_projection
 
 
 class KimiK3KDA(KdaAttention):
@@ -42,25 +42,20 @@ class KimiK3KDA(KdaAttention):
             (W.linear_attn_f_b_w, K3W.KDA_FORGET_S),
             (W.linear_attn_out_w, W.linear_attn_out_s),
         ):
-            weight = weights[weight_key]
-            fp8 = weight.dtype == torch.float8_e4m3fn
             projections.append(
-                LinearFactory.create_linear(
-                    weight,
-                    bias=None,
-                    weight_scales=weights[scale_key] if fp8 else None,
-                    quant_config=Fp8BlockWiseQuantConfig() if fp8 else None,
-                    hw_kernel_config=hardware,
-                )
+                create_kimi_projection(config, weights, weight_key, scale_key, hardware)
             )
         input_projection, forget_projection, output_projection = projections
-        if getattr(runtime, "dsa", None) is not None and input_projection.weight.dtype == torch.bfloat16:
+        if getattr(runtime, "dsa", None) is not None:
             from rtp_llm.models_py.modules.factory.linear.impl.cuda.bf16_comm_fusion import prepare_bf16_projection
 
-            prepare_bf16_projection(input_projection, alignment=128)
-            prepare_bf16_projection(output_projection)
-            weights[K3W.KDA_INPUT] = input_projection.weight.T
-            weights[W.linear_attn_out_w] = output_projection.weight.T
+            for projection, key, alignment in (
+                (input_projection, K3W.KDA_INPUT, 128),
+                (output_projection, W.linear_attn_out_w, 1),
+            ):
+                if isinstance(projection, CudaF16Linear) and projection.weight.dtype == torch.bfloat16:
+                    prepare_bf16_projection(projection, alignment=alignment)
+                    weights[key] = projection.weight.T
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
             CudaFp8GEMMLinear,
         )
@@ -72,9 +67,15 @@ class KimiK3KDA(KdaAttention):
         ):
             raise ValueError("FP8 KDA output requires grouped E4M3 GEMM with UE8M0 scales")
         forget_weight = weights[W.linear_attn_f_b_w]
-        fa_width = forget_weight.shape[
-            1 if forget_weight.dtype == torch.float8_e4m3fn else 0
-        ]
+        fa_width = (
+            forget_projection.hidden_size if forget_weight.dtype == torch.uint8
+            else forget_weight.shape[1 if forget_weight.dtype == torch.float8_e4m3fn else 0]
+        )
+        if weights[K3W.KDA_INPUT].dtype == torch.uint8:
+            local_heads = cfg.linear_num_value_heads // parallelism.tp_size
+            expected = 4 * local_heads * cfg.linear_value_head_dim + fa_width + local_heads
+            if input_projection.logical_output_size != expected:
+                raise ValueError("NVFP4 KDA fused F_a width does not match the forget projection")
         prefill = KdaPagedPrefill(
             cfg,
             parallelism,
@@ -143,16 +144,8 @@ class KimiK3MLA(nn.Module):
             (W.mla_q_b_w, W.mla_q_b_s),
             (W.attn_o_w, W.attn_o_s),
         ):
-            weight = weights[weight_key]
-            fp8 = weight.dtype == torch.float8_e4m3fn
             projections.append(
-                LinearFactory.create_linear(
-                    weight,
-                    bias=None,
-                    weight_scales=weights[scale_key] if fp8 else None,
-                    quant_config=Fp8BlockWiseQuantConfig() if fp8 else None,
-                    hw_kernel_config=hardware,
-                )
+                create_kimi_projection(config, weights, weight_key, scale_key, hardware)
             )
         self.input, self.q_b, self.output = projections
         self.q_norm = RMSNorm(weights[W.mla_q_a_ln_gamma], config.layernorm_eps)
@@ -173,6 +166,8 @@ class KimiK3MLA(nn.Module):
         weight = weights[W.mla_fusedqkrope_w]
         if (
             isinstance(self.input, CudaF16Linear)
+            and isinstance(self.q_b, CudaF16Linear)
+            and isinstance(self.output, CudaF16Linear)
             and weight.is_cuda
             and weight.dtype == torch.bfloat16
             and torch.cuda.get_device_capability(weight.device) in ((10, 3), (10, 7))

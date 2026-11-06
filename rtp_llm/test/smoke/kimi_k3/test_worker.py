@@ -70,6 +70,8 @@ class NativePdSmokeTest(unittest.TestCase):
             ("decode_dp", True),
             ("decode_dp", 3),
             ("fp8_gemm", 1),
+            ("kda_nvfp4", "1"),
+            ("dsa_nvfp4", 1),
             ("model_warm_up", "false"),
             ("moe_strategy", "other"),
             ("startup_timeout_s", 0),

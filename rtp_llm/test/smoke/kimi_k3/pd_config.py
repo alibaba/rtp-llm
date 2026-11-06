@@ -76,7 +76,7 @@ def validate_config(config, *, local_role):
         "decode_dp", 1
     ) not in (1, 2):
         raise ValueError("The smoke supports Decode DP1 or DP2")
-    for key in ("fp8_gemm", "fp8_kv_cache", "warm_up", "model_warm_up"):
+    for key in ("fp8_gemm", "fp8_kv_cache", "kda_nvfp4", "dsa_nvfp4", "warm_up", "model_warm_up"):
         if key in config and type(config[key]) is not bool:
             raise ValueError(f"{key} must be boolean")
     if "moe_strategy" in config and config["moe_strategy"] not in strategies:

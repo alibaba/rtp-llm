@@ -453,7 +453,7 @@ class Worker:
             or self.config.get("moe_strategy")
             or ("mega_moe" if self.role == "prefill" else "mega_moe_se"),
         ]
-        for key in ("fp8_gemm", "fp8_kv_cache"):
+        for key in ("fp8_gemm", "fp8_kv_cache", "kda_nvfp4", "dsa_nvfp4"):
             if key in self.config:
                 command.append(("--" if self.config[key] else "--no-") + key.replace("_", "-"))
         for key in ("warm_up", "model_warm_up"):

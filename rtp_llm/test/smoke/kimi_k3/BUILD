@@ -9,6 +9,7 @@ py_library(
         "k31_chunk_fixture.py",
         "logprobs_smoke.py",
         "mtp_contract.py",
+        "nvfp4_evidence.py",
         "pd_group_relay.py",
         "k31_full_smoke.py",
         "k31_long_prefix_smoke.py",
@@ -25,7 +26,7 @@ py_library(
     ],
     # Preserve the scripts' sibling imports as well as their package imports.
     imports = ["."],
-    deps = ["//rtp_llm:zstandard", "//rtp_llm:speculative_acceptance"],
+    deps = ["//rtp_llm:zstandard", "//rtp_llm:speculative_acceptance", "//rtp_llm:kimi_k31_nvfp4_config"],
 )
 
 py_library(

@@ -13,6 +13,21 @@ launch=importlib.util.module_from_spec(spec);spec.loader.exec_module(launch)
 
 
 class K31LaunchContract(unittest.TestCase):
+    def test_nvfp4_switches_default_on_and_explicit_values_override_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            with patch.dict(launch.os.environ, {}, clear=True), patch.object(launch.socket, "socket") as route:
+                route.return_value.getsockname.return_value = ("127.0.0.1", 0)
+                env, _ = launch.launch_config(args)
+                self.assertEqual((env["KDA_NVFP4"], env["DSA_NVFP4"]), ("1", "1"))
+                for kda in (False, True):
+                    for dsa in (False, True):
+                        args.kda_nvfp4, args.dsa_nvfp4 = kda, dsa
+                        with patch.dict(launch.os.environ, KDA_NVFP4=str(int(not kda)), DSA_NVFP4=str(int(not dsa))):
+                            env, _ = launch.launch_config(args)
+                        self.assertEqual((env["KDA_NVFP4"], env["DSA_NVFP4"]), (str(int(kda)), str(int(dsa))))
+                        self.assertEqual(env["SP_QUANTIZATION"], "")
+
     def test_tcp_cache_store_keeps_disaggregated_role_and_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self.fixture(Path(tmp), 93)
@@ -159,6 +174,24 @@ class K31LaunchContract(unittest.TestCase):
             args.request_capacity=2
             with self.assertRaisesRegex(ValueError,'cover all Decode graph buckets'):
                 launch.launch_config(args)
+
+    def test_linear_pool_override_keeps_paged_pool_and_mtp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            args.linear_pool_blocks, args.test_block_num = 1032, 140
+            args.block_tree_transfer_worker_count = 1
+            with patch.object(launch.socket, "socket") as route:
+                route.return_value.getsockname.return_value = ("127.0.0.1", 0)
+                env, argv = launch.launch_config(args)
+            options = dict(zip(argv[1::2], argv[2::2]))
+            self.assertEqual(options["--linear_pool_blocks"], "1032")
+            self.assertEqual(options["--test_block_num"], "140")
+            self.assertEqual(options["--block_tree_transfer_worker_count"], "1")
+            self.assertEqual(env["SP_QUANTIZATION"], "")
+            for value in (1, -1, True, 2**31):
+                args.linear_pool_blocks = value
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, "linear pool blocks"):
+                    launch.launch_config(args)
 
     def test_pairing_rejects_wrong_shapes_missing_weights_and_indexer(self):
         for field in ('hidden_size','vocab_size'):

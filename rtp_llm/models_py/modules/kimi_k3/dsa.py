@@ -113,7 +113,8 @@ class KimiK31DSA(KimiK3MLA):
             projections = (self.input, self.q_b, self.output)
             if (not policy.indexer_use_fp8 or any(
                 not ((isinstance(p, CudaF16Linear) and p.weight.dtype == torch.bfloat16)
-                     or (isinstance(p, CudaFp8GEMMLinear) and p.weight.dtype == torch.float8_e4m3fn))
+                     or (isinstance(p, CudaFp8GEMMLinear) and p.weight.dtype == torch.float8_e4m3fn)
+                     or (getattr(p, "dynamic_input_scale", False) and p.weight.dtype == torch.uint8))
                 or p.bias is not None for p in projections
             ) or not isinstance(self.indexer.weights_proj, CudaF16Linear)
                     or self.indexer.weights_proj.weight.dtype != torch.float32
@@ -121,9 +122,12 @@ class KimiK31DSA(KimiK3MLA):
                     or any(not isinstance(p, CudaFp8GEMMLinear) for p in (self.indexer.wk, self.indexer.wq_b))):
                 raise ValueError("natural outer DSA requires supported CUDA SFA projections and FP8 Indexer with FP32 head weights")
             width = self.q_rank + self.kv_rank + self.suffix_dim + self._input_padding + self.heads * self.v_dim
-            if (self.input.weight.ndim != 2 or self.input.weight.shape != (width, config.hidden_size)
-                    or self.q_b.weight.shape != (self.heads * self.q_dim, self.q_rank)
-                    or self.output.weight.shape != (config.hidden_size, self.heads * self.v_dim)):
+            def logical_shape(p):
+                return ((p.output_size, p.hidden_size) if getattr(p, "dynamic_input_scale", False)
+                        else p.weight.shape)
+            if (self.input.weight.ndim != 2 or logical_shape(self.input) != (width, config.hidden_size)
+                    or logical_shape(self.q_b) != (self.heads * self.q_dim, self.q_rank)
+                    or logical_shape(self.output) != (config.hidden_size, self.heads * self.v_dim)):
                 raise ValueError("natural outer DSA fused input must contain the complete full-head gate")
             from .natural_dsa import NaturalQGateProjection, split_natural_projection
 
