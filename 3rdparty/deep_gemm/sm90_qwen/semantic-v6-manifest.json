@@ -1,0 +1,18 @@
+{
+  "alias": "rtp_megagemm_semantic_v6",
+  "base": "semantic-v3 host ABI plus isolated SM90 cluster1 scheduler and NVCC dependent-template syntax fixes",
+  "requires_host_rebuild": false,
+  "host_abi_unchanged": true,
+  "I": 640,
+  "scope": "v5 numerical/layout contract; align GEMM2 K128 promotion and actual baseline Triton PTX SiLU/scale/quant primitive order; input prepack unchanged",
+  "files": {
+    "csrc/apis/sm90_mega.hpp": "0f2a63b3e421b07c93a7308f384fbad0bdc178f689b269ef24374ca9e0bfb0a3",
+    "csrc/jit_kernels/heuristics/sm90_mega_moe.hpp": "5be2a5248cf490eb6d2ee56f10eec9855f07247ddc6062d6e9e259f54809ee89",
+    "csrc/jit_kernels/impls/sm90_fp8_mega_moe.hpp": "24a35159fb0902402ef24e0593dfe7a8069a8ff5580fb9eda94f4e3198c2ec5c",
+    "deep_gemm/include/deep_gemm/impls/sm90_fp8_mega_moe.cuh": "0cc84e1aeba9e5d005c5442a42afab7cd8d52e607253733331234f1bb95a4580",
+    "deep_gemm/include/deep_gemm/impls/sm90_mega_moe_pre_dispatch.cuh": "5ed450f8bed37edb3391413bff935fbf63a31195737b32a31c1754203d2d5b8f",
+    "deep_gemm/include/deep_gemm/scheduler/sm90_mega_moe.cuh": "fd3be708f69e92cdc748c9d63739192e855353e8a42e80b007981b2fffe2c9bd"
+  },
+  "generic_scheduler_unchanged_sha256": "5f0a0e891de27aa4bc41a2ad721bc019f3dca9d8f98e176e23e92555fbfabda6",
+  "upstream_revision": "9e3afe91cb145ddfa0b18ae874a11dbb449e16a9"
+}
