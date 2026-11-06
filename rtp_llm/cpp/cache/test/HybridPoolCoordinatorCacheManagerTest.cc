@@ -2722,6 +2722,53 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedInsertThenReuseSamePr
     allocator->free(hit_free);
 }
 
+TEST_F(HybridPoolCoordinatorCacheManagerTest, ImpossibleFreeBlockRequestsPreserveCachedPrefixes) {
+    for (const size_t held_count : {0u, 2u}) {
+        SCOPED_TRACE(held_count);
+        auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/8, /*full_block_num=*/16);
+        auto allocator = makeAllocator(config);
+        ASSERT_TRUE(allocator->init());
+
+        const auto seed = seedCompleteBlockTreePath(allocator, CacheKeysType{100, 101, 102});
+        ASSERT_TRUE(seed.success);
+        const auto& groups = allocator->cacheGroups();
+        const auto  group_it =
+            std::find_if(groups.begin(), groups.end(), [](const auto& group) { return group->tag() == "linear"; });
+        ASSERT_NE(group_it, groups.end());
+        const auto& group = *group_it;
+        const auto  pool  = group->blockPool();
+        ASSERT_LT(pool->freeBlocksNum(), pool->totalBlocksNum());
+        const auto cached_before = allocator->blockTreeCacheOwner()->getKeySnapshot();
+        ASSERT_FALSE(cached_before.keys.empty());
+
+        BlockIndicesType held;
+        if (held_count > 0) {
+            auto allocated = pool->malloc(held_count);
+            ASSERT_TRUE(allocated.has_value());
+            held = *allocated;
+            pool->incRef(held);
+        }
+        const size_t free_before = pool->freeBlocksNum();
+        const size_t required    = pool->availableBlocksNum() + 1;
+        if (held_count == 0) {
+            ASSERT_GT(required, pool->totalBlocksNum());
+        } else {
+            ASSERT_LE(required, pool->totalBlocksNum());
+        }
+
+        EXPECT_FALSE(group->ensureFreeBlocks(static_cast<int>(required)));
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+        const auto cached_after = allocator->blockTreeCacheOwner()->getKeySnapshot();
+        EXPECT_EQ(cached_after.keys, cached_before.keys);
+        EXPECT_EQ(cached_after.version, cached_before.version);
+
+        pool->decRef(held);
+        // Once the live request releases its blocks, reclaiming the same cache is useful.
+        EXPECT_TRUE(group->ensureFreeBlocks(static_cast<int>(pool->totalBlocksNum())));
+        EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    }
+}
+
 TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedEvictionCascadesFromFullToLowerPriorityGroups) {
     auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64, /*cp_size=*/2);
     auto allocator = makeAllocator(config);
