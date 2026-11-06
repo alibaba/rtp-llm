@@ -1277,63 +1277,11 @@ class DashScGrpcRequestTest(TestCase):
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
 
-    def test_parse_workspace_meta_from_header_attributes(self) -> None:
+    def test_parse_workspace_meta_dash_key_from_ds_header_attributes(self) -> None:
         meta = json.dumps({"model_logging_policy": "default", "region": "cn-beijing"})
-        req = predict_v2_pb2.ModelInferRequest()
-        req.parameters["header"].string_param = json.dumps(
-            {
-                "request_id": "r1",
-                "service_id": "s1",
-                "task_id": "t1",
-                "attributes": {
-                    "x_dashscope_inner_workspace_meta": meta,
-                    "x-dashscope-inner-gateway-region": "cn-beijing",
-                },
-            }
-        )
+        req = self._tpm_request({"x-dashscope-inner-workspace-meta": meta})
         headers = parse_request_controls(req).request_headers
         self.assertEqual(headers["x_dashscope_inner_workspace_meta"], meta)
-
-    def test_parse_workspace_meta_header_attributes_precedence(self) -> None:
-        req = self._tpm_request(
-            {"x_dashscope_inner_workspace_meta": json.dumps({"region": "from-ds"})}
-        )
-        req.parameters["header"].string_param = json.dumps(
-            {
-                "attributes": {
-                    "x_dashscope_inner_workspace_meta": json.dumps(
-                        {"region": "from-header"}
-                    )
-                }
-            }
-        )
-        headers = parse_request_controls(req).request_headers
-        self.assertEqual(
-            headers["x_dashscope_inner_workspace_meta"],
-            json.dumps({"region": "from-header"}),
-        )
-
-    def test_parse_workspace_meta_ds_header_attributes_fallback(self) -> None:
-        meta = json.dumps({"region": "ap-southeast-1"})
-        for key in (
-            "x_dashscope_inner_workspace_meta",
-            "x-dashscope-inner-workspace-meta",
-        ):
-            with self.subTest(key=key):
-                req = self._tpm_request({key: meta})
-                headers = parse_request_controls(req).request_headers
-                self.assertEqual(headers["x_dashscope_inner_workspace_meta"], meta)
-
-    def test_parse_workspace_meta_malformed_header_parameter(self) -> None:
-        req = self._tpm_request(
-            {"x_dashscope_inner_workspace_meta": json.dumps({"region": "from-ds"})}
-        )
-        req.parameters["header"].string_param = "not-json"
-        headers = parse_request_controls(req).request_headers
-        self.assertEqual(
-            headers["x_dashscope_inner_workspace_meta"],
-            json.dumps({"region": "from-ds"}),
-        )
 
     def test_parse_enable_estimated_usage(self) -> None:
         for value, expected in (

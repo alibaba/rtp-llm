@@ -543,42 +543,6 @@ def parse_ds_header_attributes(
     return normalized
 
 
-def _parse_header_attributes(
-    request: predict_v2_pb2.ModelInferRequest,
-) -> dict[str, Any]:
-    """Parse ``parameters.header.attributes`` into a lower-case-key dict.
-
-    The gateway mirrors the HTTP headers under ``parameters.header`` as a JSON
-    string: top-level ``request_id``/``service_id``/``task_id`` plus an
-    ``attributes`` object keeping the canonical header names (e.g.
-    ``x_dashscope_inner_workspace_meta``). Returning an empty dict on malformed
-    input preserves inference while keeping the parser defensive against
-    legacy requests.
-    """
-    if "header" not in request.parameters:
-        return {}
-    p = request.parameters["header"]
-    if not p.HasField("string_param") or not p.string_param:
-        return {}
-    try:
-        header = json.loads(p.string_param)
-    except Exception as e:
-        logging.warning("failed to parse header attributes: %s", e)
-        return {}
-    if not isinstance(header, dict):
-        return {}
-    attrs = header.get("attributes")
-    if isinstance(attrs, dict):
-        return {str(k).lower(): v for k, v in attrs.items()}
-    if isinstance(attrs, list):
-        parsed: dict[str, Any] = {}
-        for item in attrs:
-            if isinstance(item, dict) and "key" in item and "value" in item:
-                parsed[str(item["key"]).lower()] = item["value"]
-        return parsed
-    return {}
-
-
 def _dict_get_case_insensitive(value: Any, key: str) -> Any:
     if not isinstance(value, dict):
         return None
@@ -1490,20 +1454,12 @@ def parse_request_controls(
         if value is not None:
             request_headers[header_name] = value
 
-    # The gateway mirrors the HTTP headers under ``parameters.header.attributes``
-    # with the canonical spelling; ``ds_header_attributes`` may carry the
-    # dash-normalized alias instead (``x-dashscope-inner-workspace-meta``).
+    # The gateway serializes this header with dash separators inside
+    # ``ds_header_attributes``; normalize to the underscore name read
+    # downstream (``extract_workspace_region``).
     workspace_meta = _normalize_non_empty_str(
-        _parse_header_attributes(request).get("x_dashscope_inner_workspace_meta")
+        ds_attrs.get("x-dashscope-inner-workspace-meta")
     )
-    if workspace_meta is None:
-        workspace_meta = _normalize_non_empty_str(
-            ds_attrs.get("x_dashscope_inner_workspace_meta")
-        )
-    if workspace_meta is None:
-        workspace_meta = _normalize_non_empty_str(
-            ds_attrs.get("x-dashscope-inner-workspace-meta")
-        )
     if workspace_meta is not None:
         request_headers["x_dashscope_inner_workspace_meta"] = workspace_meta
 
