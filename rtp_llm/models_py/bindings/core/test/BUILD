@@ -185,3 +185,20 @@ cc_test_wrapper(
         "MI308X-ROCM7",
     ],
 )
+
+# CPU coverage for the sampler's temperature-folding conditions and scale.
+cc_test(
+    name = "sample_temperature_test",
+    srcs = ["SampleTemperatureTest.cc"],
+    deps = [
+        # Exports SampleTemperature.h as a header-only std library.
+        "//rtp_llm/models_py/bindings/core:common_defines",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = copts(),
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "GPU_COUNT": "0",
+    },
+    tags = ["cpu"],
+)

@@ -2743,7 +2743,7 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
     // above that cap. Pure explicit top-k keeps the full-vocabulary path.
     const bool compact_pure_path  = !has_top_k && has_top_p;
     const bool compact_mixed_path = mixed_sampling;
-    if (force_topk <= 0 || force_topk > 4096 || force_topk >= static_cast<int>(draft_vocab_size_) || d2t_map_.defined()
+    if (force_topk >= static_cast<int>(draft_vocab_size_) || d2t_map_.defined()
         || (!compact_mixed_path && !compact_pure_path)) {
         force_topk = 0;
     }
