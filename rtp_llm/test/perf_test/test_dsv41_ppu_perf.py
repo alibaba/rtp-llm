@@ -160,6 +160,28 @@ class TestSweepPlan(unittest.TestCase):
             "16",
         )
 
+    def test_fake_balance_is_explicit_and_recorded_for_both_backends(self):
+        for backend in ("grouped", "megamoe"):
+            for enabled in (False, True):
+                option = (
+                    "--fake-balance-expert" if enabled else "--no-fake-balance-expert"
+                )
+                job = perf.build_plan(
+                    self.args("decode", "--moe-backend", backend, option)
+                )["jobs"][0]
+                self.assertEqual(job["fake_balance_expert"], enabled)
+                self.assertTrue(
+                    all(case["fake_balance_expert"] == enabled for case in job["cases"])
+                )
+                self.assertEqual(
+                    job["environment"]["FAKE_BALANCE_EXPERT"], str(int(enabled))
+                )
+                index = job["command"].index("--fake_balance_expert")
+                self.assertEqual(job["command"][index + 1], str(int(enabled)))
+        with patch.dict(os.environ, {"FAKE_BALANCE_EXPERT": "1"}):
+            self.assertTrue(self.args().fake_balance_expert)
+            self.assertFalse(self.args("--no-fake-balance-expert").fake_balance_expert)
+
     def test_old_decode_and_graph_environment_still_work(self):
         with patch.dict(
             os.environ,

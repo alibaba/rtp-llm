@@ -9,7 +9,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from rtp_llm.config.v41_runtime import PPU_STRATEGY, V41RuntimeConfig
+from rtp_llm.config.v41_runtime import PPU_STRATEGY, V41RuntimeConfig, env_bool
 from rtp_llm.tools.v41.preflight import collect_report
 
 DEFAULT_PREFILL_WAIT_TIMEOUT_MS = 1800000
@@ -47,9 +47,18 @@ def preset_env(
     dspark_verify_mode="dense",
     dspark_verify_budget=-1,
     dspark_budget_mode="fixed",
+    fake_balance_expert=None,
 ):
     if role not in ("prefill", "decode"):
         raise ValueError("role must be prefill or decode")
+    if fake_balance_expert is None:
+        fake_balance_expert = env_bool(
+            os.environ if parent is None else parent, "FAKE_BALANCE_EXPERT"
+        )
+    if type(fake_balance_expert) is not bool:
+        raise ValueError("fake_balance_expert must be an explicit boolean")
+    if fake_balance_expert and dspark_gamma:
+        raise ValueError("PPU fake balance is qualified only without DSpark")
     prefill_wait_timeout_ms = bounded_prefill_wait_timeout_ms(prefill_wait_timeout_ms)
     if prefill_parallel not in ("cp", "dp"):
         raise ValueError("prefill_parallel must be cp or dp")
@@ -140,7 +149,7 @@ def preset_env(
             "ENABLE_FFN_DISAGGREGATE": "0",
             "USE_MORI_EP": "0",
             "MOE_STRATEGY": "auto",
-            "FAKE_BALANCE_EXPERT": "0",
+            "FAKE_BALANCE_EXPERT": str(int(fake_balance_expert)),
             "REDUNDANT_EXPERT": "0",
             "CACHE_STORE_RDMA_MODE": "1" if rdma else "0",
             "START_PORT": str(start_port or (8090 if role == "prefill" else 9090)),
@@ -251,6 +260,12 @@ def main():
     )
     parser.add_argument("--dspark-gamma", type=int, default=0)
     parser.add_argument(
+        "--fake-balance-expert",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Performance-only balanced expert routes; default off, no DSpark",
+    )
+    parser.add_argument(
         "--dspark-confidence", choices=("off", "observe", "bounded"), default="off"
     )
     parser.add_argument(
@@ -312,6 +327,7 @@ def main():
         dspark_verify_mode=args.dspark_verify_mode,
         dspark_verify_budget=args.dspark_verify_budget,
         dspark_budget_mode=args.dspark_budget_mode,
+        fake_balance_expert=args.fake_balance_expert,
     )
     env = preset_env(args.role, args.checkpoint_path, **options)
     if args.token_map_cache:
@@ -319,7 +335,12 @@ def main():
     command = [sys.executable, "-m", "rtp_llm.start_server"]
     if args.print_command:
         # Only print preset-owned values; never expose inherited secrets.
-        owned = preset_env(args.role, args.checkpoint_path, parent={}, **options)
+        owned = preset_env(
+            args.role,
+            args.checkpoint_path,
+            parent={},
+            **{**options, "fake_balance_expert": env_bool(env, "FAKE_BALANCE_EXPERT")},
+        )
         if args.token_map_cache:
             owned["RTP_V41_TOKEN_MAP_CACHE"] = str(args.token_map_cache)
         print(

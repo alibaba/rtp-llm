@@ -196,6 +196,12 @@ class DeepSeekV41PPUModel(torch.nn.Module):
             enpm_group=enpm_group,
             deepep_group=group,
         )
+        ops.moe_engine.configure_fake_balance(
+            bool(getattr(moe_config, "fake_balance_expert", False)),
+            top_k=geometry.n_activated_experts,
+            dp_rank=int(getattr(parallelism_config, "dp_rank", 0)),
+            dp_size=int(getattr(parallelism_config, "dp_size", 1)),
+        )
         bundle = load_ppu_weights(
             config,
             checkpoint_path,

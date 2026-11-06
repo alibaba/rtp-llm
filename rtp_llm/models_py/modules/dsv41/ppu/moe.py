@@ -1452,6 +1452,8 @@ class PPUMoE:
         self._mega_capacity = 0
         self._mega_device = None
         self._mega_recv_stats = None
+        self._fake_balance_config = None
+        self._fake_balance_op = None
         self.group = group
         if self.num_routed_experts % self.num_local_experts != 0:
             raise ValueError(
@@ -1472,6 +1474,68 @@ class PPUMoE:
         if self.backend == "megamoe":
             with self._BUFFER_LOCK:
                 self._MEGA_ENGINES.add(self)
+
+    def configure_fake_balance(self, enabled, *, top_k, dp_rank, dp_size):
+        """Freeze the performance-only route override for this model instance."""
+        if type(enabled) is not bool:
+            raise ValueError("fake balance must be an explicit boolean")
+        if not 0 <= dp_rank < dp_size or not 0 < top_k <= self.num_routed_experts:
+            raise ValueError("fake balance requires valid DP rank/size and top-k")
+        config = (enabled, int(top_k), int(dp_rank), int(dp_size))
+        if self._fake_balance_config not in (None, config):
+            raise ValueError("fake balance configuration is frozen per model")
+        self._fake_balance_config = config
+
+    def _apply_fake_balance(self, expert_ids, expert_weights):
+        """Override only real routes; preserve idle rows and communication padding.
+
+        Native FakeBalanceExpertOp expects tightly packed [T, real_top_k]
+        tensors. A [:, :6] view of padded [T, 8] storage is not contiguous.
+        Work on private compact tensors, then restore masks without host reads
+        so changed live-row counts remain valid during Graph replay.
+        """
+        config = self._fake_balance_config
+        if config is None or not config[0] or expert_ids.shape[0] == 0:
+            return expert_ids, expert_weights
+        _, top_k, dp_rank, dp_size = config
+        if expert_ids.ndim != 2 or expert_ids.shape != expert_weights.shape:
+            raise ValueError("fake balance requires matching [tokens, slots] routes")
+        if expert_ids.shape[1] < top_k:
+            raise ValueError("route width does not cover the real MoE top-k")
+        if expert_ids.dtype not in (torch.int32, torch.int64):
+            raise TypeError("fake balance expert IDs must be int32 or int64")
+        if expert_weights.dtype != torch.float32:
+            raise TypeError("fake balance expert weights must be float32")
+        original = expert_ids[:, :top_k]
+        valid = original >= 0
+        ids = original.clone(memory_format=torch.contiguous_format)
+        weights = expert_weights[:, :top_k].clone(memory_format=torch.contiguous_format)
+        if ids.is_cuda:
+            if self._fake_balance_op is None:
+                if torch.cuda.is_current_stream_capturing():
+                    raise RuntimeError(
+                        "fake balance requires eager warmup before Graph capture"
+                    )
+                from rtp_llm.models_py.modules.base.cuda.select_topk import (
+                    FakeBalanceExpert,
+                )
+
+                self._fake_balance_op = FakeBalanceExpert(
+                    self.num_routed_experts, top_k, dp_rank, dp_size, self.ep_size
+                )
+            self._fake_balance_op(ids, weights)
+        else:
+            # CPU reference of RTP's existing fakeBalanceExpertKernel mapping.
+            index = torch.arange(ids.numel(), device=ids.device).reshape(ids.shape)
+            rank_offset = self.ep_size * dp_rank // dp_size
+            local_offset = int(dp_rank * max(self.num_local_experts / dp_size, 1.0))
+            rank = (rank_offset + index % self.ep_size) % self.ep_size
+            local = (local_offset + index // self.ep_size) % self.num_local_experts
+            ids.copy_(rank * self.num_local_experts + local)
+            weights.fill_(1.0)
+        ids = torch.where(valid, ids, original)
+        weights = torch.where(valid, weights, torch.zeros_like(weights))
+        return pad_topk_for_dispatch(ids, weights, slots=expert_ids.shape[1])
 
     # -- weight binding ---------------------------------------------------
 
@@ -1543,6 +1607,9 @@ class PPUMoE:
             "grouped_forward_calls": self.grouped_forward_calls,
             "grouped_gemm_calls": self.grouped_gemm_calls,
             "mega_moe_calls": self.mega_moe_calls,
+            "fake_balance_expert": bool(
+                self._fake_balance_config and self._fake_balance_config[0]
+            ),
             "mega_workspace_capacity": self._mega_capacity,
             "mega_received_assignments": (
                 0
@@ -1628,6 +1695,9 @@ class PPUMoE:
         plus ``-1`` padding); ``expert_weights`` is the matching fp32
         ``[T, 8]`` slot weights (zero on padding slots).
         """
+        expert_ids, expert_weights = self._apply_fake_balance(
+            expert_ids, expert_weights
+        )
         if self.backend == "megamoe":
             # Empty owners must still enter MegaMoE's cross-rank protocol.
             return self._forward_megamoe(x, expert_ids, expert_weights, layer_id)

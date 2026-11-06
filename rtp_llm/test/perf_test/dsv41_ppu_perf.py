@@ -39,6 +39,15 @@ def sizes(value):
         )
 
 
+def env_boolean(value):
+    value = value.strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise ValueError("FAKE_BALANCE_EXPERT must be a boolean")
+
+
 def parse_args(argv=None):
     env = os.environ
     parser = argparse.ArgumentParser(description=__doc__)
@@ -91,6 +100,12 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--moe-backend", choices=("grouped", "megamoe"), default="megamoe"
+    )
+    parser.add_argument(
+        "--fake-balance-expert",
+        action=argparse.BooleanOptionalAction,
+        default=env_boolean(env.get("FAKE_BALANCE_EXPERT", "0")),
+        help="Override real expert routes for performance measurements; default off",
     )
     parser.add_argument(
         "--dry-run",
@@ -195,7 +210,7 @@ def build_plan(args):
             "PERF_MEASURE_RUNS": str(args.measure_runs),
             "PERF_PROFILE_RUNS": "0",
             "DISABLE_COMPILE_PRINT": "1",
-            "FAKE_BALANCE_EXPERT": "0",
+            "FAKE_BALANCE_EXPERT": str(int(args.fake_balance_expert)),
             "MAX_SEQ_LEN": str(maximum),
             "KV_CACHE_MEM_MB": str(args.kv_cache_mem_mb),
             "ENABLE_CUDA_GRAPH": str(int(decode and args.decode_graph)),
@@ -250,7 +265,7 @@ def build_plan(args):
                 else max(inputs) * max(batches)
             ),
             "--fake_balance_expert",
-            "0",
+            str(int(args.fake_balance_expert)),
             "--warm_up",
             "0",
             "--model_warm_up",
@@ -283,6 +298,7 @@ def build_plan(args):
                 "cached_tokens_per_request": context if decode else 0,
                 "executed_prefill_tokens_per_request": 0 if decode else context,
                 "output_tokens_per_request": output_tokens,
+                "fake_balance_expert": args.fake_balance_expert,
                 "raw_path": str(
                     directory
                     / "raw_latencies"
@@ -313,6 +329,7 @@ def build_plan(args):
                 },
                 "synthetic_kv": decode,
                 "speculative": False,
+                "fake_balance_expert": args.fake_balance_expert,
                 "prefix_reuse": False,
                 "graph": decode and args.decode_graph,
             }
@@ -532,7 +549,12 @@ def phase_environment(args, job):
     for name in ("MODEL_SERVICE_CONFIG", "REMOTE_RPC_SERVER_IP", "REMOTE_SERVER_PORT"):
         parent.pop(name, None)
     parent.update(job["environment"])
-    env = preset_env(job["phase"], args.checkpoint_path, parent=parent)
+    env = preset_env(
+        job["phase"],
+        args.checkpoint_path,
+        parent=parent,
+        fake_balance_expert=args.fake_balance_expert,
+    )
     env.update(job["environment"])
     V41RuntimeConfig.from_env(env)
     env["PYTHONPATH"] = os.pathsep.join(

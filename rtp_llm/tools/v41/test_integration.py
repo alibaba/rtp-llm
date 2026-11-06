@@ -27,6 +27,59 @@ from rtp_llm.tools.v41.preflight import (
 
 
 class IntegrationTest(unittest.TestCase):
+    def test_print_command_preserves_effective_fake_balance_without_environment_leak(
+        self,
+    ):
+        from rtp_llm.tools.v41.launch import main
+
+        for flags, expected in (([], "1"), (["--no-fake-balance-expert"], "0")):
+            output = io.StringIO()
+            argv = [
+                "launch",
+                "decode",
+                "--checkpoint-path",
+                "/weights",
+                "--print-command",
+                *flags,
+            ]
+            with patch.dict(
+                os.environ,
+                {"FAKE_BALANCE_EXPERT": "1", "PRIVATE_TEST_SENTINEL": "do-not-print"},
+            ), patch.object(sys, "argv", argv), redirect_stdout(output):
+                self.assertEqual(main(), 0)
+            self.assertIn("FAKE_BALANCE_EXPERT=" + expected, output.getvalue())
+            self.assertNotIn("PRIVATE_TEST_SENTINEL", output.getvalue())
+            self.assertNotIn("do-not-print", output.getvalue())
+
+    def test_fake_balance_default_environment_and_explicit_override(self):
+        for role in ("prefill", "decode"):
+            self.assertEqual(
+                preset_env(role, "/weights", parent={})["FAKE_BALANCE_EXPERT"], "0"
+            )
+            self.assertEqual(
+                preset_env(role, "/weights", parent={"FAKE_BALANCE_EXPERT": "1"})[
+                    "FAKE_BALANCE_EXPERT"
+                ],
+                "1",
+            )
+            self.assertEqual(
+                preset_env(
+                    role,
+                    "/weights",
+                    parent={"FAKE_BALANCE_EXPERT": "1"},
+                    fake_balance_expert=False,
+                )["FAKE_BALANCE_EXPERT"],
+                "0",
+            )
+        with self.assertRaisesRegex(ValueError, "without DSpark"):
+            preset_env(
+                "decode",
+                "/weights",
+                parent={},
+                dspark_gamma=3,
+                fake_balance_expert=True,
+            )
+
     def test_encoder_recovery_is_explicit_and_requires_bounded_decoder_replay(self):
         with self.assertRaisesRegex(ValueError, "requires --ced-mode bounded"):
             preset_env("prefill", "/checkpoint", parent={}, encoder_swa_replay=True)
