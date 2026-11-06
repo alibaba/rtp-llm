@@ -1019,6 +1019,13 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     const auto& row_indexes = merge_input_status.value().all_logits_row_indexes;
     ASSERT_TRUE(row_indexes.defined());
     EXPECT_EQ(toVec<int32_t>(row_indexes), (std::vector<int32_t>{1, 3, 4}));
+    // Labels are the next execute-token for every selected row: stream3's row reads token[1]=1,
+    // stream4's rows read token[1]=1 and token[2]=0. No stream asks for prompt top-k here.
+    const auto& row_labels = merge_input_status.value().all_logits_row_labels;
+    ASSERT_TRUE(row_labels.defined());
+    EXPECT_EQ(row_labels.size(0), row_indexes.size(0));
+    EXPECT_EQ(toVec<int32_t>(row_labels), (std::vector<int32_t>{1, 1, 0}));
+    EXPECT_EQ(merge_input_status.value().all_logits_top_k, 0);
 
     SamplerInputs sampler_inputs;
     MergedOutput  merge_outputs;
@@ -1206,6 +1213,187 @@ TEST_F(NormalBatchStreamProcessorTest, testAllLogitsRowSelectedLayout) {
             EXPECT_TRUE(torch::equal(pl_sel.topk_token_ids, pl_ref.topk_token_ids));
             EXPECT_EQ(pl_sel.target_logprobs.defined(), pl_ref.target_logprobs.defined());
             if (pl_sel.target_logprobs.defined() && pl_ref.target_logprobs.defined()) {
+                EXPECT_TRUE(torch::equal(pl_sel.target_logprobs, pl_ref.target_logprobs));
+            }
+        }
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testShardedScoringOutputsLayout) {
+    // The tp_size>1 sharded reduction emits per-row lse / target logit / merged top-k instead of
+    // all_logits. Feeding the merged tensors derived from the same selected rows must drive the
+    // dispatcher to the same outputs the gathered layout produces: top-k ids/values bitwise,
+    // logprobs bitwise (same lse value is subtracted), loss equal within reduction-order ULPs.
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 16;
+    model_config.num_layers  = 2;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    const int64_t vocab = model_config.vocab_size;
+    const int64_t top_k = 4;
+
+    struct StreamSpec {
+        std::vector<int32_t> ids;
+        bool                 decode;
+        int                  loss;
+        bool                 prompt_logits;
+        int                  prompt_start;
+        int                  prompt_end;
+    };
+    const std::vector<StreamSpec> specs = {
+        {{5, 6}, true, 0, true, -1, -1},             // decode prompt rows: [0, 1)
+        {{7, 8}, true, 0, false, -1, -1},            // decode, no consumers
+        {{1, 2, 3, 4}, false, 2, false, -1, -1},     // loss only: [0, 3)
+        {{1, 2, 3, 4, 5, 6}, false, 0, true, 2, 5},  // prompt window: [2, 5)
+        {{2, 3, 4, 5, 6}, false, 2, true, 1, 4},     // loss + window: union [0, 4)
+        {{9, 9, 9}, false, 0, false, -1, -1},        // context, no consumers
+        {{3, 4, 5, 6}, false, 0, true, 4, 4},        // empty window, no rows
+    };
+    const int64_t lm_rows = static_cast<int64_t>(specs.size());
+
+    int  next_block  = 1;
+    auto make_stream = [&](const StreamSpec& spec) {
+        auto query                                    = make_shared<GenerateInput>();
+        query->input_ids                              = hostIntBuffer(spec.ids);
+        query->generate_config                        = make_shared<GenerateConfig>();
+        query->generate_config->calculate_loss        = spec.loss;
+        query->generate_config->return_prompt_logits  = spec.prompt_logits;
+        query->generate_config->prompt_logits_start   = spec.prompt_start;
+        query->generate_config->prompt_logits_end     = spec.prompt_end;
+        query->generate_config->prompt_logits_top_k   = top_k;
+        query->generate_config->return_target_logprob = true;
+        query->generate_config->is_streaming          = true;
+        GenerateStreamPtr stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        BatchKVCacheResource addr;
+        addr.resetBatchSize(1);
+        addr.initGroups(cache_config.topologyPtr());
+        addr.setBatchBlocks(0, 0, {next_block, next_block + 1, next_block + 2});
+        next_block += 3;
+        stream->setKVCache(addr);
+        stream->setIsContextStream(!spec.decode);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+
+    int total_tokens = 0;
+    for (const auto& spec : specs) {
+        total_tokens += spec.decode ? 1 : static_cast<int>(spec.ids.size());
+    }
+    auto aligned = torch::arange(total_tokens * vocab, torch::kFloat32).reshape({total_tokens, vocab});
+    aligned += torch::arange(total_tokens, torch::kFloat32).reshape({total_tokens, 1}) * 100.0f;
+    aligned = aligned.to(torch::kCUDA);
+
+    // Row-selected [lm ++ per-stream [a,b)] layout plus per-stream label list, exactly like
+    // the gatherer + sharded model produce them.
+    std::vector<torch::Tensor> pieces       = {torch::full({lm_rows, vocab}, -1e30f, aligned.options())};
+    std::vector<int32_t>       label_vec    = std::vector<int32_t>(lm_rows, -1);
+    int                        token_offset = 0;
+    for (const auto& spec : specs) {
+        const int token_size = spec.decode ? 1 : static_cast<int>(spec.ids.size());
+        const auto [a, b] =
+            promptScoringRowRange(token_size, spec.loss != 0, spec.prompt_logits, spec.prompt_start, spec.prompt_end);
+        for (int r = a; r < b; ++r) {
+            label_vec.push_back(r + 1 < token_size ? spec.ids[r + 1] : -1);
+        }
+        if (b > a) {
+            pieces.push_back(aligned.narrow(0, token_offset + a, b - a));
+        }
+        token_offset += token_size;
+    }
+    auto selected = torch::cat(pieces, 0);
+
+    // Merged sharded outputs the model would emit for these rows: exact full-vocab lse/top-k
+    // (the merge is value-exact for top-k; lse is subtracted identically downstream), and the
+    // raw target logit per row (-inf where the row has no label).
+    auto lse    = selected.logsumexp(-1);
+    auto topk   = selected.topk(top_k, -1);
+    auto lbl    = torch::tensor(label_vec, torch::kInt32).to(torch::kCUDA).to(torch::kLong);
+    auto tcol   = lbl.clamp(0, vocab - 1).unsqueeze(1);
+    auto tvals  = selected.gather(1, tcol).squeeze(1);
+    auto tmask  = lbl < 0;
+    auto target = tvals.masked_fill(tmask, -std::numeric_limits<float>::infinity());
+
+    auto run_dispatch = [&](const std::list<GenerateStreamPtr>& streams, bool sharded) {
+        StreamGroups stream_groups(streams);
+        MergedOutput merge_outputs;
+        merge_outputs.model_output.hidden_states   = torch::zeros({lm_rows, 4}, torch::kFloat32).to(torch::kCUDA);
+        merge_outputs.model_output.logits          = torch::zeros({lm_rows, vocab}, torch::kFloat32).to(torch::kCUDA);
+        merge_outputs.sampler_output.token_ids     = torch::ones({lm_rows, 4}, torch::kInt32);
+        merge_outputs.sampler_output.cum_log_probs = torch::zeros({lm_rows}, torch::kFloat32).to(torch::kCUDA);
+        merge_outputs.model_output.all_logits_lm_rows = lm_rows;
+        if (sharded) {
+            merge_outputs.model_output.all_logits_lse           = lse;
+            merge_outputs.model_output.all_logits_target_logits = target;
+            merge_outputs.model_output.all_logits_topk_values   = std::get<0>(topk);
+            merge_outputs.model_output.all_logits_topk_ids      = std::get<1>(topk).to(torch::kInt32);
+        } else {
+            merge_outputs.model_output.all_logits = selected;
+        }
+        EXPECT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+    };
+
+    std::list<GenerateStreamPtr> streams_sharded;
+    std::list<GenerateStreamPtr> streams_ref;
+    for (const auto& spec : specs) {
+        streams_sharded.emplace_back(make_stream(spec));
+        streams_ref.emplace_back(make_stream(spec));
+    }
+    run_dispatch(streams_sharded, true);
+    run_dispatch(streams_ref, false);
+
+    auto it_sel = streams_sharded.begin();
+    auto it_ref = streams_ref.begin();
+    for (size_t i = 0; i < specs.size(); ++i, ++it_sel, ++it_ref) {
+        SCOPED_TRACE("stream " + std::to_string(i));
+        const auto& sel = *it_sel;
+        const auto& ref = *it_ref;
+
+        auto loss_sel = sel->getLoss();
+        auto loss_ref = ref->getLoss();
+        EXPECT_EQ(loss_sel.defined(), loss_ref.defined());
+        if (loss_sel.defined() && loss_ref.defined()) {
+            // CE kernel vs lse-minus-target: same value up to reduction order — check the
+            // relative ULP scale, not an absolute epsilon, since logits here are O(1e3).
+            auto diff =
+                ((loss_sel.cpu() - loss_ref.cpu()).abs() / loss_ref.cpu().abs().clamp_min(1)).max().item<float>();
+            EXPECT_LT(diff, 1e-5f);
+        }
+
+        const int token_size = specs[i].decode ? 1 : static_cast<int>(specs[i].ids.size());
+        const auto [wa, wb]  = promptScoringRowRange(
+            token_size, false, specs[i].prompt_logits, specs[i].prompt_start, specs[i].prompt_end);
+
+        auto out_sel = sel->nextOutput(5000);
+        auto out_ref = ref->nextOutput(5000);
+        ASSERT_TRUE(out_sel.ok());
+        ASSERT_TRUE(out_ref.ok());
+        auto& go_sel = out_sel.value().generate_outputs;
+        auto& go_ref = out_ref.value().generate_outputs;
+        ASSERT_EQ(go_sel.size(), 1u);
+        ASSERT_EQ(go_ref.size(), 1u);
+        const bool expect_prompt_logits = specs[i].prompt_logits && wb > wa;
+        EXPECT_EQ(go_sel[0].prompt_logits.has_value(), expect_prompt_logits);
+        ASSERT_EQ(go_sel[0].prompt_logits.has_value(), go_ref[0].prompt_logits.has_value());
+        if (expect_prompt_logits) {
+            const auto& pl_sel = *go_sel[0].prompt_logits;
+            const auto& pl_ref = *go_ref[0].prompt_logits;
+            EXPECT_EQ(pl_sel.start_pos, pl_ref.start_pos);
+            EXPECT_EQ(pl_sel.end_pos, pl_ref.end_pos);
+            // Same lse is subtracted on both paths, so these must match bitwise.
+            EXPECT_TRUE(torch::equal(pl_sel.topk_logprobs, pl_ref.topk_logprobs));
+            EXPECT_TRUE(torch::equal(pl_sel.topk_token_ids, pl_ref.topk_token_ids));
+            EXPECT_EQ(pl_sel.target_logprobs.defined(), pl_ref.target_logprobs.defined());
+            if (pl_sel.target_logprobs.defined() && pl_ref.target_logprobs.defined()) {
+                // Same raw target logit minus the same lse: bitwise equal.
                 EXPECT_TRUE(torch::equal(pl_sel.target_logprobs, pl_ref.target_logprobs));
             }
         }

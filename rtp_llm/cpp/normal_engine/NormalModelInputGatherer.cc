@@ -278,9 +278,21 @@ torch::Tensor buildLmOutputIndexesOnHost(const GptModelInputs& model_input, cons
 // instead of every executed token, so prompt scoring a long prompt no longer allocates
 // [tokens, vocab] fp32 per rank. The dispatcher recomputes the same ranges (promptScoringRowRange)
 // to locate each stream's slice, so the two must stay in lockstep.
-torch::Tensor buildAllLogitsRowIndexes(const StreamGroups& stream_groups) {
-    std::vector<int32_t> rows;
-    int32_t              token_offset = 0;
+// Alongside the rows this emits the per-row next-token labels the sharded reduction needs to read
+// raw target logits out of each rank's vocab shard (token[r+1] in the stream's own execute
+// tokens, -1 when the row has no label), and the max prompt_logits_top_k any stream requests so
+// all ranks compute the same per-shard top-k width.
+struct AllLogitsRowSelection {
+    torch::Tensor row_indexes;
+    torch::Tensor row_labels;
+    int64_t       max_top_k = 0;
+};
+
+AllLogitsRowSelection buildAllLogitsRowSelection(const StreamGroups& stream_groups) {
+    std::vector<int32_t>  rows;
+    std::vector<int32_t>  labels;
+    AllLogitsRowSelection selection;
+    int32_t               token_offset = 0;
     for (const auto& stream : stream_groups.allStreams()) {
         const int  token_size = stream->currentExecuteTokenSize();
         const auto config     = stream->generateConfig();
@@ -289,17 +301,28 @@ torch::Tensor buildAllLogitsRowIndexes(const StreamGroups& stream_groups) {
                                                   stream->returnPromptLogits(),
                                                   config->prompt_logits_start,
                                                   config->prompt_logits_end);
-        for (int r = a; r < b; ++r) {
-            rows.push_back(token_offset + r);
+        if (b > a) {
+            const auto tokens     = stream->currentExecuteTokens(0);
+            const int  num_tokens = static_cast<int>(tokens.size());
+            for (int r = a; r < b; ++r) {
+                rows.push_back(token_offset + r);
+                labels.push_back(r + 1 < num_tokens ? tokens[r + 1] : -1);
+            }
+        }
+        if (stream->returnPromptLogits() && config->prompt_logits_top_k > selection.max_top_k) {
+            selection.max_top_k = config->prompt_logits_top_k;
         }
         token_offset += token_size;
     }
-    auto out =
-        torch::empty({static_cast<int64_t>(rows.size())}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
-    if (!rows.empty()) {
-        std::memcpy(out.data_ptr<int32_t>(), rows.data(), rows.size() * sizeof(int32_t));
+    const auto n          = static_cast<int64_t>(rows.size());
+    auto       options    = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    selection.row_indexes = torch::empty({n}, options);
+    selection.row_labels  = torch::empty({n}, options);
+    if (n > 0) {
+        std::memcpy(selection.row_indexes.data_ptr<int32_t>(), rows.data(), n * sizeof(int32_t));
+        std::memcpy(selection.row_labels.data_ptr<int32_t>(), labels.data(), n * sizeof(int32_t));
     }
-    return out;
+    return selection;
 }
 
 torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host_holder) {
@@ -675,7 +698,10 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     if (model_input.need_all_logits) {
         // Attach the possibly-empty row set; definedness (not emptiness) is what switches
         // PyWrappedModel to the row-selected gather, and it must be identical on every TP rank.
-        model_input.all_logits_row_indexes = buildAllLogitsRowIndexes(stream_groups);
+        auto selection                     = buildAllLogitsRowSelection(stream_groups);
+        model_input.all_logits_row_indexes = selection.row_indexes;
+        model_input.all_logits_row_labels  = selection.row_labels;
+        model_input.all_logits_top_k       = selection.max_top_k;
     }
     return model_input;
 }

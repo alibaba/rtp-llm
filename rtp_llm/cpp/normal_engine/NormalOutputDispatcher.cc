@@ -334,68 +334,107 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     torch::Tensor                     loss;
     std::optional<PromptLogitsOutput> prompt_logits_output;
     try {
+        // Sharded scoring outputs replace all_logits on the tp_size>1 row-selected path; the
+        // legacy gathered tensor remains for tp_size==1 and non-selected producers.
+        const bool has_sharded_scoring = model_output.all_logits_lse.defined();
         const bool consumes_scoring =
-            stream->calculateLoss() || (stream->returnPromptLogits() && model_output.all_logits.defined());
+            stream->calculateLoss()
+            || (stream->returnPromptLogits() && (model_output.all_logits.defined() || has_sharded_scoring));
         if (consumes_scoring && test_scoring_failure_hook) {
             test_scoring_failure_hook(stream);
         }
 
         if (stream->calculateLoss()) {
-            auto all_logits_tensor = model_output.all_logits.narrow(0, all_logits_origin, token_size - 1);
-            auto tokens            = stream->currentExecuteTokens(0);
-            auto label_tensor =
-                torch::from_blob(const_cast<int*>(tokens.data() + 1), {(int64_t)(tokens.size() - 1)}, torch::kInt32)
-                    .to(torch::kCUDA);
-            auto labels_int64 = label_tensor.toType(torch::kInt64);
-            loss = torch::cross_entropy_loss(all_logits_tensor, labels_int64, torch::nullopt, at::Reduction::None)
-                       .to(torch::kFloat32);
+            if (has_sharded_scoring) {
+                // CE(label) = logsumexp - target_logit, both already reduced globally per row.
+                auto lse_rows    = model_output.all_logits_lse.narrow(0, all_logits_origin, token_size - 1);
+                auto target_rows = model_output.all_logits_target_logits.narrow(0, all_logits_origin, token_size - 1);
+                loss             = (lse_rows - target_rows).to(torch::kFloat32);
+            } else {
+                auto all_logits_tensor = model_output.all_logits.narrow(0, all_logits_origin, token_size - 1);
+                auto tokens            = stream->currentExecuteTokens(0);
+                auto label_tensor =
+                    torch::from_blob(const_cast<int*>(tokens.data() + 1), {(int64_t)(tokens.size() - 1)}, torch::kInt32)
+                        .to(torch::kCUDA);
+                auto labels_int64 = label_tensor.toType(torch::kInt64);
+                loss = torch::cross_entropy_loss(all_logits_tensor, labels_int64, torch::nullopt, at::Reduction::None)
+                           .to(torch::kFloat32);
+            }
         }
 
-        // Prompt scoring: guarded by all_logits.defined(), which the model produces whenever
-        // need_all_logits is set — prefill prompt-logits/loss requests and decode-phase
+        // Prompt scoring: guarded by scoring outputs being defined, which the model produces
+        // whenever need_all_logits is set — prefill prompt-logits/loss requests and decode-phase
         // calculate_loss both reach this path.
-        if (stream->returnPromptLogits() && !model_output.all_logits.defined()) {
+        if (stream->returnPromptLogits() && !model_output.all_logits.defined() && !has_sharded_scoring) {
             RTP_LLM_LOG_WARNING("stream [%ld] prompt_logits requested but all_logits not produced", stream->streamId());
         }
-        if (stream->returnPromptLogits() && model_output.all_logits.defined()) {
+        if (stream->returnPromptLogits() && (model_output.all_logits.defined() || has_sharded_scoring)) {
             auto config    = stream->generateConfig();
             int  ts        = (int)token_size;
             int  start_pos = std::clamp(config->prompt_logits_start >= 0 ? config->prompt_logits_start : 0, 0, ts);
             int  end_pos   = std::clamp(config->prompt_logits_end >= 0 ? config->prompt_logits_end : ts, start_pos, ts);
             int  slice_len = end_pos - start_pos;
             if (slice_len > 0) {
-                int top_k = std::min(config->prompt_logits_top_k, (int)model_output.all_logits.size(1));
+                torch::Tensor topk_logprobs, topk_indices, target_logprobs;
+                if (has_sharded_scoring) {
+                    // Per-row global lse / raw target logit / merged top-k (value desc, then
+                    // ascending token id) were produced by the sharded reduction; narrow this
+                    // stream's window the same way the gathered path does.
+                    const int64_t merged_k = model_output.all_logits_topk_values.size(1);
+                    int           top_k    = std::min(config->prompt_logits_top_k, (int)merged_k);
+                    auto          lse = model_output.all_logits_lse.narrow(0, all_logits_origin + start_pos, slice_len);
+                    topk_logprobs =
+                        model_output.all_logits_topk_values.narrow(0, all_logits_origin + start_pos, slice_len)
+                            .narrow(1, 0, top_k)
+                        - lse.unsqueeze(1);
+                    topk_indices = model_output.all_logits_topk_ids.narrow(0, all_logits_origin + start_pos, slice_len)
+                                       .narrow(1, 0, top_k);
+                    if (config->return_target_logprob) {
+                        auto tokens      = stream->currentExecuteTokens(0);
+                        int  label_start = start_pos + 1;
+                        int  label_end   = std::min(end_pos + 1, (int)tokens.size());
+                        int  logprob_len = label_end - label_start;
+                        if (logprob_len > 0) {
+                            auto target_raw = model_output.all_logits_target_logits.narrow(
+                                0, all_logits_origin + start_pos, logprob_len);
+                            target_logprobs = (target_raw - lse.narrow(0, 0, logprob_len)).cpu();
+                        }
+                    }
+                } else {
+                    int top_k = std::min(config->prompt_logits_top_k, (int)model_output.all_logits.size(1));
 
-                auto sliced_logits =
-                    model_output.all_logits.narrow(0, all_logits_origin + start_pos, slice_len).to(torch::kFloat32);
+                    auto sliced_logits =
+                        model_output.all_logits.narrow(0, all_logits_origin + start_pos, slice_len).to(torch::kFloat32);
 
-                // topk on raw logits (monotonicity of softmax preserves ranking)
-                auto [topk_values_raw, topk_indices] = sliced_logits.topk(top_k, -1);
+                    // topk on raw logits (monotonicity of softmax preserves ranking)
+                    auto [topk_values_raw, topk_idx] = sliced_logits.topk(top_k, -1);
 
-                // single reduce for log-normalizer, avoids materializing [slice_len, vocab_size]
-                auto log_sum_exp   = sliced_logits.logsumexp(-1, /*keepdim=*/true);
-                auto topk_logprobs = topk_values_raw - log_sum_exp;
+                    // single reduce for log-normalizer, avoids materializing [slice_len, vocab_size]
+                    auto log_sum_exp = sliced_logits.logsumexp(-1, /*keepdim=*/true);
+                    topk_logprobs    = topk_values_raw - log_sum_exp;
+                    topk_indices     = topk_idx;
 
-                // target_logprobs[i] = logprob of token[start_pos+i+1] at position start_pos+i.
-                // Length = min(slice_len, tokens.size() - start_pos - 1): equals slice_len when
-                // end_pos < tokens.size(), or slice_len-1 when end_pos == tokens.size() (last
-                // position has no next token as label).
-                torch::Tensor target_logprobs;
-                if (config->return_target_logprob) {
-                    auto tokens      = stream->currentExecuteTokens(0);
-                    int  label_start = start_pos + 1;
-                    int  label_end   = std::min(end_pos + 1, (int)tokens.size());
-                    int  logprob_len = label_end - label_start;
-                    if (logprob_len > 0) {
-                        // from_blob + to(kCUDA) is a synchronous copy; token buffer is stable during prefill.
-                        auto label_tensor = torch::from_blob(const_cast<int*>(tokens.data() + label_start),
-                                                             {(int64_t)logprob_len},
-                                                             torch::kInt32)
-                                                .to(torch::kCUDA)
-                                                .toType(torch::kInt64)
-                                                .unsqueeze(1);
-                        auto target_raw = sliced_logits.narrow(0, 0, logprob_len).gather(1, label_tensor).squeeze(1);
-                        target_logprobs = (target_raw - log_sum_exp.narrow(0, 0, logprob_len).squeeze(1)).cpu();
+                    // target_logprobs[i] = logprob of token[start_pos+i+1] at position start_pos+i.
+                    // Length = min(slice_len, tokens.size() - start_pos - 1): equals slice_len when
+                    // end_pos < tokens.size(), or slice_len-1 when end_pos == tokens.size() (last
+                    // position has no next token as label).
+                    if (config->return_target_logprob) {
+                        auto tokens      = stream->currentExecuteTokens(0);
+                        int  label_start = start_pos + 1;
+                        int  label_end   = std::min(end_pos + 1, (int)tokens.size());
+                        int  logprob_len = label_end - label_start;
+                        if (logprob_len > 0) {
+                            // from_blob + to(kCUDA) is a synchronous copy; token buffer is stable during prefill.
+                            auto label_tensor = torch::from_blob(const_cast<int*>(tokens.data() + label_start),
+                                                                 {(int64_t)logprob_len},
+                                                                 torch::kInt32)
+                                                    .to(torch::kCUDA)
+                                                    .toType(torch::kInt64)
+                                                    .unsqueeze(1);
+                            auto target_raw =
+                                sliced_logits.narrow(0, 0, logprob_len).gather(1, label_tensor).squeeze(1);
+                            target_logprobs = (target_raw - log_sum_exp.narrow(0, 0, logprob_len).squeeze(1)).cpu();
+                        }
                     }
                 }
 

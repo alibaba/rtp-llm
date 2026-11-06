@@ -83,6 +83,15 @@ struct GptModelInputs {
     // definedness (not emptiness) selects the row-gather path, and undefined keeps the legacy
     // full-row gather.
     torch::Tensor all_logits_row_indexes;
+    // int32 host tensor aligned with all_logits_row_indexes: the next-token label each scoring
+    // row needs (token[r+1] in the stream's own execute tokens), or -1 when the row has no
+    // label (last executed position). TP ranks use it to read the raw target logit out of their
+    // local vocab shard; defined iff all_logits_row_indexes is defined.
+    torch::Tensor all_logits_row_labels;
+    // Max prompt_logits_top_k requested by any scoring stream this step (0 when none ask for
+    // top-k). Synchronized via the allLogitsTopK shape hint so every rank computes the same
+    // per-shard top-k width.
+    int64_t all_logits_top_k = 0;
     // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
     size_t kv_block_stride_bytes;
     size_t kv_scale_stride_bytes;
@@ -133,6 +142,20 @@ struct GptModelOutputs {
     // prompt-scoring/loss ranges in allStreams() order (see all_logits_row_indexes and
     // promptScoringRowRange). Set only by PyWrappedModel::forwardPostLayers on the selected path.
     int64_t all_logits_lm_rows = -1;
+
+    // TP-sharded scoring outputs, produced instead of all_logits when the row-selected path runs
+    // at tp_size > 1: each rank reduces its local [rows, vocab/tp] shard to small per-row
+    // partials and only those are all-gathered, so no rank materializes [rows, vocab] for
+    // scoring. All four tensors share the row-selected all_logits layout described above
+    // ([lm rows ++ per-stream scoring ranges]); lm rows are computed but never consumed.
+    //   all_logits_lse           [rows]      fp32 global logsumexp over the full vocab
+    //   all_logits_topk_values   [rows, K]   fp32 global top-k raw logit values (desc, gid asc)
+    //   all_logits_topk_ids      [rows, K]   int32 global top-k token ids
+    //   all_logits_target_logits [rows]      fp32 raw logit at the row's label (-inf if none)
+    torch::Tensor all_logits_lse;
+    torch::Tensor all_logits_topk_values;
+    torch::Tensor all_logits_topk_ids;
+    torch::Tensor all_logits_target_logits;
 };
 
 struct CopyParams {

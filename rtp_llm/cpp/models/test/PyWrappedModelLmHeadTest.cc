@@ -18,7 +18,9 @@ py::dict runLmHead(py::object           py_model,
                    bool                 already_selected,
                    int                  tp_size,
                    size_t               output_vocab_size,
-                   const py::object&    all_logits_row_indexes) {
+                   const py::object&    all_logits_row_indexes,
+                   const py::object&    all_logits_row_labels,
+                   int64_t              all_logits_top_k) {
     initRuntime(/*device_id=*/0, /*trace_memory=*/false, /*enable_comm_overlap=*/false, MlaOpsType::AUTO);
     Weights weights;
     weights.layers.resize(1);
@@ -48,6 +50,10 @@ py::dict runLmHead(py::object           py_model,
     if (!all_logits_row_indexes.is_none()) {
         inputs.all_logits_row_indexes = all_logits_row_indexes.cast<torch::Tensor>();
     }
+    if (!all_logits_row_labels.is_none()) {
+        inputs.all_logits_row_labels = all_logits_row_labels.cast<torch::Tensor>();
+    }
+    inputs.all_logits_top_k = all_logits_top_k;
     auto outputs = already_selected ? model.forwardPostLayersLastHidden(hidden, inputs) :
                                       model.forwardPostLayers(hidden,
                                                               has_context_request,
@@ -64,6 +70,16 @@ py::dict runLmHead(py::object           py_model,
     result["all_hidden_states"]  = outputs.all_hidden_states;
     result["all_logits"]         = outputs.all_logits.defined() ? py::cast(outputs.all_logits) : py::none();
     result["all_logits_lm_rows"] = outputs.all_logits_lm_rows;
+    auto cast_or_none            = [](const torch::Tensor& t) -> py::object {
+        if (!t.defined()) {
+            return py::none();
+        }
+        return py::cast(t);
+    };
+    result["all_logits_lse"]           = cast_or_none(outputs.all_logits_lse);
+    result["all_logits_target_logits"] = cast_or_none(outputs.all_logits_target_logits);
+    result["all_logits_topk_values"]   = cast_or_none(outputs.all_logits_topk_values);
+    result["all_logits_topk_ids"]      = cast_or_none(outputs.all_logits_topk_ids);
     return result;
 }
 
@@ -81,5 +97,7 @@ PYBIND11_MODULE(libth_pywrapped_model_lm_head_test, m) {
           py::arg("already_selected")       = false,
           py::arg("tp_size")                = 1,
           py::arg("output_vocab_size")      = 0,
-          py::arg("all_logits_row_indexes") = py::none());
+          py::arg("all_logits_row_indexes") = py::none(),
+          py::arg("all_logits_row_labels")  = py::none(),
+          py::arg("all_logits_top_k")       = int64_t{0});
 }

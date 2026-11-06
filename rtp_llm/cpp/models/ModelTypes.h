@@ -101,6 +101,9 @@ enum GptModelInputIndex : size_t {
     // Number of rows in all_logits_row_indexes (int32 host tensor selecting which token rows get
     // full-vocab TP-gathered logits; see GptModelInputs::all_logits_row_indexes).
     allLogitsRowIndexes,
+    // Max prompt_logits_top_k over the batch's scoring streams; every rank must compute the
+    // same per-shard top-k width so the partial all-gather shapes agree.
+    allLogitsTopK,
     gptModelInputLength,
 };
 

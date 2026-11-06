@@ -32,6 +32,20 @@ test_deps = [
 ] + torch_deps() + cuda13_torch_link_deps
 
 cc_test(
+    name = "prompt_scoring_shards_test",
+    srcs = [
+        "PromptScoringShardsTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "model_data_test",
     srcs = [
         "ModelDataTest.cc",

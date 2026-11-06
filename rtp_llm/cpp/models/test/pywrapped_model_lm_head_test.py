@@ -197,18 +197,47 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
         self.assertEqual(result["all_logits_lm_rows"], 2)
 
     def test_row_selected_tp_gather_sends_only_needed_rows(self):
+        # tp_size>1 row selection never gathers [rows, vocab]: only the 2 lm rows ship
+        # whole, and the scoring rows ride one compact partial-reduction payload
+        # [lse | target | topk_values | topk_ids-as-f32]. The mock emulates a peer whose
+        # shard equals this shard's columns + 16 (its global ids are +16), so every merged
+        # output is computable from rank 0's local logits alone.
         gathered_shapes = []
+        # Partials are produced for every selected row (2 lm + 1 scoring = 3); lm rows
+        # carry -1 labels.
+        R, kl = 3, 3
 
         def gather(receivers, mode, senders, inplace):
+            # tpSyncEmbeddingOrLogits uses the inplace form: rank 0's data already sits in
+            # the first slot of the recv buffer and `senders` is empty.
             buffer = receivers[0]
-            rows = buffer.shape[0]
             gathered_shapes.append(tuple(buffer.shape))
-            local = buffer.reshape(2, rows, 16)[0].clone()
-            buffer.reshape(2, rows, 16).copy_(torch.stack((local, local + 16)))
+            local = buffer.view(2, buffer.size(0), -1)[0].clone()
+            if buffer.size(0) > 1:
+                # lm-row gather: [rows, 2*16], rank1 = rank0 + 16.
+                buffer.view(2, buffer.size(0), -1).copy_(
+                    torch.stack((local, local + 16))
+                )
+            else:
+                # Scoring payload [1, 2P]: synthesize rank1's partials from rank0's
+                # layout [lse R | tgt R | tkv R*kl | tki R*kl].
+                p = local.reshape(-1)
+                l0, t0, v0, i0 = p.split([R, R, R * kl, R * kl])
+                # Label 7 lives on rank0's shard, so rank1's target column is -inf.
+                r1 = torch.cat(
+                    (
+                        l0 + 16,
+                        torch.full_like(t0, float("-inf")),
+                        v0 + 16,
+                        (i0.view(torch.int32) + 16).view(torch.float32),
+                    )
+                )
+                buffer.view(2, -1).copy_(torch.stack((p, r1)))
 
         register_comm_ops(lambda *args: None, lambda *args: None, gather)
         try:
             scoring = torch.tensor([4], dtype=torch.int32, pin_memory=True)
+            labels = torch.tensor([7], dtype=torch.int32, pin_memory=True)
             with torch.no_grad():
                 result = run_lm_head(
                     self.model,
@@ -217,21 +246,43 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
                     self.indexes,
                     need_all_logits=True,
                     all_logits_row_indexes=scoring,
+                    all_logits_row_labels=labels,
+                    all_logits_top_k=3,
                     tp_size=2,
                     output_vocab_size=29,
                 )
-            # 2 lm rows + 1 scoring row -> one 3-row gather, not 6 rows.
-            self.assertEqual(gathered_shapes, [(3, 32)])
-            expected = torch.cat(
-                (
-                    self.model.nvfp4_lm_head(self.hidden[[5, 1, 4]]),
-                    self.model.nvfp4_lm_head(self.hidden[[5, 1, 4]]) + 16,
-                ),
-                dim=1,
-            )[:, :29].float()
-            torch.testing.assert_close(result["all_logits"], expected, rtol=0, atol=0)
-            torch.testing.assert_close(result["logits"], expected[:2], rtol=0, atol=0)
+            # One 2x16 lm-row gather + one 24-wide payload gather; never a [rows, vocab]
+            # scoring gather.
+            self.assertEqual(gathered_shapes, [(2, 32), (1, 48)])
+            local = self.model.nvfp4_lm_head(self.hidden)[[5, 1, 4]]
+            # The lm-row gather communicates bf16 (peer adds 16 on the bf16 grid);
+            # the fp32 scoring payload is exact.
+            expected = torch.cat((local[:2], local[:2] + 16), dim=1)[:, :29].float()
+            torch.testing.assert_close(result["logits"], expected, rtol=0, atol=0)
+            self.assertIsNone(result["all_logits"])
             self.assertEqual(result["all_logits_lm_rows"], 2)
+
+            local_f = local.float()
+            l0 = local_f.logsumexp(-1)
+            expected_lse = torch.logsumexp(torch.stack((l0, l0 + 16), -1), -1)
+            torch.testing.assert_close(
+                result["all_logits_lse"], expected_lse, rtol=1e-6, atol=1e-6
+            )
+            expected_target = torch.tensor(
+                [float("-inf"), float("-inf"), local_f[2][7].item()], device="cuda"
+            )
+            torch.testing.assert_close(
+                result["all_logits_target_logits"], expected_target, rtol=0, atol=0
+            )
+            # Union's top-3 are rank1's entries: rank0's local top-3 shifted (+16 value,
+            # +16 global id).
+            v0, i0 = local_f.topk(3, -1)
+            torch.testing.assert_close(
+                result["all_logits_topk_values"], v0 + 16, rtol=0, atol=0
+            )
+            torch.testing.assert_close(
+                result["all_logits_topk_ids"], i0.to(torch.int32) + 16, rtol=0, atol=0
+            )
         finally:
             clear_comm_ops()
 
