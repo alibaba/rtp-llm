@@ -43,8 +43,10 @@ def load_dsa():
                * weight.float()).to(x.dtype)
         suffix = kwargs.get("suffix")
         return out if suffix is None else torch.cat((out, suffix), -1)[:, :x.shape[-1]]
+    def grouped_norm(q, kv, q_weight, kv_weight, eps, *, kv_suffix=None):
+        return norm(q, q_weight, eps), norm(kv, kv_weight, eps, suffix=kv_suffix)
     stub("rtp_llm.models_py.triton_kernels.common.layernorm_gated",
-         fused_q_kv_rmsnorm=None, grouped_q_kv_rmsnorm=None, independent_q_kv_rmsnorm=norm)
+         fused_q_kv_rmsnorm=None, grouped_q_kv_rmsnorm=grouped_norm, independent_q_kv_rmsnorm=norm)
     from contextlib import nullcontext
     stub("rtp_llm.models_py.utils.module_profiler", profile_scope=lambda *a: nullcontext())
     stub("rtp_llm.ops", RoleType=SimpleNamespace(PREFILL=0), KvCacheDataType=None)
@@ -189,12 +191,22 @@ class NaturalIntegrationTest(unittest.TestCase):
         native = ModuleType("rtp_llm.models_py.modules.dsv4.indexer_topk")
         native.native_exact_topk_enabled = lambda: False
         native.native_candidate_selection_supported = lambda *a, **kw: False
+        native.native_page_rr_selection_supported = lambda *a, **kw: False
+        ops = ModuleType("rtp_llm.ops")
+        ops.KvCacheDataType = SimpleNamespace(FP8="fp8")
         package = ModuleType("natural_budget")
         directory = ROOT / "models_py/modules/factory/attention/cuda_mla_impl"
-        package.__path__ = [str(directory)]
-        with patch.dict(sys.modules, {native.__name__: native, package.__name__: package}):
-            workspace = load_file("natural_budget.dsa_kv_workspace", directory / "dsa_kv_workspace.py")
-            execution = load_file("natural_budget.dsa_kv_chunk_execution", directory / "dsa_kv_chunk_execution.py")
+        package.__path__ = [str(directory.parent)]
+        cuda_package = ModuleType("natural_budget.cuda_mla_impl")
+        cuda_package.__path__ = [str(directory)]
+        with patch.dict(sys.modules, {
+            native.__name__: native,
+            ops.__name__: ops,
+            package.__name__: package,
+            cuda_package.__name__: cuda_package,
+        }):
+            workspace = load_file("natural_budget.cuda_mla_impl.dsa_kv_workspace", directory / "dsa_kv_workspace.py")
+            execution = load_file("natural_budget.cuda_mla_impl.dsa_kv_chunk_execution", directory / "dsa_kv_chunk_execution.py")
             owner = workspace.DsaWorkspaceOwner(device="cpu", hidden_dim=16, q_rank=8, tp_size=4)
             owner.prefill_query_cp = True
             before = owner.external_projection_bytes(12, indexer=True)
@@ -346,6 +358,7 @@ class NaturalIntegrationTest(unittest.TestCase):
             self.assertEqual(model._query_layout_buffers, {})
             self.assertEqual(model._outer_layout_buffers, {})
             self.assertEqual(len(plans), 1)
+
             self.assertEqual(model._outer_layout.local_positions.tolist(), [104, 105, 106, 107])
             self.assertEqual(model._query_layout.local_positions.tolist(), [102, 103, 112, 113])
             self.assertGreater(model.dsa_workspace.layout_bytes, model._query_layout.resident_bytes)
@@ -366,21 +379,70 @@ class NaturalIntegrationTest(unittest.TestCase):
             self.assertTrue(model._query_layout_buffers)
             self.assertEqual(len(plans), 1)
 
+            # Cache hits retain owned static metadata but must still validate
+            # the current producer's contents, even when its tensor is reused.
+            model._outer_natural_enabled = True
+            cached_query = next(iter(model._natural_layout_cache.values()))[0]
+            model._prepare_dsa(SimpleNamespace(primary=primary, input_ids=torch.arange(4)), False)
+            self.assertIs(model._query_layout, cached_query)
+            saved = info.prefill_qkv_restore_indice.clone()
+            info.prefill_qkv_restore_indice.copy_(saved.roll(1))
+            with self.assertRaisesRegex(ValueError, "permutation"):
+                model._prepare_dsa(SimpleNamespace(primary=primary, input_ids=torch.arange(4)), False)
+            torch.testing.assert_close(cached_query.restore, saved, rtol=0, atol=0)
+            info.prefill_qkv_restore_indice.copy_(saved)
+
     def test_query_chunks_fill_destination_slices_and_history_runs_once(self):
+        from rtp_llm.models_py.modules.kimi_k3.natural_dsa import Fp8NaturalProjection, NaturalQGateProjection
+
         module = load_dsa()
         cls = module.KimiK31DSA
         self.assertTrue(hasattr(cls, "_forward_natural"), "natural DSA execution missing")
         torch.manual_seed(31)
-        for chunk_rows in (1, 3, 5, 6, 9):
+        for fp8, chunk_rows in [(fp8, n) for fp8 in (False, True) for n in (1, 3, 5, 6, 9)]:
             model = cls.__new__(cls)
             torch.nn.Module.__init__(model)
             model.q_rank, model.kv_rank, model.suffix_dim = 4, 2, 2
             model.heads, model.q_dim, model.v_dim, model.layer_idx = 2, 2, 2, 0
+            model._fp8_output_gate = False
             def linear(i, o):
                 return torch.nn.Linear(i, o, bias=False).bfloat16()
             model.natural_q_input = linear(4, 4)
             model.natural_kv_input = linear(4, 4)
             model.natural_gate_input = linear(4, 4)
+            quantizations, encodings = [], {"q": [], "gate": []}
+            if fp8:
+                # Real routed control flow; CPU arithmetic replaces only the
+                # unavailable CUDA projection, exposing encoding reuse/ordering.
+                class CpuFp8Projection(Fp8NaturalProjection):
+                    def __init__(self, source, name):
+                        torch.nn.Module.__init__(self)
+                        self.weight, self.name = source.weight, name
+                    def quantize_input(self, value):
+                        quantizations.append((self.name, value.shape[0]))
+                        return value.to(torch.float8_e4m3fn), torch.ones(value.shape[0], 1)
+                    def forward_quantized(self, values, scales):
+                        encodings[self.name].append((values, scales))
+                        output = (values.float() @ self.weight.float().T).bfloat16()
+                        if self.name == "gate":
+                            produced["gate"] = output
+                        return output
+                model.natural_q_input = CpuFp8Projection(model.natural_q_input, "q")
+                model.natural_gate_input = CpuFp8Projection(model.natural_gate_input, "gate")
+                class CpuQGate(torch.nn.Module):
+                    def forward(inner, value):
+                        values, scales = model.natural_q_input.quantize_input(value)
+                        encodings["q"].append((values, scales))
+                        encodings["gate"].append((values, scales))
+                        weight = torch.cat((model.natural_q_input.weight,
+                                            model.natural_gate_input.weight), 0)
+                        q, gate = (values.float() @ weight.float().T).bfloat16().split((4, 4), -1)
+                        produced["gate"] = gate
+                        return q, gate
+                model.natural_q_gate_input = CpuQGate()
+            else:
+                model.natural_q_gate_input = NaturalQGateProjection(
+                    model.natural_q_input, model.natural_gate_input)
             model.q_b, model.output = linear(4, 4), linear(4, 4)
             model.q_norm = SimpleNamespace(weight=torch.ones(4).bfloat16(), variance_epsilon=1e-5)
             model.kv_norm = SimpleNamespace(weight=torch.ones(2).bfloat16(), variance_epsilon=1e-5)
@@ -390,6 +452,9 @@ class NaturalIntegrationTest(unittest.TestCase):
             events, received, produced = [], {}, {}
             model.q_b.register_forward_hook(lambda m, a, value: produced.update(query=value))
             model.natural_gate_input.register_forward_hook(lambda m, a, value: produced.update(gate=value))
+            if not fp8:
+                model.natural_q_gate_input.register_forward_hook(
+                    lambda m, a, value: produced.update(gate=value[1]))
             gate_sigmoid_mul = module.gate_sigmoid_mul
 
             def checked_gate(output, gate, mask):
@@ -398,8 +463,11 @@ class NaturalIntegrationTest(unittest.TestCase):
                 return gate_sigmoid_mul(output, gate, mask)
 
             class Exchange:
-                def consume_chunks(self, values, plan, direction, *, chunk_rows, consumer):
+                def consume_chunks(self, values, plan, direction, *, chunk_rows, consumer,
+                                   before_consume=None):
                     self_outer.assertEqual(direction, "to_zigzag")
+                    if before_consume is not None:
+                        before_consume()
                     for start in range(0, 6, chunk_rows):
                         slot = values[permutation[start:start + chunk_rows]]
                         consumer(start, slot)
@@ -445,13 +513,23 @@ class NaturalIntegrationTest(unittest.TestCase):
             sfa = SimpleNamespace(forward=attend, workspace_owner=owner)
             inputs = SimpleNamespace(is_prefill=True, cache_store_inputs=object(),
                 cache_store_writer=SimpleNamespace(write=lambda *args: events.append("index_publish")))
-            index_fmha = SimpleNamespace(fmha_params=object(), cp_params=object(), attn_inputs=inputs, is_sparse=lambda: True)
+            index_fmha = SimpleNamespace(fmha_params=SimpleNamespace(is_prefill=True),
+                                        cp_params=object(), attn_inputs=inputs, is_sparse=lambda: True)
             layout = SimpleNamespace(local_rows=6, all_valid=False,
                 local_valid=torch.tensor([True, False, True, True, False, True]))
             with patch.object(module, "gate_sigmoid_mul", checked_gate):
                 result = model._forward_natural(hidden, {"full": sfa, "indexer_kv": index_fmha},
                                                {"full": object(), "indexer_kv": object()},
                                                SimpleNamespace(query_layout=layout))
+            if fp8:
+                chunks = (6 + chunk_rows - 1) // chunk_rows
+                self.assertEqual(len(quantizations), chunks)
+                self.assertTrue(all(name == "q" for name, rows in quantizations))
+                self.assertEqual(len(encodings["q"]), chunks)
+                self.assertEqual(len(encodings["gate"]), chunks)
+                for q_encoding, gate_encoding in zip(encodings["q"], encodings["gate"]):
+                    self.assertIs(q_encoding[0], gate_encoding[0])
+                    self.assertIs(q_encoding[1], gate_encoding[1])
             torch.testing.assert_close(received["key"], hidden[:, :2], rtol=0, atol=0)
             torch.testing.assert_close(received["weights"], query_hidden[:, :2].float().unsqueeze(-1), rtol=0, atol=0)
             q = model.natural_q_input(query_hidden)
@@ -499,15 +577,34 @@ class NaturalIntegrationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "restore"):
                 helper.validate_shared_restore(layout, plan)
 
-    def test_option_requires_exact_zero_or_one(self):
-        helper_path = ROOT / "models_py/modules/kimi_k3/natural_dsa.py"
-        self.assertTrue(helper_path.exists(), "natural integration contract missing")
-        helper = load_file("natural_contract", helper_path)
-        self.assertFalse(helper.outer_natural_enabled({}))
-        self.assertTrue(helper.outer_natural_enabled({"KIMI_K31_OUTER_NATURAL": "1"}))
-        for value in ("true", "", "2", "01"):
-            with self.assertRaises(ValueError):
-                helper.outer_natural_enabled({"KIMI_K31_OUTER_NATURAL": value})
+    def test_natural_outer_is_default_for_query_cp_target(self):
+        block_map = ModuleType("rtp_llm.models_py.model_desc.block_map")
+        block_map.get_attention_inputs_value = None
+        block_map.get_primary_attention_inputs = None
+        ops = ModuleType("rtp_llm.ops")
+        ops.HybridAttentionType = SimpleNamespace(LINEAR="linear")
+        with patch.dict(sys.modules, {
+            block_map.__name__: block_map,
+            ops.__name__: ops,
+        }):
+            adapter = load_file(
+                "natural_default_adapter",
+                "models_py/modules/kimi_k3/dsa_model_adapter.py",
+            ).KimiK31ModelAdapter
+            for query_cp in (False, True):
+                for is_mtp in (False, True):
+                    with self.subTest(query_cp=query_cp, is_mtp=is_mtp):
+                        model = adapter()
+                        model.prefill_query_cp = query_cp
+                        model.config = SimpleNamespace(
+                            is_mtp=is_mtp,
+                            k3_runtime_config=SimpleNamespace(dsa=None),
+                        )
+                        model.register_buffer = lambda *args, **kwargs: None
+                        model._setup_dsa()
+                        self.assertEqual(
+                            model._outer_natural_enabled, query_cp and not is_mtp
+                        )
 
     def test_prepared_indexer_runs_once_and_publishes_after_success(self):
         routes = load_file("natural_routes", "models_py/mla_routes.py")

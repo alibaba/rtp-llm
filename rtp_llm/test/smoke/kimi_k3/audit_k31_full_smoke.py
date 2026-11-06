@@ -7,10 +7,12 @@ from pathlib import Path
 import re
 
 if __package__:
+    from .k31_smoke_capacity import device_pool_usable_blocks
     from . import result_check
     from .k31_full_smoke import cache_pressure_plan, decode_batch_sizes, request_budget
     from .smoke_request_identity import resolve as resolve_request_identity
 else:
+    from k31_smoke_capacity import device_pool_usable_blocks
     import result_check
     from k31_full_smoke import cache_pressure_plan, decode_batch_sizes, request_budget
     from smoke_request_identity import resolve as resolve_request_identity
@@ -319,11 +321,8 @@ def main():
         plan = result.get("cache_pressure_plan") or {}
         prefill_full_pages = None
         if "requests" in plan:
-            with args.prefill_engine.open(errors="replace") as engine:
-                for line in engine:
-                    match = re.search(r"kvc raw pool\[DEVICE/full\]:[^\n]*?\btotal=(\d+)", line)
-                    if match:
-                        prefill_full_pages = int(match[1])
+            prefill_full_pages = device_pool_usable_blocks(
+                args.prefill_engine.read_text(errors="replace"), "full")
         proof = audit(result, read_events(args.prefill_logs,args.prefill_engine),
                       read_events(args.decode_logs,args.decode_engine), args.decode_tp,
                       prefill_full_pages=prefill_full_pages)

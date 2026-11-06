@@ -13,7 +13,7 @@ from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
     fused_q_kv_rmsnorm, grouped_q_kv_rmsnorm, independent_q_kv_rmsnorm,
 )
 from rtp_llm.models_py.utils.module_profiler import profile_scope
-from rtp_llm.ops import KvCacheDataType, RoleType
+from rtp_llm.ops import RoleType
 
 
 class KimiK31DSA(KimiK3MLA):
@@ -65,35 +65,34 @@ class KimiK31DSA(KimiK3MLA):
         self._qkv_norm = (
             grouped_q_kv_rmsnorm if self.prefill_query_cp else fused_q_kv_rmsnorm
         )
-        from .natural_dsa import outer_natural_enabled
-
-        if outer_natural_enabled() and self.prefill_query_cp and not config.is_mtp:
+        if self.prefill_query_cp and not config.is_mtp:
             from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
             from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import CudaFp8GEMMLinear
 
             projections = (self.input, self.q_b, self.output)
-            if (not policy.indexer_use_fp8
-                    or config.attn_config.kv_cache_dtype == KvCacheDataType.FP8
-                    or any(
-                not isinstance(p, CudaF16Linear) or p.weight.dtype != torch.bfloat16
+            if (not policy.indexer_use_fp8 or any(
+                not ((isinstance(p, CudaF16Linear) and p.weight.dtype == torch.bfloat16)
+                     or (isinstance(p, CudaFp8GEMMLinear) and p.weight.dtype == torch.float8_e4m3fn))
                 or p.bias is not None for p in projections
             ) or not isinstance(self.indexer.weights_proj, CudaF16Linear)
                     or self.indexer.weights_proj.weight.dtype != torch.float32
                     or self.indexer.weights_proj.bias is not None
                     or any(not isinstance(p, CudaFp8GEMMLinear) for p in (self.indexer.wk, self.indexer.wq_b))):
-                raise ValueError("natural outer DSA requires bias-free CUDA BF16 SFA and FP8 Indexer with FP32 head weights")
-            width = self.q_rank + self.kv_rank + self.suffix_dim + self.heads * self.v_dim
+                raise ValueError("natural outer DSA requires supported CUDA SFA projections and FP8 Indexer with FP32 head weights")
+            width = self.q_rank + self.kv_rank + self.suffix_dim + self._input_padding + self.heads * self.v_dim
             if (self.input.weight.ndim != 2 or self.input.weight.shape != (width, config.hidden_size)
                     or self.q_b.weight.shape != (self.heads * self.q_dim, self.q_rank)
                     or self.output.weight.shape != (config.hidden_size, self.heads * self.v_dim)):
                 raise ValueError("natural outer DSA fused input must contain the complete full-head gate")
-            # CudaF16Linear accepts [in,out], stores [out,in]. Each persistent
-            # slice shares the original storage; no concatenation/repack/copy.
-            w = self.input.weight
-            kv_end = self.q_rank + self.kv_rank + self.suffix_dim
-            self.natural_q_input = CudaF16Linear(w[:self.q_rank].T)
-            self.natural_kv_input = CudaF16Linear(w[self.q_rank:kv_end].T)
-            self.natural_gate_input = CudaF16Linear(w[kv_end:].T)
+            from .natural_dsa import NaturalQGateProjection, split_natural_projection
+
+            self.natural_q_input, self.natural_kv_input, self.natural_gate_input = split_natural_projection(
+                self.input, self.q_rank, self.kv_rank + self.suffix_dim,
+                self.heads * self.v_dim, self._input_padding,
+            )
+            self.natural_q_gate_input = NaturalQGateProjection(
+                self.natural_q_input, self.natural_gate_input,
+            )
 
     def _attend(self, qkv, fmha, cache, hidden):
         sfa, sfa_cache, indexer, indexer_cache = resolve_mla_routes(
@@ -127,30 +126,38 @@ class KimiK31DSA(KimiK3MLA):
         return output.reshape(-1, self.heads * self.v_dim)
 
     def _forward_natural(self, hidden, fmha, cache, metadata):
+        from rtp_llm.models_py.modules.kimi_k3.natural_dsa import Fp8NaturalProjection
+
         sfa, sfa_cache, index_fmha, index_cache = resolve_mla_routes(
             fmha, cache, sparse=True, attention_tag="full",
         )
         owner, layout = sfa.workspace_owner, metadata.query_layout
         rows = layout.local_rows
-        with profile_scope("RTP::attention.dsa.natural_kv"):
-            packed = self.natural_kv_input(hidden)
-            latent, suffix = packed.split([self.kv_rank, self.suffix_dim], -1)
-            latent = independent_q_kv_rmsnorm(
-                latent, self.kv_norm.weight, self.kv_norm.variance_epsilon,
-                q_width=self.q_rank, kv_width=self.kv_rank, full_rows=rows, suffix=suffix,
+        single_chunk = 0 < rows <= owner.route_chunk_rows
+        latent = suffix = None
+
+        def packed_suffix(value):
+            return value.as_strided(
+                (rows, self.suffix_dim), (value.stride(0), 1),
+                value.storage_offset() + self.kv_rank,
             )
-            suffix = latent.as_strided(
-                (rows, self.suffix_dim), (latent.stride(0), 1),
-                latent.storage_offset() + self.kv_rank,
-            )
-            del packed
-            if index_cache is not None:
-                key = self.indexer.project_key(hidden)
-                self.indexer.indexer_op.write_key(key, index_cache, index_fmha.fmha_params)
-                del key
+
+        def prepare_kv():
+            nonlocal latent, suffix
+            with profile_scope("RTP::attention.dsa.natural_kv"):
+                packed = self.natural_kv_input(hidden)
+                latent, suffix = packed.split([self.kv_rank, self.suffix_dim], -1)
+                if not single_chunk:
+                    latent = independent_q_kv_rmsnorm(
+                        latent, self.kv_norm.weight, self.kv_norm.variance_epsilon,
+                        q_width=self.q_rank, kv_width=self.kv_rank, full_rows=rows, suffix=suffix,
+                    )
+                    suffix = packed_suffix(latent)
+                if index_cache is not None:
+                    key = self.indexer.project_key(hidden)
+                    self.indexer.indexer_op.write_key(key, index_cache, index_fmha.fmha_params)
         # A complete chunk can retain the projection/encoding outputs directly:
         # they own storage independent of the recyclable received H slot.
-        single_chunk = 0 < rows <= owner.route_chunk_rows
         query = gate = None
         if not single_chunk:
             query = hidden.new_empty((rows, self.heads, self.q_dim))
@@ -163,14 +170,33 @@ class KimiK31DSA(KimiK3MLA):
             head_weights = torch.empty((*index_shape[:2], 1), dtype=torch.float32, device=hidden.device)
 
         def receive(start, chunk):
-            nonlocal query, gate, index_query, head_weights
+            nonlocal query, gate, index_query, head_weights, latent, suffix
             end = start + chunk.shape[0]
             if single_chunk and (start != 0 or end != rows):
                 raise RuntimeError("single-chunk query route must cover all local rows")
-            q = independent_q_kv_rmsnorm(
-                self.natural_q_input(chunk), self.q_norm.weight, self.q_norm.variance_epsilon,
-                q_width=self.q_rank, kv_width=self.kv_rank, full_rows=rows,
-            )
+            # Q and gate consume the same received H rows with the same FP8
+            # policy. Keep their encoding alive until both GEMMs are enqueued.
+            quantized = None
+            q_gate = getattr(self, "natural_q_gate_input", None)
+            if q_gate is not None:
+                q_input, projected_gate = q_gate(chunk)
+            elif isinstance(self.natural_q_input, Fp8NaturalProjection):
+                quantized = self.natural_q_input.quantize_input(chunk)
+                q_input = self.natural_q_input.forward_quantized(*quantized)
+            else:
+                q_input = self.natural_q_input(chunk)
+            if single_chunk:
+                q, latent = grouped_q_kv_rmsnorm(
+                    q_input, latent, self.q_norm.weight, self.kv_norm.weight,
+                    self.q_norm.variance_epsilon, kv_suffix=suffix,
+                )
+                suffix = packed_suffix(latent)
+            else:
+                q = independent_q_kv_rmsnorm(
+                    q_input, self.q_norm.weight, self.q_norm.variance_epsilon,
+                    q_width=self.q_rank, kv_width=self.kv_rank, full_rows=rows,
+                )
+            del q_input
             projected = self.q_b(q).reshape(-1, self.heads, self.q_dim)
             if single_chunk:
                 query = projected
@@ -190,7 +216,10 @@ class KimiK31DSA(KimiK3MLA):
                     index_query[start:end].copy_(encoded)
                     head_weights[start:end].copy_(weights)
                 del encoded, scale, weights
-            projected_gate = self.natural_gate_input(chunk)
+            if q_gate is None:
+                projected_gate = (self.natural_gate_input.forward_quantized(*quantized)
+                                  if quantized is not None else self.natural_gate_input(chunk))
+            del quantized
             if single_chunk:
                 gate = projected_gate
             else:
@@ -199,7 +228,7 @@ class KimiK31DSA(KimiK3MLA):
         with profile_scope("RTP::attention.dsa.natural_h_to_zigzag"):
             owner.row_exchange.consume_chunks(
                 hidden, owner.routing_plan, "to_zigzag",
-                chunk_rows=owner.route_chunk_rows, consumer=receive,
+                chunk_rows=owner.route_chunk_rows, consumer=receive, before_consume=prepare_kv,
             )
         with profile_scope("RTP::attention.dsa.indexer"):
             indices = run_prepared_sparse_indexer(
@@ -213,10 +242,27 @@ class KimiK31DSA(KimiK3MLA):
         del query, latent, suffix, indices
         mask = None if layout.all_valid else layout.local_valid
         with profile_scope("RTP::attention.mla.output_gate_quant"):
-            output = gate_sigmoid_mul(output.reshape(rows, self.heads * self.v_dim), gate, mask)
+            output = output.reshape(rows, self.heads * self.v_dim)
+            if self._fp8_output_gate:
+                from rtp_llm.models_py.triton_kernels.common.activation import sigmoid_mul_per_token_group_quant_fp8
+
+                if mask is not None:
+                    output = torch.where(mask[:, None], output, 0)
+                    gate = torch.where(mask[:, None], gate, 0)
+                values, scales = sigmoid_mul_per_token_group_quant_fp8(output, gate)
+            else:
+                output = gate_sigmoid_mul(output, gate, mask)
         del gate
+        publish = getattr(owner.row_exchange, "produce_and_exchange", None)
+        if self._fp8_output_gate and publish is not None:
+            def produce(target):
+                with profile_scope("RTP::attention.mla.output_proj"):
+                    self.output.forward_quantized(values, scales, out=target)
+            with profile_scope("RTP::attention.dsa.zigzag_o_to_natural"):
+                return publish(owner.routing_plan, "to_natural", produce)
         with profile_scope("RTP::attention.mla.output_proj"):
-            output = self.output(output)
+            output = (self.output.forward_quantized(values, scales)
+                      if self._fp8_output_gate else self.output(output))
         # Full O is complete before publication. No reverse-route overlap or RS.
         with profile_scope("RTP::attention.dsa.zigzag_o_to_natural"):
             return owner.row_exchange.exchange(output, owner.routing_plan, "to_natural")

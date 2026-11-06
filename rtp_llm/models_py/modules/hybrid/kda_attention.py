@@ -130,9 +130,12 @@ class KdaAttention(nn.Module):
         outer_layout = getattr(metadata, "outer_layout", None)
         layout = outer_layout if outer_layout is not None else getattr(metadata, "query_layout", None)
         if layout is not None:
-            with profile_scope("RTP::attention.kda.zigzag_to_natural"):
-                fused = layout.gather_natural(fused)
+            if outer_layout is not None and outer_layout.all_valid:
                 attention_inputs = layout.natural_attention(attention_inputs)
+            else:
+                with profile_scope("RTP::attention.kda.zigzag_to_natural"):
+                    fused = layout.gather_natural(fused)
+                    attention_inputs = layout.natural_attention(attention_inputs)
         qkv, gate, fa, beta = fused.split(
             [3 * self.width, self.width, self.fa_width, self.heads], dim=-1
         )
@@ -185,7 +188,8 @@ class KdaAttention(nn.Module):
                         else None
                     ),
                 )
-        if layout is not None and self._fp8_output_norm:
+        if (layout is not None and self._fp8_output_norm
+                and not (outer_layout is not None and outer_layout.all_valid)):
             with profile_scope("RTP::attention.kda.natural_to_zigzag"):
                 values, scales = layout.scatter_rankmajor(values, scales)
         use_fused_rs = (

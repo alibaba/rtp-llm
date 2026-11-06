@@ -1,6 +1,6 @@
 """Executable split-projection gate; run only after the parent's GPU preflight.
 
-    KIMI_K31_OUTER_NATURAL=1 python -m rtp_llm.test.kimi_k31_natural_projection_cuda_test
+    python -m rtp_llm.test.kimi_k31_natural_projection_cuda_test
 
 The exported check_projection_contract also accepts a loaded real DSA layer.
 BF16 GEMM tolerances are the existing bounded_projection_jit_gpu.py contract
@@ -10,7 +10,6 @@ an independent gate; this script does not claim it from synthetic projections.
 """
 
 import json
-import os
 from types import SimpleNamespace
 
 import torch
@@ -67,6 +66,7 @@ def check_attention_history_contract(layer, hidden, fmha, cache, metadata):
 
 
 def check_projection_contract(layer, hidden, *, chunk_rows=1024):
+    from rtp_llm.models_py.modules.kimi_k3.natural_dsa import Fp8NaturalProjection
     from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
         grouped_q_kv_rmsnorm, independent_q_kv_rmsnorm,
     )
@@ -74,7 +74,8 @@ def check_projection_contract(layer, hidden, *, chunk_rows=1024):
     rows = hidden.shape[0]
     qr, kr, sr = layer.q_rank, layer.kv_rank, layer.suffix_dim
     fused = layer.input(hidden)
-    q_raw, kv_raw, suffix, gate = fused.split([qr, kr, sr, layer.heads * layer.v_dim], -1)
+    q_raw, kv_raw, suffix, _, gate = fused.split(
+        [qr, kr, sr, layer._input_padding, layer.heads * layer.v_dim], -1)
     expected_q, expected_kv = grouped_q_kv_rmsnorm(
         q_raw, kv_raw, layer.q_norm.weight, layer.kv_norm.weight,
         layer.q_norm.variance_epsilon, kv_suffix=suffix,
@@ -116,7 +117,18 @@ def check_projection_contract(layer, hidden, *, chunk_rows=1024):
     for start in range(0, rows, chunk_rows):
         end = min(rows, start + chunk_rows)
         part = hidden[start:end].contiguous()
-        raw = layer.natural_q_input(part)
+        merged_q, merged_gate = layer.natural_q_gate_input(part)
+        check("merged_q_projection", merged_q, q_raw[start:end])
+        check("merged_gate_projection", merged_gate, gate[start:end])
+        if isinstance(layer.natural_q_input, Fp8NaturalProjection):
+            encoded_input = layer.natural_q_input.quantize_input(part)
+            raw = layer.natural_q_input.forward_quantized(*encoded_input)
+            projected_gate = layer.natural_gate_input.forward_quantized(*encoded_input)
+            check("shared_encoding_q", raw, layer.natural_q_input(part), exact=True)
+            check("shared_encoding_gate", projected_gate, layer.natural_gate_input(part), exact=True)
+        else:
+            raw = layer.natural_q_input(part)
+            projected_gate = layer.natural_gate_input(part)
         check("q_projection", raw, q_raw[start:end])
         same_q = independent_q_kv_rmsnorm(
             q_raw[start:end], layer.q_norm.weight, layer.q_norm.variance_epsilon,
@@ -129,7 +141,7 @@ def check_projection_contract(layer, hidden, *, chunk_rows=1024):
         )
         check("split_q_norm", actual_q, expected_q[start:end])
         check("query_up", layer.q_b(actual_q), full_query[start:end])
-        check("gate", layer.natural_gate_input(part), gate[start:end])
+        check("gate", projected_gate, gate[start:end])
         query = layer.indexer.project_query(expected_q[start:end].contiguous(), original_rows=rows)
         check("index_query", query, full_index_query[start:end])
         # Quantization is tested with identical BF16 input, independently of
@@ -144,7 +156,7 @@ def check_projection_contract(layer, hidden, *, chunk_rows=1024):
     return diagnostics
 
 
-def make_layer():
+def make_layer(*, fp8=False):
     """Real CUDA modules at trained architecture dimensions; synthetic weights."""
     from rtp_llm.config.dsa_config import DsaConfig
     from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
@@ -155,8 +167,6 @@ def make_layer():
     from rtp_llm.ops import RoleType
     from rtp_llm.utils.model_weight import W
 
-    if os.environ.get("KIMI_K31_OUTER_NATURAL") != "1":
-        raise ValueError("run this gate with KIMI_K31_OUTER_NATURAL=1")
     device = torch.device("cuda")
     torch.manual_seed(31031)
     def matrix(i, o):
@@ -172,6 +182,20 @@ def make_layer():
         W.mla_indexer_weights_proj_w: torch.randn(7168, 32, device=device, dtype=torch.float32) / 7168**0.5,
     }
     e8m0 = is_deep_gemm_e8m0_used()
+    if fp8:
+        fused = weights[W.mla_fusedqkrope_w]
+        qkv = 1536 + 512 + 64
+        weights[W.mla_fusedqkrope_w] = torch.cat(
+            (fused[:, :qkv], fused.new_zeros((7168, (-qkv) % 128)), fused[:, qkv:]), -1)
+        for key, scale in ((W.mla_fusedqkrope_w, W.mla_fusedqkrope_s),
+                           (W.mla_q_b_w, W.mla_q_b_s), (W.attn_o_w, W.attn_o_s)):
+            i, o = weights[key].shape
+            weight, scales = KimiK31LoadIndexerFp8Weight._quantize_matrix(
+                weights[key].T.contiguous(), use_ue8m0=e8m0)
+            if e8m0:
+                scales = _transform_scale_ue8m0(scales, mn=o)
+            weights[key] = weight if e8m0 else weight.reshape(i, o)
+            weights[scale] = scales if e8m0 else scales.reshape((i + 127) // 128, (o + 127) // 128)
     for key, scale, i, o in ((W.mla_indexer_qb_w, W.mla_indexer_qb_s, 1536, 4096),
                             (W.mla_indexer_k_w, W.mla_indexer_k_s, 7168, 128)):
         weight, scales = KimiK31LoadIndexerFp8Weight._quantize_matrix(matrix(i, o).T.contiguous(), use_ue8m0=e8m0)
@@ -197,15 +221,12 @@ def make_layer():
 def main():
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA numerical gate must run on the parent-selected GPU host")
-    layer = make_layer()
-    for rows in (1, 2, 31, 32, 33, 127, 128, 129, 1025, 1026, 1055, 1057):
-        hidden = torch.randn(rows, 7168, device="cuda", dtype=torch.bfloat16)
-        print(json.dumps(check_projection_contract(layer, hidden)), flush=True)
-    # One full CP8 64K shard, plus an irregular one-row tail. Keep the
-    # original-row backend policy and exact FP8/FP32-weight contracts above.
-    for rows in (8192, 8193):
-        hidden = torch.randn(rows, 7168, device="cuda", dtype=torch.bfloat16)
-        print(json.dumps(check_projection_contract(layer, hidden, chunk_rows=8192)), flush=True)
+    for fp8 in (False, True):
+        layer = make_layer(fp8=fp8)
+        for rows in (1, 2, 31, 32, 33, 127, 128, 129, 1025, 1026, 1055, 1057, 8192, 8193):
+            hidden = torch.randn(rows, 7168, device="cuda", dtype=torch.bfloat16)
+            print(json.dumps(dict(fp8=fp8, **check_projection_contract(
+                layer, hidden, chunk_rows=8192 if rows >= 8192 else 1024))), flush=True)
 
 
 if __name__ == "__main__":
