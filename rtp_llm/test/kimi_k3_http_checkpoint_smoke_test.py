@@ -319,9 +319,7 @@ class KimiK3HttpCheckpointSmokeTest(unittest.TestCase):
             )
             self.assertEqual(len(item["top_logprobs"]), 2)
         usage = response.json()["usage"]
-        expected_prompt_tokens = self.backend.calls[0].input_length - (
-            KimiK3Renderer._pending_prompt_token_count(self.tokenizer, False)
-        )
+        expected_prompt_tokens = self.backend.calls[0].input_length
         expected_completion_tokens = len(self.tokenizer.encode(self.backend.reply))
         self.assertEqual(usage["prompt_tokens"], expected_prompt_tokens)
         self.assertEqual(usage["completion_tokens"], expected_completion_tokens)
@@ -333,6 +331,39 @@ class KimiK3HttpCheckpointSmokeTest(unittest.TestCase):
             self.backend.calls[0].generate_config.return_all_probs,
             ReturnAllProbsMode.DEFAULT,
         )
+
+    def test_stream_usage_covers_full_prompt_in_final_empty_choice_frame(self):
+        self.backend.reply = "answer"
+        response = self.client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "kimi_k3",
+                "messages": [{"role": "user", "content": "Question?"}],
+                "enable_thinking": False,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        frames = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        self.assertEqual(frames[-1]["choices"], [])
+        usage = frames[-1]["usage"]
+        expected_prompt_tokens = self.backend.calls[0].input_length
+        expected_completion_tokens = len(self.tokenizer.encode(self.backend.reply))
+        self.assertEqual(usage["prompt_tokens"], expected_prompt_tokens)
+        self.assertEqual(usage["completion_tokens"], expected_completion_tokens)
+        self.assertEqual(
+            usage["total_tokens"],
+            expected_prompt_tokens + expected_completion_tokens,
+        )
+        for frame in frames[:-1]:
+            self.assertNotIn("usage", frame)
+            for choice in frame["choices"]:
+                self.assertNotIn("usage", choice)
 
     def test_streamed_target_probabilities_cross_think_boundary(self):
         self.backend.reply = (
