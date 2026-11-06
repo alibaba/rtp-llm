@@ -483,6 +483,20 @@ class ChunkedMoeTest(unittest.TestCase):
         layer(torch.ones(3, 4), is_decode_forward=True)
         self.assertEqual(layer._moe.token_chunks, [3])
 
+    def test_low_latency_strategy_rejects_non_decode_role_at_construction(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+            _validate_strategy_role,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "only supported for the decode role"
+        ):
+            _validate_strategy_role("fp8_per_block_ep_low_latency", False)
+        # Decode-role workers and every other strategy stay constructible.
+        _validate_strategy_role("fp8_per_block_ep_low_latency", True)
+        _validate_strategy_role("fp8_per_block_pure_dp", False)
+        _validate_strategy_role("fp8_per_block_ep_normal", False)
+
     def test_mixed_non_mega_layer_ignores_synchronized_token_count(self):
         mega = _fake_layer()
         local = _fake_layer()

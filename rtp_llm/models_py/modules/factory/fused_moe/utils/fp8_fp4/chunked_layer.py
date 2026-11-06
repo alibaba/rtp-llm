@@ -104,6 +104,23 @@ def resolve_moe_max_tokens_per_rank(
     return max(min(budget, chunk_tokens) if chunking_enabled else budget, 1)
 
 
+def _validate_strategy_role(strategy_name: str, is_decode_role: bool) -> None:
+    """Reject role-infeasible strategies at construction, before serving.
+
+    The low-latency DeepEP strategy allocates fixed decode-sized buffers and
+    dispatches every MoE invocation through the low-latency path, so a
+    non-decode role (PREFILL / PDFUSION workers) must fail here instead of
+    on the first prefill forward, where the exception kills the engine loop.
+    """
+
+    if strategy_name == "fp8_per_block_ep_low_latency" and not is_decode_role:
+        raise RuntimeError(
+            "FP8-per-block DeepEP low-latency MoE is only supported for the "
+            "decode role; use fp8_per_block_ep_normal for prefill workers "
+            f"(strategy={strategy_name!r})"
+        )
+
+
 def _get_or_create_final_out(
     capacity: int,
     dim: int,
@@ -272,6 +289,10 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             is_decode_role=is_decode_role,
         )
         self.strategy_name = self._moe.strategy_name
+        # Fail before serving: a role-infeasible strategy must not survive
+        # construction, where the first forward would otherwise kill the
+        # engine loop.
+        _validate_strategy_role(self.strategy_name, self._is_decode_role)
 
     @property
     def fused_moe(self):
