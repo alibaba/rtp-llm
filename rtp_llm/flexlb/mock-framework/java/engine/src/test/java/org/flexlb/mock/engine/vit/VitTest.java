@@ -258,4 +258,15 @@ class VitTest {
         assertEquals("vit",config.effective().path("role").asText());
     }
 
+    @Test void healthDoesNotWaitForVisionSchedulingLock() throws Exception {
+        try (var scheduler = new VitScheduler(config("1",1024,1024,1024,0));
+             var readers = Executors.newVirtualThreadPerTaskExecutor()) {
+            synchronized (scheduler) {
+                readers.submit(scheduler::checkHealthy).get(1, TimeUnit.SECONDS);
+            }
+            scheduler.close();
+            assertThrows(IllegalStateException.class, scheduler::checkHealthy);
+        }
+    }
+
 }

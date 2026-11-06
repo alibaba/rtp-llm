@@ -14,8 +14,8 @@ final class VitScheduler implements AutoCloseable {
     private final ArrayDeque<Work> waiting=new ArrayDeque<>();
     private final SimulatedCompute compute=new SimulatedCompute();
     private final Thread worker;
-    private boolean closed;
-    private RuntimeException failure;
+    private volatile boolean closed;
+    private volatile RuntimeException failure;
     private int running;
     private long sequence;
 
@@ -104,7 +104,7 @@ final class VitScheduler implements AutoCloseable {
         if(batch!=null) for(var job:batch) complete(job,error);
         for(var job:rest) complete(job,error);
     }
-    synchronized void checkHealthy() { if(failure!=null) throw failure; if(closed) throw new IllegalStateException("V scheduler closed"); }
+    void checkHealthy() { if(failure!=null) throw failure; if(closed) throw new IllegalStateException("V scheduler closed"); }
     synchronized Map<String,Double> snapshot() {
         checkHealthy();
         return Map.of("py_rtp_vit_embedding_queue_size",(double)waiting.size(),"mock_vit_running_image_count",(double)running);

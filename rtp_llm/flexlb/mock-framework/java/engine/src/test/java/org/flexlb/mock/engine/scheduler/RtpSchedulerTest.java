@@ -926,4 +926,18 @@ class RtpSchedulerTest {
             }
     }
 
+    @Test void healthDoesNotWaitForTheSchedulingLockAndStillReportsClose() throws Exception {
+        var config = config("decode", "1", 2); var lock = new Object();
+        try (var cache = new KvCache(2, 8, 0);
+             var engine = new RtpEngineLoop(lock, AbstractRtpScheduler.factory(config), new TaskHistory(), cache,
+                 config.compute(), config.role(), config.id());
+             var readers = Executors.newVirtualThreadPerTaskExecutor()) {
+            synchronized (lock) {
+                readers.submit(engine::checkHealthy).get(1, TimeUnit.SECONDS);
+            }
+            engine.close();
+            assertThrows(RequestFailure.class, engine::checkHealthy);
+        }
+    }
+
 }

@@ -29,7 +29,7 @@ public final class RtpEngineLoop implements AutoCloseable {
     private volatile boolean closed;
     private boolean dirty;
     private int notifying;
-    private RuntimeException failure;
+    private volatile RuntimeException failure;
 
     private static final class Pending {
         final EngineScheduler.Work work;
@@ -81,7 +81,7 @@ public final class RtpEngineLoop implements AutoCloseable {
             return finished.snapshot(latestFinishedVersion, tasks, counts.waiting(), counts.running());
         }
     }
-    public void checkHealthy() { synchronized (lock) { ensureOpen(); } }
+    public void checkHealthy() { ensureOpen(); }
 
     private <T> T change(Supplier<T> operation) {
         try { synchronized (lock) { return operation.get(); } }
