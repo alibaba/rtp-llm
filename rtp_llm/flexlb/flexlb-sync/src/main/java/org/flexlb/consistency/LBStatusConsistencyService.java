@@ -54,6 +54,13 @@ public class LBStatusConsistencyService implements MasterElectService {
         log.info("start init LBStatusConsistencyService.");
         try {
             localHostIp = InetAddress.getLocalHost().getHostAddress();
+            String configuredAddress = environment.getProperty("server.address");
+            if (configuredAddress != null
+                    && !configuredAddress.isBlank()
+                    && !configuredAddress.equals("0.0.0.0")
+                    && !configuredAddress.equals("::")) {
+                localHostIp = configuredAddress;
+            }
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
         }

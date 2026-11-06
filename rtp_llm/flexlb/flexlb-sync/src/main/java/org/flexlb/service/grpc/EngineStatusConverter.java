@@ -52,7 +52,10 @@ public class EngineStatusConverter {
                         workerStatusPB.getMaxBatchTokensSize(),
                         workerStatusPB.getRunningQueryLen(),
                         workerStatusPB.getWaitingQueryLen(),
-                        convertStepMetrics(workerStatusPB));
+                        convertStepMetrics(workerStatusPB),
+                        workerStatusPB.hasMmInflightInputs()
+                                ? workerStatusPB.getMmInflightInputs().getValue()
+                                : null);
         return owner.bindStatusObservation(
                 engine,
                 workerStatusPB.getAlive(),

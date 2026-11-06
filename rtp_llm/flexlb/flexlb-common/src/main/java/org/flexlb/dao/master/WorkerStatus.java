@@ -157,7 +157,8 @@ public class WorkerStatus {
                         response.getMaxBatchTokensSize(),
                         response.getRunningQueryLen(),
                         response.getWaitingQueryLen(),
-                        response.getLastStepMetrics());
+                        response.getLastStepMetrics(),
+                        null);
         return new StatusObservation(
                 this,
                 engine,
@@ -761,7 +762,8 @@ public class WorkerStatus {
             long maxBatchTokensSize,
             long runningQueryLen,
             long waitingQueryLen,
-            StepMetrics lastStepMetrics) {
+            StepMetrics lastStepMetrics,
+            Long mmInflightInputs) {
 
         public EngineObservation {
             Objects.requireNonNull(role, "role");
@@ -804,6 +806,7 @@ public class WorkerStatus {
                     maxBatchTokensSize,
                     runningQueryLen,
                     waitingQueryLen,
+                    null,
                     null);
         }
     }

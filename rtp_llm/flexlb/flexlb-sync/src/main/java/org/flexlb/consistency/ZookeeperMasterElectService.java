@@ -284,6 +284,13 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private void initializeIpAndPort() {
         try {
             localIp = InetAddress.getLocalHost().getHostAddress();
+            String configuredAddress = environment.getProperty("server.address");
+            if (configuredAddress != null
+                    && !configuredAddress.isBlank()
+                    && !configuredAddress.equals("0.0.0.0")
+                    && !configuredAddress.equals("::")) {
+                localIp = configuredAddress;
+            }
         } catch (UnknownHostException e) {
             throw new RuntimeException("Failed to retrieve local host address", e);
         }
