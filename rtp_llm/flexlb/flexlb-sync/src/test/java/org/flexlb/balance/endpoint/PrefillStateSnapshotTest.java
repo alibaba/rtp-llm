@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
@@ -136,7 +137,7 @@ class PrefillStateSnapshotTest {
     void queuedAndImmediateRoutesUseOneCommitAndTerminalOwnership() {
         ScheduledRequest queued = item(1), immediate = item(2);
         enqueue(queued);
-        try (var queuedReservation = state.reserveRoute(queued, 30L).reservation();
+        try (var queuedReservation = state.reserveRoute(queued, 30L, Long.MAX_VALUE).reservation();
                 var immediateReservation =
                         state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation()) {
             assertEquals(List.of(queued), waitingItems());
@@ -166,8 +167,8 @@ class PrefillStateSnapshotTest {
                 2,
                 state.committedSnapshot().requests().size(),
                 "closing committed capabilities cannot release Engine ownership");
-        assertTrue(state.terminalizeCommittedItem(queued));
-        assertTrue(state.terminalizeCommittedItem(immediate));
+        assertTrue(state.terminalizeCommittedItem(queued.execution()));
+        assertTrue(state.terminalizeCommittedItem(immediate.execution()));
         assertTrue(state.committedSnapshot().requests().isEmpty());
     }
 
@@ -199,18 +200,18 @@ class PrefillStateSnapshotTest {
     void leaseRollbackRetainsQueuedWorkButReleasesUnqueuedAdmission() {
         ScheduledRequest queued = item(1), immediate = item(2);
         enqueue(queued);
-        state.reserveRoute(queued, 30L).reservation().close();
+        state.reserveRoute(queued, 30L, Long.MAX_VALUE).reservation().close();
         state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation().close();
         assertEquals(List.of(queued), waitingItems());
         assertTrue(state.committedSnapshot().requests().isEmpty());
-        assertTrue(state.reserveRoute(queued, 35L).reservation() != null);
+        assertTrue(state.reserveRoute(queued, 35L, Long.MAX_VALUE).reservation() != null);
     }
 
     @Test
     void routeCommitRejectsMissingQueueIndexBeforeCommittingAnyMember() {
         ScheduledRequest queued = item(1), immediate = item(2);
         enqueue(queued);
-        try (var queuedReservation = state.reserveRoute(queued, 30L).reservation();
+        try (var queuedReservation = state.reserveRoute(queued, 30L, Long.MAX_VALUE).reservation();
                 var immediateReservation =
                         state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation()) {
             assertTrue(waiting.remove(queued));
@@ -223,7 +224,7 @@ class PrefillStateSnapshotTest {
                                         List.of(immediateReservation, queuedReservation),
                                         handoff));
             }
-            assertFalse(state.terminalizeCommittedItem(immediate));
+            assertFalse(state.terminalizeCommittedItem(immediate.execution()));
             assertTrue(waiting.add(queued));
             try (var handoff =
                     state.commitRouteGroup(
@@ -253,7 +254,13 @@ class PrefillStateSnapshotTest {
         var retired = state.retireGenerationOwnership();
         assertNull(retired.invariantFailure());
         assertEquals(3, retired.ownedItems().size());
-        assertTrue(retired.ownedItems().containsAll(List.of(queued, prepared, committed)));
+        assertTrue(
+                retired.ownedItems()
+                        .containsAll(
+                                List.of(
+                                        queued.execution(),
+                                        prepared.execution(),
+                                        committed.execution())));
         preparedReservation.close();
         committedReservation.close();
         assertTrue(state.committedSnapshot().requests().isEmpty());
@@ -266,8 +273,8 @@ class PrefillStateSnapshotTest {
         var reservation = state.reserveUnqueuedRoute(immediate, 40L, Long.MAX_VALUE).reservation();
         lock.lock();
         try {
-            assertTrue(state.terminalizeActiveRouteUnderLock(immediate, reservation));
-            assertFalse(state.terminalizeActiveRouteUnderLock(immediate, reservation));
+            assertTrue(state.terminalizeActiveUnderLock(immediate));
+            assertFalse(state.terminalizeActiveUnderLock(immediate));
         } finally {
             lock.unlock();
         }
@@ -354,14 +361,16 @@ class PrefillStateSnapshotTest {
                 });
 
         clock.set(150);
-        assertTrue(state.terminalizeCommittedItem(a));
+        assertTrue(state.terminalizeCommittedItem(a.execution()));
         assertEquals(
                 List.of("2", "3"), state.committedSnapshot().batches().getFirst().requestIds());
         assertEquals(250L, remainingWork());
         clock.set(190);
-        assertTrue(state.terminalizeCommittedItem(b));
-        assertFalse(state.terminalizeCommittedItem(a));
-        assertFalse(state.terminalizeCommittedItem(item(3)), "cleanup must match the exact item");
+        assertTrue(state.terminalizeCommittedItem(b.execution()));
+        assertFalse(state.terminalizeCommittedItem(a.execution()));
+        assertFalse(
+                state.terminalizeCommittedItem(item(3).execution()),
+                "cleanup must match the exact item");
         assertEquals(210L, remainingWork());
 
         // Returning to QUEUED pauses elapsed-time accounting, but does not undo work already
@@ -445,7 +454,7 @@ class PrefillStateSnapshotTest {
                 Map.of("1", task(1, null, 500, 0)),
                 Map.of("2", task(2, TaskPhase.RECEIVED, 0, 0)),
                 survivors -> {
-                    assertEquals(List.of(b), survivors);
+                    assertEquals(List.of(b.execution()), survivors);
                     return 200L;
                 });
         clock.set(1_200);
@@ -474,7 +483,7 @@ class PrefillStateSnapshotTest {
     private void reconcile(
             Map<String, TaskInfo> finished,
             Map<String, TaskInfo> active,
-            ToLongFunction<List<ScheduledRequest>> repredictor) {
+            ToLongFunction<List<RequestExecution>> repredictor) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(RoleType.PREFILL);
         response.setFinishedTaskInfo(finished);
@@ -505,7 +514,11 @@ class PrefillStateSnapshotTest {
     private static ScheduledRequest item(long id) {
         var item = mock(ScheduledRequest.class);
         when(item.requestId()).thenReturn(Long.toString(id));
+        RequestExecution execution = mock(RequestExecution.class);
+        when(execution.requestId()).thenReturn(Long.toString(id));
+        when(item.execution()).thenReturn(execution);
         when(item.seqLen()).thenReturn(100L);
+        when(execution.seqLen()).thenReturn(100L);
         return item;
     }
 

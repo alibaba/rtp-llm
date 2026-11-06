@@ -5,7 +5,6 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.testfixture.WorkerStatusResponse;
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
 import java.util.Map;
 
@@ -58,11 +57,13 @@ public final class WorkerStatusTestSupport {
         workerStatus.lock.lock();
         try {
             WorkerStatus.StatusObservation observation =
-                    WorkerStatusTestFixtures.observation(workerStatus, response);
+                    org.flexlb.testfixture.WorkerStatusTestFixtures.observation(
+                            workerStatus, response);
             WorkerStatus.PreparedStatus prepared =
-                    WorkerStatusTestFixtures.prepare(workerStatus, observation);
+                    org.flexlb.testfixture.WorkerStatusTestFixtures.prepare(
+                            workerStatus, observation);
             workerStatus.publishPreparedStatus(prepared);
-            WorkerStatusTestFixtures.receive(workerStatus, alive, null);
+            org.flexlb.testfixture.WorkerStatusTestFixtures.receive(workerStatus, alive, null);
         } finally {
             workerStatus.lock.unlock();
         }

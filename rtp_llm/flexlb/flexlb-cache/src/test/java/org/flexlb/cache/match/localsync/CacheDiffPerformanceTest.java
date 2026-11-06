@@ -2,8 +2,6 @@ package org.flexlb.cache.match.localsync;
 
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusProvider;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -101,7 +99,8 @@ class CacheDiffPerformanceTest {
                     DynamicCacheIntervalService.class,
                     () -> mock(DynamicCacheIntervalService.class));
             context.registerBean(
-                    WorkerStatusProvider.class, () -> mock(WorkerStatusProvider.class));
+                    org.flexlb.dao.master.WorkerStatusProvider.class,
+                    () -> mock(org.flexlb.dao.master.WorkerStatusProvider.class));
             context.register(EngineLocalView.class, GlobalCacheIndex.class, KvCacheManager.class);
             context.refresh();
             var manager = context.getBean(KvCacheManager.class);
@@ -177,14 +176,14 @@ class CacheDiffPerformanceTest {
         return value ^ (value >>> 31);
     }
 
-    private final java.util.Map<String, WorkerStatus> workers =
+    private final java.util.Map<String, org.flexlb.dao.master.WorkerStatus> workers =
             new java.util.concurrent.ConcurrentHashMap<>();
 
-    private WorkerStatus worker(String address) {
+    private org.flexlb.dao.master.WorkerStatus worker(String address) {
         return workers.computeIfAbsent(
                 address,
                 ip ->
-                        WorkerStatus.createDiscovered(
+                        org.flexlb.dao.master.WorkerStatus.createDiscovered(
                                 org.flexlb.dao.route.RoleType.PREFILL,
                                 "group",
                                 ip,

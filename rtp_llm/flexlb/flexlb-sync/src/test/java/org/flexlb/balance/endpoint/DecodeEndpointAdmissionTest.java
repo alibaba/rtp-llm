@@ -326,7 +326,7 @@ class DecodeEndpointAdmissionTest {
                 endpoint.routingView().engineFacingKvUsed(),
                 "queued expected KV must not poison the dispatch gate");
         assertEquals(600, endpoint.realKvAvailable());
-        assertEquals(1_000, endpoint.routingView().engineFacingKvAvailable());
+        assertEquals(1_000, endpoint.routingView().dispatchUsage().availableKvAfterReservations());
 
         DecodeEndpoint.EngineDispatchPermitAcquisition first =
                 endpoint.acquireDispatchPermit(
@@ -358,7 +358,7 @@ class DecodeEndpointAdmissionTest {
 
         assertEquals(TRANSFERRED, first.permit().dispatch());
         assertEquals(900, endpoint.routingView().engineFacingKvUsed());
-        assertEquals(600, endpoint.routingView().engineFacingKvAvailable());
+        assertEquals(600, endpoint.routingView().dispatchUsage().availableKvAfterReservations());
     }
 
     @Test

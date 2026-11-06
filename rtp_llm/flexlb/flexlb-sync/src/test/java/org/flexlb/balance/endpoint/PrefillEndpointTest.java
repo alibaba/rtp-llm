@@ -4,6 +4,7 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestExecution;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DispatcherConfig;
@@ -136,7 +137,7 @@ class PrefillEndpointTest {
     void releaseBatchDecreasesInflightCount() {
         ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
-        assertTrue(endpoint.releaseCommittedItem(item));
+        assertTrue(endpoint.releaseCommittedItem(item.execution()));
 
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.captureRouteProjectionInputs().work().batches().size());
@@ -150,15 +151,15 @@ class PrefillEndpointTest {
         assertEquals(2, endpoint.getLocallyOwnedRequestCount());
         assertEquals(1, endpoint.getInflightBatchCount());
 
-        assertTrue(endpoint.expireCommittedItem(first));
-        assertFalse(endpoint.expireCommittedItem(first));
+        assertTrue(endpoint.expireCommittedItem(first.execution()));
+        assertFalse(endpoint.expireCommittedItem(first.execution()));
         assertEquals(1, endpoint.getLocallyOwnedRequestCount());
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.observedRequestCount());
         assertEquals(1, endpoint.captureRouteProjectionInputs().work().batches().size());
 
-        assertTrue(endpoint.expireCommittedItem(sibling));
-        assertFalse(endpoint.expireCommittedItem(sibling));
+        assertTrue(endpoint.expireCommittedItem(sibling.execution()));
+        assertFalse(endpoint.expireCommittedItem(sibling.execution()));
         assertEquals(0, endpoint.getLocallyOwnedRequestCount());
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.captureRouteProjectionInputs().work().batches().size());
@@ -169,14 +170,14 @@ class PrefillEndpointTest {
     void staleExpirationCannotReleaseReusedRequestId() {
         ScheduledRequest original = createScheduledRequest(101L, 500, 200);
         registerBatch(endpoint, 7L, 100, List.of(original));
-        assertTrue(endpoint.expireCommittedItem(original));
+        assertTrue(endpoint.expireCommittedItem(original.execution()));
 
         ScheduledRequest replacement = createScheduledRequest(101L, 300, 100);
         registerBatch(endpoint, 8L, 100, List.of(replacement));
-        assertFalse(endpoint.expireCommittedItem(original));
+        assertFalse(endpoint.expireCommittedItem(original.execution()));
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.observedRequestCount());
-        assertTrue(endpoint.expireCommittedItem(replacement));
+        assertTrue(endpoint.expireCommittedItem(replacement.execution()));
         assertEquals(0, endpoint.getInflightBatchCount());
     }
 
@@ -204,8 +205,8 @@ class PrefillEndpointTest {
 
         assertTrue(
                 expiration
-                        ? endpoint.expireCommittedItem(item2)
-                        : endpoint.releaseCommittedItem(item2));
+                        ? endpoint.expireCommittedItem(item2.execution())
+                        : endpoint.releaseCommittedItem(item2.execution()));
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.captureRouteProjectionInputs().work().batches().size());
         assertEquals(1, endpoint.observedRequestCount());
@@ -219,7 +220,7 @@ class PrefillEndpointTest {
         ScheduledRequest item1 = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item1));
 
-        assertTrue(endpoint.releaseCommittedItem(item1));
+        assertTrue(endpoint.releaseCommittedItem(item1.execution()));
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.captureRouteProjectionInputs().work().batches().size());
     }
@@ -278,7 +279,7 @@ class PrefillEndpointTest {
                         .totalRemainingWorkMs()
                         .orElseThrow());
         assertEquals(1L, endpoint.observedRequestCount());
-        assertTrue(endpoint.releaseCommittedItem(survivor));
+        assertTrue(endpoint.releaseCommittedItem(survivor.execution()));
         assertEquals(0L, endpoint.observedRequestCount());
         assertEquals(0L, endpoint.getInflightBatchCount());
     }
@@ -292,15 +293,12 @@ class PrefillEndpointTest {
         // through one atomic reference.
         record RawFeatures(long seqLen, long hitCache) {}
         ScheduledRequest survivor = org.mockito.Mockito.spy(createScheduledRequest(1L, 500L, 200L));
-        AtomicReference<RawFeatures> features = new AtomicReference<>(new RawFeatures(500L, 200L));
-        org.mockito.Mockito.doAnswer(invocation -> features.get().seqLen()).when(survivor).seqLen();
-        org.mockito.Mockito.doAnswer(invocation -> features.get().hitCache())
-                .when(survivor)
-                .hitCache();
-
+        RequestExecution execution = org.mockito.Mockito.spy(survivor.execution());
+        org.mockito.Mockito.doReturn(seqLen).when(execution).seqLen();
+        org.mockito.Mockito.doReturn(hitCache).when(execution).hitCache();
+        org.mockito.Mockito.doReturn(execution).when(survivor).execution();
         ScheduledRequest finished = createScheduledRequest(2L, 300L, 100L);
         registerBatch(endpoint, 1L, 100L, List.of(survivor, finished));
-        features.set(new RawFeatures(seqLen, hitCache));
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
         assertEquals(
@@ -309,7 +307,7 @@ class PrefillEndpointTest {
                         .work()
                         .totalRemainingWorkMs()
                         .orElseThrow());
-        assertTrue(endpoint.releaseCommittedItem(survivor));
+        assertTrue(endpoint.releaseCommittedItem(survivor.execution()));
         assertEquals(0L, endpoint.observedRequestCount());
     }
 
@@ -562,7 +560,8 @@ class PrefillEndpointTest {
         assertEquals(1, endpoint.getInflightBatchCount());
         assertFalse(
                 endpoint.batchAdmissionAvailability(1).isAvailable(),
-                "a short member finishing must not reopen maxInflight=1 while its long sibling runs");
+                "a short member finishing must not reopen maxInflight=1 while its long sibling"
+                        + " runs");
 
         calibrate(Map.of("102", taskInfo(102L, 700L, null, 0, 1_900)), Map.of());
 
@@ -820,7 +819,7 @@ class PrefillEndpointTest {
 
         calibrate(Map.of("101", taskInfo(101L, 700L, null, 0, 10)), Map.of());
 
-        assertFalse(endpoint.expireCommittedItem(item));
+        assertFalse(endpoint.expireCommittedItem(item.execution()));
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.captureRouteProjectionInputs().work().batches().size());
         assertEquals(0, endpoint.observedRequestCount());
@@ -1008,10 +1007,10 @@ class PrefillEndpointTest {
         ScheduledRequest item = createScheduledRequest(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
-        assertTrue(endpoint.expireCommittedItem(item));
+        assertTrue(endpoint.expireCommittedItem(item.execution()));
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.observedRequestCount());
-        assertFalse(endpoint.expireCommittedItem(item));
+        assertFalse(endpoint.expireCommittedItem(item.execution()));
     }
 
     // ---- observedRequestCount ----
@@ -1088,7 +1087,8 @@ class PrefillEndpointTest {
         assertEquals(
                 5,
                 endpoint.observedRequestCount(),
-                "scalar active count must cover a partial detail list without double-counting local tasks");
+                "scalar active count must cover a partial detail list without double-counting local"
+                        + " tasks");
     }
 
     @Test
@@ -1273,14 +1273,7 @@ class PrefillEndpointTest {
                     "retirement-owner reentry must return instead of waiting on itself");
             assertTrue(callbackFailure.get() == null, () -> String.valueOf(callbackFailure.get()));
 
-            assertEquals(
-                    PrefillState.CapacityStatus.ENDPOINT_RETIRED,
-                    retirementEndpoint
-                            .reserveRouteOwnership(
-                                    createScheduledRequest(
-                                            retirementEndpoint, retirementConfig, 8_102L, 128, 0),
-                                    0L)
-                            .status());
+            assertNull(retirementEndpoint.tryBeginRouteCommitAdmission());
         } finally {
             retirementEndpoint.close();
             executor.shutdownNow();
@@ -1512,7 +1505,7 @@ class PrefillEndpointTest {
         EndpointTestSupport.PrefillRetirement retirement =
                 requestRuntime.prefillRetirements().stream().findFirst().orElseThrow();
         assertTrue(
-                retirement.ownedItems().contains(item),
+                retirement.ownedItems().contains(item.execution()),
                 "retirement must publish the exact canonical owner");
         assertEquals(
                 PrefillState.CapacityStatus.ENDPOINT_RETIRED,
@@ -1540,9 +1533,9 @@ class PrefillEndpointTest {
                 requestRuntime.prefillRetirements().stream().findFirst().orElseThrow();
         assertEquals(
                 List.of("100", "200"),
-                retirement.ownedItems().stream().map(ScheduledRequest::requestId).sorted().toList(),
+                retirement.ownedItems().stream().map(RequestExecution::requestId).sorted().toList(),
                 "both immediate and queued routes retain their canonical retirement owner");
-        assertTrue(retirement.ownedItems().contains(route));
+        assertTrue(retirement.ownedItems().contains(route.execution()));
     }
 
     @Test

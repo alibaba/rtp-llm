@@ -17,6 +17,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -55,7 +56,7 @@ class RequestConfirmationTimeoutTest {
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
-        var projector = new EndpointEventProjector(requests);
+        var projector = new EndpointEventProjector(requests, mock(StatusFailureReporter.class));
         var endpoints =
                 new EndpointRegistry(
                         service,
@@ -78,11 +79,9 @@ class RequestConfirmationTimeoutTest {
                                                 prefillWorker,
                                                 WorkerStatusTestFixtures.prepare(
                                                         prefillWorker,
-                                                        org.flexlb.testfixture
-                                                                .WorkerStatusTestFixtures
-                                                                .observation(
-                                                                        prefillWorker,
-                                                                        status(RoleType.PREFILL))))
+                                                        WorkerStatusTestFixtures.observation(
+                                                                prefillWorker,
+                                                                status(RoleType.PREFILL))))
                                         .endpoint();
             } finally {
                 prefillWorker.lock.unlock();
@@ -204,7 +203,9 @@ class RequestConfirmationTimeoutTest {
                 decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             }
             requests.processPrefillStatus(
-                    prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
+                    prefill,
+                    RoleType.PREFILL,
+                    PrefillState.WorkerStatusFact.active(item.execution()));
             requests.processDecodeStatus(
                     decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
             assertEquals(
@@ -231,7 +232,8 @@ class RequestConfirmationTimeoutTest {
     }
 
     private static WorkerStatus worker(RoleType role, String ip) {
-        return WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test");
+        return WorkerStatusTestFixtures.readyForScheduling(
+                WorkerStatus.createDiscovered(role, "g1", ip, 8080, 8081, "test"));
     }
 
     private static WorkerStatusResponse status(RoleType role) {

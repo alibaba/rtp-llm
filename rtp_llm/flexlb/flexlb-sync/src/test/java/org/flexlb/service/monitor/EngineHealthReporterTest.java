@@ -25,7 +25,6 @@ import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.testfixture.WorkerStatusResponse;
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -1328,11 +1327,12 @@ class EngineHealthReporterTest {
                 }
             }
             WorkerStatus.PreparedStatus prepared =
-                    WorkerStatusTestFixtures.prepare(
+                    org.flexlb.testfixture.WorkerStatusTestFixtures.prepare(
                             workerStatus,
-                            WorkerStatusTestFixtures.observation(workerStatus, response));
+                            org.flexlb.testfixture.WorkerStatusTestFixtures.observation(
+                                    workerStatus, response));
             workerStatus.publishPreparedStatus(prepared);
-            WorkerStatusTestFixtures.receive(workerStatus, true, null);
+            org.flexlb.testfixture.WorkerStatusTestFixtures.receive(workerStatus, true, null);
         } finally {
             workerStatus.lock.unlock();
         }

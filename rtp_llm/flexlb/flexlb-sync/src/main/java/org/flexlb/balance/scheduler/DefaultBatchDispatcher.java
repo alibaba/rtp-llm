@@ -66,8 +66,7 @@ public class DefaultBatchDispatcher {
             new RouteProjection.AdmissionBlockSemantics(
                     "DELIVERY_CAPACITY_BATCH_ADMISSION",
                     RouteProjection.AfterProbeAdmission.BLOCKED,
-                    "DELIVERY_CAPACITY_BATCH_ADMISSION",
-                    RoleType.PREFILL);
+                    "DELIVERY_CAPACITY_BATCH_ADMISSION");
 
     private final EngineGrpcClient grpcClient;
     private final ConfigService configService;
@@ -166,7 +165,9 @@ public class DefaultBatchDispatcher {
         this.maxInflightBytes = Math.max(1L, maxInflightBytes);
         this.inflightPayloadBytes = new AtomicLong(0L);
         Logger.info(
-                "FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={}, maxInflightBytes={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
+                "FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={},"
+                        + " maxInflightBytes={}, threadFactory=flexlb-dispatch-executor,"
+                        + " rejectionPolicy=AbortPolicy",
                 poolSize,
                 admissionCapacity,
                 this.maxInflightBytes);
@@ -353,7 +354,9 @@ public class DefaultBatchDispatcher {
                                             long bytes = wireSizeUpperBound(items);
                                             if (!tryChargeBytes(bytes)) {
                                                 Logger.warn(
-                                                        "EnqueueBatch byte budget exhausted; failing batch {} ({}B > budget {}B, in-flight {}B) as NOT_SENT",
+                                                        "EnqueueBatch byte budget exhausted;"
+                                                                + " failing batch {} ({}B > budget {}B,"
+                                                                + " in-flight {}B) as NOT_SENT",
                                                         batchId,
                                                         bytes,
                                                         maxInflightBytes,
@@ -652,7 +655,8 @@ public class DefaultBatchDispatcher {
                                     if (ex != null) {
                                         Throwable cause = unwrapCompletionFailure(ex);
                                         Logger.debug(
-                                                "EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
+                                                "EnqueueBatch failed batchId: {}, entrypoint:"
+                                                        + " {}:{}, err: {}",
                                                 batchId,
                                                 prefillIp,
                                                 prefillGrpcPort,
@@ -931,8 +935,7 @@ public class DefaultBatchDispatcher {
                     "generateInputPb is missing for request " + item.requestId());
         }
         EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder();
-        input.mergeFrom(generateInput);
+                GenerateInputPayload.parse(generateInput).toWireBuilder();
         if (!Objects.equals(RequestId.parse(input), item.requestId())) {
             throw new IllegalArgumentException(
                     "request_id mismatch between schedule request and GenerateInputPB");

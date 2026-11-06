@@ -11,8 +11,6 @@ import org.flexlb.cache.match.localsync.KvCacheManager;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ConfigService;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.engine.grpc.EngineRpcService.CacheStatusPB;
 import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
@@ -169,7 +167,8 @@ class MillionBlockCacheStatusPerformanceTest {
                             DynamicCacheIntervalService.class,
                             () -> mock(DynamicCacheIntervalService.class));
                     context.registerBean(
-                            WorkerStatusProvider.class, () -> mock(WorkerStatusProvider.class));
+                            org.flexlb.dao.master.WorkerStatusProvider.class,
+                            () -> mock(org.flexlb.dao.master.WorkerStatusProvider.class));
                     context.register(
                             EngineLocalView.class, GlobalCacheIndex.class, KvCacheManager.class);
                     context.refresh();
@@ -273,8 +272,8 @@ class MillionBlockCacheStatusPerformanceTest {
                 .sum();
     }
 
-    private final WorkerStatus owner =
-            WorkerStatus.createDiscovered(
+    private final org.flexlb.dao.master.WorkerStatus owner =
+            org.flexlb.dao.master.WorkerStatus.createDiscovered(
                     org.flexlb.dao.route.RoleType.PREFILL,
                     "group",
                     "127.0.0.1",
@@ -282,7 +281,7 @@ class MillionBlockCacheStatusPerformanceTest {
                     8001,
                     "site");
 
-    private WorkerStatus worker() {
+    private org.flexlb.dao.master.WorkerStatus worker() {
         return owner;
     }
 }

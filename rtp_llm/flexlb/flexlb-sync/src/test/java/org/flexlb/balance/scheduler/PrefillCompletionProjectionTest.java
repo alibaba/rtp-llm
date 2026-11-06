@@ -15,6 +15,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.testfixture.WorkerStatusTestFixtures;
@@ -46,7 +47,7 @@ class PrefillCompletionProjectionTest {
         var reporter = mock(BatchSchedulerReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
         var requests = new RequestRegistry(service, reporter, requestReporter);
-        var projector = new EndpointEventProjector(requests);
+        var projector = new EndpointEventProjector(requests, mock(StatusFailureReporter.class));
         var endpoints =
                 new EndpointRegistry(
                         service,
@@ -57,8 +58,9 @@ class PrefillCompletionProjectionTest {
         var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
         try {
             WorkerStatus worker =
-                    WorkerStatus.createDiscovered(
-                            RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test");
+                    WorkerStatusTestFixtures.readyForScheduling(
+                            WorkerStatus.createDiscovered(
+                                    RoleType.PREFILL, "g1", "127.0.0.1", 8080, 8081, "test"));
             PrefillEndpoint prefill;
             worker.lock.lock();
             try {
@@ -70,20 +72,17 @@ class PrefillCompletionProjectionTest {
                                                 worker,
                                                 WorkerStatusTestFixtures.prepare(
                                                         worker,
-                                                        org.flexlb.testfixture
-                                                                .WorkerStatusTestFixtures
-                                                                .observation(
-                                                                        worker,
-                                                                        status(
-                                                                                1L, Map.of(),
-                                                                                Map.of()))))
+                                                        WorkerStatusTestFixtures.observation(
+                                                                worker,
+                                                                status(1L, Map.of(), Map.of()))))
                                         .endpoint();
             } finally {
                 worker.lock.unlock();
             }
             WorkerStatus decodeWorker =
-                    WorkerStatus.createDiscovered(
-                            RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test");
+                    WorkerStatusTestFixtures.readyForScheduling(
+                            WorkerStatus.createDiscovered(
+                                    RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test"));
             DecodeEndpoint decode = new DecodeEndpoint(decodeWorker, projector);
             applyStatus(decode, decodeStatus(1L, Map.of()));
             DecodeEndpoint.ReservationHandle reservation;

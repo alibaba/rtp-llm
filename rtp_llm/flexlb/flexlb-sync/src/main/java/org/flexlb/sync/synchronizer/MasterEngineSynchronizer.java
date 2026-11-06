@@ -174,10 +174,6 @@ public final class MasterEngineSynchronizer {
         }
     }
 
-    public boolean isReady() {
-        return requiredRoles.stream().allMatch(role -> workerDirectory.routingCapacity(role) > 0);
-    }
-
     @PreDestroy
     public void destroy() {
         scheduler.shutdown();

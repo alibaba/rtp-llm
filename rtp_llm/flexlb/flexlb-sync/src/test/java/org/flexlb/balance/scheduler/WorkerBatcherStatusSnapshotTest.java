@@ -72,11 +72,11 @@ class WorkerBatcherStatusSnapshotTest {
     void capacityProjectionUsesOneCoherentEngineObservation() {
         WorkerStatusResponse first = statusResponse(700L, 600L, 1_000L, 1L);
         WorkerStatusResponse second = statusResponse(3L, 5L, 10L, 2L);
-        WorkerStatus status =
-                spy(
-                        WorkerStatus.createDiscovered(
-                                RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090, "site-a"));
-        publish(status, first);
+        WorkerStatus owner =
+                WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, "group-a", "10.0.0.1", 8080, 9090, "site-a");
+        publish(owner, first);
+        WorkerStatus status = spy(owner);
 
         AtomicBoolean publishedSecond = new AtomicBoolean();
         doAnswer(
@@ -84,7 +84,7 @@ class WorkerBatcherStatusSnapshotTest {
                             WorkerStatus.EngineObservation captured =
                                     (WorkerStatus.EngineObservation) invocation.callRealMethod();
                             if (publishedSecond.compareAndSet(false, true)) {
-                                publish(status, second);
+                                publish(owner, second);
                             }
                             return captured;
                         })

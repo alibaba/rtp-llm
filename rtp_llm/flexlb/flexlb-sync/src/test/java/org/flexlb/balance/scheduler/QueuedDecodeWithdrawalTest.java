@@ -118,7 +118,13 @@ class QueuedDecodeWithdrawalTest {
         decode.close();
         WorkerStatus status =
                 WorkerStatus.createDiscovered(RoleType.DECODE, null, "127.0.0.1", 8000, 8001, null);
-        decode = new DecodeEndpoint(status, new EndpointEventProjector(registry));
+        decode =
+                new DecodeEndpoint(
+                        status,
+                        new EndpointEventProjector(
+                                registry,
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.service.monitor.StatusFailureReporter.class)));
         applyStatus(Map.of(), Map.of());
         var item = queued(42);
         var slot = registry.requestSlot("42");
@@ -164,9 +170,10 @@ class QueuedDecodeWithdrawalTest {
             projection =
                     decode.applyPreparedStatus(
                             status,
-                            WorkerStatusTestFixtures.prepare(
+                            org.flexlb.testfixture.WorkerStatusTestFixtures.prepare(
                                     status,
-                                    WorkerStatusTestFixtures.observation(status, response)));
+                                    org.flexlb.testfixture.WorkerStatusTestFixtures.observation(
+                                            status, response)));
         } finally {
             status.lock.unlock();
         }
@@ -227,7 +234,7 @@ class QueuedDecodeWithdrawalTest {
         }
         registry.processDecodeStatus(
                 decode, DecodeEndpoint.WorkerStatusFact.terminal(item.decodeReservation(), 0));
-        assertSame(next, registry.requestSlot("1").activeItem());
+        assertSame(next.execution(), registry.requestSlot("1").activeItem());
         assertFalse(
                 item.future().isDone(),
                 "old reservation evidence must not terminate the new route");
@@ -239,7 +246,7 @@ class QueuedDecodeWithdrawalTest {
         var permit = decode.acquireDispatchPermit(item.decodeReservation(), capacity).permit();
         assertNotNull(permit);
         assertFalse(replace(item));
-        assertSame(item, registry.requestSlot("2").activeItem());
+        assertSame(item.execution(), registry.requestSlot("2").activeItem());
         assertFalse(item.future().isDone());
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item));
         verify(queue, never()).requeue(any());
@@ -252,7 +259,7 @@ class QueuedDecodeWithdrawalTest {
         assertFalse(
                 registry.replaceQueuedDecodeReservations(
                         decode, List.of(item.decodeReservation()), "100", 16, 16, 30, capacity));
-        assertSame(item, registry.requestSlot("3").activeItem());
+        assertSame(item.execution(), registry.requestSlot("3").activeItem());
         assertNotNull(decode.reservationHandle("3"));
         verify(queue, never()).requeue(any());
     }
@@ -268,7 +275,8 @@ class QueuedDecodeWithdrawalTest {
                         call -> {
                             assertFalse(
                                     RequestLifecycleTestSupport.prepareMember(registry, item),
-                                    "withdrawal must fence batch preparation before releasing the old route");
+                                    "withdrawal must fence batch preparation before releasing the"
+                                            + " old route");
                             registry.cancelRequest("4", 0, reason);
                             return true;
                         })
@@ -292,7 +300,7 @@ class QueuedDecodeWithdrawalTest {
         assertFalse(
                 registry.replaceQueuedDecodeReservations(
                         decode, List.of(stale), "100", 16, 16, 80, capacity));
-        assertSame(item, registry.requestSlot("5").activeItem());
+        assertSame(item.execution(), registry.requestSlot("5").activeItem());
         assertTrue(RequestLifecycleTestSupport.prepareMember(registry, item));
         verify(item.prefillEp(), never()).removeQueued(any(), anyString());
     }
@@ -322,7 +330,7 @@ class QueuedDecodeWithdrawalTest {
                         16,
                         80,
                         capacity));
-        assertSame(item, registry.requestSlot("7").activeItem());
+        assertSame(item.execution(), registry.requestSlot("7").activeItem());
         assertNotNull(decode.reservationHandle("7"));
         assertNull(decode.reservationHandle("100"));
         assertTrue(

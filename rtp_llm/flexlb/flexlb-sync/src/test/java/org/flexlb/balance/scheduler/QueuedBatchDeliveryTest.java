@@ -18,6 +18,7 @@ import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -105,7 +106,7 @@ class QueuedBatchDeliveryTest {
         when(prefill.releaseCommittedItem(any()))
                 .thenAnswer(
                         call -> {
-                            ScheduledRequest item = call.getArgument(0);
+                            RequestExecution item = call.getArgument(0);
                             assertFalse(Thread.holdsLock(registry.requestSlot(item.requestId())));
                             return ledger.prefill.terminalizeCommittedItem(item);
                         });
@@ -122,7 +123,7 @@ class QueuedBatchDeliveryTest {
                 new DecodeEndpoint(
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        new EndpointEventProjector(registry));
+                        new EndpointEventProjector(registry, mock(StatusFailureReporter.class)));
         CountDownLatch entered = new CountDownLatch(1);
         dispatcher
                 .tryPrepareSubmission()
@@ -177,7 +178,7 @@ class QueuedBatchDeliveryTest {
                         registry.expireInactiveRequest(slot, slot.createdAtMs() + TIMEOUT_MS);
                 case "LATE_DEADLINE" ->
                         ReflectionTestUtils.setField(
-                                item, "expiresAtMs", System.currentTimeMillis() - 1L);
+                                item.execution(), "expiresAtMs", System.currentTimeMillis() - 1L);
                 case "LATE_INACTIVITY" ->
                         ReflectionTestUtils.setField(
                                 slot,

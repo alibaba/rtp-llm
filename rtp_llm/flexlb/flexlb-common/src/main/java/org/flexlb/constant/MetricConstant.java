@@ -671,9 +671,6 @@ public class MetricConstant {
      */
     public static final String GRPC_SERVER_EXECUTOR_QUEUE_SIZE = "grpc.server.executor.queue.size";
 
-    public static final String GRPC_SERVER_EXECUTOR_REJECTED_TASKS =
-            "grpc.server.executor.caller.runs";
-
     /**
      * gRPC server executor current pool size (gauge)
      */

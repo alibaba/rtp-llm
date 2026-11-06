@@ -2,7 +2,6 @@ package org.flexlb.cache.match.localsync;
 
 import org.flexlb.cache.domain.DiffResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.dao.master.WorkerStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -187,8 +186,8 @@ class KvCacheManagerRetirementTest {
         field.set(target, value);
     }
 
-    private final WorkerStatus owner =
-            WorkerStatus.createDiscovered(
+    private final org.flexlb.dao.master.WorkerStatus owner =
+            org.flexlb.dao.master.WorkerStatus.createDiscovered(
                     org.flexlb.dao.route.RoleType.PREFILL,
                     "group",
                     "127.0.0.1",
@@ -196,7 +195,7 @@ class KvCacheManagerRetirementTest {
                     8081,
                     "site");
 
-    private WorkerStatus worker(String address) {
+    private org.flexlb.dao.master.WorkerStatus worker(String address) {
         return owner;
     }
 }

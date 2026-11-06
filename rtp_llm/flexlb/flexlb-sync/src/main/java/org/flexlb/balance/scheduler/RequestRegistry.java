@@ -220,7 +220,7 @@ public class RequestRegistry {
                 if (!isCurrentSlot(slot)) {
                     return null;
                 }
-                ScheduledRequest active = slot.activeItem();
+                ScheduledRequest active = slot.scheduledItem();
                 if (active == null || active.priority() >= incomingPriority) {
                     return null;
                 }
@@ -354,7 +354,7 @@ public class RequestRegistry {
         processDecodeStatus(source, DecodeEndpoint.WorkerStatusFact.accepted(reservation));
     }
 
-    void projectPrefillRetirementItem(PrefillEndpoint source, ScheduledRequest exact) {
+    void projectPrefillRetirementItem(PrefillEndpoint source, RequestExecution exact) {
         if (exact == null || exact.prefillEp() != source) {
             return;
         }
@@ -414,6 +414,9 @@ public class RequestRegistry {
                             buildErrorResponse(
                                     StrategyErrorType.DISPATCH_FAILED,
                                     "request scheduler is shutting down"));
+                }
+                if (!context.getConfig().getDispatcher().requiresGenerateInput()) {
+                    context.setGenerateInputPb(null);
                 }
                 boolean queueScheduling = context.getConfig().isQueue();
                 slot =
@@ -579,16 +582,6 @@ public class RequestRegistry {
         finishVictim(victim, StrategyErrorType.PRIORITY_PREEMPTED, detail);
     }
 
-    void onQueuedItemPreempted(ScheduledRequest victim, ScheduledRequest incoming) {
-        finishYielded(victim, "preempted by higher-priority request " + incoming.requestId());
-        requestReporter.reportVictim(
-                victim.priority(),
-                incoming.priority(),
-                "prefill_queued",
-                "prefill_inflight_requests");
-        requestReporter.reportPriorityPreempt("prefill_queued");
-    }
-
     private void finishVictim(ScheduledRequest item, StrategyErrorType error, String detail) {
         RequestSlot slot = entryFor(item);
         if (slot != null) {
@@ -630,7 +623,7 @@ public class RequestRegistry {
         return slot == null ? null : slot.cancelRequest(expectedBatchId, reason);
     }
 
-    private static CancelTarget cancelTarget(ScheduledRequest item) {
+    private static CancelTarget cancelTarget(RequestExecution item) {
         ServerStatus prefill = item == null ? null : item.prefill();
         return prefill == null
                 ? null

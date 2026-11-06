@@ -37,7 +37,6 @@ import org.flexlb.metric.FlexMonitor;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -398,9 +397,11 @@ class CacheHitFeedbackFlowTest {
             registry.publishPreparedEndpoint(
                     status.getLogicalIpPort(),
                     status,
-                    WorkerStatusTestFixtures.prepare(
-                            status, WorkerStatusTestFixtures.observation(status, value)));
-            WorkerStatusTestFixtures.receive(status, true, null);
+                    org.flexlb.testfixture.WorkerStatusTestFixtures.prepare(
+                            status,
+                            org.flexlb.testfixture.WorkerStatusTestFixtures.observation(
+                                    status, value)));
+            org.flexlb.testfixture.WorkerStatusTestFixtures.receive(status, true, null);
         } finally {
             status.lock.unlock();
         }

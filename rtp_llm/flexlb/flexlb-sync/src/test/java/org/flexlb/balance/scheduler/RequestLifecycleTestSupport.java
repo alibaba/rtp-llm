@@ -130,13 +130,16 @@ final class RequestLifecycleTestSupport {
     static void startRouteDelivery(RequestSlot slot) {
         assertNotNull(
                 slot.claimDelivery(
-                        slot.activeItem(), DeliveryClaimKind.ROUTE_DECISION, 0L, () -> true));
+                        slot.scheduledItem(), DeliveryClaimKind.ROUTE_DECISION, 0L, () -> true));
     }
 
     static void startBatchDelivery(RequestSlot slot, long batchId) {
         assertNotNull(
                 slot.claimDelivery(
-                        slot.activeItem(), DeliveryClaimKind.BATCH_ENQUEUE, batchId, () -> true));
+                        slot.scheduledItem(),
+                        DeliveryClaimKind.BATCH_ENQUEUE,
+                        batchId,
+                        () -> true));
     }
 
     static void markAcknowledged(RequestSlot slot) {

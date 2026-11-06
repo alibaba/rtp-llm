@@ -23,6 +23,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 import org.flexlb.testfixture.WorkerStatusResponse;
 import org.flexlb.testfixture.WorkerStatusTestFixtures;
 
@@ -53,7 +54,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             EngineCancelChannel cancelChannel) {
         Objects.requireNonNull(prepareBatchSubmission, "prepareBatchSubmission");
         this.lifecycle = new RequestRegistry(configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
+        this.endpointEvents =
+                new EndpointEventProjector(
+                        lifecycle, org.mockito.Mockito.mock(StatusFailureReporter.class));
         AtomicLong batchIds = new AtomicLong();
         DeliveryMetrics deliveryMetrics = new DeliveryMetrics(batchReporter);
         DeliveryStrategy delivery =

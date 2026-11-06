@@ -15,8 +15,10 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.monitor.StatusFailureReporter;
 
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
@@ -41,7 +43,8 @@ public class SnapshotBench {
     static BatchDeliveryStrategy strategy;
     static RequestRegistry registry;
     static final RouteProjection.Probe PROBE =
-            new RouteProjection.Probe(Long.MAX_VALUE, 0, 1, Long.MAX_VALUE, 2048, 0, 0);
+            new RouteProjection.Probe(
+                    Long.toString(Long.MAX_VALUE), 0, 1, Long.MAX_VALUE, 2048, 0, 0);
 
     record Endpoint(WorkerBatcher runtime, ReentrantLock lock, ScheduledRequest member) {
         void changeMembership() {
@@ -61,7 +64,7 @@ public class SnapshotBench {
 
     static ScheduledRequest request(FlexlbConfig config, long id, int priority, long tokens) {
         var request = new Request();
-        request.setRequestId(id);
+        request.setRequestId(Long.toString(id));
         request.setSeqLen(tokens);
         request.setPriority(priority);
         var context = new BalanceContext(config);
@@ -90,7 +93,8 @@ public class SnapshotBench {
                         null,
                         config,
                         strategy,
-                        new EndpointEventProjector(registry));
+                        new EndpointEventProjector(
+                                registry, new StatusFailureReporter(new NoOpFlexMonitor())));
         Field lockField = WorkerBatcher.class.getDeclaredField("queueLock");
         lockField.setAccessible(true);
         var lock = (ReentrantLock) lockField.get(runtime);
@@ -224,7 +228,8 @@ public class SnapshotBench {
             if (round >= 2)
                 System.out.printf(
                         Locale.ROOT,
-                        "index_remove_add_depth%d round=%d ns/op=%.2f cpu_ns/op=%.2f bytes/op=%.2f%n",
+                        "index_remove_add_depth%d round=%d ns/op=%.2f cpu_ns/op=%.2f"
+                                + " bytes/op=%.2f%n",
                         depth,
                         round,
                         (double) elapsed / operations,
