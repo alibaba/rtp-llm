@@ -39,6 +39,7 @@ from rtp_llm.server.request_headers import (
     dashscope_greennet_metadata,
     extract_correlation_request_id,
     extract_trace_id,
+    extract_qos_priority,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -666,6 +667,7 @@ def trans_v41_inputs(prepared, payload_id=""):
 def trans_input(input_py: GenerateInput):
     input_pb = GenerateInputPB()
     input_pb.request_id = input_py.request_id
+    input_pb.priority = extract_qos_priority(input_py)
     expansion = input_py.mm_token_expansion
     if expansion is not None:
         input_pb.token_ids.extend(expansion.token_ids)
