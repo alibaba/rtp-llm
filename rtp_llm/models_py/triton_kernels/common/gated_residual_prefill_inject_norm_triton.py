@@ -9,6 +9,7 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.common.gated_residual_norm_triton import (
     _norm_fp8_scale,
 )
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 @triton.jit
@@ -111,7 +112,7 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps):
         and isinstance(eps, (float, int))
         and math.isfinite(eps)
         and eps >= 0
-        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
+        and cached_device_capability(x.device) in ((9, 0), (12, 0))
     ):
         return None
     return _inject_grouped_norm(x, sublayer, gates, gamma, eps)

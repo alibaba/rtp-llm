@@ -28,8 +28,8 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    has_nonzero_prefill_prefix,
     host_input_mirror,
-    lookup_prefill_step_plan,
 )
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
@@ -188,11 +188,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def _has_nonzero_prefill_prefix(self) -> bool:
-        # Per-step CPU mirror: a device prefix_lengths source
-        # (RTP_LLM_DEVICE_INPUT) was read back once this step by the
-        # gate/plan build; this per-layer dispatch check stays host-side.
-        prefixes = host_input_mirror(self.attn_inputs, "prefix_lengths")
-        return bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
+        # Per-step frozen gate: the mirror facts compute the ``any`` verdict
+        # once per step; the per-layer dispatch checks only read the cached
+        # boolean instead of recomputing host tensor ops per call.
+        return has_nonzero_prefill_prefix(self.attn_inputs)
 
     def _validate_main_paged_geometry(
         self,
@@ -807,23 +806,16 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             # Invalid padded rows cannot read KV: their visible length is zero
             # and every selected index is -1. Restore packed order afterwards.
             # The frozen step plan already carries this step's padding map,
-            # validity mask and padded KV lengths; without one they are
-            # rebuilt inline exactly as before.
-            step = lookup_prefill_step_plan(self.attn_inputs, tokens)
+            # validity mask and padded KV lengths; the prepare pass served it
+            # from a fingerprint-validated plan hit, so only plans built
+            # without one fall back to the inline rebuild below.
+            step = plan.step_plan
             if (
                 step is not None
                 and step.selection_row_map is not None
                 and step.selection_valid is not None
                 and step.selection_valid_rows is not None
                 and step.padded_kv_lens is not None
-                and step.max_len == max_rows
-                and step.batch_size == len(requests)
-                and step.lengths
-                == [int(req.end) - int(req.start) for req in requests]
-                and step.prefix_values
-                == host_input_mirror(
-                    self.attn_inputs, "prefix_lengths"
-                ).tolist()
             ):
                 row_map = step.selection_row_map
                 valid = step.selection_valid

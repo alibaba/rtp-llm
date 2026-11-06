@@ -11,7 +11,8 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
     host_input_mirror,
-    lookup_prefill_step_plan,
+    prefill_mirror_facts,
+    prefill_step_plan_hit,
 )
 from rtp_llm.ops.compute_ops import LayerKVCache
 
@@ -288,36 +289,51 @@ def _prepare_incremental_prefill_inputs(
     batch = int(input_lengths.numel())
     if batch <= 0 or int(prefixes.numel()) != batch:
         raise ValueError("qwen4_exp incremental prefill lengths and prefixes disagree")
-    # Request-data checks run on the per-step CPU mirrors; a device source
-    # (RTP_LLM_DEVICE_INPUT) was already read back once this step by the
-    # gate/plan build, so these fail-fast checks stay host-side and free.
-    lengths_mirror = host_input_mirror(self.attn_inputs, "input_lengths")
-    prefix_mirror = host_input_mirror(self.attn_inputs, "prefix_lengths")
-    if bool(torch.any(lengths_mirror <= 0)):
-        raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
-    if bool(torch.any(prefix_mirror < 0)):
-        raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
-    # The frozen step plan (when this step's QSA pass produced one) replaces
-    # the device mirrors, the cu reconstruction and the per-request KV rows.
-    lengths_list = lengths_mirror.tolist()
-    prefix_list = prefix_mirror.tolist()
-    step = lookup_prefill_step_plan(self.attn_inputs, sum(lengths_list))
-    if (
-        step is not None
-        and step.kv_lens_rows is not None
-        and step.cu_host is not None
-        and step.input_lengths_i32 is not None
-        and step.prefixes_i32 is not None
-        and step.lengths == lengths_list
-        and step.prefix_values == prefix_list
-        and step.device == qkv.device
-        and step.batch_size == batch
-    ):
-        input_lengths_device = step.input_lengths_i32
-        prefixes_device = step.prefixes_i32
-        cu_host = step.cu_host
-    else:
-        step = None
+    # Request-data checks: one frozen facts pass per step (non-strict path)
+    # replaces the per-layer mirror reads; a fingerprint-only plan hit then
+    # serves the frozen device mirrors and cu boundaries.  Strict mode and
+    # the no-plan fallback keep the legacy per-call reads below.
+    step = None
+    facts = (
+        None
+        if qsa_strict_validation_enabled()
+        else prefill_mirror_facts(self.attn_inputs)
+    )
+    if facts is not None:
+        if not facts.lengths_positive:
+            raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
+        if not facts.prefixes_nonneg:
+            raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
+        step = prefill_step_plan_hit(
+            self.attn_inputs,
+            facts.lengths_sum,
+            device=qkv.device,
+            batch_size=batch,
+        )
+        if (
+            step is not None
+            and step.kv_lens_rows is not None
+            and step.cu_host is not None
+            and step.input_lengths_i32 is not None
+            and step.prefixes_i32 is not None
+        ):
+            input_lengths_device = step.input_lengths_i32
+            prefixes_device = step.prefixes_i32
+            cu_host = step.cu_host
+        else:
+            step = None
+    if step is None:
+        # Request-data checks run on the per-step CPU mirrors; a device source
+        # (RTP_LLM_DEVICE_INPUT) was already read back once this step by the
+        # gate/plan build, so these fail-fast checks stay host-side and free.
+        lengths_mirror = host_input_mirror(self.attn_inputs, "input_lengths")
+        prefix_mirror = host_input_mirror(self.attn_inputs, "prefix_lengths")
+        if bool(torch.any(lengths_mirror <= 0)):
+            raise ValueError("qwen4_exp incremental prefill input lengths must be positive")
+        if bool(torch.any(prefix_mirror < 0)):
+            raise ValueError("qwen4_exp incremental prefill prefixes must be non-negative")
+        lengths_list = lengths_mirror.tolist()
+        prefix_list = prefix_mirror.tolist()
         input_lengths_device = input_lengths.to(
             device=qkv.device, dtype=torch.int32, non_blocking=True
         )
@@ -390,8 +406,9 @@ def _prepare_incremental_prefill_inputs(
         start, end = cu_host[request_idx : request_idx + 2]
         query_len = end - start
         if step is not None:
+            # The frozen [1, length] KV rows need no per-layer reshape; the
+            # strict per-request diagnostics below never run on a plan hit.
             kv_lens_row = step.kv_lens_rows[request_idx]
-            kv_lens_vec = kv_lens_row.reshape(-1)
         else:
             kv_lens_vec = prefixes_device[request_idx] + torch.arange(
                 1, query_len + 1, dtype=torch.int32, device=qkv.device
@@ -430,5 +447,6 @@ def _prepare_incremental_prefill_inputs(
             "requests": requests,
             "selected_indices": selected_indices,
             "prefixes_device": prefixes_device,
+            "step_plan": step,
         }
     )
