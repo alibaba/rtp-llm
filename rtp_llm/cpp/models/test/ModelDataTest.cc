@@ -292,13 +292,14 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
     }
     inputs.kv_cache_group_tags = local_tags;
     if (rank == 0) {
-        inputs.combo_tokens             = torch::tensor({7, 8}, torch::kInt32);
-        inputs.input_lengths            = torch::tensor({1, 1}, torch::kInt32);
-        inputs.sequence_lengths         = torch::tensor({4, 5}, torch::kInt32);
-        inputs.kv_cache_block_id        = physical.clone();
-        inputs.kv_cache_kernel_block_id = kernel.clone();
-        inputs.kv_cache_group_types     = types.clone();
-        inputs.kv_cache_update_mapping  = copies.clone();
+        inputs.combo_tokens                = torch::tensor({7, 8}, torch::kInt32);
+        inputs.input_lengths               = torch::tensor({1, 1}, torch::kInt32);
+        inputs.sequence_lengths            = torch::tensor({4, 5}, torch::kInt32);
+        inputs.kv_cache_block_id           = physical.clone();
+        inputs.kv_cache_kernel_block_id    = kernel.clone();
+        inputs.kv_cache_group_types        = types.clone();
+        inputs.kv_cache_update_mapping     = copies.clone();
+        inputs.kv_cache_copy_token_lengths = empty_tables ? torch::Tensor() : torch::tensor({3, 0, 7}, torch::kInt32);
         inputs.cache_store_publish_start_tokens = torch::tensor({0, 8}, torch::kInt32);
     }
     const auto        original_physical = inputs.kv_cache_block_id;
@@ -333,6 +334,11 @@ void checkGroupedTpRound(GptModelInputs&                 inputs,
         EXPECT_TRUE(!inputs.kv_cache_update_mapping.defined() || inputs.kv_cache_update_mapping.numel() == 0);
     } else {
         expectIntTensor(inputs.kv_cache_update_mapping, expected_copies.to(inputs.kv_cache_update_mapping.device()));
+    }
+    if (empty_tables) {
+        EXPECT_FALSE(inputs.kv_cache_copy_token_lengths.defined());
+    } else {
+        expectIntTensor(inputs.kv_cache_copy_token_lengths, torch::tensor({3, 0, 7}, torch::kInt32));
     }
     expectIntTensor(inputs.combo_tokens, torch::tensor({7, 8}, torch::kInt32));
     expectIntTensor(inputs.cache_store_publish_start_tokens, torch::tensor({0, 8}, torch::kInt32));

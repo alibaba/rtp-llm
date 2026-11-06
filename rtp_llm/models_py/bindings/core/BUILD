@@ -5,11 +5,16 @@ cc_library(
     name = "gpu_block_copy",
     srcs = ["GpuBlockCopy.cc"],
     hdrs = ["GpuBlockCopy.h"],
-    deps = torch_deps() + select({
+    deps = ["//rtp_llm/cpp/utils:profiling_scope"] + torch_deps() + select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/common/kernels:block_id_copy",
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/common/kernels:block_id_copy",
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:hip",
         ],
         "//conditions:default": [],
     }),

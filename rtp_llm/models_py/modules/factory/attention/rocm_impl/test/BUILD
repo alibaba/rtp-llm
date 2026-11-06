@@ -1,5 +1,19 @@
 # ROCm attention tests run on the MI308X runner.
 
+py_test(
+    name = "test_beam_search_cascade",
+    srcs = ["test_beam_search_cascade.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py/triton_kernels:attention",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "long",
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]

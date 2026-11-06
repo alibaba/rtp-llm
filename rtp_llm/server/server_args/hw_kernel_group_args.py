@@ -253,6 +253,15 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
+        "--enable_decode_cascade_attention",
+        env_name="ENABLE_DECODE_CASCADE_ATTENTION",
+        type=str2bool,
+        default=False,
+        bind_to=(hw_kernel_config, "enable_decode_cascade_attention"),
+        help="Use shared-prefix Prefill plus private-tail Decode attention for Beam Search. Request slots follow CONCURRENCY_LIMIT; captured decode rows must fit the same limit.",
+    )
+
+    hw_kernel_group.add_argument(
         "--decode_capture_config",
         env_name="DECODE_CAPTURE_CONFIG",
         type=_parse_decode_capture_config,
@@ -261,7 +270,8 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         help=(
             "Decode CUDA Graph capture batch sizes configuration. "
             "Supports comma-separated list format, e.g., '1,2,4,8,16,32'. "
-            "If not set, default logic will be used to generate batch sizes."
+            "Buckets must not exceed CONCURRENCY_LIMIT and do not resize decode capacity. "
+            "If unset, buckets are generated up to CONCURRENCY_LIMIT."
         ),
     )
 
@@ -547,8 +557,6 @@ def _parse_decode_capture_config(config: str) -> List[int]:
     Returns:
         List of positive integers (batch sizes), or empty list if config is empty
     """
-    import argparse
-
     if not config:
         # Return empty list to use default logic
         return []
@@ -557,14 +565,8 @@ def _parse_decode_capture_config(config: str) -> List[int]:
     if not config:
         return []
 
-    # Only support comma-separated list format
-    try:
-        return _parse_comma_separated_ints(
-            config,
-            "decode_capture_config",
-            "decode capture batch sizes",
-            raise_on_empty=False,
-        )
-    except ValueError as e:
-        # Convert ValueError to ArgumentTypeError for argparse
-        raise argparse.ArgumentTypeError(str(e))
+    buckets = [
+        _positive_int(item.strip(), "DECODE_CAPTURE_CONFIG bucket")
+        for item in config.split(",")
+    ]
+    return sorted(set(buckets))

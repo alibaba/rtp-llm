@@ -11,6 +11,34 @@ from rtp_llm.ops import (
 )
 
 
+class DecodeGraphConfigPickleTest(unittest.TestCase):
+    def test_capture_config_and_explicit_prefill_capacity_round_trip(self):
+        config = HWKernelConfig()
+        config.decode_capture_batch_sizes = [128, 2048, 256]
+        config.generation_prefill_cuda_graph_max_requests = 3
+        config.enable_decode_cascade_attention = True
+        result = pickle.loads(pickle.dumps(config))
+        self.assertEqual(result.decode_capture_batch_sizes, [128, 2048, 256])
+        self.assertEqual(result.generation_prefill_cuda_graph_max_requests, 3)
+        self.assertTrue(result.enable_decode_cascade_attention)
+
+    def test_previous_layouts_keep_defaults(self):
+        state = HWKernelConfig().__getstate__()
+        for legacy in (state[:16], state[:14]):
+            result = HWKernelConfig.__new__(HWKernelConfig)
+            result.__setstate__(legacy)
+            self.assertFalse(result.enable_decode_cascade_attention)
+            self.assertEqual(result.decode_capture_batch_sizes, [])
+            self.assertEqual(result.generation_prefill_cuda_graph_max_requests, 1)
+        # The retired independent decode capacity is ignored when reading an
+        # older in-flight bootstrap; the Cascade flag still round-trips.
+        previous = state[:16] + (4096, True)
+        result = HWKernelConfig.__new__(HWKernelConfig)
+        result.__setstate__(previous)
+        self.assertTrue(result.enable_decode_cascade_attention)
+        self.assertEqual(result.decode_capture_batch_sizes, [])
+
+
 def _new_grammar_config():
     return GrammarConfig.__new__(GrammarConfig)
 
@@ -99,7 +127,6 @@ class _InvalidTypePDSepConfig:
         return _new_config, (PDSepConfig,), tuple(state)
 
 
-
 class MoeConfigPickleTest(unittest.TestCase):
     def test_non_default_fp4_moe_op_round_trip(self):
         config = MoeConfig()
@@ -126,7 +153,6 @@ class PDSepConfigPickleTest(unittest.TestCase):
 
         self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 118)
         self.assertEqual(restored.prefill_prepare_resource_pool_size, 119)
-
 
     def test_rejects_invalid_state_length(self):
         for size in (20, 21, 23):
@@ -267,7 +293,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         )
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (15, 17, 18):
+        for size in (15, 19, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):

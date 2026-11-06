@@ -9,6 +9,7 @@ from librtp_compute_ops import LayerKVCache, PyAttentionInputs, get_scalar_type
 from rtp_llm.ops.attention_input_utils import select_prefill_position_ids
 from libth_transformer_config import (
     AttentionConfigs,
+    RopeStyle,
     check_rope_cache,
     get_rope_cache_once,
 )
@@ -47,6 +48,37 @@ class FusedRopeAttnParams:
 class FusedRopeKVCachePrefillOpBase:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
+        self._graph_rope_cache: Optional[torch.Tensor] = None
+
+    def _prepare_graph_rope_cache(self, params: FusedRopeAttnParams) -> None:
+        if self.attn_configs.rope_config.style not in (RopeStyle.Base, RopeStyle.Yarn):
+            return
+        # The longest input and prefix may belong to different requests.
+        # Check actual per-request positions, including MTP replay batches.
+        required = int((params.input_lengths + params.prefix_lengths).max().item())
+        if self._graph_rope_cache is not None:
+            if required > self._graph_rope_cache.shape[0]:
+                raise RuntimeError("prefill replay exceeds its captured RoPE cache")
+            return
+        cache = get_rope_cache_once(
+            self.attn_configs.rope_config, self.attn_configs.max_seq_len
+        )
+        if not check_rope_cache(self.attn_configs.rope_config, cache):
+            return
+        data = cache.data
+        if data.shape[0] < min(required, self.attn_configs.max_seq_len):
+            raise RuntimeError("RoPE cache does not cover real request positions")
+        if required > data.shape[0]:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("prepare scratch RoPE storage before graph capture")
+            # Generation capture uses one discarded scratch sequence for the
+            # total token bucket. Real requests keep their original position
+            # limit and coefficients; only scratch positions need extra rows.
+            # Own the extended tensor for the lifetime of the captured graph.
+            data = torch.cat(
+                (data, data[-1:].expand(required - data.shape[0], -1)), dim=0
+            )
+        self._graph_rope_cache = data
 
     def prepare_kv_cache_offset(
         self, attn_inputs: PyAttentionInputs
@@ -71,7 +103,7 @@ class FusedRopeKVCachePrefillOpBase:
         # shuffle indices are only a fallback for models without position IDs.
         position_ids = select_prefill_position_ids(attn_inputs)
 
-        return FusedRopeAttnParams(
+        params = FusedRopeAttnParams(
             kv_cache_offset,
             kv_cache_offset_h,
             attn_inputs.padding_offset,
@@ -87,6 +119,9 @@ class FusedRopeKVCachePrefillOpBase:
             False,
             get_scalar_type(attn_inputs.dtype),
         )
+        if attn_inputs.is_cuda_graph:
+            self._prepare_graph_rope_cache(params)
+        return params
 
     def _forward(
         self,
@@ -102,7 +137,11 @@ class FusedRopeKVCachePrefillOpBase:
     ) -> torch.Tensor:
         store_cache = kv_cache is not None
         rope_config = self.attn_configs.rope_config
-        rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
+        rope_cache_data = self._graph_rope_cache
+        if rope_cache_data is None:
+            rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
+            if check_rope_cache(rope_config, rope_cache):
+                rope_cache_data = rope_cache.data
 
         return _get_fused_rope_kvcache().prefill_fused_rope_kvcache(
             qkv,
@@ -124,9 +163,7 @@ class FusedRopeKVCachePrefillOpBase:
             kv_cache_scale=None if kv_cache is None else kv_cache.kv_scale_base,
             kv_cache_offset=params.kv_cache_offset,
             kv_cache_offset_h=params.kv_cache_offset_h,
-            rope_cache=(
-                rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
-            ),
+            rope_cache=rope_cache_data,
             padding_offset=params.padding_offset,
             position_ids=params.position_ids,
             use_logn_attn=self.attn_configs.use_logn_attn,

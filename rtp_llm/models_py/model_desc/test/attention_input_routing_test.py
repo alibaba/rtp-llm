@@ -6,7 +6,10 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.models_py.model_desc.block_map import get_group_tags_for_layers
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -178,6 +181,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 fmha_config=model.fmha_config,
                 is_cuda_graph=False,
                 cuda_graph_selection_mode=None,
+                decode_cascade_max_requests=0,
             )
             self.assertIs(routes["default"], factory.return_value)
             self.assertIs(routes["indexer_kv"], factory.return_value)
@@ -188,7 +192,9 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 model.prepare_fmha_impl(inputs)
             factory.assert_not_called()
 
-    def test_sparse_mla_cacheless_prepare_accepts_generation_prefill_selection_mode(self):
+    def test_sparse_mla_cacheless_prepare_accepts_generation_prefill_selection_mode(
+        self,
+    ):
         model = object.__new__(GenericMoeModel)
         model.__dict__.update(
             config=SimpleNamespace(
@@ -217,6 +223,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 fmha_config=model.fmha_config,
                 is_cuda_graph=True,
                 cuda_graph_selection_mode="generation_prefill_graph",
+                decode_cascade_max_requests=0,
             )
             self.assertIs(routes["default"], factory.return_value)
             self.assertIs(routes["indexer_kv"], factory.return_value)
@@ -248,6 +255,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 fmha_config=model.fmha_config,
                 is_cuda_graph=True,
                 cuda_graph_selection_mode=CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH,
+                decode_cascade_max_requests=0,
             )
             self.assertIs(impls, factory.return_value)
 
@@ -462,6 +470,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         }
         inputs = SimpleNamespace(attention_inputs=inputs_by_tag)
         model = RoutingModel(["full"])
+        model.decode_cascade_max_requests = 8
 
         with patch(
             "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
@@ -475,6 +484,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         self.assertEqual(fmha_impl, {"full": inputs_by_tag["full"]})
         factory.assert_called_once()
+        self.assertEqual(factory.call_args.kwargs["decode_cascade_max_requests"], 8)
         self.assertEqual(
             factory.call_args.kwargs["cuda_graph_selection_mode"],
             "generation_prefill_graph",
@@ -493,6 +503,8 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         self.assertEqual(fmha_impl, inputs_by_tag)
         self.assertEqual(factory.call_count, 2)
+        for call in factory.call_args_list:
+            self.assertEqual(call.kwargs["decode_cascade_max_requests"], 0)
 
     def test_dspark_commit_publishes_only_with_swa_inputs(self):
         model = object.__new__(DeepSeekV4DSparkModel)

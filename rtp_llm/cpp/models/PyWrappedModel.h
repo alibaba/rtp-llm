@@ -239,6 +239,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     const auto& generation_prefill_cuda_graph_buckets =
         params.hw_kernel_config.generation_prefill_capture_token_buckets;
+    const int generation_prefill_graph_request_capacity =
+        params.hw_kernel_config.generation_prefill_cuda_graph_max_requests;
     if (owns_generation_prefill_cuda_graph_) {
         const auto& parallelism = params.parallelism_config;
         RTP_LLM_CHECK_WITH_INFO(isSingleDeviceGenerationPrefillCudaGraphConfig(parallelism),
@@ -263,47 +265,51 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             "GENERATION_PREFILL_CAPTURE_CONFIG must not exceed %d buckets, got %zu",
             HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureBuckets,
             buckets.size());
-        RTP_LLM_CHECK_WITH_INFO(params.hw_kernel_config.generation_prefill_cuda_graph_max_requests > 0,
+        RTP_LLM_CHECK_WITH_INFO(generation_prefill_graph_request_capacity > 0,
                                 "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS must be positive, got %d",
-                                params.hw_kernel_config.generation_prefill_cuda_graph_max_requests);
+                                generation_prefill_graph_request_capacity);
         RTP_LLM_CHECK_WITH_INFO(
-            params.hw_kernel_config.generation_prefill_cuda_graph_max_requests
-                <= HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
+            generation_prefill_graph_request_capacity <= HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
             "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS must not exceed the backend limit %d, got %d",
             HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests,
-            params.hw_kernel_config.generation_prefill_cuda_graph_max_requests);
+            generation_prefill_graph_request_capacity);
         const int64_t reachable_request_capacity = generationPrefillCudaGraphReachableRequestCapacity(
             params.runtime_config.fifo_scheduler_config.max_context_batch_size,
             params.concurrency_config.concurrency_limit);
         RTP_LLM_CHECK_WITH_INFO(
             generationPrefillCudaGraphMaxRequestsFitsCapacity(
-                params.hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+                generation_prefill_graph_request_capacity,
                 params.runtime_config.fifo_scheduler_config.max_context_batch_size,
                 params.concurrency_config.concurrency_limit),
             "GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS=%d must not exceed the reachable context batch capacity "
             "min(MAX_CONTEXT_BATCH_SIZE=%ld, CONCURRENCY_LIMIT=%d)=%ld",
-            params.hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            generation_prefill_graph_request_capacity,
             params.runtime_config.fifo_scheduler_config.max_context_batch_size,
             params.concurrency_config.concurrency_limit,
             reachable_request_capacity);
         const auto invalid_bucket = std::find_if(buckets.begin(), buckets.end(), [&](int bucket) {
-            return bucket <= 0 || bucket > params.max_seq_len
-                   || bucket > HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureTokens;
+            // Buckets count all requests' tokens, while params.max_seq_len is
+            // still the admission bound for each real request. Divide instead
+            // of multiplying user-provided limits to keep this check overflow-safe.
+            const int64_t requests = generation_prefill_graph_request_capacity;
+            return bucket <= 0 || bucket > HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureTokens
+                   || (static_cast<int64_t>(bucket) + requests - 1) / requests > params.max_seq_len;
         });
         RTP_LLM_CHECK_WITH_INFO(invalid_bucket == buckets.end(),
                                 "Generation prefill CUDA graph buckets must be in "
-                                "[1, min(max_seq_len=%ld, limit=%d)], got %d",
+                                "[1, min(max_seq_len=%ld * max_requests=%d, limit=%d)], got %d",
                                 params.max_seq_len,
+                                generation_prefill_graph_request_capacity,
                                 HWKernelConfig::kGenerationPrefillCudaGraphMaxCaptureTokens,
                                 invalid_bucket == buckets.end() ? 0 : *invalid_bucket);
         const int64_t max_bucket = *std::max_element(buckets.begin(), buckets.end());
         RTP_LLM_CHECK_WITH_INFO(
-            params.hw_kernel_config.generation_prefill_cuda_graph_max_requests < std::numeric_limits<int>::max()
-                && generationPrefillCudaGraphPaddedTokenIndexFitsInt32(
-                    params.hw_kernel_config.generation_prefill_cuda_graph_max_requests, max_bucket),
+            generation_prefill_graph_request_capacity < std::numeric_limits<int>::max()
+                && generationPrefillCudaGraphPaddedTokenIndexFitsInt32(generation_prefill_graph_request_capacity,
+                                                                       max_bucket),
             "Generation prefill CUDA graph padded token index exceeds int32 capacity: max_requests=%d "
             "max_bucket=%ld",
-            params.hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+            generation_prefill_graph_request_capacity,
             max_bucket);
     }
 
@@ -403,8 +409,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
             graph_params.input_hidden_size = static_cast<size_t>(width);
         }
-        graph_params.model_data_type            = dtype;
-        graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
+        graph_params.model_data_type        = dtype;
+        graph_params.max_context_batch_size = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
@@ -539,18 +545,30 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                 generation_prefill_cuda_graph_params.is_prefill_cuda_graph_mode = true;
                 generation_prefill_cuda_graph_params.is_target_verify           = false;
                 generation_prefill_cuda_graph_params.num_tokens_per_bs          = 1;
-                generation_prefill_cuda_graph_params.prefill_capture_seq_lens   = generation_prefill_cuda_graph_buckets;
+                generation_prefill_cuda_graph_params.request_max_seq_len        = params.max_seq_len;
+                generation_prefill_cuda_graph_params.max_seq_len =
+                    std::max<int64_t>(params.max_seq_len,
+                                      *std::max_element(generation_prefill_cuda_graph_buckets.begin(),
+                                                        generation_prefill_cuda_graph_buckets.end()));
+                // Capture puts the total token bucket into the scratch slot.
+                // Real request and decode tables retain their original width.
+                generation_prefill_cuda_graph_params.kernel_block_table_width = std::max<int64_t>(
+                    params.kernel_block_table_width,
+                    CudaGraphRunner::captureKernelBlockTableWidth(params.cache_manager->cacheConfig().topology(),
+                                                                  generation_prefill_cuda_graph_params.max_seq_len,
+                                                                  /*max_reserved_step=*/0));
+                generation_prefill_cuda_graph_params.prefill_capture_seq_lens = generation_prefill_cuda_graph_buckets;
                 generation_prefill_cuda_graph_params.max_context_batch_size =
-                    static_cast<size_t>(params.hw_kernel_config.generation_prefill_cuda_graph_max_requests + 1);
+                    static_cast<size_t>(generation_prefill_graph_request_capacity + 1);
                 generation_prefill_cuda_graph_params.generation_prefill_cuda_graph_max_requests =
-                    params.hw_kernel_config.generation_prefill_cuda_graph_max_requests;
+                    generation_prefill_graph_request_capacity;
                 generation_prefill_cuda_graph_params.generation_prefill_cuda_graph_pad_token_id = 0;
                 try {
                     generation_prefill_graph_runner_.reset(CudaGraphRunner::initializeCapture(
                         std::make_unique<CudaGraphRunner>(generation_prefill_cuda_graph_params, py_instance)));
                     generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
                     RTP_LLM_LOG_INFO("generation prefill CUDA graph enabled: max_requests=%d moe_strategy=%s",
-                                     params.hw_kernel_config.generation_prefill_cuda_graph_max_requests,
+                                     generation_prefill_graph_request_capacity,
                                      description_.ffn_conf.moe_configs.has_value() ?
                                          description_.moe_runtime_config.moe_strategy.c_str() :
                                          "dense");

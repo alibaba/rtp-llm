@@ -65,6 +65,8 @@ void invokeTopkBeamSearch(T const* logProbs, T const* bias, void* workspace, Bea
         case 2048: CASE_K(2048)
         case 4096: CASE_K(4096)
 #endif // FAST_BUILD
+        default:
+            throw std::invalid_argument("unsupported V2 beam width");
         }
     }
     else // V1, only use kernels of `beam_width <= kMaxBeamWidthForV1`
@@ -75,6 +77,8 @@ void invokeTopkBeamSearch(T const* logProbs, T const* bias, void* workspace, Bea
         case 2:
         case 4: CASE_K(4)
         case 8: CASE_K(8)
+        default:
+            throw std::invalid_argument("unsupported V1 beam width");
         }
     }
 }
@@ -149,16 +153,19 @@ template <typename T>
 __global__ void addCumLogProbsKernel(
     T* __restrict pStage1LogProbs, float const* __restrict cumLogProbs,
     FinishedState const* finished, int const* endIds, float const* diversityRates,
-    runtime::SizeType32 const* batchSlots, size_t const nBS, size_t const nBMIn, size_t const nBMOut)
+    runtime::SizeType32 const* batchSlots, size_t const nBS, size_t const nBMIn, size_t const nStage1TopK,
+    size_t const nStage2InputLen)
 {
     int const bid = blockIdx.x; // Index of request in batch
     runtime::SizeType32 const slot = batchSlots ? batchSlots[bid] : bid;
     float const diversityRate{diversityRates == nullptr ? kBeamSearchDiversity : diversityRates[slot]};
-    T* pLocalLogProbs = pStage1LogProbs + bid * nBMIn * nBMOut;
+    T* pLocalLogProbs = pStage1LogProbs + bid * nStage2InputLen;
 
-    for (int i = threadIdx.x; i < nBMIn * nBMOut; i += blockDim.x)
+    // Candidates are independent. Spread each request over several CTAs while
+    // retaining bid/slot addressing and the original per-element arithmetic.
+    for (int i = blockIdx.y * blockDim.x + threadIdx.x; i < nStage2InputLen; i += blockDim.x * gridDim.y)
     {
-        int const iBMIn = i / nBMOut;
+        int const iBMIn = i / nStage1TopK;
         if (finished && finished[slot * nBMIn + iBMIn].isFinished())
         {
             // TODO(known-broken): i is a candidate-slot index, endIds[slot] is a vocab
@@ -180,47 +187,46 @@ template <typename T>
 void launchAddCumLogProbs(
     T* pStage1LogProbs, float const* cumLogProbs, FinishedState const* finished,
     int const* endIds, float const* diversityRates,
-    runtime::SizeType32 const* batchSlots, size_t nBS, size_t nBMIn, size_t nBMOut,
+    runtime::SizeType32 const* batchSlots, size_t nBS, size_t nBMIn, size_t nStage1TopK,
+    size_t nStage2InputLen,
     int nThread, cudaStream_t stream)
 {
-    addCumLogProbsKernel<T><<<nBS, nThread, 0, stream>>>(
-        pStage1LogProbs, cumLogProbs, finished, endIds, diversityRates, batchSlots, nBS, nBMIn, nBMOut);
+    int const threads = std::min(nThread, 256);
+    size_t const candidatesPerBlock = static_cast<size_t>(threads) * 4;
+    size_t const blocksPerRequest = std::min(
+        std::max((nStage2InputLen + candidatesPerBlock - 1) / candidatesPerBlock, size_t{1}), size_t{65535});
+    dim3 const grid(nBS, blocksPerRequest);
+    addCumLogProbsKernel<T><<<grid, threads, 0, stream>>>(
+        pStage1LogProbs, cumLogProbs, finished, endIds, diversityRates, batchSlots, nBS, nBMIn, nStage1TopK,
+        nStage2InputLen);
     check_cuda_error();
 }
 
 template void launchAddCumLogProbs<float>(
     float*, float const*, FinishedState const*, int const*, float const*,
-    runtime::SizeType32 const*, size_t, size_t, size_t, int, cudaStream_t);
+    runtime::SizeType32 const*, size_t, size_t, size_t, size_t, int, cudaStream_t);
 
 template void launchAddCumLogProbs<half>(
     half*, float const*, FinishedState const*, int const*, float const*,
-    runtime::SizeType32 const*, size_t, size_t, size_t, int, cudaStream_t);
+    runtime::SizeType32 const*, size_t, size_t, size_t, size_t, int, cudaStream_t);
 
 __global__ void gatherId(int const* __restrict pStage1Id, int* __restrict pStage2Id, size_t const nBS,
-    size_t const nBMIn, size_t const nBMOut, size_t const nV)
+    size_t const nBMIn, size_t const nStage1TopK, size_t const nStage2TopK, size_t const nV)
 {
     // Use topK output `pStage1Id` and `pStage2Id` to get the index of a new token in `logProbs` for each beam.
     // Layouts: pStage1Id is [nBS, nBMIn, nBMOut] flat (per-beam candidates, index-ordered);
     // pStage2Id is [nBS, nBMOut] flat, holding the flat stage-1 indices that survived the
     // merged top-k.
     //
-    // For output slot j of batch a = blockIdx.x:
-    //   stage2Id = pStage2Id[a * nBMOut + j]        flat candidate index into stage-1
-    //   b = stage2Id / nBMOut                       beam the candidate came from
-    //   d = stage2Id % nBMOut                       slot inside that beam's candidates
-    //   c = a * nBMIn + b                           row in pStage1Id
-    //   e = pStage1Id[c * nBMOut + d]               token id within the vocab
-    //   f = b * nV                                  padding for previous tokens
-    //   output: pStage2Id[a * nBMOut + j] = e + f   final index in logProbs
     int const a = blockIdx.x; // Index of request in batch
-    for (int j = threadIdx.x; j < nBMOut; j += blockDim.x)
+    for (int j = threadIdx.x; j < nStage2TopK; j += blockDim.x)
     {
-        int const index = a * nBMOut + j;
+        int const index = a * nStage2TopK + j;
         int const stage2Id = pStage2Id[index];
-        int const b = stage2Id / nBMOut;
+        int const b = stage2Id / nStage1TopK;
         int const c = a * nBMIn + b;
-        int const d = stage2Id % nBMOut;
-        int const e = pStage1Id[c * nBMOut + d];
+        int const d = stage2Id % nStage1TopK;
+        int const e = pStage1Id[c * nStage1TopK + d];
         int const f = b * nV;
         pStage2Id[index] = e + f;
     }

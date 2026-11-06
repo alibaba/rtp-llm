@@ -858,7 +858,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.debug_start_fake_process = t[12].cast<bool>();
                         c.enable_detail_log        = t[13].cast<bool>();
                         c.check_nan                = t[14].cast<bool>();
-                        if (t.size() == 16) {
+                        if (t.size() >= 16) {
                             c.enable_model_inputs_log = t[15].cast<bool>();
                         }
                     }
@@ -895,6 +895,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("num_native_cuda_graph", &HWKernelConfig::num_native_cuda_graph)
         .def_readwrite("prefill_capture_seq_lens", &HWKernelConfig::prefill_capture_seq_lens)
         .def_readwrite("decode_capture_batch_sizes", &HWKernelConfig::decode_capture_batch_sizes)
+        .def_readwrite("enable_decode_cascade_attention", &HWKernelConfig::enable_decode_cascade_attention)
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
         .def("to_string", &HWKernelConfig::to_string)
@@ -915,10 +916,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disable_dpc_random,
                                       self.rocm_disable_custom_ag,
                                       self.generation_prefill_cuda_graph_max_requests,
-                                      self.generation_prefill_capture_token_buckets);
+                                      self.generation_prefill_capture_token_buckets,
+                                      self.enable_decode_cascade_attention);
             },
             [](py::tuple t) {
-                if (t.size() != 14 && t.size() != 16)
+                if (t.size() != 14 && t.size() != 16 && t.size() != 17 && t.size() != 18)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -936,9 +938,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_capture_batch_sizes   = t[11].cast<std::vector<int>>();
                     c.disable_dpc_random           = t[12].cast<bool>();
                     c.rocm_disable_custom_ag       = t[13].cast<bool>();
-                    if (t.size() == 16) {
+                    if (t.size() >= 16) {
                         c.generation_prefill_cuda_graph_max_requests = t[14].cast<int>();
                         c.generation_prefill_capture_token_buckets   = t[15].cast<std::vector<int>>();
+                    }
+                    if (t.size() >= 17) {
+                        // The old 18-field state stored an explicit Decode capacity
+                        // at index 16. Capacity is derived from buckets now.
+                        c.enable_decode_cascade_attention = t[t.size() - 1].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());

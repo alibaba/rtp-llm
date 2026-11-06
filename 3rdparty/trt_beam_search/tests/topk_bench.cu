@@ -320,6 +320,23 @@ int runSemanticChecks()
         dIn = nullptr;
     }
 
+    // Both forced and auto routes must handle selecting the entire row,
+    // including lengths above the normal one-block threshold.
+    for (int len : {4096, 32768}) {
+        fillInput(hostIn, 1, len);
+        dIn = toDevice(hostIn);
+        for (bool sorted : {false, true}) {
+            failures += checkVsHost(1, len, len, sorted, hostIn, dIn, stream, "radix-select-all", true) ? 0 : 1;
+            PathOutput multi  = runPath(1, len, len, sorted, 1, dIn, 3, stream);
+            PathOutput oneblk = runPath(1, len, len, sorted, 2, dIn, 3, stream);
+            bool const ok     = sameOutput(multi, oneblk);
+            std::printf("dual[select-all]: len=%d sorted=%d -> %s\n", len, sorted ? 1 : 0, ok ? "PASS" : "FAIL");
+            failures += ok ? 0 : 1;
+        }
+        BENCH_CHECK(cudaFree(dIn));
+        dIn = nullptr;
+    }
+
     // Dual-path consistency: the routing change's premise is "same result on either
     // radix path". The full matrix checks this but only runs manually; these three
     // shapes put it under --check/CI, covering the ROCm crossover band (grid 11/16)
