@@ -141,7 +141,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             long micros = Math.multiplyExact(System.currentTimeMillis(), 1000);
             long version = statusVersion.updateAndGet(previous -> Math.max(previous + 1, micros));
             var tasks = prefill == null ? decode.snapshot(request.getLatestFinishedVersion()) : prefill.snapshot(request.getLatestFinishedVersion());
-            return WorkerStatusPB.newBuilder().setRole("RoleType." + role)
+            long collected = System.nanoTime();
+            var result = WorkerStatusPB.newBuilder().setRole("RoleType." + role)
                 .setRoleType(RoleTypePB.valueOf("ROLE_TYPE_" + role)).setAlive(true).setKvCacheGroupMode(KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY)
                 .setDpSize(config.dpSize()).setDpRank(0).setTpSize(config.tpSize()).setPrecision("FP16")
                 .setStatusVersion(version).setMaxSeqLen(config.maxSeqLen()).setMaxBatchTokensSize(config.maxBatchTokens())
@@ -149,6 +150,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
                 .addAllRunningTaskInfo(tasks.tasks().stream().map(RpcMessages::task).toList())
                 .addAllFinishedTaskList(tasks.finished().stream().map(RpcMessages::task).toList()).setLatestFinishedVersion(tasks.finishedVersion())
                 .build();
+            return new StatusResult<>(result, collected);
         });
     }
 
@@ -158,7 +160,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
                 .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.blockSize()).setVersion(snapshot.version());
             for (long key : snapshot.keys()) result.putCacheKeys(key, true);
-            return result.build();
+            return new StatusResult<>(result.build(), System.nanoTime());
         });
     }
 
@@ -170,16 +172,23 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         return MetricTags.collect(rpcRegistry, metricTags);
     }
 
-    private <T> void statusReply(String kind, StreamObserver<T> observer, Supplier<T> read) {
+    private record StatusResult<T>(T value, long collected) {}
+    private <T> void statusReply(String kind, StreamObserver<T> observer, Supplier<StatusResult<T>> read) {
         long started = System.nanoTime();
+        T value = null;
+        RuntimeException failure = null;
+        long completed;
         try {
-            reply(observer, read);
-        } finally {
-            synchronized (rpcMetrics) {
-                rpcMetrics.increment("rtp_llm_rpc_" + kind + "_qps");
-                rpcMetrics.observe("rtp_llm_rpc_" + kind + "_total_rt_us", (System.nanoTime() - started) / 1000.0);
-            }
-        }
+            if (closed) throw Status.UNAVAILABLE.withDescription("RTP node is closed").asRuntimeException();
+            var result = read.get(); value = result.value(); completed = result.collected();
+        } catch (RuntimeException error) { failure = error; completed = System.nanoTime(); }
+        long elapsed = completed - started;
+        rpcMetrics.increment("rtp_llm_rpc_" + kind + "_qps");
+        rpcMetrics.observe("rtp_llm_rpc_" + kind + "_total_rt_us", elapsed / 1000.0);
+        if (failure != null) {
+            observer.onError(failure instanceof io.grpc.StatusRuntimeException ? failure
+                : Status.INTERNAL.withCause(failure).withDescription(failure.getMessage()).asRuntimeException());
+        } else { observer.onNext(value); observer.onCompleted(); }
     }
 
     private long tokens(int blocks) { return (long) blocks * config.blockSize(); }

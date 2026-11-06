@@ -5,7 +5,7 @@ import com.taobao.kmonitor.impl.KMonitorConfig;
 import io.prometheus.client.Collector.MetricFamilySamples;
 import java.util.*;
 
-/** Internal SDK transport, compiled only by the internal-monitoring profile. */
+/** Internal SDK transport. MetricsOutput supplies the single sending owner after initialization. */
 public final class KMonitorReporter implements MetricReporter {
     private final Set<String> registered = new HashSet<>();
     private KMonitor monitor;
@@ -60,13 +60,13 @@ public final class KMonitorReporter implements MetricReporter {
         }
     }
 
-    @Override public synchronized void observe(String name, Map<String, String> tags, double value) {
+    @Override public void observe(String name, Map<String, String> tags, double value) {
         if (monitor == null) throw new IllegalStateException("KMonitor reporter is not initialized");
         register(name, EventMetrics.isRate(name) ? MetricType.QPS : MetricType.GAUGE);
         monitor.report(name, new ImmutableMetricTags(tags), value);
     }
 
-    @Override public synchronized void report(List<MetricFamilySamples> snapshot) {
+    @Override public void report(List<MetricFamilySamples> snapshot) {
         if (monitor == null) throw new IllegalStateException("KMonitor reporter is not initialized");
         for (var family : snapshot) {
             // Prometheus counters/histograms are local query helpers, not native Gauge observations.

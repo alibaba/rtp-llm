@@ -85,4 +85,23 @@ class SimulatedComputeTest {
             assertNotNull(execution.completion().toCompletableFuture().get(2, TimeUnit.SECONDS));
         }
     }
+    @Test void elapsedStopsBeforeNotificationQueueDelay() throws Exception {
+        var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
+        var notifications = Executors.newSingleThreadExecutor();
+        notifications.execute(() -> {
+            entered.countDown();
+            try { release.await(); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+        });
+        try (var compute = new SimulatedCompute(notifications)) {
+            assertTrue(entered.await(1, TimeUnit.SECONDS));
+            long before = System.nanoTime();
+            var execution = compute.submit(sample(Duration.ofHours(1).toNanos())); execution.cancel();
+            long upperBound = System.nanoTime() - before;
+            Thread.sleep(30);
+            release.countDown();
+            var outcome = execution.completion().toCompletableFuture().get(1, TimeUnit.SECONDS);
+            assertTrue(outcome.elapsedNanos() <= upperBound);
+        } finally { release.countDown(); notifications.shutdownNow(); }
+    }
+
 }

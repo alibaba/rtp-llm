@@ -29,9 +29,8 @@ public final class RtpNode implements AutoCloseable {
     private ControlServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
     private KvcmReporter publisher;
-    private MetricSource metricSource;
+    private java.util.function.Supplier<List<MetricFamilySamples>> metricSource;
 
-    private record MetricSource(Object lock, java.util.function.Supplier<List<MetricFamilySamples>> metrics) {}
 
     private RtpNode(RtpConfig config, EngineScheduler.Factory schedulers, KvCache.RemotePrefixLoader remote) {
         this.config = Objects.requireNonNull(config);
@@ -43,7 +42,7 @@ public final class RtpNode implements AutoCloseable {
         try {
             var scheduler = schedulers.create(lock, cache, finished);
             var samples = AbstractRtpScheduler.metricsFor(scheduler);
-            if (samples != null) metricSource = new MetricSource(lock, samples);
+            if (samples != null) metricSource = samples;
             engine = new RtpEngineLoop(lock, scheduler, finished, cache, config.compute(), config.role(), config.id());
             try {
                 service = new RtpRpcService(RtpRpcService.Config.from(config), cache, lock, finished, engine, config.groupScheduling());
@@ -93,12 +92,10 @@ public final class RtpNode implements AutoCloseable {
 
     private List<MetricFamilySamples> collectMetrics() {
         if (metricSource == null) return service.collectMetrics();
-        synchronized (metricSource.lock()) {
-            service.checkHealthy();
-            var samples = new java.util.ArrayList<>(metricSource.metrics().get());
-            samples.addAll(service.collectMetrics());
-            return samples;
-        }
+        service.checkHealthy();
+        var samples = new java.util.ArrayList<>(metricSource.get());
+        samples.addAll(service.collectMetrics());
+        return samples;
     }
 
     private KvcmReporter startMetadataReporter() {
@@ -158,7 +155,6 @@ public final class RtpNode implements AutoCloseable {
     @Override public void close() {
         if (!closed.compareAndSet(false, true)) return;
         RuntimeException failure = null;
-        try { if (metrics != null) metrics.close(); } catch (RuntimeException error) { failure = error; }
         try { service.close(); } catch (RuntimeException error) {
             if (failure == null) failure = error; else failure.addSuppressed(error);
         }
@@ -177,6 +173,8 @@ public final class RtpNode implements AutoCloseable {
         } catch (RuntimeException error) {
             if (failure == null) failure = error; else failure.addSuppressed(error);
         } finally {
+            try { if (metrics != null) metrics.close(); }
+            catch (RuntimeException error) { if (failure == null) failure = error; else failure.addSuppressed(error); }
             try { engine.close(); } finally {
                 try { if (publisher != null) publisher.close(); } finally {
                     try { if (api != null) api.close(); } finally { cache.close(); }

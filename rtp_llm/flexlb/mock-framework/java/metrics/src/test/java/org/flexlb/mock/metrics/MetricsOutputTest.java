@@ -46,4 +46,56 @@ class MetricsOutputTest {
         Thread.sleep(40);
         assertEquals(stopped, collections.get());
     }
+    @Test void slowSdkDoesNotBlockBusinessAndPreservesOriginalSampleOrder() throws Exception {
+        var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
+        var values = new ArrayList<Double>();
+        MetricReporter sdk = new MetricReporter() {
+            public void initialize(Map<String,String> env) { }
+            public void observe(String name, Map<String,String> tags, double value) {
+                assertEquals(Map.of("role", "prefill"), tags);
+                entered.countDown();
+                try { assertTrue(release.await(2, TimeUnit.SECONDS)); }
+                catch (InterruptedException error) { throw new RuntimeException(error); }
+                values.add(value);
+            }
+            public void report(List<MetricFamilySamples> snapshot) { values.add(-1.0); }
+        };
+        var sender = new MetricsOutput.Sender(sdk, 128);
+        try {
+            var events = new EventMetrics("prefill", System::nanoTime, sender, Map.of());
+            events.observe("input_length", 10);
+            assertTrue(entered.await(1, TimeUnit.SECONDS));
+            assertTimeoutPreemptively(java.time.Duration.ofSeconds(1), () -> {
+                for (int i = 0; i < 99; i++) events.observe("input_length", 10);
+                events.observe("input_length", 1000);
+                sender.report(List.of());
+            });
+            release.countDown(); sender.close();
+            assertEquals(102, values.size());
+            assertEquals(2000, values.subList(0, 101).stream().mapToDouble(Double::doubleValue).sum());
+            assertEquals(1000, values.get(100)); assertEquals(-1, values.get(101));
+        } finally { release.countDown(); sender.close(); }
+    }
+
+    @Test void overflowNeverBackpressuresBusinessAndIsAnExplicitIncompleteMetricStream() throws Exception {
+        var entered = new CountDownLatch(1); var release = new CountDownLatch(1);
+        MetricReporter sdk = new MetricReporter() {
+            public void initialize(Map<String,String> env) { }
+            public void observe(String name, Map<String,String> tags, double value) {
+                entered.countDown();
+                try { release.await(); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            }
+            public void report(List<MetricFamilySamples> snapshot) { }
+        };
+        var sender = new MetricsOutput.Sender(sdk, 1);
+        try {
+            sender.observe("length", Map.of(), 1); assertTrue(entered.await(1, TimeUnit.SECONDS));
+            sender.observe("length", Map.of(), 2);
+            assertTimeoutPreemptively(java.time.Duration.ofSeconds(1), () -> sender.observe("length", Map.of(), 3));
+            assertThrows(IllegalStateException.class, sender::checkHealthy);
+        } finally {
+            release.countDown(); assertThrows(IllegalStateException.class, sender::close);
+        }
+    }
+
 }
