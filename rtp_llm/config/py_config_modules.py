@@ -59,6 +59,9 @@ class ServerConfig:
         self.ip: str = ""
         self.worker_info_port_num: int = MIN_WORKER_INFO_PORT_NUM
         self.shutdown_timeout: int = 600  # graceful drain budget (seconds)
+        self.startup_health_check_timeout: int = (
+            3600  # startup readiness bound (seconds)
+        )
         self.monitor_interval: int = 1  # Monitor interval in seconds
         self.frontend_pre_stop_drain_seconds: float = 120.0
         self.dash_sc_grpc_pre_stop_drain_seconds: float = 120.0

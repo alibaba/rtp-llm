@@ -85,7 +85,9 @@ def _backend_deferred_sigterm_seconds(py_env_configs: PyEnvConfigs) -> str:
     timeout = ProcessManager.normalize_shutdown_timeout_seconds(
         py_env_configs.server_config.shutdown_timeout
     )
-    return str(ProcessManager.deferred_group_shutdown_timeout_seconds(timeout))
+    deferred = ProcessManager.deferred_group_shutdown_timeout_seconds(timeout)
+    # None must serialize as "-1": the backend parses this env with float().
+    return "-1" if deferred is None else str(deferred)
 
 
 def _sync_server_shutdown_timeout(py_env_configs: PyEnvConfigs):
@@ -136,10 +138,14 @@ def start_backend_server_impl(
             os.environ.pop(DEFER_FIRST_SIGTERM_SECONDS_ENV, None)
         else:
             os.environ[DEFER_FIRST_SIGTERM_SECONDS_ENV] = old_defer_seconds
-    pipe_writer.close()  # Parent process closes write end
+        # Close parent's write end on both paths; on spawn failure leaving it open masks EOF as a hang.
+        pipe_writer.close()
+
+    if process_manager:
+        # Register right after start so later failures in start_server() still clean this process up.
+        process_manager.add_process(backend_process, shutdown_group="backend")
 
     # Create check_ready_fn for pipe-based health check
-    max_wait_seconds = 60 * 60
     startup_status = {"ready": False, "error": None}
 
     def check_backend_ready():
@@ -261,6 +267,9 @@ def start_dash_sc_server_impl(
         )
         dash_sc_processes.append(process)
         process.start()
+        if process_manager:
+            # Register right after start: a failure in a later loop iteration must not leak running servers.
+            process_manager.add_process(process, shutdown_group="frontend")
         pipe_writer.close()
         dash_sc_pipe_readers.append(pipe_reader)
 
@@ -395,6 +404,8 @@ def start_vit_server_impl(
             )
             worker_processes.append(process)
             process.start()
+            if process_manager:
+                process_manager.add_process(process)
 
         external_grpc_port = base_grpc_port  # 主进程使用基础 gRPC 端口
         external_http_port = py_env_configs.server_config.server_port
@@ -416,6 +427,8 @@ def start_vit_server_impl(
             name="vit_proxy",
         )
         proxy_process.start()
+        if process_manager:
+            process_manager.add_process(proxy_process)
 
         vit_processes = [proxy_process] + worker_processes
 
@@ -443,6 +456,8 @@ def start_vit_server_impl(
             name="vit_server",
         )
         process.start()
+        if process_manager:
+            process_manager.add_process(process)
         vit_processes = [process]
 
     if process_manager and vit_processes:
@@ -517,6 +532,8 @@ def start_frontend_server_impl(
                 )
                 frontend_processes.append(process)
                 process.start()
+                if process_manager:
+                    process_manager.add_process(process, shutdown_group="frontend")
             else:
                 logging.info(f"rank {pc.world_rank + rank} skipping frontend startup")
 
@@ -680,15 +697,13 @@ def start_server(py_env_configs: PyEnvConfigs):
     dash_sc_enabled = py_env_configs.role_config.role_type != RoleType.VIT
     py_env_configs.server_config.validate_port_layout(dash_sc_enabled=dash_sc_enabled)
 
-    # Initialize backend_process to None in case role_type is FRONTEND
-    backend_process = None
+    # Impls register spawned processes right after start, so later failures still reach them in the finally cleanup.
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
 
     try:
         if py_env_configs.role_config.role_type == RoleType.VIT:
             logging.info("start vit server")
-            vit_processes = start_vit_server_impl(py_env_configs, process_manager)
-            process_manager.add_processes(vit_processes)
+            start_vit_server_impl(py_env_configs, process_manager)
 
         if (
             py_env_configs.role_config.role_type != RoleType.FRONTEND
@@ -696,30 +711,33 @@ def start_server(py_env_configs: PyEnvConfigs):
         ):
             # For backend server, vit_process_engine is None when vit is separated
             logging.info("start backend server")
-            backend_process = start_backend_server_impl(
+            start_backend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
-            process_manager.add_process(backend_process, shutdown_group="backend")
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
             # vit has its own frontend server
             logging.info("start frontend server")
-            frontend_process = start_frontend_server_impl(
+            start_frontend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
-            process_manager.add_processes(frontend_process, shutdown_group="frontend")
 
             logging.info("start dash_sc server")
-            dash_sc_processes = start_dash_sc_server_impl(
+            start_dash_sc_server_impl(
                 global_controller, py_env_configs, process_manager
             )
-            if dash_sc_processes:
-                process_manager.add_processes(
-                    dash_sc_processes, shutdown_group="frontend"
-                )
 
-        # Start parallel health checks and wait for completion
-        if not process_manager.run_health_checks():
+        # Start parallel health checks and wait; the bound is total (shared deadline across checks).
+        # Only -1 is the unbounded opt-out; other non-positive values fall back to 3600.
+        startup_timeout = py_env_configs.server_config.startup_health_check_timeout
+        if startup_timeout == -1:
+            startup_timeout = None
+        elif startup_timeout <= 0:
+            logging.warning(
+                "invalid startup_health_check_timeout=%s; using 3600", startup_timeout
+            )
+            startup_timeout = 3600
+        if not process_manager.run_health_checks(timeout=startup_timeout):
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
 
