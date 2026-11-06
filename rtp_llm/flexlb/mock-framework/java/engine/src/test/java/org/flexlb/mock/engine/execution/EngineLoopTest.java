@@ -30,10 +30,10 @@ class EngineLoopTest {
         Work cancelled;
         Policy(boolean newestFirst) { this.newestFirst = newestFirst; }
         public Work schedule() { var work = newestFirst ? queue.pollLast() : queue.pollFirst(); if (work != null) scheduled.add(work); return work; }
-        public void computeCompleted(Work work, SimulatedCompute.Outcome result) { finished.add(work.batch().id()); }
-        public void failed(Work work, RuntimeException error) { failures.add(work); }
-        public boolean cancelled(Work work) { return cancelled == work; }
-        public void maintain() {}
+        public void processOutputs(Work work, SimulatedCompute.Outcome result) { finished.add(work.batch().id()); }
+        public void failForward(Work work, RuntimeException error) { failures.add(work); }
+        public boolean isForwardCancelled(Work work) { return cancelled == work; }
+        public void prepareKvAndCheckTimeouts() {}
         public long nextDeadline() { return Long.MAX_VALUE; }
         public List<Task> tasks() { return List.of(); }
         public void transferCompleted(Request request, TransferResult result) { throw new UnsupportedOperationException(); }
@@ -41,14 +41,14 @@ class EngineLoopTest {
         public void close() { queue.clear(); }
         public List<Request> requests() { return List.of(); }
         public QueueSnapshot queues() { return new QueueSnapshot(queue.size(), 0, 0, 0); }
-        public Request input(Input input, Listener listener) { throw new UnsupportedOperationException(); }
-        public List<InputResult> input(List<InputItem> batch) { throw new UnsupportedOperationException(); }
+        public Request enqueue(Input input, Listener listener) { throw new UnsupportedOperationException(); }
+        public List<InputResult> enqueue(List<InputItem> batch) { throw new UnsupportedOperationException(); }
         public void control(Request request, Control event) { throw new UnsupportedOperationException(); }
         public void finish(Request request, RequestFailure failure) { throw new UnsupportedOperationException(); }
         public RequestState.Use beginTransfer(Request request) { throw new UnsupportedOperationException(); }
     }
-    private RtpEngineLoop engine(Object lock, Policy policy, String expression) {
-        return new RtpEngineLoop(lock, (domain, cache, finished) -> policy, new TaskHistory(), new org.flexlb.mock.engine.cache.KvCache(1, 1, 0), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
+    private EngineLoop engine(Object lock, Policy policy, String expression) {
+        return new EngineLoop(lock, (domain, cache, finished) -> policy, new TaskHistory(), new org.flexlb.mock.engine.cache.KvCacheManager(1, 1, 0), new ComputeModel(new ComputeSpec(new ComputeSpec.Forward(expression, null), null, null)), Role.prefill, "test");
     }
 
     @Test void healthChecksExposeLoopFailures() throws Exception {
@@ -61,7 +61,7 @@ class EngineLoopTest {
         };
         try (var loop = engine(policy, policy, "1")) {
             loop.checkHealthy(); loop.checkHealthy();
-            fail.set(true); loop.wake();
+            fail.set(true); loop.wakeUp();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (true) {
                 try { loop.checkHealthy(); }
@@ -73,16 +73,16 @@ class EngineLoopTest {
     }
 
     @Test void idleLoopsCannotExhaustVirtualThreadCarriers() throws Exception {
-        var loops = new ArrayList<RtpEngineLoop>();
+        var loops = new ArrayList<EngineLoop>();
         var policies = new ArrayList<Policy>();
         try {
             for (int i = 0; i < 300; i++) {
                 var policy = new Policy(false); policies.add(policy);
                 policy.queue.add(work("progress"));
-                var loop = engine(policy, policy, "1"); loops.add(loop); loop.wake();
+                var loop = engine(policy, policy, "1"); loops.add(loop); loop.wakeUp();
             }
             for (var policy : policies) assertEquals("progress", policy.finished.poll(5, TimeUnit.SECONDS));
-        } finally { loops.forEach(RtpEngineLoop::close); }
+        } finally { loops.forEach(EngineLoop::close); }
     }
 
     @Test void replacingQueuePolicyDoesNotChangeComputeOrLoop() throws Exception {
@@ -90,7 +90,7 @@ class EngineLoopTest {
             var policy = new Policy(newest);
             policy.queue.add(work("first")); policy.queue.add(work("second"));
             try (var loop = engine(policy, policy, "1")) {
-                loop.wake(); loop.wake();
+                loop.wakeUp(); loop.wakeUp();
                 assertEquals(newest ? "second" : "first", policy.finished.poll(2, TimeUnit.SECONDS));
                 assertEquals(newest ? "first" : "second", policy.finished.poll(2, TimeUnit.SECONDS));
                 synchronized (policy) { assertTrue(policy.failures.isEmpty()); }
@@ -100,14 +100,14 @@ class EngineLoopTest {
 
     @Test void schedulerCanScheduleAnotherRoundAfterResultCommit() throws Exception {
         var policy = new Policy(false) {
-            @Override public void computeCompleted(Work work, SimulatedCompute.Outcome result) {
+            @Override public void processOutputs(Work work, SimulatedCompute.Outcome result) {
                 if (work.batch().id().equals("first")) queue.add(work("next"));
-                super.computeCompleted(work, result);
+                super.processOutputs(work, result);
             }
         };
         policy.queue.add(work("first"));
         try (var loop = engine(policy, policy, "1")) {
-            loop.wake();
+            loop.wakeUp();
             assertEquals("first", policy.finished.poll(2, TimeUnit.SECONDS));
             assertEquals("next", policy.finished.poll(2, TimeUnit.SECONDS));
         }
@@ -118,9 +118,9 @@ class EngineLoopTest {
         var first = work("same"); var second = work("same");
         policy.queue.add(first); policy.queue.add(second);
         try (var loop = engine(policy, policy, "100")) {
-            loop.wake();
+            loop.wakeUp();
             assertSame(first, policy.scheduled.poll(2, TimeUnit.SECONDS));
-            synchronized (policy) { policy.cancelled = first; loop.wake(); }
+            synchronized (policy) { policy.cancelled = first; loop.wakeUp(); }
             assertSame(second, policy.scheduled.poll(2, TimeUnit.SECONDS));
             assertEquals("same", policy.finished.poll(2, TimeUnit.SECONDS));
             assertNull(policy.finished.poll(150, TimeUnit.MILLISECONDS));
@@ -132,7 +132,7 @@ class EngineLoopTest {
         var policy = new Policy(false);
         policy.queue.add(work("a")); policy.queue.add(work("b"));
         try (var loop = engine(policy, policy, "-1")) {
-            loop.wake();
+            loop.wakeUp();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
             while (true) {
                 synchronized (policy) { if (policy.failures.size() == 2) break; }
@@ -152,7 +152,7 @@ class EngineLoopTest {
         });
         policy.queue.add(work("forward"));
         try (var loop = engine(policy, policy, "1")) {
-            loop.wake();
+            loop.wakeUp();
             assertFalse(entered.get(2, TimeUnit.SECONDS));
             assertEquals("forward", policy.finished.poll(2, TimeUnit.SECONDS));
         } finally { release.countDown(); }
@@ -164,7 +164,7 @@ class EngineLoopTest {
             long deadline = Long.MAX_VALUE;
             boolean armed;
             @Override public long nextDeadline() { return deadline; }
-            @Override public void maintain() {
+            @Override public void prepareKvAndCheckTimeouts() {
                 calls.incrementAndGet();
                 if (!armed) { armed = true; deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100); }
                 else if (System.nanoTime() >= deadline) { deadline = Long.MAX_VALUE; expired.complete(null); }
@@ -173,7 +173,7 @@ class EngineLoopTest {
         try (var loop = engine(policy, policy, "1")) {
             Thread.sleep(100);
             assertEquals(0, calls.get(), "Idle Engines must not poll");
-            loop.wake();
+            loop.wakeUp();
             expired.get(2, TimeUnit.SECONDS);
             int committed = calls.get();
             assertEquals(2, committed);
@@ -183,12 +183,12 @@ class EngineLoopTest {
     }
 
     @Test void externalCapacityReleaseWakesAnOtherwiseIdleEngine() throws Exception {
-        try (var cache = new org.flexlb.mock.engine.cache.KvCache(1, 1, 0)) {
+        try (var cache = new org.flexlb.mock.engine.cache.KvCacheManager(1, 1, 0)) {
             var owner = cache.acquire(1, List.of()).lease();
             var tried = new CountDownLatch(1);
             var attempts = new java.util.concurrent.atomic.AtomicInteger();
             var policy = new Policy(false) {
-                org.flexlb.mock.engine.cache.KvCache.Lease lease;
+                org.flexlb.mock.engine.cache.KvCacheManager.Lease lease;
                 @Override public Work schedule() {
                     if (lease != null) return null;
                     attempts.incrementAndGet();
@@ -197,12 +197,12 @@ class EngineLoopTest {
                     lease = admission.lease();
                     return work("capacity");
                 }
-                @Override public void computeCompleted(Work work, SimulatedCompute.Outcome result) {
-                    lease.close(); super.computeCompleted(work, result);
+                @Override public void processOutputs(Work work, SimulatedCompute.Outcome result) {
+                    lease.close(); super.processOutputs(work, result);
                 }
             };
-            try (var loop = new RtpEngineLoop(policy, (domain, storage, finished) -> policy, new TaskHistory(), cache, new ComputeModel(new ComputeSpec(new ComputeSpec.Forward("1", null), null, null)), Role.prefill, "capacity")) {
-                loop.wake();
+            try (var loop = new EngineLoop(policy, (domain, storage, finished) -> policy, new TaskHistory(), cache, new ComputeModel(new ComputeSpec(new ComputeSpec.Forward("1", null), null, null)), Role.prefill, "capacity")) {
+                loop.wakeUp();
                 assertTrue(tried.await(2, TimeUnit.SECONDS));
                 Thread.sleep(100);
                 assertEquals(1, attempts.get(), "Waiting for capacity must not poll");

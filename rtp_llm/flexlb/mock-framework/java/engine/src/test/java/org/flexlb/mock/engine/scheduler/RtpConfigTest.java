@@ -14,20 +14,20 @@ class RtpConfigTest {
     private RtpConfig load(ObjectNode value) throws Exception {
         var path = directory.resolve("component.json"); JSON.writeValue(path.toFile(), value); return RtpConfig.load(path);
     }
-    private ObjectNode root() { return JSON.valueToTree(RtpNodeTest.configuration("prefill")); }
+    private ObjectNode root() { return JSON.valueToTree(LLMMockEngineTest.configuration("prefill")); }
 
     @Test void schedulerModeSelectsPolicyAndRejectsUnknownValues() throws Exception {
         var root = root();
         var values = (ObjectNode) root.path("component").path("config");
         var defaults = load(root);
-        try (var cache = new org.flexlb.mock.engine.cache.KvCache(16, 8, 0);
+        try (var cache = new org.flexlb.mock.engine.cache.KvCacheManager(16, 8, 0);
              var scheduler = AbstractRtpScheduler.factory(defaults).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
             assertInstanceOf(RtpFifoScheduler.class, scheduler);
             assertEquals("fifo", defaults.effective().path("mock.scheduler.mode").asText());
         }
         values.put("mock.scheduler.mode", "group");
         var grouped = load(root);
-        try (var cache = new org.flexlb.mock.engine.cache.KvCache(16, 8, 0);
+        try (var cache = new org.flexlb.mock.engine.cache.KvCacheManager(16, 8, 0);
              var scheduler = AbstractRtpScheduler.factory(grouped).create(new Object(), cache, new org.flexlb.mock.engine.scheduler.TaskHistory())) {
             assertInstanceOf(RtpPrefillGroupScheduler.class, scheduler);
             assertEquals("group", grouped.effective().path("mock.scheduler.mode").asText());
@@ -175,7 +175,7 @@ class RtpConfigTest {
     }
 
     @Test void zeroTimeHandoffDoesNotReportAnIndependentLoadTimeoutAsEffective() throws Exception {
-        var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration("decode"));
+        var root = JSON.<ObjectNode>valueToTree(LLMMockEngineTest.configuration("decode"));
         ((ObjectNode) root.path("component").path("config")).put("load_cache_timeout_ms", 5000);
         var effective = load(root).effective();
         assertFalse(effective.has("load_cache_timeout_ms"));
@@ -196,7 +196,7 @@ class RtpConfigTest {
 
     @Test void fileAndEnvironmentResolveToIdenticalModelsAndDefaults() throws Exception {
         for (String role : java.util.List.of("prefill", "decode")) {
-            var root = JSON.<ObjectNode>valueToTree(RtpNodeTest.configuration(role));
+            var root = JSON.<ObjectNode>valueToTree(LLMMockEngineTest.configuration(role));
             var config = (ObjectNode) root.path("component").path("config");
             config.put("cp_rotate_method", "ALL_GATHER").put("tp_size", 4).put("dp_size", 3);
             config.put("mock.scheduler.mode", "fifo");

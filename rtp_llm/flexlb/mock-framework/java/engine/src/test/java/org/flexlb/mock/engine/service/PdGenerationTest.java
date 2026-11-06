@@ -13,8 +13,8 @@ import java.util.stream.IntStream;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
-import org.flexlb.mock.engine.execution.RtpNode;
-import org.flexlb.mock.engine.scheduler.RtpNodeTest;
+import org.flexlb.mock.engine.execution.LLMMockEngine;
+import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
@@ -23,7 +23,7 @@ class PdGenerationTest {
     @TempDir Path directory;
     private Harness node(String role, int blocks, int millis) throws Exception { return node(role, blocks, millis, Map.of()); }
     private Harness node(String role, int blocks, int millis, Map<String, Object> models) throws Exception {
-        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(RtpNodeTest.configuration(role));
+        var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration(role));
         ((ObjectNode) root.path("component").path("config")).put("seq_size_per_block", 2).put("reuse_cache", true);
         // This suite exercises native batch admission as well as individual PD calls.
         if (role.equals("prefill")) ((ObjectNode) root.path("component").path("config")).put("mock.scheduler.mode", "group");
@@ -36,11 +36,11 @@ class PdGenerationTest {
             else compute.set(key, json.valueToTree(value));
         });
         var path = directory.resolve(role + ".json"); json.writeValue(path.toFile(), root);
-        return new Harness(RtpNode.start(RtpConfig.load(path)));
+        return new Harness(LLMMockEngine.start(RtpConfig.load(path)));
     }
     private static final class Harness implements AutoCloseable {
-        final RtpNode node; final ManagedChannel channel;
-        Harness(RtpNode node) { this.node = node; channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build(); }
+        final LLMMockEngine node; final ManagedChannel channel;
+        Harness(LLMMockEngine node) { this.node = node; channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build(); }
         WorkerStatusPB status() { return RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(3, TimeUnit.SECONDS).getWorkerStatus(StatusVersionPB.getDefaultInstance()); }
         @Override public void close() throws Exception { channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); node.close(); }
     }
@@ -618,7 +618,7 @@ class PdGenerationTest {
         try (var p = node("prefill", 8, 1, Map.of("eos", Map.of("probability", 1)));
                 var d = node("decode", 8, 1, Map.of("eos", Map.of("probability", 1)))) {
             var input = input(d, 1, 3, 4, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setIgnoreEos(true);
-            try (var call = new Call(p, input.build())) { for (int n = 1; n <= 4; n++) call.output(n, n == 4, 1); assertEquals("completed", call.next()); }
+            try (var call = new Call(p, input.build())) { call.completeOutput(4); }
         }
     }
 
@@ -706,7 +706,7 @@ class PdGenerationTest {
     }
 
     @Test void prefillDoesNotStartBeforeDecodeAllocationAcknowledgement() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var holder = d.node.cache().acquire(12, List.of()).lease();
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1); var holder = d.node.cacheManager().acquire(12, List.of()).lease();
                 var call = new Call(p, input(d, 1, 5, 4, 2500, true))) {
             await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             assertEquals(1, p.status().getRunningTaskInfoCount());
@@ -719,13 +719,13 @@ class PdGenerationTest {
     }
 
     @Test void growthPressureFailsLikeRtpAndCannotResumeAfterRelease() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 10); var holder = d.node.cache().acquire(4, List.of()).lease();
+        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 10); var holder = d.node.cacheManager().acquire(4, List.of()).lease();
                 var call = new Call(p, input(d, 1, 3, 6, 2500, true))) {
             assertEquals(602, code(call.errorAfterProgress(Status.Code.RESOURCE_EXHAUSTED, 2)));
             assertEquals(4, d.status().getAvailableKvCache()); holder.close();
             assertNull(call.outputs.poll(150, TimeUnit.MILLISECONDS));
             assertEquals(8, d.status().getAvailableKvCache());
-            assertEquals(0, d.node.cache().snapshot(-1, true).keys().length);
+            assertEquals(0, d.node.cacheManager().snapshot(-1, true).keys().length);
             assertEquals(1, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
         }
     }
@@ -733,12 +733,12 @@ class PdGenerationTest {
     @Test void growthBeyondPhysicalCapacityFailsWith602AndDoesNotPublishDCache() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 3, 1); var call = new Call(p, input(d, 1, 3, 6, 2000, true))) {
             assertEquals(602, code(call.errorAfterProgress(Status.Code.RESOURCE_EXHAUSTED, 4)));
-            assertEquals(6, d.status().getAvailableKvCache()); assertEquals(0, d.node.cache().snapshot(-1, true).keys().length);
+            assertEquals(6, d.status().getAvailableKvCache()); assertEquals(0, d.node.cacheManager().snapshot(-1, true).keys().length);
         }
     }
 
     @Test void deadlineDuringCapacityWaitReleasesRequestAndDoesNotWakeIntoGeneration() throws Exception {
-        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 1); var holder = d.node.cache().acquire(6, List.of()).lease();
+        try (var p = node("prefill", 8, 1); var d = node("decode", 4, 1); var holder = d.node.cacheManager().acquire(6, List.of()).lease();
                 var call = new Call(p, input(d, 1, 3, 6, 300, true))) {
             await(() -> d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
             call.error(Status.Code.DEADLINE_EXCEEDED);
@@ -857,7 +857,7 @@ class PdGenerationTest {
     @Test void masterBatchWaitsForAllDecodePreparationsAndExecutesOnePrefillForward() throws Exception {
         var settings = Map.<String, Object>of("settings", Map.of("concurrency_limit", 4, "max_batch_tokens_size", 100));
         try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
-             var holder = d.node.cache().acquire(8, List.of()).lease();
+             var holder = d.node.cacheManager().acquire(8, List.of()).lease();
              var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var accepted = workers.submit(() -> enqueue(p, 2000,
                 input(d, 701, 5, 3, 3000, true), input(d, 702, 7, 3, 3000, true)));
@@ -888,7 +888,7 @@ class PdGenerationTest {
     @Test void cancellingOneMemberDuringBatchPreparationUnblocksTheRemainingGroup() throws Exception {
         var settings = Map.<String, Object>of("settings", Map.of("concurrency_limit", 4, "max_batch_tokens_size", 100));
         try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
-             var holder = d.node.cache().acquire(8, List.of()).lease();
+             var holder = d.node.cacheManager().acquire(8, List.of()).lease();
              var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             var accepted = workers.submit(() -> enqueue(p, 2000,
                 input(d, 721, 5, 3, 3000, true), input(d, 722, 5, 3, 3000, true)));

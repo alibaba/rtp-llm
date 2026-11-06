@@ -8,12 +8,12 @@ import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
-import org.flexlb.mock.engine.execution.RtpNode;
+import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import static org.junit.jupiter.api.Assertions.*;
 
-public class RtpNodeTest {
+public class LLMMockEngineTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     @TempDir Path directory;
 
@@ -32,7 +32,7 @@ public class RtpNodeTest {
         var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
         ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
             .put("dp_size", 3).put("mock.cache.total.blocks", 16);
-        try (var node = RtpNode.start(RtpConfig.load(root))) {
+        try (var node = LLMMockEngine.start(RtpConfig.load(root))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS);
@@ -45,20 +45,20 @@ public class RtpNodeTest {
                 assertEquals(3, status.getDpSize()); assertEquals(0, status.getDpRank());
                 assertEquals(4096, status.getMaxBatchTokensSize());
                 assertTrue(rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getStatusVersion() > status.getStatusVersion());
-                var lease = node.cache().acquire(32, List.of()).lease();
+                var lease = node.cacheManager().acquire(32, List.of()).lease();
                 assertEquals(96, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 lease.publish(List.of(1L, -2L), 32); lease.close();
                 var snapshot = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                 assertEquals(Set.of(1L, -2L), snapshot.getCacheKeysMap().keySet());
                 assertEquals(16, snapshot.getBlockSize()); assertEquals(128, snapshot.getAvailableKvCache());
-                try (var extra = node.cache().acquire(112, List.of()).lease()) {
+                try (var extra = node.cacheManager().acquire(112, List.of()).lease()) {
                     assertTrue(extra.publish(List.of(10L, 11L, 12L, 13L, 14L, 15L, 16L), 112));
                 }
-                assertEquals(9, node.cache().itemCount()); // Logical cache now exceeds eight device blocks.
+                assertEquals(9, node.cacheManager().itemCount()); // Logical cache now exceeds eight device blocks.
                 assertEquals(128, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getTotalKvCache());
                 snapshot = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                 assertEquals(9, snapshot.getCacheKeysCount());
-                var pinned = node.cache().acquire(16, List.of(1L)).lease();
+                var pinned = node.cacheManager().acquire(16, List.of(1L)).lease();
                 var unchanged = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(snapshot.getVersion()).build());
                 assertEquals(snapshot.getVersion(), unchanged.getVersion()); assertEquals(0, unchanged.getCacheKeysCount());
                 assertEquals(112, unchanged.getAvailableKvCache()); pinned.close();
@@ -67,7 +67,7 @@ public class RtpNodeTest {
     }
 
     @Test void decodeReportsItsRoleAndRequestRpcDoesNotInventSuccessfulGeneration() throws Exception {
-        try (var node = RtpNode.start(config("decode"))) {
+        try (var node = LLMMockEngine.start(config("decode"))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
                 var rpc = RpcServiceGrpc.newBlockingStub(channel).withDeadlineAfter(2, TimeUnit.SECONDS);
@@ -80,7 +80,7 @@ public class RtpNodeTest {
 
     @Test void defaultFifoModeRejectsGroupRpcsButStillGeneratesIndividualRequests() throws Exception {
         var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
-        try (var node = RtpNode.start(RtpConfig.load(root))) {
+        try (var node = LLMMockEngine.start(RtpConfig.load(root))) {
             assertFalse(((List<?>) node.endpoints().get("supported_rpc")).contains("EnqueueBatch"));
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
@@ -102,7 +102,7 @@ public class RtpNodeTest {
         var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
         ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
             .put("enable_remote_cache", true);
-        var error = assertThrows(IllegalArgumentException.class, () -> RtpNode.start(RtpConfig.load(root)));
+        var error = assertThrows(IllegalArgumentException.class, () -> LLMMockEngine.start(RtpConfig.load(root)));
         assertTrue(error.getMessage().contains("supports only local KV"));
     }
 

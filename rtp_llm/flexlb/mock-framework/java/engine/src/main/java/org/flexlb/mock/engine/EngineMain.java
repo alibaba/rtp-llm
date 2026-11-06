@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.config.RtpConfig;
-import org.flexlb.mock.engine.execution.RtpNode;
+import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.vit.VitConfig;
 import org.flexlb.mock.engine.vit.VitNode;
 import org.flexlb.mock.protocol.ConfigInput;
@@ -90,7 +90,7 @@ public final class EngineMain {
         }
         if (!role.equals("prefill") && !role.equals("decode")) throw new IllegalArgumentException("Unknown ROLE_TYPE: " + role);
         var config = RtpConfig.fromEnvironment(id, Role.valueOf(role), env);
-        var node = RtpNode.start(config, rpcPort, controlPort);
+        var node = LLMMockEngine.start(config, rpcPort, controlPort);
         return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
     }
 
@@ -107,7 +107,7 @@ public final class EngineMain {
             throw new IllegalArgumentException("Unknown Engine role: " + role);
         // P/D select an LLM backend; V uses one shared implementation.
         var config = RtpConfig.load(root);
-        var node = RtpNode.start(config, rpcPort, controlPort);
+        var node = LLMMockEngine.start(config, rpcPort, controlPort);
         return new Started(node::close, node::checkHealthy, node::endpoints, config.effective());
     }
 
