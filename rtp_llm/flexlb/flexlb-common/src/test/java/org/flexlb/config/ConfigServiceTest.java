@@ -172,7 +172,7 @@ class ConfigServiceTest {
         FlexlbConfig.GrpcServerConfig defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
         assertEquals(1000, defaults.getExecutorCoreSize());
         assertEquals(1000, defaults.getExecutorMaxSize());
-        assertEquals(1000, defaults.getExecutorQueueSize());
+        assertEquals(25000, defaults.getExecutorQueueSize());
         FlexlbConfig.GrpcServerConfig grpc = ConfigTestFixtures.parse("""
                 {"grpcServer":{"executorCoreSize":16,"executorMaxSize":32,"executorQueueSize":256}}
                 """).getGrpcServer();

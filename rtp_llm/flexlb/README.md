@@ -227,15 +227,15 @@ The gRPC server executor, shutdown quiet period and HTTP/2 keepalive policy are 
 "grpcServer": {
   "executorCoreSize": 1000,
   "executorMaxSize": 1000,
-  "executorQueueSize": 1000,
+  "executorQueueSize": 25000,
   "shutdownQuietPeriodMs": 5000,
   "permitKeepAliveTimeMs": 10000,
   "permitKeepAliveWithoutCalls": true
 }
 ```
 
-All three executor settings default to 1000. Core size may be 0; maximum size and queue size
-must be positive, and maximum size must be at least core size.
+Core and maximum sizes default to 1000; queue size defaults to 25000. Core size may be 0;
+maximum size and queue size must be positive, and maximum size must be at least core size.
 `shutdownQuietPeriodMs` (静默时间) defaults to 5000 ms and must be positive.
 The quiet period starts when shutting down; each Schedule arrival restarts it.
 After it elapses, gRPC waits for accepted RPCs to finish before serving resources
