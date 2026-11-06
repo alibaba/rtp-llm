@@ -69,15 +69,19 @@ protected:
         DeviceTestBase::TearDown();
     }
 
-    std::shared_ptr<FIFOScheduler> createScheduler(size_t max_generate_batch_size     = 100,
-                                                   size_t max_inited_kv_cache_streams = 0) {
+    std::shared_ptr<FIFOScheduler> createScheduler(size_t   max_generate_batch_size     = 100,
+                                                   size_t   max_inited_kv_cache_streams = 0,
+                                                   RoleType role                        = RoleType::PDFUSION,
+                                                   int      prefill_chunk_size          = 0) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
         runtime_config.max_generate_batch_size                           = max_generate_batch_size;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
         runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams = max_inited_kv_cache_streams;
-        PDSepConfig         pd_sep_config;
+        runtime_config.fifo_scheduler_config.prefill_chunk_size          = prefill_chunk_size;
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type = role;
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
         return std::make_shared<FIFOScheduler>(
@@ -98,12 +102,13 @@ protected:
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager_);
     }
 
-    GenerateStreamPtr createStream(const std::vector<int>& input_tokens        = {1, 2, 3},
-                                   bool                    reuse_cache         = false,
-                                   bool                    enable_memory_cache = false,
-                                   int                     max_new_tokens      = 1,
-                                   const std::vector<int>& variable_num_beams  = {},
-                                   RoleType                role_type           = RoleType::PDFUSION) {
+    GenerateStreamPtr createStream(const std::vector<int>&                     input_tokens        = {1, 2, 3},
+                                   bool                                        reuse_cache         = false,
+                                   bool                                        enable_memory_cache = false,
+                                   int                                         max_new_tokens      = 1,
+                                   const std::vector<int>&                     variable_num_beams  = {},
+                                   RoleType                                    role_type           = RoleType::PDFUSION,
+                                   const std::function<void(GenerateConfig&)>& configure           = {}) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = reuse_cache;
@@ -121,9 +126,18 @@ protected:
         generate_config->enable_memory_cache = enable_memory_cache;
         generate_config->max_new_tokens      = max_new_tokens;
         generate_config->variable_num_beams  = variable_num_beams;
-        query->input_ids                     = torch::tensor(input_tokens, torch::kInt32);
-        query->generate_config               = generate_config;
+        if (configure) {
+            configure(*generate_config);
+        }
+        query->input_ids       = torch::tensor(input_tokens, torch::kInt32);
+        query->generate_config = generate_config;
         return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    }
+
+    GenerateStreamPtr createPrefillStream(const std::vector<int>& input_tokens   = {1, 2, 3},
+                                          bool                    reuse_cache    = false,
+                                          int                     max_new_tokens = 1) {
+        return createStream(input_tokens, reuse_cache, false, max_new_tokens, {}, RoleType::PREFILL);
     }
 
     void installReadinessAllocator(ContextSelector selector) {
@@ -165,6 +179,9 @@ protected:
         ON_CALL(*mock_allocator_, maxAvailableTokensNum()).WillByDefault(testing::Invoke([this]() {
             return real_allocator_->maxAvailableTokensNum();
         }));
+        ON_CALL(*mock_allocator_, availableBlocksNum()).WillByDefault(testing::Invoke([this]() {
+            return real_allocator_->availableBlocksNum();
+        }));
 
         cache_manager_->coordinator_manager_ = mock_allocator_;
     }
@@ -174,6 +191,15 @@ protected:
         mock_allocator_ = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
         initial_malloc_calls_ = 0;
 
+        ON_CALL(*mock_allocator_, maxAvailableTokensNum()).WillByDefault(testing::Invoke([this] {
+            return real_allocator_->maxAvailableTokensNum();
+        }));
+        ON_CALL(*mock_allocator_, availableBlocksNum()).WillByDefault(testing::Invoke([this] {
+            return real_allocator_->availableBlocksNum();
+        }));
+        ON_CALL(*mock_allocator_, seqSizePerBlock()).WillByDefault(testing::Invoke([this] {
+            return real_allocator_->seqSizePerBlock();
+        }));
         ON_CALL(*mock_allocator_, totalBlocksNum()).WillByDefault(testing::Return(64));
         ON_CALL(*mock_allocator_, getNeedBlocks(testing::_)).WillByDefault(testing::Return(1));
         ON_CALL(*mock_allocator_, initMallocForCommonLen(testing::_))
@@ -192,7 +218,7 @@ protected:
     int64_t                                                         next_request_id_{1};
     CoordinatorCacheManagerPtr                                      real_allocator_;
     std::shared_ptr<testing::NiceMock<MockCoordinatorCacheManager>> mock_allocator_;
-    size_t                                                          initial_malloc_calls_{0};
+    std::atomic<size_t>                                             initial_malloc_calls_{0};
     size_t                                                          free_calls_{0};
     size_t                                                          insert_calls_{0};
 };
@@ -884,6 +910,552 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionPendingAllocatorLoadsCountToward
     ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler->pendingDecodeStreamsSize(), 0);
     ASSERT_EQ(initial_malloc_calls_, 2);
+}
+
+namespace {
+bool waitForCache(const std::function<bool()>& predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return predicate();
+}
+}  // namespace
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareRejectsPDFusion) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    EXPECT_THROW(createScheduler(2, 0, RoleType::PDFUSION), std::exception);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareDisabledSupportsLocalDecode) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "0");
+    auto            scheduler = createScheduler(2, 0, RoleType::PREFILL);
+    auto            stream    = createPrefillStream({1, 2, 3}, false, 8);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    EXPECT_FALSE(scheduler->async_cache_prepare_enabled_);
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_EQ(stream->curBlocksNum(), 0);
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), stream);
+    const auto prefill_blocks = stream->curBlocksNum();
+    stream->setIsContextStream(false);
+    stream->complete_token_ids_->setSeqLength(6);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_GT(stream->curBlocksNum(), prefill_blocks);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareAcceptsPDSeparatedGeneration) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            scheduler               = createScheduler(2, 0, RoleType::PREFILL);
+    auto            stream                  = createPrefillStream({1, 2, 3}, false, 8);
+    stream->generateConfig()->pd_separation = true;
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_TRUE(waitForCache([&] { return stream->hasEvent(StreamEvents::CachePrepared); }));
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_GT(stream->curBlocksNum(), 0);
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), stream);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareReadyTailUnblocksMemoryStarvedHead) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            head = createPrefillStream(std::vector<int>(16, 1));
+    auto            tail = createPrefillStream(std::vector<int>(30, 2));
+    // Reproduce the state after a head load needs to retry allocation while a
+    // later, already-prepared request holds the blocks required for that retry.
+    ASSERT_EQ(tail->prepareCache(), GenerateStream::CachePrepareResult::DONE);
+    ASSERT_FALSE(tail->hasError());
+    auto scheduler = createScheduler(1, 0, RoleType::PREFILL);
+    ASSERT_TRUE(scheduler->enqueue(head).ok());
+    ASSERT_TRUE(scheduler->enqueue(tail).ok());
+    ASSERT_TRUE(waitForCache([&] {
+        std::lock_guard<std::mutex> stream_lock(*head->mutex_);
+        return head->streamCacheResource().mallocFailedTimes() > 0;
+    }));
+
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), tail);
+    EXPECT_EQ(head->getStatus(), StreamState::WAITING);
+
+    tail->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_TRUE(waitForCache([&] { return head->hasEvent(StreamEvents::CachePrepared); }));
+    auto resumed = scheduler->schedule();
+    ASSERT_TRUE(resumed.ok());
+    ASSERT_EQ(resumed->size(), 1);
+    EXPECT_EQ(resumed->front(), head);
+    EXPECT_FALSE(head->hasError());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareCompletesInflightTailAfterHeadAllocationShortage) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            head    = createPrefillStream(std::vector<int>(16, 1));
+    auto            tail    = createPrefillStream(std::vector<int>(30, 2), true);
+    auto            context = makeControlledAllocatorContext();
+    installReadinessAllocator(
+        [&](const MallocInfo& info) { return info.request_id == tail->streamId() ? context : nullptr; });
+    ASSERT_EQ(tail->prepareCache(), GenerateStream::CachePrepareResult::WAIT);
+    auto scheduler = createScheduler(1, 0, RoleType::PREFILL);
+    ASSERT_TRUE(scheduler->enqueue(head).ok());
+    ASSERT_TRUE(scheduler->enqueue(tail).ok());
+    ASSERT_TRUE(waitForCache([&] {
+        std::lock_guard<std::mutex> stream_lock(*head->mutex_);
+        return head->streamCacheResource().mallocFailedTimes() > 0;
+    }));
+    const auto available = cache_manager_->availableBlocksNum();
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    ASSERT_TRUE(waitForCache([&] { return tail->hasEvent(StreamEvents::CachePrepared); }));
+    EXPECT_EQ(cache_manager_->availableBlocksNum(), available);
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), tail);
+    tail->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_TRUE(waitForCache([&] { return head->hasEvent(StreamEvents::CachePrepared); }));
+    batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), head);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareShortageDoesNotBlockSmallerRequestsOrGroups) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            held = createPrefillStream(std::vector<int>(30, 9));
+    ASSERT_TRUE(held->initKVBlock().ok());
+    auto head      = createPrefillStream(std::vector<int>(16, 1));
+    auto tail      = createPrefillStream({2});
+    auto grouped   = createPrefillStream({3});
+    auto scheduler = createScheduler(2, 0, RoleType::PREFILL);
+    ASSERT_TRUE(scheduler->enqueue(head).ok());
+    ASSERT_TRUE(scheduler->enqueue(tail).ok());
+    ASSERT_EQ(scheduler->enqueueGroup({grouped}).first, std::vector<bool>({true}));
+    ASSERT_TRUE(waitForCache([&] { return tail->hasEvent(StreamEvents::CachePrepared); }));
+    ASSERT_TRUE(waitForCache([&] { return grouped->hasEvent(StreamEvents::CachePrepared); }));
+    EXPECT_FALSE(head->hasEvent(StreamEvents::CachePrepared));
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), tail);
+    tail->reportEvent(StreamEvents::GenerateDone);
+    batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), grouped);
+    grouped->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    held->releaseResource();
+    ASSERT_TRUE(waitForCache([&] { return head->hasEvent(StreamEvents::CachePrepared); }));
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareShortageDoesNotBlockLaterReadyGroup) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            held = createPrefillStream(std::vector<int>(30, 9));
+    ASSERT_TRUE(held->initKVBlock().ok());
+    auto head      = createPrefillStream(std::vector<int>(16, 1));
+    auto tail      = createPrefillStream({2});
+    auto scheduler = createScheduler(2, 0, RoleType::PREFILL);
+    ASSERT_EQ(scheduler->enqueueGroup({head}).first, std::vector<bool>({true}));
+    ASSERT_EQ(scheduler->enqueueGroup({tail}).first, std::vector<bool>({true}));
+    ASSERT_TRUE(waitForCache([&] { return tail->hasEvent(StreamEvents::CachePrepared); }));
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), tail);
+    EXPECT_FALSE(head->hasEvent(StreamEvents::CachePrepared));
+    tail->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    held->releaseResource();
+    ASSERT_TRUE(waitForCache([&] { return head->hasEvent(StreamEvents::CachePrepared); }));
+    batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), head);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareEnforcesPurePDContractForLocalFallbackConfigurations) {
+    const std::vector<std::function<void(GenerateConfig&)>> configurations = {
+        [](GenerateConfig& config) { config.num_beams = 2; },
+        [](GenerateConfig& config) { config.variable_num_beams = {1, 2}; },
+        [](GenerateConfig& config) { config.num_return_sequences = 2; },
+        [](GenerateConfig& config) { config.can_use_pd_separation = false; },
+    };
+    for (const char* enabled : {"0", "1"}) {
+        autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", enabled);
+        for (size_t i = 0; i < configurations.size(); ++i) {
+            SCOPED_TRACE(enabled);
+            SCOPED_TRACE(i);
+            auto stream    = createStream({1, 2}, false, false, 8, {}, RoleType::PREFILL, configurations[i]);
+            auto scheduler = createScheduler(2, 0, RoleType::PREFILL);
+            ASSERT_TRUE(scheduler->enqueue(stream).ok());
+            if (enabled[0] == '1') {
+                ASSERT_TRUE(waitForCache([&] { return stream->hasEvent(StreamEvents::CachePrepared); }));
+                EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+                EXPECT_NE(stream->statusInfo().ToString().find("pure PD"), std::string::npos);
+                EXPECT_EQ(stream->curBlocksNum(), 0);
+                EXPECT_FALSE(stream->hasEvent(StreamEvents::LoadInitiated));
+                auto batch = scheduler->schedule();
+                ASSERT_TRUE(batch.ok());
+                EXPECT_TRUE(batch->empty());
+                EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+            } else {
+                auto batch = scheduler->schedule();
+                ASSERT_TRUE(batch.ok());
+                ASSERT_EQ(batch->size(), 1);
+                EXPECT_EQ(batch->front(), stream);
+                EXPECT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+            }
+            ASSERT_TRUE(scheduler->stop().ok());
+        }
+    }
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareRejectsLocalDecodeWithoutDisruptingInflightLoads) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            context = makeControlledAllocatorContext();
+    auto            pending = createPrefillStream(std::vector<int>(30, 2), true);
+    installReadinessAllocator(
+        [&](const MallocInfo& info) { return info.request_id == pending->streamId() ? context : nullptr; });
+    auto scheduler = createScheduler(1, 1, RoleType::PREFILL);
+    ASSERT_TRUE(scheduler->enqueue(pending).ok());
+    ASSERT_TRUE(waitForCache([&] { return pending->hasEvent(StreamEvents::LoadInitiated); }));
+    auto local = createPrefillStream({1, 2, 3}, false, 8);
+    auto fresh = createPrefillStream({4, 5});
+    ASSERT_TRUE(scheduler->enqueue(local).ok());
+    ASSERT_TRUE(scheduler->enqueue(fresh).ok());
+    ASSERT_TRUE(waitForCache([&] { return local->hasEvent(StreamEvents::CachePrepared); }));
+    EXPECT_EQ(local->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(local->curBlocksNum(), 0);
+    EXPECT_FALSE(local->hasEvent(StreamEvents::LoadInitiated));
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_TRUE(batch->empty());
+    EXPECT_EQ(local->getStatus(), StreamState::FINISHED);
+    EXPECT_FALSE(pending->hasError());
+    EXPECT_EQ(fresh->curBlocksNum(), 0);
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    ASSERT_TRUE(waitForCache([&] { return pending->hasEvent(StreamEvents::CachePrepared); }));
+    batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), pending);
+    pending->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_TRUE(waitForCache([&] { return fresh->hasEvent(StreamEvents::CachePrepared); }));
+    batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), fresh);
+    EXPECT_FALSE(fresh->hasError());
+    std::lock_guard<std::mutex> lock(scheduler->lock_);
+    EXPECT_TRUE(scheduler->async_cache_prepare_enabled_);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareRejectsLocalGroupMemberAndAdmitsPDMember) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            scheduler           = createScheduler(2, 0, RoleType::PREFILL);
+    auto            local               = createPrefillStream({1, 2}, false, 8);
+    auto            pd                  = createPrefillStream({2, 3}, false, 8);
+    pd->generateConfig()->pd_separation = true;
+    ASSERT_EQ(scheduler->enqueueGroup({local, pd}).first, std::vector<bool>({true, true}));
+    ASSERT_TRUE(waitForCache([&] { return local->hasEvent(StreamEvents::CachePrepared); }));
+    ASSERT_TRUE(waitForCache([&] { return pd->hasEvent(StreamEvents::CachePrepared); }));
+    EXPECT_EQ(local->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(local->curBlocksNum(), 0);
+    EXPECT_FALSE(local->hasEvent(StreamEvents::LoadInitiated));
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), pd);
+    EXPECT_FALSE(pd->hasError());
+    EXPECT_EQ(local->getStatus(), StreamState::FINISHED);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareStartsBeforeAdmissionAndPreservesWaitLatency) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            context = makeControlledAllocatorContext();
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+    auto scheduler = createScheduler(1, 0, RoleType::PREFILL);
+    auto stream    = createPrefillStream({1, 2, 3}, true);
+    stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 1000000);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_TRUE(waitForCache([&] { return stream->hasEvent(StreamEvents::LoadInitiated); }));
+    EXPECT_GT(stream->curBlocksNum(), 0);
+    EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(stream->getTimeInfo().wait_time_us, 0);
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    ASSERT_TRUE(waitForCache([&] { return stream->hasEvent(StreamEvents::CachePrepared); }));
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_GE(stream->getTimeInfo().wait_time_us, 1000000);
+    EXPECT_EQ(initial_malloc_calls_.load(), 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareAdmitsReadyTailBeforePendingHead) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            first_context  = makeControlledAllocatorContext();
+    auto            second_context = makeControlledAllocatorContext();
+    auto            first          = createPrefillStream({1, 2}, true);
+    auto            second         = createPrefillStream({3, 4}, true);
+    installReadinessAllocator(
+        [&](const MallocInfo& info) { return info.request_id == first->streamId() ? first_context : second_context; });
+    auto scheduler = createScheduler(2, 0, RoleType::PREFILL);
+    ASSERT_TRUE(scheduler->enqueue(first).ok());
+    ASSERT_TRUE(scheduler->enqueue(second).ok());
+    ASSERT_TRUE(waitForCache([&] { return second->hasEvent(StreamEvents::LoadInitiated); }));
+    ASSERT_TRUE(second_context->completeTransfers(1, true));
+    ASSERT_TRUE(waitForCache([&] { return second->hasEvent(StreamEvents::CachePrepared); }));
+    auto ready = scheduler->schedule();
+    ASSERT_TRUE(ready.ok());
+    ASSERT_EQ(ready->size(), 1);
+    EXPECT_EQ(ready->front(), second);
+    EXPECT_EQ(first->getStatus(), StreamState::WAITING);
+    ASSERT_TRUE(first_context->completeTransfers(1, true));
+    ASSERT_TRUE(waitForCache([&] { return first->hasEvent(StreamEvents::CachePrepared); }));
+    second->reportEvent(StreamEvents::GenerateDone);
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), first);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareGroupWaitsForAllLoads) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            context = makeControlledAllocatorContext();
+    auto            first   = createPrefillStream({1, 2}, true);
+    auto            second  = createPrefillStream({3, 4});
+    installReadinessAllocator(
+        [context, first](const MallocInfo& info) { return info.request_id == first->streamId() ? context : nullptr; });
+    auto scheduler = createScheduler(2, 0, RoleType::PREFILL);
+    ASSERT_EQ(scheduler->enqueueGroup({first, second}).first, std::vector<bool>({true, true}));
+    ASSERT_TRUE(waitForCache([&] { return second->hasEvent(StreamEvents::CachePrepared); }));
+    auto pending = scheduler->schedule();
+    ASSERT_TRUE(pending.ok());
+    EXPECT_TRUE(pending->empty());
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    ASSERT_TRUE(waitForCache([&] { return first->hasEvent(StreamEvents::CachePrepared); }));
+    ASSERT_FALSE(first->hasError()) << first->statusInfo().ToString();
+    ASSERT_FALSE(second->hasError()) << second->statusInfo().ToString();
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_EQ(batch->size(), 2);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareGroupRecoversFromAllocationShortage) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            scheduler = createScheduler(2, 0, RoleType::PREFILL);
+    auto            first     = createPrefillStream(std::vector<int>(16, 1));
+    auto            blocked   = createPrefillStream(std::vector<int>(30, 2));
+    ASSERT_EQ(scheduler->enqueueGroup({first, blocked}).first, std::vector<bool>({true, true}));
+    ASSERT_TRUE(waitForCache([&] {
+        std::lock_guard<std::mutex> stream_lock(*blocked->mutex_);
+        return blocked->streamCacheResource().mallocFailedTimes() > 0;
+    }));
+    auto prefix = scheduler->schedule();
+    ASSERT_TRUE(prefix.ok());
+    ASSERT_EQ(prefix->size(), 1);
+    EXPECT_EQ(prefix->front(), first);
+    first->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_TRUE(waitForCache([&] { return blocked->hasEvent(StreamEvents::CachePrepared); }));
+    auto residual = scheduler->schedule();
+    ASSERT_TRUE(residual.ok());
+    ASSERT_EQ(residual->size(), 1);
+    EXPECT_EQ(residual->front(), blocked);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareHonorsInitializedStreamQuota) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            scheduler = createScheduler(2, 1, RoleType::PREFILL);
+    auto            first     = createPrefillStream({1, 2});
+    auto            second    = createPrefillStream({3, 4});
+    ASSERT_TRUE(scheduler->enqueue(first).ok());
+    ASSERT_TRUE(scheduler->enqueue(second).ok());
+    ASSERT_TRUE(waitForCache([&] { return first->hasEvent(StreamEvents::CachePrepared); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    EXPECT_EQ(second->curBlocksNum(), 0);
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    first->reportEvent(StreamEvents::GenerateDone);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    ASSERT_TRUE(waitForCache([&] { return second->hasEvent(StreamEvents::CachePrepared); }));
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareDoesNotSpinOnRetryableShortage) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    installRetryableAllocator();
+    auto scheduler = createScheduler(2, 0, RoleType::PREFILL);
+    auto first     = createPrefillStream({1, 2});
+    auto trailing  = createPrefillStream({3, 4});
+    ASSERT_TRUE(scheduler->enqueue(first).ok());
+    ASSERT_TRUE(scheduler->enqueue(trailing).ok());
+    ASSERT_TRUE(waitForCache([&] { return initial_malloc_calls_.load() >= 2; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    EXPECT_GE(initial_malloc_calls_.load(), 2);
+    EXPECT_LE(initial_malloc_calls_.load(), 8);
+    EXPECT_EQ(trailing->curBlocksNum(), 0);
+    first->reportError(ErrorCode::CANCELLED, "cancel blocked request");
+    ASSERT_TRUE(waitForCache([&] { return first->hasEvent(StreamEvents::CachePrepared); }));
+    ASSERT_TRUE(scheduler->schedule().ok());
+    EXPECT_EQ(first->getStatus(), StreamState::FINISHED);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareRetriesCapacityReleasedDuringFailedAllocation) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            held = createPrefillStream(std::vector<int>(10, 9));
+    ASSERT_TRUE(held->initKVBlock().ok());
+    installReadinessAllocator([](const MallocInfo&) { return nullptr; });
+    ON_CALL(*mock_allocator_, initMallocForCommonLen(testing::_))
+        .WillByDefault(testing::Invoke([&](const MallocInfo& info) {
+            if (++initial_malloc_calls_ == 1) {
+                held->releaseResource();
+                return MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+            }
+            return real_allocator_->initMallocForCommonLen(info);
+        }));
+    auto scheduler = createScheduler(1, 0, RoleType::PREFILL);
+    auto stream    = createPrefillStream({1, 2});
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_TRUE(waitForCache([&] { return stream->hasEvent(StreamEvents::CachePrepared); }));
+    EXPECT_EQ(initial_malloc_calls_.load(), 2);
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), stream);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPreparePreservesGlobalChunkBudgetAndInitialReuse) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    installReadinessAllocator([](const MallocInfo&) { return nullptr; });
+    auto scheduler = createScheduler(2, 0, RoleType::PREFILL, 4);
+    auto stream    = createPrefillStream({1, 2, 3, 4, 5, 6});
+    stream->setChunkSize(4);
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_TRUE(waitForCache([&] { return stream->hasEvent(StreamEvents::CachePrepared); }));
+    auto first = scheduler->schedule();
+    ASSERT_TRUE(first.ok());
+    ASSERT_EQ(first->size(), 1);
+    EXPECT_EQ(first->front(), stream);
+    EXPECT_EQ(stream->contextLength(), 4);
+    EXPECT_TRUE(stream->isMiddleChunk());
+    stream->advanceChunk();
+    auto second = scheduler->schedule();
+    ASSERT_TRUE(second.ok());
+    ASSERT_EQ(second->size(), 1);
+    EXPECT_EQ(second->front(), stream);
+    EXPECT_EQ(stream->contextLength(), 2);
+    EXPECT_FALSE(stream->isMiddleChunk());
+    EXPECT_EQ(stream->initialReuseLength(), 0);
+    EXPECT_EQ(stream->synchronizedPrefixLength(), 4);
+    EXPECT_EQ(initial_malloc_calls_.load(), 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareTimesOutWhileCapacityIsUnchanged) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    installRetryableAllocator();
+    auto scheduler                       = createScheduler(1, 0, RoleType::PREFILL);
+    auto stream                          = createPrefillStream({1, 2});
+    stream->generateConfig()->timeout_ms = 100;
+    stream->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+    ASSERT_TRUE(waitForCache([&] { return initial_malloc_calls_.load() >= 1; }));
+    ASSERT_TRUE(waitForCache([&] { return stream->hasEvent(StreamEvents::CachePrepared); }));
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_LE(initial_malloc_calls_.load(), 2);
+    ASSERT_TRUE(scheduler->schedule().ok());
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareTimesOutUnpreparedTailBehindBlockedHead) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    installRetryableAllocator();
+    auto scheduler                     = createScheduler(2, 0, RoleType::PREFILL);
+    auto head                          = createPrefillStream({1, 2});
+    auto tail                          = createPrefillStream({3, 4});
+    tail->generateConfig()->timeout_ms = 100;
+    ASSERT_TRUE(scheduler->enqueue(head).ok());
+    ASSERT_TRUE(scheduler->enqueue(tail).ok());
+    ASSERT_TRUE(waitForCache([&] { return initial_malloc_calls_.load() >= 2; }));
+    tail->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds() - 1000000);
+
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_TRUE(batch->empty());
+    EXPECT_EQ(tail->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(tail->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_TRUE(tail->streamCacheResource().isResourceReleased());
+    EXPECT_EQ(head->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareStopJoinsWorkerAndReleasesPendingLoads) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            context = makeControlledAllocatorContext();
+    installReadinessAllocator([context](const MallocInfo&) { return context; });
+    auto scheduler = createScheduler(2, 0, RoleType::PREFILL);
+    auto stream    = createPrefillStream({1, 2}, true);
+    ASSERT_EQ(scheduler->enqueueGroup({stream}).first, std::vector<bool>({true}));
+    ASSERT_TRUE(waitForCache([&] { return stream->hasEvent(StreamEvents::LoadInitiated); }));
+    ASSERT_TRUE(scheduler->stop().ok());
+    EXPECT_FALSE(scheduler->cache_prepare_thread_.joinable());
+    EXPECT_TRUE(scheduler->empty());
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+    ASSERT_TRUE(scheduler->stop().ok());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareIsDisabledForDecodeAndByDefault) {
+    {
+        autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "0");
+        auto            scheduler = createScheduler(2);
+        EXPECT_FALSE(scheduler->async_cache_prepare_enabled_);
+        ASSERT_TRUE(scheduler->enqueue(createStream()).ok());
+        ASSERT_EQ(scheduler->schedule()->size(), 1);
+    }
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            scheduler = createScheduler(2, 0, RoleType::DECODE);
+    EXPECT_FALSE(scheduler->async_cache_prepare_enabled_);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, AsyncPrepareCleansCanceledTailBehindPendingHead) {
+    autil::EnvGuard flag("RTP_LLM_ASYNC_PREPARE_CACHE", "1");
+    auto            context  = makeControlledAllocatorContext();
+    auto            first    = createPrefillStream({1, 2, 3}, true);
+    auto            canceled = createPrefillStream({4, 5, 6});
+    installReadinessAllocator(
+        [context, first](const MallocInfo& info) { return info.request_id == first->streamId() ? context : nullptr; });
+    auto scheduler = createScheduler(2, 0, RoleType::PREFILL);
+    ASSERT_TRUE(scheduler->enqueue(first).ok());
+    ASSERT_TRUE(scheduler->enqueue(canceled).ok());
+    ASSERT_TRUE(waitForCache([&] { return first->hasEvent(StreamEvents::LoadInitiated); }));
+    canceled->reportError(ErrorCode::CANCELLED, "cancel while waiting for head");
+    auto batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    EXPECT_TRUE(batch->empty());
+    EXPECT_EQ(first->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(canceled->getStatus(), StreamState::FINISHED);
+    EXPECT_TRUE(canceled->streamCacheResource().isResourceReleased());
+    EXPECT_EQ(scheduler->waitingStreamsSize(), 1);
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    ASSERT_TRUE(waitForCache([&] { return first->hasEvent(StreamEvents::CachePrepared); }));
+    batch = scheduler->schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->size(), 1);
+    EXPECT_EQ(batch->front(), first);
 }
 
 }  // namespace rtp_llm
