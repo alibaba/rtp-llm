@@ -15,7 +15,10 @@ namespace rtp_llm {
 
 namespace kvcm {
 
-std::string genLocationSpecName(int tp_rank, const std::string& group_name);
+std::string genLocationSpecName(int                tp_rank,
+                                const std::string& group_name,
+                                const std::string& model_name = {},
+                                bool               merge_full = false);
 
 struct LocationSpecUnitView {
     LocationSpecUnitView(const kv_cache_manager::LocationSpecUnit& unit): spec_name(unit.spec_name), uri(unit.uri) {}
@@ -48,9 +51,11 @@ public:
     };
     using GroupIdMap = std::map<int32_t, Group>;
     struct SpecInfo {
+        // Representative fields retain FULL reuse semantics; payloads use every group_id.
         int32_t     group_id;
         int32_t     tp_rank;
         std::string tag;
+        std::vector<int32_t> group_ids;
     };
     using SpecInfoMap        = std::map<std::string, SpecInfo, std::less<>>;
     using SpecNames          = std::vector<std::string>;
@@ -87,14 +92,17 @@ public:
     }
 
     // Aggregate group masks that getNeedWriteGroups() can actually emit.
-    // Singleton specs are registered independently by KVCM.
+    // Unmerged singleton specs are registered independently by KVCM.
     virtual std::vector<uint64_t> reachableAggregateMasks() const {
         return {};
     }
 
     // Build singleton and reachable aggregate location groups using the
     // canonical group-name order used by the legacy KVCM protocol.
-    bool buildLocationSpecGroups(int tp_size, LocationSpecGroups& location_spec_groups);
+    bool buildLocationSpecGroups(int                 tp_size,
+                                 LocationSpecGroups& location_spec_groups,
+                                 const std::string&  model_name = {},
+                                 bool                merge_full = false);
 
     const SpecInfoMap& spec_info_map() const {
         return spec_name_to_info_;
@@ -207,20 +215,16 @@ protected:
                          StorageBackend::BufferResolver          buffer_resolver,
                          const std::vector<std::string>&         full_group_tags,
                          const std::vector<std::string>&         other_group_tags,
-                         uint32_t                                write_interval,
                          std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
-        DefaultLayerGroupPolicy(
-            topology, std::move(buffer_resolver), full_group_tags, other_group_tags, std::move(group_block_size_bytes)),
-        write_interval_(write_interval) {}
+        DefaultLayerGroupPolicy(topology,
+                                std::move(buffer_resolver),
+                                full_group_tags,
+                                other_group_tags,
+                                std::move(group_block_size_bytes)) {}
     uint64_t  valid_full_bithash_       = 0;
     uint64_t  valid_full_other_bithash_ = 0;
     SpecNames full_spec_names_;
     SpecNames full_other_spec_names_;
-    /*
-        interval == 0 :         only write last key's other attention
-        interval == n (n > 0) : every n keys, write a other attention
-    */
-    uint32_t write_interval_ = 0;
 };
 
 class FullLinearLayerGroupPolicy: public FullOtherGroupPolicy {
@@ -229,13 +233,11 @@ public:
                                StorageBackend::BufferResolver          buffer_resolver,
                                const std::vector<std::string>&         full_group_tags,
                                const std::vector<std::string>&         other_group_tags,
-                               uint32_t                                linear_attention_write_interval,
                                std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
         FullOtherGroupPolicy(topology,
                              std::move(buffer_resolver),
                              full_group_tags,
                              other_group_tags,
-                             linear_attention_write_interval,
                              std::move(group_block_size_bytes)) {}
 
     bool filterNeedLoadLocations(const kv_cache_manager::Locations& locations,

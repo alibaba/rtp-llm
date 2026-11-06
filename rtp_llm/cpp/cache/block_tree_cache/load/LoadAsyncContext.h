@@ -53,12 +53,21 @@ public:
                      StorageRequest                                 storage_request = {});
     ~LoadAsyncContext() override;
 
-    bool     empty() const;
-    uint64_t contextId() const;
-    size_t   localMatchedBlocks() const;
-    size_t   matchedBlocks() const;
-    size_t   matchedBlocks(Tier tier) const;
-    bool     needBackendMatch() const;
+    bool                   empty() const;
+    uint64_t               contextId() const;
+    std::optional<int64_t> requestId() const {
+        return request_id_;
+    }
+    uint64_t workflowId() const {
+        return backend_task_.traceId();
+    }
+    void traceDependency(uint64_t owner_workflow) const noexcept {
+        AsyncProfileSession::taskLink(workflowId(), workflowId(), 0, request_id_.value_or(-1), "load", owner_workflow);
+    }
+    size_t localMatchedBlocks() const;
+    size_t matchedBlocks() const;
+    size_t matchedBlocks(Tier tier) const;
+    bool   needBackendMatch() const;
 
     void setValidPrefix(std::function<bool(size_t)> valid_prefix) {
         valid_prefix_ = std::move(valid_prefix);
@@ -80,25 +89,33 @@ public:
     bool         completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us);
     bool         completeTransfers(size_t count, bool success);
     void         cancelUnsubmittedTransfers();
-    ErrorInfo    errorInfo() const override;
     bool         aggregateSuccess() const;
+    bool         localTransfersSucceeded() const;
+    bool         localLoadSucceeded() const;
+    bool         backendTimedOut() const;
+    bool deadlineExceeded() const {
+        return backend_deadline_state_.load() == State::FAILED;
+    }
     bool         settle(bool success);
     bool         onTaskFail();
     void         waitDone() override;
     void         onDone(DoneCallback callback) override;
     bool         done() const override;
     bool         success() const override;
+    ErrorInfo    errorInfo() const override;
+    void         deferRelease(std::shared_ptr<BatchKVCacheResource> resource);
     MallocStatus mallocStatus() const;
 
 private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
-    void onBackendRead(bool success);
+    void onBackendRead(ErrorInfo error);
     void failBeforeCommit();
     void failCommit();
     void finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback);
     void dispatchCompletion(bool notify, SettlementReadyCallback settlement_ready_callback);
+    ErrorInfo completionErrorLocked() const;
     void notifyCompletion();
 
     std::shared_ptr<LoadContextCoordinator> coordinator_;
@@ -111,12 +128,16 @@ private:
     std::array<size_t, 3>                   matched_blocks_by_tier_{};
 
     std::shared_ptr<StorageBackend> storage_backend_;
+    const std::optional<int64_t>    request_id_;
     StorageRequest                  storage_request_;
+    const TransferTask              backend_task_;
     std::function<bool(size_t)>     valid_prefix_;
     MatchCallback                   match_callback_;
     const bool                      need_backend_match_{false};
     bool                            backend_started_{false};
     bool                            backend_pending_{false};
+    // SUCCEEDED closes the remote business budget; FAILED latches its expiry.
+    mutable std::atomic<State>      backend_deadline_state_{State::SUCCEEDED};
     std::atomic<bool>               commit_started_{false};
     bool                            committed_{false};
 
@@ -129,11 +150,16 @@ private:
     size_t                    remaining_transfer_count_{0};
     std::atomic<size_t>       remaining_join_count_{0};
     int64_t                   join_start_time_us_{0};
-    bool                      has_failure_{false};
+    bool                      has_local_failure_{false};
+    bool                      local_load_succeeded_{false};
+    ErrorInfo                 backend_error_{ErrorInfo::OkStatus()};
+    ErrorInfo                 error_info_{ErrorInfo::OkStatus()};
     bool                      settlement_ready_{false};
     SettlementReadyCallback   settlement_ready_callback_;
     std::vector<DoneCallback> callbacks_;
 
+    AsyncProfileSpan  workflow_span_, join_span_;
+    std::atomic<bool> workflow_trace_finished_{false}, join_trace_finished_{false};
     friend class LoadContextCoordinator;
 };
 
@@ -142,7 +168,9 @@ public:
     using CommitCallback = std::function<bool(const std::shared_ptr<LoadAsyncContext>& context)>;
     using AbortCallback  = std::function<void(LoadAsyncContext& context)>;
 
-    LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback);
+    LoadContextCoordinator(CommitCallback                             commit_callback,
+                           AbortCallback                              abort_callback,
+                           std::function<bool(std::function<void()>)> defer_cleanup = {});
 
     std::shared_ptr<LoadAsyncContext> create(std::vector<TransferDescriptor> load_descs,
                                              std::vector<bool>               joined_load,
@@ -170,6 +198,7 @@ private:
     PendingContextMap       pending_contexts_;
     CommitCallback          commit_callback_;
     AbortCallback           abort_callback_;
+    std::function<bool(std::function<void()>)> defer_cleanup_;
     std::function<void()>   shutdown_wait_observer_for_test_;
 };
 

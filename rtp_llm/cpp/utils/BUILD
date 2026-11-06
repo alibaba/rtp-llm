@@ -30,6 +30,7 @@ cc_library(
     hdrs = [
         "AssertUtils.h",
         "Logger.h",
+        "RemoteCacheConfig.h",
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",
@@ -38,6 +39,7 @@ cc_library(
     srcs = [
         "AssertUtils.cc",
         "Logger.cc",
+        "RemoteCacheConfig.cc",
         "Exception.cc"
     ],
     deps = [
@@ -71,6 +73,22 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "async_profile_trace",
+    srcs = ["AsyncProfileTrace.cc", "AsyncProfileTimeline.cc"],
+    hdrs = ["AsyncProfileTrace.h"],
+    deps = [":async_profiling_scope"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "async_profiling_scope",
+    hdrs = ["AsyncProfilingScope.h"],
+    copts = copts(),
     visibility = ["//visibility:public"],
 )
 

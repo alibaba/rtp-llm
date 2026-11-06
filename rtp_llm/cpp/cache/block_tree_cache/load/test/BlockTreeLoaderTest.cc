@@ -39,6 +39,7 @@ public:
     }
 
     std::atomic<size_t> read_calls{0};
+    std::shared_ptr<block_tree_cache_test::CallbackBarrier> read_barrier;
 
 protected:
     bool initImpl() override {
@@ -49,12 +50,15 @@ protected:
     }
     void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
         ++read_calls;
+        if (read_barrier) {
+            read_barrier->enterAndWait();
+        }
         throw std::runtime_error("injected remote read failure");
     }
     void writeImpl(const StorageRequest&) override {}
 };
 
-TEST(BlockTreeLoaderTest, CrcDeviceReuseDoesNotPromoteUnprotectedBackendFailure) {
+TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -127,21 +131,44 @@ TEST(BlockTreeLoaderTest, CrcDeviceReuseDoesNotPromoteUnprotectedBackendFailure)
         EXPECT_EQ(matched, 2u);
         return current.commit();
     });
+    backend->read_barrier = std::make_shared<block_tree_cache_test::CallbackBarrier>();
+    block_tree_cache_detail::ScopeRollback release_read([&] { backend->read_barrier->release(); });
     context->startBackendMatch();
+    ASSERT_TRUE(backend->read_barrier->waitUntilEnteredFor(1, std::chrono::seconds(5)));
+    auto joined_result = environment->cache->match(environment->keys);
+    auto joined        = joined_result.async_context;
+    ASSERT_NE(joined, nullptr);
+    ASSERT_EQ(joined->loadDescs().size(), 2u);
+    ASSERT_TRUE(joined->joinedLoads()[1]);
+    for (const auto& desc : joined->loadDescs()) {
+        const auto& blocks = desc.source_tier == Tier::DEVICE ? desc.source_blocks : desc.target_blocks;
+        const auto& group  = environment->groups[desc.group_set_id];
+        for (size_t member = 0; member < blocks.size(); ++member) {
+            request_refs.emplace_back(group->devicePools()[member], blocks[member]);
+        }
+    }
+    ASSERT_TRUE(joined->commit());
+    backend->read_barrier->release();
     context->waitDone();
+    joined->waitDone();
+    EXPECT_TRUE(joined->success());
+    EXPECT_TRUE(joined->localLoadSucceeded());
     backend->shutdown();
     EXPECT_EQ(backend->read_calls.load(), 1u);
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     resources = environment->resourcesForPathNode(0);
     EXPECT_TRUE(resources[0].hasTier(Tier::DEVICE));
-    EXPECT_TRUE(resources[1].hasTier(Tier::HOST));
-    EXPECT_FALSE(resources[1].hasTier(Tier::DEVICE));
+    EXPECT_FALSE(resources[1].hasTier(Tier::HOST));
+    EXPECT_TRUE(resources[1].hasTier(Tier::DEVICE));
+    EXPECT_TRUE(context->localLoadSucceeded());
     for (const auto& resource : resources) {
         EXPECT_TRUE(resource.isMatchUsable());
     }
 
     result.async_context.reset();
+    joined_result.async_context.reset();
+    joined.reset();
     context.reset();
     for (const auto& [pool, block] : request_refs) {
         releaseDeviceBlocks(*environment->cache, pool, {block});
@@ -163,12 +190,24 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
 
     environment->insertRequestPath();
     environment->releaseRequestRefs();
+    auto device_hit = environment->cache->match(environment->keys);
+    ASSERT_EQ(device_hit.reuse_time_metrics_snapshots.size(), 4u);
+    for (const auto& snapshot : device_hit.reuse_time_metrics_snapshots) {
+        EXPECT_EQ(snapshot.tier, Tier::DEVICE);
+        EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
+    }
+    environment->releaseMatch(device_hit);
     environment->demoteAll(Tier::DEVICE);
     ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::HOST), 1u);
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     EXPECT_EQ(result.matched_device_blocks, 0u);
+    ASSERT_EQ(result.reuse_time_metrics_snapshots.size(), 4u);
+    for (const auto& snapshot : result.reuse_time_metrics_snapshots) {
+        EXPECT_EQ(snapshot.tier, Tier::HOST);
+        EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
+    }
     std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(load_context, nullptr);
     EXPECT_EQ(load_context->matchedBlocks(), 2u);
@@ -210,6 +249,19 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::HOST), 0u);
     EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::DEVICE), 1u);
     environment->expectPayloads();
+    auto device_first_hit = environment->cache->match(environment->keys);
+    ASSERT_EQ(device_first_hit.reuse_time_metrics_snapshots.size(), 4u);
+    for (const auto& snapshot : device_first_hit.reuse_time_metrics_snapshots) {
+        EXPECT_EQ(snapshot.tier, Tier::DEVICE);
+        EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
+    }
+    environment->releaseMatch(device_first_hit);
+    auto device_second_hit = environment->cache->match(environment->keys);
+    ASSERT_EQ(device_second_hit.reuse_time_metrics_snapshots.size(), 4u);
+    for (const auto& snapshot : device_second_hit.reuse_time_metrics_snapshots) {
+        EXPECT_FALSE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
+    }
+    environment->releaseMatch(device_second_hit);
 
     result.async_context.reset();
     load_context.reset();
@@ -347,9 +399,12 @@ TEST(BlockTreeLoaderTest, PrefixValidatorClipsHostMatchBeforeImageInterior) {
     result.async_context.reset();
 }
 
-TEST(BlockTreeLoaderTest, MatchRefreshesOnlyReusedSuffixForEachGroup) {
-    constexpr size_t path_length = 4;
-    auto             full        = std::make_shared<FullGroupSet>(
+class BlockTreeLoaderReuseTimeTest: public ::testing::TestWithParam<size_t> {};
+
+TEST_P(BlockTreeLoaderReuseTimeTest, DevicePrefixAndLogicalSuffixShareReuseAndEvictionHitTime) {
+    constexpr size_t path_length          = 4;
+    const size_t     device_prefix_length = GetParam();
+    auto             full                 = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, makeHostPool(1, path_length), nullptr);
     auto swa    = std::make_shared<SWAGroupSet>(/*sliding_window_size=*/2,
                                              /*seq_size_per_block=*/1,
@@ -371,9 +426,13 @@ TEST(BlockTreeLoaderTest, MatchRefreshesOnlyReusedSuffixForEachGroup) {
     std::vector<std::vector<GroupSetResource>> resources(path_length, std::vector<GroupSetResource>(groups.size()));
     for (size_t path_index = 0; path_index < path_length; ++path_index) {
         for (size_t group_set_id = 0; group_set_id < groups.size(); ++group_set_id) {
-            resources[path_index][group_set_id].host_block =
-                groups[group_set_id]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
-            ASSERT_NE(resources[path_index][group_set_id].host_block, NULL_BLOCK_IDX);
+            if (path_index < device_prefix_length) {
+                resources[path_index][group_set_id].device_blocks = {static_cast<BlockIdxType>(10 + path_index)};
+            } else {
+                resources[path_index][group_set_id].host_block =
+                    groups[group_set_id]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+                ASSERT_NE(resources[path_index][group_set_id].host_block, NULL_BLOCK_IDX);
+            }
         }
     }
     ASSERT_TRUE(insertGroupSetResources(*cache, keys, resources));
@@ -390,28 +449,55 @@ TEST(BlockTreeLoaderTest, MatchRefreshesOnlyReusedSuffixForEachGroup) {
     }
 
     BlockTreeMatchResult result = cache->match(keys);
-    EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_EQ(result.matched_device_blocks, device_prefix_length);
     auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
-    ASSERT_NE(load_context, nullptr);
-    EXPECT_EQ(load_context->matchedBlocks(), path_length);
+    if (device_prefix_length < path_length) {
+        ASSERT_NE(load_context, nullptr);
+        EXPECT_EQ(load_context->matchedBlocks(), path_length);
+    } else {
+        EXPECT_EQ(load_context, nullptr);
+    }
 
+    const size_t expected_samples = device_prefix_length == 2 ? 10 : device_prefix_length == 3 ? 9 : 7;
+    ASSERT_EQ(result.reuse_time_metrics_snapshots.size(), expected_samples);
+    for (const auto& snapshot : result.reuse_time_metrics_snapshots) {
+        EXPECT_TRUE(snapshot.tier == Tier::DEVICE || snapshot.tier == Tier::HOST);
+        ASSERT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
+        EXPECT_EQ(snapshot.reuse_block_hit_idletime_ms, *snapshot.reuse_block_first_hit_idletime_ms);
+    }
+    const uint64_t            access_seq = path.front()->group_set_resources[0].candidate_meta.last_access_seq;
     const std::vector<size_t> reused_suffix_starts = {0, 2, 3};
+    const std::vector<size_t> device_suffix_starts = {0,
+                                                      device_prefix_length > 2 ? device_prefix_length - 2 : 0,
+                                                      device_prefix_length > 0 ? device_prefix_length - 1 : 0};
     for (size_t group_set_id = 0; group_set_id < groups.size(); ++group_set_id) {
         for (size_t node_index = 0; node_index < path.size(); ++node_index) {
             const CandidateMeta& meta = path[node_index]->group_set_resources[group_set_id].candidate_meta;
-            if (node_index < reused_suffix_starts[group_set_id]) {
+            const bool           reused =
+                node_index >= reused_suffix_starts[group_set_id]
+                || (node_index >= device_suffix_starts[group_set_id] && node_index < device_prefix_length);
+            if (reused) {
+                EXPECT_GT(meta.last_access_seq, access_before[node_index][group_set_id]);
+                EXPECT_EQ(meta.last_access_seq, access_seq);
+                EXPECT_EQ(meta.hit_count, 1u);
+                EXPECT_GE(meta.tier_last_hit_time_us, meta.tier_enter_time_us);
+                EXPECT_EQ(meta.last_access_time_us, meta.tier_last_hit_time_us);
+                EXPECT_EQ(EvictionTimingSnapshot(meta).last_access_time_us, meta.tier_last_hit_time_us);
+            } else {
                 EXPECT_EQ(meta.last_access_seq, access_before[node_index][group_set_id]);
                 EXPECT_EQ(meta.hit_count, 0u);
-            } else {
-                EXPECT_GT(meta.last_access_seq, access_before[node_index][group_set_id]);
-                EXPECT_EQ(meta.hit_count, 1u);
+                EXPECT_EQ(meta.tier_last_hit_time_us, 0);
+                EXPECT_EQ(meta.last_access_time_us, meta.tier_enter_time_us);
             }
         }
     }
 
     result.async_context.reset();
     load_context.reset();
+    block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
 }
+
+INSTANTIATE_TEST_SUITE_P(DevicePrefixes, BlockTreeLoaderReuseTimeTest, ::testing::Values(0u, 2u, 3u, 4u));
 
 TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     if (!cudaAvailable()) {
@@ -426,6 +512,14 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     environment->insertRequestPath();
     environment->releaseRequestRefs();
     environment->demoteAll(Tier::DEVICE);
+    {
+        auto host_hit = environment->cache->match(environment->keys);
+        ASSERT_EQ(host_hit.reuse_time_metrics_snapshots.size(), 2u);
+        for (const auto& snapshot : host_hit.reuse_time_metrics_snapshots) {
+            EXPECT_EQ(snapshot.tier, Tier::HOST);
+            EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
+        }
+    }
     environment->demoteAll(Tier::HOST);
     ASSERT_TRUE(environment->allResourcesAtTier(Tier::DISK));
 
@@ -434,6 +528,11 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
     environment->scripted_per_rank_transfer_engine->enqueue(false);
 
     BlockTreeMatchResult result       = environment->cache->match(environment->keys);
+    ASSERT_EQ(result.reuse_time_metrics_snapshots.size(), 2u);
+    for (const auto& snapshot : result.reuse_time_metrics_snapshots) {
+        EXPECT_EQ(snapshot.tier, Tier::DISK);
+        EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
+    }
     auto                 load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(load_context, nullptr);
     ASSERT_EQ(load_context->loadDescs().size(), 2u);
@@ -468,10 +567,24 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
         EXPECT_EQ(pool->freeBlocksNum(), options.usable_device_blocks);
     }
 
+    {
+        auto disk_hit = environment->cache->match(environment->keys);
+        ASSERT_EQ(disk_hit.reuse_time_metrics_snapshots.size(), 2u);
+        for (const auto& snapshot : disk_hit.reuse_time_metrics_snapshots) {
+            EXPECT_EQ(snapshot.tier, Tier::DISK);
+            EXPECT_FALSE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
+        }
+    }
     result.async_context.reset();
     load_context.reset();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+    for (const auto& group : environment->groups) {
+        EXPECT_EQ(group->diskPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        for (const auto& pool : group->devicePools()) {
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+        }
+    }
 }
 
 TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresSource) {
@@ -751,8 +864,15 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     auto env               = FullSWAEnvironment::create(options);
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
-    // An older request can still hold valid GPU blocks after the cache is demoted.
+    env->releaseRequestRefs();
     env->demoteAll(Tier::DEVICE);
+    ASSERT_TRUE(env->allResourcesAtTier(Tier::HOST));
+    // A different request owns independent GPU allocations for reinserting the same keys.
+    std::vector<block_tree_cache_test::MultiNodeBlocks> replacement_blocks;
+    for (const auto& group : env->groups) {
+        replacement_blocks.push_back(block_tree_cache_test::allocateDeviceBlocksForTest(*group, env->keys.size()));
+        ASSERT_EQ(replacement_blocks.back().size(), env->keys.size());
+    }
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match({env->keys[0], env->keys[1]}).async_context;
@@ -793,7 +913,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     for (size_t i = 0; i < env->keys.size(); ++i) {
         std::vector<GroupSetResource> resources(env->groups.size());
         for (size_t group = 0; group < env->groups.size(); ++group) {
-            resources[group].device_blocks = env->request_blocks[group][i];
+            resources[group].device_blocks = replacement_blocks[group][i];
         }
         replacement_resources.push_back(std::move(resources));
     }
@@ -813,7 +933,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
         const auto& pools = env->groups[group]->devicePools();
         for (size_t i = 0; i < env->keys.size(); ++i) {
             for (size_t member = 0; member < pools.size(); ++member) {
-                EXPECT_EQ(pools[member]->refCount(env->request_blocks[group][i][member]), i < 2 ? 2u : 1u);
+                EXPECT_EQ(pools[member]->refCount(replacement_blocks[group][i][member]), i < 2 ? 2u : 1u);
             }
         }
     }
@@ -836,7 +956,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     EXPECT_EQ(matched.matched_device_blocks, env->keys.size());
     env->releaseMatch(matched);
     for (size_t group = 0; group < env->groups.size(); ++group) {
-        for (const auto& blocks : env->request_blocks[group]) {
+        for (const auto& blocks : replacement_blocks[group]) {
             for (size_t member = 0; member < blocks.size(); ++member) {
                 EXPECT_EQ(env->groups[group]->devicePools()[member]->refCount(blocks[member]), 2u);
             }
@@ -844,7 +964,9 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     }
     releaseTargets(owner_refs);
     releaseTargets(child_refs);
-    env->releaseRequestRefs();
+    for (size_t group = 0; group < env->groups.size(); ++group) {
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*env->groups[group], replacement_blocks[group]);
+    }
     env->reclaimAll();
     env->expectFullyReclaimed();
 }

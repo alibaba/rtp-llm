@@ -21,18 +21,20 @@ enum class PublisherState {
     DISABLED    = 0,
     STARTING    = 1,
     REGISTERING = 3,
-    RESYNCING   = 4,
-    READY       = 5,
+    RESYNCING   = 4,  // Reserved metric value; periodic snapshots no longer set this state.
+    READY       = 5,  // Registered; incremental publishing does not wait for a snapshot ACK.
     DEGRADED    = 6,
     STOPPED     = 7,
 };
 static_assert(static_cast<int>(PublisherState::STOPPED) == 7);
 
 struct PublisherStatus {
-    PublisherState state          = PublisherState::DISABLED;
-    size_t         queue_size     = 0;
-    uint64_t       accepted_count = 0;
-    uint64_t       dropped_count  = 0;
+    PublisherState state               = PublisherState::DISABLED;
+    size_t         queue_size          = 0;
+    uint64_t       accepted_count      = 0;
+    uint64_t       dropped_count       = 0;
+    uint64_t       queue_full_count    = 0;
+    uint64_t       report_failed_count = 0;
 };
 
 // Cache mutation points depend only on this interface. Concrete publishers,

@@ -123,6 +123,7 @@ std::string KVCacheConfig::to_string() const {
         << "reserve_block_ratio: " << reserve_block_ratio << "\n"
         << "max_block_size_per_item: " << max_block_size_per_item << "\n"
         << "memory_cache_size_mb: " << memory_cache_size_mb << "\n"
+        << "memory_cache_swa_block_ratio: " << memory_cache_swa_block_ratio << "\n"
         << "memory_cache_sync_timeout_ms: " << memory_cache_sync_timeout_ms << "\n"
         << "disk_cache_paths: " << disk_cache_paths << "\n"
         << "disk_cache_size_mb: " << disk_cache_size_mb << "\n"
@@ -140,7 +141,20 @@ std::string KVCacheConfig::to_string() const {
         << "block_tree_memory_evict_high_watermark_ratio: " << block_tree_memory_evict_high_watermark_ratio << "\n"
         << "block_tree_disk_evict_low_watermark_ratio: " << block_tree_disk_evict_low_watermark_ratio << "\n"
         << "block_tree_disk_evict_high_watermark_ratio: " << block_tree_disk_evict_high_watermark_ratio << "\n"
-        << "linear_step: " << linear_step << "\n"
+        << "block_tree_full_device_evict_low_watermark_ratio: " << block_tree_full_device_evict_low_watermark_ratio
+        << "\n"
+        << "block_tree_full_device_evict_high_watermark_ratio: " << block_tree_full_device_evict_high_watermark_ratio
+        << "\n"
+        << "block_tree_full_memory_evict_low_watermark_ratio: " << block_tree_full_memory_evict_low_watermark_ratio
+        << "\n"
+        << "block_tree_full_memory_evict_high_watermark_ratio: " << block_tree_full_memory_evict_high_watermark_ratio
+        << "\n"
+        << "block_tree_full_disk_evict_low_watermark_ratio: " << block_tree_full_disk_evict_low_watermark_ratio << "\n"
+        << "block_tree_full_disk_evict_high_watermark_ratio: " << block_tree_full_disk_evict_high_watermark_ratio
+        << "\n"
+        << "reuse_cache_tail_blocks: " << reuse_cache_tail_blocks << "\n"
+        << "linear_pool_blocks: " << linear_pool_blocks << "\n"
+        << "swa_pool_blocks: " << swa_pool_blocks << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
@@ -157,6 +171,7 @@ std::string KVCacheConfig::to_string() const {
         << "memory_eviction_policy: " << memory_eviction_policy << "\n"
         << "disk_eviction_policy: " << disk_eviction_policy << "\n"
         << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
+        << "dsv41_decoder_swa_pool_blocks: " << dsv41_decoder_swa_pool_blocks << "\n"
         << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
         << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n"
         << "kv_cache_event_publisher_type: " << kv_cache_event_publisher_type << "\n"
@@ -164,6 +179,9 @@ std::string KVCacheConfig::to_string() const {
         << "kv_cache_event_instance_group: " << kv_cache_event_instance_group << "\n"
         << "kv_cache_event_instance_id: " << kv_cache_event_instance_id << "\n"
         << "kv_cache_event_host_ip_port: " << kv_cache_event_host_ip_port << "\n"
+        << "kv_cache_event_snapshot_interval_ms: " << kv_cache_event_snapshot_interval_ms << "\n"
+        << "kvcm_read_backend_type: " << kvcm_read_backend_type << "\n"
+        << "kvcm_min_replica_count: " << kvcm_min_replica_count << "\n"
         << "block_tree_full_prefix_scan_interval_ms: " << block_tree_full_prefix_scan_interval_ms << "\n";
     return oss.str();
 }

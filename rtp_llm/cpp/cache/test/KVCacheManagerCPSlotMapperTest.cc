@@ -179,7 +179,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCp
     model.attn_config.kernel_tokens_per_block = 128;
     model.attn_config.sliding_window          = 128;
     KVCacheSpecDesc full;
-    full.tag               = "global_kv_2";
+    full.tag               = "csa_kv";
     full.cache_type        = KVCacheSpecType::OpaqueKV;
     full.entry_dtype       = DataType::TYPE_UINT8;
     full.entry_elems       = 288;
@@ -250,10 +250,10 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DecodePageRRAllocatesCompactOwnerTables) 
             par.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
             par.prefill_cp_config.kv_cache_sharded = true;
             par.prefill_cp_config.prefill_cp_size = 8;
-            par.prefill_cp_config.decode_kv_cache_sharded = true;
             PDSepConfig pd;
             pd.role_type = RoleType::DECODE;
             auto config = makeTestConfig(20, page);
+            config.local_kv_cache_sharded = true;
             auto manager = std::make_shared<KVCacheManager>(
                 config, false, nullptr, KVCacheConfig{}, par, RuntimeConfig{}, SpeculativeExecutionConfig{}, pd);
             ASSERT_TRUE(manager->init());
@@ -338,6 +338,25 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     EXPECT_EQ(mapper->cpSize(), 2);
     EXPECT_EQ(mapper->blockSize(), seq_size_per_block);
     EXPECT_EQ(mapper->virtualBlockSize(), seq_size_per_block * 2);
+}
+
+TEST_F(KVCacheManagerCPSlotMapperTest, PrefillCPShardingEnabled_ReturnsValidMapper) {
+    auto config = makeTestConfig(/*block_num=*/20, /*seq_size_per_block=*/4, /*local_sharding=*/true);
+
+    ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    par.prefill_cp_config.kv_cache_sharded = true;
+    par.prefill_cp_config.prefill_cp_size  = 2;
+    par.tp_rank                            = 1;
+    par.tp_size                            = 2;
+
+    auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+    ASSERT_TRUE(mgr->init());
+    const auto mapper = mgr->cpSlotMapper();
+    ASSERT_NE(mapper, nullptr);
+    EXPECT_EQ(mapper->cpRank(), 1);
+    EXPECT_EQ(mapper->cpSize(), 2);
 }
 
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtualBlockSize) {

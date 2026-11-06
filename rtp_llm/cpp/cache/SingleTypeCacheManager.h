@@ -54,7 +54,14 @@ public:
                         bool                     enable_reuse_cache   = false,
                         int                      reserve_step         = 0,
                         std::vector<size_t>*     backfilled_positions = nullptr,
-                        const RequiredPositions& required_positions   = {})                                        = 0;
+                        const RequiredPositions& required_positions   = {}) = 0;
+    virtual bool mallocForDecode(BlockIds&            block_ids,
+                                 int                  seq_len,
+                                 bool                 enable_reuse_cache   = false,
+                                 int                  reserve_step         = 0,
+                                 std::vector<size_t>* backfilled_positions = nullptr) {
+        return malloc(block_ids, seq_len, enable_reuse_cache, reserve_step, backfilled_positions);
+    }
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     // Estimate peak additional blocks needed when generating remaining_tokens more tokens.
@@ -78,8 +85,8 @@ public:
                                                          bool                     reuse_enabled      = false,
                                                          const RequiredPositions& required_positions = {}) const = 0;
     void                                   reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices);
-    void                                   reference(const BlockIndicesType& block_indices);
-    void                                   unreference(const BlockIndicesType& block_indices);
+    void reference(const BlockIndicesType& block_indices, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
+    void unreference(const BlockIndicesType& block_indices, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
     std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
@@ -110,6 +117,12 @@ public:
     virtual CacheMemoryPlacement memoryPlacement() const;
 
 protected:
+    int prefillTailBlocks(int reuse_tail_blocks, bool enable_reuse_cache) const {
+        const int active_tail_blocks = static_cast<int>(std::max<size_t>(1, activeTailBlocks()));
+        return enable_reuse_cache && prefixReuseEnabled() ? std::max(reuse_tail_blocks, active_tail_blocks) :
+                                                            active_tail_blocks;
+    }
+
     static GroupBase makeLegacyCacheGroup(KVCacheSpecPtr spec, const CacheGroupPolicy& policy) {
         GroupBase group;
         group.tag    = spec == nullptr ? std::string{} : spec->tag;

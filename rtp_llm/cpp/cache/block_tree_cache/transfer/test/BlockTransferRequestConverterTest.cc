@@ -159,6 +159,39 @@ TEST(BlockTransferRequestConverterTest, ConvertsDeviceToHost) {
     EXPECT_EQ(output.blocksAt(Tier::DEVICE), (std::vector<BlockIdxType>{11, 12}));
 }
 
+TEST(BlockTransferRequestConverterTest, DiagnosticIdentitySurvivesSubtasksAndWireEncoding) {
+    auto         descriptor = TransferDescriptor::diskToDevice(0, 1, {2});
+    TransferTask task({descriptor}, std::chrono::seconds(10), 0);
+    auto         child = task.subtask({descriptor});
+    EXPECT_EQ(child.traceId(), task.traceId());
+    EXPECT_NE(child.traceId(), 0u);
+    auto rpc_first  = task.rpcSubtask({descriptor});
+    auto rpc_second = task.rpcSubtask({descriptor});
+    EXPECT_NE(rpc_first.traceId(), rpc_second.traceId());
+    EXPECT_NE(rpc_first.traceId(), task.traceId());
+    EXPECT_EQ(rpc_first.workflowId(), task.workflowId());
+    EXPECT_EQ(rpc_first.parentTraceId(), task.traceId());
+    EXPECT_EQ(rpc_first.subtask({descriptor}).parentTraceId(), task.traceId());
+    EXPECT_EQ(rpc_first.subtask({descriptor}).traceId(), rpc_first.traceId());
+    MemoryOperationRequestPB request;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, child, groupSets()));
+    MemoryOperationRequestPB parsed;
+    ASSERT_TRUE(parsed.ParseFromString(request.SerializeAsString()));
+    EXPECT_EQ(parsed.transfer_trace_id(), task.traceId());
+    EXPECT_EQ(parsed.transfer_workflow_id(), task.workflowId());
+    EXPECT_EQ(parsed.transfer_parent_id(), task.parentTraceId());
+    EXPECT_TRUE(parsed.has_transfer_request_id());
+    EXPECT_EQ(parsed.transfer_request_id(), 0);
+    std::vector<TransferDescriptor> decoded;
+    EXPECT_TRUE(BlockTransferRequestConverter::decodeTransfer(parsed, decoded, groupSets()));
+    parsed.clear_transfer_workflow_id();
+    parsed.clear_transfer_parent_id();
+    parsed.clear_transfer_trace_id();
+    parsed.clear_transfer_request_id();
+    parsed.clear_has_transfer_request_id();
+    EXPECT_TRUE(BlockTransferRequestConverter::decodeTransfer(parsed, decoded, groupSets()));
+}
+
 TEST(BlockTransferRequestConverterTest, EncodeRejectsExpiredTask) {
     const auto               descriptor = TransferDescriptor::deviceToHost(0, {1}, 2);
     MemoryOperationRequestPB request;
@@ -639,8 +672,7 @@ TEST(BlockTransferRequestConverterTest, MixedGroupLayoutsRoundTripWithLocalCrcCo
     const auto               first  = TransferDescriptor::hostToDevice(0, 21, {11});
     const auto               second = TransferDescriptor::hostToDevice(2, 22, {12, 13});
     MemoryOperationRequestPB request;
-    ASSERT_TRUE(
-        BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({first, second}), groups));
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(request, makeTransferTask({first, second}), groups));
     EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2D);
     std::vector<TransferDescriptor> decoded;
     ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, decoded, groups));
@@ -704,8 +736,7 @@ TEST(BlockTransferRequestConverterTest, ResponseReportsHighestCopyErrorForEntire
     EXPECT_EQ(received.code(), MemoryOperationResponsePB::CRC_COMPUTE_FAILED);
     EXPECT_EQ(BlockTransferRequestConverter::decodeCode(received.code()), CacheCopyError::CRC_COMPUTE_FAILED);
     result.merge({failure, CacheCopyError::CRC_MISMATCH});
-    EXPECT_EQ(BlockTransferRequestConverter::encodeCode(result.copy_error),
-              MemoryOperationResponsePB::CRC_MISMATCH);
+    EXPECT_EQ(BlockTransferRequestConverter::encodeCode(result.copy_error), MemoryOperationResponsePB::CRC_MISMATCH);
 }
 
 TEST(BlockTransferRequestConverterTest, ResponseRoundTripPreservesMixedBlockOutcomes) {
@@ -726,8 +757,9 @@ TEST(BlockTransferRequestConverterTest, ResponseRoundTripPreservesMixedBlockOutc
 
     const auto incomplete = BlockTransferRequestConverter::decodeTransferResult(received, 5);
     EXPECT_FALSE(incomplete.ok());
-    EXPECT_EQ(incomplete.copy_error, CacheCopyError::COPY_FAILED);
-    EXPECT_EQ(incomplete.block_errors, std::vector<CacheCopyError>(5, CacheCopyError::COPY_FAILED));
+    EXPECT_EQ(incomplete.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_EQ(incomplete.copy_error, CacheCopyError::RPC_FAILED);
+    EXPECT_EQ(incomplete.block_errors, std::vector<CacheCopyError>(5, CacheCopyError::RPC_FAILED));
 }
 
 TEST(BlockTransferRequestConverterTest, ResponsePreservesMergedMessagesAndOriginalErrorCode) {

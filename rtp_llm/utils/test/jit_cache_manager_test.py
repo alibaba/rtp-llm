@@ -577,6 +577,46 @@ class DeepGemmWatcherEventTest(JitCacheTestBase):
 
 
 class StoreTest(JitCacheTestBase):
+    def test_deep_gemm_read_events_do_not_rescan_entries(self):
+        component = replace(
+            next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
+            local_dir=self.root / "deep_gemm",
+        )
+        entry = component.local_dir / "cache" / "hash"
+        entry.mkdir(parents=True)
+        for name, payload in (
+            ("kernel.cu", b"source"),
+            ("kernel.cubin", b"binary"),
+            ("meta.json", b"{}"),
+            (".committed", b""),
+        ):
+            (entry / name).write_bytes(payload)
+        manager = jit.JitCacheManager(jit.Scope("test", self.root, (component,)), "")
+        read_processed = threading.Event()
+        handle_event = manager.on_any_event
+
+        def observe(event):
+            handle_event(event)
+            if event.event_type == "closed_no_write":
+                read_processed.set()
+
+        manager.on_any_event = observe
+        observer = jit.Observer()
+        observer.schedule(manager, str(component.local_dir), recursive=True)
+        with mock.patch.object(
+            jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+        ) as validate:
+            observer.start()
+            try:
+                (entry / "meta.json").read_bytes()
+                self.assertTrue(read_processed.wait(5), "read event was not handled")
+            finally:
+                observer.stop()
+                observer.join(5)
+            self.assertFalse(observer.is_alive())
+            validate.assert_not_called()
+        self.assertFalse(manager._dirty.is_set())
+
     def test_deep_gemm_completed_entry_survives_snapshot_restore(self):
         component = replace(
             next(item for item in jit.COMPONENTS if item.name == "deep_gemm"),
@@ -1476,6 +1516,44 @@ class ManagerTest(JitCacheTestBase):
         self.assertEqual((scope.root / "triton" / "local.cubin").read_bytes(), b"local")
         staging = scope.root.parent / jit.STAGING_DIR / scope.scope_id
         self.assertFalse(list(staging.glob("*")))
+
+    def test_deepjit_read_events_do_not_revalidate_metadata(self):
+        component = replace(
+            next(x for x in jit.COMPONENTS if x.name == "deep_gemm"),
+            local_dir=self.root / "deep_gemm",
+        )
+        manager = self.make_manager(jit.Scope("test", self.root, (component,)))
+        entry = component.local_dir / "cache" / "hash"
+        entry.mkdir(parents=True)
+        for name, data in {
+            "kernel.cu": "source",
+            "kernel.cubin": "binary",
+            "meta.json": "{}",
+            ".committed": "",
+        }.items():
+            (entry / name).write_text(data)
+        with mock.patch.object(
+            jit, "deepjit_entry_files", wraps=jit.deepjit_entry_files
+        ) as validate:
+            for event_type in ("opened", "closed_no_write"):
+                manager.on_any_event(
+                    types.SimpleNamespace(
+                        is_directory=False,
+                        event_type=event_type,
+                        src_path=str(entry / "meta.json"),
+                    )
+                )
+            validate.assert_not_called()
+            self.assertFalse(manager._dirty.is_set())
+            manager.on_any_event(
+                types.SimpleNamespace(
+                    is_directory=False,
+                    event_type="closed",
+                    src_path=str(entry / ".committed"),
+                )
+            )
+            validate.assert_called_once_with(entry)
+            self.assertTrue(manager._dirty.is_set())
 
     def test_event_handler_marks_dirty_only_for_trigger_files(self):
         triton = replace(

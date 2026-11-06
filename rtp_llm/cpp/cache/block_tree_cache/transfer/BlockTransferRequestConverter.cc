@@ -109,7 +109,12 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         return false;
     }
     request.set_timeout_ms(remaining->count());
-    const auto&                             descriptors = task.descriptors();
+    request.set_transfer_trace_id(task.traceId());
+    request.set_transfer_workflow_id(task.workflowId());
+    request.set_transfer_parent_id(task.parentTraceId());
+    request.set_has_transfer_request_id(task.requestId().has_value());
+    request.set_transfer_request_id(task.requestId().value_or(0));
+    const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
         return false;
     }
@@ -291,8 +296,13 @@ void BlockTransferRequestConverter::encodeTransferResult(MemoryOperationResponse
 TransferResult BlockTransferRequestConverter::decodeTransferResult(const MemoryOperationResponsePB& response,
                                                                    size_t                           block_count) {
     TransferResult result;
-    if (static_cast<size_t>(response.block_errors_size()) != block_count) {
-        result = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer response block count mismatch");
+    if (static_cast<size_t>(response.block_errors_size()) != block_count
+        || !MemoryOperationResponsePB::Code_IsValid(response.code())
+        || std::any_of(response.block_errors().begin(), response.block_errors().end(), [](int code) {
+               return !MemoryOperationResponsePB::Code_IsValid(code);
+           })) {
+        result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "invalid block transfer response"),
+                  CacheCopyError::RPC_FAILED};
         result.expandBlockErrors(block_count);
         return result;
     }

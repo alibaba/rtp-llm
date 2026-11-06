@@ -44,9 +44,9 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
             group_sets_, max_descriptors_per_batch, 2 * transfer_worker_count, world_rank);
     }
     load_transfer_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferLoad");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "btc_load");
     transfer_task_pool_ =
-        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferBackground");
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "btc_evict_store");
     RTP_LLM_CHECK(load_transfer_task_pool_->start());
     RTP_LLM_CHECK(transfer_task_pool_->start());
     device_host_executor_ = std::make_unique<DeviceHostTransferExecutor>(*transfer_task_pool_,
@@ -54,9 +54,10 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                                          std::move(device_host_options),
                                                                          metrics_reporter,
                                                                          std::move(crc_service),
-                                                                         load_transfer_task_pool_.get());
+                                                                         load_transfer_task_pool_.get(),
+                                                                         group_sets_, world_rank);
     host_disk_executor_   = std::make_unique<HostDiskTransferExecutor>(
-        *transfer_task_pool_, max_descriptors_per_batch, metrics_reporter, load_transfer_task_pool_.get());
+        *transfer_task_pool_, max_descriptors_per_batch, metrics_reporter, load_transfer_task_pool_.get(), world_rank);
     if (enable_disk_cache && !group_sets_.empty()) {
         device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(*device_host_executor_,
                                                                              *host_disk_executor_,
@@ -65,7 +66,8 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                                              *transfer_task_pool_,
                                                                              max_descriptors_per_batch,
                                                                              std::move(metrics_reporter),
-                                                                             load_transfer_task_pool_.get());
+                                                                             load_transfer_task_pool_.get(),
+                                                                             world_rank);
     }
 }
 

@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -47,13 +48,13 @@ TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
         cv.notify_all();
     };
 
-    const bool first_submitted = executor->submit(blocking_task);
+    const bool first_submitted = executor->submit(blocking_task, BlockTreeTaskClass::LOAD);
     bool       first_started   = false;
     {
         std::unique_lock<std::mutex> lock(mutex);
         first_started = cv.wait_for(lock, std::chrono::seconds(5), [&] { return started >= 1; });
     }
-    const bool second_submitted = first_started && executor->submit(blocking_task);
+    const bool second_submitted = first_started && executor->submit(blocking_task, BlockTreeTaskClass::LOAD);
     bool       both_started     = false;
     if (second_submitted) {
         std::unique_lock<std::mutex> lock(mutex);
@@ -62,8 +63,8 @@ TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
     const bool queued_submitted  = both_started && executor->submit([&] {
         completed.fetch_add(1);
         cv.notify_all();
-    });
-    const bool overflow_rejected = both_started && !executor->submit([] {});
+    }, BlockTreeTaskClass::LOAD);
+    const bool overflow_rejected = both_started && !executor->submit([] {}, BlockTreeTaskClass::LOAD);
     {
         std::lock_guard<std::mutex> lock(mutex);
         release = true;
@@ -97,12 +98,12 @@ TEST(StorageBackendExecutorTest, ShutdownDrainsQueuedTasksAndWaitsForConcurrentS
         entered->set_value();
         released.wait();
         completed->fetch_add(1);
-    }));
+    }, BlockTreeTaskClass::LOAD));
     const auto started_status = started.wait_for(std::chrono::seconds(5));
     EXPECT_EQ(started_status, std::future_status::ready);
-    EXPECT_TRUE(executor->submit([completed] { completed->fetch_add(1); }));
-    EXPECT_TRUE(executor->submit([] { throw std::runtime_error("task failure"); }));
-    EXPECT_TRUE(executor->submit([completed] { completed->fetch_add(1); }));
+    EXPECT_TRUE(executor->submit([completed] { completed->fetch_add(1); }, BlockTreeTaskClass::LOAD));
+    EXPECT_TRUE(executor->submit([] { throw std::runtime_error("task failure"); }, BlockTreeTaskClass::LOAD));
+    EXPECT_TRUE(executor->submit([completed] { completed->fetch_add(1); }, BlockTreeTaskClass::LOAD));
 
     BoundedThread<void> first([executor] { executor->shutdown(); });
     EXPECT_EQ(first.waitFor(std::chrono::milliseconds(50)), std::future_status::timeout);
@@ -116,6 +117,56 @@ TEST(StorageBackendExecutorTest, ShutdownDrainsQueuedTasksAndWaitsForConcurrentS
     second.get();
     EXPECT_EQ(completed->load(), 3u);
     EXPECT_FALSE(executor->submit([] {}));
+}
+
+TEST(StorageBackendExecutorTest, BlockedBackgroundTaskLeavesAWorkerForLoad) {
+    auto executor = makeStorageBackendExecutor(/*thread_count=*/2, /*queue_size=*/8);
+    ASSERT_TRUE(executor->start());
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::promise<void> background_entered;
+    auto started = background_entered.get_future();
+    std::promise<void> load_entered;
+    auto load_started = load_entered.get_future();
+    block_tree_cache_detail::ScopeRollback cleanup([&] {
+        release.set_value();
+        executor->shutdown();
+    });
+    ASSERT_TRUE(executor->submit([&] {
+        background_entered.set_value();
+        released.wait();
+    }));
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_FALSE(executor->submit([] {}));
+    EXPECT_TRUE(executor->submit([&] { load_entered.set_value(); }, BlockTreeTaskClass::LOAD));
+    EXPECT_EQ(load_started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+}
+
+TEST(StorageBackendExecutorTest, BackgroundExceptionRetiresAdmission) {
+    auto executor = makeStorageBackendExecutor(/*thread_count=*/1, /*queue_size=*/8);
+    ASSERT_TRUE(executor->start());
+    std::promise<void> release;
+    auto released = release.get_future().share();
+    std::promise<void> entered;
+    auto started = entered.get_future();
+    std::promise<bool> admitted;
+    auto admission = admitted.get_future();
+    block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
+    block_tree_cache_detail::ScopeRollback cleanup([&] {
+        unblock.run();
+        executor->shutdown();
+    });
+    ASSERT_TRUE(executor->submit([&] {
+        entered.set_value();
+        released.wait();
+        throw std::runtime_error("background failure");
+    }));
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_FALSE(executor->submit([] {}));
+    EXPECT_TRUE(executor->submit([&] { admitted.set_value(executor->submit([] {})); }, BlockTreeTaskClass::LOAD));
+    unblock.run();
+    ASSERT_EQ(admission.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(admission.get());
 }
 
 class CoreDumpGuard {
@@ -157,6 +208,19 @@ private:
     }
 };
 
+class FreezeObservingPool: public TestBlockPool {
+public:
+    std::function<void()> on_first_tree_ref;
+
+protected:
+    void onFirstTreeRefNoLock(BlockIdxType block) override {
+        if (on_first_tree_ref) {
+            on_first_tree_ref();
+        }
+        DeviceBlockPool::onFirstTreeRefNoLock(block);
+    }
+};
+
 class HoldingExecutor: public StorageBackendExecutor {
 public:
     explicit HoldingExecutor(bool start_result = true): start_result_(start_result) {}
@@ -166,7 +230,7 @@ public:
         return started_;
     }
 
-    bool submit(Task task) override {
+    bool submit(Task task, BlockTreeTaskClass = BlockTreeTaskClass::BACKGROUND) override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (throw_on_submit_) {
@@ -320,6 +384,11 @@ public:
         return read_calls_;
     }
 
+    bool matchEntered() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return match_entered_;
+    }
+
     size_t writeHandleCount() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return write_handle_count_;
@@ -403,6 +472,52 @@ private:
     size_t                  init_calls_{0};
     void*                   init_resolved_address_{nullptr};
     std::atomic<bool>       shutdown_called_{false};
+};
+
+class QuarantineObservingBackend: public TestBackend {
+public:
+    using TestBackend::TestBackend;
+
+    std::function<void()>   read_action;
+    std::function<void()>   write_action;
+    size_t                  quarantine_events{0};
+    bool                    last_quarantine_is_write{false};
+    StorageQuarantineReason last_quarantine_reason{StorageQuarantineReason::RPC_ERROR};
+    size_t                  last_quarantine_blocks{0};
+    size_t                  quarantined_tasks{0};
+    size_t                  quarantined_blocks{0};
+
+protected:
+    void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override {
+        if (read_action) {
+            read_action();
+        } else {
+            TestBackend::readImpl(request, match_meta);
+        }
+    }
+
+    void writeImpl(const StorageRequest& request) override {
+        if (write_action) {
+            write_action();
+        } else {
+            TestBackend::writeImpl(request);
+        }
+    }
+
+    void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override {
+        ++quarantine_events;
+        last_quarantine_is_write = is_write;
+        last_quarantine_reason   = reason;
+        last_quarantine_blocks   = block_count;
+    }
+
+    void onQuarantineChanged(uint64_t,
+                             size_t task_count,
+                             size_t block_count,
+                             const StorageQuarantineBreakdown&) noexcept override {
+        quarantined_tasks  = task_count;
+        quarantined_blocks = block_count;
+    }
 };
 
 std::shared_ptr<const CacheTopology> makeTopology() {
@@ -499,14 +614,20 @@ TEST(StorageBackendTest, ReorderedPoolInputsPreserveTagIdentityAndTopologyLifeti
     StorageRequest first{std::make_shared<CacheKeysType>(CacheKeysType{1}), {{{"group_0", first_block}}}};
     auto           task = backend.prepareWrite(std::move(first));
     EXPECT_EQ(first_pool->refCount(first_block), 2u);
+    EXPECT_EQ(first_pool->referencedBlocksNum(), 1u);
+    EXPECT_EQ(first_pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
     EXPECT_EQ(second_pool->refCount(second_block), 1u);
     task = {};
+    EXPECT_EQ(first_pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
     StorageRequest second{std::make_shared<CacheKeysType>(CacheKeysType{1}), {{{"group_1", second_block}}}};
-    backend.read(std::move(second), nullptr, [](bool success) { EXPECT_TRUE(success); });
+    backend.read(std::move(second), nullptr, [](ErrorInfo error) { EXPECT_TRUE(error.ok()); });
     EXPECT_EQ(first_pool->refCount(first_block), 1u);
     EXPECT_EQ(second_pool->refCount(second_block), 2u);
+    EXPECT_EQ(second_pool->referencedBlocksNum(), 1u);
+    EXPECT_EQ(second_pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 1u);
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(second_pool->refCount(second_block), 1u);
+    EXPECT_EQ(second_pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
     backend.shutdown();
     first_pool->decRef(first_block);
     second_pool->decRef(second_block);
@@ -567,7 +688,7 @@ TEST(StorageBackendTest, CallbackExceptionsSettleTasksAndPreserveExecutor) {
             ++callbacks;
             throw std::runtime_error("match callback failure");
         });
-        backend.read(makeRequest(block), nullptr, [&](bool) {
+        backend.read(makeRequest(block), nullptr, [&](ErrorInfo) {
             ++callbacks;
             throw 42;
         });
@@ -627,8 +748,8 @@ TEST(StorageBackendTest, DefaultExecutorShutdownSettlesQueuedOperationsAndPins) 
         backend->releaseMatch();
         FAIL() << "match did not occupy the worker";
     }
-    backend->read(makeRequest(block), nullptr, [completions](bool success) {
-        EXPECT_TRUE(success);
+    backend->read(makeRequest(block), nullptr, [completions](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
         completions->fetch_add(1);
     });
     backend->write(backend->prepareWrite(makeRequest(block)));
@@ -644,6 +765,114 @@ TEST(StorageBackendTest, DefaultExecutorShutdownSettlesQueuedOperationsAndPins) 
     EXPECT_EQ(backend->readCalls(), 1u);
     EXPECT_EQ(backend->writeHandleCount(), 1u);
     EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, TimelineSeparatesPrepareQueueIoSettlementAndCallback) {
+    auto       pool  = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    executor->setDuplicate(true);
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    auto   session           = AsyncProfileSession::start();
+    size_t callbacks         = 0;
+    auto   match_request     = makeRequest(NULL_BLOCK_IDX);
+    match_request.request_id = 42;
+    backend.match(std::move(match_request), [&](size_t, auto, bool ok) {
+        EXPECT_TRUE(ok);
+        ++callbacks;
+    });
+    auto read_request       = makeRequest(block);
+    read_request.request_id = 43;
+    backend.read(std::move(read_request), nullptr, [&](ErrorInfo e) {
+        EXPECT_TRUE(e.ok());
+        ++callbacks;
+    });
+    auto write_request       = makeRequest(block);
+    write_request.request_id = 44;
+    EXPECT_TRUE(backend.write(backend.prepareWrite(std::move(write_request))));
+    EXPECT_EQ(callbacks, 0u);
+    int64_t     worker_tid = 0;
+    const auto  caller_tid = asyncProfileThreadId();
+    std::thread worker([&] {
+        worker_tid = asyncProfileThreadId();
+        EXPECT_EQ(executor->runAll(), 3u);
+    });
+    worker.join();
+    EXPECT_EQ(callbacks, 2u);
+    auto events = session->finish();
+    EXPECT_EQ(events.size(), 15u);
+    for (const auto& event : events) {
+        const std::string stage(event.record.stage);
+        if (stage.find("queue_wait") != std::string::npos) {
+            EXPECT_EQ(event.record.kind, AsyncProfileKind::Wait);
+        } else if (stage.find("total") != std::string::npos) {
+            EXPECT_EQ(event.record.kind, AsyncProfileKind::Lifecycle);
+        } else {
+            EXPECT_EQ(event.record.kind, AsyncProfileKind::Execution);
+            EXPECT_EQ(event.record.start_tid, stage.find("prepare") != std::string::npos ? caller_tid : worker_tid);
+            EXPECT_EQ(event.record.start_tid, event.end_tid);
+        }
+    }
+    for (const auto* stage : {"match_total",
+                              "match_queue_wait",
+                              "match_io",
+                              "match_callback",
+                              "read_total",
+                              "read_prepare",
+                              "read_queue_wait",
+                              "read_io",
+                              "read_settle",
+                              "read_callback",
+                              "write_total",
+                              "write_prepare",
+                              "write_queue_wait",
+                              "write_io",
+                              "write_settle"}) {
+        size_t count = 0;
+        for (const auto& event : events) {
+            if (event.name.find(std::string("cache.transfer.storage_backend.") + stage + "(") == 0)
+                ++count;
+            EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
+            EXPECT_GE(event.end_us, event.start_us);
+        }
+        EXPECT_EQ(count, 1u) << stage;
+    }
+    EXPECT_EQ(pool->refCount(block), 1u);
+    backend.shutdown();
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, RejectedStorageOperationsHaveNoIoRangesAndStillReleasePins) {
+    auto       pool  = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto        executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    executor->setReject(true);
+    auto   session   = AsyncProfileSession::start();
+    size_t callbacks = 0;
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo e) {
+        EXPECT_FALSE(e.ok());
+        ++callbacks;
+    });
+    backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool ok) {
+        EXPECT_FALSE(ok);
+        ++callbacks;
+    });
+    EXPECT_FALSE(backend.write(backend.prepareWrite(makeRequest(block))));
+    EXPECT_EQ(callbacks, 2u);
+    const auto events = session->finish();
+    EXPECT_EQ(events.size(), 12u);
+    for (const auto& event : events) {
+        EXPECT_EQ(event.name.find("_io("), std::string::npos);
+        EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
+    }
+    EXPECT_EQ(pool->refCount(block), 1u);
+    backend.shutdown();
     pool->decRef(block);
 }
 
@@ -688,9 +917,9 @@ TEST(StorageBackendTest, SubmissionFailureCompletesOnceAndReleasesPins) {
 
     executor->setReject(true);
     size_t read_completions = 0;
-    backend.read(makeRequest(block), nullptr, [&](bool success) {
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
         ++read_completions;
-        EXPECT_FALSE(success);
+        EXPECT_FALSE(error.ok());
     });
     EXPECT_EQ(read_completions, 1u);
     EXPECT_EQ(pool->refCount(block), 1u);
@@ -726,7 +955,7 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
 
     backend.failNextRead();
     bool read_success = true;
-    backend.read(makeRequest(block), nullptr, [&](bool success) { read_success = success; });
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { read_success = error.ok(); });
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_FALSE(read_success);
     EXPECT_EQ(pool->refCount(block), 1u);
@@ -743,6 +972,126 @@ TEST(StorageBackendTest, IoExceptionsPropagateFailureAndReleasePins) {
     EXPECT_FALSE(match_success);
     pool->decRef(block);
     backend.shutdown();
+}
+
+TEST(StorageBackendTest, RuntimeDisableSkipsQueuedIoAndPreservesLocalMatchesAndPins) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    auto write = backend.prepareWrite(makeRequest(block));
+    ASSERT_TRUE(write);
+    EXPECT_TRUE(backend.write(std::move(write)));
+    bool read_success = true;
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { read_success = error.ok(); });
+    auto request = makeRequest(NULL_BLOCK_IDX, 2);
+    request.local_matched_blocks_num = 1;
+    bool match_done = false;
+    backend.match(std::move(request), [&](size_t matched, auto meta, bool success) {
+        EXPECT_TRUE(success);
+        EXPECT_EQ(matched, 1u);
+        EXPECT_EQ(meta, nullptr);
+        match_done = true;
+    });
+    EXPECT_EQ(pool->refCount(block), 3u);
+    backend.setRemoteCacheEnabled(false);
+    EXPECT_FALSE(backend.prepareWrite(makeRequest(block)));
+    EXPECT_EQ(executor->runAll(), 3u);
+    EXPECT_TRUE(match_done);
+    EXPECT_FALSE(read_success);
+    EXPECT_EQ(backend.readCalls(), 0u);
+    EXPECT_EQ(backend.writeHandleCount(), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_FALSE(pool->isFrozen(block));
+
+    backend.setRemoteCacheEnabled(true);
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { read_success = error.ok(); });
+    EXPECT_TRUE(backend.write(backend.prepareWrite(makeRequest(block))));
+    EXPECT_EQ(executor->runAll(), 2u);
+    EXPECT_TRUE(read_success);
+    EXPECT_EQ(backend.readCalls(), 1u);
+    EXPECT_EQ(backend.writeHandleCount(), 1u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    backend.shutdown();
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, DisabledLocalMatchDoesNotDependOnExecutorCapacity) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    TestBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    auto write = backend.prepareWrite(makeRequest(block));
+    ASSERT_TRUE(write);
+    executor->setReject(true);
+    backend.setRemoteCacheEnabled(false);
+    auto request = makeRequest(NULL_BLOCK_IDX, 2);
+    request.local_matched_blocks_num = 1;
+    bool done = false;
+    backend.match(std::move(request), [&](size_t matched, auto meta, bool success) {
+        EXPECT_TRUE(success);
+        EXPECT_EQ(matched, 1u);
+        EXPECT_EQ(meta, nullptr);
+        done = true;
+    });
+    EXPECT_TRUE(done);
+    bool read_done = false;
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
+        EXPECT_FALSE(error.ok());
+        read_done = true;
+    });
+    EXPECT_TRUE(read_done);
+    EXPECT_FALSE(backend.write(std::move(write)));
+    EXPECT_EQ(backend.readCalls(), 0u);
+    EXPECT_EQ(backend.writeHandleCount(), 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(executor->pendingCount(), 0u);
+    backend.shutdown();
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, DisableDuringMatchDiscardsRemoteHitsWithoutFailingLocalMatch) {
+    auto pool = std::make_shared<TestBlockPool>();
+    TestBackend backend;
+    ASSERT_TRUE(initBackend(backend, pool));
+    backend.blockMatch();
+    auto completion = std::make_shared<std::promise<size_t>>();
+    auto result = completion->get_future();
+    auto request = makeRequest(NULL_BLOCK_IDX, 2);
+    request.local_matched_blocks_num = 1;
+    backend.match(std::move(request), [completion](size_t matched, auto meta, bool success) {
+        EXPECT_TRUE(success);
+        EXPECT_EQ(meta, nullptr);
+        completion->set_value(matched);
+    });
+    const bool entered = backend.waitUntilMatchEntered();
+    backend.setRemoteCacheEnabled(false);
+    backend.releaseMatch();
+    ASSERT_TRUE(entered);
+    ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(result.get(), 1u);
+    backend.shutdown();
+}
+
+TEST(StorageBackendTest, DisableDoesNotCancelAlreadyAdmittedPayload) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    QuarantineObservingBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    backend.write_action = [&] { backend.setRemoteCacheEnabled(false); };
+    EXPECT_TRUE(backend.write(backend.prepareWrite(makeRequest(block))));
+    EXPECT_EQ(executor->runAll(), 1u);
+    EXPECT_FALSE(backend.remoteCacheEnabled());
+    EXPECT_EQ(backend.quarantine_events, 0u);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    backend.shutdown();
+    pool->decRef(block);
 }
 
 TEST(StorageBackendTest, AsyncWritesReturnBeforeCompletionAndReleaseOnlyTheirOwnPins) {
@@ -856,7 +1205,7 @@ TEST(StorageBackendTest, AsyncWriteFromOwnCallbacksQueuesWithoutBlocking) {
             called = true;
         };
         if (read) {
-            backend.read(makeRequest(block), nullptr, done);
+            backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { done(error.ok()); });
         } else {
             backend.match(makeRequest(NULL_BLOCK_IDX), [&](size_t, auto, bool success) { done(success); });
         }
@@ -881,8 +1230,8 @@ TEST(StorageBackendTest, DuplicateExecutorInvocationCompletesExactlyOnce) {
     ASSERT_TRUE(initBackend(backend, pool));
 
     size_t completions = 0;
-    backend.read(makeRequest(block), nullptr, [&](bool success) {
-        EXPECT_TRUE(success);
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
         ++completions;
     });
     EXPECT_EQ(executor->runAll(), 1u);
@@ -948,7 +1297,9 @@ TEST(StorageBackendTest, ShutdownFromCompletionIsRejectedWithoutDeadlock) {
         EXPECT_TRUE(success);
         try {
             backend.shutdown();
-        } catch (...) { rejected = true; }
+        } catch (...) {
+            rejected = true;
+        }
     });
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_TRUE(rejected);
@@ -966,7 +1317,7 @@ TEST(StorageBackendTest, ReadAfterShutdownReleasesPin) {
     backend.shutdown();
 
     bool success = true;
-    backend.read(makeRequest(block), nullptr, [&](bool current_success) { success = current_success; });
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) { success = error.ok(); });
     EXPECT_FALSE(success);
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
@@ -1115,8 +1466,8 @@ TEST(StorageBackendTest, ReadPinsTargetsUntilCompletion) {
     ASSERT_TRUE(initBackend(backend, pool));
     bool completed = false;
 
-    backend.read(makeRequest(block), nullptr, [&](bool success) {
-        EXPECT_TRUE(success);
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
+        EXPECT_TRUE(error.ok());
         completed = true;
     });
     EXPECT_FALSE(completed);
@@ -1127,6 +1478,201 @@ TEST(StorageBackendTest, ReadPinsTargetsUntilCompletion) {
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
     backend.shutdown();
+}
+
+TEST(StorageBackendTest, UnknownReadFreezesBeforeCallbackAndReleasesTaskState) {
+    for (const auto reason : {StorageQuarantineReason::SDK_TIMEOUT,
+                              StorageQuarantineReason::RPC_TIMEOUT,
+                              StorageQuarantineReason::RPC_ERROR,
+                              StorageQuarantineReason::INVALID_RESPONSE}) {
+        auto pool  = std::make_shared<TestBlockPool>();
+        auto block = pool->malloc().value();
+        pool->incRef(block);
+        auto                       executor = std::make_shared<HoldingExecutor>();
+        QuarantineObservingBackend backend(/*init_result=*/true, executor);
+        ASSERT_TRUE(initBackend(backend, pool));
+        const bool timeout =
+            reason == StorageQuarantineReason::SDK_TIMEOUT || reason == StorageQuarantineReason::RPC_TIMEOUT;
+        backend.read_action = [reason, timeout] {
+            if (timeout) {
+                throw StorageOperationTimeout("transfer timed out", reason);
+            }
+            throw StorageOperationCompletionUnknown("transfer completion unknown", reason);
+        };
+        auto                               request      = makeRequest(block, /*key_count=*/2);
+        std::weak_ptr<const CacheKeysType> request_keys = request.keys;
+        bool                               completed    = false;
+        backend.read(std::move(request), nullptr, [&](ErrorInfo error) {
+            EXPECT_EQ(error.code(), timeout ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION);
+            EXPECT_TRUE(pool->isFrozen(block));
+            EXPECT_EQ(pool->treeRefCount(block), 1u);
+            EXPECT_EQ(pool->refCount(block), 2u);  // The request and the permanent tree hold.
+            completed = true;
+        });
+        EXPECT_EQ(pool->refCount(block), 2u);
+        EXPECT_FALSE(pool->isFrozen(block));
+        ASSERT_EQ(executor->runAll(), 1u);
+        EXPECT_TRUE(completed);
+        EXPECT_TRUE(request_keys.expired());
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+        EXPECT_EQ(backend.quarantine_events, 1u);
+        EXPECT_FALSE(backend.last_quarantine_is_write);
+        EXPECT_EQ(backend.last_quarantine_reason, reason);
+        EXPECT_EQ(backend.last_quarantine_blocks, 1u);
+        EXPECT_EQ(backend.quarantined_tasks, 1u);
+        EXPECT_EQ(backend.quarantined_blocks, 1u);
+
+        pool->decRef(block);
+        backend.shutdown();
+        EXPECT_EQ(backend.quarantined_tasks, 0u);
+        EXPECT_EQ(backend.quarantined_blocks, 0u);
+        EXPECT_TRUE(pool->isAllocated(block));
+        EXPECT_TRUE(pool->isFrozen(block));
+        EXPECT_EQ(pool->refCount(block), 1u);
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    }
+}
+
+TEST(StorageBackendTest, RepeatedUnknownWritesKeepFrozenReferencesAcrossShutdown) {
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto                       executor = std::make_shared<HoldingExecutor>();
+    QuarantineObservingBackend backend(/*init_result=*/true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    backend.write_action = [] {
+        throw StorageOperationCompletionUnknown("write completion unknown", StorageQuarantineReason::RPC_ERROR);
+    };
+    for (size_t task_index = 1; task_index <= 2; ++task_index) {
+        auto                               request      = makeRequest(block, /*key_count=*/2);
+        std::weak_ptr<const CacheKeysType> request_keys = request.keys;
+        ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
+        ASSERT_EQ(executor->runAll(), 1u);
+        EXPECT_TRUE(request_keys.expired());
+        EXPECT_EQ(pool->refCount(block), 2u);
+        EXPECT_EQ(pool->treeRefCount(block), 1u);
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+        EXPECT_EQ(backend.quarantine_events, task_index);
+        EXPECT_TRUE(backend.last_quarantine_is_write);
+        EXPECT_EQ(backend.last_quarantine_blocks, 1u);
+        EXPECT_EQ(backend.quarantined_tasks, task_index);
+        EXPECT_EQ(backend.quarantined_blocks, 1u);
+    }
+    const auto next_block = pool->malloc().value();
+    pool->incRef(next_block);
+    ASSERT_TRUE(backend.write(backend.prepareWrite(makeRequest(next_block))));
+    ASSERT_EQ(executor->runAll(), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
+    EXPECT_EQ(backend.quarantine_events, 3u);
+    EXPECT_EQ(backend.last_quarantine_blocks, 1u);
+    EXPECT_EQ(backend.quarantined_tasks, 3u);
+    EXPECT_EQ(backend.quarantined_blocks, 2u);
+    // BTC can freeze the same block without changing the physical-block metric.
+    pool->freezeBlock(block);
+    EXPECT_EQ(pool->treeRefCount(block), 1u);
+    backend.shutdown();
+    EXPECT_EQ(backend.quarantined_tasks, 0u);
+    EXPECT_EQ(backend.quarantined_blocks, 0u);
+    EXPECT_EQ(pool->refCount(block), 2u);
+    EXPECT_EQ(pool->treeRefCount(block), 1u);
+    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
+    EXPECT_TRUE(pool->isFrozen(next_block));
+    pool->decRef(block);
+    pool->decRef(next_block);
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(pool->refCount(next_block), 1u);
+}
+
+TEST(StorageBackendTest, UnknownReadFreezesAllPoolsBeforeReleasingAnyPinWithoutCallback) {
+    auto       first        = std::make_shared<FreezeObservingPool>();
+    auto       second       = std::make_shared<FreezeObservingPool>();
+    const auto first_block  = first->malloc().value();
+    const auto second_block = second->malloc().value();
+    ASSERT_EQ(first_block, second_block);
+    first->incRef(first_block);
+    second->incRef(second_block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    executor->setDuplicate(true);
+    QuarantineObservingBackend backend(/*init_result=*/true, executor);
+    ASSERT_TRUE(backend.init(
+        makeSharedPoolTopology(), {{"group_0", first}, {"group_1", second}}, [](int layer, const auto&, int) {
+            return std::vector<BlockInfo>{{false, layer, 0, reinterpret_cast<void*>(1), 16}};
+        }));
+    size_t freeze_calls      = 0;
+    first->on_first_tree_ref = [&] {
+        ++freeze_calls;
+        EXPECT_FALSE(second->isFrozen(second_block));
+        EXPECT_EQ(second->refCount(second_block), 2u);
+    };
+    second->on_first_tree_ref = [&] {
+        ++freeze_calls;
+        EXPECT_TRUE(first->isFrozen(first_block));
+        // Caller + normal task pin + permanent tree hold. Releasing each pin
+        // immediately after freezing its block would leave only two holds here.
+        EXPECT_EQ(first->refCount(first_block), 3u);
+    };
+    backend.read_action = [] {
+        throw StorageOperationCompletionUnknown("multiple pools still in use", StorageQuarantineReason::RPC_ERROR);
+    };
+    StorageRequest request;
+    request.keys                            = std::make_shared<const CacheKeysType>(CacheKeysType{1, 2});
+    request.handles                         = {{{"group_0", first_block}, {"group_1", second_block}},
+                                               {{"group_0", first_block}, {"group_1", second_block}}};
+    std::weak_ptr<const CacheKeysType> keys = request.keys;
+    backend.read(std::move(request), nullptr, {});
+    EXPECT_EQ(executor->runAll(), 1u);
+    EXPECT_EQ(freeze_calls, 2u);
+    EXPECT_EQ(backend.quarantine_events, 1u);
+    EXPECT_EQ(backend.quarantined_blocks, 2u);
+    EXPECT_TRUE(keys.expired());
+
+    StorageRequest repeated_request;
+    repeated_request.keys    = std::make_shared<const CacheKeysType>(CacheKeysType{3});
+    repeated_request.handles = {{{"group_0", first_block}}};
+    backend.read(std::move(repeated_request), nullptr, {});
+    EXPECT_EQ(executor->runAll(), 1u);
+    EXPECT_EQ(freeze_calls, 2u);
+    EXPECT_EQ(backend.quarantine_events, 2u);
+    EXPECT_EQ(backend.last_quarantine_blocks, 1u);
+    EXPECT_EQ(backend.quarantined_tasks, 2u);
+    EXPECT_EQ(backend.quarantined_blocks, 2u);
+    EXPECT_EQ(first->refCount(first_block), 2u);
+    EXPECT_EQ(second->refCount(second_block), 2u);
+    first->decRef(first_block);
+    second->decRef(second_block);
+    backend.shutdown();
+    EXPECT_TRUE(first->isFrozen(first_block));
+    EXPECT_TRUE(second->isFrozen(second_block));
+    EXPECT_EQ(first->refCount(first_block), 1u);
+    EXPECT_EQ(second->refCount(second_block), 1u);
+}
+
+TEST(StorageBackendTest, CompletedReadAndWriteFailuresReleasePinsWithoutFreezing) {
+    auto pool  = std::make_shared<TestBlockPool>();
+    auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto                       executor = std::make_shared<HoldingExecutor>();
+    QuarantineObservingBackend backend(/*init_result=*/true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    backend.failNextRead();
+    bool completed = false;
+    backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
+        EXPECT_EQ(error.code(), ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_EQ(pool->refCount(block), 1u);
+        completed = true;
+    });
+    ASSERT_EQ(executor->runAll(), 1u);
+    EXPECT_TRUE(completed);
+    backend.failNextWrite();
+    ASSERT_TRUE(backend.write(backend.prepareWrite(makeRequest(block))));
+    ASSERT_EQ(executor->runAll(), 1u);
+    EXPECT_FALSE(pool->isFrozen(block));
+    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(pool->treeRefCount(block), 0u);
+    EXPECT_EQ(backend.quarantine_events, 0u);
+    backend.shutdown();
+    pool->decRef(block);
+    EXPECT_FALSE(pool->isAllocated(block));
 }
 
 TEST(StorageBackendTest, ResolvesGpuBufferAndGroupMetadataFromBoundResources) {

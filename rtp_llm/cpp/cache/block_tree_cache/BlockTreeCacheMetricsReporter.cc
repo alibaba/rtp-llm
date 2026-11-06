@@ -5,6 +5,8 @@
 #include <unordered_set>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/CacheStageMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -20,19 +22,6 @@ constexpr std::array<CacheGroupType, 3> kMetricGroupTypes = {
 
 size_t transferOperationIndex(CacheTransferOperation operation) {
     return static_cast<size_t>(operation);
-}
-
-int metricTierIndex(Tier tier) {
-    if (tier == Tier::DEVICE) {
-        return 0;
-    }
-    if (tier == Tier::HOST) {
-        return 1;
-    }
-    if (tier == Tier::DISK) {
-        return 2;
-    }
-    return -1;
 }
 
 int metricGroupTypeIndex(CacheGroupType group_type) {
@@ -62,20 +51,36 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
     snapshot.load_ref_blocks            = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
     snapshot.eviction_target_ref_blocks = pool.referencedBlocksNum(BlockTreeRefType::EVICTION);
     snapshot.store_ref_blocks           = pool.referencedBlocksNum(BlockTreeRefType::STORE);
+    snapshot.frozen_ref_blocks          = pool.referencedBlocksNum(BlockTreeRefType::FROZEN);
     return snapshot;
 }
 
 BlockTreePoolMetricsSnapshot makeDevicePoolMetricsSnapshot(const DeviceBlockPool& pool) {
     BlockTreePoolMetricsSnapshot snapshot = makePoolMetricsSnapshot(Tier::DEVICE, pool);
     snapshot.request_ref_blocks           = pool.referencedBlocksNum();
+    snapshot.remote_connector_ref_blocks  = pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR);
+    snapshot.pd_connector_ref_blocks      = pool.referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR);
     return snapshot;
 }
 
 }  // namespace
 
 BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter):
-    metrics_reporter_(std::move(metrics_reporter)) {}
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
+    bool                                       enable_stage_metrics,
+    std::chrono::milliseconds                  stage_interval):
+    metrics_reporter_(std::move(metrics_reporter)) {
+    if (metrics_reporter_ && enable_stage_metrics) {
+        try {
+            stage_metrics_ = std::make_unique<CacheStageMetrics>(metrics_reporter_, stage_interval);
+        } catch (...) {}  // Optional observer initialization must never fail cache creation.
+    }
+}
+BlockTreeCacheMetricsReporter::~BlockTreeCacheMetricsReporter() = default;
+void BlockTreeCacheMetricsReporter::flushStageMetrics() const {
+    if (stage_metrics_)
+        stage_metrics_->flush();
+}
 
 std::vector<BlockTreePoolMetricsSnapshot>
 BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
@@ -184,6 +189,44 @@ void BlockTreeCacheMetricsReporter::reportEvictableCandidateCount(
     }
 }
 
+void BlockTreeCacheMetricsReporter::reportVictimSelectionMetrics(const VictimSelectionMetrics& snapshot) const {
+    if (!enabled()) {
+        return;
+    }
+    for (const auto trigger : {VictimSelectionTrigger::WATERMARK, VictimSelectionTrigger::ON_DEMAND}) {
+        for (const auto tier : kMetricTiers) {
+            for (const auto group_type : kMetricGroupTypes) {
+                for (const bool drop : {false, true}) {
+                    const auto& counters = snapshot.at(trigger, tier, group_type, drop);
+                    if (!counters.observed) {
+                        continue;
+                    }
+                    kmonitor::MetricsTags tags(
+                        "trigger_type", trigger == VictimSelectionTrigger::WATERMARK ? "watermark" : "on_demand");
+                    tags.AddTag("tier", tierName(tier));
+                    tags.AddTag("group_type", metricCacheGroupTypeName(group_type));
+                    tags.AddTag("mode", drop ? "drop" : "demote");
+                    RtpLLMCacheVictimSelectionMetricsCollector collector;
+                    collector.calls              = counters.calls;
+                    collector.selected           = counters.selected;
+                    collector.latency_sum_us     = static_cast<double>(counters.latency_sum_ns) / 1000.0;
+                    collector.scanned_candidates = counters.scanned_candidates;
+                    metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheVictimSelectionMetricsCollector>(
+                        &tags, &collector);
+                    // Zero deltas keep previously active reason series current during idle periods.
+                    for (size_t i = 0; i < counters.skipped.size(); ++i) {
+                        collector.skip_reason = kVictimSkipReasonNames[i];
+                        collector.skipped     = counters.skipped[i];
+                        metrics_reporter_
+                            ->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheVictimSelectionMetricsCollector>(
+                                &tags, &collector);
+                    }
+                }
+            }
+        }
+    }
+}
+
 void BlockTreeCacheMetricsReporter::reportEvictionTriggered(Tier           source_tier,
                                                             CacheGroupType group_type,
                                                             bool           force_drop) const {
@@ -224,73 +267,49 @@ void BlockTreeCacheMetricsReporter::reportEvictionTrigger(Tier           source_
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
 }
 
-std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> BlockTreeCacheMetricsReporter::collectCacheReuseTimeMetrics(
-    const std::vector<BlockTreeCacheReuseTimeSample>& samples) const {
-    struct Accumulator {
-        int64_t reuse_interval_sum_us{0};
-        int64_t reuse_interval_max_us{0};
-        int64_t entry_age_sum_us{0};
-        int64_t entry_age_max_us{0};
-        size_t  count{0};
-    };
-
-    std::array<std::array<Accumulator, kMetricGroupTypes.size()>, kMetricTiers.size()> accumulators{};
-    for (const BlockTreeCacheReuseTimeSample& sample : samples) {
-        const int tier_index       = metricTierIndex(sample.tier);
-        const int group_type_index = metricGroupTypeIndex(sample.group_type);
-        if (tier_index < 0) {
-            continue;
-        }
-        assert(static_cast<size_t>(tier_index) < kMetricTiers.size());
-        assert(group_type_index >= 0 && static_cast<size_t>(group_type_index) < kMetricGroupTypes.size());
-        const int64_t reuse_interval_us = sample.access_time_us - sample.last_access_time_us;
-        const int64_t entry_age_us      = sample.access_time_us - sample.insert_time_us;
-        Accumulator& accumulator = accumulators[static_cast<size_t>(tier_index)][static_cast<size_t>(group_type_index)];
-        accumulator.reuse_interval_sum_us += reuse_interval_us;
-        accumulator.reuse_interval_max_us = std::max(accumulator.reuse_interval_max_us, reuse_interval_us);
-        accumulator.entry_age_sum_us += entry_age_us;
-        accumulator.entry_age_max_us = std::max(accumulator.entry_age_max_us, entry_age_us);
-        ++accumulator.count;
-    }
-
-    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> snapshots;
-    snapshots.reserve(kMetricTiers.size() * kMetricGroupTypes.size());
-    for (size_t tier_index = 0; tier_index < kMetricTiers.size(); ++tier_index) {
-        for (size_t group_type_index = 0; group_type_index < kMetricGroupTypes.size(); ++group_type_index) {
-            const Accumulator& accumulator = accumulators[tier_index][group_type_index];
-            if (accumulator.count == 0) {
-                continue;
-            }
-            BlockTreeCacheReuseTimeMetricsSnapshot snapshot;
-            snapshot.tier       = kMetricTiers[tier_index];
-            snapshot.group_type = kMetricGroupTypes[group_type_index];
-            snapshot.reuse_interval_avg_ms =
-                accumulator.reuse_interval_sum_us / static_cast<int64_t>(accumulator.count) / 1000;
-            snapshot.reuse_interval_max_ms = accumulator.reuse_interval_max_us / 1000;
-            snapshot.hit_entry_age_avg_ms =
-                accumulator.entry_age_sum_us / static_cast<int64_t>(accumulator.count) / 1000;
-            snapshot.hit_entry_age_max_ms = accumulator.entry_age_max_us / 1000;
-            snapshots.push_back(snapshot);
-        }
-    }
-    return snapshots;
-}
-
 void BlockTreeCacheMetricsReporter::reportCacheReuseTimeMetrics(
     const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) const {
-    if (metrics_reporter_ == nullptr) {
+    if (metrics_reporter_ == nullptr || snapshots.empty()) {
         return;
     }
+    struct Accumulator {
+        int64_t first_hit_sum_ms{0};
+        size_t  first_hit_count{0};
+        int64_t hit_sum_ms{0};
+        size_t  hit_count{0};
+    };
+    std::array<std::array<Accumulator, kMetricGroupTypes.size()>, kMetricTiers.size()> accumulators{};
     for (const BlockTreeCacheReuseTimeMetricsSnapshot& snapshot : snapshots) {
-        RtpLLMCacheReuseMetricsCollector collector;
-        collector.reuse_interval_avg_ms     = snapshot.reuse_interval_avg_ms;
-        collector.reuse_interval_max_ms     = snapshot.reuse_interval_max_ms;
-        collector.hit_entry_age_avg_ms      = snapshot.hit_entry_age_avg_ms;
-        collector.hit_entry_age_max_ms      = snapshot.hit_entry_age_max_ms;
-        collector.report_reuse_time_metrics = true;
-        kmonitor::MetricsTags tags("tier", tierName(snapshot.tier));
-        tags.AddTag("group_type", metricCacheGroupTypeName(snapshot.group_type));
-        metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
+        const size_t tier_index       = static_cast<size_t>(snapshot.tier);
+        const int    group_type_index = metricGroupTypeIndex(snapshot.group_type);
+        if (tier_index >= kMetricTiers.size() || group_type_index < 0) {
+            continue;
+        }
+        auto& accumulator = accumulators[tier_index][group_type_index];
+        if (snapshot.reuse_block_first_hit_idletime_ms.has_value()) {
+            accumulator.first_hit_sum_ms += *snapshot.reuse_block_first_hit_idletime_ms;
+            ++accumulator.first_hit_count;
+        }
+        accumulator.hit_sum_ms += snapshot.reuse_block_hit_idletime_ms;
+        ++accumulator.hit_count;
+    }
+    for (size_t tier_index = 0; tier_index < kMetricTiers.size(); ++tier_index) {
+        for (size_t group_type_index = 0; group_type_index < kMetricGroupTypes.size(); ++group_type_index) {
+            const auto& accumulator = accumulators[tier_index][group_type_index];
+            if (accumulator.hit_count == 0) {
+                continue;
+            }
+            RtpLLMCacheReuseMetricsCollector collector;
+            if (accumulator.first_hit_count != 0) {
+                collector.reuse_block_first_hit_idletime_ms =
+                    static_cast<double>(accumulator.first_hit_sum_ms) / accumulator.first_hit_count;
+            }
+            collector.reuse_block_hit_idletime_ms = static_cast<double>(accumulator.hit_sum_ms) / accumulator.hit_count;
+            collector.report_reuse_time_metrics   = true;
+            kmonitor::MetricsTags tags("tier", tierName(kMetricTiers[tier_index]));
+            tags.AddTag("group_type", metricCacheGroupTypeName(kMetricGroupTypes[group_type_index]));
+            metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
+        }
     }
 }
 
@@ -300,29 +319,34 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTransfe
         return;
     }
     for (size_t desc_index = 0; desc_index < task.descriptors().size(); ++desc_index) {
-        reportEvictedDescriptor(task.descriptors()[desc_index], task.timings[desc_index], group_sets, true);
+        reportEvictedDescriptor(task.descriptors()[desc_index], task.timings[desc_index], group_sets, "watermark");
     }
 }
 
 void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionDropTask&         task,
-                                                           const std::vector<GroupSetPtr>& group_sets) const {
+                                                           const std::vector<GroupSetPtr>& group_sets,
+                                                           const char*                     trigger_type) const {
     if (metrics_reporter_ == nullptr) {
         return;
     }
-    reportEvictedDescriptor(task.primary_desc, task.primary_timing, group_sets, true);
+    reportEvictedDescriptor(task.primary_desc, task.primary_timing, group_sets, trigger_type);
     for (size_t desc_index = 0; desc_index < task.dependent_prune_descs.size(); ++desc_index) {
         reportEvictedDescriptor(
-            task.dependent_prune_descs[desc_index], task.dependent_prune_timings[desc_index], group_sets, false);
+            task.dependent_prune_descs[desc_index], task.dependent_prune_timings[desc_index], group_sets, trigger_type);
     }
     for (size_t desc_index = 0; desc_index < task.cascade_descs.size(); ++desc_index) {
-        reportEvictedDescriptor(task.cascade_descs[desc_index], task.cascade_timings[desc_index], group_sets, false);
+        reportEvictedDescriptor(
+            task.cascade_descs[desc_index], task.cascade_timings[desc_index], group_sets, trigger_type);
     }
 }
 
 void BlockTreeCacheMetricsReporter::reportEvictedDescriptor(const TransferDescriptor&       desc,
                                                             const EvictionTimingSnapshot&   timing,
                                                             const std::vector<GroupSetPtr>& group_sets,
-                                                            bool report_block_idletime) const {
+                                                            const char*                     trigger_type) const {
+    if (metrics_reporter_ == nullptr) {
+        return;
+    }
     const size_t group_set_id = desc.group_set_id;
     if (group_set_id >= group_sets.size()) {
         return;
@@ -334,15 +358,29 @@ void BlockTreeCacheMetricsReporter::reportEvictedDescriptor(const TransferDescri
 
     RtpLLMCacheEvictionMetricsCollector collector;
     collector.source_tier       = tierName(desc.source_tier);
-    collector.target_tier       = tierName(desc.target_tier);
     collector.group_type        = metricCacheGroupTypeName(group_set->groupType());
+    collector.trigger_type      = trigger_type;
     collector.report_eviction   = true;
     collector.block_lifetime_ms = std::max<int64_t>(0, (timing.selected_time_us - timing.tier_enter_time_us) / 1000);
-    if (report_block_idletime) {
-        collector.block_idletime_ms     = (timing.selected_time_us - timing.last_access_time_us) / 1000;
-        collector.report_block_idletime = true;
-    }
+    collector.block_idletime_ms = (timing.selected_time_us - timing.last_access_time_us) / 1000;
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
+}
+
+void BlockTreeCacheMetricsReporter::reportInsertHardStop(const BlockTreeInsertHardStopInfo& hard_stop) const {
+    if (metrics_reporter_ == nullptr) {
+        return;
+    }
+    RtpLLMCacheInsertMetricsCollector collector;
+    collector.tier = tierName(hard_stop.existing_tier);
+    if (hard_stop.transfer_state == GroupSetTransferState::DEMOTING) {
+        collector.operation = cacheTransferOperationName(CacheTransferOperation::EVICT);
+    } else if (hard_stop.transfer_state == GroupSetTransferState::LOAD_PENDING
+               || hard_stop.transfer_state == GroupSetTransferState::LOADING) {
+        collector.operation = cacheTransferOperationName(CacheTransferOperation::LOAD);
+    } else {
+        collector.operation = "idle";
+    }
+    metrics_reporter_->report<RtpLLMCacheInsertMetrics, RtpLLMCacheInsertMetricsCollector>(nullptr, &collector);
 }
 
 void BlockTreeCacheMetricsReporter::reportLoadJoin(size_t dependency_count) const {
@@ -363,6 +401,25 @@ void BlockTreeCacheMetricsReporter::reportLoadJoinWait(int64_t join_wait_latency
     collector.join_wait_latency_us  = join_wait_latency_us;
     collector.report_load_join_wait = true;
     metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
+}
+
+void BlockTreeCacheMetricsReporter::reportDiskLoadStage(
+    const char* stage, int64_t latency_us, bool success, int64_t rank, const char* scope) const noexcept {
+    reportTransferStage(stage, latency_us, success, rank, scope, "load", "DISK", "DEVICE");
+}
+
+void BlockTreeCacheMetricsReporter::reportTransferStage(const char* stage,
+                                                        int64_t     latency_us,
+                                                        bool        success,
+                                                        int64_t     rank,
+                                                        const char* scope,
+                                                        const char* operation,
+                                                        const char* source_tier,
+                                                        const char* target_tier) const noexcept {
+    if (!stage_metrics_ || latency_us < 0) {
+        return;
+    }
+    stage_metrics_->record(stage, latency_us, success, rank, scope, operation, source_tier, target_tier);
 }
 
 int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier target_tier) {

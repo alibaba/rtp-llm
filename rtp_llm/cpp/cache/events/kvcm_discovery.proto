@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package rtp_llm.kvcm.discovery;
+
+// Wire-compatible subset of KVCM MetaService.GetClusterInfo. A separate
+// package avoids registering the SDK's protobuf descriptors a second time.
+// Discovery uses the existing RPC; event reporting continues to use HTTP.
+message GetClusterInfoRequest {
+    string trace_id = 1;
+    string instance_id = 2;
+}
+
+message Status {
+    int32 code = 1;
+}
+
+message ResponseHeader {
+    Status status = 1;
+}
+
+message MetaNodeEndpoint {
+    string node_id = 1;
+    string host = 2;
+    int32 meta_http_port = 4;
+}
+
+message GetClusterInfoResponse {
+    ResponseHeader header = 1;
+    string leader_node_id = 3;
+    MetaNodeEndpoint leader_endpoint = 4;
+}

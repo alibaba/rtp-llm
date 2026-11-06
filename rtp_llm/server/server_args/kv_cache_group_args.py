@@ -1,4 +1,82 @@
+import argparse
+import math
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _reuse_tail_blocks(value):
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "reuse_cache_tail_blocks must be an integer"
+        ) from error
+    if not 0 < count <= 2147483647:
+        raise argparse.ArgumentTypeError(
+            "reuse_cache_tail_blocks must be in [1, 2147483647]"
+        )
+    return count
+
+
+def _pool_blocks(value):
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("pool blocks must be an integer") from error
+    if count != 0 and not 2 <= count <= 2147483647:
+        raise argparse.ArgumentTypeError(
+            "pool blocks must be 0 or in [2, 2147483647], including block 0"
+        )
+    return count
+
+
+def _positive_finite_ratio(value):
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("SWA/full block ratio must be finite and positive") from error
+    if not math.isfinite(ratio) or ratio <= 0:
+        raise argparse.ArgumentTypeError("SWA/full block ratio must be finite and positive")
+    return ratio
+
+
+def _decoder_pool_blocks(value):
+    try:
+        count = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("decoder SWA pool blocks must be an integer") from error
+    if count != 0 and not 2 <= count <= 2**31 - 1:
+        raise argparse.ArgumentTypeError("decoder SWA pool blocks must be 0 or in [2, 2**31-1], including block zero")
+    return count
+
+
+def _snapshot_interval_ms(value):
+    try:
+        interval = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "snapshot interval must be an integer in milliseconds"
+        ) from error
+    if not 1 <= interval <= 2**31 - 1:
+        raise argparse.ArgumentTypeError(
+            "snapshot interval must be in [1, 2**31-1] milliseconds"
+        )
+    return interval
+
+
+def _snapshot_interval_ms(value):
+    try:
+        interval = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "snapshot interval must be an integer in milliseconds"
+        ) from error
+    if not -(2**31) <= interval <= 2**31 - 1:
+        raise argparse.ArgumentTypeError(
+            "snapshot interval must fit in a signed 32-bit integer"
+        )
+    return interval
+
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
@@ -53,7 +131,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=str,
         choices=["none", "kvcm"],
         default="none",
-        help="HBM KV cache 事件输出：none 关闭，kvcm 直连 KVCM。",
+        help="HBM KV cache 事件输出：none 关闭数据上报，kvcm 直连 KVCM；remote backend 的注册与心跳不受此项控制。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_snapshot_interval_ms",
+        env_name="KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS",
+        bind_to=(kv_cache_config, "kv_cache_event_snapshot_interval_ms"),
+        type=_snapshot_interval_ms,
+        default=600000,
+        help="KVCM 全量快照采集间隔（毫秒），默认 600000；非正数禁用数据上报，保留 remote 控制心跳；未启用 remote 时必须为正数。",
     )
     kv_cache_group.add_argument(
         "--kv_cache_event_manager_endpoint",
@@ -61,7 +147,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kv_cache_event_manager_endpoint"),
         type=str,
         default="",
-        help="KVCM Meta HTTP endpoint，例如 http://127.0.0.1:56020。",
+        help="KVCM Meta HTTP endpoint；为空时复用 RECO_* 发现 leader，非空时覆盖自动发现。",
     )
     kv_cache_group.add_argument(
         "--kv_cache_event_instance_group",
@@ -147,12 +233,28 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Attention算子使用的kernel block大小（token数量）。0表示与seq_size_per_block相同。",
     )
     kv_cache_group.add_argument(
-        "--linear_step",
-        env_name="LINEAR_STEP",
-        bind_to=(kv_cache_config, "linear_step"),
-        type=int,
-        default=1,
-        help="线性注意力（Linear Attention）缓存重用的步长：每隔 linear_step 个 block 额外保留一个 block（>=1）。",
+        "--reuse_cache_tail_blocks",
+        env_name="REUSE_CACHE_TAIL_BLOCKS",
+        bind_to=(kv_cache_config, "reuse_cache_tail_blocks"),
+        type=_reuse_tail_blocks,
+        default=2147483647,
+        help="参与 reuse cache 的 Linear/SWA group 在 prefill 分配的尾部 block 数，至少保留该组 active_tail_blocks，再按实际 block 数截断；命中的复用状态单独保留；默认全保留。未参与复用的 group 和 decode 使用原有 active tail 策略。",
+    )
+    kv_cache_group.add_argument(
+        "--linear_pool_blocks",
+        env_name="LINEAR_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "linear_pool_blocks"),
+        type=_pool_blocks,
+        default=0,
+        help="每个 Linear 独立池的物理 block 总数（含 block 0）；0 表示自动计算，模型专用配置优先。",
+    )
+    kv_cache_group.add_argument(
+        "--swa_pool_blocks",
+        env_name="SWA_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "swa_pool_blocks"),
+        type=_pool_blocks,
+        default=0,
+        help="每个 SWA 独立池的物理 block 总数（含 block 0）；0 表示自动计算，模型专用配置优先。",
     )
     kv_cache_group.add_argument(
         "--ssm_state_dtype",
@@ -198,6 +300,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=0,
         help="单个 rank 的 Memory KVCache 容量，单位 MB",
+    )
+    kv_cache_group.add_argument(
+        "--memory_cache_swa_block_ratio",
+        env_name="MEMORY_CACHE_SWA_BLOCK_RATIO",
+        bind_to=(kv_cache_config, "memory_cache_swa_block_ratio"),
+        type=_positive_finite_ratio,
+        default=1.0,
+        help="HOST SWA/full 可用 block 数比例，默认 1.0；仅同时存在 FULL/SWA 时生效，不改变检查点间隔。",
     )
     kv_cache_group.add_argument(
         "--memory_cache_sync_timeout_ms",
@@ -294,15 +404,27 @@ def init_kv_cache_group_args(parser, kv_cache_config):
                 default=default,
                 help=f"BlockTreeCache {tier} 淘汰水位 {boundary} 比例。",
             )
+            full_name = f"block_tree_full_{tier}_evict_{boundary}_watermark_ratio"
+            kv_cache_group.add_argument(
+                f"--{full_name}",
+                env_name=full_name.upper(),
+                bind_to=(kv_cache_config, full_name),
+                type=float,
+                default=-1.0,
+                help=f"BlockTreeCache FULL {tier} 淘汰水位 {boundary} 比例。"
+                "low/high 均为 -1 时继承共享水位，均为 0 时禁用 FULL 水位淘汰；"
+                "否则需满足 0 < low < high <= 1。",
+            )
 
     kv_cache_group.add_argument(
         "--block_tree_full_prefix_scan_interval_ms",
         env_name="BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS",
         bind_to=(kv_cache_config, "block_tree_full_prefix_scan_interval_ms"),
         type=int,
-        default=0,
-        help="BlockTreeCache FULL 前缀异常扫描周期，单位毫秒；0 表示关闭且不创建线程，非 0 时必须不小于 1000。"
-        "单轮扫描节点数和单 cycle 明细上限由 scanner 内部常量固定，不可配置。",
+        default=30000,
+        help="BlockTreeCache FULL 前缀异常扫描批次间隔，单位毫秒；默认 30000（30 秒），"
+        "0 表示关闭且不创建线程，非 0 时必须不小于 1000。仅非 FFN 服务的 TP rank 0 执行扫描。"
+        "单批扫描节点数和单轮明细上限由 scanner 内部常量固定，不可配置。",
     )
 
     # KVCM storage backend configuration arguments
@@ -337,6 +459,30 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=str,
         default="default",
         help="instance_group名称",
+    )
+    kv_cache_group.add_argument(
+        "--kvcm_task_timeout_ms",
+        env_name="KVCM_TASK_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "kvcm_task_timeout_ms"),
+        type=int,
+        default=20000,
+        help="Remote读写整体任务超时预算（毫秒，包含排队）",
+    )
+    kv_cache_group.add_argument(
+        "--kvcm_read_backend_type",
+        env_name="KVCM_READ_BACKEND_TYPE",
+        bind_to=(kv_cache_config, "kvcm_read_backend_type"),
+        type=int,
+        default=0,
+        help="Single KVCM backend: 0=normal match, 1=3fs, 2=mooncake, 3=pace, 4=file, 5=vcns3fs",
+    )
+    kv_cache_group.add_argument(
+        "--kvcm_min_replica_count",
+        env_name="KVCM_MIN_REPLICA_COUNT",
+        bind_to=(kv_cache_config, "kvcm_min_replica_count"),
+        type=int,
+        default=0,
+        help="Minimum readable replicas before StartWrite skips a key; 0 means 1",
     )
     kv_cache_group.add_argument(
         "--kvcm_meta_channel_retry_time",
@@ -448,7 +594,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kvcm_get_broadcast_timeout"),
         type=int,
         default=15000,
-        help="GET广播超时时间（毫秒）",
+        help="兼容旧参数；BTC remote GET广播使用整体任务剩余预算",
     )
     kv_cache_group.add_argument(
         "--kvcm_put_broadcast_timeout",
@@ -456,7 +602,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kvcm_put_broadcast_timeout"),
         type=int,
         default=15000,
-        help="PUT广播超时时间（毫秒）",
+        help="兼容旧参数；BTC remote PUT广播使用整体任务剩余预算",
     )
     kv_cache_group.add_argument(
         "--kvcm_client_config",
@@ -472,7 +618,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=0,
         help="DSV4 固定池 block 数。>0 时用于 INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV 四个 pool；"
-        "不配置或配置为 0 时，这四个 pool 按 linear_step 派生 block 数，并保持一致。",
+        "不配置或配置为 0 时，这四个 pool 使用通用池配置或自动计算 block 数，并保持一致。",
+    )
+    kv_cache_group.add_argument(
+        "--dsv41_decoder_swa_pool_blocks",
+        env_name="DSV41_DECODER_SWA_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "dsv41_decoder_swa_pool_blocks"),
+        type=_decoder_pool_blocks,
+        default=0,
+        help="V4.1 decoder_swa_kv 物理 block 数（含 block 0）；0 不覆盖，正值优先于 DSV4_FIXED_POOL_BLOCKS。",
     )
     kv_cache_group.add_argument(
         "--dsv4_hca_state_pool_blocks",
@@ -481,7 +635,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=0,
         help="DSV4 HCA_STATE pool 单独 block 数。>0 时仅覆盖 HCA_STATE；"
-        "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或 linear_step 派生 block 数。",
+        "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或通用池配置/自动计算 block 数。",
     )
     kv_cache_group.add_argument(
         "--dsv4_fixed_pool_use_memory",

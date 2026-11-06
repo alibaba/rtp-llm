@@ -28,6 +28,7 @@ enum class BlockTreeRefType : uint8_t {
     LOAD,
     EVICTION,
     STORE,
+    FROZEN,
     COUNT,
 };
 
@@ -61,6 +62,14 @@ public:
     void     decTreeRef(BlockIdxType block, BlockTreeRefType ref_type);
     void     decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
     uint32_t treeRefCount(BlockIdxType block) const;
+
+    // True when releasing one CACHE reference would immediately free the block.
+    // Checks tree and external ownership together under the pool mutex.
+    bool canReclaimCacheBlock(BlockIdxType block) const;
+
+    // Keep one permanent tree reference per physical block for this pool's lifetime.
+    void freezeBlock(BlockIdxType block) noexcept;
+    bool isFrozen(BlockIdxType block) const;
 
     // Number of distinct blocks carrying at least one tree reference of this type.
     size_t referencedBlocksNum(BlockTreeRefType ref_type) const;
@@ -150,6 +159,7 @@ private:
     bool          validBlockNoLock(BlockIdxType block) const;
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
+    void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
 
     size_t       totalBlocksNumNoLock() const;
     void         refillAscendingFreeBlocksNoLock();

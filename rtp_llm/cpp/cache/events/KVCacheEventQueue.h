@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <vector>
@@ -29,6 +30,9 @@ public:
     QueuePushResult           tryPush(KVCacheEvent event) noexcept;
     std::vector<KVCacheEvent> waitPop(size_t max_batch_size, std::chrono::milliseconds timeout);
     void                      waitForStop(std::chrono::milliseconds timeout);
+    // The predicate runs under the wait mutex; call wake() after changing its state.
+    void                      waitForStopOrInterrupt(std::chrono::milliseconds timeout,
+                                                    const std::function<bool()>& interrupted);
     void                      discardPending();
     void                      wake();
     void                      stop();

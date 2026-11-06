@@ -109,6 +109,40 @@ class KVCacheEventHostIdentityTest(TestCase):
 
         self.assertEqual(py_env_configs.kv_cache_config.kv_cache_event_host_ip_port, "")
 
+    def test_remote_control_derives_identity_when_hbm_events_are_disabled(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = True
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(
+            configs.kv_cache_config.kv_cache_event_host_ip_port, "10.0.0.8:20027"
+        )
+
+    def test_remote_control_preserves_explicit_identity(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = True
+        configs.kv_cache_config.kv_cache_event_host_ip_port = "replica-1:19000"
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(
+            configs.kv_cache_config.kv_cache_event_host_ip_port, "replica-1:19000"
+        )
+
+    def test_disabled_remote_and_hbm_events_do_not_derive_identity(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = False
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(configs.kv_cache_config.kv_cache_event_host_ip_port, "")
+
+    def test_remote_control_does_not_derive_identity_on_nonzero_tp_rank(self):
+        configs = self._dp_publisher_configs()
+        configs.kv_cache_config.kv_cache_event_publisher_type = "none"
+        configs.kv_cache_config.enable_remote_cache = True
+        configs.parallelism_config.tp_rank = 1
+        configure_kv_cache_event_host_ip_port(configs)
+        self.assertEqual(configs.kv_cache_config.kv_cache_event_host_ip_port, "")
+
 
 class SingleGpuBackendRankTest(TestCase):
     def _start_rank(self, tp_size: int, dp_size: int, world_rank: int):
@@ -208,7 +242,7 @@ class GenerateConfigTest(TestCase):
             "ENABLE_MEMORY_CACHE": "1",
             "MEMORY_CACHE_SIZE_MB": "2048",
             "MEMORY_CACHE_SYNC_TIMEOUT_MS": "6789",
-            "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "30000",
+            "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "5000",
             "BLOCK_TREE_TRANSFER_WORKER_COUNT": "7",
             "BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE": "211",
             "BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE": "307",
@@ -234,7 +268,7 @@ class GenerateConfigTest(TestCase):
         self.assertTrue(config.enable_memory_cache)
         self.assertEqual(config.memory_cache_size_mb, 2048)
         self.assertEqual(config.memory_cache_sync_timeout_ms, 6789)
-        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
+        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 5000)
         self.assertEqual(config.block_tree_transfer_worker_count, 7)
         self.assertEqual(config.block_tree_business_queue_max_size, 211)
         self.assertEqual(config.block_tree_transfer_queue_max_size, 307)
@@ -245,6 +279,38 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_disk_evict_low_watermark_ratio, 0.73)
         self.assertEqual(config.block_tree_disk_evict_high_watermark_ratio, 0.83)
 
+    def test_full_watermarks_env_cli_and_worker_pickle(self):
+        import pickle
+
+        values = {
+            "block_tree_full_device_evict_low_watermark_ratio": 0.90,
+            "block_tree_full_device_evict_high_watermark_ratio": 0.95,
+            "block_tree_full_memory_evict_low_watermark_ratio": 0.94,
+            "block_tree_full_memory_evict_high_watermark_ratio": 0.97,
+            "block_tree_full_disk_evict_low_watermark_ratio": 0.96,
+            "block_tree_full_disk_evict_high_watermark_ratio": 0.98,
+        }
+        env = {name.upper(): str(value) for name, value in values.items()}
+        with patch.dict("os.environ", _jit_env(**env), clear=True):
+            config = setup_args([]).kv_cache_config
+            # Spawned backend and rank workers must keep the FULL overrides.
+            for _ in range(2):
+                config = pickle.loads(pickle.dumps(config))
+                for name, value in values.items():
+                    self.assertEqual(getattr(config, name), value)
+            self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.82)
+            self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.90)
+            config = setup_args(
+                ["--block_tree_full_device_evict_high_watermark_ratio", "0.96"]
+            ).kv_cache_config
+            self.assertEqual(
+                config.block_tree_full_device_evict_high_watermark_ratio, 0.96
+            )
+        with patch.dict("os.environ", _jit_env(), clear=True):
+            config = setup_args([]).kv_cache_config
+            for name in values:
+                self.assertEqual(getattr(config, name), -1.0)
+
     def test_kv_cache_strategy_defaults_are_rollback_safe(self):
         config = PyEnvConfigs().kv_cache_config
 
@@ -253,10 +319,30 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.disk_cache_staging_block_count, 128)
         self.assertEqual(config.device_eviction_policy, "lru")
         self.assertEqual(config.memory_eviction_policy, "lru")
-        self.assertEqual(config.disk_eviction_policy, "fifo")
+        self.assertEqual(config.disk_eviction_policy, "lru")
         self.assertEqual(config.reserve_block_ratio, 5)
-        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
+        self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
         self.assertFalse(hasattr(config, "write_cache_sync"))
+
+    def test_full_prefix_scan_interval_default_and_disable(self):
+        with patch.dict("os.environ", _jit_env(), clear=True):
+            self.assertEqual(
+                setup_args([]).kv_cache_config.block_tree_full_prefix_scan_interval_ms,
+                30000,
+            )
+            config = setup_args(
+                ["--block_tree_full_prefix_scan_interval_ms", "0"]
+            ).kv_cache_config
+            self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
+        with patch.dict(
+            "os.environ",
+            _jit_env(BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS="0"),
+            clear=True,
+        ):
+            self.assertEqual(
+                setup_args([]).kv_cache_config.block_tree_full_prefix_scan_interval_ms,
+                0,
+            )
 
     def test_disabled_crc_survives_worker_pickle_and_engine_config(self):
         import pickle
@@ -296,6 +382,44 @@ class GenerateConfigTest(TestCase):
             with self.subTest(args=args):
                 config = setup_args(args).kv_cache_config
                 self.assertEqual(config.reserve_block_ratio, expected_ratio)
+
+    def test_reuse_tail_and_independent_pools_from_env_and_cli(self):
+        env = _jit_env(
+            REUSE_CACHE_TAIL_BLOCKS="16", LINEAR_POOL_BLOCKS="100", SWA_POOL_BLOCKS="50"
+        )
+        with patch.dict("os.environ", env, clear=True):
+            config = setup_args([]).kv_cache_config
+            self.assertEqual(config.reuse_cache_tail_blocks, 16)
+            self.assertEqual(config.linear_pool_blocks, 100)
+            self.assertEqual(config.swa_pool_blocks, 50)
+            config = setup_args(
+                ["--reuse_cache_tail_blocks", "32", "--swa_pool_blocks", "0"]
+            ).kv_cache_config
+            self.assertEqual(config.reuse_cache_tail_blocks, 32)
+            self.assertEqual(config.linear_pool_blocks, 100)
+            self.assertEqual(config.swa_pool_blocks, 0)
+
+    def test_reuse_tail_and_pool_limits(self):
+        for option, value in (
+            ("reuse_cache_tail_blocks", "invalid"),
+            ("reuse_cache_tail_blocks", "0"),
+            ("reuse_cache_tail_blocks", "-1"),
+            ("reuse_cache_tail_blocks", "2147483648"),
+            ("linear_pool_blocks", "invalid"),
+            ("linear_pool_blocks", "1"),
+            ("linear_pool_blocks", "-1"),
+            ("swa_pool_blocks", "1"),
+            ("swa_pool_blocks", "4294967296"),
+        ):
+            for from_env in (False, True):
+                env = {option.upper(): value} if from_env else {}
+                args = [] if from_env else ["--" + option, value]
+                with self.subTest(option=option, value=value, env=from_env), patch.dict(
+                    "os.environ", _jit_env(**env), clear=True
+                ), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(
+                    SystemExit
+                ):
+                    setup_args(args)
 
     def test_canonical_kv_cache_cli_names(self):
         config = setup_args(
@@ -397,8 +521,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 70)
-        self.assertEqual(state[:2], ("KVCacheConfig", 8))
+        self.assertEqual(len(state), 84)
+        self.assertEqual(state[:2], ("KVCacheConfig", 12))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -433,7 +557,7 @@ class GenerateConfigTest(TestCase):
             return value
 
         event_state = state
-        state = (state[0], 6, *state[2:-6])
+        state = (state[0], 6, *state[2:64])
         self.assertEqual(restore(state).__getstate__(), event_state)
         version_five_state = (state[0], 5, *state[2:], True)
         self.assertEqual(restore(version_five_state).__getstate__(), event_state)
@@ -517,6 +641,12 @@ class GenerateConfigTest(TestCase):
             "block_tree_memory_evict_high_watermark_ratio": "float",
             "block_tree_disk_evict_low_watermark_ratio": "float",
             "block_tree_disk_evict_high_watermark_ratio": "float",
+            "block_tree_full_device_evict_low_watermark_ratio": "float",
+            "block_tree_full_device_evict_high_watermark_ratio": "float",
+            "block_tree_full_memory_evict_low_watermark_ratio": "float",
+            "block_tree_full_memory_evict_high_watermark_ratio": "float",
+            "block_tree_full_disk_evict_low_watermark_ratio": "float",
+            "block_tree_full_disk_evict_high_watermark_ratio": "float",
         }
         stub_path = (
             Path(__file__).resolve().parents[2] / "ops" / "libth_transformer_config.pyi"

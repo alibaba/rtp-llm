@@ -16,7 +16,7 @@ struct CandidateMeta {
     uint64_t last_access_seq{0};  // LRU: logical clock of the last real match
     uint64_t admission_seq{0};    // FIFO: logical clock of entering the current tier
     uint64_t hit_count{0};        // LFU: cumulative real hit count
-    int64_t  insert_time_us{0};
+    int64_t  tier_last_hit_time_us{0};
     int64_t  last_access_time_us{0};
     int64_t  tier_enter_time_us{0};
 };
@@ -28,6 +28,20 @@ enum class GroupSetTransferState : uint8_t {
     LOAD_PENDING,  // Host/Disk source reserved by a deferred load ticket
     LOADING        // Host/Disk -> Device
 };
+
+inline const char* transferStateName(GroupSetTransferState state) {
+    switch (state) {
+        case GroupSetTransferState::IDLE:
+            return "IDLE";
+        case GroupSetTransferState::DEMOTING:
+            return "DEMOTING";
+        case GroupSetTransferState::LOAD_PENDING:
+            return "LOAD_PENDING";
+        case GroupSetTransferState::LOADING:
+            return "LOADING";
+    }
+    return "UNKNOWN";
+}
 
 // Per-GroupSet data location across storage tiers.
 // Each GroupSetResource corresponds to one GroupSet on one TreeNode.

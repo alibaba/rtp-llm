@@ -566,8 +566,17 @@ void BlockTreeCacheTestPeer::refreshCandidateForTest(BlockTreeCache& cache, Tree
 }
 
 void BlockTreeCacheTestPeer::markPathMatchedForTest(BlockTreeCache& cache, const std::vector<TreeNode*>& path) {
-    std::lock_guard<std::mutex> lock(cache.mutex_);
-    cache.evictor_.onMatched(path);
+    std::lock_guard<std::mutex>                         lock(cache.mutex_);
+    const uint64_t                                      access_seq     = cache.evictor_.nextAccessSeq();
+    const int64_t                                       access_time_us = currentTimeUs();
+    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> snapshots;
+    for (const GroupSetPtr& group_set : cache.tree()->groupSets()) {
+        const size_t reuse_count = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
+        for (size_t i = path.size() - reuse_count; i < path.size(); ++i) {
+            cache.loader_.collectReuseTimeSnapshots(
+                path[i], group_set->groupSetId(), access_seq, access_time_us, snapshots);
+        }
+    }
 }
 
 size_t BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(const BlockTreeCache& cache) {
@@ -841,7 +850,8 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     };
     environment->host_pools = {
         makeHostPool(2 * kGroupPayloadBytes, options.usable_host_blocks),
-        makeHostPool(kGroupPayloadBytes, options.usable_host_blocks),
+        makeHostPool(kGroupPayloadBytes,
+                     options.usable_swa_host_blocks ? options.usable_swa_host_blocks : options.usable_host_blocks),
     };
     if (options.enable_disk) {
         environment->disk_pools = {
@@ -1092,7 +1102,9 @@ void FullSWAEnvironment::expectPoolFreeCounts(const std::vector<size_t>& device_
 void FullSWAEnvironment::expectFullyReclaimed() const {
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
     expectPoolFreeCounts(std::vector<size_t>(device_pools.size(), options_.usable_device_blocks),
-                         std::vector<size_t>(host_pools.size(), options_.usable_host_blocks),
+                         std::vector<size_t>{options_.usable_host_blocks,
+                                             options_.usable_swa_host_blocks ? options_.usable_swa_host_blocks :
+                                                                               options_.usable_host_blocks},
                          std::vector<size_t>(disk_pools.size(), options_.usable_disk_blocks));
 }
 

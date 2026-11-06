@@ -101,6 +101,7 @@ public:
     auto& sdk_backend_configs() {
         return sdk_backend_configs_;
     }
+    void parseBackendConfigs(const std::string& config);
 
 private:
     uint32_t                                       thread_num_{4};
@@ -194,6 +195,9 @@ public:
         model_deployment_(model_deployment) {}
 
     void        Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override;
+    std::string registerInstanceRequest() const;
+    const std::string& instance_group() const { return instance_group_; }
+    const std::string& instance_id() const { return instance_id_; }
     inline bool enable_vipserver() const {
         return enable_vipserver_;
     }
@@ -209,11 +213,18 @@ public:
     inline const auto& meta_channel_config() const {
         return meta_channel_config_;
     }
+    int32_t default_query_type() const {
+        return default_query_type_;
+    }
+    void set_default_query_type(int32_t query_type) {
+        default_query_type_ = query_type;
+    }
 
 private:
     bool                                 enable_vipserver_ = false;
     std::string                          vipserver_domain_ = "";
     int32_t                              block_size_       = -1;
+    int32_t                              default_query_type_ = 2;
     std::string                          instance_group_;
     std::string                          instance_id_;
     std::vector<std::string>             addresses_;

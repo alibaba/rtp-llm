@@ -5,6 +5,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -44,10 +45,13 @@ struct KVCachePoolMetricsSnapshot {
     size_t      total_blocks               = 0;
     size_t      reserve_blocks             = 0;
     size_t      request_ref_blocks         = 0;
+    size_t      remote_connector_ref_blocks = 0;
+    size_t      pd_connector_ref_blocks     = 0;
     size_t      block_cache_ref_blocks     = 0;
     size_t      load_ref_blocks            = 0;
     size_t      eviction_target_ref_blocks = 0;
     size_t      store_ref_blocks           = 0;
+    size_t      frozen_ref_blocks          = 0;
     float       used_ratio                 = 0.0f;
 };
 
@@ -135,6 +139,10 @@ public:
         use_device_malloc_block_pool_ = use_device_malloc_block_pool;
     }
 
+    void setSkipRemoteReusedWrite(bool skip_remote_reused_write) {
+        skip_remote_reused_write_ = skip_remote_reused_write;
+    }
+
     void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
         cp_slot_mapper_ = std::move(cp_slot_mapper);
     }
@@ -211,7 +219,7 @@ protected:
                                                      bool enable_reuse_cache,
                                                      int  target_batch_size) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
-    virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
+    void          decrKVCacheRef(const KVCacheResource& kvcache_resource, DeviceBlockRefType ref_type);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
     int           deviceCacheMetricTokensPerBlock() const;
     static size_t maxReusableMatchKeys(int seq_len, int reuse_unit_tokens) {
@@ -252,7 +260,9 @@ protected:
                                                      BatchKVCacheResource&                kv_resource,
                                                      const std::shared_ptr<CPSlotMapper>& cp_mapper,
                                                      PreparedKVCache&                     prepared,
-                                                     const std::function<bool(size_t)>&   valid_prefix = {});
+                                                     const std::function<bool(size_t)>&   valid_prefix           = {},
+                                                     bool                                 enable_storage_backend = true,
+                                                     std::optional<int64_t>               request_id             = {});
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,
@@ -299,6 +309,7 @@ protected:
     size_t                                 reserveBlocksForPool(size_t group_id) const;
     std::vector<DeviceBlockPoolPtr>        group_block_pools_;
     RoleType                               role_type_{RoleType::PDFUSION};
+    bool                                   skip_remote_reused_write_{false};
     // Drain pending copies before releasing the cache groups and pools.
     std::unique_ptr<GpuBlockCopy> gpu_block_copy_;
 

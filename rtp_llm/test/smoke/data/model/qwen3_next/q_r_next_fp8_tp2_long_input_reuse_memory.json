@@ -109,10 +109,10 @@
         "aux_info": {
           "input_len": 4195,
           "prefix_len": 0,
-          "reuse_len": 4096,
-          "local_reuse_len": 4096,
+          "reuse_len": 0,
+          "local_reuse_len": 0,
           "remote_reuse_len": 0,
-          "memory_reuse_len": 4096,
+          "memory_reuse_len": 0,
           "prefill_total_reuse_len": 0,
           "prefill_local_reuse_len": 0,
           "prefill_remote_reuse_len": 0,

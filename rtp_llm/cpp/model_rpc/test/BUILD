@@ -82,6 +82,23 @@ test_deps = [
 # )
 
 cc_test(
+    name = "prefill_request_logger_test",
+    srcs = ["PrefillRequestLoggerTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:prefill_request_logger",
+        "@com_google_protobuf//:protobuf",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+py_test(
+    name = "replay_request_test",
+    srcs = ["replay_request_test.py"],
+    deps = ["//rtp_llm/cpp/model_rpc:replay_request_lib"],
+)
+
+cc_test(
     name = "local_rpc_server_test",
     srcs = ["LocalRpcServerTest.cc"],
     copts = test_copts,
@@ -146,6 +163,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "@com_google_googletest//:gtest",

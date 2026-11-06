@@ -3,6 +3,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -26,15 +27,29 @@ struct ReusableGroupLocation {
 
 using ReusableGroupLocations = std::unordered_map<std::string, ReusableGroupLocation>;
 
+struct BlockTreeInsertHardStopInfo {
+    Tier                  existing_tier;
+    GroupSetTransferState transfer_state;
+};
+
+struct BlockTreeReplacedCandidate {
+    TreeNode* node;
+    size_t    group_set_id;
+    Tier      source_tier;
+};
+
 struct BlockTreeInsertResult {
     std::vector<TreeNode*>                                 path;
     std::vector<TreeNode*>                                 inserted_nodes;
     std::vector<std::pair<TreeNode*, std::vector<size_t>>> adopted_nodes;
+    // Replaced FULL resources; old-tier heap erasure tolerates absent entries. Consumed under the cache mutex.
+    std::vector<BlockTreeReplacedCandidate> replaced_candidates;
     // Borrowed from the tree; consumed under the BlockTreeCache mutex.
     std::vector<TreeNode*> newly_resident_nodes;
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
     size_t accepted_resource_count{0};
     size_t resident_prefix_length{0};
+    std::optional<BlockTreeInsertHardStopInfo> hard_stop;
 };
 
 struct BlockTreeNodeRangeResult {
@@ -88,7 +103,7 @@ public:
                                                   const std::function<void(const TreeNode&)>& visitor) const;
 
     // All publication operations require the owning BlockTreeCache mutex.
-    // Only complete, matchable DEVICE values in every required group are advertised.
+    // Complete, matchable DEVICE components are advertised independently.
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     void            refreshPublishedState(const TreeNode* node);
@@ -97,7 +112,7 @@ private:
     void                               removePublishedKey(CacheKeyType key);
     KVCacheEventPublisherPtr           event_publisher_;
     std::vector<ReusableGroupLocation> publication_groups_;
-    std::unordered_set<CacheKeyType>   published_keys_;
+    std::unordered_map<CacheKeyType, std::vector<size_t>> published_groups_;
     int64_t                            publication_version_{-1};
 
     friend class BlockTreeEvictor;

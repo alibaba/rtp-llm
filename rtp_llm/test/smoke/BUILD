@@ -1,4 +1,4 @@
-load(":defs.bzl", "custom_smoke_test", "smoke_test")
+load(":defs.bzl", "SMOKE_FRAMEWORK_DEPS", "custom_smoke_test", "smoke_test")
 
 custom_smoke_test(
     name = "chunked_multimodal",
@@ -51,6 +51,15 @@ py_test(
 )
 
 py_test(
+    name = "remote_cache_cleanup_test",
+    srcs = glob(["*.py"], exclude = ["entry.py"]),
+    main = "remote_cache_cleanup_test.py",
+    imports = [".."],
+    env = {"GPU_COUNT": "0"},
+    deps = SMOKE_FRAMEWORK_DEPS,
+)
+
+py_test(
     name = "dash_cancel_state_test",
     srcs = [
         "dash_cancel_state.py",
@@ -84,6 +93,58 @@ filegroup(
 filegroup(
     name = "qwen3_8b_task_info",
     srcs = ["data/model/qwen3/q_r_new_model_py.json"],
+)
+
+# This helper links the selected SDK RPM without the RTP model stack.
+# Published SDKs require the corresponding CUDA runtime even for CPU buffers.
+cc_binary(
+    name = "pace_sdk_smoke",
+    testonly = True,
+    srcs = ["pace_sdk_smoke.cc"],
+    # The paired SDK RPM uses the C++11 string ABI; --config=cpu uses ABI 0.
+    copts = ["-std=c++17", "-U_GLIBCXX_USE_CXX11_ABI", "-D_GLIBCXX_USE_CXX11_ABI=1"],
+    deps = [
+        "//3rdparty/3fs:hf3fs",
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
+        "@grpc//:grpc++",
+        "@havenask//aios/alog:alog",
+        "@havenask//aios/autil:lock_free",
+        "@havenask//aios/autil:string_helper",
+    ],
+)
+
+py_library(
+    name = "pace_smoke_fixture",
+    srcs = [
+        "pace_fixture.py", "remote_kvcm_server.py",
+    ],
+    deps = ["//rtp_llm:psutil", "//rtp_llm:requests", "//rtp_llm/test/utils:test_util"],
+)
+
+py_test(
+    name = "remote_kvcm_server_test",
+    srcs = ["remote_kvcm_server_test.py"],
+    deps = [":pace_smoke_fixture"],
+    legacy_create_init = 0,
+)
+
+_PACE_SMOKE_DATA = [
+    ":pace_sdk_smoke",
+    "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin",
+]
+
+py_test(
+    name = "remote_cache_pace_contract",
+    srcs = ["pace_contract_smoke.py"],
+    main = "pace_contract_smoke.py",
+    deps = [":pace_smoke_fixture"],
+    data = _PACE_SMOKE_DATA,
+    args = ["--sdk", "$(location :pace_sdk_smoke)"],
+    # The contract uses CPU buffers with either a CPU-only or CUDA SDK.
+    tags = ["manual", "smoke_case", "no-remote", "requires-pace"],
+    timeout = "long",
+    legacy_create_init = 0,
 )
 
 # ============================================================================

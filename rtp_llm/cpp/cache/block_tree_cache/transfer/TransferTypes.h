@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm {
 
@@ -104,7 +106,8 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
 // and NOT_EXECUTED means no target was committed to the caller. The copy may
 // have been skipped or discarded after a batch CRC failure; target bytes can change.
 // An empty block_errors vector represents a uniform result until the task boundary expands it.
-// status.code() and copy_error summarize the highest-priority failure, while status keeps all failure messages.
+// copy_error summarizes diagnostic priority. Unknown completion takes priority in
+// status.code() so CRC evidence cannot hide outstanding I/O; status keeps all failure messages.
 struct TransferResult {
     TransferResult() = default;
     explicit TransferResult(size_t block_count): block_errors(block_count, CacheCopyError::NOT_EXECUTED) {}
@@ -121,7 +124,8 @@ struct TransferResult {
         return status.ok();
     }
 
-    // Append every failure message; keep the first error code at equal priority.
+    // Unknown completion takes precedence over known failures, independently of diagnostic priority.
+    // Append every failure message; keep the first error code at equal diagnostic priority.
     void merge(TransferResult other) {
         if (other.ok()) {
             return;
@@ -131,7 +135,11 @@ struct TransferResult {
             copy_error = other.copy_error;
             return;
         }
-        const auto code = other.copy_error > copy_error ? other.status.code() : status.code();
+        const bool completion_unknown = status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN
+                                        || other.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN;
+        const auto code = completion_unknown            ? ErrorCode::TRANSFER_COMPLETION_UNKNOWN :
+                          other.copy_error > copy_error ? other.status.code() :
+                                                          status.code();
         status          = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
         copy_error      = std::max(copy_error, other.copy_error);
     }
@@ -151,11 +159,21 @@ struct TransferResult {
     std::vector<CacheCopyError> block_errors;
 };
 
+struct DeviceHostCopyTemplate {
+    size_t member_index;
+    void*  device_base;
+    size_t host_offset;
+    size_t width_bytes;
+    size_t layer_count;
+    size_t device_pitch;
+};
+
 struct DeviceHostCopyOptions {
     size_t staged_sm_min_tile_count{16};
     size_t staged_sm_min_bytes{64 * 1024};
     bool   staged_sm_copy_enabled{true};
     bool   cuda_batch_copy_enabled{true};
+    bool   cuda_3d_batch_copy_enabled{true};
 };
 
 struct HostBufferView {
@@ -313,8 +331,37 @@ class TransferTask {
 public:
     using Clock = std::chrono::steady_clock;
 
-    TransferTask(std::vector<TransferDescriptor> descriptors, std::chrono::milliseconds timeout):
-        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout) {}
+    TransferTask(std::vector<TransferDescriptor> descriptors,
+                 std::chrono::milliseconds       timeout,
+                 std::optional<int64_t>          request_id = {}):
+        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout), request_id_(request_id) {}
+
+    std::optional<int64_t> requestId() const {
+        return request_id_;
+    }
+
+    uint64_t traceId() const {
+        if (AsyncProfileSession::enabled())
+            AsyncProfileSession::taskLink(trace_id_, workflow_id_, parent_trace_id_, request_id_.value_or(-1));
+        return trace_id_;
+    }
+    uint64_t workflowId() const {
+        return workflow_id_;
+    }
+    uint64_t parentTraceId() const {
+        return parent_trace_id_;
+    }
+    void setWorkflow(uint64_t workflow, uint64_t parent = 0) {
+        workflow_id_     = workflow ? workflow : trace_id_;
+        parent_trace_id_ = parent;
+    }
+    void setTraceId(uint64_t id) {
+        if (id != 0) {
+            if (workflow_id_ == trace_id_)
+                workflow_id_ = id;
+            trace_id_ = id;
+        }
+    }
 
     const std::vector<TransferDescriptor>& descriptors() const {
         return descriptors_;
@@ -346,15 +393,34 @@ public:
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
-        return TransferTask(std::move(descriptors), deadline_);
+        auto task      = TransferTask(std::move(descriptors), deadline_, request_id_);
+        task.trace_id_ = trace_id_;
+        task.workflow_id_     = workflow_id_;
+        task.parent_trace_id_ = parent_trace_id_;
+        return task;
+    }
+
+    // A separately submitted RPC batch needs its own identity. Nested worker
+    // batches retain that identity and use their local descriptor ranges.
+    TransferTask rpcSubtask(std::vector<TransferDescriptor> descriptors) const {
+        auto task = TransferTask(std::move(descriptors), deadline_, request_id_);
+        task.setWorkflow(workflow_id_, trace_id_);
+        return task;
     }
 
 private:
-    TransferTask(std::vector<TransferDescriptor> descriptors, Clock::time_point deadline):
-        descriptors_(std::move(descriptors)), deadline_(deadline) {}
+    TransferTask(std::vector<TransferDescriptor> descriptors,
+                 Clock::time_point               deadline,
+                 std::optional<int64_t>          request_id):
+        descriptors_(std::move(descriptors)), deadline_(deadline), request_id_(request_id) {}
 
-    std::vector<TransferDescriptor> descriptors_;
-    Clock::time_point               deadline_;
+    std::vector<TransferDescriptor>     descriptors_;
+    Clock::time_point                   deadline_;
+    std::optional<int64_t>              request_id_;
+    inline static std::atomic<uint64_t> next_trace_id_{1};
+    uint64_t                            trace_id_{next_trace_id_.fetch_add(1, std::memory_order_relaxed)};
+    uint64_t                            workflow_id_{trace_id_};
+    uint64_t                            parent_trace_id_{0};
 };
 
 }  // namespace rtp_llm

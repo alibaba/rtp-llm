@@ -20,6 +20,7 @@ cc_library(
         ":client",
         ":group_policy",
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/utils:core_utils",
@@ -71,6 +72,7 @@ cc_library(
         ":config",
         ":subscriber",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
         "//rtp_llm/cpp/cache:storage_3fs",
         "@grpc//:grpc++",
     ],
@@ -85,7 +87,10 @@ cc_library(
         "VIPServerSubscriber.h",
     ],
     copts = copts(),
-    visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:__subpackages__"],
+    visibility = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:__subpackages__",
+        "//rtp_llm/cpp/cache/events:__pkg__",
+    ],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/autil:env_util",

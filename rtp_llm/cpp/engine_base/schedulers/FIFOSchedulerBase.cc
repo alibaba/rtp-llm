@@ -77,14 +77,6 @@ FIFOSchedulerBase::FIFOSchedulerBase(const RuntimeConfig&                   runt
     }
     for (const auto& group : config.groups()) {
         int64_t checkpoint_tokens = group.seqSizePerBlock();
-        if (group.policy.group_type == CacheGroupType::LINEAR) {
-            const auto step = std::max(1, config.linear_step);
-            if (checkpoint_tokens > std::numeric_limits<int>::max() / step) {
-                prefill_chunk_alignment_ = 0;
-                break;
-            }
-            checkpoint_tokens *= step;
-        }
         prefill_chunk_alignment_ = combineChunkAlignment(prefill_chunk_alignment_, checkpoint_tokens);
     }
     if (prefill_chunk_size_ > 0) {
@@ -197,12 +189,13 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
             const bool linear_reuse = reuse_cache && group.policy.enable_prefix_reuse
                                       && group.policy.group_type == CacheGroupType::LINEAR;
             std::string error_msg;
-            if (group.policy.group_type == CacheGroupType::SWA && !group.policy.shared_chunk_state
-                && reuse_cache && group.policy.enable_prefix_reuse && cache_config.linear_step != 1) {
-                // LINEAR checkpoint periods participate in the LCM below. Ordinary
-                // SWA still needs every prompt page, rather than sparse checkpoints.
-                error_msg = "[chunked_prefill] SWA cache reuse requires linear_step=1, got "
-                            + std::to_string(cache_config.linear_step);
+            const bool  sparse_reuse =
+                reuse_cache && group.policy.enable_prefix_reuse && group.policy.group_type != CacheGroupType::FULL;
+            const int64_t prompt_blocks = (seq_length + group.seqSizePerBlock() - 1) / group.seqSizePerBlock();
+            if (sparse_reuse && cache_config.reuse_cache_tail_blocks < prompt_blocks) {
+                error_msg = "[chunked_prefill] cache group [" + group.tag
+                            + "] requires reuse_cache_tail_blocks >= " + std::to_string(prompt_blocks) + ", got "
+                            + std::to_string(cache_config.reuse_cache_tail_blocks);
             } else if (cp_mapper && cp_mapper->isSharded() && group.policy.group_type != CacheGroupType::FULL
                        && group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
                 error_msg = "[chunked_prefill] cache group [" + group.tag

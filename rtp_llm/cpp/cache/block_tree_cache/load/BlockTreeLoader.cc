@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -44,17 +45,20 @@ BlockTreeLoader::BlockTreeLoader(BlockTree*                      tree,
             std::lock_guard<std::mutex> lock(mutex_);
             abortLoadLocked(
                 context.loadDescs(), context.joinedLoads(), 0, context.contextId(), /*release_transferred_refs=*/false);
-        })) {}
+        },
+        [task_pool](std::function<void()> cleanup) { return task_pool->submitCompletion(std::move(cleanup)); })) {}
 
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&               cache_keys,
-                                                  const std::function<bool(size_t)>& valid_prefix) {
+                                                  const std::function<bool(size_t)>& valid_prefix,
+                                                  bool                               enable_storage_backend,
+                                                  std::optional<int64_t>             request_id) {
     if (cache_keys.empty()) {
         RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
         return {};
     }
 
-    std::vector<TreeNode*> path   = tree_->findNode(cache_keys);
-    BlockTreeMatchResult   result = createMatchResult(path, cache_keys, valid_prefix);
+    std::vector<TreeNode*> path = tree_->findNode(cache_keys);
+    BlockTreeMatchResult result = createMatchResult(path, cache_keys, valid_prefix, enable_storage_backend, request_id);
     RTP_LLM_LOG_DEBUG("matched %zu device blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_device_blocks,
                       cache_keys.size(),
@@ -112,47 +116,48 @@ BlockIndicesType BlockTreeLoader::matchedBlocksForGroup(std::string_view        
     return {};
 }
 
-std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> BlockTreeLoader::collectReuseTimeSnapshots(
-    const std::vector<TreeNode*>& path, size_t matched_device_blocks, int64_t access_time_us) const {
-    std::vector<BlockTreeCacheReuseTimeSample> reuse_time_samples;
-    reuse_time_samples.reserve(path.size() * tree_->groupSets().size());
-    for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
-        const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
-        const size_t       ready_reuse_count =
-            std::min(group_set->computeReuseBlockCount(matched_device_blocks), matched_device_blocks);
-        for (size_t i = matched_device_blocks - ready_reuse_count; i < matched_device_blocks; ++i) {
-            const GroupSetResource& resource       = path[i]->group_set_resources[group_set_id];
-            const CandidateMeta&    candidate_meta = resource.candidate_meta;
-            reuse_time_samples.push_back({Tier::DEVICE,
-                                          group_set->groupType(),
-                                          candidate_meta.insert_time_us,
-                                          candidate_meta.last_access_time_us,
-                                          access_time_us});
-        }
-
-        const size_t logical_reuse_count = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
-        for (size_t i = std::max(path.size() - logical_reuse_count, matched_device_blocks); i < path.size(); ++i) {
-            const GroupSetResource& resource       = path[i]->group_set_resources[group_set_id];
-            const CandidateMeta&    candidate_meta = resource.candidate_meta;
-            reuse_time_samples.push_back({resource.getTopTier(),
-                                          group_set->groupType(),
-                                          candidate_meta.insert_time_us,
-                                          candidate_meta.last_access_time_us,
-                                          access_time_us});
-        }
+void BlockTreeLoader::collectReuseTimeSnapshots(TreeNode*                                            node,
+                                                size_t                                               group_set_id,
+                                                uint64_t                                             access_seq,
+                                                int64_t                                              access_time_us,
+                                                std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) {
+    GroupSetResource& resource = node->group_set_resources[group_set_id];
+    const Tier        tier     = resource.getTopTier();
+    if (tier == Tier::NONE) {
+        return;
     }
-    return metrics_reporter_.collectCacheReuseTimeMetrics(reuse_time_samples);
+    CandidateMeta& meta             = resource.candidate_meta;
+    const bool     first_hit        = meta.tier_last_hit_time_us == 0;
+    const int64_t  previous_time_us = first_hit ? meta.tier_enter_time_us : meta.tier_last_hit_time_us;
+    BlockTreeCacheReuseTimeMetricsSnapshot snapshot;
+    snapshot.tier                        = tier;
+    snapshot.group_type                  = tree_->groupSets()[group_set_id]->groupType();
+    snapshot.reuse_block_hit_idletime_ms = std::max<int64_t>(0, access_time_us - previous_time_us) / 1000;
+    if (first_hit) {
+        snapshot.reuse_block_first_hit_idletime_ms = snapshot.reuse_block_hit_idletime_ms;
+    }
+    snapshots.push_back(snapshot);
+
+    meta.tier_last_hit_time_us = access_time_us;
+    meta.last_access_time_us   = access_time_us;
+    meta.last_access_seq       = access_seq;
+    ++meta.hit_count;
+    evictor_.onMatched(node, group_set_id);
 }
 
 BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>&            path,
                                                         const CacheKeysType&               cache_keys,
-                                                        const std::function<bool(size_t)>& valid_prefix) {
+                                                        const std::function<bool(size_t)>& valid_prefix,
+                                                        bool                               enable_storage_backend,
+                                                        std::optional<int64_t>             request_id) {
     BlockTreeMatchResult result;
     std::vector<bool>    candidate_valid;
     if (!path.empty() && !validMatch(path, candidate_valid, valid_prefix) && !storage_backend_) {
         return result;
     }
-    const int64_t access_time_us = currentTimeUs();
+    const int64_t  access_time_us = currentTimeUs();
+    const uint64_t access_seq     = evictor_.nextAccessSeq();
+    result.reuse_time_metrics_snapshots.reserve(path.size() * tree_->groupSets().size());
 
     for (size_t candidate_count = path.size(); candidate_count > 0; --candidate_count) {
         if (!candidate_valid[candidate_count - 1]) {
@@ -178,7 +183,6 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         }
     }
 
-    result.reuse_time_metrics_snapshots = collectReuseTimeSnapshots(path, result.matched_device_blocks, access_time_us);
     std::vector<TransferDescriptor> pending_load_descs;
     std::vector<bool>               joined_loads;
     for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
@@ -187,6 +191,8 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             std::min(group_set->computeReuseBlockCount(result.matched_device_blocks), result.matched_device_blocks);
         MultiNodeResource matched_device_resource{group_set_id, Tier::DEVICE};
         for (size_t i = result.matched_device_blocks - ready_reuse_count; i < result.matched_device_blocks; ++i) {
+            collectReuseTimeSnapshots(
+                path[i], group_set_id, access_seq, access_time_us, result.reuse_time_metrics_snapshots);
             const GroupSetResource& resource = path[i]->group_set_resources[group_set_id];
             matched_device_resource.node_blocks.emplace_back(nullptr, resource.getBlocks(Tier::DEVICE));
         }
@@ -214,17 +220,19 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                     evictor_.suspendCandidate(path[i], group_set_id, source_tier);
                 }
             }
+            collectReuseTimeSnapshots(
+                path[i], group_set_id, access_seq, access_time_us, result.reuse_time_metrics_snapshots);
             pending_load_descs.emplace_back(std::move(desc));
             joined_loads.push_back(is_joined);
         }
     }
-    evictor_.onMatched(path);
 
     StorageRequest storage_request;
-    if (storage_backend_ && path.size() < cache_keys.size()) {
+    if (enable_storage_backend && storage_backend_ && path.size() < cache_keys.size()) {
         storage_request = makeStorageRequest(cache_keys, path.size());
     }
-    const bool use_storage = !storage_request.empty();
+    const bool use_storage     = !storage_request.empty();
+    storage_request.request_id = request_id;
     if (!pending_load_descs.empty() || use_storage) {
         result.async_context = load_context_coordinator_->create(pending_load_descs,
                                                                  joined_loads,
@@ -442,7 +450,33 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
 }
 
 void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
-    const auto complete = [task](ErrorInfo error) {
+    const auto complete = [this, task](ErrorInfo error) noexcept {
+        task->phase = LoadTaskRunner::Task::Phase::FINISHED;
+        if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+            const auto& transfer    = task->completionTransfer();
+            auto                 observation = CompletionStageContext::forWorkflow(metrics_reporter_,
+                                                                   task->load_descs,
+                                                                   "load",
+                                                                   transfer.requestId().value_or(-1),
+                                                                   transfer.traceId(),
+                                                                   false);
+            CompletionStageScope freeze(observation, "freeze_blocks", "workflow_callback");
+            // Ordinary LOAD references still protect both ends until settlement.
+            // Preserve those physical slots before publishing the failure.
+            for (const TransferDescriptor& desc : task->load_descs) {
+                const GroupSetPtr& group_set   = tree_->groupSets()[desc.group_set_id];
+                IBlockPool*        source_pool = desc.source_tier == Tier::HOST ?
+                                                     static_cast<IBlockPool*>(group_set->hostPool().get()) :
+                                                     static_cast<IBlockPool*>(group_set->diskPool().get());
+                for (BlockIdxType block : desc.source_blocks) {
+                    source_pool->freezeBlock(block);
+                }
+                const auto& device_pools = group_set->devicePools();
+                for (size_t member = 0; member < device_pools.size(); ++member) {
+                    device_pools[member]->freezeBlock(desc.target_blocks[member]);
+                }
+            }
+        }
         const size_t descriptor_count = task->load_descs.size();
         if (!task->context->completeTransfers(descriptor_count, error.ok())) {
             RTP_LLM_LOG_WARNING("failed to record load copy completion, descriptor_count=%zu", descriptor_count);
@@ -461,15 +495,43 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
 
 void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&           task,
                                                 const std::shared_ptr<LoadAsyncContext>& context) {
-    auto settle = [this, task, context]() {
-        bool                                           settlement_success = context->aggregateSuccess();
+    const auto& descriptors = task ? task->load_descs : context->loadDescs();
+    uint64_t    transfer_id = context->workflowId();
+    if (task) {
+        transfer_id = task->completionTransfer().traceId();
+    }
+    auto                   observation = CompletionStageContext::forWorkflow(metrics_reporter_,
+                                                           descriptors,
+                                                           "load",
+                                                           context->requestId().value_or(-1),
+                                                           transfer_id,
+                                                           context->localTransfersSucceeded());
+    auto                   timers      = CompletionStageTimers::create(observation);
+    const int64_t          queue_begin = currentTimeUs();
+    auto                   settle      = [this, task, context, observation, timers, queue_begin](bool queued) {
+        timers.finishQueue(observation.success);
+        bool                                   success = false;
+        block_tree_cache_detail::ScopeRollback finish([&] { timers.finish(success); });
+        CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
+        if (queued) {
+            metrics_reporter_.reportQueueWaitMetric(
+                true, "business", "load", Tier::NONE, Tier::NONE, currentTimeUs() - queue_begin);
+        }
+        bool                                           settlement_success = context->localTransfersSucceeded();
         std::vector<std::shared_ptr<LoadAsyncContext>> joined_contexts;
         if (task) {
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts);
+                std::unique_lock<std::mutex> lock(mutex_, std::defer_lock);
+                {
+                    CompletionStageScope wait(observation, "completion_lock_wait", "business_completion", AsyncProfileKind::Wait);
+                    lock.lock();
+                }
+                CompletionStageScope tree(observation, "completion_settle", "business_completion");
+                settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts, observation);
+                tree.setSuccess(settlement_success);
             }
-            for (const std::shared_ptr<LoadAsyncContext>& joined_context : joined_contexts) {
+            CompletionStageScope notify(observation, "completion_join_notify", "business_completion");
+            for (const auto& joined_context : joined_contexts) {
                 bool    join_completed       = false;
                 int64_t join_wait_latency_us = 0;
                 if (!joined_context->completeJoinedOne(settlement_success, join_completed, join_wait_latency_us)) {
@@ -479,22 +541,19 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
                 }
             }
         }
-        if (!context->settle(settlement_success)) {
-            RTP_LLM_LOG_WARNING("failed to publish load context settlement, context_id=%lu", context->contextId());
+        {
+            CompletionStageScope notify(observation, "completion_notify", "business_completion");
+            if (!context->settle(settlement_success)) {
+                RTP_LLM_LOG_WARNING("failed to publish load context settlement, context_id=%lu", context->contextId());
+            }
+            success = context->success();
+            notify.setSuccess(success);
         }
+        execute.setSuccess(success);
     };
-    const int64_t queue_begin = currentTimeUs();
-    if (!task_pool_->submitCompletion([this, settle, queue_begin]() mutable {
-            metrics_reporter_.reportQueueWaitMetric(true,
-                                                    "business",
-                                                    cacheTransferOperationName(CacheTransferOperation::LOAD),
-                                                    Tier::NONE,
-                                                    Tier::NONE,
-                                                    currentTimeUs() - queue_begin);
-            settle();
-        })) {
+    if (!task_pool_->submitCompletion([settle] { settle(true); })) {
         RTP_LLM_LOG_WARNING("load completion queue is closed; settling context inline");
-        settle();
+        settle(false);
     }
 }
 
@@ -517,7 +576,8 @@ bool BlockTreeLoader::validateLoadTaskLocked(const LoadTaskRunner::Task& task) c
 
 bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                           task,
                                        bool                                            aggregate_success,
-                                       std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
+                                       std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts,
+                                       CompletionStageContext                          observation) {
     std::vector<BlockTreeEvictor::InvalidationSource> corrupted;
     const auto collect_corrupted = [this, &corrupted](const TransferTask& transfer, const TransferResult& result) {
         for (size_t index = 0; index < result.block_errors.size(); ++index) {
@@ -539,65 +599,81 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
     collect_corrupted(task.disk_to_device_task, task.disk_result);
 
     const bool                    settlement_success = aggregate_success && validateLoadTaskLocked(task);
+    observation.success                              = settlement_success;
     bool                          state_settled      = false;
     std::unordered_set<TreeNode*> detached_nodes;
 
     const auto& descriptors = task.load_descs;
-    for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
-        const TransferDescriptor& desc      = descriptors[desc_index];
-        const GroupSetPtr&        group_set = tree_->groupSets()[desc.group_set_id];
-        MultiNodeResource source_protection{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
-        group_set->unreferenceBlocks(source_protection, BlockTreeRefType::LOAD);
+    {
+        CompletionStageScope update(observation, "completion_tree_update", "business_completion");
+        for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
+            const TransferDescriptor& desc      = descriptors[desc_index];
+            const GroupSetPtr&        group_set = tree_->groupSets()[desc.group_set_id];
+            MultiNodeResource source_protection{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
+            group_set->unreferenceBlocks(source_protection, BlockTreeRefType::LOAD);
 
-        GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
-        if (resource.transfer_detached) {
-            evictor_.discardDetachedTransfer({desc});
-            detached_nodes.insert(desc.node);
-            state_settled     = true;
-            continue;
-        }
-        if (settlement_success) {
-            if (enable_device_cache_) {
-                MultiNodeResource target_holder{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}};
-                resource.setBlocks(Tier::DEVICE, desc.target_blocks);
-                group_set->referenceBlocks(target_holder, BlockTreeRefType::CACHE);
-                group_set->unreferenceBlocks(target_holder, BlockTreeRefType::LOAD);
-                group_set->unreferenceBlocks(source_protection, BlockTreeRefType::CACHE);
-                resource.evictFromTier(desc.source_tier);
-                task.target_installed[desc_index] = true;
+            GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
+            if (resource.transfer_detached) {
+                evictor_.discardDetachedTransfer({desc});
+                detached_nodes.insert(desc.node);
+                state_settled = true;
+                continue;
             }
-            const bool state_changed = changeTransferState(
-                desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE);
-            assert(state_changed);
-            (void)state_changed;
-            state_settled = true;
-            if (enable_device_cache_) {
-                evictor_.onLoaded(desc.node, desc.group_set_id);
+            if (settlement_success) {
+                if (enable_device_cache_) {
+                    MultiNodeResource target_holder{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}};
+                    resource.setBlocks(Tier::DEVICE, desc.target_blocks);
+                    group_set->referenceBlocks(target_holder, BlockTreeRefType::CACHE);
+                    group_set->unreferenceBlocks(target_holder, BlockTreeRefType::LOAD);
+                    group_set->unreferenceBlocks(source_protection, BlockTreeRefType::CACHE);
+                    resource.evictFromTier(desc.source_tier);
+                    task.target_installed[desc_index] = true;
+                }
+                const bool state_changed = changeTransferState(
+                    desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE);
+                assert(state_changed);
+                (void)state_changed;
+                state_settled = true;
+                if (enable_device_cache_) {
+                    evictor_.onLoaded(desc.node, desc.group_set_id);
+                } else {
+                    evictor_.admitCandidate(desc.node, desc.group_set_id, desc.source_tier);
+                }
+                continue;
+            }
+
+            // Ordinary copy failures still retain a reusable source.
+            if (!changeTransferState(
+                    desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE)) {
+                RTP_LLM_LOG_WARNING(
+                    "loading state mismatch, group_set=%zu source=%s", desc.group_set_id, tierName(desc.source_tier));
             } else {
                 evictor_.admitCandidate(desc.node, desc.group_set_id, desc.source_tier);
+                state_settled = true;
             }
-            continue;
-        }
-
-        // Ordinary copy failures still retain a reusable source.
-        if (!changeTransferState(
-                desc.node, desc.group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE)) {
-            RTP_LLM_LOG_WARNING(
-                "loading state mismatch, group_set=%zu source=%s", desc.group_set_id, tierName(desc.source_tier));
-        } else {
-            evictor_.admitCandidate(desc.node, desc.group_set_id, desc.source_tier);
-            state_settled = true;
         }
     }
-    load_task_runner_.releaseTaskResources(task);
-    for (const TransferDescriptor& desc : task.load_descs) {
-        if (!load_join_registry_.finish(desc.node, desc.group_set_id, joined_contexts)) {
-            RTP_LLM_LOG_WARNING("failed to finish loading record, group_set=%zu", desc.group_set_id);
+    {
+        CompletionStageScope refs(observation, "completion_release_refs", "business_completion");
+        load_task_runner_.releaseTaskResources(task);
+    }
+    {
+        CompletionStageScope joins(observation, "completion_join_registry", "business_completion");
+        for (const TransferDescriptor& desc : task.load_descs) {
+            if (!load_join_registry_.finish(desc.node, desc.group_set_id, joined_contexts)) {
+                RTP_LLM_LOG_WARNING("failed to finish loading record, group_set=%zu", desc.group_set_id);
+            }
         }
     }
-    tree_->removePendingNodes(detached_nodes);
-    evictor_.invalidateSources(corrupted);
-    settled_(state_settled);
+    {
+        CompletionStageScope cleanup(observation, "completion_cleanup", "business_completion");
+        tree_->removePendingNodes(detached_nodes);
+        evictor_.invalidateSources(corrupted);
+    }
+    {
+        CompletionStageScope watermark(observation, "completion_watermark", "business_completion");
+        settled_(state_settled);
+    }
     return settlement_success;
 }
 

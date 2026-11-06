@@ -60,7 +60,7 @@ public:
     size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
 
     // Attention-specific configuration
-    int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
+    int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
 
     // Accepted-prefix replay is enabled for target LINEAR groups during MTP.
     // Group IDs follow the merged physical topology; the draft groups are excluded.

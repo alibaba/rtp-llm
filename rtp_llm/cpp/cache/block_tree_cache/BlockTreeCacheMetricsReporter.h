@@ -22,7 +22,9 @@ class MetricsReporter;
 
 namespace rtp_llm {
 
+struct BlockTreeInsertHardStopInfo;
 struct BlockTreeQueueSizes;
+class CacheStageMetrics;
 
 struct BlockTreePoolMetricsSnapshot {
     Tier        tier{Tier::DEVICE};
@@ -34,10 +36,13 @@ struct BlockTreePoolMetricsSnapshot {
     size_t      available_blocks{0};
     size_t      active_blocks{0};
     size_t      request_ref_blocks{0};
+    size_t      remote_connector_ref_blocks{0};
+    size_t      pd_connector_ref_blocks{0};
     size_t      block_cache_ref_blocks{0};
     size_t      load_ref_blocks{0};
     size_t      eviction_target_ref_blocks{0};
     size_t      store_ref_blocks{0};
+    size_t      frozen_ref_blocks{0};
 
     std::optional<int64_t> read_bytes;
     std::optional<int64_t> write_bytes;
@@ -59,21 +64,11 @@ struct BlockTreeEvictableMetricsSnapshot {
     size_t         evictable_candidate_count{0};
 };
 
-struct BlockTreeCacheReuseTimeSample {
-    Tier           tier{Tier::DEVICE};
-    CacheGroupType group_type{CacheGroupType::FULL};
-    int64_t        insert_time_us{0};
-    int64_t        last_access_time_us{0};
-    int64_t        access_time_us{0};
-};
-
 struct BlockTreeCacheReuseTimeMetricsSnapshot {
-    Tier           tier{Tier::DEVICE};
-    CacheGroupType group_type{CacheGroupType::FULL};
-    int64_t        reuse_interval_avg_ms{0};
-    int64_t        reuse_interval_max_ms{0};
-    int64_t        hit_entry_age_avg_ms{0};
-    int64_t        hit_entry_age_max_ms{0};
+    Tier                   tier{Tier::DEVICE};
+    CacheGroupType         group_type{CacheGroupType::FULL};
+    std::optional<int64_t> reuse_block_first_hit_idletime_ms;
+    int64_t                reuse_block_hit_idletime_ms{0};
 };
 
 struct BlockTreeTransferBytesKey {
@@ -95,7 +90,33 @@ using BlockTreeTransferBytes = std::unordered_map<BlockTreeTransferBytesKey, siz
 
 class BlockTreeCacheMetricsReporter final {
 public:
-    explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
+    explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
+                                           bool                                       enable_stage_metrics = true,
+                                           std::chrono::milliseconds stage_interval = std::chrono::seconds(1));
+    ~BlockTreeCacheMetricsReporter();
+    bool enabled() const noexcept {
+        return metrics_reporter_ != nullptr;
+    }
+    bool stageMetricsEnabled() const noexcept {
+        return stage_metrics_ != nullptr;
+    }
+    void flushStageMetrics() const;
+
+    // Durations are per worker batch, except coordinator multi-rank stages.
+    // Request/transfer IDs belong in the timeline, never in metric tags.
+    void reportDiskLoadStage(const char* stage,
+                             int64_t     latency_us,
+                             bool        success,
+                             int64_t     rank  = -1,
+                             const char* scope = "worker_batch") const noexcept;
+    void reportTransferStage(const char* stage,
+                             int64_t     latency_us,
+                             bool        success,
+                             int64_t     rank,
+                             const char* scope,
+                             const char* operation,
+                             const char* source_tier,
+                             const char* target_tier) const noexcept;
 
     std::vector<BlockTreePoolMetricsSnapshot>
     collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
@@ -103,11 +124,16 @@ public:
     std::vector<BlockTreeEvictableMetricsSnapshot>
     collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets, const BlockTreeEvictor& evictor) const;
     void reportEvictableCandidateCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
-    std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>
-         collectCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeSample>& samples) const;
+    void reportVictimSelectionMetrics(const VictimSelectionMetrics& snapshot) const;
     void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) const;
     void reportEvictionFinished(const EvictionTransferTask& task, const std::vector<GroupSetPtr>& group_sets) const;
-    void reportEvictionFinished(const EvictionDropTask& task, const std::vector<GroupSetPtr>& group_sets) const;
+    void reportEvictionFinished(const EvictionDropTask&         task,
+                                const std::vector<GroupSetPtr>& group_sets,
+                                const char*                     trigger_type) const;
+    void reportEvictedDescriptor(const TransferDescriptor&       desc,
+                                 const EvictionTimingSnapshot&   timing,
+                                 const std::vector<GroupSetPtr>& group_sets,
+                                 const char*                     trigger_type) const;
     void reportEvictionTriggered(Tier source_tier, CacheGroupType group_type, bool force_drop) const;
     void reportEvictionBlocks(Tier           source_tier,
                               CacheGroupType group_type,
@@ -117,6 +143,7 @@ public:
 
     void reportLoadJoin(size_t dependency_count) const;
     void reportLoadJoinWait(int64_t join_wait_latency_us) const;
+    void reportInsertHardStop(const BlockTreeInsertHardStopInfo& hard_stop) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
     // Report once after all batches/ranks of a logical copy have completed.
@@ -151,10 +178,6 @@ private:
     static constexpr size_t kDirectionCount = 5;
 
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
-    void       reportEvictedDescriptor(const TransferDescriptor&       desc,
-                                       const EvictionTimingSnapshot&   timing,
-                                       const std::vector<GroupSetPtr>& group_sets,
-                                       bool                            report_block_idletime) const;
     void
     reportEvictionTrigger(Tier source_tier, CacheGroupType group_type, const char* trigger_type, int64_t count) const;
     void reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;
@@ -165,6 +188,7 @@ private:
                                  const std::vector<GroupSetPtr>&        group_sets,
                                  BlockTreeTransferBytes&                transfer_bytes) const;
     std::shared_ptr<kmonitor::MetricsReporter>                                     metrics_reporter_;
+    std::unique_ptr<CacheStageMetrics>                                             stage_metrics_;
     std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};
 };
 
