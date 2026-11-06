@@ -132,3 +132,33 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
             "和请求标识，写入繁忙时可能丢失部分记录。默认为 False"
         ),
     )
+    profile_debug_logging_group.add_argument(
+        "--enable_batch_record",
+        env_name="RTP_LLM_ENABLE_BATCH_RECORD",
+        bind_to=(profiling_debug_config, "enable_batch_record"),
+        type=str2bool,
+        default=False,
+        help=(
+            "批量录制总开关：记录 batch 调度与请求时序到 alog batch_schedule 日志，"
+            "manifest 写入 LOG_PATH/batch_record，日志按 256MB×160/进程滚动。默认为 False"
+        ),
+    )
+    profile_debug_logging_group.add_argument(
+        "--record_queue_size",
+        env_name="RTP_LLM_RECORD_QUEUE_SIZE",
+        bind_to=(profiling_debug_config, "record_queue_size"),
+        type=int,
+        default=4096,
+        help="批量录制异步队列容量，队列满时丢弃并计数。非正值回退默认 4096。",
+    )
+    profile_debug_logging_group.add_argument(
+        "--record_decode",
+        env_name="RTP_LLM_RECORD_DECODE",
+        bind_to=(profiling_debug_config, "record_decode"),
+        type=str2bool,
+        default=False,
+        help=(
+            "批量录制是否包含 decode 批（数据量约为 prefill 的 10~100 倍），"
+            "需同时开启 --enable_batch_record。默认为 False"
+        ),
+    )

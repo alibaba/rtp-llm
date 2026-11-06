@@ -281,6 +281,14 @@ struct ProfilingDebugLoggingConfig {
     bool        enable_detail_log         = false;
     bool        check_nan                 = false;
     bool        enable_model_inputs_log   = false;
+    // Batch recording (ExecutionRecorder) switch and tuning knobs. Enabled
+    // only by the switch; queue size falls back to the default below when
+    // non-positive. Disk footprint is bounded by alog rotation (256MB x 160
+    // per process), not by a recorder-side budget. Manifest lands under
+    // LOG_PATH/batch_record.
+    bool    enable_batch_record = false;
+    int64_t record_queue_size   = 4096;
+    bool    record_decode       = false;
 
     std::string to_string() const;
 };

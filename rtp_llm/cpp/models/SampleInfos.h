@@ -11,6 +11,7 @@
 namespace rtp_llm {
 
 class LogitsProcessorStates;
+class RecordedBatch;
 typedef std::shared_ptr<LogitsProcessorStates> LogitsProcessorStatesPtr;
 
 struct SamplerInitParams {
@@ -78,13 +79,14 @@ public:
     std::vector<std::optional<ErrorInfo>> processor_errors;
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].
-    bool                                  token_ids_are_point_mass = false;
+    bool token_ids_are_point_mass = false;
 };
 
 struct MergedOutput {
 public:
-    GptModelOutputs model_output;
-    SamplerOutput   sampler_output;
+    GptModelOutputs                model_output;
+    SamplerOutput                  sampler_output;
+    std::shared_ptr<RecordedBatch> recorded_batch;
 };
 
 }  // namespace rtp_llm

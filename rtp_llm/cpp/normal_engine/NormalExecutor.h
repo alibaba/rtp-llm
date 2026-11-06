@@ -67,11 +67,12 @@ protected:
     // Stream-async dispatch. Records sampler_event on the main stream after
     // sampler_->forward, then forks the bookkeeping worker to wait on the
     // event and run dispatch + per-stream update off the main thread.
-    absl::Status dispatchOutputAsync(const StreamGroups&           stream_groups,
-                                     GptModelOutputs               model_output,
-                                     SamplerOutput                 sampler_output,
-                                     std::shared_ptr<torch::Event> sampler_event,
-                                     std::function<void()>         profile_step_finish = nullptr);
+    absl::Status dispatchOutputAsync(const StreamGroups&            stream_groups,
+                                     GptModelOutputs                model_output,
+                                     SamplerOutput                  sampler_output,
+                                     std::shared_ptr<torch::Event>  sampler_event,
+                                     std::function<void()>          profile_step_finish = nullptr,
+                                     std::shared_ptr<RecordedBatch> recorded_batch      = nullptr);
 
     bool has_engram_ = false;
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
@@ -104,6 +105,8 @@ private:
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
     bool enable_ffn_disaggregate_ = false;
     bool enable_detail_log_       = false;
+    // Batch recording decode capture, from ProfilingDebugLoggingConfig.
+    bool record_decode_           = false;
 
     bool                  is_propose_          = false;
     int                   propose_model_index_ = 0;
