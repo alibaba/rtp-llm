@@ -66,6 +66,7 @@ public:
 
 private:
     int  retainedDecodeBlocks(int reserve_step) const;
+    int  prefixCheckpointStride(bool enable_reuse_cache) const;
     bool mallocImpl(BlockIds&                block_ids,
                     int                      seq_len,
                     int                      reserve_step,

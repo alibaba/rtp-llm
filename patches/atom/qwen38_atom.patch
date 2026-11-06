@@ -1,0 +1,100 @@
+diff --git a/atom/model_ops/qwen4_exp/qsa_attention.py b/atom/model_ops/qwen4_exp/qsa_attention.py
+--- a/atom/model_ops/qwen4_exp/qsa_attention.py
++++ b/atom/model_ops/qwen4_exp/qsa_attention.py
+@@ -522,6 +522,12 @@
+             block_tables=torch.arange(pages, device=device, dtype=torch.int32)[None],
+             seq_lens=torch.tensor([tokens], device=device, dtype=torch.int32),
+             max_seq_len=tokens,
++            # Serving metadata gained these optional native cache mappings.
++            # Synthetic profiling does not own paged RTP cache regions.
++            raw_index_slot_mapping=None,
++            index_compressed_slot_mapping=None,
++            raw_index_block_tables=None,
++            index_block_tables=None,
+         )
+         names = (
+             "k_cache",
+diff --git a/atom/model_ops/topK.py b/atom/model_ops/topK.py
+--- a/atom/model_ops/topK.py
++++ b/atom/model_ops/topK.py
+@@ -210,39 +210,19 @@
+     fused_shared_experts_scoring_func: str | None = None,
+     num_valid_rows: torch.Tensor | None = None,
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+-    from aiter import topk_softmax
+-
+-    token = gating_output.shape[0]
+-    device = gating_output.device
+-    if num_fused_shared_experts > 0:
+-        total_topk_weights, total_topk_ids = topk_meta_rows(token)
+-        # The kernel scores the shared columns too when given a scoring func.
+-        topk_weights = total_topk_weights
+-        topk_ids = total_topk_ids[:, :topk]
+-    else:
+-        topk_ids = torch.empty((token, topk), dtype=torch.int32, device=device)
+-        topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
+-    token_expert_indicies = torch.empty(
+-        gating_output.shape[0], topk, dtype=torch.int32, device=gating_output.device
+-    )
+-    if fused_shared_experts_scoring_func is None:
+-        fused_shared_experts_scoring_func = ""
+-        fused_shared_experts_for_kernel = 0
+-    else:
+-        fused_shared_experts_for_kernel = num_fused_shared_experts
+-    topk_softmax(
+-        topk_weights,
+-        topk_ids,
+-        token_expert_indicies,
++    # Keep standalone and RTP on the same pinned AITER ABI bridge. This wheel
++    # calls the eight-argument topk API, while AITER cbccc02fd exposes seven.
++    from atom.plugin.rtpllm.utils.topk_compat import rtp_topk_softmax
++
++    return rtp_topk_softmax(
+         gating_output,
++        topk,
+         renormalize,
+-        fused_shared_experts_for_kernel,
++        num_fused_shared_experts,
++        num_routing_experts,
+         fused_shared_experts_scoring_func,
+         num_valid_rows,
+     )
+-    if num_fused_shared_experts > 0:
+-        return total_topk_weights, total_topk_ids
+-    return topk_weights, topk_ids
+ 
+ 
+ def rocm_aiter_biased_grouped_topk_impl(
+diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/qwen4_exp.py
+--- a/atom/plugin/rtpllm/models/qwen4_exp.py
++++ b/atom/plugin/rtpllm/models/qwen4_exp.py
+@@ -18,6 +18,7 @@
+     ple_state_desc,
+ )
+ from rtp_llm.ops import (
++    CacheTailPolicyDesc,
+     DataType,
+     HybridAttentionType,
+     KVCacheSpecType,
+@@ -33,6 +34,11 @@
+ )
+ 
+ logger = logging.getLogger("atom.plugin.rtpllm.models")
++
++# The GDN state is much larger than QSA/PLE state. One checkpoint per 1024
++# prompt tokens lets the prefix cache serve common 6K/7K prefixes without
++# retaining every 64-token state page of a long request.
++GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS = 16
+ 
+ 
+ class _Qwen4ExpAttnPyObj(_ATOMAttnPyObj):
+@@ -720,6 +726,9 @@
+             for desc in layer:
+                 if desc.cache_type == KVCacheSpecType.LINEAR:
+                     desc.dtype = DataType.TYPE_BF16
++                    tail = desc.tail or CacheTailPolicyDesc()
++                    tail.prefix_checkpoint_stride_blocks = GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS
++                    desc.tail = tail
+         model_config.kv_cache_spec_descs = descs
+ 
+     @classmethod
