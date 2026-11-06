@@ -18,9 +18,14 @@ import time
 import urllib.request
 from pathlib import Path
 
-from pd_config import gpu_contexts, validate_config
-from result_check import failure_details
-from server_launcher import cpu_tp_socket_environment, runtime_tmp_environment
+if __package__:
+    from .pd_config import gpu_contexts, validate_config
+    from .result_check import failure_details
+    from .server_launcher import cpu_tp_socket_environment, runtime_tmp_environment
+else:
+    from pd_config import gpu_contexts, validate_config
+    from result_check import failure_details
+    from server_launcher import cpu_tp_socket_environment, runtime_tmp_environment
 
 # server_launcher's orthogonal Prefill profile uses TP8 and 4096-token pages.
 # CP-sharded cache keys span all Prefill ranks, independently of Decode DP.
@@ -29,16 +34,17 @@ CACHE_PAGE_TOKENS = 4096
 WORKER_PORT_STRIDE = 9
 
 
-def pd_endpoints(start_port, dp_size):
+def pd_endpoints(start_port, dp_size, local_world_size=8, world_rank=0):
     """Endpoints used by the fixed eight-rank PD profile in this launcher."""
     if dp_size not in (1, 2):
         raise ValueError("PD readiness requires DP1 or DP2")
     endpoints = []
-    for rank in range(PREFILL_TP_SIZE):
-        base = start_port + rank * WORKER_PORT_STRIDE
+    for local_rank in range(local_world_size):
+        rank = world_rank + local_rank
+        base = start_port + local_rank * WORKER_PORT_STRIDE
         for kind, offset in (("rpc", 1), ("cache_tcp", 2), ("cache_rdma", 4)):
             endpoints.append({"rank": rank, "kind": kind, "port": base + offset})
-        if rank % (PREFILL_TP_SIZE // dp_size) == 0:
+        if local_rank == 0 or rank % (PREFILL_TP_SIZE // dp_size) == 0:
             endpoints.append({"rank": rank, "kind": "http", "port": base})
     return endpoints
 
@@ -129,6 +135,11 @@ def stop_process(process, timeout=60):
 
 
 class Worker:
+    run_id_prefix = "k3-pd-"
+    local_gpu_count = 8
+    world_rank = 0
+    gpu_model_tokens = ("L20D", "B300")
+
     def __init__(self, disconnected):
         self.disconnected = disconnected
         self.locks = contextlib.ExitStack()
@@ -156,8 +167,8 @@ class Worker:
         host = config[role]
         if (
             not isinstance(run_id, str)
-            or not run_id.startswith("k3-pd-")
-            or not run_id[6:].isalnum()
+            or not run_id.startswith(self.run_id_prefix)
+            or not run_id[len(self.run_id_prefix):].isalnum()
         ):
             raise ValueError("Invalid run id")
         root = Path(host["artifact_root"])
@@ -354,15 +365,17 @@ class Worker:
             timeout=30,
         ).splitlines()
         rows = [tuple(value.strip() for value in row.split(",")) for row in rows]
-        if len(rows) != 8 or {row[0] for row in rows} != {str(i) for i in range(8)}:
-            raise ValueError("Each worker must expose exactly eight B300 GPUs")
-        if any(not ("L20D" in row[2] or "B300" in row[2]) for row in rows):
+        count = self.local_gpu_count
+        if len(rows) != count or {row[0] for row in rows} != {str(i) for i in range(count)}:
+            label = "eight" if count == 8 else str(count)
+            raise ValueError(f"Each worker must expose exactly {label} GPUs")
+        if any(not any(token in row[2] for token in self.gpu_model_tokens) for row in rows):
             raise ValueError("This native K3 profile requires the B300 machine class")
         self.gpu_uuids = [row[1] for row in rows]
         lock_root.mkdir(parents=True, exist_ok=True)
         # Same flock files as //rtp_llm/test/utils:gpu_lock; fail rather than
         # partially reserving one node while waiting indefinitely for the other.
-        for index in range(8):
+        for index in range(count):
             handle = self.locks.enter_context((lock_root / str(index)).open("a"))
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self._capture_gpu_baseline("prepare")
@@ -416,7 +429,7 @@ class Worker:
         dp = self.config.get("decode_dp", 1) if self.role == "decode" else 1
         command = [
             sys.executable,
-            str(Path(__file__).with_name("server_launcher.py")),
+            str(self.launcher_path()),
             "--role",
             self.role.upper(),
             "--tp-size",
@@ -453,6 +466,7 @@ class Worker:
             or self.config.get("moe_strategy")
             or ("mega_moe" if self.role == "prefill" else "mega_moe_se"),
         ]
+        command.extend(self.launcher_options())
         for key in ("fp8_gemm", "fp8_kv_cache", "kda_nvfp4", "dsa_nvfp4"):
             if key in self.config:
                 command.append(("--" if self.config[key] else "--no-") + key.replace("_", "-"))
@@ -477,11 +491,14 @@ class Worker:
             if option in self.host:
                 command += ["--" + option.replace("_", "-"), str(self.host[option])]
         environment = os.environ.copy()
+        environment.update(self.launcher_environment())
         # The controller is GPU_COUNT=0; the remote server must own all eight.
         environment.update(
-            GPU_COUNT="8",
+            GPU_COUNT=str(self.local_gpu_count),
             WORLD_SIZE="8",
-            CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7",
+            WORLD_RANK=str(self.world_rank),
+            LOCAL_WORLD_SIZE=str(self.local_gpu_count),
+            CUDA_VISIBLE_DEVICES=",".join(str(i) for i in range(self.local_gpu_count)),
         )
         self.console = (self.task / "service.log").open("w")
         self.service = subprocess.Popen(
@@ -494,6 +511,15 @@ class Worker:
         )
         return {"started": True, "pid": self.service.pid}
 
+    def launcher_path(self):
+        return Path(__file__).with_name("server_launcher.py")
+
+    def launcher_options(self):
+        return []
+
+    def launcher_environment(self):
+        return {}
+
     def status(self):
         if self.service is None or self.service.poll() is not None:
             service_log = self.task / "service.log" if self.task else "<not prepared>"
@@ -502,7 +528,7 @@ class Worker:
                 f"service_log={service_log}"
             )
         dp_size = self.config.get("decode_dp", 1) if self.role == "decode" else 1
-        endpoints = pd_endpoints(self.host["port"], dp_size)
+        endpoints = pd_endpoints(self.host["port"], dp_size, self.local_gpu_count, self.world_rank)
         listeners = listening_tcp_ports(self.host["ip"])
         missing = [item for item in endpoints if item["port"] not in listeners]
         unhealthy_http = []
@@ -538,7 +564,7 @@ class Worker:
         )
         return {"healthy": healthy}
 
-    def requests(self, message):
+    def request_command(self):
         if self.role != "prefill":
             raise ValueError("The request runner must execute on the Prefill host")
         self.status()
@@ -582,6 +608,10 @@ class Worker:
         for owner in range(dp):
             port = decode["port"] + owner * (8 // dp) * 9
             command += ["--decode-role-addr", f"{decode['ip']}:{port}:{port + 1}"]
+        return command
+
+    def requests(self, message):
+        command = self.request_command()
         (self.task / "requests-command.json").write_text(
             json.dumps({"argv": command}, indent=2) + "\n"
         )
@@ -613,6 +643,9 @@ class Worker:
                 )
         return {"requests_passed": True}
 
+    def stop_service(self):
+        stop_process(self.service, timeout=330)
+
     def close(self):
         errors = []
         remaining_contexts = set()
@@ -631,7 +664,10 @@ class Worker:
             for name, process in (("request", self.request), ("service", self.service)):
                 try:
                     # 120s frontend + 180s deferred backend + 30s supervisor reap.
-                    stop_process(process, timeout=330 if name == "service" else 60)
+                    if name == "service":
+                        self.stop_service()
+                    else:
+                        stop_process(process, timeout=60)
                 except Exception as exc:
                     errors.append(f"{name} cleanup: {type(exc).__name__}: {exc}")
             if unexpected_exit is not None:
