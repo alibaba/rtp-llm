@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
+#include "rtp_llm/cpp/normal_engine/PromptScoringRows.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 
@@ -269,6 +270,36 @@ torch::Tensor buildLmOutputIndexesOnHost(const GptModelInputs& model_input, cons
         }
     }
     return indexes;
+}
+
+// Token rows (combo_tokens coordinates, allStreams() order) whose full-vocab logits any output
+// consumer can read this step: per stream, the clamped prompt-logits window and/or the loss range
+// [0, token_size-1). PyWrappedModel TP-gathers only these rows (plus the lm_output_indexes rows)
+// instead of every executed token, so prompt scoring a long prompt no longer allocates
+// [tokens, vocab] fp32 per rank. The dispatcher recomputes the same ranges (promptScoringRowRange)
+// to locate each stream's slice, so the two must stay in lockstep.
+torch::Tensor buildAllLogitsRowIndexes(const StreamGroups& stream_groups) {
+    std::vector<int32_t> rows;
+    int32_t              token_offset = 0;
+    for (const auto& stream : stream_groups.allStreams()) {
+        const int  token_size = stream->currentExecuteTokenSize();
+        const auto config     = stream->generateConfig();
+        const auto [a, b]     = promptScoringRowRange(token_size,
+                                                  stream->calculateLoss(),
+                                                  stream->returnPromptLogits(),
+                                                  config->prompt_logits_start,
+                                                  config->prompt_logits_end);
+        for (int r = a; r < b; ++r) {
+            rows.push_back(token_offset + r);
+        }
+        token_offset += token_size;
+    }
+    auto out =
+        torch::empty({static_cast<int64_t>(rows.size())}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
+    if (!rows.empty()) {
+        std::memcpy(out.data_ptr<int32_t>(), rows.data(), rows.size() * sizeof(int32_t));
+    }
+    return out;
 }
 
 torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host_holder) {
@@ -640,6 +671,11 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
         model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
     } else {
         model_input.lm_output_indexes = buildLmOutputIndexesOnHost(model_input, stream_groups);
+    }
+    if (model_input.need_all_logits) {
+        // Attach the possibly-empty row set; definedness (not emptiness) is what switches
+        // PyWrappedModel to the row-selected gather, and it must be identical on every TP rank.
+        model_input.all_logits_row_indexes = buildAllLogitsRowIndexes(stream_groups);
     }
     return model_input;
 }

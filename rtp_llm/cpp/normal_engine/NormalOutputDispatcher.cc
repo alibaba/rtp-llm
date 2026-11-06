@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
+#include "rtp_llm/cpp/normal_engine/PromptScoringRows.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -143,11 +144,14 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
-    int  batch_idx_in     = 0;
-    int  batch_idx_out    = 0;
-    int  token_offset     = 0;
-    bool return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
-    auto new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
+    int batch_idx_in  = 0;
+    int batch_idx_out = 0;
+    int token_offset  = 0;
+    // Prefix of this stream's prompt-scoring/loss rows inside a row-selected all_logits
+    // (advanced per stream; unused when all_logits keeps the legacy token-aligned layout).
+    int  all_logits_row_offset = 0;
+    bool return_all_probs      = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
+    auto new_tokens_all        = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
@@ -159,6 +163,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                              batch_idx_in,
                              batch_idx_out,
                              token_offset,
+                             all_logits_row_offset,
                              return_all_probs,
                              new_tokens_all,
                              token_ids_cpu,
@@ -178,6 +183,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   int                  batch_idx_in,
                                                   int                  batch_idx_out,
                                                   int                  token_offset,
+                                                  int&                 all_logits_row_offset,
                                                   bool                 return_all_probs,
                                                   const torch::Tensor& new_tokens_all,
                                                   const torch::Tensor& token_ids_cpu,
@@ -191,6 +197,23 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     auto cur_batch_size  = stream->currentBatchSize();
     auto next_batch_size = stream->nextBatchSize();
     auto token_size      = stream->currentExecuteTokenSize();
+
+    // Row origin of this stream's execute tokens inside model_output.all_logits. The legacy layout
+    // is token-aligned (all_logits has one row per executed token); the row-selected layout
+    // (all_logits_lm_rows >= 0) packs the lm_output_indexes rows first and then each stream's
+    // prompt-scoring/loss row range, so this stream's token row r lives at
+    // lm_rows + prefix + (r - range_a). The range rule must match NormalModelInputGatherer.
+    int all_logits_origin = token_offset;
+    if (model_output.all_logits_lm_rows >= 0) {
+        const auto config             = stream->generateConfig();
+        const auto [range_a, range_b] = promptScoringRowRange(token_size,
+                                                              stream->calculateLoss(),
+                                                              stream->returnPromptLogits(),
+                                                              config->prompt_logits_start,
+                                                              config->prompt_logits_end);
+        all_logits_origin = static_cast<int>(model_output.all_logits_lm_rows) + all_logits_row_offset - range_a;
+        all_logits_row_offset += range_b - range_a;
+    }
 
     auto batch_new_all_token_ids = new_all_token_ids.narrow(0, batch_idx_out, next_batch_size);
 
@@ -269,7 +292,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
 
     torch::Tensor loss;
     if (stream->calculateLoss()) {
-        auto all_logits_tensor = model_output.all_logits.narrow(0, token_offset, token_size - 1);
+        auto all_logits_tensor = model_output.all_logits.narrow(0, all_logits_origin, token_size - 1);
         auto tokens            = stream->currentExecuteTokens(0);
         auto label_tensor =
             torch::from_blob(const_cast<int*>(tokens.data() + 1), {(int64_t)(tokens.size() - 1)}, torch::kInt32)
@@ -279,8 +302,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                    .to(torch::kFloat32);
     }
 
-    // Prompt scoring: guarded by all_logits.defined() which is only produced during prefill
-    // (NormalModelInputGatherer sets need_all_logits only in processContextStreams).
+    // Prompt scoring: guarded by all_logits.defined(), which the model produces whenever
+    // need_all_logits is set — prefill prompt-logits/loss requests and decode-phase
+    // calculate_loss both reach this path.
     std::optional<PromptLogitsOutput> prompt_logits_output;
     if (stream->returnPromptLogits() && !model_output.all_logits.defined()) {
         RTP_LLM_LOG_WARNING("stream [%ld] prompt_logits requested but all_logits not produced", stream->streamId());
@@ -295,7 +319,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
             int top_k = std::min(config->prompt_logits_top_k, (int)model_output.all_logits.size(1));
 
             auto sliced_logits =
-                model_output.all_logits.narrow(0, token_offset + start_pos, slice_len).to(torch::kFloat32);
+                model_output.all_logits.narrow(0, all_logits_origin + start_pos, slice_len).to(torch::kFloat32);
 
             // topk on raw logits (monotonicity of softmax preserves ranking)
             auto [topk_values_raw, topk_indices] = sliced_logits.topk(top_k, -1);

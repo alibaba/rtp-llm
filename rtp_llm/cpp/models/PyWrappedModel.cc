@@ -970,7 +970,11 @@ torch::Tensor PyWrappedModel::computeQuantizedLogits(const torch::Tensor& hidden
     return logits;
 }
 
-torch::Tensor PyWrappedModel::lmHeadLogits(const torch::Tensor& last_hidden, const torch::Tensor& kernel) {
+// LM head matmul only: the TP-local logits [rows, local_vocab] (fp32 for dense kernels, bf16 for
+// the packed nvfp4 callback). Split from lmHeadLogits so the prompt-scoring path can row-select
+// before the TP gather while keeping the GEMM itself identical to the unselected full-token call.
+torch::Tensor
+PyWrappedModel::lmHeadLocalLogits(const torch::Tensor& last_hidden, const torch::Tensor& kernel, bool* int8_used_out) {
     torch::Tensor logits;
 #if USING_CUDA
     bool int8_used = false;
@@ -1026,6 +1030,17 @@ torch::Tensor PyWrappedModel::lmHeadLogits(const torch::Tensor& last_hidden, con
     {
         logits = torch::mm(last_hidden.to(kernel.dtype()), kernel.t()).to(torch::kFloat32);
     }
+#if USING_CUDA
+    if (int8_used_out != nullptr) {
+        *int8_used_out = int8_used;
+    }
+#endif
+    return logits;
+}
+
+torch::Tensor PyWrappedModel::lmHeadLogits(const torch::Tensor& last_hidden, const torch::Tensor& kernel) {
+    bool          int8_used = false;
+    torch::Tensor logits    = lmHeadLocalLogits(last_hidden, kernel, &int8_used);
     printTorchTensorData(logits, "logits");
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.lmHeadLogits(tp_sync_logits)");
@@ -1161,8 +1176,67 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         printTorchTensorData(last_hidden, "last_hidden");
 
+        // When the input gatherer marked the exact token rows any consumer can read
+        // (all_logits_row_indexes, set iff need_all_logits), run the full local lm head GEMM exactly
+        // as the unselected path would (same shapes -> bitwise-identical local logits), then select
+        // only [lm_output_indexes ++ all_logits_row_indexes] rows before the TP gather. The gather
+        // then moves a handful of rows instead of the whole prompt, so a long prompt-scoring request
+        // no longer materializes [tokens, vocab] fp32 per rank (the 3.46 GiB @3740-token allocation
+        // that OOMed nearly-full GPUs). The first lm_output_indexes.numel() rows of the gathered
+        // tensor remain the sampler-facing logits.
+        const bool row_select = need_all_logits && inputs.all_logits_row_indexes.defined();
+
         torch::Tensor logits;
-        {
+        if (row_select) {
+            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm_row_select)");
+            buffer_holder_.hold_host(inputs.all_logits_row_indexes);
+            auto scoring_rows_device = inputs.all_logits_row_indexes.to(torch::kCUDA, /*non_blocking=*/true);
+            auto row_indexes_device  = scoring_rows_device.numel() > 0 ?
+                                           torch::cat({lm_output_indexes_device, scoring_rows_device}, 0) :
+                                           lm_output_indexes_device;
+            // Local logits cover every executed token (identical GEMM to the unselected path);
+            // the TP gather ships only the needed rows. The full [tokens, local_vocab] temporary
+            // is released before the gather so peak memory stays at one local copy.
+            bool int8_used = false;
+            logits         = lmHeadLocalLogits(last_hidden, lm_head->kernel, &int8_used)
+                         .index_select(0, row_indexes_device.to(torch::kLong));
+            if (device_props_.tp_size > 1) {
+                RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_selected_logits)");
+                logits = tpSyncEmbeddingOrLogits(logits);
+            }
+#if USING_CUDA
+            if (int8_used && int8_lm_head_check_) {
+                // Mirror lmHeadLogits' check mode on the served rows: rebuild the bf16
+                // reference over the same token set, select and gather the same rows,
+                // compare top-1, and serve the reference like the unselected path does.
+                auto ref = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16).contiguous(),
+                                                                 lm_head->kernel)
+                               .index_select(0, row_indexes_device.to(torch::kLong));
+                if (device_props_.tp_size > 1) {
+                    ref = tpSyncEmbeddingOrLogits(ref);
+                }
+                if (!int8_lm_head_check_stats_.defined()) {
+                    int8_lm_head_check_stats_ = torch::zeros({2}, ref.options().dtype(torch::kLong));
+                }
+                auto          ref_top1 = ref;
+                auto          out_top1 = logits;
+                const int64_t vocab    = static_cast<int64_t>(description_.output_vocab_size);
+                if (vocab > 0 && vocab < ref.size(1)) {
+                    ref_top1 = ref.narrow(1, 0, vocab);
+                    out_top1 = logits.narrow(1, 0, vocab);
+                }
+                auto mismatch = (ref_top1.argmax(-1) != out_top1.argmax(-1)).sum();
+                int8_lm_head_check_stats_.select(0, 0).add_(ref.size(0));
+                int8_lm_head_check_stats_.select(0, 1).add_(mismatch);
+                if (++int8_lm_head_check_calls_ % 256 == 0) {
+                    auto s = int8_lm_head_check_stats_.cpu();
+                    RTP_LLM_LOG_INFO(
+                        "INT8 LM head check: rows=%ld top1_mismatch=%ld", s[0].item<int64_t>(), s[1].item<int64_t>());
+                }
+                logits = ref;
+            }
+#endif
+        } else {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
             logits = lmHeadLogits(last_hidden, lm_head->kernel);
         }
@@ -1183,6 +1257,18 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor softmax_result_t;
         if (need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(need_all_logits_index)");
+            GptModelOutputs outputs;
+            if (row_select) {
+                const auto lm_rows = lm_output_indexes.size(0);
+                outputs.logits     = logits.narrow(0, 0, lm_rows);
+                // hidden_states/all_hidden_states keep the legacy full-sequence contract.
+                outputs.hidden_states      = hidden;
+                outputs.all_hidden_states  = hidden;
+                outputs.all_logits         = logits;
+                outputs.softmax_result     = softmax_result_t;
+                outputs.all_logits_lm_rows = lm_rows;
+                return outputs;
+            }
             auto last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
             return {last_logits, last_hidden, hidden, logits, softmax_result_t};
         }

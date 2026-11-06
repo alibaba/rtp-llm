@@ -34,6 +34,7 @@ private:
                               int                  batch_idx_in,
                               int                  batch_idx_out,
                               int                  token_offset,
+                              int&                 all_logits_row_offset,
                               bool                 return_all_probs,
                               const torch::Tensor& new_tokens_all,
                               const torch::Tensor& token_ids_cpu,

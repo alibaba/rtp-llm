@@ -17,7 +17,8 @@ py::dict runLmHead(py::object           py_model,
                    bool                 need_all_logits,
                    bool                 already_selected,
                    int                  tp_size,
-                   size_t               output_vocab_size) {
+                   size_t               output_vocab_size,
+                   const py::object&    all_logits_row_indexes) {
     initRuntime(/*device_id=*/0, /*trace_memory=*/false, /*enable_comm_overlap=*/false, MlaOpsType::AUTO);
     Weights weights;
     weights.layers.resize(1);
@@ -43,6 +44,10 @@ py::dict runLmHead(py::object           py_model,
 
     PyWrappedModel model(params, std::move(py_model));
     GptModelInputs inputs;
+    inputs.need_all_logits = need_all_logits;
+    if (!all_logits_row_indexes.is_none()) {
+        inputs.all_logits_row_indexes = all_logits_row_indexes.cast<torch::Tensor>();
+    }
     auto outputs = already_selected ? model.forwardPostLayersLastHidden(hidden, inputs) :
                                       model.forwardPostLayers(hidden,
                                                               has_context_request,
@@ -54,10 +59,11 @@ py::dict runLmHead(py::object           py_model,
                                                               torch::Tensor(),
                                                               /*skip_final_layernorm=*/true);
     py::dict result;
-    result["logits"]            = outputs.logits;
-    result["hidden_states"]     = outputs.hidden_states;
-    result["all_hidden_states"] = outputs.all_hidden_states;
-    result["all_logits"]        = outputs.all_logits.defined() ? py::cast(outputs.all_logits) : py::none();
+    result["logits"]             = outputs.logits;
+    result["hidden_states"]      = outputs.hidden_states;
+    result["all_hidden_states"]  = outputs.all_hidden_states;
+    result["all_logits"]         = outputs.all_logits.defined() ? py::cast(outputs.all_logits) : py::none();
+    result["all_logits_lm_rows"] = outputs.all_logits_lm_rows;
     return result;
 }
 
@@ -70,9 +76,10 @@ PYBIND11_MODULE(libth_pywrapped_model_lm_head_test, m) {
           py::arg("kernel"),
           py::arg("hidden"),
           py::arg("indexes"),
-          py::arg("has_context_request") = true,
-          py::arg("need_all_logits")     = false,
-          py::arg("already_selected")    = false,
-          py::arg("tp_size")             = 1,
-          py::arg("output_vocab_size")   = 0);
+          py::arg("has_context_request")    = true,
+          py::arg("need_all_logits")        = false,
+          py::arg("already_selected")       = false,
+          py::arg("tp_size")                = 1,
+          py::arg("output_vocab_size")      = 0,
+          py::arg("all_logits_row_indexes") = py::none());
 }

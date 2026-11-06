@@ -354,6 +354,7 @@ struct Scenario {
     size_t                           model_id{0};
     std::optional<int>               mtp_cache_config_index;
     bool                             replace_cp_processor{false};
+    bool                             with_lm_head{false};
 };
 
 Scenario makeMultiTagScenario() {
@@ -387,6 +388,18 @@ Scenario makeMicroBatchScenario() {
                              /*global_stride_bytes=*/16);
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
+    return scenario;
+}
+
+Scenario makeMicroBatchScoringScenario() {
+    // Same three-request batch as micro_batch, but with prompt-scoring rows attached.
+    // need_all_logits must NOT disable layer micro-batching: forwardMicroBatched reassembles
+    // the full-batch hidden states and calls post-layers with the unsplit inputs, so the
+    // full-batch all_logits_row_indexes stay valid (combo_tokens coordinates).
+    auto scenario                          = makeMicroBatchScenario();
+    scenario.inputs.need_all_logits        = true;
+    scenario.inputs.all_logits_row_indexes = pinnedTensor({0, 2, 3}, {3});
+    scenario.with_lm_head                  = true;
     return scenario;
 }
 
@@ -438,6 +451,9 @@ Scenario makeScenario(const std::string& name) {
     }
     if (name == "micro_batch") {
         return makeMicroBatchScenario();
+    }
+    if (name == "micro_batch_scoring") {
+        return makeMicroBatchScoringScenario();
     }
     if (name == "cp_actual_lengths") {
         return makeContextParallelScenario();
@@ -504,6 +520,11 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     Weights weights;
     weights.layers.resize(1);
+    if (scenario.with_lm_head) {
+        auto head       = std::make_shared<DenseWeights>();
+        head->kernel    = torch::ones({16, 1}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA));
+        weights.lm_head = std::move(head);
+    }
     GptModelDescription description;
     description.data_type                    = DataType::TYPE_FP16;
     description.norm_type                    = NormType::rmsnorm;
@@ -533,14 +554,19 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                               manager,
                               scenario.mtp_cache_config_index};
 
+    GptModelOutputs outputs;
     {
         PyWrappedModel model(params, std::move(py_model));
         if (scenario.replace_cp_processor) {
             model.context_parallel_processor_ = std::make_unique<TestContextParallelProcessor>(scenario.parallelism);
         }
-        (void)model.forward(scenario.inputs);
+        outputs = model.forward(scenario.inputs);
     }
-    return serializeResult(*cache_store, scenario.base_addresses);
+    auto result                  = serializeResult(*cache_store, scenario.base_addresses);
+    result["logits"]             = outputs.logits.defined() ? py::cast(outputs.logits) : py::none();
+    result["all_logits"]         = outputs.all_logits.defined() ? py::cast(outputs.all_logits) : py::none();
+    result["all_logits_lm_rows"] = outputs.all_logits_lm_rows;
+    return result;
 }
 
 }  // namespace

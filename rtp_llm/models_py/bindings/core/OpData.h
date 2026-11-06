@@ -73,6 +73,16 @@ struct GptModelInputs {
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
+
+    // int32 host tensor populated by NormalModelInputGatherer iff need_all_logits: the token rows
+    // (in combo_tokens coordinates, allStreams() order) whose full-vocab logits any consumer can
+    // read — prompt-logits window rows and loss rows. PyWrappedModel gathers only
+    // cat(lm_output_indexes, all_logits_row_indexes) across TP instead of all token rows, so a long
+    // prompt-scoring request no longer materializes [tokens, vocab] fp32 on every rank.
+    // Undefined when need_all_logits is false; when true it is defined but may still be empty —
+    // definedness (not emptiness) selects the row-gather path, and undefined keeps the legacy
+    // full-row gather.
+    torch::Tensor all_logits_row_indexes;
     // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
     size_t kv_block_stride_bytes;
     size_t kv_scale_stride_bytes;
@@ -116,6 +126,13 @@ struct GptModelOutputs {
     torch::Tensor softmax_result;
 
     std::vector<torch::Tensor> moe_gating;
+
+    // Row layout of all_logits: -1 (default) = legacy, one row per executed token
+    // (combo_tokens coordinates). >= 0 = row-selected: the first all_logits_lm_rows rows are the
+    // lm_output_indexes rows (the sampler-facing logits), the remaining rows are the per-stream
+    // prompt-scoring/loss ranges in allStreams() order (see all_logits_row_indexes and
+    // promptScoringRowRange). Set only by PyWrappedModel::forwardPostLayers on the selected path.
+    int64_t all_logits_lm_rows = -1;
 };
 
 struct CopyParams {

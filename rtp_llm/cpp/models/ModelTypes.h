@@ -98,6 +98,9 @@ enum GptModelInputIndex : size_t {
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
     comboTokenTypeIds,
+    // Number of rows in all_logits_row_indexes (int32 host tensor selecting which token rows get
+    // full-vocab TP-gathered logits; see GptModelInputs::all_logits_row_indexes).
+    allLogitsRowIndexes,
     gptModelInputLength,
 };
 
