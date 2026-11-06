@@ -10,17 +10,21 @@ import java.util.WeakHashMap;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Builds and inspects request ownership for API tests. */
+/**
+ * Builds and inspects request ownership for API tests.
+ */
 public final class SchedulerTestSupport {
-    /** Read shadow ownership for assertions, without granting a production lookup capability. */
-    public static DecodeResources.ReservationHandle decodeReservation(
+    /**
+     * Read shadow ownership for assertions, without granting a production lookup capability.
+     */
+    public static DecodeResources.RequestReservation decodeReservation(
             DecodeEndpoint endpoint, long requestId) {
         return endpoint.isRetired()
                 ? null
                 : decodeReservation(endpoint.resourceSnapshot(), requestId);
     }
 
-    private static DecodeResources.ReservationHandle decodeReservation(
+    private static DecodeResources.RequestReservation decodeReservation(
             DecodeResources.ResourceSnapshot snapshot, long requestId) {
         var request = snapshot.requests().get(String.valueOf(requestId));
         if (request == null || request.reservationToken() <= 0L) {
@@ -28,7 +32,7 @@ public final class SchedulerTestSupport {
         }
         return switch (request.phase()) {
             case LOCAL_RESERVED, MASTER_QUEUED_NOT_DISPATCHED, ENGINE_MAY_HAVE_SEEN ->
-                    new DecodeResources.ReservationHandle(
+                    new DecodeResources.RequestReservation(
                             snapshot.routing().generationId(),
                             String.valueOf(requestId),
                             request.reservationToken());
@@ -36,10 +40,10 @@ public final class SchedulerTestSupport {
         };
     }
 
-    private static final Map<RequestLifecycle, RequestRepository> mockRepositories =
+    private static final Map<AbstractRequestScheduler, RequestRepository> mockRepositories =
             new WeakHashMap<>();
 
-    public static synchronized RequestRepository repository(RequestLifecycle owner) {
+    public static synchronized RequestRepository repository(AbstractRequestScheduler owner) {
         if (owner == null) {
             return null;
         }
@@ -48,7 +52,7 @@ public final class SchedulerTestSupport {
                 : mockRepositories.computeIfAbsent(owner, SchedulerTestSupport::mockRepository);
     }
 
-    private static RequestRepository mockRepository(RequestLifecycle owner) {
+    private static RequestRepository mockRepository(AbstractRequestScheduler owner) {
         var repository = mock(RequestRepository.class);
         when(repository.ownerOf(org.mockito.ArgumentMatchers.anyString())).thenReturn(owner);
         when(repository.findActive(org.mockito.ArgumentMatchers.anyString()))
@@ -57,16 +61,26 @@ public final class SchedulerTestSupport {
                             var context = mock(RequestContext.class);
                             var data = mock(RequestData.class);
                             when(context.data()).thenReturn(data);
-                            when(data.getLifecycle()).thenReturn(owner);
+                            when(data.getRequestScheduler()).thenReturn(owner);
                             return context;
                         });
         return repository;
     }
 
-    public static void bindOwner(RequestContext context, RequestLifecycle owner) {
-        if (context.data().getLifecycle() == null) {
+    public static void bindOwner(RequestContext context, AbstractRequestScheduler owner) {
+        if (context.data().getRequestScheduler() == null) {
             // Minimal fixtures may bind an owner without registering a runnable request.
-            ReflectionTestUtils.setField(context.data(), "lifecycle", owner);
+            ReflectionTestUtils.setField(context.data(), "requestScheduler", owner);
         }
+    }
+
+    public static PlacementOperation claim(
+            AbstractRequestScheduler scheduler,
+            String id,
+            java.util.concurrent.CompletableFuture<?> future) {
+        var context = scheduler.requests.findActive(id);
+        return context != null && context.data().getFuture() == future
+                ? scheduler.claimPlacement(context)
+                : null;
     }
 }

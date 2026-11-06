@@ -3,10 +3,10 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestExecutionTestSupport;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -56,7 +56,7 @@ class RequestExecutionRequestCapacityTest {
             config.getScheduler().setOrdering(ConfigTestSupport.priority());
         }
         try (Fixture fixture = fixture(config)) {
-            List<RequestRoute> routes = new ArrayList<>();
+            List<RouteExecution> routes = new ArrayList<>();
             for (long id = 1; id <= 8; id++) {
                 var route = item(config, fixture.endpoint, id, priority ? (int) id : 0);
                 routes.add(route);
@@ -87,13 +87,13 @@ class RequestExecutionRequestCapacityTest {
         config.getDispatcher().setMaxInflightPerPrefillWorker(4);
         try (Fixture fixture = fixture(config);
                 var writers = Executors.newFixedThreadPool(8)) {
-            var routes = new ArrayList<RequestRoute>();
+            var routes = new ArrayList<RouteExecution>();
             for (long id = 1; id <= 64; id++) {
                 var route = item(config, fixture.endpoint, id);
                 routes.add(route);
                 assertTrue(EndpointTestSupport.offer(fixture.endpoint, route));
             }
-            var futures = new ArrayList<java.util.concurrent.Future<RequestRoute>>();
+            var futures = new ArrayList<java.util.concurrent.Future<RouteExecution>>();
             for (var route : routes) {
                 futures.add(
                         writers.submit(
@@ -112,7 +112,7 @@ class RequestExecutionRequestCapacityTest {
                                     }
                                 }));
             }
-            var committed = new ArrayList<RequestRoute>();
+            var committed = new ArrayList<RouteExecution>();
             for (var future : futures) {
                 var route = future.get();
                 if (route != null) committed.add(route);
@@ -194,7 +194,7 @@ class RequestExecutionRequestCapacityTest {
         when(predictor.evaluator()).thenReturn(mock(PrefillTimePredictor.Evaluator.class));
         ReflectionTestUtils.setField(endpoint, "predictor", predictor);
         var requests = EndpointTestSupport.requestRuntime();
-        EndpointWork runtime =
+        PrefillQueueScheduler runtime =
                 RequestExecutionTestSupport.create(
                         "failed-reservation",
                         endpoint,
@@ -204,8 +204,8 @@ class RequestExecutionRequestCapacityTest {
         IllegalStateException failure = new IllegalStateException("reservation failed");
         RequestExecutionTestSupport.start(runtime);
         try {
-            RequestRoute previous = item(config, endpoint, 1L);
-            RequestRoute incoming = org.mockito.Mockito.spy(item(config, endpoint, 2L, 90));
+            RouteExecution previous = item(config, endpoint, 1L);
+            RouteExecution incoming = org.mockito.Mockito.spy(item(config, endpoint, 2L, 90));
             doAnswer(
                             invocation -> {
                                 assertEquals(
@@ -231,7 +231,7 @@ class RequestExecutionRequestCapacityTest {
                             .admissionSummary(0, 0L)
                             .occupiedRequests());
             verify(requests.events(), times(0)).rejectRoute(any(), org.mockito.Mockito.isNull());
-            RequestRoute next = item(config, endpoint, 3L);
+            RouteExecution next = item(config, endpoint, 3L);
             assertTrue(RequestExecutionTestSupport.offer(runtime, next));
             assertEquals(
                     List.of(previous, next), RequestExecutionTestSupport.capture(runtime).items());
@@ -255,7 +255,7 @@ class RequestExecutionRequestCapacityTest {
                         WorkerStatus.createDiscovered(
                                 RoleType.PREFILL, "test", "127.0.0.1", 8080, 9090, "test"));
         var requests = EndpointTestSupport.requestRuntime();
-        EndpointWork runtime =
+        PrefillQueueScheduler runtime =
                 RequestExecutionTestSupport.create(
                         "retiring-publication",
                         endpoint,
@@ -276,7 +276,7 @@ class RequestExecutionRequestCapacityTest {
                 .isRetired();
         RequestExecutionTestSupport.start(runtime);
         try {
-            RequestRoute item = item(config, endpoint, 1L);
+            RouteExecution item = item(config, endpoint, 1L);
             assertFalse(RequestExecutionTestSupport.offer(runtime, item));
             assertEquals(
                     0L,
@@ -342,11 +342,11 @@ class RequestExecutionRequestCapacityTest {
     void defaultBatchLimitAllowsTwoReservationsAndReopensAfterRelease() {
         FlexlbConfig config = productionConfig();
         try (Fixture fixture = fixture(config)) {
-            var items = new ArrayList<RequestRoute>();
-            var reservations = new ArrayList<PrefillEndpoint.BatchReservation>();
+            var items = new ArrayList<RouteExecution>();
+            var reservations = new ArrayList<PrefillEndpoint.BatchRecord>();
             try {
                 for (long id = 1L; id <= 3L; id++) {
-                    RequestRoute queued = item(config, fixture.endpoint, id);
+                    RouteExecution queued = item(config, fixture.endpoint, id);
                     items.add(queued);
                     assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker());
                     assertTrue(
@@ -386,12 +386,12 @@ class RequestExecutionRequestCapacityTest {
         return config;
     }
 
-    private static RequestRoute item(
+    private static RouteExecution item(
             FlexlbConfig config, PrefillEndpoint endpoint, long requestId) {
         return item(config, endpoint, requestId, 50);
     }
 
-    private static RequestRoute item(
+    private static RouteExecution item(
             FlexlbConfig config, PrefillEndpoint endpoint, long requestId, int priority) {
         Request request =
                 Request.builder().requestId(String.valueOf(requestId)).seqLen(100L).build();

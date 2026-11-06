@@ -42,9 +42,161 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Waiting ownership is independent of delivery slots; failed publication rolls back only its owner. */
+/**
+ * Waiting ownership is independent of delivery slots; failed publication rolls back only its owner.
+ */
 @Timeout(15)
 class QueuedPublicationNotificationFailureTest {
+    @Test
+    void vitFailureReleasesOtherRolesAndOldCallbacksCannotReleaseReplacementRoute()
+            throws Exception {
+        try (var fixture = new Fixture()) {
+            fixture.encoder =
+                    new org.flexlb.balance.endpoint.EncoderEndpoint(
+                            WorkerStatus.createDiscovered(
+                                    RoleType.ENCODER, null, "127.0.0.1", 18300, 18301, null),
+                            new PlacementAvailability());
+            fixture.vit =
+                    new org.flexlb.balance.endpoint.WorkerEndpoint(
+                            WorkerStatus.createDiscovered(
+                                    RoleType.VIT, null, "127.0.0.1", 18400, 18401, null));
+            var context = fixture.context(9403L, 80);
+            var oldRoute = fixture.publish(context);
+            assertTrue(fixture.encoder.commit(oldRoute, 10));
+            var requeues = new java.util.concurrent.atomic.AtomicInteger();
+            doAnswer(
+                            call -> {
+                                assertNull(context.snapshot().route());
+                                assertEquals(0L, fixture.encoder.requestCount());
+                                assertEquals(0, fixture.decode.resourceSnapshot().reservedCount());
+                                assertEquals(0L, fixture.prefill.progress().queueDepth());
+                                requeues.incrementAndGet();
+                                return true;
+                            })
+                    .when(fixture.queue)
+                    .enqueue(any());
+            fixture.vit.getStatus().markRemovedFromDiscovery();
+            var lifecycle = SchedulerTestServices.lifecycle(fixture.queue);
+            assertTrue(
+                    lifecycle.onRouteFailure(
+                            oldRoute,
+                            ContextResult.RouteFailureReason.ENDPOINT_UNAVAILABLE,
+                            "VIT unavailable"));
+            assertEquals(1, requeues.get());
+            var reported = org.mockito.ArgumentCaptor.forClass(ContextResult.RouteFailure.class);
+            verify(fixture.queue).shouldRetryRouteFailure(reported.capture());
+            assertSame(fixture.vit, reported.getValue().failedEndpoint());
+            assertEquals(RoleType.VIT, reported.getValue().failedRole());
+            fixture.vit =
+                    new org.flexlb.balance.endpoint.WorkerEndpoint(
+                            WorkerStatus.createDiscovered(
+                                    RoleType.VIT, null, "127.0.0.1", 18400, 18401, null));
+            var replacement = fixture.publish(context);
+            assertTrue(fixture.encoder.commit(replacement, 10));
+            lifecycle.onEndpointRetired(
+                    context,
+                    new ContextResult.EndpointRetirement(
+                            oldRoute,
+                            oldRoute.decodeReservation(),
+                            RoleType.DECODE,
+                            fixture.decode,
+                            "Late old retirement",
+                            System.currentTimeMillis()));
+            assertFalse(
+                    lifecycle.onRouteFailure(
+                            oldRoute,
+                            ContextResult.RouteFailureReason.ENDPOINT_UNAVAILABLE,
+                            "Late old failure"));
+            assertSame(replacement, context.snapshot().route());
+            assertTrue(fixture.decode.ownership(replacement.decodeReservation()).owned());
+            assertEquals(1L, fixture.encoder.requestCount());
+            assertEquals(1L, fixture.prefill.progress().queueDepth());
+            assertFalse(context.data().getFuture().isDone());
+            assertEquals(1, requeues.get());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+        "PREFILL,false",
+        "DECODE,false",
+        "PREFILL,true",
+        "DECODE,true"
+    })
+    void unavailableRoleWithdrawsWholeQueuedRouteBeforeRequeue(RoleType failedRole, boolean retire)
+            throws Exception {
+        try (var fixture = new Fixture()) {
+            var context = fixture.context(9401L, 80);
+            var route = fixture.publish(context);
+            long sequence = context.data().getWorkerEnqueueSequence();
+            long expiresAt = route.expiresAtMs();
+            var requeues = new java.util.concurrent.atomic.AtomicInteger();
+            doAnswer(
+                            call -> {
+                                assertSame(context, call.getArgument(0));
+                                assertNull(context.snapshot().route());
+                                assertNull(context.snapshot().placement());
+                                assertEquals(0L, fixture.prefill.progress().queueDepth());
+                                assertEquals(
+                                        0L,
+                                        fixture.prefill.admissionSummary(0, 0).occupiedRequests());
+                                assertEquals(0, fixture.decode.resourceSnapshot().reservedCount());
+                                assertEquals(
+                                        0,
+                                        fixture.decode.resourceSnapshot().activeDispatchPermits());
+                                assertEquals(sequence, context.data().getWorkerEnqueueSequence());
+                                assertEquals(expiresAt, context.data().getRequestExpiresAtMs());
+                                assertFalse(context.data().getFuture().isDone());
+                                requeues.incrementAndGet();
+                                return true;
+                            })
+                    .when(fixture.queue)
+                    .enqueue(any());
+            var failed = failedRole == RoleType.PREFILL ? fixture.prefill : fixture.decode;
+            if (retire) failed.close();
+            else {
+                failed.getStatus().markRemovedFromDiscovery();
+                fixture.queue.onEndpointChanged(failed);
+                fixture.queue.schedule();
+                RequestProtocolTestSupport.awaitCondition(() -> requeues.get() == 1);
+            }
+            assertEquals(1, requeues.get());
+            assertFalse(
+                    SchedulerTestServices.lifecycle(fixture.queue)
+                            .onRouteFailure(
+                                    route,
+                                    ContextResult.RouteFailureReason.ENDPOINT_UNAVAILABLE,
+                                    "Duplicate old notification"));
+            assertEquals(1, requeues.get());
+            assertFalse(context.data().getFuture().isDone());
+        }
+    }
+
+    @Test
+    void wholeRouteCleanupFailureEndsRequestWithoutRequeue() throws Exception {
+        try (var fixture = new Fixture()) {
+            var context = fixture.context(9402L, 80);
+            var route = fixture.publish(context);
+            fixture.failedReservation = route.decodeReservation();
+            fixture.releaseFailure = new IllegalStateException("Decode release failed");
+            assertThrows(
+                    IllegalStateException.class,
+                    () ->
+                            SchedulerTestServices.lifecycle(fixture.queue)
+                                    .onRouteFailure(
+                                            route,
+                                            ContextResult.RouteFailureReason.ENDPOINT_UNAVAILABLE,
+                                            "Worker unavailable"));
+            verify(fixture.queue, never()).enqueue(any());
+            assertEquals(0L, fixture.prefill.progress().queueDepth());
+            assertFalse(
+                    context.data()
+                            .getFuture()
+                            .get(2, java.util.concurrent.TimeUnit.SECONDS)
+                            .isSuccess());
+        }
+    }
+
     @Test
     void waitingOwnersAreNotVictimsOfDeliveryCapacity() throws Exception {
         try (var fixture = new Fixture(1)) {
@@ -91,8 +243,10 @@ class QueuedPublicationNotificationFailureTest {
             var oldRoute = fixture.publish(low);
             var incoming = fixture.context(9312L, 80);
             var handle =
-                    SchedulerTestServices.lifecycle(fixture.queue)
-                            .claimAdmissionHandle("9312", incoming.data().getFuture());
+                    SchedulerTestSupport.claim(
+                            SchedulerTestServices.lifecycle(fixture.queue),
+                            "9312",
+                            incoming.data().getFuture());
             assertNotNull(handle);
             var failure = new IllegalStateException("physical offer failed before enqueue");
             fixture.physicalFailure = failure;
@@ -113,7 +267,7 @@ class QueuedPublicationNotificationFailureTest {
                         List.of(oldRoute), fixture.prefill.captureQueue(Integer.MAX_VALUE).items());
                 assertTrue(fixture.decode.ownership(oldRoute.decodeReservation()).owned());
             } finally {
-                handle.finish();
+                AbstractRequestScheduler.finishPlacement(handle);
                 fixture.physicalFailure = null;
             }
         }
@@ -124,12 +278,13 @@ class QueuedPublicationNotificationFailureTest {
         try (var fixture = new Fixture()) {
             var context = fixture.context(9341L, 50);
             var lifecycle = SchedulerTestServices.lifecycle(fixture.queue);
-            var admission = lifecycle.claimAdmissionHandle("9341", context.data().getFuture());
+            var admission =
+                    SchedulerTestSupport.claim(lifecycle, "9341", context.data().getFuture());
             var failure = new IllegalStateException("placement notification failed");
             org.mockito.Mockito.doThrow(failure)
                     .when(fixture.prefill)
                     .signal(PrefillEndpoint.Signal.PLACEMENT);
-            RequestRoute route = fixture.select(context);
+            RouteExecution route = fixture.select(context);
             try (var plan = RequestProtocolTestSupport.plan(context, route)) {
                 assertSame(
                         failure,
@@ -143,7 +298,7 @@ class QueuedPublicationNotificationFailureTest {
                 assertTrue(fixture.decode.ownership(route.decodeReservation()).owned());
                 assertEquals(List.of(route), fixture.prefill.captureQueue(2).items());
             } finally {
-                admission.finish();
+                AbstractRequestScheduler.finishPlacement(admission);
             }
             lifecycle.cancel(context, 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(
@@ -165,7 +320,9 @@ class QueuedPublicationNotificationFailureTest {
         volatile RuntimeException metricsFailure;
         volatile RuntimeException releaseFailure;
         volatile RuntimeException physicalFailure;
-        volatile DecodeResources.ReservationHandle failedReservation;
+        volatile DecodeResources.RequestReservation failedReservation;
+        org.flexlb.balance.endpoint.EncoderEndpoint encoder;
+        org.flexlb.balance.endpoint.WorkerEndpoint vit;
 
         Fixture() {
             this(1);
@@ -214,7 +371,9 @@ class QueuedPublicationNotificationFailureTest {
             doAnswer(
                             call -> {
                                 org.junit.jupiter.api.Assertions.assertFalse(
-                                        prefill.resourceLock().isHeldByCurrentThread());
+                                        org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(
+                                                        prefill)
+                                                .isHeldByCurrentThread());
                                 if (metricsFailure != null
                                         && call.getArgument(0, Integer.class) == 20) {
                                     throw metricsFailure;
@@ -232,7 +391,7 @@ class QueuedPublicationNotificationFailureTest {
                                                         call.getArgument(
                                                                         0,
                                                                         DecodeResources
-                                                                                .ReservationHandle
+                                                                                .RequestReservation
                                                                                 .class)
                                                                 .requestId());
                                 assertFalse(exact != null && Thread.holdsLock(exact));
@@ -253,51 +412,55 @@ class QueuedPublicationNotificationFailureTest {
                                 return call.callRealMethod();
                             })
                     .when(prefill)
-                    .offerPinned(any(), any(), any());
+                    .enqueueRoute(any(), any());
         }
 
         RequestContext context(long id, int priority) {
             var context = RequestProtocolTestSupport.context(config, id);
             context.data()
                     .setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
-            RequestProtocolTestSupport.register(queue, context);
+            RequestProtocolTestSupport.submitForManualPlacement(queue, context);
             return context;
         }
 
-        RequestRoute select(RequestContext context) {
+        RouteExecution select(RequestContext context) {
             var p = metadata(context, RoleType.PREFILL, prefill);
             var d = metadata(context, RoleType.DECODE, decode);
             return SchedulingTestConfig.prepareRoute(
                             context,
                             route -> {
-                                route.add(
-                                        prefill.tryPinGeneration(),
-                                        p,
-                                        1L,
-                                        prefill.progress().ownershipVersion());
-                                route.add(
-                                        decode.tryPinGeneration(),
-                                        d,
-                                        -1L,
-                                        decode.placementVersion());
+                                route.add(prefill, p, 1L, prefill.progress().ownershipVersion());
+                                route.add(decode, d, -1L, decode.placementVersion());
+                                if (encoder != null)
+                                    route.add(
+                                            encoder,
+                                            metadata(context, RoleType.ENCODER, encoder),
+                                            0L,
+                                            0L);
+                                if (vit != null)
+                                    route.add(vit, metadata(context, RoleType.VIT, vit), 0L, 0L);
                                 return org.flexlb.balance.PlacementResult.success(route);
                             })
                     .value();
         }
 
-        RequestRoute publish(RequestContext context) {
+        RouteExecution publish(RequestContext context) {
             var handle =
-                    SchedulerTestServices.lifecycle(queue)
-                            .claimAdmissionHandle(
-                                    context.data().getRequestId(), context.data().getFuture());
+                    SchedulerTestSupport.claim(
+                            SchedulerTestServices.lifecycle(queue),
+                            context.data().getRequestId(),
+                            context.data().getFuture());
             try (var plan = RequestProtocolTestSupport.plan(context, select(context))) {
                 assertNotNull(handle);
                 var publication = SchedulerTestSupport.enqueueRoute(queue, plan);
-                assertEquals(PlacementResult.Status.SUCCESS, publication.status());
+                assertEquals(
+                        PlacementResult.Status.SUCCESS,
+                        publication.status(),
+                        publication::toString);
                 return publication.value();
             } finally {
                 if (handle != null) {
-                    handle.finish();
+                    AbstractRequestScheduler.finishPlacement(handle);
                 }
             }
         }
@@ -319,6 +482,7 @@ class QueuedPublicationNotificationFailureTest {
         @Override
         public void close() {
             metricsFailure = releaseFailure = physicalFailure = null;
+            queue.stop();
             prefill.close();
             if (RequestProtocolTestSupport.closeAdmissionAndAwaitMutations(
                     SchedulerTestServices.lifecycle(queue))) {

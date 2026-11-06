@@ -8,9 +8,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.flexlb.balance.scheduler.RequestChangeAssertions.Update;
 import static org.flexlb.balance.scheduler.RequestChangeAssertions.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,12 +43,12 @@ class RequestEngineObservationTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                                 context,
                                 observedRequest ->
-                                        observedRequest.recordEngineEvidence(
-                                                new EngineEvidence(
+                                        observedRequest.recordWorkerRequestEvent(
+                                                new WorkerRequestEvent(
                                                         fixture.route(),
                                                         fixture.reservation(),
                                                         RoleType.PREFILL,
-                                                        EngineKind.ACTIVE,
+                                                        WorkerRequestEventType.ACTIVE,
                                                         0L,
                                                         null,
                                                         1100L)))
@@ -57,12 +57,12 @@ class RequestEngineObservationTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         context,
                         observedRequest ->
-                                observedRequest.recordEngineEvidence(
-                                        new EngineEvidence(
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
                                                 fixture.route(),
                                                 fixture.reservation(),
                                                 RoleType.PREFILL,
-                                                EngineKind.ACTIVE,
+                                                WorkerRequestEventType.ACTIVE,
                                                 0L,
                                                 null,
                                                 1100L)));
@@ -73,12 +73,12 @@ class RequestEngineObservationTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                                 context,
                                 observedRequest ->
-                                        observedRequest.recordEngineEvidence(
-                                                new EngineEvidence(
+                                        observedRequest.recordWorkerRequestEvent(
+                                                new WorkerRequestEvent(
                                                         fixture.route(),
                                                         fixture.reservation(),
                                                         RoleType.PREFILL,
-                                                        EngineKind.ACTIVE,
+                                                        WorkerRequestEventType.ACTIVE,
                                                         0L,
                                                         null,
                                                         1200L)))
@@ -94,12 +94,12 @@ class RequestEngineObservationTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         context,
                         observedRequest ->
-                                observedRequest.recordEngineEvidence(
-                                        new EngineEvidence(
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
                                                 fixture.route(),
                                                 fixture.reservation(),
                                                 RoleType.PREFILL,
-                                                EngineKind.ACTIVE,
+                                                WorkerRequestEventType.ACTIVE,
                                                 0L,
                                                 null,
                                                 1200L)));
@@ -110,12 +110,12 @@ class RequestEngineObservationTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         context,
                         observedRequest ->
-                                observedRequest.recordEngineEvidence(
-                                        new EngineEvidence(
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
                                                 null,
                                                 fixture.reservation(),
                                                 RoleType.PREFILL,
-                                                EngineKind.ACTIVE,
+                                                WorkerRequestEventType.ACTIVE,
                                                 0L,
                                                 null,
                                                 1250L)));
@@ -192,15 +192,18 @@ class RequestEngineObservationTest {
                                             .record(
                                                     context,
                                                     observedRequest ->
-                                                            observedRequest.recordEngineEvidence(
-                                                                    new EngineEvidence(
-                                                                            fixture.route(),
-                                                                            fixture.reservation(),
-                                                                            role,
-                                                                            EngineKind.ACTIVE,
-                                                                            0L,
-                                                                            null,
-                                                                            2000L)));
+                                                            observedRequest
+                                                                    .recordWorkerRequestEvent(
+                                                                            new WorkerRequestEvent(
+                                                                                    fixture.route(),
+                                                                                    fixture
+                                                                                            .reservation(),
+                                                                                    role,
+                                                                                    WorkerRequestEventType
+                                                                                            .ACTIVE,
+                                                                                    0L,
+                                                                                    null,
+                                                                                    2000L)));
                                 });
                 assertTrue(entered.await(5, TimeUnit.SECONDS));
                 assertFalse(

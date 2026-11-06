@@ -6,7 +6,7 @@ import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.cache.match.CacheAwareService;
@@ -64,7 +64,7 @@ class CostBasedPrefillStrategyBlockerTest {
                                 .toList();
         var inputs =
                 new RequestTimeEstimation.Inputs(
-                        new QueueSnapshot(
+                        new ProjectionQueueSnapshot(
                                 0L,
                                 true,
                                 BuiltinGroupPlanner.FIXED_WINDOW,
@@ -133,7 +133,7 @@ class CostBasedPrefillStrategyBlockerTest {
                             role,
                             group);
 
-            // Ranking models all scoped workers, including full workers; no generation pin is
+            // Ranking models all scoped workers, including full workers; no selected Worker is
             // published by this fixture.
             assertEquals(
                     registered == 0

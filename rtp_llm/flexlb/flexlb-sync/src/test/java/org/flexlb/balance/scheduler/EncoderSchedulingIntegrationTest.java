@@ -27,6 +27,8 @@ import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Duration;
 import java.util.List;
@@ -48,18 +50,147 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class EncoderSchedulingIntegrationTest {
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void cancellationDuringEncoderCommitRejectsDeliveryAndReleasesAdmission(
+            boolean queue, boolean beforeCommit) throws Exception {
+        configure(queue, 1, List.of(RoleType.ENCODER));
+        var original = worker("encoder", 8001, true, "group", Map.of(), 0, 0);
+        var endpoint = org.mockito.Mockito.spy(original);
+        workers.set(0, endpoint);
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var resume = new java.util.concurrent.CountDownLatch(1);
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            RouteExecution route = call.getArgument(0);
+                            assertFalse(Thread.holdsLock(route.ctx()));
+                            boolean committed = !beforeCommit && (boolean) call.callRealMethod();
+                            entered.countDown();
+                            assertTrue(resume.await(5, TimeUnit.SECONDS));
+                            return beforeCommit ? call.callRealMethod() : committed;
+                        })
+                .when(endpoint)
+                .commit(any(), org.mockito.ArgumentMatchers.anyInt());
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            try {
+                var context = context("9900", 100, 0L);
+                var submitted = executor.submit(() -> lifecycle.submit(context));
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                assertEquals(beforeCommit ? 0L : 1L, endpoint.requestCount());
+                executor.submit(
+                                () ->
+                                        lifecycle.cancel(
+                                                "9900",
+                                                0,
+                                                CancelReason.CLIENT_CANCELLED,
+                                                RequestPhase.ENCODER))
+                        .get(2, TimeUnit.SECONDS);
+                assertNotNull(context.snapshot().cancellation());
+                assertNotNull(context.snapshot().placement());
+                assertEquals(beforeCommit ? 0L : 1L, endpoint.requestCount());
+                resume.countDown();
+                assertEquals(
+                        StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                        submitted.get(2, TimeUnit.SECONDS).get(2, TimeUnit.SECONDS).getCode());
+                SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(lifecycle));
+                assertEquals(0L, endpoint.requestCount());
+                assertNull(context.snapshot().delivery());
+                assertNull(requests.findActive("9900", RequestPhase.ENCODER));
+            } finally {
+                resume.countDown();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void retirementDuringEncoderCommitReselectsWithoutLeakingOldAdmission(
+            boolean queue, boolean beforeCommit) throws Exception {
+        configure(queue, 1, List.of(RoleType.ENCODER));
+        var first = org.mockito.Mockito.spy(worker("first", 8001, true, "group", Map.of(), 0, 0));
+        workers.set(0, first);
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var resume = new java.util.concurrent.CountDownLatch(1);
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            RouteExecution route = call.getArgument(0);
+                            assertFalse(Thread.holdsLock(route.ctx()));
+                            boolean committed = !beforeCommit && (boolean) call.callRealMethod();
+                            entered.countDown();
+                            assertTrue(resume.await(5, TimeUnit.SECONDS));
+                            return beforeCommit ? call.callRealMethod() : committed;
+                        })
+                .when(first)
+                .commit(any(), org.mockito.ArgumentMatchers.anyInt());
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            try {
+                var submitted = executor.submit(() -> submit(9901, 100, 0L));
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                assertEquals(beforeCommit ? 0L : 1L, first.requestCount());
+                workers.remove(first);
+                var replacement = worker("replacement", 8002, true, "group", Map.of(), 0, 0);
+                executor.submit(first::close).get(2, TimeUnit.SECONDS);
+                assertTrue(first.isRetired());
+                assertEquals(0L, first.requestCount());
+                resume.countDown();
+                assertEquals("replacement", selected(submitted.get(2, TimeUnit.SECONDS)));
+                SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(lifecycle));
+                assertEquals(0L, first.requestCount());
+                assertEquals(1L, replacement.requestCount());
+            } finally {
+                resume.countDown();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void retiredEncoderIsReselectedDuringConstructionOrAdmission(
+            boolean queue, boolean beforeCommit) throws Exception {
+        configure(queue, 1, List.of(RoleType.ENCODER), false);
+        var first = worker("first", 8001, true, "group", Map.of(), 0, 0);
+        var replacement = new java.util.concurrent.atomic.AtomicReference<EncoderEndpoint>();
+        Runnable retire =
+                () -> {
+                    first.close();
+                    workers.remove(first);
+                    replacement.set(worker("replacement", 8002, true, "group", Map.of(), 0, 0));
+                };
+        if (beforeCommit) {
+            org.mockito.Mockito.doAnswer(
+                            call -> {
+                                if (replacement.get() == null) retire.run();
+                                return call.callRealMethod();
+                            })
+                    .when(lifecycle)
+                    .beginRoute(any());
+        } else {
+            org.mockito.Mockito.doAnswer(
+                            call -> {
+                                retire.run();
+                                return first;
+                            })
+                    .when(endpoints)
+                    .selectEndpoint(RoleType.ENCODER, first.address());
+        }
+        lifecycle.start();
+        assertEquals("replacement", selected(submit(9001, 100, 0L)));
+        assertEquals(0L, first.requestCount());
+        assertEquals(1L, replacement.get().requestCount());
+    }
+
     private final ConfigService configService = mock(ConfigService.class);
     private final EndpointRegistry endpoints = mock(EndpointRegistry.class);
     private final List<EncoderEndpoint> workers = new CopyOnWriteArrayList<>();
     private final PlacementAvailability availability = new PlacementAvailability();
-    private RequestLifecycle lifecycle;
+    private AbstractRequestScheduler lifecycle;
     private RequestRepository requests;
     private FlexlbConfig config;
 
     @BeforeEach
     void setUp() {
         when(endpoints.encoderRoutingSnapshot()).thenAnswer(call -> List.copyOf(workers));
-        when(endpoints.capture(eq(RoleType.ENCODER), anyString()))
+        when(endpoints.selectEndpoint(eq(RoleType.ENCODER), anyString()))
                 .thenAnswer(
                         call ->
                                 workers.stream()
@@ -68,12 +199,15 @@ class EncoderSchedulingIntegrationTest {
                                                         worker.address()
                                                                 .equals(call.getArgument(1)))
                                         .findFirst()
-                                        .map(EncoderEndpoint::tryPinGeneration)
                                         .orElse(null));
         configure(false, 1, List.of(RoleType.ENCODER));
     }
 
     private void configure(boolean queue, int limit, List<RoleType> roles) {
+        configure(queue, limit, roles, true);
+    }
+
+    private void configure(boolean queue, int limit, List<RoleType> roles, boolean start) {
         if (lifecycle != null) stop();
         config = SchedulingTestConfig.batchConfig();
         if (queue) SchedulingTestConfig.useFifoQueue(config);
@@ -84,7 +218,7 @@ class EncoderSchedulingIntegrationTest {
         var model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(roles);
         var selector =
-                new RequestWorkerSelector(
+                new RequestRouteSelector(
                         endpoints,
                         mock(PrefillSelectionStrategy.class),
                         mock(DecodeSelectionStrategy.class),
@@ -104,7 +238,8 @@ class EncoderSchedulingIntegrationTest {
                         mock(TheoryCacheHitReporter.class),
                         selector,
                         mock(DecodePreemption.class),
-                        availability);
+                        availability,
+                        start);
         requests = SchedulerTestSupport.repository(lifecycle);
     }
 

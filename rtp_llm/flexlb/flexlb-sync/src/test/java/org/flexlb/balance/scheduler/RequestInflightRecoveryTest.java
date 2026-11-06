@@ -33,6 +33,8 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.runWithStateLock;
+import static org.flexlb.balance.endpoint.EndpointTestSupport.withStateLock;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -50,7 +52,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * Real endpoint ledgers, status reducers, request ownership and capacity gates.
- * Transport replies are injected; this does not run an Engine or a EndpointWork thread.
+ * Transport replies are injected; this does not run an Engine or a PrefillQueueScheduler thread.
  *
  * A rejected reply plus NOT_FOUND is deliberately insufficient to release Decode.
  * The red cases supply exact terminal evidence from BOTH endpoints before requiring settlement.
@@ -198,7 +200,7 @@ class RequestInflightRecoveryTest {
             f.send(
                     Delivery.Result.uncertain(
                             new IllegalStateException("accepted then socket reset")));
-            var duplicate = RequestProtocolTestSupport.register(f.owner, f.context);
+            var duplicate = RequestProtocolTestSupport.submitForManualPlacement(f.owner, f.context);
 
             assertTrue(
                     duplicate.isDone(), "a retry of the active logical request must be rejected");
@@ -217,13 +219,14 @@ class RequestInflightRecoveryTest {
     void orderedPrefixStopsAtBusyDecodeWhileLaterRouteReservesAnOtherwiseDispatchableDecode()
             throws Exception {
         try (Fixture f = new Fixture()) {
-            DecodeResources.ReservationHandle occupyingD1;
-            try (var pin = f.decode.tryPinGeneration()) {
+            DecodeResources.RequestReservation occupyingD1;
+            {
+                var selectedEndpoint = f.decode;
+
                 occupyingD1 =
                         f.decode
-                                .tryReserveQueuedRequest(
-                                        pin, String.valueOf(201L), 16L, 32L, 50, null)
-                                .handle();
+                                .tryReserveQueuedRequest(String.valueOf(201L), 16L, 32L, 50, null)
+                                .value();
             }
             assertNotNull(occupyingD1);
             var occupied = f.decode.acquireDispatchPermit(occupyingD1, f.capacity);
@@ -231,15 +234,17 @@ class RequestInflightRecoveryTest {
                     DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, occupied.status());
             assertEquals(
                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                    occupied.handle().dispatch().status());
+                    occupied.value().dispatch().status());
             try {
                 var d2 = (DecodeEndpoint) f.publish(RoleType.DECODE, "127.0.0.3");
-                DecodeResources.ReservationHandle reservedD2;
-                try (var pin = d2.tryPinGeneration()) {
+                DecodeResources.RequestReservation reservedD2;
+                {
+                    var selectedEndpoint = d2;
+
                     reservedD2 =
                             d2.tryReserveQueuedRequest(
-                                            pin, String.valueOf(302L), 16L, 32L, 50, f.capacity)
-                                    .handle();
+                                            String.valueOf(302L), 16L, 32L, 50, f.capacity)
+                                    .value();
                 }
                 assertNotNull(reservedD2);
                 var behindHead = f.enqueue(302L, d2, reservedD2);
@@ -298,12 +303,14 @@ class RequestInflightRecoveryTest {
                         DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                         bPermit.status(),
                         "B itself could dispatch on D2 if ordered-prefix policy allowed reaching it");
-                bPermit.handle().release();
-                try (var pin = d2.tryPinGeneration()) {
+                bPermit.value().release();
+                {
+                    var selectedEndpoint = d2;
+
                     assertNull(
                             d2.tryReserveQueuedRequest(
-                                            pin, String.valueOf(303L), 16L, 32L, 50, f.capacity)
-                                    .handle(),
+                                            String.valueOf(303L), 16L, 32L, 50, f.capacity)
+                                    .value(),
                             "New C cannot reserve D2 while queued B holds its sole placement slot");
                 }
             } finally {
@@ -317,7 +324,7 @@ class RequestInflightRecoveryTest {
     private static final class Fixture implements AutoCloseable {
         static final long REQUEST_ID = 101L;
         static final long BATCH_ID = 51L;
-        final RequestLifecycle owner;
+        final AbstractRequestScheduler owner;
         final FlexlbConfig config;
         final EndpointRegistry endpoints;
         final PrefillEndpoint prefill;
@@ -325,9 +332,9 @@ class RequestInflightRecoveryTest {
         final PrefillEndpoint prefillState;
         final DecodeResources.AdmissionCapacity capacity =
                 new DecodeResources.AdmissionCapacity(1L, 90L);
-        final DecodeResources.ReservationHandle reservation;
+        final DecodeResources.RequestReservation reservation;
         final RequestContext context;
-        final RequestRoute route;
+        final RouteExecution route;
         Delivery.Member claim;
         long prefillVersion = 1L;
         long decodeVersion = 1L;
@@ -354,7 +361,7 @@ class RequestInflightRecoveryTest {
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                     service.loadBalanceConfig()),
                             order ->
-                                    org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
+                                    org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
                                             16, order));
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
@@ -367,15 +374,17 @@ class RequestInflightRecoveryTest {
                                     EngineGrpcClient.CancelReply.NOT_FOUND));
             prefill = (PrefillEndpoint) publish(RoleType.PREFILL, "127.0.0.1");
             decode = (DecodeEndpoint) publish(RoleType.DECODE, "127.0.0.2");
-            try (var pin = decode.tryPinGeneration()) {
+            {
+                var selectedEndpoint = decode;
+
                 reservation =
                         decode.tryReserveQueuedRequest(
-                                        pin, String.valueOf(REQUEST_ID), 16L, 32L, 50, capacity)
-                                .handle();
+                                        String.valueOf(REQUEST_ID), 16L, 32L, 50, capacity)
+                                .value();
             }
             assertNotNull(reservation);
             context = RequestProtocolTestSupport.context(config, REQUEST_ID);
-            var future = RequestProtocolTestSupport.register(owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
             context.data().setFuture(future);
             route =
                     SchedulingTestConfig.createRoute(
@@ -388,20 +397,21 @@ class RequestInflightRecoveryTest {
                             reservation,
                             System.currentTimeMillis());
             prefillState = (PrefillEndpoint) prefill;
-            prefillState.resourceLock().lock();
-            try {
-                ReflectionTestUtils.invokeMethod(
-                        prefillState,
-                        "enableQueueLocked",
-                        org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
-                                16,
-                                Comparator.comparing(
-                                        org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
-                                                ::requestId)));
-            } finally {
-                prefillState.resourceLock().unlock();
-            }
-            try (var admission = owner.claimAdmissionHandle(String.valueOf(REQUEST_ID), future);
+            runWithStateLock(
+                    org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefillState),
+                    () -> {
+                        ReflectionTestUtils.invokeMethod(
+                                prefillState,
+                                "enableQueueLocked",
+                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                        16,
+                                        Comparator.comparing(
+                                                org.flexlb.balance.endpoint.PrefillRequestQueue
+                                                                .QueueItem
+                                                        ::requestId)));
+                    });
+            try (var admission =
+                            SchedulerTestSupport.claim(owner, String.valueOf(REQUEST_ID), future);
                     var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
@@ -411,15 +421,16 @@ class RequestInflightRecoveryTest {
                                 route,
                                 RequestProtocolTestSupport.publication(
                                         () -> {
-                                            prefillState.resourceLock().lock();
-                                            try {
-                                                return org.flexlb.balance.endpoint
-                                                                .EndpointTestSupport.enqueue(
-                                                                prefillState, route)
-                                                        == route;
-                                            } finally {
-                                                prefillState.resourceLock().unlock();
-                                            }
+                                            return withStateLock(
+                                                    org.flexlb.balance.endpoint.EndpointTestSupport
+                                                            .stateLock(prefillState),
+                                                    () -> {
+                                                        return org.flexlb.balance.endpoint
+                                                                        .EndpointTestSupport
+                                                                        .enqueue(
+                                                                                prefillState, route)
+                                                                == route;
+                                                    });
                                         })));
             }
         }
@@ -439,10 +450,10 @@ class RequestInflightRecoveryTest {
             }
         }
 
-        RequestRoute enqueue(
-                long requestId, DecodeEndpoint endpoint, DecodeResources.ReservationHandle held) {
+        RouteExecution enqueue(
+                long requestId, DecodeEndpoint endpoint, DecodeResources.RequestReservation held) {
             var requestContext = RequestProtocolTestSupport.context(config, requestId);
-            var future = RequestProtocolTestSupport.register(owner, requestContext);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(owner, requestContext);
             requestContext.data().setFuture(future);
             var item =
                     SchedulingTestConfig.createRoute(
@@ -454,7 +465,8 @@ class RequestInflightRecoveryTest {
                             endpoint,
                             held,
                             System.currentTimeMillis());
-            try (var admission = owner.claimAdmissionHandle(String.valueOf(requestId), future);
+            try (var admission =
+                            SchedulerTestSupport.claim(owner, String.valueOf(requestId), future);
                     var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
@@ -464,15 +476,15 @@ class RequestInflightRecoveryTest {
                                 item,
                                 RequestProtocolTestSupport.publication(
                                         () -> {
-                                            prefillState.resourceLock().lock();
-                                            try {
-                                                return org.flexlb.balance.endpoint
-                                                                .EndpointTestSupport.enqueue(
-                                                                prefillState, item)
-                                                        == item;
-                                            } finally {
-                                                prefillState.resourceLock().unlock();
-                                            }
+                                            return withStateLock(
+                                                    org.flexlb.balance.endpoint.EndpointTestSupport
+                                                            .stateLock(prefillState),
+                                                    () -> {
+                                                        return org.flexlb.balance.endpoint
+                                                                        .EndpointTestSupport
+                                                                        .enqueue(prefillState, item)
+                                                                == item;
+                                                    });
                                         })));
             }
             return item;
@@ -485,25 +497,23 @@ class RequestInflightRecoveryTest {
                     acquisition.status());
             assertEquals(
                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                    acquisition.handle().dispatch().status());
+                    acquisition.value().dispatch().status());
             var batch = prefill.reserveBatch(BATCH_ID, 1).value();
             assertNotNull(batch);
-            org.flexlb.balance.scheduler.Delivery handoff;
-            prefillState.resourceLock().lock();
-            try {
-                handoff =
-                        prefillState.commitLocked(
-                                org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                        List.of(route),
-                                        batch,
-                                        new long[] {30_000L},
-                                        null,
-                                        System.currentTimeMillis()));
-            } finally {
-                prefillState.resourceLock().unlock();
-            }
+            var handoff =
+                    withStateLock(
+                            org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefillState),
+                            () -> {
+                                return prefillState.commitDelivery(
+                                        org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                                                List.of(route),
+                                                batch,
+                                                new long[] {30_000L},
+                                                null,
+                                                System.currentTimeMillis()));
+                            });
             assertNotNull(handoff);
-            try (handoff) {
+            {
                 claim =
                         RequestProtocolTestSupport.claimBatchWithoutPrediction(
                                 owner, route, BATCH_ID, () -> true);
@@ -570,21 +580,23 @@ class RequestInflightRecoveryTest {
         }
 
         void assertNextDecodeReservationRejected() {
-            try (var pin = decode.tryPinGeneration()) {
+            {
+                var selectedEndpoint = decode;
+
                 assertNull(
-                        decode.tryReserveQueuedRequest(
-                                        pin, String.valueOf(102L), 16L, 32L, 50, capacity)
-                                .handle(),
+                        decode.tryReserveQueuedRequest(String.valueOf(102L), 16L, 32L, 50, capacity)
+                                .value(),
                         "The retained shadow fills the one-request Decode placement limit");
             }
         }
 
         void assertNextDecodeReservationAccepted() {
-            try (var pin = decode.tryPinGeneration()) {
+            {
+                var selectedEndpoint = decode;
+
                 var next =
-                        decode.tryReserveQueuedRequest(
-                                        pin, String.valueOf(102L), 16L, 32L, 50, capacity)
-                                .handle();
+                        decode.tryReserveQueuedRequest(String.valueOf(102L), 16L, 32L, 50, capacity)
+                                .value();
                 assertNotNull(next, "Released capacity must admit the next request");
                 decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
             }
@@ -602,6 +614,7 @@ class RequestInflightRecoveryTest {
 
         @Override
         public void close() {
+            SchedulerTestServices.scheduler(owner).stop();
             // Inject strong proof only AFTER each test's assertions. This prevents an unrelated
             // shutdown timeout from hiding the missing terminal-settlement assertion.
             if (claim != null && !claim.completion().toCompletableFuture().isDone()) {

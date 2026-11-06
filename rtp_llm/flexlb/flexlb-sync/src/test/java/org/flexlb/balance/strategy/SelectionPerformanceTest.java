@@ -4,12 +4,11 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestWorkerSelector;
+import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -38,19 +37,15 @@ class SelectionPerformanceTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void selectionCostAt750PrefillAndDecodeWorkers(boolean batch) throws Exception {
-        var config = StrategyTestSupport.config();
-        if (!batch) config.setDispatcher(ConfigTestSupport.nonBatch());
-        config.getRouter()
-                .getRoles()
-                .getPrefill()
-                .getExecutionTimeEstimator()
-                .setExpression("sum(computeTokens)");
-        var constructor = ConfigService.class.getDeclaredConstructor(String.class);
-        constructor.setAccessible(true);
         var service =
-                constructor.newInstance(
-                        "{\"requestLifecycle\":{\"request\":{\"timeoutMs\":60000}}}");
-        ReflectionTestUtils.setField(service, "flexlbConfig", config);
+                new ConfigService(
+                        """
+                {"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "dispatcher":{"type":"%s"},
+                 "router":{"roles":{"prefill":{"executionTimeEstimator":
+                    {"expression":"sum(computeTokens)"}}}}}
+                """
+                                .formatted(batch ? "BATCH" : "NON_BATCH"));
         long singleWorkerBytes = measure(service, batch, 1);
         long fleetBytes = measure(service, batch, 750);
         assertTrue(
@@ -96,9 +91,10 @@ class SelectionPerformanceTest {
                 for (int index = 0; index < operations; index++) {
                     var result = selector.select(context, null);
                     assertEquals(PlacementResult.Status.SUCCESS, result.status());
-                    try (var route = result.value()) {
-                        checksum += route.prefillWorkMs();
-                    }
+                    checksum +=
+                            ((org.flexlb.balance.scheduler.RoleSelection.Prefill)
+                                            result.value().role(RoleType.PREFILL))
+                                    .workMs();
                 }
                 long nanos = System.nanoTime() - start;
                 long cpuNanos = bean.getCurrentThreadCpuTime() - cpu;
@@ -123,7 +119,7 @@ class SelectionPerformanceTest {
         }
     }
 
-    private RequestWorkerSelector selector(ConfigService service, EndpointRegistry registry) {
+    private RequestRouteSelector selector(ConfigService service, EndpointRegistry registry) {
         var monitor = new NoOpFlexMonitor();
         var metrics = new CacheMetricsReporter();
         ReflectionTestUtils.setField(metrics, "monitor", monitor);
@@ -144,7 +140,7 @@ class SelectionPerformanceTest {
                 };
         var model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(ROLES);
-        return new RequestWorkerSelector(
+        return new RequestRouteSelector(
                 registry,
                 new CostBasedPrefillStrategy(cache, service),
                 new DecodeSelector(service, new AdmissionCapacity(1000, 100)),

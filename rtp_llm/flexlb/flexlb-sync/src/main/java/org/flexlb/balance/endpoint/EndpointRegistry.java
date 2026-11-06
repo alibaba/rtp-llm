@@ -30,7 +30,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -39,15 +38,17 @@ import java.util.function.Supplier;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
-/** Owns discovered worker identities and their published routing generations. */
+/**
+ * Owns discovered worker identities and their published routing generations.
+ */
 @Component
 public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.WorkerStatusProvider {
 
     /**
      * One non-owning Prefill generation exposed to routing.
      *
-     * <p>The endpoint identity is advisory: a caller must capture the address
-     * and verify that the pinned endpoint is still this exact instance before
+     * <p>The endpoint identity is advisory: a caller must selectEndpoint the address
+     * and verify that the selected endpoint is still this exact instance before
      * transferring generation ownership to a request.</p>
      */
     public record PrefillRoutingEntry(String address, PrefillEndpoint endpoint)
@@ -92,7 +93,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
         }
     }
 
-    /** Owns one retiring status identity and its optional published endpoint. */
+    /**
+     * Owns one retiring status identity and its optional published endpoint.
+     */
     public final class Retirement {
         private final RoleType role;
         private final String address;
@@ -112,7 +115,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
             return status;
         }
 
-        /** The registry close barrier retains ownership until this cleanup finishes. */
+        /**
+         * The registry close barrier retains ownership until this cleanup finishes.
+         */
         public void completeAsync(CacheAwareService cacheAwareService, org.slf4j.Logger logger) {
             try {
                 WorkerEndpoint.executeRetirement(() -> complete(cacheAwareService, logger, false));
@@ -143,8 +148,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
             endpoint.onRetired(finalizeExact);
             Throwable failure = Failures.run(null, () -> placementAvailability.changed(endpoint));
             failure = Failures.run(failure, endpoint::close);
-            // Pin release queues cleanup on this same pool. Its workers must return
-            // rather than wait for their own queued cleanup; onRetired owns completion.
+            // Completion callbacks finalize the registry after Endpoint cleanup.
             if (awaitDrain) {
                 failure =
                         Failures.run(failure, () -> endpoint.awaitRetirement(retirementTimeoutMs));
@@ -174,7 +178,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
     private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointsByRole =
             roleMaps(RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION, RoleType.VIT);
 
-    /** Advisory Prefill generations, atomically replaced after each map write. */
+    /**
+     * Advisory Prefill generations, atomically replaced after each map write.
+     */
     private volatile List<EncoderEndpoint> encoderDirectory = List.of();
 
     public List<EncoderEndpoint> encoderRoutingSnapshot() {
@@ -183,7 +189,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
 
     private volatile List<PrefillRoutingEntry> prefillDirectory = List.of();
 
-    /** PDFusion uses the same Prefill planning path but a distinct role map. */
+    /**
+     * PDFusion uses the same Prefill planning path but a distinct role map.
+     */
     private volatile List<PrefillRoutingEntry> pdFusionDirectory = List.of();
 
     /**
@@ -191,7 +199,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
      * replacement after changing the endpoint map. A racing reader may finish
      * an older traversal, but it cannot acquire stale ownership because the
      * selected address and generation are always revalidated by
-     * {@link #captureDecodeGeneration(DecodeResources.DecodeRoutingView)}.
+     * {@link #selectDecodeEndpoint(DecodeResources.DecodeRoutingView)}.
      */
     private volatile List<Map.Entry<String, DecodeEndpoint>> decodeDirectory = List.of();
 
@@ -211,7 +219,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
 
     private final Object lifecycleGate = new Object();
 
-    /** Null while open; every closing caller observes the same completed cleanup result. */
+    /**
+     * Null while open; every closing caller observes the same completed cleanup result.
+     */
     private volatile CompletableFuture<Throwable> closeCompletion;
 
     private int inflightPublications;
@@ -253,25 +263,15 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
     }
 
     /**
-     * Capture one exact currently published endpoint generation.
-     *
-     * <p>The pin is acquired inside the address key's CHM remapping critical
-     * section. Capture therefore linearizes either before exact detach (and
-     * retirement waits for the pin) or after detach (and returns {@code null}).
-     * The returned route capability is thread-confined.</p>
+     * Returns a currently available Endpoint. Admission rechecks retirement and capacity in its state lock.
      */
-    public WorkerEndpoint.GenerationPin capture(RoleType roleType, String ipPort) {
-        ConcurrentHashMap<String, WorkerEndpoint> endpoints = endpointsByRole.get(roleType);
-        return endpoints == null ? null : capture(endpoints, ipPort);
+    public WorkerEndpoint selectEndpoint(RoleType roleType, String ipPort) {
+        WorkerEndpoint endpoint = get(roleType, ipPort);
+        return endpoint == null || !endpoint.acceptsNewRequests() ? null : endpoint;
     }
 
     /**
-     * Return an immutable point-in-time address snapshot for one role.
-     *
-     * <p>No endpoint object or live registry map escapes.  A caller which needs
-     * generation ownership must still pass an address back through
-     * {@link #capture(RoleType, String)}; same-address replacement therefore
-     * remains linearized by the address key's remapping critical section.</p>
+     * Returns an immutable address snapshot. Select the Endpoint again before admission.
      */
     public List<String> endpointAddressSnapshot(RoleType roleType) {
         if (roleType != null && roleType.supportsPrefill()) {
@@ -289,15 +289,15 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
             };
         }
         Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(roleType);
-        return endpoints == null ? List.of() : List.copyOf(endpoints.keySet());
+        if (endpoints == null) return List.of();
+        return endpoints.entrySet().stream()
+                .filter(entry -> selectEndpoint(roleType, entry.getKey()) == entry.getValue())
+                .map(Map.Entry::getKey)
+                .toList();
     }
 
     /**
-     * Return the immutable Prefill routing directory observed at one instant.
-     *
-     * <p>This removes per-request registry lookups while deliberately avoiding
-     * fleet-wide generation pins. A selected entry remains advisory until its
-     * address is captured and the endpoint identity is revalidated.</p>
+     * Returns an immutable Prefill directory. Entries are advisory until admission succeeds.
      */
     public List<PrefillRoutingEntry> prefillRoutingSnapshot(RoleType roleType) {
         return switch (roleType) {
@@ -308,13 +308,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
     }
 
     /**
-     * Append immutable Decode routing values to caller-owned storage, which
-     * the registry never retains. Values reflect generations seen during this traversal.
-     *
-     * <p>The registry is intentionally not locked while an endpoint takes its
-     * admission lock.  This avoids introducing a map-bin/admission-lock order;
-     * publication races are resolved when the selected generation is pinned
-     * by {@link #captureDecodeGeneration(DecodeResources.DecodeRoutingView)}.</p>
+     * Copies Decode routing snapshots without retaining the caller list or holding registry locks.
      */
     public void decodeRoutingSnapshot(
             String group, List<DecodeResources.DecodeRoutingView> target) {
@@ -329,48 +323,19 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
     }
 
     /**
-     * Capture the exact Decode generation represented by a routing snapshot.
-     *
-     * <p>The routing values are advisory and may change after selection. The
-     * subsequent reservation/dispatch transaction revalidates capacity under
-     * the endpoint admission lock. This method authorizes only an identical
-     * endpoint generation; every rejected or exceptional capture is closed
-     * here, while a successful caller owns the returned generation pin.</p>
+     * Returns the same Decode generation as the snapshot; admission rechecks its current capacity.
      */
-    public WorkerEndpoint.GenerationPin captureDecodeGeneration(
-            DecodeResources.DecodeRoutingView expected) {
-        WorkerEndpoint.GenerationPin pin = capture(RoleType.DECODE, expected.address());
-        if (pin == null) {
-            return null;
-        }
-        boolean transferred = false;
-        try {
-            if (pin.generationId() != expected.generationId()
-                    || !(pin.endpoint() instanceof DecodeEndpoint)) {
-                return null;
-            }
-            transferred = true;
-            return pin;
-        } finally {
-            if (!transferred) {
-                pin.close();
-            }
-        }
+    public WorkerEndpoint selectDecodeEndpoint(DecodeResources.DecodeRoutingView expected) {
+        WorkerEndpoint endpoint = selectEndpoint(RoleType.DECODE, expected.address());
+        return endpoint instanceof DecodeEndpoint
+                        && endpoint.getStatus().getGenerationId() == expected.generationId()
+                ? endpoint
+                : null;
     }
 
-    private static WorkerEndpoint.GenerationPin capture(
-            ConcurrentHashMap<String, WorkerEndpoint> endpoints, String ipPort) {
-        AtomicReference<WorkerEndpoint.GenerationPin> captured = new AtomicReference<>();
-        endpoints.computeIfPresent(
-                ipPort,
-                (ignored, current) -> {
-                    captured.set(current.tryPinGeneration());
-                    return current;
-                });
-        return captured.get();
-    }
-
-    /** Return the endpoint only when it belongs to the expected status generation. */
+    /**
+     * Return the endpoint only when it belongs to the expected status generation.
+     */
     public WorkerEndpoint get(RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
         WorkerEndpoint endpoint = get(roleType, ipPort);
         return endpoint != null && endpoint.getStatus() == expectedStatus ? endpoint : null;
@@ -554,7 +519,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
         }
     }
 
-    /** Keep the immutable directory in address order; request routing then needs no full sort. */
+    /**
+     * Keep the immutable directory in address order; request routing then needs no full sort.
+     */
     private <T> List<T> directoryAfterMutation(
             List<T> previous, String address, Function<T, String> addressOf, T next) {
         if (closeCompletion != null) {
@@ -578,7 +545,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
         return List.copyOf(updated);
     }
 
-    /** Detach confirmed unavailable generations without waiting for local status application. */
+    /**
+     * Detach confirmed unavailable generations without waiting for local status application.
+     */
     public Retirement beginRequestedRetirement(RoleType role, String address, WorkerStatus status) {
         if (status.retirementReason() == null || !status.lock.tryLock()) {
             return null;
@@ -639,7 +608,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
         return retirement;
     }
 
-    /** Resolve the barrier after the exact generation's drain and finalization. */
+    /**
+     * Resolve the barrier after the exact generation's drain and finalization.
+     */
     private void resolveDetachedGeneration() {
         synchronized (lifecycleGate) {
             checkState(inflightDetachedRetirements > 0, "Detached retirement count underflow");
@@ -738,7 +709,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
         Failures.rethrow(failure, "EndpointRegistry close failed");
     }
 
-    /** Wait for every generation detached before the close gate linearized. */
+    /**
+     * Wait for every generation detached before the close gate linearized.
+     */
     private void awaitDetachedRetirements() {
         boolean interrupted = false;
         long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(retirementTimeoutMs);
@@ -815,7 +788,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
             }
         }
         // Phase 2: initiate every cleanup. A generation with an accepted
-        // handoff may transfer its cleanup to a dedicated continuation.
+        // cleanup may finish asynchronously through its completion callback.
         for (WorkerEndpoint endpoint : endpoints) {
             failure =
                     Failures.run(
@@ -841,7 +814,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
         return failure;
     }
 
-    /** Immutable diagnostic view; callers know the role of each resource owner. */
+    /**
+     * Immutable diagnostic view; callers know the role of each resource owner.
+     */
     public Map<String, WorkerEndpoint> endpointSnapshot(RoleType role) {
         Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(role);
         return endpoints == null ? Map.of() : Map.copyOf(endpoints);
@@ -877,7 +852,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
         return Map.copyOf(values);
     }
 
-    /** Cheap role counts; no endpoint or request snapshots are constructed. */
+    /**
+     * Cheap role counts; no endpoint or request snapshots are constructed.
+     */
     public Counts counts(RoleType role) {
         Objects.requireNonNull(role, "role");
         Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(role);
@@ -890,7 +867,7 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
      *
      * @param ttlMs max age before eviction
      * @param retainForSchedulerCleanup current directory lookup, called outside endpoint locks;
-     *                                  candidates are revalidated under the ledger lock before eviction
+     *                                  candidates are revalidated in an Endpoint lock before eviction
      */
     public void evictExpiredOrphans(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         for (RoleType role : List.of(RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION)) {
@@ -920,7 +897,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
         }
     }
 
-    /** Immutable point-in-time view of discovered generations for one role. */
+    /**
+     * Immutable point-in-time view of discovered generations for one role.
+     */
     public Map<String, WorkerStatus> statusSnapshot(RoleType role) {
         if (role == null) {
             return Map.of();
@@ -928,7 +907,9 @@ public class EndpointRegistry implements EndpointStats, org.flexlb.dao.master.Wo
         return Map.copyOf(statusesByRole.get(role));
     }
 
-    /** Accept updates only for an exact current generation while this registry is open. */
+    /**
+     * Accept updates only for an exact current generation while this registry is open.
+     */
     public boolean isCurrentStatus(RoleType role, String address, WorkerStatus expected) {
         return closeCompletion == null
                 && expected != null

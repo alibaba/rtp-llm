@@ -2,7 +2,7 @@ import com.sun.management.ThreadMXBean;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 
@@ -93,7 +93,7 @@ public class PlanningBench {
             for (int i = 0; i < 5; i++) {
                 endpoints.add(
                         new RequestTimeEstimation.Inputs(
-                                new QueueSnapshot(
+                                new ProjectionQueueSnapshot(
                                         1000,
                                         true,
                                         org.flexlb.balance.planner.GroupPlanner.FIXED_WINDOW,

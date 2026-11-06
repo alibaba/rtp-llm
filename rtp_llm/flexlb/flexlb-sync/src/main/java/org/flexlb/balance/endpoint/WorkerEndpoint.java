@@ -2,14 +2,13 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Failures;
-import org.flexlb.util.Logger;
 
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -24,7 +23,9 @@ import static com.google.common.base.Preconditions.checkState;
  */
 public class WorkerEndpoint {
 
-    /** Passive status facts. The sync workflow publishes them after releasing the generation lock. */
+    /**
+     * Passive status facts. The sync workflow publishes them after releasing the generation lock.
+     */
     public sealed interface StatusChange {
         record None() implements StatusChange {}
 
@@ -66,24 +67,27 @@ public class WorkerEndpoint {
                     Thread.ofPlatform().daemon().name("flexlb-endpoint-retirement-", 1).factory());
 
     private final WorkerStatus status;
+    private final ReentrantLock stateLock = new ReentrantLock();
+
+    final ReentrantLock stateLock() {
+        return stateLock;
+    }
 
     public WorkerStatus getStatus() {
         return status;
     }
 
     private enum RetirementPhase {
-        ACCEPTING_HANDOFFS,
+        ACCEPTING_REQUESTS,
         RETIRING,
-        WAITING_HANDOFFS,
         CLEANUP_SCHEDULED,
         CLEANING,
         RETIRED
     }
 
-    private volatile RetirementPhase phase = RetirementPhase.ACCEPTING_HANDOFFS;
+    private volatile RetirementPhase phase = RetirementPhase.ACCEPTING_REQUESTS;
     private final CompletableFuture<Void> retirementCompleted = new CompletableFuture<>();
-    private int activeHandoffs;
-    private Thread cleanupThread;
+    private volatile Thread cleanupThread;
 
     public WorkerEndpoint(WorkerStatus status) {
         this.status = Objects.requireNonNull(status, "status");
@@ -117,7 +121,7 @@ public class WorkerEndpoint {
      * Reduce one private status observation and publish it at the role's
      * consistency boundary. Any returned scheduler facts were derived from
      * exact endpoint-owned identities and are consumed only after this method
-     * has released the role-local lock.
+     * has released the Endpoint lock.
      */
     public StatusChange applyPreparedStatus(WorkerStatus ws, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(ws);
@@ -153,7 +157,9 @@ public class WorkerEndpoint {
         return NO_STATUS_CHANGE;
     }
 
-    /** Publish only facts belonging to this role; subclasses own their notification adapters. */
+    /**
+     * Publish only facts belonging to this role; subclasses own their notification adapters.
+     */
     public void publishStatus(StatusChange change) {
         checkArgument(
                 change instanceof StatusChange.None,
@@ -164,248 +170,109 @@ public class WorkerEndpoint {
         checkArgument(status == ws, "WorkerStatus generation does not belong to this endpoint");
     }
 
-    /**
-     * Pin this exact endpoint generation for one admission handoff.
-     *
-     * <p>The returned capability remains valid after retirement starts. That is
-     * the point of the pin: a capture which linearized before registry detach
-     * may finish its already accepted handoff. The owner must close the pin on
-     * every selected, rejected, and exceptional path.</p>
-     */
-    public final GenerationPin tryPinGeneration() {
-        if (!status.isAvailableForScheduling()) {
-            return null;
-        }
-        synchronized (retirementCompleted) {
-            if (phase != RetirementPhase.ACCEPTING_HANDOFFS) return null;
-            activeHandoffs++;
-            return new GenerationPin(this);
-        }
-    }
-
-    /** Validate an exact, still-open pin before consuming its admission right. */
-    public final void requirePinnedGeneration(GenerationPin pin) {
-        checkArgument(
-                pin != null && pin.endpoint == this && pin.isOpen(),
-                "Generation pin does not own this endpoint generation");
-    }
-
     public final boolean isRetired() {
-        return phase != RetirementPhase.ACCEPTING_HANDOFFS;
+        return phase != RetirementPhase.ACCEPTING_REQUESTS;
     }
 
     /**
-     * Close the admission gate for this exact endpoint generation.
-     *
-     * <p>This is the non-blocking half of endpoint retirement. Implementations
-     * must make every later generation-local ownership acquisition fail closed,
-     * but must not wait for existing handoffs, drain queues, or invoke external
-     * callbacks. {@link EndpointRegistry} invokes this method while atomically
-     * withdrawing the endpoint from its address mapping.</p>
+     * New requests require both a schedulable Worker and an Endpoint accepting requests.
+     * Admission callers recheck this while holding the Endpoint state lock.
+     */
+    public final boolean acceptsNewRequests() {
+        return !isRetired() && status.isAvailableForScheduling();
+    }
+
+    /**
+     * Reject later admissions in the same critical section as request record changes.
      */
     final void beginRetirement() {
-        synchronized (retirementCompleted) {
-            if (phase == RetirementPhase.ACCEPTING_HANDOFFS) phase = RetirementPhase.RETIRING;
+        stateLock.lock();
+        try {
+            if (phase == RetirementPhase.ACCEPTING_REQUESTS) phase = RetirementPhase.RETIRING;
+        } finally {
+            stateLock.unlock();
         }
     }
 
-    /**
-     * Initiate exact-generation drain and cleanup after the admission gate has
-     * closed. This method never waits for cleanup already owned by another
-     * caller; use the generation lifecycle retirement barrier at composition shutdown.
-     */
     public final void close() {
-        retireInternal(false);
+        retireInternal(stateLock.isHeldByCurrentThread());
     }
 
-    /** Initiate unpublished-candidate cleanup without blocking its status lock. */
     final void closeAsynchronously() {
         retireInternal(true);
     }
 
-    private void retireInternal(boolean forceAsynchronous) {
+    private void retireInternal(boolean asynchronously) {
         beginRetirement();
-
-        // Pending handoffs schedule cleanup on the retirement executor when the
-        // last permit closes, keeping cleanup off the worker callback thread.
-        if (!tryStartCleanup()) {
-            return;
+        stateLock.lock();
+        try {
+            if (phase != RetirementPhase.RETIRING) return;
+            phase = RetirementPhase.CLEANUP_SCHEDULED;
+        } finally {
+            stateLock.unlock();
         }
-        if (forceAsynchronous) {
-            continueRetirementAfterHandoff();
-        } else {
-            finishRetirement();
-        }
+        if (asynchronously) executeRetirement(this::finishRetirement);
+        else finishRetirement();
     }
 
-    /** Claim cleanup atomically; return true only when this caller should run it. */
-    boolean tryStartCleanup() {
-        synchronized (retirementCompleted) {
-            checkState(
-                    phase != RetirementPhase.ACCEPTING_HANDOFFS,
-                    "endpoint retirement gate is still open");
-            if (phase != RetirementPhase.RETIRING) {
-                return false;
-            }
-            phase =
-                    activeHandoffs == 0
-                            ? RetirementPhase.CLEANUP_SCHEDULED
-                            : RetirementPhase.WAITING_HANDOFFS;
-            return phase == RetirementPhase.CLEANUP_SCHEDULED;
-        }
-    }
-
-    /** Bind the claimed cleanup to its execution thread for reentrant close. */
-    void beginCleanup() {
-        synchronized (retirementCompleted) {
-            checkState(
-                    phase == RetirementPhase.CLEANUP_SCHEDULED && activeHandoffs == 0,
-                    "endpoint retirement cleanup owner is invalid");
-            phase = RetirementPhase.CLEANING;
-            cleanupThread = Thread.currentThread();
-        }
-    }
-
-    void completeRetirement(Throwable failure) {
-        synchronized (retirementCompleted) {
-            checkState(
-                    phase == RetirementPhase.CLEANING && activeHandoffs == 0,
-                    "endpoint generation cleanup is not ready to complete");
-            cleanupThread = null;
-            phase = RetirementPhase.RETIRED;
-        }
-        // Completion can acquire a generation lock; never run it under L.
-        if (failure == null) {
-            retirementCompleted.complete(null);
-        } else {
-            retirementCompleted.completeExceptionally(failure);
-        }
-    }
-
-    /** Run finalization only after successful local cleanup, including after a wait timeout. */
+    /**
+     * Finalize registry and cache state after request cleanup and notifications succeed.
+     */
     void onRetired(Runnable completion) {
         retirementCompleted.thenRun(Objects.requireNonNull(completion, "completion"));
     }
 
-    /** Await this generation's cleanup result; caller interruption is restored after waiting. */
     void awaitRetirement(long timeoutMs) {
         checkArgument(timeoutMs > 0L, "endpoint retirement timeout must be positive");
-        synchronized (retirementCompleted) {
-            checkState(
-                    phase != RetirementPhase.ACCEPTING_HANDOFFS,
-                    "endpoint retirement has not begun");
-            checkState(
-                    phase != RetirementPhase.RETIRING,
-                    "endpoint retirement cleanup has not been initiated");
-            checkState(
-                    phase != RetirementPhase.CLEANING || cleanupThread != Thread.currentThread(),
-                    "endpoint retirement cleanup cannot await itself");
-        }
+        checkState(
+                !stateLock.isHeldByCurrentThread() && cleanupThread != Thread.currentThread(),
+                "endpoint cleanup cannot wait for itself");
         try {
             com.google.common.util.concurrent.Uninterruptibles.getUninterruptibly(
                     retirementCompleted, timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.ExecutionException failure) {
-            Failures.rethrow(failure.getCause(), "endpoint generation retirement failed");
+            Failures.rethrow(failure.getCause(), "Endpoint retirement failed");
         } catch (java.util.concurrent.TimeoutException timeout) {
-            synchronized (retirementCompleted) {
-                throw new IllegalStateException(
-                        "endpoint retirement timed out after "
-                                + timeoutMs
-                                + "ms: phase="
-                                + phase
-                                + ", activeHandoffs="
-                                + activeHandoffs,
-                        timeout);
-            }
-        }
-    }
-
-    private void releaseHandoff() {
-        boolean runContinuation = false;
-        synchronized (retirementCompleted) {
-            checkState(activeHandoffs > 0, "endpoint handoff permit released more than once");
-            activeHandoffs--;
-            if (activeHandoffs == 0 && phase == RetirementPhase.WAITING_HANDOFFS) {
-                phase = RetirementPhase.CLEANUP_SCHEDULED;
-                runContinuation = true;
-            }
-        }
-        if (runContinuation) {
-            continueRetirementAfterHandoff();
+            throw new IllegalStateException(
+                    "Endpoint retirement timed out: phase=" + phase, timeout);
         }
     }
 
     private void finishRetirement() {
-        beginCleanup();
-        Throwable retirementFailure = null;
+        cleanupThread = Thread.currentThread();
+        stateLock.lock();
+        try {
+            phase = RetirementPhase.CLEANING;
+        } finally {
+            stateLock.unlock();
+        }
+        Throwable failure = null;
         try {
             closeEndpoint();
-        } catch (Throwable failure) {
-            retirementFailure = failure;
+        } catch (Throwable problem) {
+            failure = problem;
         } finally {
-            completeRetirement(retirementFailure);
+            stateLock.lock();
+            try {
+                phase = RetirementPhase.RETIRED;
+            } finally {
+                stateLock.unlock();
+            }
+            cleanupThread = null;
+            if (failure == null) retirementCompleted.complete(null);
+            else retirementCompleted.completeExceptionally(failure);
         }
-        Failures.rethrow(retirementFailure, "Endpoint generation retirement failed");
+        Failures.rethrow(failure, "Endpoint retirement failed");
     }
 
     static void executeRetirement(Runnable cleanup) {
         RETIREMENT_EXECUTOR.execute(cleanup);
     }
 
-    void continueRetirementAfterHandoff() {
-        RETIREMENT_EXECUTOR.execute(
-                () -> {
-                    try {
-                        finishRetirement();
-                    } catch (Throwable cleanupFailure) {
-                        Logger.error(
-                                "Endpoint generation cleanup failed after detach: {}#{}",
-                                status.getIpPort(),
-                                status.getGenerationId(),
-                                cleanupFailure);
-                    }
-                });
-    }
-
     /**
-     * Release subclass resources after the shared generation gate has drained.
-     * This is invoked exactly once by the retirement owner.
+     * Remove request records in the Endpoint state lock, then notify outside it.
      */
-    protected void closeEndpoint() {
-        // Stateless roles own no endpoint-local resources.
-    }
-
-    /**
-     * Exact, single-owner admission capability for one endpoint generation.
-     * The permit is transferable: asynchronous ownership may close it from a
-     * completion thread without adding a second lifecycle state.
-     */
-    public static final class GenerationPin implements AutoCloseable {
-
-        private final WorkerEndpoint endpoint;
-        private final AtomicBoolean open = new AtomicBoolean(true);
-
-        private GenerationPin(WorkerEndpoint endpoint) {
-            this.endpoint = endpoint;
-        }
-
-        public WorkerEndpoint endpoint() {
-            return endpoint;
-        }
-
-        public boolean isOpen() {
-            return open.get();
-        }
-
-        public long generationId() {
-            return endpoint.status.getGenerationId();
-        }
-
-        @Override
-        public void close() {
-            if (open.compareAndSet(true, false)) endpoint.releaseHandoff();
-        }
-    }
+    protected void closeEndpoint() {}
 
     // ==================== monitoring (EP-authoritative) ====================
 
@@ -414,7 +281,7 @@ public class WorkerEndpoint {
      * <p>Prefill: identity-backed committed work (ms), absent while the
      * endpoint cannot publish a coherent complete work view.
      * <p>Decode: total active task count (confirmed running + inflight).
-     * Stateful endpoints skip the sample while their resource lock is busy.
+     * Stateful endpoints skip the sample while their state lock is busy.
      */
     public OptionalLong tryGetLoadMetric() {
         WorkerStatus.EngineObservation engine = status.committedEngineObservation();

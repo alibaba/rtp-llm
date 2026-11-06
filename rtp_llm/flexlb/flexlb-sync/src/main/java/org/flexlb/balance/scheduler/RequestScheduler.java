@@ -2,33 +2,55 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 
-/** Scheduling owns its triggers and execution; Lifecycle owns requests and settlement. */
+/**
+ * Defines replaceable scheduling decisions and triggers.
+ */
 public interface RequestScheduler extends AutoCloseable {
-    /** Start this implementation's scheduling triggers. */
+    /**
+     * Start this implementation's scheduling triggers.
+     */
     void start();
 
-    /** Run available scheduling decisions. Implementations serialize concurrent invocations. */
+    /**
+     * Run available scheduling decisions. Implementations serialize concurrent invocations.
+     */
     void schedule();
 
+    /**
+     * Schedule a newly registered request or one whose previous route has been fully released.
+     * The implementation decides when to run it and preserves its original ordering on retry.
+     */
     void onRequest(RequestContext request);
-
-    /** Invalidate exact membership; resource settlement remains with RequestLifecycle. */
-    void onRequestChanged(RequestContext request);
 
     void onEndpointChanged(WorkerEndpoint endpoint);
 
-    /** Number of requests waiting for placement capacity or preemption availability. */
+    /**
+     * Select the failure policy. After successful withdrawal and cleanup, retry uses onRequest.
+     */
+    default boolean shouldRetryRouteFailure(ContextResult.RouteFailure failure) {
+        return false;
+    }
+
+    /**
+     * Number of requests waiting for placement capacity or preemption availability.
+     */
     default int blockedRequestCount() {
         return 0;
     }
 
-    /** Stop producing scheduling work and cancel owned timers; do not close shared facilities. */
+    /**
+     * Stop producing scheduling work and cancel owned timers; do not close shared facilities.
+     */
     void stop();
 
-    /** Wait for accepted scheduling work, using an absolute System.nanoTime deadline. */
+    /**
+     * Wait for accepted scheduling work, using an absolute System.nanoTime deadline.
+     */
     boolean awaitStopped(long deadlineNanos);
 
-    /** Stop, drain scheduler-owned work and release scheduler-owned resources. */
+    /**
+     * Stop, drain scheduler-owned work and release scheduler-owned resources.
+     */
     @Override
     void close();
 }

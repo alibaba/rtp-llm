@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.runWithStateLock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -42,7 +43,7 @@ public final class EndpointCleanupTestSupport {
         private final PrefillEndpoint state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         lock,
-                        PrefillActiveIndex.ordered(
+                        OrderedPrefillRequestQueue.ordered(
                                 4,
                                 Comparator.comparing(
                                         org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
@@ -55,36 +56,36 @@ public final class EndpointCleanupTestSupport {
             this.batch = batch;
         }
 
-        public record Owner(
-                RequestRoute item, PrefillEndpoint.Reservation reservation, long batchId) {}
+        public record Owner(RouteExecution item, Runnable rollback, long batchId) {}
 
         public Owner commit(long requestId, long batchId, long predictedMs) {
-            RequestRoute item = mock(RequestRoute.class);
+            RouteExecution item = mock(RouteExecution.class);
             when(item.requestId()).thenReturn(String.valueOf(requestId));
             when(item.seqLen()).thenReturn(100L);
             if (batch) {
-                lock.lock();
-                try {
-                    assertSame(
-                            item,
-                            org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, item));
-                } finally {
-                    lock.unlock();
-                }
+                runWithStateLock(
+                        lock,
+                        () -> {
+                            assertSame(
+                                    item,
+                                    org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
+                                            state, item));
+                        });
                 {
-                    var reservation =
-                            state.reserveBatch(batchId, 1, generation.tryPinGeneration()).value();
+                    var reservation = state.reserveBatch(batchId, 1).value();
                     try (var preparationReservation =
                             EndpointTestSupport.preparation(reservation)) {
                         assertNotNull(
                                 reservation,
                                 "the expired batch must release its sole capacity slot");
-                        try (var handoff =
-                                EndpointTestSupport.commitBatch(
-                                        state, reservation, List.of(item), predictedMs)) {
+                        {
+                            var handoff =
+                                    EndpointTestSupport.commitBatch(
+                                            state, reservation, List.of(item), predictedMs);
+
                             assertNotNull(handoff);
                         }
-                        return new Owner(item, reservation, batchId);
+                        return new Owner(item, () -> state.rollback(reservation), batchId);
                     }
                 }
             }
@@ -94,12 +95,14 @@ public final class EndpointCleanupTestSupport {
                     assertNotNull(
                             reservation,
                             "the expired individual must release its sole capacity slot");
-                    try (var handoff =
-                            org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                    state, item, reservation)) {
+                    {
+                        var handoff =
+                                org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
+                                        state, item, reservation);
+
                         assertNotNull(handoff);
                     }
-                    return new Owner(item, reservation, batchId);
+                    return new Owner(item, () -> state.rollback(reservation), batchId);
                 }
             }
         }
@@ -122,16 +125,15 @@ public final class EndpointCleanupTestSupport {
             assertFalse(work.hasUnknownWork());
             assertTrue(work.containsRequest(owner.item().requestId()));
             if (batch) {
-                lock.lock();
-                try {
-                    Map<?, ?> batches =
-                            (Map<?, ?>)
-                                    org.springframework.test.util.ReflectionTestUtils.getField(
-                                            state, "batches");
-                    assertEquals(java.util.Set.of(owner.batchId()), batches.keySet());
-                } finally {
-                    lock.unlock();
-                }
+                runWithStateLock(
+                        lock,
+                        () -> {
+                            Map<?, ?> batches =
+                                    (Map<?, ?>)
+                                            org.springframework.test.util.ReflectionTestUtils
+                                                    .getField(state, "batches");
+                            assertEquals(java.util.Set.of(owner.batchId()), batches.keySet());
+                        });
                 // Check the actual admission gate, not just the derived batch count.
                 assertFalse(state.batchCapacityAvailable(1));
                 assertTrue(state.batchCapacityAvailable(2));
@@ -140,7 +142,7 @@ public final class EndpointCleanupTestSupport {
 
         public void assertStaleReleaseIsIgnored(Owner old) {
             assertFalse(EndpointTestSupport.releaseRequest(state, old.item()));
-            EndpointTestSupport.rollback(old.reservation());
+            old.rollback().run();
         }
 
         public void assertEmpty() {

@@ -37,7 +37,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Prefill status must carry stage completion through the real endpoint and context reducers. */
+/**
+ * Prefill status must carry stage completion through the real endpoint and context reducers.
+ */
 class PrefillCompletionProjectionTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -63,7 +65,9 @@ class PrefillCompletionProjectionTest {
                         new PlacementAvailability(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 service.loadBalanceConfig()),
-                        order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
+                        order ->
+                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                        16, order));
         var runtime =
                 new SchedulerTestServices(
                         SchedulerTestSupport.repository(requests),
@@ -91,20 +95,21 @@ class PrefillCompletionProjectionTest {
             } finally {
                 worker.lock.unlock();
             }
-            WorkerStatus decodeWorker =
+            WorkerStatus decodeEndpoint =
                     WorkerStatus.createDiscovered(
                             RoleType.DECODE, "g1", "127.0.0.2", 8080, 8081, "test");
             DecodeEndpoint decode =
                     EndpointTestSupport.decode(
-                            decodeWorker, SchedulerTestSupport.repository(projector));
+                            decodeEndpoint, SchedulerTestSupport.repository(projector));
             applyStatus(decode, decodeStatus(1L, Map.of()));
-            DecodeResources.ReservationHandle reservation;
+            DecodeResources.RequestReservation reservation;
             var capacity = new DecodeResources.AdmissionCapacity(10L, 90L);
-            try (var pin = decode.tryPinGeneration()) {
+            {
+                var selectedEndpoint = decode;
+
                 reservation =
-                        decode.tryReserveQueuedRequest(
-                                        pin, String.valueOf(101L), 16L, 32L, 50, capacity)
-                                .handle();
+                        decode.tryReserveQueuedRequest(String.valueOf(101L), 16L, 32L, 50, capacity)
+                                .value();
                 assertNotNull(reservation);
                 var acquisition = decode.acquireDispatchPermit(reservation, capacity);
                 assertEquals(
@@ -112,12 +117,12 @@ class PrefillCompletionProjectionTest {
                         acquisition.status());
                 assertEquals(
                         DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                        acquisition.handle().dispatch().status());
+                        acquisition.value().dispatch().status());
             }
             var context = RequestProtocolTestSupport.context(config, 101L);
-            var future = RequestProtocolTestSupport.register(requests, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(requests, context);
             context.data().setFuture(future);
-            RequestRoute item =
+            RouteExecution item =
                     SchedulingTestConfig.createRoute(
                             context,
                             new Response(),
@@ -127,27 +132,30 @@ class PrefillCompletionProjectionTest {
                             decode,
                             reservation,
                             System.currentTimeMillis());
-            AtomicReference<PrefillEndpoint.RouteReservation> routeReservation =
+            AtomicReference<PrefillEndpoint.RequestRecord> routeReservation =
                     new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle("101", future);
-                    var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(mutation);
-                    var pin = prefill.tryPinGeneration()) {
-                assertNotNull(mutation);
-                assertNotNull(pin);
-                assertTrue(
-                        (RequestProtocolTestSupport.commitRoute(
-                                        requests,
-                                        item,
-                                        RequestProtocolTestSupport.publication(
-                                                () -> {
-                                                    var registered =
-                                                            prefill.reserveUnqueuedRoute(
-                                                                    pin, item, 30_000L);
-                                                    assertTrue(registered.accepted());
-                                                    routeReservation.set(registered.value());
-                                                    return true;
-                                                }))
-                                == org.flexlb.balance.PlacementResult.Status.SUCCESS));
+            {
+                var selectedEndpoint = prefill;
+                try (var mutation = SchedulerTestSupport.claim(requests, "101", future);
+                        var admissionCompletion1 =
+                                RequestProtocolTestSupport.finishOnExit(mutation)) {
+                    assertNotNull(mutation);
+                    assertNotNull(selectedEndpoint);
+                    assertTrue(
+                            (RequestProtocolTestSupport.commitRoute(
+                                            requests,
+                                            item,
+                                            RequestProtocolTestSupport.publication(
+                                                    () -> {
+                                                        var registered =
+                                                                prefill.reserveUnqueuedRoute(
+                                                                        item, 30_000L);
+                                                        assertTrue(registered.accepted());
+                                                        routeReservation.set(registered.value());
+                                                        return true;
+                                                    }))
+                                    == org.flexlb.balance.PlacementResult.Status.SUCCESS));
+                }
             }
             {
                 var claim =
@@ -155,12 +163,14 @@ class PrefillCompletionProjectionTest {
                                 requests,
                                 item,
                                 () -> {
-                                    try (var handoff =
-                                            org.flexlb.balance.endpoint.EndpointTestSupport
-                                                    .commitDirect(
-                                                            prefill,
-                                                            item,
-                                                            routeReservation.get())) {
+                                    {
+                                        var handoff =
+                                                org.flexlb.balance.endpoint.EndpointTestSupport
+                                                        .commitDirect(
+                                                                prefill,
+                                                                item,
+                                                                routeReservation.get());
+
                                         return true;
                                     }
                                 });
@@ -223,17 +233,18 @@ class PrefillCompletionProjectionTest {
                                     CapacityRelease.NONE)
                             .fits(),
                     "a suspected lost request must not isolate a worker with available capacity");
-            try (var pin = decode.tryPinGeneration()) {
+            {
+                var selectedEndpoint = decode;
+
                 var waiting =
-                        decode.tryReserveQueuedRequest(
-                                        pin, String.valueOf(102L), 16L, 32L, 50, capacity)
-                                .handle();
+                        decode.tryReserveQueuedRequest(String.valueOf(102L), 16L, 32L, 50, capacity)
+                                .value();
                 assertNotNull(waiting);
                 var acquisition = decode.acquireDispatchPermit(waiting, capacity);
                 assertEquals(
                         DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                         acquisition.status());
-                assertTrue(acquisition.handle().release());
+                assertTrue(acquisition.value().release());
                 decode.release(waiting, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
             }
 
@@ -262,7 +273,7 @@ class PrefillCompletionProjectionTest {
     }
 
     private static boolean visibilityInstalledOrAbsent(
-            RequestLifecycle owner, RequestContext context) {
+            AbstractRequestScheduler owner, RequestContext context) {
         var token = context.snapshot().deadlines().visibility();
         if (token == null) {
             return true;

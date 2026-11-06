@@ -47,7 +47,9 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Frontend result selection precedes unlocked publication and cannot undo TTL cleanup. */
+/**
+ * Frontend result selection precedes unlocked publication and cannot undo TTL cleanup.
+ */
 class RequestCompletionPublicationRaceTest {
 
     @ParameterizedTest
@@ -133,7 +135,7 @@ class RequestCompletionPublicationRaceTest {
         var config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        RequestLifecycle registry =
+        AbstractRequestScheduler registry =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -141,10 +143,7 @@ class RequestCompletionPublicationRaceTest {
                         mock(TheoryCacheHitReporter.class));
         try {
             CompletableFuture<Response> future =
-                    registry.register(
-                            RequestProtocolTestSupport.context(config, 503L),
-                            () -> {},
-                            StrategyErrorType.BATCH_SLO_EXPIRED);
+                    registry.submit(RequestProtocolTestSupport.context(config, 503L), () -> {});
             var responseExecutor =
                     (ResponseCompletionExecutor)
                             org.springframework.test.util.ReflectionTestUtils.getField(
@@ -186,7 +185,7 @@ class RequestCompletionPublicationRaceTest {
         when(config.getInternalRuntime()).thenReturn(runtime);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        RequestLifecycle scheduler =
+        AbstractRequestScheduler scheduler =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -206,7 +205,8 @@ class RequestCompletionPublicationRaceTest {
             for (int index = 0; index < count; index++) {
                 long requestId = 10_000L + index;
                 var context = RequestProtocolTestSupport.context(config, requestId);
-                var future = RequestProtocolTestSupport.register(scheduler, context);
+                var future =
+                        RequestProtocolTestSupport.submitForManualPlacement(scheduler, context);
                 boolean last = index == count - 1;
                 callbacks.add(
                         future.thenAccept(
@@ -355,7 +355,7 @@ class RequestCompletionPublicationRaceTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
-        RequestLifecycle registry =
+        AbstractRequestScheduler registry =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         service,
                         reporter,
@@ -369,14 +369,14 @@ class RequestCompletionPublicationRaceTest {
         try {
             RequestContext context = RequestProtocolTestSupport.context(config, 501L);
             CompletableFuture<Response> future =
-                    RequestProtocolTestSupport.register(registry, context);
+                    RequestProtocolTestSupport.submitForManualPlacement(registry, context);
             RequestContext requestContext = registry.requests.findActive("501");
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
             when(prefill.getIp()).thenReturn("prefill");
             DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
-            var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(501L), 1L);
+            var reservation = new DecodeResources.RequestReservation(1L, String.valueOf(501L), 1L);
             context.data().setFuture(future);
-            RequestRoute item =
+            RouteExecution item =
                     org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
                             context,
                             new Response(),
@@ -421,7 +421,7 @@ class RequestCompletionPublicationRaceTest {
                     .thenReturn(
                             CompletableFuture.completedFuture(
                                     EngineGrpcClient.CancelReply.REQUEST_CLEANED));
-            assertTrue(claim.owner().data().getLifecycle().tryStartSend(claim));
+            assertTrue(claim.owner().data().getRequestScheduler().tryStartSend(claim));
             var completions = new java.util.concurrent.atomic.AtomicInteger();
             CompletableFuture<Void> callback =
                     future.thenAccept(
@@ -437,7 +437,7 @@ class RequestCompletionPublicationRaceTest {
                             () ->
                                     claim.owner()
                                             .data()
-                                            .getLifecycle()
+                                            .getRequestScheduler()
                                             .onDeliveryResult(
                                                     new ContextResult.TransportResult(
                                                             claim,
@@ -466,10 +466,7 @@ class RequestCompletionPublicationRaceTest {
             assertSame(requestContext, registry.requests.findActive("501"));
             assertEquals(
                     StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                    registry.register(
-                                    RequestProtocolTestSupport.context(config, 501L),
-                                    () -> {},
-                                    StrategyErrorType.BATCH_SLO_EXPIRED)
+                    registry.submit(RequestProtocolTestSupport.context(config, 501L), () -> {})
                             .join()
                             .getCode());
             resumeReporting.countDown();
@@ -478,10 +475,7 @@ class RequestCompletionPublicationRaceTest {
             // A second response proves the obsolete ACK has run. The terminal response
             // may finish while cleanup is pending, but cannot archive the live identity.
             var barrier =
-                    registry.register(
-                            RequestProtocolTestSupport.context(config, 502L),
-                            () -> {},
-                            StrategyErrorType.BATCH_SLO_EXPIRED);
+                    registry.submit(RequestProtocolTestSupport.context(config, 502L), () -> {});
             registry.cancel("502", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(barrier.get(2L, TimeUnit.SECONDS).isSuccess());
             assertFalse(
@@ -806,7 +800,7 @@ class RequestCompletionPublicationRaceTest {
     void externalFutureOperationUnderContextLockLeavesRequestUnchanged(TerminalForm form) {
         RequestContext requestContext =
                 RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 702L);
-        RequestLifecycle requestOwner =
+        AbstractRequestScheduler requestOwner =
                 RequestProtocolTestSupport.initialize(
                         mock(ResponseCompletionExecutor.class),
                         requestContext,
@@ -843,7 +837,7 @@ class RequestCompletionPublicationRaceTest {
         try (var publisher = spy(new ResponseCompletionExecutor(1))) {
             Fixture fixture = fixture(publisher, !deliveryFailure);
             RequestContext context = fixture.requestContext();
-            RequestRoute exact = context.snapshot().route();
+            RouteExecution exact = context.snapshot().route();
             var phase = context.snapshot().phase();
             org.mockito.Mockito.doReturn(false).when(publisher).register();
             try {
@@ -910,13 +904,13 @@ class RequestCompletionPublicationRaceTest {
             org.mockito.Mockito.clearInvocations(publisher);
             try {
                 fixture.scheduler()
-                        .onEngineEvidence(
+                        .onWorkerRequestEvent(
                                 fixture.requestContext(),
-                                new ContextResult.EngineEvidence(
+                                new ContextResult.WorkerRequestEvent(
                                         null,
                                         null,
                                         RoleType.PREFILL,
-                                        ContextResult.EngineKind.COMPLETED,
+                                        ContextResult.WorkerRequestEventType.COMPLETED,
                                         0L,
                                         null,
                                         System.currentTimeMillis()));
@@ -950,10 +944,10 @@ class RequestCompletionPublicationRaceTest {
     private static Fixture fixture(ResponseCompletionExecutor responseExecutor, boolean delivered) {
         var config = SchedulingTestConfig.batchConfig();
         RequestContext context = RequestProtocolTestSupport.context(config, 701L);
-        RequestLifecycle owner =
+        AbstractRequestScheduler owner =
                 RequestProtocolTestSupport.initialize(
                         responseExecutor, context, mock(ExpirationTimer.class));
-        RequestRoute item =
+        RouteExecution item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -969,7 +963,7 @@ class RequestCompletionPublicationRaceTest {
                 org.flexlb.balance.PlacementResult.Status.SUCCESS,
                 RequestProtocolTestSupport.commitRoute(
                         owner, item, RequestProtocolTestSupport.publication(() -> true)));
-        admission.finish();
+        AbstractRequestScheduler.finishPlacement(admission);
         var claim =
                 DeliveryDispatcher.commitDelivery(
                         owner,
@@ -1010,7 +1004,7 @@ class RequestCompletionPublicationRaceTest {
     }
 
     private record Fixture(
-            RequestLifecycle scheduler,
+            AbstractRequestScheduler scheduler,
             RequestContext requestContext,
             Delivery.Member claim,
             Registration publication,

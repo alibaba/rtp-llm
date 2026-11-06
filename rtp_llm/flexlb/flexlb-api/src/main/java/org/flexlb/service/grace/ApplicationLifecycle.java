@@ -3,13 +3,12 @@ package org.flexlb.service.grace;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.DeliveryExecution;
 import org.flexlb.balance.scheduler.ExpirationTimer;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRepository;
-import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestTaskPool;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor;
 import org.flexlb.balance.scheduler.ScheduledTaskTimer;
@@ -39,9 +38,8 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class ApplicationLifecycle implements ApplicationContextAware {
 
-    private RequestScheduler scheduler;
     private DecodePreemption preemption;
-    private RequestLifecycle lifecycle;
+    private AbstractRequestScheduler scheduler;
     private RequestRepository requests;
     private EndpointRegistry endpoints;
     private DeliveryExecution deliveries;
@@ -54,13 +52,11 @@ public class ApplicationLifecycle implements ApplicationContextAware {
 
     @Autowired
     public void configureScheduling(
-            RequestScheduler scheduler,
-            RequestLifecycle lifecycle,
+            AbstractRequestScheduler scheduler,
             RequestRepository requests,
             EndpointRegistry endpoints,
             DecodePreemption preemption) {
         this.scheduler = scheduler;
-        this.lifecycle = lifecycle;
         this.requests = requests;
         this.endpoints = endpoints;
         this.preemption = preemption;
@@ -89,8 +85,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     }
 
     @Autowired
-    public void startScheduling(RequestScheduler scheduler, RequestLifecycle lifecycle) {
-        lifecycle.bindScheduler(scheduler);
+    public void startScheduling(AbstractRequestScheduler scheduler) {
         scheduler.start();
     }
 
@@ -108,9 +103,10 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         failure = Failures.run(failure, scheduler::stop);
         failure = Failures.run(failure, scheduler::close);
         failure = Failures.run(failure, preemption::close);
-        var owners = new LinkedHashSet<RequestLifecycle>();
-        owners.add(lifecycle);
-        for (var context : requests.snapshotActive()) owners.add(context.data().getLifecycle());
+        var owners = new LinkedHashSet<AbstractRequestScheduler>();
+        owners.add(scheduler);
+        for (var context : requests.snapshotActive())
+            owners.add(context.data().getRequestScheduler());
         for (var owner : owners)
             failure = Failures.run(failure, owner::stopAdmissionsAndAwaitCompletion);
         for (var context : requests.snapshotActive()) {
@@ -119,7 +115,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
                             failure,
                             () ->
                                     context.data()
-                                            .getLifecycle()
+                                            .getRequestScheduler()
                                             .cancel(context, 0L, CancelReason.SHUTDOWN));
         }
         failure = Failures.run(failure, deliveries::awaitDeliveries);

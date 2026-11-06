@@ -6,7 +6,9 @@ import org.flexlb.balance.preemption.VictimResolution;
 
 import java.util.Objects;
 
-/** Exact victim and attempt identity, including its read-only completion. */
+/**
+ * Exact victim and attempt identity, including its read-only completion.
+ */
 public final class PreemptionRegistration {
     @lombok.Getter
     @lombok.experimental.Accessors(fluent = true)
@@ -18,7 +20,7 @@ public final class PreemptionRegistration {
 
     @lombok.Getter
     @lombok.experimental.Accessors(fluent = true)
-    private final DecodeResources.ReservationHandle reservation;
+    private final DecodeResources.RequestReservation reservation;
 
     @lombok.Getter
     @lombok.experimental.Accessors(fluent = true)
@@ -31,18 +33,24 @@ public final class PreemptionRegistration {
      * released. Those decisions require the matching Context and endpoint evidence.
      */
     public enum Reply {
-        /** The reply was accepted as progress, but request and ledger settlement are pending. */
+        /**
+         * The reply was accepted as progress, but request and ledger settlement are pending.
+         */
         WAITING,
-        /** The remote worker did not own this work; this is not completion proof. */
+        /**
+         * The remote worker did not own this work; this is not completion proof.
+         */
         NOT_FOUND,
-        /** The reply could not advance the matching attempt; this is not completion proof. */
+        /**
+         * The reply could not advance the matching attempt; this is not completion proof.
+         */
         UNKNOWN
     }
 
     public PreemptionRegistration(
             RequestContext owner,
             long attemptToken,
-            DecodeResources.ReservationHandle reservation,
+            DecodeResources.RequestReservation reservation,
             CancelTarget cancelTarget) {
         this.owner = owner;
         this.attemptToken = attemptToken;

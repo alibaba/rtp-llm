@@ -38,7 +38,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final EndpointRegistry registry;
     private final DecodePreemption decodePreemption;
     private final AbstractRequestScheduler scheduler;
-    private final RequestLifecycle entry;
+    private final AbstractRequestScheduler entry;
     private final SchedulerTestServices runtime;
     private volatile boolean deliveryPaused;
     private final java.util.Set<Runnable> deliveryListeners =
@@ -71,7 +71,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         placementAvailability,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
-                        order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
+                        order ->
+                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                        16, order));
         this.router = new BindingRouter(registry, configService, capacity);
         this.runtime =
                 org.mockito.Mockito.spy(
@@ -127,7 +129,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         capacity,
                         new PriorityDecodePreemptionPolicy());
         this.scheduler =
-                PlacementConfiguration.create(
+                SchedulerTestServices.create(
                         runtime.newLifecycle(
                                 configService.loadBalanceConfig(),
                                 capacity,
@@ -151,7 +153,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         return requests;
     }
 
-    public RequestLifecycle entry() {
+    public AbstractRequestScheduler entry() {
         return entry;
     }
 
@@ -167,12 +169,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         return placementAvailability;
     }
 
-    public void bindRouter(RequestWorkerSelector exactRouter) {
+    public void bindRouter(RequestRouteSelector exactRouter) {
         router.bind(exactRouter);
     }
 
     /** Translate fixture response metadata into an exact queue admission. */
-    public PlacementResult<RequestRoute, PlacementKey> routeResult(
+    public PlacementResult<RouteResult, PlacementKey> routeResult(
             RequestContext context, Response response) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(response, "response");
@@ -183,26 +185,26 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             throw new IllegalArgumentException("successful fixture route has no worker metadata");
         }
 
-        RequestRoute route = new RequestRoute(context);
+        RouteResult.Builder route = new RouteResult.Builder(context);
         try {
             for (ServerStatus status : response.getServerStatus()) {
                 if (status == null) {
                     continue;
                 }
                 String address = status.getLogicalIpPort();
-                var pin = registry.capture(status.getRole(), address);
-                if (pin == null) {
+                var selectedEndpoint = registry.selectEndpoint(status.getRole(), address);
+                if (selectedEndpoint == null) {
                     throw new IllegalStateException(
                             "fixture route references an unpublished endpoint: " + address);
                 }
                 long version =
-                        pin.endpoint() instanceof PrefillEndpoint prefill
+                        selectedEndpoint instanceof PrefillEndpoint prefill
                                 ? prefill.progress().ownershipVersion()
-                                : pin.endpoint() instanceof DecodeEndpoint decode
+                                : selectedEndpoint instanceof DecodeEndpoint decode
                                         ? decode.placementVersion()
                                         : 0L;
                 route.add(
-                        pin,
+                        selectedEndpoint,
                         status,
                         status.getRole().supportsPrefill()
                                 ? Math.max(0L, status.getPrefillTime())
@@ -211,7 +213,6 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             }
             return PlacementResult.success(route.prepare());
         } catch (RuntimeException | Error failure) {
-            org.flexlb.util.Failures.append(failure, org.flexlb.util.Failures.close(route));
             throw failure;
         }
     }
@@ -263,8 +264,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         runtime.shutdown(ShutdownMode.DRAIN, Duration.ofSeconds(30L));
     }
 
-    private static final class BindingRouter extends RequestWorkerSelector {
-        private RequestWorkerSelector delegate;
+    private static final class BindingRouter extends RequestRouteSelector {
+        private RequestRouteSelector delegate;
 
         private BindingRouter(
                 EndpointRegistry workers,
@@ -289,7 +290,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     emptyModelMeta());
         }
 
-        private synchronized void bind(RequestWorkerSelector exactRouter) {
+        private synchronized void bind(RequestRouteSelector exactRouter) {
             Objects.requireNonNull(exactRouter, "exactRouter");
             if (delegate != null) {
                 throw new IllegalStateException("test router was already bound");
@@ -298,12 +299,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
 
         @Override
-        public PlacementResult<RequestRoute, PlacementKey> select(
+        public PlacementResult<RouteResult, PlacementKey> select(
                 RequestContext context, String policyGroup) {
             return requireBound().select(context, policyGroup);
         }
 
-        private synchronized RequestWorkerSelector requireBound() {
+        private synchronized RequestRouteSelector requireBound() {
             if (delegate == null) {
                 throw new IllegalStateException("test router is not bound");
             }

@@ -139,7 +139,7 @@ class RequestSchedulerModeTest {
                             PlacementResult.rejected(
                                     Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
             try (var directScheduler =
-                    new DirectRequestScheduler(
+                    SchedulerTestServices.direct(
                             queued.router,
                             SchedulerTestSupport.runtime(queued.requests)
                                     .newLifecycle(
@@ -240,8 +240,8 @@ class RequestSchedulerModeTest {
     }
 
     private static final class Fixture implements AutoCloseable {
-        final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
-        final RequestLifecycle requests;
+        final RequestRouteSelector router = mock(RequestRouteSelector.class);
+        final AbstractRequestScheduler requests;
         final RequestContext context;
         final QueuedRequestScheduler queue;
         final AbstractRequestScheduler scheduler;

@@ -27,13 +27,13 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.CancellationFacts;
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.flexlb.balance.scheduler.ExpirationTimer.Kind.INACTIVITY;
 import static org.flexlb.balance.scheduler.ExpirationTimer.Kind.REQUEST;
 import static org.flexlb.balance.scheduler.ExpirationTimer.Kind.VISIBILITY;
@@ -238,7 +238,7 @@ class RequestLifetimeTest {
     }
 
     @Test
-    void missingEngineEvidenceMarksSuspicionWithoutReleasingRequestOwnership() {
+    void missingWorkerRequestEventMarksSuspicionWithoutReleasingRequestOwnership() {
         Fixture fixture = fixture(true);
         startDelivery(fixture.requestContext);
         startPrediction(fixture.scheduler, fixture.requestContext);
@@ -335,7 +335,7 @@ class RequestLifetimeTest {
     }
 
     @Test
-    void delayedUncertaintyCannotReplaceMatchingEngineEvidence() {
+    void delayedUncertaintyCannotReplaceMatchingWorkerRequestEvent() {
         Fixture fixture = fixture(true);
         expireDecision(fixture);
         preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, false);
@@ -391,12 +391,12 @@ class RequestLifetimeTest {
 
     @ParameterizedTest
     @CsvSource({"PREFILL,true", "DECODE,true", "PREFILL,false", "DECODE,false"})
-    void uncertaintyAllowsActualAckIndependentlyOfMatchingEngineEvidence(
+    void uncertaintyAllowsActualAckIndependentlyOfMatchingWorkerRequestEvent(
             RoleType evidenceSource, boolean ackBeforeEvidence) throws Exception {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        RequestLifecycle registry =
+        AbstractRequestScheduler registry =
                 SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -404,11 +404,11 @@ class RequestLifetimeTest {
                         mock(TheoryCacheHitReporter.class));
         try {
             RequestContext context = RequestProtocolTestSupport.context(config, 202L);
-            var future = RequestProtocolTestSupport.register(registry, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(registry, context);
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
             DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
-            var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(202L), 1L);
-            RequestRoute item =
+            var reservation = new DecodeResources.RequestReservation(1L, String.valueOf(202L), 1L);
+            RouteExecution item =
                     SchedulingTestConfig.createRoute(
                             context,
                             new Response(),
@@ -438,13 +438,13 @@ class RequestLifetimeTest {
             } else {
                 assertFalse(future.isDone());
             }
-            registry.onEngineEvidence(
+            registry.onWorkerRequestEvent(
                     context,
-                    new EngineEvidence(
+                    new WorkerRequestEvent(
                             item,
                             evidenceSource == RoleType.DECODE ? reservation : null,
                             evidenceSource,
-                            EngineKind.ACTIVE,
+                            WorkerRequestEventType.ACTIVE,
                             0L,
                             null,
                             System.currentTimeMillis()));
@@ -466,13 +466,13 @@ class RequestLifetimeTest {
             assertTrue(context.snapshot().phase() != Phase.CLOSED);
             preparePrefillStatusEffects(registry, context, item, true);
             assertFalse(needsConfirmation(context));
-            registry.onEngineEvidence(
+            registry.onWorkerRequestEvent(
                     context,
-                    new EngineEvidence(
+                    new WorkerRequestEvent(
                             item,
                             reservation,
                             RoleType.DECODE,
-                            EngineKind.COMPLETED,
+                            WorkerRequestEventType.COMPLETED,
                             0L,
                             null,
                             System.currentTimeMillis()));
@@ -489,7 +489,7 @@ class RequestLifetimeTest {
     void earlyTimerFiresOnlyAfterSuccessfulInstallation(String outcome) throws Exception {
         Fixture fixture = fixture(true);
         RequestContext context = fixture.requestContext;
-        RequestLifecycle scheduler = fixture.scheduler;
+        AbstractRequestScheduler scheduler = fixture.scheduler;
         var failure = new IllegalStateException("installation failed");
         try (var executor =
                         org.mockito.Mockito.spy(
@@ -571,7 +571,7 @@ class RequestLifetimeTest {
     @Test
     void timerChecksInactivityAfterThePublicFutureHasCompleted() throws Exception {
         Fixture fixture = fixture(true);
-        RequestLifecycle registry = fixture.scheduler;
+        AbstractRequestScheduler registry = fixture.scheduler;
         doAnswer(
                         invocation -> {
                             var token = invocation.getArgument(0, ExpirationTimer.Token.class);
@@ -606,7 +606,7 @@ class RequestLifetimeTest {
     @Test
     void timerCloseWaitsForAnAlreadyStartedInactivityHandoff() throws Exception {
         Fixture fixture = fixture(true);
-        RequestLifecycle registry = fixture.scheduler;
+        AbstractRequestScheduler registry = fixture.scheduler;
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         doAnswer(
@@ -652,7 +652,7 @@ class RequestLifetimeTest {
     @Test
     void renewedActivityRearmsTheTimerUntilTheNewInactivityDeadline() throws Exception {
         Fixture fixture = fixture(true);
-        RequestLifecycle registry = fixture.scheduler;
+        AbstractRequestScheduler registry = fixture.scheduler;
         long start = fixture.requestContext.snapshot().createdAtMs();
         AtomicLong now = new AtomicLong(start + 100L);
         AtomicInteger checks = new AtomicInteger();
@@ -817,12 +817,12 @@ class RequestLifetimeTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordEngineEvidence(
-                                new EngineEvidence(
+                        observedRequest.recordWorkerRequestEvent(
+                                new WorkerRequestEvent(
                                         route,
                                         route.decodeReservation(),
                                         RoleType.DECODE,
-                                        EngineKind.ACTIVE,
+                                        WorkerRequestEventType.ACTIVE,
                                         0L,
                                         null,
                                         context.snapshot().lastWorkerAtMs())));
@@ -834,14 +834,16 @@ class RequestLifetimeTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordEngineEvidence(
-                                new EngineEvidence(
+                        observedRequest.recordWorkerRequestEvent(
+                                new WorkerRequestEvent(
                                         route,
                                         null,
-                                        route.decodeEp() == null
+                                        route.decodeEndpoint() == null
                                                 ? RoleType.PDFUSION
                                                 : RoleType.PREFILL,
-                                        completed ? EngineKind.COMPLETED : EngineKind.ACTIVE,
+                                        completed
+                                                ? WorkerRequestEventType.COMPLETED
+                                                : WorkerRequestEventType.ACTIVE,
                                         0L,
                                         null,
                                         nowMs)));
@@ -936,7 +938,7 @@ class RequestLifetimeTest {
         config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
         SchedulingTestConfig.useNonBatchDispatcher(config);
         RequestContext context = RequestProtocolTestSupport.context(config, 101L);
-        RequestLifecycle owner = mock(RequestLifecycle.class);
+        AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
         var repository = mock(RequestRepository.class);
         when(repository.isCurrent(context)).thenReturn(true);
         org.springframework.test.util.ReflectionTestUtils.setField(owner, "requests", repository);
@@ -947,9 +949,9 @@ class RequestLifetimeTest {
         DecodeEndpoint decode = separateDecode ? RequestProtocolTestSupport.decodeEndpoint() : null;
         var reservation =
                 separateDecode
-                        ? new DecodeResources.ReservationHandle(1L, String.valueOf(101L), 1L)
+                        ? new DecodeResources.RequestReservation(1L, String.valueOf(101L), 1L)
                         : null;
-        RequestRoute item =
+        RouteExecution item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -959,7 +961,7 @@ class RequestLifetimeTest {
                         decode,
                         reservation,
                         System.currentTimeMillis());
-        var placement = (AdmissionHandle) context.beginPlacement(null);
+        var placement = (PlacementOperation) context.beginPlacement(null);
         context.bindPlacement(placement, item, PublicationResult.PREPARED);
         context.bindPlacement(placement, item, PublicationResult.PUBLISHED);
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
@@ -973,9 +975,9 @@ class RequestLifetimeTest {
     }
 
     private static void preparePrefillStatusEffects(
-            RequestLifecycle scheduler,
+            AbstractRequestScheduler scheduler,
             RequestContext context,
-            RequestRoute item,
+            RouteExecution item,
             boolean completed) {
         recordPrefill(context, completed, System.currentTimeMillis());
     }
@@ -1002,7 +1004,7 @@ class RequestLifetimeTest {
     }
 
     private static void startPrediction(
-            RequestLifecycle requestOwner, RequestContext requestContext) {
+            AbstractRequestScheduler requestOwner, RequestContext requestContext) {
         predictDelivery(
                 requestContext,
                 emptyWork(System.currentTimeMillis()),
@@ -1041,8 +1043,8 @@ class RequestLifetimeTest {
     }
 
     private record Fixture(
-            RequestLifecycle scheduler,
+            AbstractRequestScheduler scheduler,
             FlexlbConfig config,
             RequestContext requestContext,
-            RequestRoute item) {}
+            RouteExecution item) {}
 }

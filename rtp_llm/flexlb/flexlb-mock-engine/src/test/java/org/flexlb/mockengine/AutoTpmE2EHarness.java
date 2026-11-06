@@ -6,13 +6,13 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestLifecycle;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
-import org.flexlb.balance.scheduler.RequestWorkerSelector;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -81,9 +81,9 @@ import static org.mockito.Mockito.when;
  * prepared-status transaction, closing the calibrate/settle loop exactly like
  * production polling would.
  *
- * <p>By default, {@code ConfigService}/{@code RequestWorkerSelector}/{@code EngineGrpcClient}/reporters
+ * <p>By default, {@code ConfigService}/{@code RequestRouteSelector}/{@code EngineGrpcClient}/reporters
  * are Mockito stand-ins — identical to the flexlb-sync unit-test harness pattern.
- * Routing-regression scenarios can opt into the production {@link RequestWorkerSelector}
+ * Routing-regression scenarios can opt into the production {@link RequestRouteSelector}
  * and endpoint-selection strategies while retaining the in-process transport.
  */
 final class AutoTpmE2EHarness implements AutoCloseable {
@@ -92,7 +92,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     final ConfigService configService = mock(ConfigService.class);
     private final java.util.concurrent.atomic.AtomicReference<Throwable> pumpFailure =
             new java.util.concurrent.atomic.AtomicReference<>();
-    final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
+    final RequestRouteSelector router = mock(RequestRouteSelector.class);
     final EngineGrpcClient grpcClient = mock(EngineGrpcClient.class);
     final DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
     final RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
@@ -103,7 +103,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     final ScheduledExecutorService engineScheduler = Executors.newScheduledThreadPool(8);
 
     final EndpointRegistry endpointRegistry;
-    final RequestLifecycle scheduler;
+    final AbstractRequestScheduler scheduler;
     final org.flexlb.balance.scheduler.RequestRepository requests;
     final DeliveryDispatcher dispatcher;
     private final RequestSchedulerTestRuntime schedulerRuntime;
@@ -172,7 +172,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     }
 
     /**
-     * @param autoTpm must be decided at construction time: {@code EndpointWork}
+     * @param autoTpm must be decided at construction time: {@code PrefillQueueScheduler}
      *                freezes its queue comparator from the configured ordering
      *                when the endpoint is registered — flipping the switch after
      *                construction does NOT change the batch queue ordering.
@@ -277,7 +277,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         }
 
         // Conservative defaults; scenarios override before submitting traffic.
-        // Priority ordering must be set BEFORE registerEndpoint (EndpointWork freezes it).
+        // Priority ordering must be set BEFORE registerEndpoint (PrefillQueueScheduler freezes it).
         if (initialConfig == null) {
             if (autoTpm) {
                 config.queueScheduler().setOrdering(ConfigTestSupport.priority());
@@ -540,11 +540,11 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return response;
     }
 
-    private PlacementResult<RequestRoute, PlacementKey> routeResult(RequestContext context) {
+    private PlacementResult<RouteResult, PlacementKey> routeResult(RequestContext context) {
         return schedulerRuntime.routeResult(context, defaultRoute(context));
     }
 
-    private RequestWorkerSelector productionRouter() {
+    private RequestRouteSelector productionRouter() {
         EndpointRegistry workers = endpointRegistry;
         CacheAwareService cache = mock(CacheAwareService.class);
         when(cache.findMatchingEngines(any()))
@@ -554,7 +554,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class);
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
-        return new RequestWorkerSelector(
+        return new RequestRouteSelector(
                 workers,
                 new CostBasedPrefillStrategy(cache, configService),
                 new DecodeSelector(

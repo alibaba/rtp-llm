@@ -26,7 +26,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** A scheduler implemented without the default scheduler's inheritance or decision thread. */
+/** A custom scheduler owns its decisions and triggers while inheriting shared request management. */
 class CustomRequestSchedulerContractTest {
     @Test
     void customBeanReplacesDefaultAssemblyWithoutCreatingItsDependencies() {
@@ -64,15 +64,15 @@ class CustomRequestSchedulerContractTest {
     void cancellationFencesAnAdmissionAlreadyStartedByACustomScheduler() throws Exception {
         try (ManualScheduler scheduler = new ManualScheduler(true)) {
             var context = RequestProtocolTestSupport.context(scheduler.config, 81004L);
-            var result = scheduler.entry.submit(context);
-            var admission = scheduler.lifecycle.claimAdmissionHandle("81004", result);
+            var result = scheduler.submit(context);
+            var admission = SchedulerTestSupport.claim(scheduler, "81004", result);
             assertNotNull(admission);
             try {
-                scheduler.entry.cancel("81004", 0L, CancelReason.CLIENT_CANCELLED);
-                assertFalse(scheduler.lifecycle.isAdmissionOpen("81004", result));
+                scheduler.cancel("81004", 0L, CancelReason.CLIENT_CANCELLED);
+                assertFalse(scheduler.isAdmissionOpen(context));
                 assertFalse(scheduler.advance());
             } finally {
-                admission.finish();
+                AbstractRequestScheduler.finishPlacement(admission);
             }
             assertFalse(result.get(2, TimeUnit.SECONDS).isSuccess());
             RequestProtocolTestSupport.awaitCondition(
@@ -113,9 +113,9 @@ class CustomRequestSchedulerContractTest {
             throws Exception {
         try (ManualScheduler scheduler = new ManualScheduler(alternative)) {
             var context = RequestProtocolTestSupport.context(scheduler.config, 81001L);
-            var result = scheduler.entry.submit(context);
+            var result = scheduler.submit(context);
             assertFalse(result.isDone());
-            scheduler.entry.cancel("81001", 0L, CancelReason.CLIENT_CANCELLED);
+            scheduler.cancel("81001", 0L, CancelReason.CLIENT_CANCELLED);
             assertEquals(
                     StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                     result.get(2, TimeUnit.SECONDS).getCode());
@@ -133,9 +133,9 @@ class CustomRequestSchedulerContractTest {
             throws Exception {
         try (ManualScheduler scheduler = new ManualScheduler(alternative)) {
             var context = RequestProtocolTestSupport.context(scheduler.config, 81002L);
-            var result = scheduler.entry.submit(context);
+            var result = scheduler.submit(context);
             var deadline = context.snapshot().deadlines().request();
-            scheduler.lifecycle.onDeadline(deadline, deadline.atMs());
+            scheduler.onDeadline(deadline, deadline.atMs());
             assertFalse(result.get(2, TimeUnit.SECONDS).isSuccess());
             RequestProtocolTestSupport.awaitCondition(() -> scheduler.queue.size() == 0);
             assertEquals(
@@ -150,7 +150,7 @@ class CustomRequestSchedulerContractTest {
     void customSchedulingTurnCanCompleteARegisteredRequest(boolean alternative) throws Exception {
         try (ManualScheduler scheduler = new ManualScheduler(alternative)) {
             var context = RequestProtocolTestSupport.context(scheduler.config, 81003L);
-            var result = scheduler.entry.submit(context);
+            var result = scheduler.submit(context);
             assertFalse(result.isDone());
             assertTrue(scheduler.advance());
             assertEquals(
@@ -185,8 +185,7 @@ class CustomRequestSchedulerContractTest {
                 }) {
             scheduler.start();
             var future =
-                    scheduler.entry.submit(
-                            RequestProtocolTestSupport.context(scheduler.config, 81006L));
+                    scheduler.submit(RequestProtocolTestSupport.context(scheduler.config, 81006L));
             assertFalse(future.isDone(), "admission must not bypass the scheduler's deadline");
             assertFalse(future.get(2, TimeUnit.SECONDS).isSuccess());
             assertTrue(scheduled.await(2, TimeUnit.SECONDS));
@@ -240,31 +239,58 @@ class CustomRequestSchedulerContractTest {
         }
     }
 
-    private static class ManualScheduler implements RequestScheduler, AutoCloseable {
-        final FlexlbConfig config = SchedulingTestConfig.batchConfig();
+    private static class ManualScheduler extends AbstractRequestScheduler {
+        final FlexlbConfig config;
         final SchedulerTestServices runtime;
-        final RequestLifecycle lifecycle;
-        final RequestLifecycle entry;
         final PlacementQueue queue;
-        final RequestWorkerSelector selector = mock(RequestWorkerSelector.class);
+        final RequestRouteSelector selector = mock(RequestRouteSelector.class);
 
         ManualScheduler(boolean alternative) {
             this(alternative, true);
         }
 
         ManualScheduler(boolean alternative, boolean queued) {
-            if (!queued) {
-                config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
-                config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
-            }
+            this(alternative, configuration(queued));
+        }
+
+        private ManualScheduler(boolean alternative, FlexlbConfig config) {
+            this(alternative, config, facilities(config));
+        }
+
+        private ManualScheduler(
+                boolean alternative, FlexlbConfig config, SchedulerTestServices runtime) {
+            super(
+                    runtime.requests(),
+                    runtime.tasks,
+                    runtime.deadlines(),
+                    runtime.dispatcher,
+                    runtime.responseCompletions(),
+                    runtime.deliveryReporter,
+                    mock(TheoryCacheHitReporter.class));
+            this.config = config;
+            this.runtime = runtime;
             queue = alternative ? new ListPlacementQueue() : new OrderedRequestQueue(false);
             when(selector.select(any(), isNull()))
                     .thenReturn(
                             org.flexlb.balance.PlacementResult.rejected(
                                     Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
+            SchedulerTestServices.bind(this, runtime);
+            runtime.registerScheduler(this);
+        }
+
+        private static FlexlbConfig configuration(boolean queued) {
+            var config = SchedulingTestConfig.batchConfig();
+            if (!queued) {
+                config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
+                config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
+            }
+            return config;
+        }
+
+        private static SchedulerTestServices facilities(FlexlbConfig config) {
             var service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
-            runtime =
+            var runtime =
                     new SchedulerTestServices(
                             new RequestRepository(),
                             mock(EndpointRegistry.class),
@@ -273,14 +299,11 @@ class CustomRequestSchedulerContractTest {
                             SchedulerTestSupport.dispatcher(),
                             service,
                             mock(EngineGrpcClient.class));
-            lifecycle =
-                    runtime.boundLifecycle(
-                            this,
-                            config,
-                            SchedulingTestConfig.capacity(config),
-                            mock(TheoryCacheHitReporter.class));
-            entry = lifecycle;
-            runtime.registerScheduler(this);
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    runtime.dispatcher,
+                    "decodeAdmissionCapacity",
+                    SchedulingTestConfig.capacity(config));
+            return runtime;
         }
 
         @Override
@@ -308,7 +331,7 @@ class CustomRequestSchedulerContractTest {
         }
 
         @Override
-        public void onRequestChanged(RequestContext request) {
+        public void removeRequest(RequestContext request) {
             synchronized (queue) {
                 for (var entry : queue.drain()) {
                     if (entry.context != request) queue.restore(entry);
@@ -325,7 +348,7 @@ class CustomRequestSchedulerContractTest {
                 queue.remove(selected);
             }
             var result = selector.select(selected.context, selected.routingGroup);
-            lifecycle.publish(selected.context, result.failure(), false);
+            publish(selected.context, result.failure(), false);
             return true;
         }
 

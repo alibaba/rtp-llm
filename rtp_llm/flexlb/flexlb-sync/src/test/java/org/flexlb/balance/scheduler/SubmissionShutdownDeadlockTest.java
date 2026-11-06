@@ -152,7 +152,7 @@ class SubmissionShutdownDeadlockTest {
                 // gate.
                 assertTrue(beforeAcceptingReturn.await(3, TimeUnit.SECONDS));
                 assertNull(
-                        lateContext.data().getLifecycle(),
+                        lateContext.data().getRequestScheduler(),
                         "late submission has not registered yet");
 
                 f.runtime.requests().stopAccepting();
@@ -176,7 +176,7 @@ class SubmissionShutdownDeadlockTest {
                         StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
                         lateResult.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS).getCode());
                 assertNull(
-                        lateContext.data().getLifecycle(),
+                        lateContext.data().getRequestScheduler(),
                         "stopped submission must remain unregistered");
                 activeResult.get(3, TimeUnit.SECONDS).get(3, TimeUnit.SECONDS);
                 shutdownResult.get(3, TimeUnit.SECONDS);
@@ -197,7 +197,7 @@ class SubmissionShutdownDeadlockTest {
 
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
-        final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
+        final RequestRouteSelector router = mock(RequestRouteSelector.class);
         final SchedulerTestServices runtime;
         final AbstractRequestScheduler scheduler;
 

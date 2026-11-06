@@ -45,11 +45,12 @@ class EndpointDiscoveryTest {
 
         List<DecodeResources.DecodeRoutingView> result = decodeRoutingSnapshot(registry, "group1");
         assertEquals(1, result.size());
-        try (WorkerEndpoint.GenerationPin pin =
-                registry.captureDecodeGeneration(result.getFirst())) {
-            assertNotNull(pin);
-            assertSame(matching, pin.endpoint().getStatus());
-            assertEquals(matching.getLogicalIpPort(), pin.endpoint().ipPort());
+        {
+            WorkerEndpoint selectedEndpoint = registry.selectDecodeEndpoint(result.getFirst());
+
+            assertNotNull(selectedEndpoint);
+            assertSame(matching, selectedEndpoint.getStatus());
+            assertEquals(matching.getLogicalIpPort(), selectedEndpoint.ipPort());
         }
     }
 
@@ -68,10 +69,12 @@ class EndpointDiscoveryTest {
         assertTrue(result.stream().anyMatch(entry -> entry.endpoint().getStatus() == first));
         assertTrue(result.stream().anyMatch(entry -> entry.endpoint().getStatus() == second));
         for (EndpointRegistry.PrefillRoutingEntry entry : result) {
-            try (WorkerEndpoint.GenerationPin pin =
-                    registry.capture(RoleType.PREFILL, entry.address())) {
-                assertNotNull(pin);
-                assertSame(entry.endpoint(), pin.endpoint());
+            {
+                WorkerEndpoint selectedEndpoint =
+                        registry.selectEndpoint(RoleType.PREFILL, entry.address());
+
+                assertNotNull(selectedEndpoint);
+                assertSame(entry.endpoint(), selectedEndpoint);
             }
         }
     }
@@ -157,9 +160,12 @@ class EndpointDiscoveryTest {
                         registry, role, status.getLogicalIpPort(), status);
 
         assertEquals(List.of(status.getLogicalIpPort()), registry.endpointAddressSnapshot(role));
-        try (WorkerEndpoint.GenerationPin pin = registry.capture(role, status.getLogicalIpPort())) {
-            assertNotNull(pin);
-            assertSame(registered, pin.endpoint());
+        {
+            WorkerEndpoint selectedEndpoint =
+                    registry.selectEndpoint(role, status.getLogicalIpPort());
+
+            assertNotNull(selectedEndpoint);
+            assertSame(registered, selectedEndpoint);
         }
     }
 

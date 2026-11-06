@@ -7,7 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestWorkerSelector;
+import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
@@ -78,7 +78,7 @@ class CacheHitFeedbackFlowTest {
     private WorkerStatus worker;
     private CacheAwareService cache;
     private CacheMetricsReporter cacheMetrics;
-    private RequestWorkerSelector selector;
+    private RequestRouteSelector selector;
     private EngineHealthReporter reporter;
     private FlexlbConfig config;
 
@@ -142,7 +142,7 @@ class CacheHitFeedbackFlowTest {
         var model = mock(org.flexlb.config.ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
         selector =
-                new RequestWorkerSelector(
+                new RequestRouteSelector(
                         registry,
                         strategy,
                         mock(org.flexlb.balance.strategy.DecodeSelectionStrategy.class),
@@ -377,7 +377,6 @@ class CacheHitFeedbackFlowTest {
                         SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
         var selected = selector.select(context, "group");
         assertEquals(PlacementResult.Status.SUCCESS, selected.status());
-        selected.value().close();
     }
 
     private void publish(WorkerStatus status) {

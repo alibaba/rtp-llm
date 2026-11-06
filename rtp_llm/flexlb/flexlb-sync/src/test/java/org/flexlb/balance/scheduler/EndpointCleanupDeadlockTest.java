@@ -107,7 +107,7 @@ class EndpointCleanupDeadlockTest {
             var config = SchedulingTestConfig.batchConfig();
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
-            RequestLifecycle registry = mock(RequestLifecycle.class);
+            AbstractRequestScheduler registry = mock(AbstractRequestScheduler.class);
             ExpirationTimer timer =
                     new ExpirationTimer(
                             org.flexlb.balance.scheduler.SchedulerTestSupport.repository(registry),
@@ -115,7 +115,7 @@ class EndpointCleanupDeadlockTest {
             RequestContext requestContext = RequestProtocolTestSupport.context(config, 992L);
             when(SchedulerTestSupport.repository(registry).isCurrent(requestContext))
                     .thenReturn(true);
-            RequestLifecycle requestOwner =
+            AbstractRequestScheduler requestOwner =
                     RequestProtocolTestSupport.initialize(
                             mock(ResponseCompletionExecutor.class), requestContext, timer);
 
@@ -211,7 +211,7 @@ class EndpointCleanupDeadlockTest {
             var config = SchedulingTestConfig.batchConfig();
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
-            RequestLifecycle registry =
+            AbstractRequestScheduler registry =
                     org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                             service,
                             mock(DeliveryMetricsReporter.class),
@@ -219,7 +219,7 @@ class EndpointCleanupDeadlockTest {
                             mock(TheoryCacheHitReporter.class));
             long id = 991L;
             var context = RequestProtocolTestSupport.context(config, id);
-            var future = RequestProtocolTestSupport.register(registry, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(registry, context);
             RequestContext requestContext = registry.requests.findActive(String.valueOf(id));
             CountDownLatch contextHeld = new CountDownLatch(1);
             CountDownLatch endpointHeld = new CountDownLatch(1);
@@ -246,13 +246,15 @@ class EndpointCleanupDeadlockTest {
                                                 8081,
                                                 null),
                                         org.flexlb.balance.scheduler.SchedulerTestSupport
-                                                .repository(mock(RequestLifecycle.class))));
-                DecodeResources.ReservationHandle reservation;
-                try (var pin = endpoint.tryPinGeneration()) {
-                    assertNotNull(pin);
+                                                .repository(mock(AbstractRequestScheduler.class))));
+                DecodeResources.RequestReservation reservation;
+                {
+                    var selectedEndpoint = endpoint;
+
+                    assertNotNull(selectedEndpoint);
                     reservation =
                             EndpointTestSupport.reserveUnqueuedDecode(
-                                    endpoint, pin, id, 1L, 1L, 50);
+                                    endpoint, selectedEndpoint, id, 1L, 1L, 50);
                 }
                 assertNotNull(reservation);
                 org.junit.jupiter.api.Assertions.assertSame(future, context.data().getFuture());
@@ -285,14 +287,16 @@ class EndpointCleanupDeadlockTest {
                                         return invocation.callRealMethod();
                                     })
                             .when(endpoint)
-                            .release(reservation, DecodeResources.ReleaseReason.NOT_SENT);
+                            .release(
+                                    org.mockito.ArgumentMatchers.eq(reservation),
+                                    org.mockito.ArgumentMatchers.any());
                 }
                 endpointOperation =
                         switch (kind) {
                             case "decode-rejection" ->
                                     () ->
                                             RequestProtocolTestSupport.transport(
-                                                    claim.owner().data().getLifecycle(),
+                                                    claim.owner().data().getRequestScheduler(),
                                                     claim,
                                                     org.flexlb.balance.scheduler.Delivery.Result
                                                             .notSent(

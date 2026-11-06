@@ -6,9 +6,9 @@ import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimResolution;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestTaskExecutor;
 import org.flexlb.balance.scheduler.SchedulerTestServices;
 import org.flexlb.balance.scheduler.SchedulerTestSupport;
@@ -95,19 +95,19 @@ class DecodePreemptionProtocolTest {
     @ValueSource(booleans = {false, true})
     void commitsOnlyAfterEveryExactVictimIsTerminal(boolean cancelledResult) throws Exception {
         Fixture fixture = fixture();
-        RequestLifecycle requests = fixture.requests();
+        AbstractRequestScheduler requests = fixture.requests();
         DecodeEndpoint endpoint = fixture.endpoint();
 
         CompletableFuture<VictimResolution> firstTerminal = new CompletableFuture<>();
         CompletableFuture<VictimResolution> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
-        when(requests.tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
+        when(requests.tryClaim(any(DecodeResources.RequestReservation.class), anyLong()))
                 .thenAnswer(
                         invocation ->
                                 Optional.of(
                                         invocation
-                                                        .<DecodeResources.ReservationHandle>
+                                                        .<DecodeResources.RequestReservation>
                                                                 getArgument(0)
                                                         .requestId()
                                                         .equals("11")
@@ -165,7 +165,7 @@ class DecodePreemptionProtocolTest {
         else {
             assertTrue(result.get(1, TimeUnit.SECONDS).committed());
             assertEquals(
-                    new DecodeResources.ReservationHandle(9L, String.valueOf(20L), 100L),
+                    new DecodeResources.RequestReservation(9L, String.valueOf(20L), 100L),
                     result.join().reservation());
         }
         verify(engineClient)
@@ -250,7 +250,7 @@ class DecodePreemptionProtocolTest {
         verify(fixture.requests())
                 .onPreemption(
                         victimClaim,
-                        new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+                        new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
         verify(channel, never()).cancelAsync(any(), anyInt(), any(), anyLong());
     }
 
@@ -298,7 +298,7 @@ class DecodePreemptionProtocolTest {
         verify(fixture.requests(), never())
                 .onPreemption(
                         victimClaim,
-                        new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+                        new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
         org.mockito.Mockito.verifyNoInteractions(channel);
     }
 
@@ -311,7 +311,7 @@ class DecodePreemptionProtocolTest {
         Fixture fixture = fixture();
         CompletableFuture<VictimResolution> terminal = new CompletableFuture<>();
         PreemptionRegistration victimClaim = claim(fixture.requests(), 11L, terminal);
-        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
+        when(fixture.requests().tryClaim(any(DecodeResources.RequestReservation.class), anyLong()))
                 .thenReturn(Optional.of(victimClaim));
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         CompletableFuture<EngineGrpcClient.CancelReply> ack = new CompletableFuture<>();
@@ -358,7 +358,7 @@ class DecodePreemptionProtocolTest {
         verify(fixture.requests(), never())
                 .onPreemption(
                         victimClaim,
-                        new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+                        new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
         assertFalse(
                 terminal.isDone(),
                 "timing out admission must retain the victim terminal observation");
@@ -378,12 +378,12 @@ class DecodePreemptionProtocolTest {
         CompletableFuture<VictimResolution> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
-        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
+        when(fixture.requests().tryClaim(any(DecodeResources.RequestReservation.class), anyLong()))
                 .thenAnswer(
                         invocation ->
                                 Optional.of(
                                         invocation
-                                                        .<DecodeResources.ReservationHandle>
+                                                        .<DecodeResources.RequestReservation>
                                                                 getArgument(0)
                                                         .requestId()
                                                         .equals("11")
@@ -465,10 +465,12 @@ class DecodePreemptionProtocolTest {
                         anyLong());
         verify(fixture.requests(), never())
                 .onPreemption(
-                        first, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+                        first,
+                        new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
         verify(fixture.requests(), never())
                 .onPreemption(
-                        second, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+                        second,
+                        new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
         // The RPC failure and the attempt timeout both report uncertainty on the same identity.
         verify(fixture.requests(), org.mockito.Mockito.times(2))
                 .onPreemption(
@@ -496,12 +498,12 @@ class DecodePreemptionProtocolTest {
         CompletableFuture<VictimResolution> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(fixture.requests(), 11L, firstTerminal);
         PreemptionRegistration second = claim(fixture.requests(), 12L, secondTerminal);
-        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
+        when(fixture.requests().tryClaim(any(DecodeResources.RequestReservation.class), anyLong()))
                 .thenAnswer(
                         invocation ->
                                 Optional.of(
                                         invocation
-                                                        .<DecodeResources.ReservationHandle>
+                                                        .<DecodeResources.RequestReservation>
                                                                 getArgument(0)
                                                         .requestId()
                                                         .equals("11")
@@ -594,11 +596,11 @@ class DecodePreemptionProtocolTest {
                 verify(fixture.requests(), org.mockito.Mockito.timeout(2000))
                         .onPreemption(
                                 second,
-                                new RequestLifecycle.PreemptionEvent(
+                                new AbstractRequestScheduler.PreemptionEvent(
                                         null,
                                         false,
                                         fixture.endpoint(),
-                                        new DecodeResources.ReservationHandle(
+                                        new DecodeResources.RequestReservation(
                                                 9L, String.valueOf(12L), 102L),
                                         "test"));
             }
@@ -626,7 +628,7 @@ class DecodePreemptionProtocolTest {
         Fixture fixture = fixture();
         CompletableFuture<VictimResolution> terminal = new CompletableFuture<>();
         PreemptionRegistration claim = claim(fixture.requests(), 11L, terminal);
-        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
+        when(fixture.requests().tryClaim(any(DecodeResources.RequestReservation.class), anyLong()))
                 .thenReturn(Optional.of(claim));
         when(fixture.requests()
                         .onPreemption(
@@ -690,7 +692,7 @@ class DecodePreemptionProtocolTest {
                     .updatePreemption(
                             1L,
                             DecodeResources.PreemptionUpdate.fenced(
-                                    new DecodeResources.ReservationHandle(
+                                    new DecodeResources.RequestReservation(
                                             9L, String.valueOf(11L), 101L)));
             verify(fixture.endpoint(), never()).commitPreemption(anyLong());
             terminal.complete(
@@ -705,7 +707,7 @@ class DecodePreemptionProtocolTest {
     void laterVictimClaimFailureReleasesEarlierClaimBeforeAnyCancel() throws Exception {
         Fixture fixture = fixture();
         PreemptionRegistration first = claim(fixture.requests(), 11L, new CompletableFuture<>());
-        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
+        when(fixture.requests().tryClaim(any(DecodeResources.RequestReservation.class), anyLong()))
                 .thenReturn(Optional.of(first), Optional.empty());
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
@@ -736,7 +738,8 @@ class DecodePreemptionProtocolTest {
         assertFalse(result.committed());
         verify(fixture.requests())
                 .onPreemption(
-                        first, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+                        first,
+                        new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
         verify(fixture.endpoint(), never())
                 .beginPreemption(
                         anyLong(),
@@ -754,7 +757,7 @@ class DecodePreemptionProtocolTest {
             throws Exception {
         Fixture fixture = fixture();
         PreemptionRegistration first = claim(fixture.requests(), 11L, new CompletableFuture<>());
-        when(fixture.requests().tryClaim(any(DecodeResources.ReservationHandle.class), anyLong()))
+        when(fixture.requests().tryClaim(any(DecodeResources.RequestReservation.class), anyLong()))
                 .thenReturn(Optional.of(first))
                 .thenThrow(
                         new IllegalStateException("Priority victim has no routable Cancel target"));
@@ -788,7 +791,8 @@ class DecodePreemptionProtocolTest {
         assertTrue(result.controlFailure());
         verify(fixture.requests())
                 .onPreemption(
-                        first, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+                        first,
+                        new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
         verify(fixture.endpoint(), never())
                 .beginPreemption(
                         anyLong(),
@@ -805,7 +809,7 @@ class DecodePreemptionProtocolTest {
     void staleEndpointGenerationCannotCancelANewerRouteWithTheSameRequestAndToken()
             throws Exception {
         Fixture fixture = fixture();
-        var stale = new DecodeResources.ReservationHandle(9L, String.valueOf(11L), 101L);
+        var stale = new DecodeResources.RequestReservation(9L, String.valueOf(11L), 101L);
         when(fixture.requests().tryClaim(eq(stale), anyLong())).thenReturn(Optional.empty());
         EngineGrpcClient channel = mock(EngineGrpcClient.class);
         var acquirer =
@@ -1012,7 +1016,7 @@ class DecodePreemptionProtocolTest {
                 mock(
                         org.flexlb.balance.scheduler.RequestContext.class,
                         org.mockito.Mockito.RETURNS_DEEP_STUBS);
-        when(context.data().getLifecycle()).thenReturn(fixture.requests());
+        when(context.data().getRequestScheduler()).thenReturn(fixture.requests());
         var terminal = new CompletableFuture<VictimResolution>();
         var victimClaim = claim(fixture.requests(), 11L, terminal);
         when(fixture.requests().tryClaim(any(), anyLong())).thenReturn(Optional.of(victimClaim));
@@ -1290,7 +1294,7 @@ class DecodePreemptionProtocolTest {
                 mock(
                         org.flexlb.balance.scheduler.RequestContext.class,
                         org.mockito.Mockito.RETURNS_DEEP_STUBS);
-        when(context.data().getLifecycle()).thenReturn(mock(RequestLifecycle.class));
+        when(context.data().getRequestScheduler()).thenReturn(mock(AbstractRequestScheduler.class));
         return acquirer.preempt(context, command);
     }
 
@@ -1311,7 +1315,7 @@ class DecodePreemptionProtocolTest {
                 new PreemptionRegistration(
                         original.owner(),
                         1L,
-                        new DecodeResources.ReservationHandle(
+                        new DecodeResources.RequestReservation(
                                 differentGeneration ? 10L : 9L,
                                 String.valueOf(11L),
                                 differentGeneration ? 101L : 999L),
@@ -1359,11 +1363,12 @@ class DecodePreemptionProtocolTest {
         verify(channel, never()).cancelAsync(any(), anyInt(), any(), anyLong());
         verify(f.requests())
                 .onPreemption(
-                        stale, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+                        stale,
+                        new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
     }
 
     private Fixture fixture() {
-        RequestLifecycle requests = mock(RequestLifecycle.class);
+        AbstractRequestScheduler requests = mock(AbstractRequestScheduler.class);
         org.flexlb.balance.scheduler.SchedulerTestServices.bind(requests, runtime);
         when(requests.onPreemption(any(), any()))
                 .thenAnswer(
@@ -1371,8 +1376,8 @@ class DecodePreemptionProtocolTest {
                                 call.getArgument(1) == null
                                         || call.getArgument(
                                                                 1,
-                                                                RequestLifecycle.PreemptionEvent
-                                                                        .class)
+                                                                AbstractRequestScheduler
+                                                                        .PreemptionEvent.class)
                                                         .phase()
                                                 != PreemptionCancelPhase.CANCEL_UNKNOWN);
         DecodeEndpoint endpoint =
@@ -1395,14 +1400,16 @@ class DecodePreemptionProtocolTest {
                                 org.flexlb.balance.endpoint.DecodeResources.MutationStatus.APPLIED,
                                 false));
         when(endpoint.commitPreemption(anyLong()))
-                .thenReturn(new DecodeResources.ReservationHandle(9L, String.valueOf(20L), 100L));
+                .thenReturn(new DecodeResources.RequestReservation(9L, String.valueOf(20L), 100L));
         return new Fixture(requests, endpoint);
     }
 
-    private record Fixture(RequestLifecycle requests, DecodeEndpoint endpoint) {}
+    private record Fixture(AbstractRequestScheduler requests, DecodeEndpoint endpoint) {}
 
     private PreemptionRegistration claim(
-            RequestLifecycle owner, long requestId, CompletableFuture<VictimResolution> terminal) {
+            AbstractRequestScheduler owner,
+            long requestId,
+            CompletableFuture<VictimResolution> terminal) {
         var context =
                 mock(
                         org.flexlb.balance.scheduler.RequestContext.class,
@@ -1410,9 +1417,9 @@ class DecodePreemptionProtocolTest {
         when(context.data().getRequestId()).thenReturn(String.valueOf(requestId));
         when(context.snapshot().delivery()).thenReturn(null);
         when(context.snapshot().cancellation()).thenReturn(null);
-        when(context.data().getLifecycle()).thenReturn(owner);
+        when(context.data().getRequestScheduler()).thenReturn(owner);
         var reservation =
-                new DecodeResources.ReservationHandle(
+                new DecodeResources.RequestReservation(
                         9L, String.valueOf(requestId), requestId == 11L ? 101L : 102L);
         var claim =
                 new PreemptionRegistration(
@@ -1426,8 +1433,9 @@ class DecodePreemptionProtocolTest {
         return claim;
     }
 
-    private static RequestLifecycle.PreemptionEvent phaseEvent(PreemptionCancelPhase phase) {
-        return new RequestLifecycle.PreemptionEvent(phase, false, null, null, null);
+    private static AbstractRequestScheduler.PreemptionEvent phaseEvent(
+            PreemptionCancelPhase phase) {
+        return new AbstractRequestScheduler.PreemptionEvent(phase, false, null, null, null);
     }
 
     private static DecodeRequestView victim(long requestId, long reservationToken) {
@@ -1661,7 +1669,7 @@ class DecodePreemptionProtocolTest {
                 .thenAnswer(
                         call ->
                                 Optional.of(
-                                        call.<DecodeResources.ReservationHandle>getArgument(0)
+                                        call.<DecodeResources.RequestReservation>getArgument(0)
                                                         .requestId()
                                                         .equals("11")
                                                 ? first
@@ -1869,7 +1877,7 @@ class DecodePreemptionProtocolTest {
                 .thenAnswer(
                         call ->
                                 Optional.of(
-                                        call.<DecodeResources.ReservationHandle>getArgument(0)
+                                        call.<DecodeResources.RequestReservation>getArgument(0)
                                                         .requestId()
                                                         .equals("11")
                                                 ? first

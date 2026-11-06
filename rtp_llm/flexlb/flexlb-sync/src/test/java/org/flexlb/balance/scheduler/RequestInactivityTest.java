@@ -24,11 +24,11 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.ContextResult.DeliveryFacts;
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.flexlb.balance.scheduler.RequestChangeAssertions.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -45,15 +45,17 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Matching Engine activity renews the lease; silence always ends local ownership. */
+/**
+ * Matching Engine activity renews the lease; silence always ends local ownership.
+ */
 class RequestInactivityTest {
     private static final long REQUEST_ID = 101L;
     // Explicit observation/check timestamps advance virtual time without waiting for wall time.
     private static final long TIMEOUT_MS = TimeUnit.HOURS.toMillis(1L);
 
-    private RequestLifecycle registry;
+    private AbstractRequestScheduler registry;
     private RequestContext requestContext;
-    private RequestRoute item;
+    private RouteExecution item;
     private PrefillEndpoint prefill;
     private DecodeEndpoint decode;
     private Delivery.Member claim;
@@ -88,7 +90,8 @@ class RequestInactivityTest {
                 "grpcClient",
                 channel);
         RequestContext context = RequestProtocolTestSupport.context(config, REQUEST_ID);
-        CompletableFuture<Response> future = RequestProtocolTestSupport.register(registry, context);
+        CompletableFuture<Response> future =
+                RequestProtocolTestSupport.submitForManualPlacement(registry, context);
         requestContext = registry.requests.findActive(String.valueOf(REQUEST_ID));
         registeredAtMs = requestContext.snapshot().createdAtMs();
         prefill = mock(PrefillEndpoint.class);
@@ -97,7 +100,8 @@ class RequestInactivityTest {
         prefillStatus.setRole(RoleType.PREFILL);
         prefillStatus.setServerIp("127.0.0.1");
         prefillStatus.setGrpcPort(8081);
-        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(REQUEST_ID), 1L);
+        var reservation =
+                new DecodeResources.RequestReservation(1L, String.valueOf(REQUEST_ID), 1L);
         context.data().setFuture(future);
         item =
                 org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
@@ -113,7 +117,7 @@ class RequestInactivityTest {
         RequestProtocolTestSupport.bind(registry, registered);
         claim = RequestProtocolTestSupport.claimBatch(registry, item, 1L, () -> true);
         assertNotNull(claim);
-        assertTrue(claim.route().ctx().data().getLifecycle().tryStartSend(claim));
+        assertTrue(claim.route().ctx().data().getRequestScheduler().tryStartSend(claim));
         handedOffAtMs = requestContext.snapshot().delivery().startedAtMs();
     }
 
@@ -213,12 +217,12 @@ class RequestInactivityTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         requestContext,
                         observedRequest ->
-                                observedRequest.recordEngineEvidence(
-                                        new EngineEvidence(
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
                                                 item,
                                                 null,
                                                 RoleType.PREFILL,
-                                                EngineKind.COMPLETED,
+                                                WorkerRequestEventType.COMPLETED,
                                                 0L,
                                                 null,
                                                 completedAt)));
@@ -227,12 +231,12 @@ class RequestInactivityTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         requestContext,
                         observedRequest ->
-                                observedRequest.recordEngineEvidence(
-                                        new EngineEvidence(
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
                                                 item,
                                                 null,
                                                 RoleType.PREFILL,
-                                                EngineKind.ACTIVE,
+                                                WorkerRequestEventType.ACTIVE,
                                                 0L,
                                                 null,
                                                 completedAt + 1)));
@@ -250,12 +254,12 @@ class RequestInactivityTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         requestContext,
                         observedRequest ->
-                                observedRequest.recordEngineEvidence(
-                                        new EngineEvidence(
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
                                                 item,
                                                 null,
                                                 RoleType.PREFILL,
-                                                EngineKind.ACTIVE,
+                                                WorkerRequestEventType.ACTIVE,
                                                 0L,
                                                 null,
                                                 completedAt + 2)));
@@ -272,28 +276,28 @@ class RequestInactivityTest {
         RequestContext foreign = mock(RequestContext.class);
         RequestData foreignData = mock(RequestData.class);
         when(foreign.data()).thenReturn(foreignData);
-        when(foreignData.getLifecycle()).thenReturn(mock(RequestLifecycle.class));
-        registry.onEngineEvidence(
+        when(foreignData.getRequestScheduler()).thenReturn(mock(AbstractRequestScheduler.class));
+        registry.onWorkerRequestEvent(
                 foreign,
-                new EngineEvidence(
+                new WorkerRequestEvent(
                         item,
                         item.decodeReservation(),
                         RoleType.DECODE,
-                        EngineKind.ACTIVE,
+                        WorkerRequestEventType.ACTIVE,
                         0L,
                         null,
                         System.currentTimeMillis()));
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 verify(foreign, never()),
-                observedRequest -> observedRequest.recordEngineEvidence(any()));
-        registry.onEngineEvidence(requestContext, null);
-        registry.onEngineEvidence(
+                observedRequest -> observedRequest.recordWorkerRequestEvent(any()));
+        registry.onWorkerRequestEvent(requestContext, null);
+        registry.onWorkerRequestEvent(
                 requestContext,
-                new EngineEvidence(
+                new WorkerRequestEvent(
                         item,
                         item.decodeReservation(),
                         null,
-                        EngineKind.ACTIVE,
+                        WorkerRequestEventType.ACTIVE,
                         0L,
                         null,
                         System.currentTimeMillis()));
@@ -304,13 +308,13 @@ class RequestInactivityTest {
     }
 
     private void active(RoleType source, long nowMs) {
-        registry.onEngineEvidence(
+        registry.onWorkerRequestEvent(
                 requestContext,
-                new EngineEvidence(
+                new WorkerRequestEvent(
                         item,
                         source == RoleType.DECODE ? item.decodeReservation() : null,
                         source,
-                        EngineKind.ACTIVE,
+                        WorkerRequestEventType.ACTIVE,
                         0L,
                         null,
                         nowMs));
@@ -508,7 +512,7 @@ class RequestInactivityTest {
     @EnumSource(StaleFact.class)
     void staleEndpointOrRequestGenerationCannotRenewInactivity(StaleFact source) {
         long lateStatusAt = registeredAtMs + 2L * TIMEOUT_MS;
-        RequestRoute route = item;
+        RouteExecution route = item;
         var reservation = item.decodeReservation();
         RoleType role =
                 source == StaleFact.PREFILL_ENDPOINT || source == StaleFact.PREFILL_ITEM
@@ -534,19 +538,19 @@ class RequestInactivityTest {
         } else {
             reservation =
                     source == StaleFact.DECODE_GENERATION
-                            ? new DecodeResources.ReservationHandle(
+                            ? new DecodeResources.RequestReservation(
                                     2L, String.valueOf(REQUEST_ID), 1L)
-                            : new DecodeResources.ReservationHandle(
+                            : new DecodeResources.RequestReservation(
                                     1L, String.valueOf(REQUEST_ID), 2L);
         }
         var before = requestContext.snapshot();
-        registry.onEngineEvidence(
+        registry.onWorkerRequestEvent(
                 requestContext,
-                new EngineEvidence(
+                new WorkerRequestEvent(
                         route,
                         role == RoleType.DECODE ? reservation : null,
                         role,
-                        EngineKind.ACTIVE,
+                        WorkerRequestEventType.ACTIVE,
                         0L,
                         null,
                         lateStatusAt));

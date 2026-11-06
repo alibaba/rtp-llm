@@ -20,13 +20,34 @@ Encoder 不按可用 KV cache 筛选或决胜。Encoder 单独请求按 `schedul
 DIRECT 或独立的 QUEUE，FlexLB 返回 `ENCODER` 端点，不调用 EnqueueBatch。
 QUEUE 还会过滤已达到 `dispatcher.maxInflightPerEncoderWorker` 的节点，并在容量释放后重试；
 DIRECT 没有候选时返回 `NO_ENCODER_WORKER` (8408)。
-本地待观察请求在 endpoint 的并发 map 中逐请求更新，选点读取允许短暂滞后；并发请求可能依据
+本地待观察请求由 Endpoint 事件串行更新，选点读取不可变快照并允许短暂滞后；并发请求可能依据
 同一份负载快照选中同一 worker。Prefill/Decode 与 PDFusion 的既有策略保持原样。
 
 `Router` 接口只有一个方法：`Response route(BalanceContext balanceContext)`。
 
-`DefaultRouter`（`balance/scheduler/DefaultRouter.java`）由 Prefill、Decode、VIT 和
-Encoder 选择器组成，按请求有效角色顺序逐个选择，并在失败时关闭已捕获的 endpoint pin。
+`RequestRouteSelector` 由 Prefill、Decode、VIT 和 Encoder 选择器组成，按角色顺序选择，
+将每个角色的选择事实冻结为 `RoleSelection`，返回 `PlacementResult<RouteResult, PlacementKey>`。
+选路失败不会关闭 Endpoint。Scheduler 在成功后创建独立的 `RouteExecution`，由 Scheduler 的 `publishPlacement()` 完成资源预留、入队或直接发布及收尾。
+准入、提交和下线在 Endpoint 事件流中排序，资源回滚核对具体请求记录。详见
+[资源管理](03-resource-management.md)。
+
+### 选择结果与资源执行的边界
+
+| 粒度 | 承载类型 | 权威字段 |
+| --- | --- | --- |
+| 单角色选择 | `RoleSelection` | Endpoint 引用、选择时拓扑、DP rank、协议所需的冻结观测信息 |
+| Prefill 选择 | `RoleSelection.Prefill` | 本请求估计工作量、选择依据的资源版本 |
+| Decode 选择 | `RoleSelection.Decode` | 选择依据的资源版本 |
+| 多角色组合 | `RouteResult` | requestId、有序的 RoleSelection 引用；不复制各角色字段 |
+| 一次执行 | `RouteExecution` | Context、RouteResult 引用、Decode/Prefill 预留凭据、Encoder 提交状态、Delivery 准备关联、队列规划输入 |
+| 外部响应 | `Response` / `ServerStatus` | 按需从 RouteResult 生成独立协议对象，不常驻缓存 Response |
+
+`RoleSelection` 对外不可修改；Endpoint 引用指向的实时资源账本不属于该快照。
+`RouteResult.Builder` 仅累积选择结果，不持有资源，也不实现关闭协议。
+构建完成或失败后均不再接受新选择；生成的 `RouteResult` 复制列表并保留不可变角色引用。
+`ContextResult.Snapshot`、`PlacementOperation` 和异步事件引用执行身份，不复制选择字段。
+同一请求重选会创建新的执行对象；旧回调仍按引用身份关联旧资源记录。
+`RoutingDecision` 保持诊断用途，候选估计值不能替代 Endpoint 的实际资源账本。
 
 ### route() 流程
 
@@ -174,3 +195,10 @@ prefixLength`），不影响选谁。
 - worker 是否可选由 `PrefillResourceMeasure` / `DecodeResourceMeasure` 基于活性、
   待处理请求、KV 使用率和可选并发上限判定（见
   [03-resource-management](03-resource-management.md)）。
+
+### 放置与收尾
+
+`RouteExecution` 只能由完整的 `RouteResult` 创建，选路结果引用不可替换；没有逐步添加角色、prepare 或 close 接口。
+Scheduler 的 `publishPlacement(route, operation, queueSettings)` 是发布入口：校验选路、预留资源、入队或直接发布，最后结束本次放置。
+直接发布的响应通知在放置结束之后执行。队列模式仅在容量阻塞时保留本次放置，供抢占继续；不抢占或抢占失败时，由队列计划调用同一 Scheduler 收尾函数释放资源。
+Dispatcher 负责发送和停止，不再反向调用 Scheduler 完成放置。Endpoint 的预留记录仍用于判断物理发布是否发生，不能用通知是否成功代替。

@@ -92,7 +92,7 @@ class BaselineParityE2ETest {
                     "engine arrivals must contain every measured request and no unexpected request");
 
             // RequestSchedulerTestRuntime supplies incrementing batch IDs. This
-            // fixture has one Prefill and one EndpointWork, so DeliveryDispatcher
+            // fixture has one Prefill and one PrefillQueueScheduler, so DeliveryDispatcher
             // assigns them in decision order before committing and submitting to
             // the asynchronous dispatcher. Preserve request order within each batch;
             // ordering RPC batches by ID removes only dispatch-thread arrival races.

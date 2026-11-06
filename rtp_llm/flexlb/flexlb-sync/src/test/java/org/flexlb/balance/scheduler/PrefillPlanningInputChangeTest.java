@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -127,12 +127,12 @@ class PrefillPlanningInputChangeTest {
         WorkerStatus status = status();
         publishInitial(status, response(1, 1000, 1000, 0, 100));
         PrefillEndpoint endpoint = endpoint(config, status);
-        EndpointWork worker = EndpointTestSupport.requestExecution(endpoint);
+        PrefillQueueScheduler worker = EndpointTestSupport.requestExecution(endpoint);
         CountDownLatch selected = new CountDownLatch(1);
         doAnswer(
                         invocation -> {
-                            List<RequestRoute> candidates = invocation.getArgument(0);
-                            RequestRoute exact = candidates.getFirst();
+                            List<RouteExecution> candidates = invocation.getArgument(0);
+                            RouteExecution exact = candidates.getFirst();
                             assertTrue(worker.prefillEndpoint().removeQueued(exact));
                             selected.countDown();
                             return null;
@@ -150,7 +150,7 @@ class PrefillPlanningInputChangeTest {
         context.data()
                 .setRequest(Request.builder().requestId("51").rawPriority(0).seqLen(10L).build());
         context.data().setSchedulingMetadata(SchedulingMetadata.explicit(0, Long.MAX_VALUE));
-        RequestRoute route =
+        RouteExecution route =
                 SchedulingTestConfig.createRoute(
                         context,
                         null,
@@ -181,7 +181,7 @@ class PrefillPlanningInputChangeTest {
         }
     }
 
-    private static void awaitKvWait(EndpointWork worker) throws InterruptedException {
+    private static void awaitKvWait(PrefillQueueScheduler worker) throws InterruptedException {
         RequestProtocolTestSupport.awaitCondition(
                 () ->
                         "Prefill KV capacity exhausted"
@@ -223,7 +223,10 @@ class PrefillPlanningInputChangeTest {
 
     private static PrefillEndpoint endpoint(FlexlbConfig config, WorkerStatus status) {
         return EndpointTestSupport.unstartedPrefill(
-                config, status, SchedulerTestSupport.dispatcher(), mock(RequestLifecycle.class));
+                config,
+                status,
+                SchedulerTestSupport.dispatcher(),
+                mock(AbstractRequestScheduler.class));
     }
 
     private static WorkerStatusResponse response(

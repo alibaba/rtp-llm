@@ -26,6 +26,7 @@ import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResu
 import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult.RELEASED;
 import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult.STALE;
 import static org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult.STILL_OWNED;
+import static org.flexlb.balance.endpoint.EndpointTestSupport.withStateLock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -34,12 +35,16 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Ledger transitions do not invoke the endpoint, scheduler, RPC client or callbacks. */
+/**
+ * Ledger transitions do not invoke the endpoint, scheduler, RPC client or callbacks.
+ */
 class DecodeResourceTest {
     private static DecodeResources.ResourceChange<DecodeResources.MutationStatus> markQueued(
-            DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
-        try (var pin = endpoint.tryPinGeneration()) {
-            return endpoint.markQueued(pin, reservation);
+            DecodeEndpoint endpoint, DecodeResources.RequestReservation reservation) {
+        {
+            var selectedEndpoint = endpoint;
+
+            return endpoint.markQueued(reservation);
         }
     }
 
@@ -52,8 +57,8 @@ class DecodeResourceTest {
                 var state = EndpointTestSupport.decodeEndpoint(status());
                 var reservation =
                         EndpointTestSupport.reserveQueuedDecode(state, 1L, 100L, 200L, 50, CAPACITY)
-                                .handle();
-                var permit = state.acquireDispatchPermit(reservation, CAPACITY).handle();
+                                .value();
+                var permit = state.acquireDispatchPermit(reservation, CAPACITY).value();
                 var start = new java.util.concurrent.CyclicBarrier(2);
                 var sent =
                         workers.submit(
@@ -93,8 +98,8 @@ class DecodeResourceTest {
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var reservation =
                 EndpointTestSupport.reserveQueuedDecode(state, 1L, 100L, 200L, 50, CAPACITY)
-                        .handle();
-        var permit = state.acquireDispatchPermit(reservation, CAPACITY).handle();
+                        .value();
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).value();
         long version = state.placementVersion();
         IllegalStateException failure = new IllegalStateException("snapshot unavailable");
         org.mockito.Mockito.doThrow(failure).when(status).getGenerationId();
@@ -107,7 +112,7 @@ class DecodeResourceTest {
                 "failed retirement must not make the live permit look already retired");
         assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
 
-        var replacement = state.acquireDispatchPermit(reservation, CAPACITY).handle();
+        var replacement = state.acquireDispatchPermit(reservation, CAPACITY).value();
         assertEquals(java.util.List.of(reservation), state.retire());
         assertFalse(state.ownership(reservation).owned());
         assertEquals(0, state.resourceSnapshot().activeDispatchPermits());
@@ -120,12 +125,12 @@ class DecodeResourceTest {
         WorkerStatus status = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var reservation =
-                EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).handle();
-        var first = state.acquireDispatchPermit(reservation, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).value();
+        var first = state.acquireDispatchPermit(reservation, CAPACITY).value();
         assertTrue(state.dispatch(first, DispatchOutcome.ABANDONED).capacityReleased());
         assertTrue(EndpointTestSupport.isQueued(state.resourceSnapshot(), String.valueOf(1)));
 
-        var replacement = state.acquireDispatchPermit(reservation, CAPACITY).handle();
+        var replacement = state.acquireDispatchPermit(reservation, CAPACITY).value();
         assertEquals(OWNERSHIP_LOST, state.dispatch(first, DispatchOutcome.ENGINE_OWNED).status());
         assertEquals(OWNERSHIP_LOST, state.dispatch(first, DispatchOutcome.ABANDONED).status());
         assertEquals(1, state.resourceSnapshot().activeDispatchPermits());
@@ -149,23 +154,27 @@ class DecodeResourceTest {
         "MASTER_QUEUED_NOT_DISPATCHED, LOCAL_ROLLBACK",
         "MASTER_QUEUED_NOT_DISPATCHED, COUNTERPART_FINISHED",
         "MASTER_QUEUED_NOT_DISPATCHED, NOT_SENT",
+        "MASTER_QUEUED_NOT_DISPATCHED, UNSENT_ROUTE_ROLLBACK",
         "ENGINE_MAY_HAVE_SEEN, LOCAL_ROLLBACK",
         "ENGINE_MAY_HAVE_SEEN, COUNTERPART_FINISHED",
         "ENGINE_MAY_HAVE_SEEN, NOT_SENT",
+        "ENGINE_MAY_HAVE_SEEN, UNSENT_ROUTE_ROLLBACK",
         "ACCEPTED_NOT_RUNNING, LOCAL_ROLLBACK",
         "ACCEPTED_NOT_RUNNING, COUNTERPART_FINISHED",
         "ACCEPTED_NOT_RUNNING, NOT_SENT",
+        "ACCEPTED_NOT_RUNNING, UNSENT_ROUTE_ROLLBACK",
         "RUNNING, LOCAL_ROLLBACK",
         "RUNNING, COUNTERPART_FINISHED",
-        "RUNNING, NOT_SENT"
+        "RUNNING, NOT_SENT",
+        "RUNNING, UNSENT_ROUTE_ROLLBACK"
     })
     void releaseReasonPreservesEngineOwnershipAndSettlesOnlyItsExactReservation(
             DecodeTaskPhase phase, ReleaseReason reason) {
         WorkerStatus status = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var reservation =
-                EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).handle();
-        var permit = state.acquireDispatchPermit(reservation, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).value();
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).value();
         if (phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN) {
             state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status();
         } else if (phase.isEngineConfirmed()) {
@@ -182,15 +191,15 @@ class DecodeResourceTest {
                     Map.of());
         }
         var sibling =
-                EndpointTestSupport.reserveQueuedDecode(state, 2, 70, 90, 30, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 2, 70, 90, 30, CAPACITY).value();
         long version = state.placementVersion();
         var stale =
-                new DecodeResources.ReservationHandle(
+                new DecodeResources.RequestReservation(
                         reservation.endpointGenerationId(),
                         String.valueOf(1),
                         reservation.reservationToken() + 100);
         var foreign =
-                new DecodeResources.ReservationHandle(
+                new DecodeResources.RequestReservation(
                         reservation.endpointGenerationId() + 1,
                         String.valueOf(1),
                         reservation.reservationToken());
@@ -201,7 +210,8 @@ class DecodeResourceTest {
         boolean released =
                 phase == DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED
                         || phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN
-                                && reason == ReleaseReason.NOT_SENT;
+                                && (reason == ReleaseReason.NOT_SENT
+                                        || reason == ReleaseReason.UNSENT_ROUTE_ROLLBACK);
         if (released) {
             assertEquals(RELEASED, state.release(reservation, reason).status());
             assertEquals(STALE, state.release(reservation, reason).status());
@@ -219,7 +229,10 @@ class DecodeResourceTest {
                         () -> state.release(reservation, reason).status());
             } else {
                 assertEquals(
-                        reason == ReleaseReason.NOT_SENT ? ENGINE_ACCEPTED : STILL_OWNED,
+                        reason == ReleaseReason.NOT_SENT
+                                        || reason == ReleaseReason.UNSENT_ROUTE_ROLLBACK
+                                ? ENGINE_ACCEPTED
+                                : STILL_OWNED,
                         state.release(reservation, reason).status());
             }
             assertTrue(state.ownership(reservation).owned());
@@ -235,8 +248,8 @@ class DecodeResourceTest {
         WorkerStatus status = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var reservation =
-                EndpointTestSupport.reserveQueuedDecode(state, 2, 100, 200, 50, CAPACITY).handle();
-        var permit = state.acquireDispatchPermit(reservation, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 2, 100, 200, 50, CAPACITY).value();
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).value();
         TaskInfo task = new TaskInfo();
         task.setRequestId(String.valueOf(2L));
         task.setPhase(TaskPhase.KV_ALLOCATED);
@@ -272,8 +285,8 @@ class DecodeResourceTest {
         WorkerStatus status = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var reservation =
-                EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).handle();
-        var permit = state.acquireDispatchPermit(reservation, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).value();
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).value();
         if (phase == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN) {
             state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status();
         } else if (phase.isEngineConfirmed()) {
@@ -290,10 +303,10 @@ class DecodeResourceTest {
                     Map.of());
         }
         var sibling =
-                EndpointTestSupport.reserveQueuedDecode(state, 2, 70, 90, 30, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 2, 70, 90, 30, CAPACITY).value();
         assertNotNull(sibling);
         var stale =
-                new DecodeResources.ReservationHandle(
+                new DecodeResources.RequestReservation(
                         reservation.endpointGenerationId(),
                         String.valueOf(1),
                         reservation.reservationToken() + 100);
@@ -330,7 +343,7 @@ class DecodeResourceTest {
         WorkerStatus status = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var reservation =
-                EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).value();
         if (settlement.equals("FULL_ABSENCE")) {
             calibrate(state, status, Map.of("1", task(1, TaskPhase.RUNNING)), Map.of());
             calibrate(state, status, Map.of(), Map.of());
@@ -380,7 +393,7 @@ class DecodeResourceTest {
         WorkerStatus status = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var reservation =
-                EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 1, 100, 200, 50, CAPACITY).value();
         state.acquireDispatchPermit(reservation, CAPACITY);
 
         var cleanup =
@@ -419,13 +432,15 @@ class DecodeResourceTest {
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 EndpointTestSupport.noopEventSink()));
         try {
-            DecodeResources.ReservationHandle reservation;
-            try (var pin = owner.tryPinGeneration()) {
+            DecodeResources.RequestReservation reservation;
+            {
+                var selectedEndpoint = owner;
+
                 reservation =
-                        owner.tryReserveQueuedRequest(pin, String.valueOf(3), 100, 200, 50, null)
-                                .handle();
+                        owner.tryReserveQueuedRequest(String.valueOf(3), 100, 200, 50, null)
+                                .value();
             }
-            var permit = owner.acquireDispatchPermit(reservation, CAPACITY).handle();
+            var permit = owner.acquireDispatchPermit(reservation, CAPACITY).value();
             assertThrows(
                     IllegalArgumentException.class,
                     () -> other.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
@@ -449,7 +464,7 @@ class DecodeResourceTest {
         WorkerStatus status = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var reservation =
-                EndpointTestSupport.reserveQueuedDecode(state, 10, 100, 200, 50, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 10, 100, 200, 50, CAPACITY).value();
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         for (int i = 0; i < 2; i++) {
             var observation = calibrate(state, status, Map.of("10", task(10, regressed)), Map.of());
@@ -475,9 +490,9 @@ class DecodeResourceTest {
         WorkerStatus status = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var regressed =
-                EndpointTestSupport.reserveQueuedDecode(state, 10, 100, 200, 50, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 10, 100, 200, 50, CAPACITY).value();
         var running =
-                EndpointTestSupport.reserveQueuedDecode(state, 11, 100, 200, 50, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 11, 100, 200, 50, CAPACITY).value();
         calibrate(
                 state,
                 status,
@@ -501,7 +516,7 @@ class DecodeResourceTest {
         WorkerStatus status = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var victim =
-                EndpointTestSupport.reserveQueuedDecode(state, 10, 100, 200, 50, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 10, 100, 200, 50, CAPACITY).value();
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
@@ -553,8 +568,8 @@ class DecodeResourceTest {
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var reservation =
                 EndpointTestSupport.reserveQueuedDecode(state, 77L, 100L, 200L, 50, CAPACITY)
-                        .handle();
-        var permit = state.acquireDispatchPermit(reservation, CAPACITY).handle();
+                        .value();
+        var permit = state.acquireDispatchPermit(reservation, CAPACITY).value();
         assertEquals(TRANSFERRED, state.dispatch(permit, DispatchOutcome.ENGINE_OWNED).status());
 
         calibrate(state, status, Map.of("77", task(77L, TaskPhase.RUNNING)), Map.of());
@@ -578,7 +593,7 @@ class DecodeResourceTest {
         var reservation =
                 locallyReserved
                         ? EndpointTestSupport.reserveQueuedDecode(state, 10, 200, 400, 50, CAPACITY)
-                                .handle()
+                                .value()
                         : null;
         var first =
                 calibrate(state, status, Map.of("10", task(10, TaskPhase.KV_ALLOCATED)), Map.of());
@@ -611,7 +626,7 @@ class DecodeResourceTest {
         WorkerStatus status = status();
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var victim =
-                EndpointTestSupport.reserveQueuedDecode(state, 10, 100, 200, 50, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 10, 100, 200, 50, CAPACITY).value();
         calibrate(state, status, Map.of("10", task(10, TaskPhase.RUNNING)), Map.of());
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
@@ -657,7 +672,7 @@ class DecodeResourceTest {
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var victim =
                 EndpointTestSupport.reserveQueuedDecode(state, 10L, 100L, 200L, 50, CAPACITY)
-                        .handle();
+                        .value();
         calibrate(state, status, Map.of("10", task(10L, TaskPhase.RUNNING)), Map.of());
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
@@ -693,8 +708,7 @@ class DecodeResourceTest {
         assertEquals(handedOff ? 100L : 0L, 10_000L - state.routingView().realKvAvailable());
 
         var replacement =
-                EndpointTestSupport.reserveQueuedDecode(state, 11L, 70L, 90L, 80, CAPACITY)
-                        .handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 11L, 70L, 90L, 80, CAPACITY).value();
         assertNotNull(replacement, "TTL cannot leave an incoming attempt blocking the request ID");
         assertEquals(
                 handedOff,
@@ -712,7 +726,7 @@ class DecodeResourceTest {
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var victim =
                 EndpointTestSupport.reserveQueuedDecode(state, 10L, 100L, 200L, 50, CAPACITY)
-                        .handle();
+                        .value();
         calibrate(state, status, Map.of("10", task(10L, TaskPhase.RUNNING)), Map.of());
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
@@ -754,7 +768,7 @@ class DecodeResourceTest {
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var victim =
                 EndpointTestSupport.reserveQueuedDecode(state, 10L, 100L, 200L, 50, CAPACITY)
-                        .handle();
+                        .value();
         calibrate(state, status, Map.of("10", task(10L, TaskPhase.RUNNING)), Map.of());
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
@@ -803,8 +817,7 @@ class DecodeResourceTest {
         // ID.
         state.expireReservations(-1L, Map.of());
         var replacement =
-                EndpointTestSupport.reserveQueuedDecode(state, 11L, 70L, 90L, 80, CAPACITY)
-                        .handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 11L, 70L, 90L, 80, CAPACITY).value();
         assertNotNull(replacement);
         assertTrue(replacement.reservationToken() != incoming.reservationToken());
         assertNull(state.finishPreemption(1L, true));
@@ -825,7 +838,7 @@ class DecodeResourceTest {
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var victim =
                 EndpointTestSupport.reserveQueuedDecode(state, 10L, 100L, 200L, 50, CAPACITY)
-                        .handle();
+                        .value();
         calibrate(state, status, Map.of("10", task(10L, TaskPhase.RUNNING)), Map.of());
         IllegalStateException failure = new IllegalStateException("attempt installation failed");
         var attempts = DecodeEndpoint.class.getDeclaredField("preemptionAttempts");
@@ -860,7 +873,7 @@ class DecodeResourceTest {
                         .claimedForPreemption());
         assertNotNull(
                 EndpointTestSupport.reserveQueuedDecode(state, 11L, 100L, 200L, 80, CAPACITY)
-                        .handle(),
+                        .value(),
                 "an unpublished attempt failure must allow immediate retry of its incoming request ID");
     }
 
@@ -878,7 +891,7 @@ class DecodeResourceTest {
                         () ->
                                 EndpointTestSupport.reserveQueuedDecode(
                                                 state, 1L, 100L, 200L, 50, null)
-                                        .handle()));
+                                        .value()));
         org.mockito.Mockito.doReturn(generation).when(status).getGenerationId();
 
         assertEquals(0, state.stats().inflight());
@@ -886,7 +899,7 @@ class DecodeResourceTest {
         assertTrue(state.resourceSnapshot().requests().isEmpty());
         assertNotNull(
                 EndpointTestSupport.reserveQueuedDecode(state, 1L, 100L, 200L, 50, CAPACITY)
-                        .handle());
+                        .value());
     }
 
     @Test
@@ -895,9 +908,9 @@ class DecodeResourceTest {
         DecodeEndpoint state = EndpointTestSupport.decodeEndpoint(status);
         var first =
                 EndpointTestSupport.reserveQueuedDecode(state, 1L, 100L, 200L, 50, CAPACITY)
-                        .handle();
+                        .value();
         var second =
-                EndpointTestSupport.reserveQueuedDecode(state, 2L, 70L, 90L, 50, CAPACITY).handle();
+                EndpointTestSupport.reserveQueuedDecode(state, 2L, 70L, 90L, 50, CAPACITY).value();
         var previous = state.routingView();
         long revision = state.placementVersion();
         calibrate(
@@ -953,14 +966,13 @@ class DecodeResourceTest {
             var prepared =
                     status.prepareNewStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
-            EndpointTestSupport.decodeLock(state).lock();
-            try {
-                var result = state.calibrateLocked(prepared.observation());
-                status.publishPreparedStatus(prepared);
-                return result;
-            } finally {
-                EndpointTestSupport.decodeLock(state).unlock();
-            }
+            return withStateLock(
+                    state.stateLock(),
+                    () -> {
+                        var result = state.calibrateLocked(prepared.observation());
+                        status.publishReducedStatus(prepared);
+                        return result;
+                    });
         } finally {
             status.lock.unlock();
         }

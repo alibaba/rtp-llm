@@ -54,7 +54,7 @@ class DecodeEndpointLayeredViewTest {
 
     private WorkerStatus status;
     private DecodeEndpoint endpoint;
-    private final Map<Long, DecodeResources.ReservationHandle> reservations = new HashMap<>();
+    private final Map<Long, DecodeResources.RequestReservation> reservations = new HashMap<>();
 
     @BeforeEach
     void setUp() {
@@ -379,9 +379,9 @@ class DecodeEndpointLayeredViewTest {
         reserve(1L, 500, 508, 30);
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.KV_ALLOCATED, 256)), null, 10_000);
 
-        DecodeResources.ReservationHandle exact = reservations.get(1L);
-        DecodeResources.ReservationHandle stale =
-                new DecodeResources.ReservationHandle(
+        DecodeResources.RequestReservation exact = reservations.get(1L);
+        DecodeResources.RequestReservation stale =
+                new DecodeResources.RequestReservation(
                         exact.endpointGenerationId(),
                         String.valueOf(exact.requestId()),
                         exact.reservationToken() + 1L);
@@ -409,7 +409,7 @@ class DecodeEndpointLayeredViewTest {
         var exact = reservations.get(1L);
         var second =
                 staleSecondToken
-                        ? new DecodeResources.ReservationHandle(
+                        ? new DecodeResources.RequestReservation(
                                 exact.endpointGenerationId(),
                                 String.valueOf(exact.requestId()),
                                 exact.reservationToken() + 1)
@@ -435,7 +435,7 @@ class DecodeEndpointLayeredViewTest {
 
     @Test
     void retirementReportsActivePreemptionOwnersExactlyOnce() {
-        var scheduler = mock(org.flexlb.balance.scheduler.RequestLifecycle.class);
+        var scheduler = mock(org.flexlb.balance.scheduler.AbstractRequestScheduler.class);
         endpoint =
                 EndpointTestSupport.decode(
                         status,
@@ -454,34 +454,28 @@ class DecodeEndpointLayeredViewTest {
         org.mockito.Mockito.doReturn(victimContext).when(requests).findActive("1");
         org.mockito.Mockito.doReturn(incomingContext).when(requests).findActive("9");
         for (var context : List.of(victimContext, incomingContext)) {
-            var route = mock(org.flexlb.balance.scheduler.RequestRoute.class);
+            var route = mock(org.flexlb.balance.scheduler.RouteExecution.class);
             var snapshot = mock(org.flexlb.balance.scheduler.ContextResult.Snapshot.class);
             when(context.snapshot()).thenReturn(snapshot);
             when(snapshot.route()).thenReturn(route);
-            when(route.decodeEp()).thenReturn(endpoint);
+            when(route.decodeEndpoint()).thenReturn(endpoint);
         }
         endpoint.close();
         endpoint.close();
 
         verify(scheduler)
-                .onEngineEvidence(
+                .onEndpointRetired(
                         eq(victimContext),
                         argThat(
                                 e ->
                                         e.role() == RoleType.DECODE
-                                                && e.kind()
-                                                        == org.flexlb.balance.scheduler
-                                                                .ContextResult.EngineKind.RETIRED
                                                 && e.reservation().equals(reservations.get(1L))));
         verify(scheduler)
-                .onEngineEvidence(
+                .onEndpointRetired(
                         eq(incomingContext),
                         argThat(
                                 e ->
                                         e.role() == RoleType.DECODE
-                                                && e.kind()
-                                                        == org.flexlb.balance.scheduler
-                                                                .ContextResult.EngineKind.RETIRED
                                                 && e.reservation().equals(incoming)));
         assertTrue(endpoint.resourceSnapshot().reservedCount() == 0);
         assertTrue(endpoint.resourceSnapshot().confirmedCount() == 0);
@@ -567,7 +561,7 @@ class DecodeEndpointLayeredViewTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void claimedShadowConfirmedLaterRetainsCapacityUntilTerminal(boolean receivedAgain) {
-        DecodeResources.ReservationHandle victim = reserve(1L, 500, 508, 30);
+        DecodeResources.RequestReservation victim = reserve(1L, 500, 508, 30);
         assertEquals(
                 DecodeResources.PreemptionBeginResult.SUCCESS,
                 beginPreemption(105L, List.of(1L), 9L, 700, 708, 70));
@@ -805,7 +799,7 @@ class DecodeEndpointLayeredViewTest {
     void absentOldReservationIsCompleteWithoutTouchingTheReplacement() {
         var replacement = reserve(702L, 400, 408, 30);
         var old =
-                new DecodeResources.ReservationHandle(
+                new DecodeResources.RequestReservation(
                         replacement.endpointGenerationId(),
                         String.valueOf(replacement.requestId()),
                         replacement.reservationToken() + 1000);
@@ -862,13 +856,15 @@ class DecodeEndpointLayeredViewTest {
         EndpointTestSupport.applyStatus(endpoint, response).run();
     }
 
-    private DecodeResources.ReservationHandle reserve(
+    private DecodeResources.RequestReservation reserve(
             long requestId, long hardKv, long expectedKv, int priority) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            assertTrue(pin != null);
-            DecodeResources.ReservationHandle reservation =
+        {
+            WorkerEndpoint selectedEndpoint = endpoint;
+
+            assertTrue(selectedEndpoint != null);
+            DecodeResources.RequestReservation reservation =
                     EndpointTestSupport.reserveUnqueuedDecode(
-                            endpoint, pin, requestId, hardKv, expectedKv, priority);
+                            endpoint, selectedEndpoint, requestId, hardKv, expectedKv, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }
@@ -887,7 +883,7 @@ class DecodeEndpointLayeredViewTest {
             long hardKv,
             long expectedKv,
             int priority) {
-        List<DecodeResources.ReservationHandle> victims =
+        List<DecodeResources.RequestReservation> victims =
                 victimIds.stream().map(reservations::get).toList();
         return endpoint.beginPreemption(
                 attemptToken,

@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
@@ -13,12 +13,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.runWithStateLock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Real endpoint accounting used by delivery callback ordering tests. */
+/**
+ * Real endpoint accounting used by delivery callback ordering tests.
+ */
 public final class DeliverySettlementTestSupport {
     private final ReentrantLock lock = new ReentrantLock();
     public final PrefillEndpoint prefill;
@@ -35,54 +38,57 @@ public final class DeliverySettlementTestSupport {
             Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem> ordering) {
         prefill =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                        lock, PrefillActiveIndex.ordered(4, ordering), System::currentTimeMillis);
+                        lock,
+                        OrderedPrefillRequestQueue.ordered(4, ordering),
+                        System::currentTimeMillis);
     }
 
-    public void enqueue(RequestRoute item) {
-        lock.lock();
-        try {
-            assertSame(
-                    item, org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(prefill, item));
-        } finally {
-            lock.unlock();
-        }
+    public void enqueue(RouteExecution item) {
+        runWithStateLock(
+                lock,
+                () -> {
+                    assertSame(
+                            item,
+                            org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(prefill, item));
+                });
     }
 
-    public CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> reserveBatch(
+    public CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> reserveBatch(
             long batchId, int maxBatches) {
-        return prefill.reserveBatch(batchId, maxBatches, generation.tryPinGeneration());
+        return prefill.reserveBatch(batchId, maxBatches);
     }
 
     public org.flexlb.balance.scheduler.Delivery commit(
             org.flexlb.balance.scheduler.Delivery plan) {
-        return prefill.commitLocked(plan);
+        return prefill.commitDelivery(plan);
     }
 
-    public void commit(long batchId, List<RequestRoute> items) {
-        lock.lock();
-        try {
-            for (RequestRoute item : items) {
-                assertSame(
-                        item,
-                        org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(prefill, item));
-            }
-        } finally {
-            lock.unlock();
-        }
+    public void commit(long batchId, List<RouteExecution> items) {
+        runWithStateLock(
+                lock,
+                () -> {
+                    for (RouteExecution item : items) {
+                        assertSame(
+                                item,
+                                org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
+                                        prefill, item));
+                    }
+                });
         {
-            var reservation =
-                    prefill.reserveBatch(batchId, 2, generation.tryPinGeneration()).value();
+            var reservation = prefill.reserveBatch(batchId, 2).value();
             try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                 assertNotNull(reservation);
-                try (var handoff =
-                        EndpointTestSupport.commitBatch(prefill, reservation, items, 100L)) {
+                {
+                    var handoff =
+                            EndpointTestSupport.commitBatch(prefill, reservation, items, 100L);
+
                     assertNotNull(handoff);
                 }
             }
         }
     }
 
-    public List<PrefillEndpoint.PrefillRequestStatus> finish(long batchId, RequestRoute item) {
+    public List<PrefillEndpoint.PrefillRequestStatus> finish(long batchId, RouteExecution item) {
         TaskInfo finished = new TaskInfo();
         finished.setRequestId(String.valueOf(item.requestId()));
         finished.setBatchId(batchId);
@@ -99,25 +105,27 @@ public final class DeliverySettlementTestSupport {
     }
 
     public static void queueDecode(
-            DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
+            DecodeEndpoint endpoint, DecodeResources.RequestReservation reservation) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(Map.of());
         response.setFinishedTaskInfo(Map.of());
         response.setAvailableKvCacheTokens(10_000L);
         response.setTotalKvCacheTokens(10_000L);
         EndpointTestSupport.applyStatus(endpoint, response).run();
-        try (var pin = endpoint.tryPinGeneration()) {
-            assertTrue(endpoint.markQueued(pin, reservation).status().applied());
+        {
+            var selectedEndpoint = endpoint;
+
+            assertTrue(endpoint.markQueued(reservation).status().applied());
         }
     }
 
     public static void dispatchDecode(
-            DecodeEndpoint endpoint, DecodeResources.ReservationHandle reservation) {
+            DecodeEndpoint endpoint, DecodeResources.RequestReservation reservation) {
         queueDecode(endpoint, reservation);
         var permit =
                 endpoint.acquireDispatchPermit(
                                 reservation, new DecodeResources.AdmissionCapacity(0, 100L))
-                        .handle();
+                        .value();
         assertNotNull(permit);
         assertEquals(
                 DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,

@@ -1,5 +1,9 @@
 # 请求与 Worker 分配的所有权设计
 
+当前实现：`RequestRoute` 直接保存 Endpoint 引用；Endpoint 通过事件串行维护请求记录，
+已移除独立的选路凭证及其引用计数。以下保留此前方案的设计与验证记录；当前结构以
+[资源管理](../architecture/03-resource-management.md)为准。
+
 更新：2026-10-08。当前方案替代 `49604284fc` 的 RoutingResult / RequestRoute 两种过程表示；
 `b28a71bfd6` 的测试专用工厂清理继续保留。旧方案与验证历史可在上述提交查看。
 
@@ -12,7 +16,7 @@
 | ---------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
 | BalanceContext   | 一次请求的固定输入、当前精确路由身份、请求生命周期和响应选择                         | 保留现有原子变更与锁约定；不保存第二份 Worker 选择数据                    |
 | RequestRoute     | 请求与完整 Worker 分配的关系，及可选 Decode reservation 的精确身份                   | GroupPlanner 输入和响应投影；不维护提交阶段、发送阶段或资源释放进度       |
-| WorkerAssignment | 单个请求角色对应的 Worker generation，冻结的角色元数据、预测工作量、placementVersion | 持有 generation pin；一次消费校验；不预留或释放 Decode / Prefill 账本资源 |
+| WorkerAssignment | 单个请求角色对应的 Worker generation，冻结的角色元数据、预测工作量、placementVersion | 持有 selected Worker；一次消费校验；不预留或释放 Decode / Prefill 账本资源 |
 | WorkerEndpoint   | 多个请求共享的一个 Worker generation 及其资源操作能力                                | generation 校验、准入、账本提交及资源释放                                 |
 | Scheduler        | 各次操作的执行与交接责任                                                             | 选择、预留、复验、提交、回滚与后续通知；不复制 Worker 分配事实            |
 
@@ -37,7 +41,7 @@ classDiagram
         decodeReservation
     }
     class WorkerAssignment {
-        generationPin
+        selectedWorker
         metadataSnapshot
         prefillWorkMs
         placementVersion
@@ -50,13 +54,13 @@ classDiagram
         commit()
         release()
     }
-    class GenerationPin {
+    class SelectedWorker {
         endpoint
         handoffPermit
         isOpen()
         close()
     }
-    class ReservationHandle {
+    class RequestReservation {
         endpointGenerationId
         requestId
         reservationToken
@@ -70,9 +74,9 @@ classDiagram
     BalanceContext --> RequestRoute : 当前精确身份
     RequestRoute --> BalanceContext : 唯一请求上下文
     RequestRoute *-- WorkerAssignment : Prefill与可选Decode分配
-    RequestRoute --> ReservationHandle : 精确资源身份
-    WorkerAssignment *-- GenerationPin : 提交期间持有
-    GenerationPin --> WorkerEndpoint : 精确generation
+    RequestRoute --> RequestReservation : 精确资源身份
+    WorkerAssignment *-- SelectedWorker : 提交期间持有
+    SelectedWorker --> WorkerEndpoint : 精确generation
     Scheduler --> RequestRoute : 执行及绑定
     Scheduler --> WorkerEndpoint : 准入与账本操作
 ```
@@ -91,7 +95,7 @@ RequestRoute 的 responseTemplate 是供前端输出的私有 DTO 模板。
 - PrefillReservationAttempt 同时捕获两个路由表示的字段；只保留实际提交的 RequestRoute。
 - 响应先导出拷贝、再成功化拷贝的连续两次深拷贝。
 
-WorkerAssignment 保留一次消费的 AtomicBoolean；GenerationPin 的 permit 保留开放状态。
+WorkerAssignment 保留一次消费的 AtomicBoolean；SelectedWorker 的 permit 保留开放状态。
 这两项约束分别回答“同一个能力是否已分配”和“generation 能力是否仍开放”，不能合成 finished。
 WorkerAssignment.close 不维护第二个关闭状态，只委托底层幂等 permit；关闭不修改资源账本。
 元数据在 pin 关闭后仍可读取，取得已关闭的 pin 或再次消费会被拒绝。
@@ -108,12 +112,12 @@ DefaultRouter 返回 RequestRoute（其 decodeReservation 尚为空），请求�
 
 | 资源或责任          | 提交前                                                 | 交接生效后                                     | 结束条件                                   |
 | ------------------- | ------------------------------------------------------ | ---------------------------------------------- | ------------------------------------------ |
-| generation pin      | QUEUE Plan / DIRECT 局部作用域持有完整路由的 pin       | 同一作用域继续持有到操作退出                   | close 仅释放 pin，不释放请求账本           |
+| selected Worker      | QUEUE Plan / DIRECT 局部作用域持有完整路由的 pin       | 同一作用域继续持有到操作退出                   | close 仅释放 pin，不释放请求账本           |
 | Decode 待回滚责任   | QUEUE Plan.pendingDecodeRollback / DIRECT 方法局部句柄 | 交接点立即清空待回滚引用，交给原有请求清理协议 | 未交接由 finally / try-with-resources 回滚 |
 | Decode 真实资源事实 | DecodeState                                            | DecodeState                                    | 精确释放、Worker 终态或相应远端释放证明    |
 | 请求响应与终结      | BalanceContext                                         | BalanceContext                                 | 响应唯一选择与资源完成分别判断             |
 
-QUEUE 的交接点仍为 offerPinned 成功；DIRECT 的交接点仍为非空 DeliveryClaim。
+QUEUE 的交接点仍为 enqueueRoute 成功；DIRECT 的交接点仍为非空 DeliveryClaim。
 确认、唤醒或 pin close 失败不能倒退已经生效的交接。
 取消 ACK、远端释放证明、发送退出、请求终态保持原来的独立语义。
 未调整锁顺序、DispatchGate、RUN_AGAIN、取消重试和超时协议。

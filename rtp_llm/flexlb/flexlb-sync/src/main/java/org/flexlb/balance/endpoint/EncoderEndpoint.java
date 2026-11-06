@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.ContextResult;
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.balance.strategy.EncoderSelectionStrategy;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Failures;
@@ -14,16 +14,16 @@ import java.util.Map;
 
 /**
  * Tracks Encoder routes until worker status observes them, then until completion or cancellation.
- * The worker generation lock protects both admission and status changes.
+ * Its state lock serializes request admission, status changes and removal.
  */
 public final class EncoderEndpoint extends WorkerEndpoint
         implements EncoderSelectionStrategy.Candidate {
-    private record Tracked(RequestRoute route, boolean observed, long uncachedTokens) {}
+    private record Tracked(RouteExecution route, boolean observed, long uncachedTokens) {}
 
     public record RequestStatus(
-            RequestRoute route, ContextResult.EngineKind kind, long errorCode) {}
+            RouteExecution route, ContextResult.WorkerRequestEventType kind, long errorCode) {}
 
-    private final Map<String, Tracked> requests = new HashMap<>();
+    private Map<String, Tracked> requests = new HashMap<>();
     private final PlacementAvailability availability;
 
     public EncoderEndpoint(WorkerStatus status, PlacementAvailability availability) {
@@ -43,71 +43,75 @@ public final class EncoderEndpoint extends WorkerEndpoint
 
     @Override
     public boolean available() {
-        return !isRetired() && getStatus().isAvailableForScheduling() && getStatus().isAlive();
+        return acceptsNewRequests() && getStatus().isAlive();
     }
 
     @Override
     public long requestCount() {
-        var lock = getStatus().lock;
-        lock.lock();
+        stateLock().lock();
         try {
-            var engine = getStatus().committedEngineObservation();
-            return Math.max(0, engine.runningQueryLen())
-                    + Math.max(0, engine.waitingQueryLen())
-                    + requests.values().stream().filter(request -> !request.observed()).count();
+            return requestCountLocked();
         } finally {
-            lock.unlock();
+            stateLock().unlock();
         }
+    }
+
+    private long requestCountLocked() {
+        var engine = getStatus().committedEngineObservation();
+        long pending = 0;
+        for (var request : requests.values()) if (!request.observed()) pending++;
+        return Math.max(0, engine.runningQueryLen())
+                + Math.max(0, engine.waitingQueryLen())
+                + pending;
     }
 
     @Override
     public long uncachedTokens() {
-        var lock = getStatus().lock;
-        lock.lock();
+        Map<String, WorkerStatus.TaskObservation> active;
+        long localTokens;
+        stateLock().lock();
         try {
-            var active = getStatus().committedEngineObservation().runningTaskList();
-            long total = 0;
-            for (var task : active.values())
-                total =
-                        com.google.common.math.LongMath.saturatedAdd(
-                                total, Math.max(0, task.inputLength()));
+            active = getStatus().committedEngineObservation().runningTaskList();
+            localTokens = 0;
             for (var request : requests.values()) {
                 if (!request.observed() && !active.containsKey(request.route().requestId()))
-                    total =
+                    localTokens =
                             com.google.common.math.LongMath.saturatedAdd(
-                                    total, request.uncachedTokens());
+                                    localTokens, request.uncachedTokens());
             }
-            return total;
         } finally {
-            lock.unlock();
+            stateLock().unlock();
         }
+        long total = localTokens;
+        for (var task : active.values())
+            total =
+                    com.google.common.math.LongMath.saturatedAdd(
+                            total, Math.max(0, task.inputLength()));
+        return total;
     }
 
-    public boolean commit(GenerationPin pin, RequestRoute route, int requestLimit) {
-        requirePinnedGeneration(pin);
-        var lock = getStatus().lock;
-        lock.lock();
+    public boolean commit(RouteExecution route, int requestLimit) {
+        var request = route.ctx().data().getRequest();
+        long hit =
+                request.getEncoderCacheHitLen() == null
+                        ? 0
+                        : Math.max(0, request.getEncoderCacheHitLen());
+        var tracked = new Tracked(route, false, Math.max(0, request.getSeqLen() - hit));
+        stateLock().lock();
         try {
-            if (requests.containsKey(route.requestId()) || requestCount() >= requestLimit)
+            if (!acceptsNewRequests()) return false;
+            if (requests.containsKey(route.requestId()) || requestCountLocked() >= requestLimit)
                 return false;
-            var request = route.ctx().data().getRequest();
-            long hit =
-                    request.getEncoderCacheHitLen() == null
-                            ? 0
-                            : Math.max(0, request.getEncoderCacheHitLen());
-            requests.put(
-                    route.requestId(),
-                    new Tracked(route, false, Math.max(0, request.getSeqLen() - hit)));
+            requests.put(route.requestId(), tracked);
             return true;
         } finally {
-            lock.unlock();
+            stateLock().unlock();
         }
     }
 
-    public void release(RequestRoute route) {
+    public void release(RouteExecution route) {
         boolean removed = false;
-        var lock = getStatus().lock;
-        lock.lock();
+        stateLock().lock();
         try {
             var current = requests.get(route.requestId());
             if (current != null && current.route() == route) {
@@ -115,7 +119,7 @@ public final class EncoderEndpoint extends WorkerEndpoint
                 removed = true;
             }
         } finally {
-            lock.unlock();
+            stateLock().unlock();
         }
         if (removed) availability.changed(this);
     }
@@ -124,9 +128,18 @@ public final class EncoderEndpoint extends WorkerEndpoint
     public StatusChange applyPreparedStatus(
             WorkerStatus status, WorkerStatus.PreparedStatus prepared) {
         requireStatusGeneration(status);
-        if (!prepared.observation().alive()) beginRetirement();
-        status.publishPreparedStatus(prepared);
-        return collectStatus(prepared.observation(), true);
+        List<RequestStatus> changes = new ArrayList<>();
+        stateLock().lock();
+        try {
+            com.google.common.base.Preconditions.checkState(
+                    !isRetired(), "Encoder endpoint is retired");
+            if (!prepared.observation().alive()) beginRetirement();
+            collectStatusLocked(prepared.observation(), true, changes);
+            status.publishReducedStatus(prepared);
+        } finally {
+            stateLock().unlock();
+        }
+        return new StatusChange.Encoder(changes);
     }
 
     @Override
@@ -138,29 +151,48 @@ public final class EncoderEndpoint extends WorkerEndpoint
 
     private StatusChange collectStatus(
             WorkerStatus.StatusObservation observation, boolean includeFinished) {
-        if (!getStatus().lock.isHeldByCurrentThread())
-            throw new IllegalStateException("worker lock required for status updates");
         List<RequestStatus> changes = new ArrayList<>();
-        for (var task : observation.activeTasks().values()) {
-            var tracked = requests.get(task.requestId());
-            if (tracked == null) continue;
-            requests.put(
-                    task.requestId(), new Tracked(tracked.route(), true, tracked.uncachedTokens()));
-            changes.add(new RequestStatus(tracked.route(), ContextResult.EngineKind.ACTIVE, 0));
+        stateLock().lock();
+        try {
+            collectStatusLocked(observation, includeFinished, changes);
+        } finally {
+            stateLock().unlock();
         }
-        if (includeFinished)
-            for (var task : observation.finishedTasks().values()) {
-                var tracked = requests.remove(task.requestId());
-                if (tracked != null)
+        return new StatusChange.Encoder(changes);
+    }
+
+    private void collectStatusLocked(
+            WorkerStatus.StatusObservation observation,
+            boolean includeFinished,
+            List<RequestStatus> changes) {
+        // Only locally tracked requests need reconciliation; reports may include many other tasks.
+        for (var entry : requests.entrySet()) {
+            if (!observation.activeTasks().containsKey(entry.getKey())) continue;
+            var tracked = entry.getValue();
+            if (!tracked.observed())
+                entry.setValue(new Tracked(tracked.route(), true, tracked.uncachedTokens()));
+            changes.add(
+                    new RequestStatus(
+                            tracked.route(), ContextResult.WorkerRequestEventType.ACTIVE, 0));
+        }
+        if (includeFinished) {
+            var members = requests.entrySet().iterator();
+            while (members.hasNext()) {
+                var entry = members.next();
+                var task = observation.finishedTasks().get(entry.getKey());
+                if (task != null) {
+                    var tracked = entry.getValue();
+                    members.remove();
                     changes.add(
                             new RequestStatus(
                                     tracked.route(),
                                     task.errorCode() == 0
-                                            ? ContextResult.EngineKind.COMPLETED
-                                            : ContextResult.EngineKind.FAILED,
+                                            ? ContextResult.WorkerRequestEventType.COMPLETED
+                                            : ContextResult.WorkerRequestEventType.FAILED,
                                     task.errorCode()));
+                }
             }
-        return new StatusChange.Encoder(changes);
+        }
     }
 
     @Override
@@ -178,10 +210,10 @@ public final class EncoderEndpoint extends WorkerEndpoint
         var route = status.route();
         route.ctx()
                 .data()
-                .getLifecycle()
-                .onEngineEvidence(
+                .getRequestScheduler()
+                .onWorkerRequestEvent(
                         route.ctx(),
-                        new ContextResult.EngineEvidence(
+                        new ContextResult.WorkerRequestEvent(
                                 route,
                                 null,
                                 org.flexlb.dao.route.RoleType.ENCODER,
@@ -193,23 +225,36 @@ public final class EncoderEndpoint extends WorkerEndpoint
 
     @Override
     protected void closeEndpoint() {
-        List<RequestStatus> retired;
-        var lock = getStatus().lock;
-        lock.lock();
+        Map<String, Tracked> retired;
+        stateLock().lock();
         try {
-            retired =
-                    requests.values().stream()
-                            .map(
-                                    request ->
-                                            new RequestStatus(
-                                                    request.route(),
-                                                    ContextResult.EngineKind.RETIRED,
-                                                    0))
-                            .toList();
-            requests.clear();
+            var result = requests;
+            requests = new HashMap<>();
+            retired = result;
         } finally {
-            lock.unlock();
+            stateLock().unlock();
         }
-        publishStatus(new StatusChange.Encoder(retired));
+        Throwable failure = null;
+        for (var request : retired.values()) {
+            var route = request.route();
+            failure =
+                    Failures.run(
+                            failure,
+                            () ->
+                                    route.ctx()
+                                            .data()
+                                            .getRequestScheduler()
+                                            .onEndpointRetired(
+                                                    route.ctx(),
+                                                    new ContextResult.EndpointRetirement(
+                                                            route,
+                                                            null,
+                                                            org.flexlb.dao.route.RoleType.ENCODER,
+                                                            this,
+                                                            "Encoder endpoint retired: " + ipPort(),
+                                                            System.currentTimeMillis())));
+        }
+        failure = Failures.run(failure, () -> availability.changed(this));
+        Failures.rethrow(failure, "Encoder retirement publication failed");
     }
 }

@@ -5,10 +5,10 @@ import ch.qos.logback.core.read.ListAppender;
 import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.Delivery;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -60,8 +60,8 @@ class FlexlbServiceImplTest {
 
     private final java.util.concurrent.ScheduledExecutorService deadlineTimer =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
-    private RequestLifecycle requestScheduler;
-    private final RequestLifecycle requestState = mock(RequestLifecycle.class);
+    private AbstractRequestScheduler requestScheduler;
+    private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
     private MasterStatusService masterStatusService;
     private EngineHealthReporter engineHealthReporter;
     private FlexlbGrpcForwarder grpcForwarder;
@@ -76,7 +76,7 @@ class FlexlbServiceImplTest {
     @BeforeEach
     void setUp() {
         org.flexlb.telemetry.FlexlbTrace.configure(io.opentelemetry.api.OpenTelemetry.noop(), "");
-        requestScheduler = mock(RequestLifecycle.class);
+        requestScheduler = mock(AbstractRequestScheduler.class);
         masterStatusService = mock(MasterStatusService.class);
         engineHealthReporter = mock(EngineHealthReporter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
@@ -121,7 +121,7 @@ class FlexlbServiceImplTest {
     @Test
     void vitRouteDoesNotOwnOrCancelGenerationLifecycle() {
         when(masterStatusService.isNeedConsistency()).thenReturn(false);
-        var selector = mock(org.flexlb.balance.scheduler.RequestWorkerSelector.class);
+        var selector = mock(org.flexlb.balance.scheduler.RequestRouteSelector.class);
         service.configureRouting(selector);
         var request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()

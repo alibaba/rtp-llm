@@ -44,7 +44,7 @@ public final class RunnerTestSupport {
                 config == null
                         ? org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE
                         : org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
+                order -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(16, order));
     }
 
     public static WorkerStatus discovered(

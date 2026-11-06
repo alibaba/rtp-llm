@@ -43,10 +43,10 @@ public final class RequestRepository {
         CLOSED
     }
 
-    public record TerminalRecord(RequestState state, RequestLifecycle owner) {}
+    public record TerminalRecord(RequestState state, AbstractRequestScheduler owner) {}
 
     RegistrationResult register(
-            RequestContext context, RequestLifecycle scheduler, RequestFuture response) {
+            RequestContext context, AbstractRequestScheduler scheduler, RequestFuture response) {
         java.util.Objects.requireNonNull(context);
         java.util.Objects.requireNonNull(scheduler);
         java.util.Objects.requireNonNull(response);
@@ -63,7 +63,7 @@ public final class RequestRepository {
                     if (activeRequests.containsKey(id) || terminalRecords.containsKey(id)) {
                         return RegistrationResult.DUPLICATE_ID;
                     }
-                    if (data.getLifecycle() != null || context.snapshot().key() != null) {
+                    if (data.getRequestScheduler() != null || context.snapshot().key() != null) {
                         return RegistrationResult.CONTEXT_BOUND;
                     }
                     if (data.getPhase() == RequestPhase.GENERATION
@@ -107,14 +107,14 @@ public final class RequestRepository {
         return terminalByPhase.get(phase).get(requestId);
     }
 
-    public RequestLifecycle ownerOf(String requestId) {
+    public AbstractRequestScheduler ownerOf(String requestId) {
         return ownerOf(requestId, RequestPhase.GENERATION);
     }
 
-    public RequestLifecycle ownerOf(String requestId, RequestPhase phase) {
+    public AbstractRequestScheduler ownerOf(String requestId, RequestPhase phase) {
         RequestContext context = findActive(requestId, phase);
         if (context != null) {
-            return context.data().getLifecycle();
+            return context.data().getRequestScheduler();
         }
         TerminalRecord terminal = findTerminal(requestId, phase);
         return terminal == null ? null : terminal.owner();
@@ -166,7 +166,8 @@ public final class RequestRepository {
                 response.get(remaining, java.util.concurrent.TimeUnit.NANOSECONDS);
             } catch (java.util.concurrent.ExecutionException
                     | java.util.concurrent.CancellationException completed) {
-                // A failed or cancelled response is finished; lifecycle still owns settlement.
+                // A failed or cancelled response is finished; the scheduler still owns request
+                // cleanup.
             } catch (java.util.concurrent.TimeoutException timeout) {
                 return false;
             } catch (InterruptedException interrupted) {
@@ -195,7 +196,7 @@ public final class RequestRepository {
                     .get(exact.data().getPhase())
                     .put(
                             exact.data().getRequestId(),
-                            new TerminalRecord(terminal, exact.data().getLifecycle()));
+                            new TerminalRecord(terminal, exact.data().getRequestScheduler()));
             activeByPhase.get(exact.data().getPhase()).remove(exact.data().getRequestId(), exact);
             exact.data().releaseSchedulingInput();
         }

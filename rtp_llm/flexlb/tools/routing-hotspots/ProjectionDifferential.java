@@ -1,6 +1,6 @@
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
 
@@ -96,7 +96,7 @@ public class ProjectionDifferential {
                             List.of(),
                             0);
             var queue =
-                    new QueueSnapshot(
+                    new ProjectionQueueSnapshot(
                             1000,
                             true,
                             org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,

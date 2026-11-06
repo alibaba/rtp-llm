@@ -6,7 +6,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.cache.match.CacheAwareService;
@@ -91,7 +91,7 @@ class PrefillSelectionContractTest {
     void policyReturnsObservedAdmissionBlockWithoutCallerInterpretation() {
         var endpoint = publish(registry, RoleType.PREFILL);
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         1000L,
                         true,
                         BuiltinGroupPlanner.SINGLE,
@@ -106,12 +106,12 @@ class PrefillSelectionContractTest {
                                         Long.MAX_VALUE,
                                         10L,
                                         0L)),
-                        new QueueSnapshot.AdmissionBlock(
+                        new ProjectionQueueSnapshot.AdmissionBlock(
                                 String.valueOf(1L),
                                 1L,
                                 new RequestTimeEstimation.AdmissionBlockSemantics(
                                         "PREFILL_CAPACITY",
-                                        RequestTimeEstimation.AfterProbeAdmission.BLOCKED,
+                                        RequestTimeEstimation.State.BLOCKED,
                                         "PREFILL_CAPACITY")));
         var input = mock(PrefillSelectionStrategy.CandidateInput.class);
         when(input.requestCapacityAvailable()).thenReturn(true);
@@ -160,7 +160,7 @@ class PrefillSelectionContractTest {
         var endpoint = publish(registry, RoleType.PREFILL);
         var clock = new AtomicLong(1000L);
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         1000L,
                         true,
                         BuiltinGroupPlanner.SINGLE,
@@ -353,7 +353,8 @@ class PrefillSelectionContractTest {
         when(cache.findMatchingEngines(any()))
                 .thenReturn(localMatches(Map.of(endpoint.ipPort(), prefix)));
 
-        try (var route = StrategyTestSupport.scope(request)) {
+        {
+            var route = StrategyTestSupport.scope(request);
             var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
             assertEquals(PlacementResult.Status.SUCCESS, result.status());
             assertEquals(effectiveHit, route.prefill().getDebugInfo().getHitCacheLen());
@@ -371,7 +372,8 @@ class PrefillSelectionContractTest {
         request = request.toBuilder().cacheKeyBlockSize(100L).build();
         when(cache.findMatchingEngines(any()))
                 .thenReturn(localMatches(nullResults ? null : Map.of()));
-        try (var route = StrategyTestSupport.scope(request)) {
+        {
+            var route = StrategyTestSupport.scope(request);
             var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
             assertEquals(PlacementResult.Status.SUCCESS, result.status());
             assertEquals(0L, route.prefill().getDebugInfo().getHitCacheLen());
@@ -392,7 +394,8 @@ class PrefillSelectionContractTest {
             ReflectionTestUtils.setField(endpoint, "predictor", null);
         }
         long started = System.currentTimeMillis();
-        try (var route = StrategyTestSupport.scope(request)) {
+        {
+            var route = StrategyTestSupport.scope(request);
             var result = strategy.select(request, metadata, role, "g", route);
             assertEquals(PlacementResult.Status.BLOCKED, result.status());
             assertEquals(new PlacementKey(role, "g", null), result.blocker());
@@ -444,37 +447,40 @@ class PrefillSelectionContractTest {
                                 unknown))
                 .when(ownership)
                 .admissionSummary(metadata.priority(), endpoint.requestLimit);
-        var pin = endpoint.tryPinGeneration();
+        var selectedEndpoint = endpoint;
         var directory = spy(registry);
         var address = endpoint.ipPort();
         doReturn(List.of(new EndpointRegistry.PrefillRoutingEntry(address, endpoint)))
                 .when(directory)
                 .prefillRoutingSnapshot(RoleType.PREFILL);
-        doReturn(pin).when(directory).capture(RoleType.PREFILL, address);
+        doReturn(selectedEndpoint).when(directory).selectEndpoint(RoleType.PREFILL, address);
         strategy = strategy(directory);
-        try (pin;
-                var route = StrategyTestSupport.scope(request)) {
-            var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
-            assertEquals(PlacementResult.Status.BLOCKED, result.status());
-            assertEquals(error.getErrorCode(), result.failure().getCode());
-            assertEquals(reason, result.failure().getAdmissionRejectReason());
-            assertEquals(
-                    PlacementKey.exact(RoleType.PREFILL, "g", endpoint.ipPort()), result.blocker());
-            assertEquals(1, result.diagnostics().get("workers"));
-            assertEquals(
-                    Map.of(
-                            "reason",
-                            "PREFILL_CAPACITY",
-                            "selectedEndpoint",
-                            endpoint.ipPort(),
-                            "cacheHitTokens",
-                            0L,
-                            "affinityReason",
-                            ""),
-                    result.diagnostics().get("details"));
-            verify(directory, org.mockito.Mockito.never()).capture(any(), any());
-            assertTrue(pin.isOpen());
-            assertNull(route.prefill());
+        {
+            {
+                var route = StrategyTestSupport.scope(request);
+                var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
+                assertEquals(PlacementResult.Status.BLOCKED, result.status());
+                assertEquals(error.getErrorCode(), result.failure().getCode());
+                assertEquals(reason, result.failure().getAdmissionRejectReason());
+                assertEquals(
+                        PlacementKey.exact(RoleType.PREFILL, "g", endpoint.ipPort()),
+                        result.blocker());
+                assertEquals(1, result.diagnostics().get("workers"));
+                assertEquals(
+                        Map.of(
+                                "reason",
+                                "PREFILL_CAPACITY",
+                                "selectedEndpoint",
+                                endpoint.ipPort(),
+                                "cacheHitTokens",
+                                0L,
+                                "affinityReason",
+                                ""),
+                        result.diagnostics().get("details"));
+                verify(directory, org.mockito.Mockito.never()).selectEndpoint(any(), any());
+                assertTrue(!selectedEndpoint.isRetired());
+                assertNull(route.prefill());
+            }
         }
     }
 
@@ -486,23 +492,27 @@ class PrefillSelectionContractTest {
             var replacement = publish(replacementRegistry, RoleType.PREFILL);
             assertEquals(original.ipPort(), replacement.ipPort());
             assertNotSame(original, replacement);
-            var pin = replacement.tryPinGeneration();
+            var selectedEndpoint = replacement;
             var directory = spy(registry);
-            doReturn(pin).when(directory).capture(RoleType.PREFILL, original.ipPort());
+            doReturn(selectedEndpoint)
+                    .when(directory)
+                    .selectEndpoint(RoleType.PREFILL, original.ipPort());
             strategy = strategy(directory);
-            try (pin;
-                    var route = StrategyTestSupport.scope(request)) {
-                var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
-                assertEquals(PlacementResult.Status.ENDPOINT_CHANGED, result.status());
-                assertEquals(PlacementResult.Status.SUCCESS, result.selection().status());
-                assertEquals(
-                        original.getStatus().getGenerationId(),
-                        ((PrefillSelectionStrategy.Selection<?>) result.selection().value())
-                                .generationId());
-                assertEquals(new PlacementKey(RoleType.PREFILL, "g", null), result.blocker());
-                assertNull(result.failure());
-                assertNull(route.prefill());
-                assertFalse(pin.isOpen());
+            {
+                {
+                    var route = StrategyTestSupport.scope(request);
+                    var result = strategy.select(request, metadata, RoleType.PREFILL, "g", route);
+                    assertEquals(PlacementResult.Status.ENDPOINT_CHANGED, result.status());
+                    assertEquals(PlacementResult.Status.SUCCESS, result.selection().status());
+                    assertEquals(
+                            original.getStatus().getGenerationId(),
+                            ((PrefillSelectionStrategy.Selection<?>) result.selection().value())
+                                    .generationId());
+                    assertEquals(new PlacementKey(RoleType.PREFILL, "g", null), result.blocker());
+                    assertNull(result.failure());
+                    assertNull(route.prefill());
+                    assertFalse(selectedEndpoint.isRetired());
+                }
             }
         } finally {
             replacementRegistry.close();

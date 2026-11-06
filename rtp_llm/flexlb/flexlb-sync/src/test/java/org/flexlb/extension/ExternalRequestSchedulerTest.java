@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.Delivery;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
@@ -17,13 +18,11 @@ import org.flexlb.balance.scheduler.PlacementConfiguration;
 import org.flexlb.balance.scheduler.PlacementQueue;
 import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRepository;
-import org.flexlb.balance.scheduler.RequestRoute;
-import org.flexlb.balance.scheduler.RequestScheduler;
+import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.scheduler.RequestTaskPool;
-import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.balance.scheduler.ScheduledTaskTimer;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigTestSupport;
@@ -67,14 +66,15 @@ class ExternalRequestSchedulerTest {
         try (var fixture = new Fixture(true, separateDecode)) {
             var first = fixture.request(98103L);
             var second = fixture.request(98104L);
-            var firstResponse = fixture.entry.submit(first);
-            var secondResponse = fixture.entry.submit(second);
+            var firstResponse = fixture.scheduler.submit(first);
+            var secondResponse = fixture.scheduler.submit(second);
             fixture.scheduler.schedule();
             fixture.scheduler.schedule();
             assertFalse(firstResponse.isDone());
             assertFalse(secondResponse.isDone());
             var selected = fixture.endpoint.captureQueue(2).items();
-            assertEquals(List.of(first, second), selected.stream().map(RequestRoute::ctx).toList());
+            assertEquals(
+                    List.of(first, second), selected.stream().map(RouteExecution::ctx).toList());
             assertNull(
                     fixture.dispatcher.submit(
                             new Delivery(
@@ -112,7 +112,7 @@ class ExternalRequestSchedulerTest {
     void extensionChoosesWhenToDispatchAndUsesTheSharedResourceTransaction() throws Exception {
         try (var fixture = new Fixture()) {
             var request = fixture.request(98101L);
-            var response = fixture.entry.submit(request);
+            var response = fixture.scheduler.submit(request);
             assertFalse(response.isDone());
             assertEquals(0, fixture.endpoint.stats().locallyOwnedRequests());
             verifyNoInteractions(fixture.selector);
@@ -127,8 +127,8 @@ class ExternalRequestSchedulerTest {
     void cancellationRemovesPendingWorkBeforeTheExtensionRuns() throws Exception {
         try (var fixture = new Fixture()) {
             var request = fixture.request(98102L);
-            var response = fixture.entry.submit(request);
-            fixture.entry.cancel("98102", 0L, CancelReason.CLIENT_CANCELLED);
+            var response = fixture.scheduler.submit(request);
+            fixture.scheduler.cancel("98102", 0L, CancelReason.CLIENT_CANCELLED);
             fixture.scheduler.schedule();
             assertFalse(response.get(2, TimeUnit.SECONDS).isSuccess());
             verifyNoInteractions(fixture.selector);
@@ -136,21 +136,23 @@ class ExternalRequestSchedulerTest {
         }
     }
 
-    private static final class ManualScheduler implements RequestScheduler {
+    private static final class ManualScheduler extends AbstractRequestScheduler {
         private final PlacementQueue queue = new OrderedRequestQueue(false);
-        private final RequestLifecycle lifecycle;
-        private final RequestWorkerSelector selector;
-        private final DeliveryDispatcher dispatcher;
+        private final RequestRouteSelector selector;
         private final QueueExecutionSettings queued;
 
         ManualScheduler(
-                RequestLifecycle lifecycle,
-                RequestWorkerSelector selector,
+                RequestRepository requests,
+                RequestTaskPool tasks,
+                ExpirationTimer expiration,
                 DeliveryDispatcher dispatcher,
+                ResponseCompletionExecutor responses,
+                DeliveryMetricsReporter reporter,
+                TheoryCacheHitReporter trace,
+                RequestRouteSelector selector,
                 QueueExecutionSettings queued) {
-            this.lifecycle = lifecycle;
+            super(requests, tasks, expiration, dispatcher, responses, reporter, trace);
             this.selector = selector;
-            this.dispatcher = dispatcher;
             this.queued = queued;
         }
 
@@ -172,7 +174,7 @@ class ExternalRequestSchedulerTest {
             queue.add(new GlobalQueueEntry(context, null));
         }
 
-        public synchronized void onRequestChanged(RequestContext context) {
+        public synchronized void removeRequest(RequestContext context) {
             for (var entry : queue.drain()) if (entry.context() != context) queue.restore(entry);
         }
 
@@ -180,35 +182,36 @@ class ExternalRequestSchedulerTest {
             for (var entry : queue.scanForPlanningCandidates(1, 1, candidate -> true)) {
                 queue.remove(entry);
                 var context = entry.context();
-                var admission =
-                        lifecycle.claimAdmissionHandle(
-                                context.data().getRequestId(), context.data().getFuture());
+                var admission = claimPlacement(context);
                 if (admission == null) continue;
                 try {
-                    var selection = selector.select(context, entry.routingGroup());
+                    var selection =
+                            prepareSelectedRoute(
+                                    context, selector.select(context, entry.routingGroup()));
                     assertEquals(PlacementResult.Status.SUCCESS, selection.status());
                     if (queued != null) {
-                        try (var route = selection.value()) {
+                        {
+                            var route = selection.value();
                             try {
                                 assertEquals(
                                         PlacementResult.Status.SUCCESS,
-                                        dispatcher.enqueueRoute(route, queued).status());
+                                        publishPlacement(route, admission, queued).status());
                             } finally {
                                 org.flexlb.util.Failures.rethrow(
-                                        DeliveryDispatcher.finishPlacement(route, admission),
+                                        AbstractRequestScheduler.finishPlacement(route, admission),
                                         "placement cleanup failed");
                             }
                         }
                         continue;
                     }
-                    var committed = dispatcher.submitRoute(selection.value(), admission);
+                    var committed = publishPlacement(selection.value(), admission, null);
                     assertEquals(PlacementResult.Status.SUCCESS, committed.status());
                     assertEquals(
                             null,
                             context.snapshot().placement(),
                             "the complete submission must finish admission before returning");
                 } finally {
-                    admission.finish();
+                    AbstractRequestScheduler.finishPlacement(admission);
                 }
             }
         }
@@ -223,12 +226,10 @@ class ExternalRequestSchedulerTest {
         final ExpirationTimer expiration = assembly.expirationTimer(requests, deadlineTimer);
         final ScheduledTaskTimer timer = assembly.taskTimer();
         final ResponseCompletionExecutor responses;
-        final RequestLifecycle lifecycle;
-        final RequestWorkerSelector selector = mock(RequestWorkerSelector.class);
+        final RequestRouteSelector selector = mock(RequestRouteSelector.class);
         final PrefillEndpoint endpoint;
         final DecodeEndpoint decode;
         final ManualScheduler scheduler;
-        final RequestLifecycle entry;
         final DeliveryDispatcher dispatcher;
         final DeliveryExecution deliveries;
 
@@ -280,26 +281,20 @@ class ExternalRequestSchedulerTest {
                                     .decodeAdmissionCapacity(service),
                             deliveries);
             responses = assembly.responseCompletions(service);
-            lifecycle =
-                    assembly.requestLifecycle(
+            scheduler =
+                    new ManualScheduler(
                             requests,
                             tasks,
                             expiration,
                             dispatcher,
                             responses,
                             reporter,
-                            mock(TheoryCacheHitReporter.class));
-            scheduler =
-                    new ManualScheduler(
-                            lifecycle,
+                            mock(TheoryCacheHitReporter.class),
                             selector,
-                            dispatcher,
                             batch
                                     ? QueueExecutionSettings.capture(
                                             config, BuiltinGroupPlanner.from(config))
                                     : null);
-            lifecycle.bindScheduler(scheduler);
-            entry = lifecycle;
             endpoint =
                     EndpointTestSupport.realPrefill(
                             WorkerStatus.createDiscovered(
@@ -329,7 +324,7 @@ class ExternalRequestSchedulerTest {
                     .thenAnswer(
                             call -> {
                                 RequestContext context = call.getArgument(0);
-                                return SchedulingTestConfig.prepareRoute(
+                                return SchedulingTestConfig.selectRoute(
                                         context,
                                         route -> {
                                             var metadata = new ServerStatus();
@@ -339,8 +334,7 @@ class ExternalRequestSchedulerTest {
                                             metadata.setServerIp(endpoint.getIp());
                                             metadata.setHttpPort(endpoint.getHttpPort());
                                             metadata.setGrpcPort(endpoint.getGrpcPort());
-                                            route.add(
-                                                    endpoint.tryPinGeneration(), metadata, 1L, 0L);
+                                            route.add(endpoint, metadata, 1L, 0L);
                                             if (decode != null) {
                                                 var decodeMetadata = ServerStatus.copyOf(metadata);
                                                 decodeMetadata.setRole(RoleType.DECODE);
@@ -348,7 +342,7 @@ class ExternalRequestSchedulerTest {
                                                 decodeMetadata.setHttpPort(decode.getHttpPort());
                                                 decodeMetadata.setGrpcPort(decode.getGrpcPort());
                                                 route.add(
-                                                        decode.tryPinGeneration(),
+                                                        decode,
                                                         decodeMetadata,
                                                         0L,
                                                         decode.placementVersion());
@@ -380,8 +374,8 @@ class ExternalRequestSchedulerTest {
         public void close() {
             scheduler.close();
             requests.closeRegistration();
-            lifecycle.stopAdmissionsAndAwaitCompletion();
-            lifecycle.closeOutstandingAndTerminalize();
+            scheduler.stopAdmissionsAndAwaitCompletion();
+            scheduler.closeOutstandingAndTerminalize();
             deliveries.awaitDeliveries();
             tasks.awaitIdle();
             expiration.close();

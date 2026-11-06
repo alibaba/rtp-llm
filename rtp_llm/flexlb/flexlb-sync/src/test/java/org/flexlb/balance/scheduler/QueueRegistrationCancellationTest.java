@@ -186,7 +186,7 @@ class QueueRegistrationCancellationTest {
                                     () -> {
                                         assertSame(
                                                 SchedulerTestServices.lifecycle(f.queue),
-                                                context.data().getLifecycle());
+                                                context.data().getRequestScheduler());
                                         assertNotNull(context.data().getFuture());
                                         assertEquals(
                                                 0, RequestProtocolTestSupport.queuedCount(f.queue));
@@ -210,7 +210,7 @@ class QueueRegistrationCancellationTest {
                                     () -> {
                                         assertSame(
                                                 SchedulerTestServices.lifecycle(f.queue),
-                                                context.data().getLifecycle());
+                                                context.data().getRequestScheduler());
                                         assertNotNull(
                                                 SchedulerTestServices.lifecycle(f.queue)
                                                         .cancel(
@@ -290,7 +290,7 @@ class QueueRegistrationCancellationTest {
 
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
+        final RequestRouteSelector router = mock(RequestRouteSelector.class);
         final SchedulerTestServices runtime;
         final QueuedRequestScheduler queue;
 
@@ -318,7 +318,7 @@ class QueueRegistrationCancellationTest {
                             mock(EngineGrpcClient.class));
             queue =
                     (QueuedRequestScheduler)
-                            PlacementConfiguration.create(
+                            SchedulerTestServices.create(
                                     runtime.newLifecycle(
                                             config,
                                             SchedulingTestConfig.capacity(config),

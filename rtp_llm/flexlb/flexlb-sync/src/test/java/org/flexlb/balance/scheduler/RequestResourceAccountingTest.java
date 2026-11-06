@@ -46,7 +46,9 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Resource assertions use real endpoint ledgers, not invocations of mocked release methods. */
+/**
+ * Resource assertions use real endpoint ledgers, not invocations of mocked release methods.
+ */
 class RequestResourceAccountingTest {
     private static final long ID = 101L;
     private static final long HARD_KV = 160L;
@@ -59,7 +61,7 @@ class RequestResourceAccountingTest {
         try (Fixture owner = new Fixture();
                 Fixture other = new Fixture()) {
             var permit =
-                    other.decode.acquireDispatchPermit(other.reservation, other.capacity).handle();
+                    other.decode.acquireDispatchPermit(other.reservation, other.capacity).value();
             assertNotNull(permit);
             try {
                 assertThrows(
@@ -89,7 +91,7 @@ class RequestResourceAccountingTest {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), ID);
         var prefill = mock(PrefillEndpoint.class);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
-        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(ID), 1L);
+        var reservation = new DecodeResources.RequestReservation(1L, String.valueOf(ID), 1L);
         var item =
                 SchedulingTestConfig.createRoute(
                         context,
@@ -108,7 +110,8 @@ class RequestResourceAccountingTest {
         when(prefill.releaseRequest(item)).thenThrow(releaseFailure);
         RequestProtocolTestSupport.closing(item);
         var firstFailure =
-                RequestLifecycle.releaseResources(context, DecodeResources.ReleaseReason.NOT_SENT);
+                AbstractRequestScheduler.releaseRouteResources(
+                        item, DecodeResources.ReleaseReason.NOT_SENT);
         assertFalse(context.snapshot().close().prefillSettled());
         assertTrue(context.snapshot().close().decodeSettled());
         assertSame(releaseFailure, firstFailure);
@@ -117,7 +120,8 @@ class RequestResourceAccountingTest {
 
         org.mockito.Mockito.doReturn(true).when(prefill).releaseRequest(item);
         assertNull(
-                RequestLifecycle.releaseResources(context, DecodeResources.ReleaseReason.NOT_SENT));
+                AbstractRequestScheduler.releaseRouteResources(
+                        item, DecodeResources.ReleaseReason.NOT_SENT));
         assertTrue(context.snapshot().close().prefillSettled());
         assertTrue(context.snapshot().close().decodeSettled());
         org.mockito.Mockito.verify(decode, org.mockito.Mockito.times(1))
@@ -183,7 +187,7 @@ class RequestResourceAccountingTest {
             }
             assertFalse(f.item.ctx().data().getFuture().isDone());
             f.assertReserved();
-            f.admission.finish();
+            AbstractRequestScheduler.finishPlacement(f.admission);
             f.assertEmpty();
             f.assertCapacityReusable();
         }
@@ -218,7 +222,7 @@ class RequestResourceAccountingTest {
             claim.route()
                     .ctx()
                     .data()
-                    .getLifecycle()
+                    .getRequestScheduler()
                     .onDeliveryResult(
                             new ContextResult.TransportResult(
                                     claim,
@@ -253,7 +257,7 @@ class RequestResourceAccountingTest {
             assertEquals(
                     DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                     acquisition.status());
-            try (var member = new Delivery.Member(f.item, acquisition.handle())) {
+            try (var member = new Delivery.Member(f.item, acquisition.value())) {
                 var claim =
                         DeliveryDispatcher.commitDelivery(
                                 f.requests,
@@ -325,7 +329,7 @@ class RequestResourceAccountingTest {
                     acquisition.status());
             assertEquals(
                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                    acquisition.handle().dispatch().status());
+                    acquisition.value().dispatch().status());
             // Endpoint ownership can advance before its notification reaches the context.
             f.requests.cancel(String.valueOf(ID), 0, CancelReason.CLIENT_CANCELLED);
             SchedulerTestSupport.awaitRequestWork(
@@ -349,7 +353,7 @@ class RequestResourceAccountingTest {
             claim.route()
                     .ctx()
                     .data()
-                    .getLifecycle()
+                    .getRequestScheduler()
                     .onDeliveryResult(
                             new ContextResult.TransportResult(
                                     claim,
@@ -378,7 +382,7 @@ class RequestResourceAccountingTest {
             claim.route()
                     .ctx()
                     .data()
-                    .getLifecycle()
+                    .getRequestScheduler()
                     .onDeliveryResult(
                             new ContextResult.TransportResult(
                                     claim,
@@ -496,7 +500,7 @@ class RequestResourceAccountingTest {
             oldClaim.route()
                     .ctx()
                     .data()
-                    .getLifecycle()
+                    .getRequestScheduler()
                     .onDeliveryResult(
                             new ContextResult.TransportResult(
                                     oldClaim,
@@ -504,24 +508,25 @@ class RequestResourceAccountingTest {
                                     System.currentTimeMillis()));
             f.proveCleanup();
             f.assertEmpty();
-            var replacementRef = new AtomicReference<DecodeResources.ReservationHandle>();
+            var replacementRef = new AtomicReference<DecodeResources.RequestReservation>();
             RequestProtocolTestSupport.awaitCondition(
                     () -> {
                         if (replacementRef.get() != null) {
                             return true;
                         }
                         f.decode.evictExpiredRequests(0, ignored -> false);
-                        try (var pin = f.decode.tryPinGeneration()) {
+                        {
+                            var selectedEndpoint = f.decode;
+
                             replacementRef.set(
                                     f.decode
                                             .tryReserveQueuedRequest(
-                                                    pin,
                                                     String.valueOf(ID),
                                                     HARD_KV * 2,
                                                     EXPECTED_KV * 2,
                                                     50,
                                                     null)
-                                            .handle());
+                                            .value());
                         }
                         return replacementRef.get() != null;
                     });
@@ -571,15 +576,15 @@ class RequestResourceAccountingTest {
     }
 
     private static final class Fixture implements AutoCloseable {
-        final RequestLifecycle requests;
+        final AbstractRequestScheduler requests;
         final SchedulerTestServices runtime;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
-        final RequestRoute item;
-        final DecodeResources.ReservationHandle reservation;
-        final PrefillEndpoint.RouteReservation routeReservation;
+        final RouteExecution item;
+        final DecodeResources.RequestReservation reservation;
+        final PrefillEndpoint.RequestRecord routeReservation;
         final org.flexlb.balance.scheduler.Delivery prefillHandoff;
-        final AdmissionHandle admission;
+        final PlacementOperation admission;
         final DecodeResources.AdmissionCapacity capacity =
                 new DecodeResources.AdmissionCapacity(1, 90);
         long version = 1;
@@ -619,7 +624,7 @@ class RequestResourceAccountingTest {
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                     service.loadBalanceConfig()),
                             order ->
-                                    org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
+                                    org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
                                             16, order));
             runtime = org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(requests);
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
@@ -654,15 +659,17 @@ class RequestResourceAccountingTest {
                                     RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"),
                             SchedulerTestSupport.repository(projector));
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
-            try (var pin = decode.tryPinGeneration()) {
+            {
+                var selectedEndpoint = decode;
+
                 reservation =
                         decode.tryReserveQueuedRequest(
-                                        pin, String.valueOf(ID), HARD_KV, EXPECTED_KV, 50, null)
-                                .handle();
+                                        String.valueOf(ID), HARD_KV, EXPECTED_KV, 50, null)
+                                .value();
             }
             assertNotNull(reservation);
             var context = RequestProtocolTestSupport.context(config, ID);
-            var future = RequestProtocolTestSupport.register(requests, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(requests, context);
             context.data().setFuture(future);
             item =
                     SchedulingTestConfig.createRoute(
@@ -674,10 +681,12 @@ class RequestResourceAccountingTest {
                             decode,
                             reservation,
                             System.currentTimeMillis());
-            var held = new AtomicReference<PrefillEndpoint.RouteReservation>();
-            admission = requests.claimAdmissionHandle(String.valueOf(ID), future);
+            var held = new AtomicReference<PrefillEndpoint.RequestRecord>();
+            admission = SchedulerTestSupport.claim(requests, String.valueOf(ID), future);
             assertNotNull(admission);
-            try (var pin = prefill.tryPinGeneration()) {
+            {
+                var selectedEndpoint = prefill;
+
                 assertTrue(
                         (RequestProtocolTestSupport.commitRoute(
                                         requests,
@@ -686,7 +695,7 @@ class RequestResourceAccountingTest {
                                                 () -> {
                                                     var result =
                                                             prefill.reserveUnqueuedRoute(
-                                                                    pin, item, 30_000);
+                                                                    item, 30_000);
                                                     assertTrue(result.accepted());
                                                     held.set(result.value());
                                                     return true;
@@ -699,7 +708,7 @@ class RequestResourceAccountingTest {
                             prefill, item, routeReservation);
             assertNotNull(prefillHandoff);
             if (!keepAdmissionOpen) {
-                admission.finish();
+                AbstractRequestScheduler.finishPlacement(admission);
             }
         }
 
@@ -708,7 +717,7 @@ class RequestResourceAccountingTest {
             assertEquals(
                     DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                     acquisition.status());
-            var member = new Delivery.Member(item, acquisition.handle());
+            var member = new Delivery.Member(item, acquisition.value());
             try {
                 var claim =
                         DeliveryDispatcher.commitDelivery(
@@ -718,7 +727,7 @@ class RequestResourceAccountingTest {
                                 Delivery.SendMode.BATCH_ENQUEUE,
                                 1L);
                 assertNotNull(claim);
-                assertTrue(claim.route().ctx().data().getLifecycle().tryStartSend(claim));
+                assertTrue(claim.route().ctx().data().getRequestScheduler().tryStartSend(claim));
                 return claim;
             } finally {
                 member.close();
@@ -775,17 +784,19 @@ class RequestResourceAccountingTest {
         }
 
         void assertCapacityReusable() {
-            try (var pin = decode.tryPinGeneration()) {
+            {
+                var selectedEndpoint = decode;
+
                 var next =
                         decode.tryReserveQueuedRequest(
-                                        pin, String.valueOf(999L), HARD_KV, EXPECTED_KV, 50, null)
-                                .handle();
+                                        String.valueOf(999L), HARD_KV, EXPECTED_KV, 50, null)
+                                .value();
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(
                         DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                         permit.status());
-                assertTrue(permit.handle().release());
+                assertTrue(permit.value().release());
                 decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
             }
             // A second exact request must be able to use the sole Prefill slot too.
@@ -802,8 +813,10 @@ class RequestResourceAccountingTest {
                             null,
                             null,
                             System.currentTimeMillis());
-            try (var pin = prefill.tryPinGeneration()) {
-                var result = prefill.reserveUnqueuedRoute(pin, next, 1);
+            {
+                var selectedEndpoint = prefill;
+
+                var result = prefill.reserveUnqueuedRoute(next, 1);
                 assertTrue(result.accepted());
                 prefill.rollback(result.value());
             }
@@ -838,7 +851,7 @@ class RequestResourceAccountingTest {
         @Override
         public void close() {
             try {
-                admission.finish();
+                AbstractRequestScheduler.finishPlacement(admission);
                 prefillHandoff.close();
                 prefill.rollback(routeReservation);
                 SchedulerTestSupport.shutdown(runtime);

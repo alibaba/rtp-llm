@@ -342,7 +342,7 @@ class SchedulingErrorCodeMatrixTest {
 
     private static final class Fixture implements AutoCloseable {
         final AutoTpmE2EHarness harness;
-        final org.flexlb.balance.scheduler.RequestLifecycle service;
+        final org.flexlb.balance.scheduler.AbstractRequestScheduler service;
 
         Fixture(String mode) {
             this(mode, 100);
@@ -393,10 +393,12 @@ class SchedulingErrorCodeMatrixTest {
 
         void reserveDecode(int priority) {
             var endpoint = harness.decodeEndpoint(0);
-            try (var pin = endpoint.tryPinGeneration()) {
+            {
+                var selectedEndpoint = endpoint;
+
                 assertNotNull(
                         SchedulerTestSupport.reserveUnqueuedDecode(
-                                endpoint, pin, REQUEST_ID - 1, 0L, 0L, priority));
+                                endpoint, selectedEndpoint, REQUEST_ID - 1, 0L, 0L, priority));
             }
         }
 

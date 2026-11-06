@@ -50,18 +50,14 @@ class SchedulerTestServicesTest {
                         service,
                         mock(EngineGrpcClient.class));
         var scheduler = mock(AbstractRequestScheduler.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                scheduler, "lifecycle", mock(RequestLifecycle.class));
         var pending = RequestProtocolTestSupport.context(config, 88001L);
         var owner =
                 runtime.newLifecycle(
                         config,
                         SchedulingTestConfig.capacity(config),
                         mock(TheoryCacheHitReporter.class));
-        owner.bindScheduler(scheduler);
-        org.springframework.test.util.ReflectionTestUtils.setField(scheduler, "lifecycle", owner);
-        owner.register(
-                pending, () -> {}, org.flexlb.dao.loadbalance.StrategyErrorType.RESOURCE_EXHAUSTED);
+        scheduler = spy(owner);
+        scheduler.submit(pending, () -> {});
         runtime.registerScheduler(scheduler);
 
         ShutdownResult result = runtime.shutdown(ShutdownMode.DRAIN, Duration.ZERO);
@@ -147,12 +143,12 @@ class SchedulerTestServicesTest {
     @org.junit.jupiter.api.Timeout(15)
     void externalFutureCancellationRemainsSynchronousAndItsSourceBlocksWorkClose()
             throws Exception {
-        try (var f = new Fixture(false)) {
+        try (var f = new Fixture(false, false)) {
             var scheduler =
                     SchedulerTestSupport.lifecycle(
                             SchedulerTestSupport.initializedScheduler(f.runtime));
             var context = RequestProtocolTestSupport.context(f.config, 9103L);
-            var result = RequestProtocolTestSupport.register(scheduler, context);
+            var result = RequestProtocolTestSupport.submitForManualPlacement(scheduler, context);
             var entered = new java.util.concurrent.CountDownLatch(1);
             var release = new java.util.concurrent.CountDownLatch(1);
             var cancelled = new java.util.concurrent.CompletableFuture<Boolean>();
@@ -286,8 +282,6 @@ class SchedulerTestServicesTest {
                                 service,
                                 mock(EngineGrpcClient.class)));
         var scheduler = mock(AbstractRequestScheduler.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                scheduler, "lifecycle", mock(RequestLifecycle.class));
         var expected = new IllegalStateException("placement close failed");
         doThrow(expected).when(scheduler).close();
         var deliveries = spy(runtime.deliveries());
@@ -322,7 +316,7 @@ class SchedulerTestServicesTest {
                     SchedulerTestSupport.lifecycle(
                             SchedulerTestSupport.initializedScheduler(f.runtime));
             var accepted = RequestProtocolTestSupport.context(f.config, 9101L);
-            var result = RequestProtocolTestSupport.register(scheduler, accepted);
+            var result = RequestProtocolTestSupport.submitForManualPlacement(scheduler, accepted);
             assertFalse(result.isDone());
 
             f.runtime.requests().stopAccepting();
@@ -331,9 +325,10 @@ class SchedulerTestServicesTest {
             assertFalse(f.runtime.requests().isClosed());
             assertSame(accepted, f.runtime.requests().findActive(accepted.data().getRequestId()));
             var rejected = RequestProtocolTestSupport.context(f.config, 9102L);
-            var rejectedResult = RequestProtocolTestSupport.register(scheduler, rejected);
+            var rejectedResult =
+                    RequestProtocolTestSupport.submitForManualPlacement(scheduler, rejected);
             assertFalse(rejectedResult.join().isSuccess());
-            assertNull(rejected.data().getLifecycle());
+            assertNull(rejected.data().getRequestScheduler());
 
             var continued = new java.util.concurrent.CompletableFuture<Void>();
             f.runtime.tasks().execute(accepted, () -> continued.complete(null));
@@ -365,17 +360,17 @@ class SchedulerTestServicesTest {
                     SchedulerTestSupport.lifecycle(
                             SchedulerTestSupport.initializedScheduler(f.runtime));
             var other =
-                    new DirectRequestScheduler(
-                            mock(RequestWorkerSelector.class),
+                    SchedulerTestServices.direct(
+                            mock(RequestRouteSelector.class),
                             f.runtime.newLifecycle(
                                     f.config,
                                     SchedulingTestConfig.capacity(f.config),
                                     mock(TheoryCacheHitReporter.class)));
             var installedResult =
-                    RequestProtocolTestSupport.register(
+                    RequestProtocolTestSupport.submitForManualPlacement(
                             installed, RequestProtocolTestSupport.context(f.config, 9103L));
             var otherResult =
-                    RequestProtocolTestSupport.register(
+                    RequestProtocolTestSupport.submitForManualPlacement(
                             other, RequestProtocolTestSupport.context(f.config, 9104L));
 
             f.runtime.shutdown(ShutdownMode.IMMEDIATE, java.time.Duration.ZERO);
@@ -394,17 +389,18 @@ class SchedulerTestServicesTest {
                             SchedulerTestSupport.initializedScheduler(f.runtime));
             var other =
                     spy(
-                            new DirectRequestScheduler(
-                                    mock(RequestWorkerSelector.class),
+                            SchedulerTestServices.direct(
+                                    mock(RequestRouteSelector.class),
                                     f.runtime.newLifecycle(
                                             f.config,
                                             SchedulingTestConfig.capacity(f.config),
                                             mock(TheoryCacheHitReporter.class))));
             var lifecycle = SchedulerTestSupport.spyLifecycle(other);
             var otherContext = RequestProtocolTestSupport.context(f.config, 9105L);
-            var otherResult = RequestProtocolTestSupport.register(other, otherContext);
+            var otherResult =
+                    RequestProtocolTestSupport.submitForManualPlacement(other, otherContext);
             var installedResult =
-                    RequestProtocolTestSupport.register(
+                    RequestProtocolTestSupport.submitForManualPlacement(
                             installed, RequestProtocolTestSupport.context(f.config, 9106L));
             var expected = new IllegalStateException("cancellation failed");
             doThrow(expected).when(lifecycle).cancel(otherContext, 0L, CancelReason.SHUTDOWN);
@@ -443,15 +439,15 @@ class SchedulerTestServicesTest {
         try {
             var owner =
                     spy(
-                            new DirectRequestScheduler(
-                                    mock(RequestWorkerSelector.class),
+                            SchedulerTestServices.direct(
+                                    mock(RequestRouteSelector.class),
                                     runtime.newLifecycle(
                                             config,
                                             SchedulingTestConfig.capacity(config),
                                             mock(TheoryCacheHitReporter.class))));
             var lifecycle = SchedulerTestSupport.spyLifecycle(owner);
             var context = RequestProtocolTestSupport.context(config, 9107L);
-            var result = RequestProtocolTestSupport.register(owner, context);
+            var result = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
             var expected =
                     new IllegalStateException("cancellation failed before scheduler registration");
             doThrow(expected).when(lifecycle).cancel(context, 0L, CancelReason.SHUTDOWN);
@@ -538,12 +534,12 @@ class SchedulerTestServicesTest {
     @org.junit.jupiter.api.Timeout(15)
     void futureCallbackRejectsSelfShutdownBeforeMutationAndExternalShutdownStillDrains(
             boolean asynchronousAck) throws Exception {
-        try (var f = new Fixture(false)) {
+        try (var f = new Fixture(false, false)) {
             var owner =
                     SchedulerTestSupport.lifecycle(
                             SchedulerTestSupport.initializedScheduler(f.runtime));
             var context = RequestProtocolTestSupport.context(f.config, 9201L);
-            var future = RequestProtocolTestSupport.register(owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
             var observed = new java.util.concurrent.CompletableFuture<Throwable>();
             var caller = Thread.currentThread();
             future.whenComplete(
@@ -602,13 +598,13 @@ class SchedulerTestServicesTest {
                                 System.currentTimeMillis()));
                 assertTrue(future.get(5, java.util.concurrent.TimeUnit.SECONDS).isSuccess());
                 assertNull(observed.get(5, java.util.concurrent.TimeUnit.SECONDS));
-                owner.onEngineEvidence(
+                owner.onWorkerRequestEvent(
                         context,
-                        new ContextResult.EngineEvidence(
+                        new ContextResult.WorkerRequestEvent(
                                 route,
                                 null,
                                 org.flexlb.dao.route.RoleType.PDFUSION,
-                                ContextResult.EngineKind.COMPLETED,
+                                ContextResult.WorkerRequestEventType.COMPLETED,
                                 0L,
                                 null,
                                 System.currentTimeMillis()));
@@ -687,6 +683,10 @@ class SchedulerTestServicesTest {
         }
 
         Fixture(boolean queued) {
+            this(queued, true);
+        }
+
+        Fixture(boolean queued, boolean startScheduling) {
             config.setScheduler(queued ? new SchedulerConfig() : ConfigTestSupport.direct());
             config.setDispatcher(ConfigTestSupport.nonBatch());
             var service = mock(ConfigService.class);
@@ -701,6 +701,14 @@ class SchedulerTestServicesTest {
                             SchedulerTestSupport.dispatcher(),
                             service,
                             mock(EngineGrpcClient.class));
+            if (!startScheduling) {
+                runtime.registerScheduler(
+                        runtime.newLifecycle(
+                                config,
+                                SchedulingTestConfig.capacity(config),
+                                mock(org.flexlb.service.TheoryCacheHitReporter.class)));
+                return;
+            }
             runtime.registerScheduler(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.createStartedScheduler(
                             runtime.newLifecycle(
@@ -709,7 +717,7 @@ class SchedulerTestServicesTest {
                                     org.mockito.Mockito.mock(
                                             org.flexlb.service.TheoryCacheHitReporter.class)),
                             config,
-                            mock(RequestWorkerSelector.class),
+                            mock(RequestRouteSelector.class),
                             mock(DecodePreemption.class),
                             new PlacementAvailability(),
                             org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),

@@ -10,7 +10,6 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.locks.ReentrantLock;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,14 +27,26 @@ class QueuedSchedulerStopRaceTest {
     void rejectedExecutionAfterStopReleasesTheSlotWithoutRecordingARequestFailure(
             boolean stopping) {
         var config = SchedulingTestConfig.batchConfig();
-        var lifecycle = mock(RequestLifecycle.class);
+        var lifecycle = mock(AbstractRequestScheduler.class);
+        var requests = mock(RequestRepository.class);
+        when(requests.snapshotActive()).thenReturn(java.util.List.of());
+        ReflectionTestUtils.setField(lifecycle, "requests", requests);
         var tasks = mock(RequestTaskPool.class);
         ReflectionTestUtils.setField(lifecycle, "tasks", tasks);
         ReflectionTestUtils.setField(lifecycle, "dispatcher", mock(DeliveryDispatcher.class));
+        ReflectionTestUtils.setField(lifecycle, "expirationTimer", mock(ExpirationTimer.class));
+        ReflectionTestUtils.setField(
+                lifecycle, "responseCompletions", mock(ResponseCompletionExecutor.class));
+        ReflectionTestUtils.setField(
+                lifecycle,
+                "deliveryReporter",
+                mock(org.flexlb.service.monitor.DeliveryMetricsReporter.class));
+        ReflectionTestUtils.setField(
+                lifecycle, "cacheTrace", mock(org.flexlb.service.TheoryCacheHitReporter.class));
         var scheduler =
-                new QueuedRequestScheduler(
+                SchedulerTestServices.queued(
                         config,
-                        mock(RequestWorkerSelector.class),
+                        mock(RequestRouteSelector.class),
                         mock(DecodePreemption.class),
                         lifecycle,
                         new PlacementAvailability(),
@@ -54,7 +65,8 @@ class QueuedSchedulerStopRaceTest {
                 .when(executor)
                 .execute(any(Runnable.class));
         var prefill = mock(PrefillEndpoint.class, RETURNS_DEEP_STUBS);
-        when(prefill.resourceLock()).thenReturn(new ReentrantLock());
+        org.flexlb.balance.endpoint.EndpointTestSupport.useStateLock(
+                prefill, new java.util.concurrent.locks.ReentrantLock());
         when(prefill.queueEnabled()).thenReturn(true);
         when(prefill.ipPort()).thenReturn("127.0.0.1:1");
         when(prefill.getStatus().getRole()).thenReturn(RoleType.PREFILL);
@@ -62,7 +74,7 @@ class QueuedSchedulerStopRaceTest {
         try {
             scheduler.onEndpointChanged(prefill);
             assertDoesNotThrow(scheduler::schedule);
-            assertEquals(0, ReflectionTestUtils.getField(scheduler, "executionInFlight"));
+            assertEquals(0, ReflectionTestUtils.getField(scheduler, "queueSchedulingInFlight"));
             if (stopping) {
                 verify(tasks, never()).recordFailure(rejection);
                 verify(prefill, never()).closeQueue();

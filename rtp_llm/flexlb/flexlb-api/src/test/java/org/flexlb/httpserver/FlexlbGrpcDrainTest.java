@@ -10,7 +10,7 @@ import io.grpc.ServerInterceptors;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
-import org.flexlb.balance.scheduler.RequestLifecycle;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.Response;
@@ -54,7 +54,7 @@ class FlexlbGrpcDrainTest {
                 {"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "grpcServer":{"shutdownQuietPeriodMs":100}}
                 """));
-        var routes = mock(org.flexlb.balance.scheduler.RequestLifecycle.class);
+        var routes = mock(org.flexlb.balance.scheduler.AbstractRequestScheduler.class);
         var success = new Response();
         success.setSuccess(true);
         success.setCode(200);
@@ -63,7 +63,7 @@ class FlexlbGrpcDrainTest {
                 FlexlbServiceTestSupport.create(
                         routes,
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                                mock(RequestLifecycle.class)),
+                                mock(AbstractRequestScheduler.class)),
                         mock(MasterStatusService.class),
                         mock(EngineHealthReporter.class),
                         mock(FlexlbGrpcForwarder.class),

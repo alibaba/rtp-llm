@@ -4,7 +4,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.InvalidPrefillPredictionException;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.config.DispatcherConfig;
 
 import java.util.Arrays;
@@ -44,8 +44,11 @@ public final class RequestTimeEstimation {
         return ESTIMATORS.get();
     }
 
-    /** Borrowed ranking result; admission is applied separately by the selection strategy. */
-    public CandidateView projectRankingView(
+    /**
+     * Borrowed ranking and admission result, valid until the next call on this thread.
+     * Ranking cost remains available when current delivery capacity blocks admission.
+     */
+    public CandidateView projectCandidate(
             Inputs inputs,
             String requestId,
             int priority,
@@ -58,7 +61,7 @@ public final class RequestTimeEstimation {
         // A predictor may invoke this estimator recursively; isolate its unfinished calculation.
         if (inUse) {
             return new RequestTimeEstimation()
-                    .projectRankingView(
+                    .projectCandidate(
                             inputs,
                             requestId,
                             priority,
@@ -78,7 +81,9 @@ public final class RequestTimeEstimation {
         predictions.routingCacheMatchTokens = routingCacheMatchTokens;
         inUse = true;
         try {
-            return project(inputs, planningAtMs);
+            project(inputs, planningAtMs);
+            applyAdmissionPolicy(inputs.queue());
+            return predictions;
         } finally {
             predictions.evaluator = null;
             predictions.batchPrediction = null;
@@ -113,7 +118,7 @@ public final class RequestTimeEstimation {
     }
 
     private CandidateView projectWithPredictions(
-            QueueSnapshot queue, WorkSnapshot committed, long projectionAtMs) {
+            ProjectionQueueSnapshot queue, WorkSnapshot committed, long projectionAtMs) {
         var constraints = rankingConstraints(queue.constraints());
         if (committed.containsRequest(requestId)) {
             return unavailable("INCOMING_ALREADY_COMMITTED");
@@ -127,10 +132,7 @@ public final class RequestTimeEstimation {
         }
 
         if (queue.queueScheduling() && seqLen > constraints.batchKvCapacity()) {
-            return blocked(
-                    incomingPrefillMs,
-                    Candidate.InitialHeadDisposition.NONE,
-                    "PREFILL_KV_CAPACITY");
+            return blocked(incomingPrefillMs, InitialHeadDisposition.NONE, "PREFILL_KV_CAPACITY");
         }
 
         long committedMs = committed.knownRemainingWorkMsAt(projectionAtMs);
@@ -176,10 +178,10 @@ public final class RequestTimeEstimation {
             long durationMs =
                     predictions.singletonMs(seqLen, predictions.hitCache, predictions.batch);
             return candidate(
-                    Candidate.State.MODELED,
+                    State.MODELED,
                     saturatedAdd(committedMs, durationMs),
                     incomingPrefillMs,
-                    Candidate.InitialHeadDisposition.NONE,
+                    InitialHeadDisposition.NONE,
                     queueScheduling ? "EMPTY_ACTIVE_QUEUE_SINGLETON" : "SERIAL_FROZEN_DIRECT");
         } catch (PredictionFailure predictionFailure) {
             return unavailable(predictionFailure.detail("SERVICE_PREDICTION_FAILED"));
@@ -187,7 +189,7 @@ public final class RequestTimeEstimation {
     }
 
     private CandidateView projectQueue(
-            QueueSnapshot queue,
+            ProjectionQueueSnapshot queue,
             GroupPlanner.Constraints constraints,
             long projectionAtMs,
             long committedMs,
@@ -216,8 +218,7 @@ public final class RequestTimeEstimation {
 
         while (true) {
             ordered.skipExpiredHead();
-            Candidate.InitialHeadDisposition initialHeadDisposition =
-                    ordered.initialHeadDisposition();
+            InitialHeadDisposition initialHeadDisposition = ordered.initialHeadDisposition();
 
             GroupPlanner.Item head = ordered.head();
             if (head.seqLen() > constraints.batchKvCapacity()) {
@@ -245,7 +246,7 @@ public final class RequestTimeEstimation {
                 long completionMs = saturatedAdd(cursorMs, durationMs);
                 if (probePosition < selection.items().size()) {
                     return candidate(
-                            Candidate.State.MODELED,
+                            State.MODELED,
                             completionMs,
                             incomingPrefillMs,
                             initialHeadDisposition,
@@ -312,16 +313,16 @@ public final class RequestTimeEstimation {
             return true;
         }
 
-        private Candidate.InitialHeadDisposition initialHeadDisposition() {
+        private InitialHeadDisposition initialHeadDisposition() {
             if (active.isEmpty()) {
-                return Candidate.InitialHeadDisposition.NONE;
+                return InitialHeadDisposition.NONE;
             }
             if (initialHeadPruned) {
-                return Candidate.InitialHeadDisposition.TERMINAL_PRUNED;
+                return InitialHeadDisposition.TERMINAL_PRUNED;
             }
             return probeIndex == 0
-                    ? Candidate.InitialHeadDisposition.AFTER_PROBE
-                    : Candidate.InitialHeadDisposition.BEFORE_PROBE;
+                    ? InitialHeadDisposition.AFTER_PROBE
+                    : InitialHeadDisposition.BEFORE_PROBE;
         }
 
         private GroupPlanner.Item head() {
@@ -380,31 +381,19 @@ public final class RequestTimeEstimation {
     }
 
     private CandidateView unavailable(String detail) {
-        return candidate(
-                Candidate.State.UNAVAILABLE,
-                Candidate.UNKNOWN,
-                0L,
-                Candidate.InitialHeadDisposition.NONE,
-                detail);
+        return candidate(State.UNAVAILABLE, UNKNOWN, 0L, InitialHeadDisposition.NONE, detail);
     }
 
     private CandidateView blocked(
-            long incomingPrefillMs,
-            Candidate.InitialHeadDisposition initialHeadDisposition,
-            String detail) {
-        return candidate(
-                Candidate.State.BLOCKED,
-                Candidate.UNKNOWN,
-                incomingPrefillMs,
-                initialHeadDisposition,
-                detail);
+            long incomingPrefillMs, InitialHeadDisposition initialHeadDisposition, String detail) {
+        return candidate(State.BLOCKED, UNKNOWN, incomingPrefillMs, initialHeadDisposition, detail);
     }
 
     private CandidateView candidate(
-            Candidate.State state,
+            State state,
             long projectedTtftMs,
             long incomingPrefillMs,
-            Candidate.InitialHeadDisposition headDisposition,
+            InitialHeadDisposition headDisposition,
             String detail) {
         predictions.state = state;
         predictions.projectedTtftMsValue = projectedTtftMs;
@@ -414,26 +403,36 @@ public final class RequestTimeEstimation {
         return predictions;
     }
 
-    /** Effect of a captured blocked head after a probe has overtaken it. */
-    public enum AfterProbeAdmission {
-        BLOCKED,
-        UNAVAILABLE
-    }
-
-    /** Delivery-independent meaning of one exact captured admission block. */
+    /**
+     * Admission restriction imposed by the captured head, including after a probe overtakes it.
+     */
     public record AdmissionBlockSemantics(
-            String blockedDetail, AfterProbeAdmission afterProbe, String afterProbeDetail) {}
+            String blockedDetail, State afterProbe, String afterProbeDetail) {
+        public AdmissionBlockSemantics {
+            checkArgument(
+                    afterProbe == State.BLOCKED || afterProbe == State.UNAVAILABLE,
+                    "an admission block must remain blocked or unavailable after the probe");
+        }
+    }
 
     /** Read-only projection result. Invocation-scoped views must not be retained. */
     public interface CandidateView {
-        Candidate.State state();
+        State state();
+
+        default State admissionState() {
+            return state();
+        }
+
+        default String admissionDetail() {
+            return detail();
+        }
 
         /** Known execution cost through this request; excludes future collection waits. */
         long projectedTtftMsValue();
 
         long incomingPrefillMs();
 
-        Candidate.InitialHeadDisposition initialHeadDisposition();
+        InitialHeadDisposition initialHeadDisposition();
 
         String detail();
 
@@ -442,58 +441,33 @@ public final class RequestTimeEstimation {
         long routingCacheMatchTokens();
 
         default boolean engineWorkUnmodeled() {
-            return state() == Candidate.State.UNMODELED_ENGINE_WORK;
+            return state() == State.UNMODELED_ENGINE_WORK;
         }
 
         default boolean selectable() {
-            return state() == Candidate.State.MODELED
-                    && projectedTtftMsValue() != Candidate.UNKNOWN;
+            return state() == State.MODELED && projectedTtftMsValue() != UNKNOWN;
         }
     }
 
-    /** Complete immutable projection used outside the full-fleet hot path. */
-    public record Candidate(
-            State state,
-            long projectedTtftMsValue,
-            long incomingPrefillMs,
-            InitialHeadDisposition initialHeadDisposition,
-            String detail,
-            long cacheHitTokens,
-            long routingCacheMatchTokens)
-            implements CandidateView {
+    public static final long UNKNOWN = -1L;
 
-        public static final long UNKNOWN = -1L;
+    public enum InitialHeadDisposition {
+        NONE,
+        BEFORE_PROBE,
+        AFTER_PROBE,
+        TERMINAL_PRUNED
+    }
 
-        public Candidate {
-            checkArgument(projectedTtftMsValue >= UNKNOWN, "projectedTtftMs must be non-negative");
-            checkArgument(
-                    (state == State.MODELED) == (projectedTtftMsValue != UNKNOWN),
-                    "only MODELED projections may carry a projected TTFT");
-            checkArgument(incomingPrefillMs >= 0L, "incomingPrefillMs must be non-negative");
-            detail = detail == null ? "" : detail;
-            checkArgument(
-                    cacheHitTokens >= 0L && routingCacheMatchTokens >= 0L,
-                    "cache token counts must be non-negative");
-        }
-
-        public enum InitialHeadDisposition {
-            NONE,
-            BEFORE_PROBE,
-            AFTER_PROBE,
-            TERMINAL_PRUNED
-        }
-
-        public enum State {
-            MODELED,
-            UNMODELED_ENGINE_WORK,
-            BLOCKED,
-            UNAVAILABLE
-        }
+    public enum State {
+        MODELED,
+        UNMODELED_ENGINE_WORK,
+        BLOCKED,
+        UNAVAILABLE
     }
 
     /** Queue/work captured under one ownership lock, with an immutable model for this projection. */
     public record Inputs(
-            QueueSnapshot queue,
+            ProjectionQueueSnapshot queue,
             WorkSnapshot work,
             long ownershipVersion,
             PrefillTimePredictor.Evaluator evaluator,
@@ -509,50 +483,43 @@ public final class RequestTimeEstimation {
         }
     }
 
-    /** Apply one observed worker admission wait without inventing a release duration. */
-    public static CandidateView applyAdmissionPolicy(QueueSnapshot queue, CandidateView candidate) {
-        QueueSnapshot.AdmissionBlock observation = queue.admissionBlock();
+    /**
+     * Combine the captured capacity wait with the projection without changing its ranking cost.
+     */
+    private void applyAdmissionPolicy(ProjectionQueueSnapshot queue) {
+        var candidate = predictions;
+        candidate.admissionState = candidate.state;
+        candidate.admissionDetail = candidate.detail;
+        var observation = queue.admissionBlock();
         if (!queue.queueScheduling()
                 || observation == null
                 || observation.semantics() == null
-                || (candidate.state() != Candidate.State.MODELED
-                        && !candidate.engineWorkUnmodeled())) {
-            return candidate;
+                || (candidate.state != State.MODELED && !candidate.engineWorkUnmodeled())) {
+            return;
         }
-        AdmissionBlockSemantics semantics = observation.semantics();
-        Candidate.State state = Candidate.State.BLOCKED;
-        String detail = semantics.blockedDetail();
+        var semantics = observation.semantics();
         if (!candidate.engineWorkUnmodeled()) {
             switch (candidate.initialHeadDisposition()) {
                 case TERMINAL_PRUNED -> {
-                    return candidate;
+                    return;
                 }
                 case NONE ->
                         throw new IllegalStateException(
                                 "admission-blocked ACTIVE head was not projected");
                 case BEFORE_PROBE -> {}
                 case AFTER_PROBE -> {
-                    state =
-                            switch (semantics.afterProbe()) {
-                                case BLOCKED -> Candidate.State.BLOCKED;
-                                case UNAVAILABLE -> Candidate.State.UNAVAILABLE;
-                            };
-                    detail = semantics.afterProbeDetail();
+                    candidate.admissionState = semantics.afterProbe();
+                    candidate.admissionDetail = semantics.afterProbeDetail();
+                    return;
                 }
             }
         }
-        return new Candidate(
-                state,
-                Candidate.UNKNOWN,
-                candidate.incomingPrefillMs(),
-                candidate.initialHeadDisposition(),
-                detail,
-                candidate.cacheHitTokens(),
-                candidate.routingCacheMatchTokens());
+        candidate.admissionState = State.BLOCKED;
+        candidate.admissionDetail = semantics.blockedDetail();
     }
 
     /** One incremental predictor for one live queue selection. */
-    public static GroupPlanner.PrefixPrediction<RequestRoute> newGroupPredictor(
+    public static GroupPlanner.PrefixPrediction<RouteExecution> newGroupPredictor(
             DispatcherConfig.Type mode, PrefillTimePredictor.Evaluator evaluator) {
         if (mode == DispatcherConfig.Type.BATCH) {
             var prediction = evaluator.newBatchPrediction();
@@ -564,7 +531,7 @@ public final class RequestTimeEstimation {
             private double totalMs;
 
             @Override
-            public double append(RequestRoute added, List<RequestRoute> items) {
+            public double append(RouteExecution added, List<RouteExecution> items) {
                 try {
                     totalMs +=
                             PrefillTimePredictor.predictSingleRequestMs(
@@ -585,16 +552,29 @@ public final class RequestTimeEstimation {
     private static final class Prediction
             implements GroupPlanner.PrefixPrediction<GroupPlanner.Item>, CandidateView {
 
-        private Candidate.State state;
+        private State state;
+        private State admissionState;
+        private String admissionDetail;
+
+        @Override
+        public State admissionState() {
+            return admissionState;
+        }
+
+        @Override
+        public String admissionDetail() {
+            return admissionDetail;
+        }
+
         private long projectedTtftMsValue;
         private long incomingPrefillMs;
-        private Candidate.InitialHeadDisposition headDisposition;
+        private InitialHeadDisposition headDisposition;
         private String detail;
         private long hitCache;
         private long routingCacheMatchTokens;
 
         @Override
-        public Candidate.State state() {
+        public State state() {
             return state;
         }
 
@@ -609,7 +589,7 @@ public final class RequestTimeEstimation {
         }
 
         @Override
-        public Candidate.InitialHeadDisposition initialHeadDisposition() {
+        public InitialHeadDisposition initialHeadDisposition() {
             return headDisposition;
         }
 
@@ -948,7 +928,7 @@ public final class RequestTimeEstimation {
      * materialized from the endpoint's PrefillEndpoint at one linearization
      * point together with committed work and pending count.
      */
-    public record QueueSnapshot(
+    public record ProjectionQueueSnapshot(
             long capturedAtMs,
             boolean queueScheduling,
             GroupPlanner grouping,
@@ -957,7 +937,7 @@ public final class RequestTimeEstimation {
             List<GroupPlanner.Item> activeItems,
             AdmissionBlock admissionBlock) {
 
-        public QueueSnapshot {
+        public ProjectionQueueSnapshot {
             if (queueScheduling) {
                 Objects.requireNonNull(grouping, "grouping");
             }

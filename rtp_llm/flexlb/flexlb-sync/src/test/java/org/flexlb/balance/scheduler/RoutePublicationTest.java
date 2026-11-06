@@ -38,7 +38,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** NON_BATCH contracts run through the same real Worker preparation/commit path. */
+/**
+ * NON_BATCH contracts run through the same real Worker preparation/commit path.
+ */
 @Timeout(15)
 class RoutePublicationTest {
     @Test
@@ -152,7 +154,7 @@ class RoutePublicationTest {
                                                             == 10L));
             verify(f.prefill, times(1))
                     .signal(org.flexlb.balance.endpoint.PrefillEndpoint.Signal.PLACEMENT);
-            verify(f.handoff, times(1)).close();
+            verify(f.prefill, never()).close();
         }
     }
 
@@ -172,7 +174,7 @@ class RoutePublicationTest {
                                         "publication must not race the next claim");
                                 assertFalse(Thread.holdsLock(claim.route().ctx()));
                                 assertFalse(f.queueLock.isHeldByCurrentThread());
-                                assertFalse(f.handoffClosed.get());
+                                assertFalse(f.prefill.isRetired());
                                 published.add(Long.parseLong(claim.route().requestId()));
                                 f.predictions.put(
                                         Long.parseLong(claim.route().requestId()),
@@ -191,7 +193,7 @@ class RoutePublicationTest {
             assertArrayEquals(new long[] {10, 20}, f.committedRoutePredictions);
             verify(f.permits.get(1L)).release();
             verify(f.permits.get(2L)).release();
-            verify(f.handoff, times(1)).close();
+            verify(f.prefill, never()).close();
             verifyNoInteractions(f.grpc);
             verify(f.runtime.deliveries(), never()).tryReserveDelivery();
         }
@@ -292,14 +294,14 @@ class RoutePublicationTest {
             assertDoesNotThrow(
                     () -> f.process(List.of(f.item(1, 10), f.item(2, 20)), OptionalLong.empty()));
             assertEquals(List.of(1L, 2L), published);
-            verify(f.handoff).close();
+            verify(f.prefill, never()).close();
             verify(f.permits.get(1L)).release();
             verify(f.permits.get(2L)).release();
         }
     }
 
     @Test
-    void cleanupFailureStillClosesSiblingPermitAndGenerationHandoff() {
+    void cleanupFailureStillReleasesSiblingPermit() {
         try (var f = new LinearDeliveryFixture(false)) {
             var first = f.item(1, 10);
             var second = f.item(2, 20);
@@ -308,7 +310,7 @@ class RoutePublicationTest {
             assertDoesNotThrow(() -> f.process(List.of(first, second), OptionalLong.empty()));
             verify(f.permits.get(1L)).release();
             verify(f.permits.get(2L)).release();
-            verify(f.handoff).close();
+            verify(f.prefill, never()).close();
             verify(f.owner, times(2)).onDeliveryResult(isA(RouteDelivered.class));
         }
     }
@@ -392,7 +394,7 @@ class RoutePublicationTest {
             var endpoint = f.realDecode();
             var first = f.realItem(endpoint, 1, 10);
             var second = f.realItem(endpoint, 2, 20);
-            when(f.prefill.commitLocked(any(org.flexlb.balance.scheduler.Delivery.class)))
+            when(f.prefill.commitDelivery(any(org.flexlb.balance.scheduler.Delivery.class)))
                     .thenReturn(null);
             f.process(List.of(first, second), OptionalLong.empty());
             var snapshot = endpoint.resourceSnapshot();
@@ -402,7 +404,7 @@ class RoutePublicationTest {
             assertEquals(2, snapshot.requests().size());
             verify(f.owner, never()).prepareDelivery(any(Delivery.Member.class), any(), anyLong());
             verify(f.owner, never()).onDeliveryResult(isA(RouteDelivered.class));
-            verify(f.handoff, never()).close();
+            verify(f.prefill, never()).close();
         }
     }
 }

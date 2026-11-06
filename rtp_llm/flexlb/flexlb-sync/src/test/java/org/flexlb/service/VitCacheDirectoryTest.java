@@ -69,13 +69,11 @@ class VitCacheDirectoryTest {
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
         when(workers.endpointAddressSnapshot(RoleType.VIT))
                 .thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
-        when(workers.capture(eq(RoleType.VIT), any()))
+        when(workers.selectEndpoint(eq(RoleType.VIT), any()))
                 .thenAnswer(
                         call -> {
                             WorkerStatus status = live.get(call.getArgument(1));
-                            return status == null
-                                    ? null
-                                    : new WorkerEndpoint(status).tryPinGeneration();
+                            return status == null ? null : new WorkerEndpoint(status);
                         });
         grpc = mock(EngineGrpcClient.class);
         consistency = mock(MasterStatusService.class);
@@ -449,7 +447,7 @@ class VitCacheDirectoryTest {
     }
 
     @Test
-    void selectionKeepsGenerationThroughCopyAndPin() throws Exception {
+    void selectionKeepsGenerationThroughCopyAndWorker() throws Exception {
         snapshot(a, "epoch-a", "image");
         var ctx = context("image");
         var selected = selector.select(ctx, "one");
@@ -468,15 +466,17 @@ class VitCacheDirectoryTest {
         assertFalse(selector.validate(ctx, "one").isSuccess());
         copied.setWorkerGeneration(a.getGenerationId());
         ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(copied).build());
-        try (var scope = new org.flexlb.balance.scheduler.RequestRoute(ctx)) {
-            var pinned = selector.selectPinned(ctx, "one", scope);
-            org.junit.jupiter.api.Assertions.assertNotNull(pinned);
-            assertEquals(a.getGenerationId(), pinned.getWorkerGeneration());
+        {
+            var scope = new org.flexlb.balance.scheduler.RouteResult.Builder(ctx);
+            var routeSelection = selector.selectForRoute(ctx, "one", scope);
+            org.junit.jupiter.api.Assertions.assertNotNull(routeSelection);
+            assertEquals(a.getGenerationId(), routeSelection.getWorkerGeneration());
         }
         live.put(a.getLogicalIpPort(), worker(a.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
-        try (var scope = new org.flexlb.balance.scheduler.RequestRoute(ctx)) {
-            org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one", scope));
+        {
+            var scope = new org.flexlb.balance.scheduler.RouteResult.Builder(ctx);
+            org.junit.jupiter.api.Assertions.assertNull(selector.selectForRoute(ctx, "one", scope));
         }
     }
 }

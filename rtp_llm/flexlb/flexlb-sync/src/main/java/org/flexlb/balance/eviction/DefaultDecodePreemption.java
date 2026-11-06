@@ -8,12 +8,12 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionProposal;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimResolution;
-import org.flexlb.balance.scheduler.AdmissionHandle;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.ContextResult;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
+import org.flexlb.balance.scheduler.PlacementOperation;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.balance.scheduler.RequestTaskExecutor;
 import org.flexlb.balance.scheduler.TaskTimer;
@@ -54,8 +54,8 @@ import static com.google.common.base.Preconditions.checkState;
  * resolution transaction may complete before or after that acknowledgement.</p>
  */
 public class DefaultDecodePreemption implements DecodePreemption {
-    private static final RequestLifecycle.PreemptionEvent START_CANCEL =
-            new RequestLifecycle.PreemptionEvent(
+    private static final AbstractRequestScheduler.PreemptionEvent START_CANCEL =
+            new AbstractRequestScheduler.PreemptionEvent(
                     PreemptionCancelPhase.CANCEL_IN_FLIGHT, false, null, null, null);
 
     record PreemptionCommand(
@@ -149,7 +149,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
     CompletableFuture<PreemptionResult> preempt(RequestContext context, PreemptionCommand command) {
         Objects.requireNonNull(context, "context");
         long token = nextToken();
-        List<DecodeResources.ReservationHandle> victimReservations =
+        List<DecodeResources.RequestReservation> victimReservations =
                 new ArrayList<>(command.victims().size());
         long endpointGenerationId = command.endpoint().getStatus().getGenerationId();
         Attempt attempt = new Attempt(command, token);
@@ -161,7 +161,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
                             attempt.abort(true, "cancel_owner_missing:" + victim.requestId()));
                 }
                 var reservation =
-                        new DecodeResources.ReservationHandle(
+                        new DecodeResources.RequestReservation(
                                 endpointGenerationId,
                                 victim.requestId(),
                                 victim.reservationToken());
@@ -204,7 +204,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
             attempt.endpointBegun = true;
             attempt.observe();
             for (ClaimedVictim owned : attempt.claims) {
-                var scheduler = owned.claim.owner().data().getLifecycle();
+                var scheduler = owned.claim.owner().data().getRequestScheduler();
                 if (!scheduler.onPreemption(owned.claim, START_CANCEL)) {
                     return CompletableFuture.completedFuture(
                             attempt.abort(
@@ -336,7 +336,9 @@ public class DefaultDecodePreemption implements DecodePreemption {
         TRANSFERRED
     }
 
-    /** Exact opaque request claim paired with its immutable endpoint victim. */
+    /**
+     * Exact opaque request claim paired with its immutable endpoint victim.
+     */
     private final class ClaimedVictim {
         private final PreemptionRegistration claim;
         private CompletableFuture<PreemptionRegistration.Reply> acknowledgement;
@@ -448,16 +450,16 @@ public class DefaultDecodePreemption implements DecodePreemption {
             owned.claim
                     .owner()
                     .data()
-                    .getLifecycle()
+                    .getRequestScheduler()
                     .onPreemption(
                             owned.claim,
-                            new RequestLifecycle.PreemptionEvent(
+                            new AbstractRequestScheduler.PreemptionEvent(
                                     PreemptionCancelPhase.CANCEL_UNKNOWN, false, null, null, null));
             transferred(owned);
         }
 
         private PreemptionResult finish(boolean hasNotFound, boolean victimsResolved) {
-            DecodeResources.ReservationHandle incoming =
+            DecodeResources.RequestReservation incoming =
                     victimsResolved
                                     && !closed
                                     && !shutdown
@@ -512,10 +514,11 @@ public class DefaultDecodePreemption implements DecodePreemption {
                                         owned.claim
                                                 .owner()
                                                 .data()
-                                                .getLifecycle()
+                                                .getRequestScheduler()
                                                 .onPreemption(
                                                         owned.claim,
-                                                        new RequestLifecycle.PreemptionEvent(
+                                                        new AbstractRequestScheduler
+                                                                .PreemptionEvent(
                                                                 null, true, null, null, null)));
                     }
                 }
@@ -614,25 +617,22 @@ public class DefaultDecodePreemption implements DecodePreemption {
             return null;
         }
         DecodeEvictionProposal proposal = planDecodeEviction(request, metadata, decodeEndpoint);
-        if (proposal == null
-                || !ctx.data()
-                        .getLifecycle()
-                        .isAdmissionOpen(request.getRequestId(), ctx.data().getFuture())) {
+        if (proposal == null || !ctx.data().getRequestScheduler().isAdmissionOpen(ctx)) {
             return null;
         }
         if (proposal.requiresEngineCancel()) {
             return startEngineCancelPreemption(ctx, proposal, decodeEndpoint, request, metadata);
         }
-        List<DecodeResources.ReservationHandle> victims =
+        List<DecodeResources.RequestReservation> victims =
                 new ArrayList<>(proposal.victims().size());
         for (DecodeRequestView victim : proposal.victims()) {
             victims.add(
-                    new DecodeResources.ReservationHandle(
+                    new DecodeResources.RequestReservation(
                             decodeEndpoint.getStatus().getGenerationId(),
                             victim.requestId(),
                             victim.reservationToken()));
         }
-        DecodeResources.ReservationHandle incoming =
+        DecodeResources.RequestReservation incoming =
                 replaceQueuedDecodeReservations(
                         decodeEndpoint, victims, request, metadata.priority());
         if (incoming == null) {
@@ -661,7 +661,9 @@ public class DefaultDecodePreemption implements DecodePreemption {
                 new PreemptionResult(incoming, false, "committed"));
     }
 
-    /** Metrics observe plans and commits without owning the reservation transaction. */
+    /**
+     * Metrics observe plans and commits without owning the reservation transaction.
+     */
     private void reportEviction(
             EvictionEvent event,
             int priority,
@@ -681,7 +683,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
     private DecodeEvictionProposal planDecodeEviction(
             Request request, SchedulingMetadata metadata, DecodeEndpoint selectedEndpoint) {
         DecodeResources.ResourceSnapshot selected = selectedEndpoint.resourceSnapshot();
-        if (selectedEndpoint.isRetired()) {
+        if (!selectedEndpoint.acceptsNewRequests()) {
             return null;
         }
         Map<String, String> failures = new HashMap<>();
@@ -720,7 +722,9 @@ public class DefaultDecodePreemption implements DecodePreemption {
         return proposal;
     }
 
-    /** Validate the policy's authority; exact live token/capacity checks remain in the ledger. */
+    /**
+     * Validate the policy's authority; exact live token/capacity checks remain in the ledger.
+     */
     private void validateProposal(
             DecodeEvictionProposal proposal,
             DecodeResources.ResourceSnapshot snapshot,
@@ -788,11 +792,7 @@ public class DefaultDecodePreemption implements DecodePreemption {
                         proposal.victims(),
                         50L,
                         preemption.getTimeoutMs(),
-                        () ->
-                                ctx.data()
-                                        .getLifecycle()
-                                        .isAdmissionOpen(
-                                                request.getRequestId(), ctx.data().getFuture()),
+                        () -> ctx.data().getRequestScheduler().isAdmissionOpen(ctx),
                         "preempted by higher-priority request " + ctx.data().getRequestId());
         report(
                 ctx.data().getRequestId(),
@@ -839,21 +839,18 @@ public class DefaultDecodePreemption implements DecodePreemption {
         }
     }
 
-    private DecodeResources.ReservationHandle replaceQueuedDecodeReservations(
+    private DecodeResources.RequestReservation replaceQueuedDecodeReservations(
             DecodeEndpoint endpoint,
-            List<DecodeResources.ReservationHandle> victims,
+            List<DecodeResources.RequestReservation> victims,
             Request request,
             int priority) {
-        List<AdmissionHandle> claimed = new ArrayList<>(victims.size());
-        DecodeResources.ReservationHandle incoming = null;
+        List<PlacementOperation> claimed = new ArrayList<>(victims.size());
+        DecodeResources.RequestReservation incoming = null;
         try {
-            for (DecodeResources.ReservationHandle victim : victims) {
+            for (DecodeResources.RequestReservation victim : victims) {
                 var owner = requests.ownerOf(victim.requestId());
-                AdmissionHandle withdrawal =
-                        owner == null
-                                ? null
-                                : AdmissionHandle.tryBeginPreemption(
-                                        owner, endpoint, victim, priority);
+                PlacementOperation withdrawal =
+                        owner == null ? null : owner.beginPreemption(endpoint, victim, priority);
                 if (withdrawal == null) {
                     return null;
                 }
@@ -870,13 +867,14 @@ public class DefaultDecodePreemption implements DecodePreemption {
             return incoming;
         } finally {
             Throwable failure = null;
-            for (AdmissionHandle withdrawal : claimed) {
+            for (PlacementOperation withdrawal : claimed) {
                 boolean committed = incoming != null;
                 failure =
                         Failures.run(
                                 failure,
                                 () ->
-                                        withdrawal.complete(
+                                        AbstractRequestScheduler.completePlacement(
+                                                withdrawal,
                                                 committed
                                                         ? ContextResult.PublicationResult.WITHDRAWN
                                                         : ContextResult.PublicationResult

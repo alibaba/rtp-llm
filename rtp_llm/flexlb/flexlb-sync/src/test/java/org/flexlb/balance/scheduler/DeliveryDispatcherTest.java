@@ -126,8 +126,8 @@ class DeliveryDispatcherTest {
         org.flexlb.telemetry.FlexlbTrace.configure(
                 enabled ? io.opentelemetry.api.OpenTelemetry.noop() : null, "");
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(501L, 500, 200, prefillEp);
-        RequestRoute second = createRequestRoute(502L, 500, 200, prefillEp);
+        RouteExecution first = createRequestRoute(501L, 500, 200, prefillEp);
+        RouteExecution second = createRequestRoute(502L, 500, 200, prefillEp);
         first.ctx()
                 .data()
                 .setGenerateInputPb(
@@ -387,7 +387,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchSendsItemsToGrpcAndReceivesAck() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response = ackResponse(1L, List.of(1L));
         when(grpcClient.batchEnqueueAsync(
@@ -411,7 +411,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchPassesConfiguredFetchAttachTimeoutToEngine() throws Exception {
         config.getDispatcher().setFetchAttachTimeoutMs(1500);
-        RequestRoute item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
+        RouteExecution item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
         when(grpcClient.batchEnqueueAsync(
                         anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(1L, List.of(1L))));
@@ -428,8 +428,8 @@ class DeliveryDispatcherTest {
     @Test
     void batchAttributesAndValidatedResponseTimePrecedeEveryItemCallback() throws Exception {
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(601L, 20, 0, endpoint);
-        RequestRoute second = createRequestRoute(602L, 20, 0, endpoint);
+        RouteExecution first = createRequestRoute(601L, 20, 0, endpoint);
+        RouteExecution second = createRequestRoute(602L, 20, 0, endpoint);
         var firstSpan = mock(io.opentelemetry.api.trace.Span.class);
         var secondSpan = mock(io.opentelemetry.api.trace.Span.class);
         when(firstSpan.storeInContext(any(io.opentelemetry.context.Context.class)))
@@ -478,7 +478,7 @@ class DeliveryDispatcherTest {
 
     @Test
     void malformedAckDoesNotPublishValidatedResponseTime() throws Exception {
-        RequestRoute item = createRequestRoute(603L, 20, 0, createPrefillEndpoint());
+        RouteExecution item = createRequestRoute(603L, 20, 0, createPrefillEndpoint());
         var span = mock(io.opentelemetry.api.trace.Span.class);
         when(span.storeInContext(any(io.opentelemetry.context.Context.class))).thenCallRealMethod();
         item.ctx().data().setTraceContext(io.opentelemetry.context.Context.root().with(span));
@@ -498,8 +498,8 @@ class DeliveryDispatcherTest {
     @ValueSource(booleans = {false, true})
     void asynchronousTimeoutKeepsEveryMemberUncertain(boolean grpcDeadline) throws Exception {
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(611L, 20, 0, endpoint);
-        RequestRoute second = createRequestRoute(612L, 20, 0, endpoint);
+        RouteExecution first = createRequestRoute(611L, 20, 0, endpoint);
+        RouteExecution second = createRequestRoute(612L, 20, 0, endpoint);
         var rpc = new CompletableFuture<EngineRpcService.EnqueueBatchResponsePB>();
         CountDownLatch invoked = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(
@@ -510,7 +510,7 @@ class DeliveryDispatcherTest {
                             return rpc;
                         });
         var results =
-                new CopyOnWriteArrayList<java.util.Map.Entry<RequestRoute, Delivery.Result>>();
+                new CopyOnWriteArrayList<java.util.Map.Entry<RouteExecution, Delivery.Result>>();
         submit(
                 List.of(first, second),
                 95L,
@@ -541,7 +541,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesGrpcError() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
 
         when(grpcClient.batchEnqueueAsync(
                         anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
@@ -562,7 +562,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesNullGrpcResponse() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
 
         when(grpcClient.batchEnqueueAsync(
                         anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class)))
@@ -577,7 +577,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesNullGrpcFutureAsUncertain() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any())).thenReturn(null);
 
         submit(List.of(item), 1L, 100, "test", callback);
@@ -590,7 +590,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchRejectsAckWithDifferentBatchId() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(8L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(8L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(
                         CompletableFuture.completedFuture(
@@ -653,16 +653,16 @@ class DeliveryDispatcherTest {
     @Test
     void unexpectedPreSendFailureIsDefiniteAndIsolatesCallbacks() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(1L, 500, 200, prefillEp);
-        RequestRoute second = createRequestRoute(2L, 500, 200, prefillEp);
+        RouteExecution first = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution second = createRequestRoute(2L, 500, 200, prefillEp);
         when(prefillEp.getIp())
                 .thenThrow(new IllegalStateException("endpoint unavailable before send"));
         CountDownLatch attempted = new CountDownLatch(2);
         var failures = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
         AtomicInteger uncertain = new AtomicInteger();
-        BiConsumer<RequestRoute, Delivery.Result> throwingCallback =
+        BiConsumer<RouteExecution, Delivery.Result> throwingCallback =
                 (exactItem, completion) -> {
-                    RequestRoute item = assertInstanceOf(RequestRoute.class, exactItem);
+                    RouteExecution item = assertInstanceOf(RouteExecution.class, exactItem);
                     if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failures.merge(Long.parseLong(item.requestId()), 1, Integer::sum);
                         attempted.countDown();
@@ -686,16 +686,16 @@ class DeliveryDispatcherTest {
     @Test
     void synchronousRpcInvocationFailureIsUncertainAndIsolatesCallbacks() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(1L, 500, 200, prefillEp);
-        RequestRoute second = createRequestRoute(2L, 500, 200, prefillEp);
+        RouteExecution first = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution second = createRequestRoute(2L, 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenThrow(new IllegalStateException("client threw after invocation began"));
         CountDownLatch attempted = new CountDownLatch(2);
         AtomicInteger failures = new AtomicInteger();
         var uncertain = new java.util.concurrent.ConcurrentHashMap<Long, Integer>();
-        BiConsumer<RequestRoute, Delivery.Result> throwingCallback =
+        BiConsumer<RouteExecution, Delivery.Result> throwingCallback =
                 (exactItem, completion) -> {
-                    RequestRoute item = assertInstanceOf(RequestRoute.class, exactItem);
+                    RouteExecution item = assertInstanceOf(RouteExecution.class, exactItem);
                     if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failures.incrementAndGet();
                     } else if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
@@ -720,7 +720,7 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =
                 new CompletableFuture<>();
         CountDownLatch invoked = new CountDownLatch(1);
@@ -763,7 +763,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesResponseWithErrors() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
@@ -842,7 +842,7 @@ class DeliveryDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response.build()));
         var results = new CopyOnWriteArrayList<Delivery.Result>();
-        var identities = new CopyOnWriteArrayList<RequestRoute>();
+        var identities = new CopyOnWriteArrayList<RouteExecution>();
         CountDownLatch observed = new CountDownLatch(2);
         submit(
                 List.of(first, second),
@@ -879,7 +879,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchHandlesMissingAck() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
@@ -899,8 +899,8 @@ class DeliveryDispatcherTest {
     void responseCallbackFailureIsIsolatedAndNeverReclassifiesOtherItemsAsUncertain()
             throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute succeeded = createRequestRoute(11L, 500, 200, prefillEp);
-        RequestRoute rejected = createRequestRoute(12L, 500, 200, prefillEp);
+        RouteExecution succeeded = createRequestRoute(11L, 500, 200, prefillEp);
+        RouteExecution rejected = createRequestRoute(12L, 500, 200, prefillEp);
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(91L)
@@ -925,7 +925,7 @@ class DeliveryDispatcherTest {
         AtomicInteger successes = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
         AtomicInteger uncertain = new AtomicInteger();
-        BiConsumer<RequestRoute, Delivery.Result> throwingCallback =
+        BiConsumer<RouteExecution, Delivery.Result> throwingCallback =
                 (exactItem, completion) -> {
                     if (completion.status() == Delivery.Result.Status.DELIVERED) {
                         successes.incrementAndGet();
@@ -960,7 +960,7 @@ class DeliveryDispatcherTest {
                             return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
                         });
 
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
         DeliveryPermit permit = reservePermit();
 
         runtime.deliveries().stopDeliveryAdmission();
@@ -1035,12 +1035,12 @@ class DeliveryDispatcherTest {
                                 runtime.deliveries(), "completionExecutor");
         executor.shutdown();
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RequestRoute first = createRequestRoute(1L, 500, 200, endpoint);
-        RequestRoute second = createRequestRoute(2L, 500, 200, endpoint);
+        RouteExecution first = createRequestRoute(1L, 500, 200, endpoint);
+        RouteExecution second = createRequestRoute(2L, 500, 200, endpoint);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenReturn(CompletableFuture.completedFuture(ackResponse(91L, List.of(1L, 2L))));
         var results = new CopyOnWriteArrayList<Delivery.Result>();
-        var identities = new CopyOnWriteArrayList<RequestRoute>();
+        var identities = new CopyOnWriteArrayList<RouteExecution>();
         CountDownLatch observed = new CountDownLatch(2);
         submit(
                 List.of(first, second),
@@ -1121,8 +1121,8 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 1, null);
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RequestRoute firstItem = createRequestRoute(1L, 500, 200, endpoint);
-        RequestRoute secondItem = createRequestRoute(2L, 500, 200, endpoint);
+        RouteExecution firstItem = createRequestRoute(1L, 500, 200, endpoint);
+        RouteExecution secondItem = createRequestRoute(2L, 500, 200, endpoint);
         DeliveryPermit running = reservePermit();
         DeliveryPermit queued = reservePermit();
         CapacityBoundary.Attempt<?> rejected = runtime.deliveries().tryReserveDelivery();
@@ -1146,7 +1146,7 @@ class DeliveryDispatcherTest {
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void replacementAfterPreparationIsUsedAtSendTime(boolean malformed) throws Exception {
-        RequestRoute item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
+        RouteExecution item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
         item.ctx().data().prepareGenerateInput();
         item.ctx()
                 .data()
@@ -1167,7 +1167,7 @@ class DeliveryDispatcherTest {
 
     @Test
     void invalidFinalBatchFailsBeforeRpcOnTheDeliveryThread() throws Exception {
-        RequestRoute item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
+        RouteExecution item = createRequestRoute(1L, 500, 200, createPrefillEndpoint());
         CompletableFuture<Void> checked = new CompletableFuture<>();
         reservePermit()
                 .submit(
@@ -1206,7 +1206,7 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, endpoint);
+        RouteExecution item = createRequestRoute(1L, 500, 200, endpoint);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =
                 new CompletableFuture<>();
         CountDownLatch rpcInvoked = new CountDownLatch(1);
@@ -1229,7 +1229,7 @@ class DeliveryDispatcherTest {
                                 capacityChanged.countDown();
                             }
                         });
-        List<RequestRoute> exactItems = List.of(item);
+        List<RouteExecution> exactItems = List.of(item);
         submit(reservation, exactItems, 1L, 100, "dispatch_handoff_capacity", callback);
         assertTrue(rpcInvoked.await(5, TimeUnit.SECONDS));
 
@@ -1276,7 +1276,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchUsesAdmissionPriorityEvenIfOriginalRequestChanges() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp, 60);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp, 60);
         item.ctx()
                 .data()
                 .setRequest(item.ctx().data().getRequest().toBuilder().rawPriority(7).build());
@@ -1299,7 +1299,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchLeavesPriorityUnsetForNoPriorityRequests() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
         // default Request priority is the no-priority sentinel (0)
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
@@ -1320,7 +1320,7 @@ class DeliveryDispatcherTest {
     @Test
     void dispatchDualWritesCompatibleRoleAddress() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
@@ -1345,9 +1345,9 @@ class DeliveryDispatcherTest {
     void dispatchPreservesPerRequestRolesAcrossMissingDecodeAndDpRanks(boolean multipleRanks)
             throws Exception {
         PrefillEndpoint endpoint = createPrefillEndpoint();
-        var items = new java.util.ArrayList<RequestRoute>();
+        var items = new java.util.ArrayList<RouteExecution>();
         for (int index = 0; index < 6; index++) {
-            RequestRoute original = createRequestRoute(index + 1L, 500L, 200L, endpoint);
+            RouteExecution original = createRequestRoute(index + 1L, 500L, 200L, endpoint);
             ServerStatus prefill = original.prefill();
             prefill.setDpRank(multipleRanks && index % 2 != 0 ? 1L : 2L);
             if (index == 4) {
@@ -1363,16 +1363,11 @@ class DeliveryDispatcherTest {
                 decode.setHttpPort(index >= 3 ? 8101 : 8100);
                 decode.setGrpcPort(index >= 4 ? 8201 : 8200);
             }
-            items.add(
-                    SchedulingTestConfig.createRoute(
-                            original.ctx(),
-                            null,
-                            prefill,
-                            decode,
-                            endpoint,
-                            null,
-                            null,
-                            original.enqueuedAtMs()));
+            var projected = org.mockito.Mockito.spy(original);
+            org.mockito.Mockito.doReturn(prefill).when(projected).prefill();
+            org.mockito.Mockito.doReturn(decode).when(projected).decode();
+            org.mockito.Mockito.doReturn(prefill.getDpRank()).when(projected).prefillDpRank();
+            items.add(projected);
         }
         CompletableFuture<EngineRpcService.EnqueueBatchRequestPB> sent = new CompletableFuture<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
@@ -1408,7 +1403,7 @@ class DeliveryDispatcherTest {
             }
         }
         assertEquals(items.size(), inputs.size());
-        for (RequestRoute item : items) {
+        for (RouteExecution item : items) {
             var roles =
                     inputs.get(Long.parseLong(item.requestId()))
                             .getGenerateConfig()
@@ -1503,32 +1498,32 @@ class DeliveryDispatcherTest {
     }
 
     private void submit(
-            List<RequestRoute> items,
+            List<RouteExecution> items,
             long batchId,
             long prediction,
             String reason,
-            BiConsumer<RequestRoute, Delivery.Result> observer) {
+            BiConsumer<RouteExecution, Delivery.Result> observer) {
         submit(reservePermit(), items, batchId, prediction, reason, observer);
     }
 
     private void submit(
             DeliveryPermit permit,
-            List<RequestRoute> items,
+            List<RouteExecution> items,
             long batchId,
             long prediction,
             String reason,
-            BiConsumer<RequestRoute, Delivery.Result> observer) {
+            BiConsumer<RouteExecution, Delivery.Result> observer) {
         for (var item : items) {
-            org.flexlb.balance.scheduler.SchedulerTestServices.bind(
-                    item.ctx().data().getLifecycle(), runtime);
+            var requestScheduler = item.ctx().data().getRequestScheduler();
+            org.flexlb.balance.scheduler.SchedulerTestServices.bind(requestScheduler, runtime);
             Delivery.Member claim = item.ctx().snapshot().delivery().identity();
             if (claim.route() != item) {
                 claim = DeliveryTestSupport.member(item, claim.kind(), batchId);
-                when(item.ctx().data().getLifecycle().tryStartSend(claim)).thenReturn(true);
+                when(item.ctx().data().getRequestScheduler().tryStartSend(claim)).thenReturn(true);
             }
             when(item.ctx()
                             .data()
-                            .getLifecycle()
+                            .getRequestScheduler()
                             .prepareDelivery(
                                     org.mockito.ArgumentMatchers.argThat(
                                             member -> member != null && member.route() == item),
@@ -1551,7 +1546,7 @@ class DeliveryDispatcherTest {
                                         item, ((TransportResult) call.getArgument(0)).result());
                                 return null;
                             })
-                    .when(item.ctx().data().getLifecycle())
+                    .when(requestScheduler)
                     .onDeliveryResult(org.mockito.ArgumentMatchers.isA(TransportResult.class));
             org.mockito.Mockito.doAnswer(
                             call -> {
@@ -1562,7 +1557,7 @@ class DeliveryDispatcherTest {
                                                 new IllegalStateException(failed.detail())));
                                 return null;
                             })
-                    .when(item.ctx().data().getLifecycle())
+                    .when(requestScheduler)
                     .onDeliveryResult(
                             argThat(
                                     (ContextResult.DeliveryEvidence e) ->
@@ -1669,7 +1664,7 @@ class DeliveryDispatcherTest {
         when(cancelled
                         .ctx()
                         .data()
-                        .getLifecycle()
+                        .getRequestScheduler()
                         .tryStartSend(cancelled.ctx().snapshot().delivery().identity()))
                 .thenReturn(false);
         var admittedSpan = mock(io.opentelemetry.api.trace.Span.class);
@@ -1737,7 +1732,7 @@ class DeliveryDispatcherTest {
             when(items.get(index)
                             .ctx()
                             .data()
-                            .getLifecycle()
+                            .getRequestScheduler()
                             .tryStartSend(items.get(index).ctx().snapshot().delivery().identity()))
                     .thenReturn(accepted);
             if (accepted) {
@@ -1772,7 +1767,7 @@ class DeliveryDispatcherTest {
                             ? Delivery.Result.Status.DELIVERED
                             : Delivery.Result.Status.NOT_SENT;
             assertEquals(expected, results.get(Long.parseLong(items.get(index).requestId())));
-            verify(items.get(index).ctx().data().getLifecycle())
+            verify(items.get(index).ctx().data().getRequestScheduler())
                     .tryStartSend(items.get(index).ctx().snapshot().delivery().identity());
         }
         if (acceptedIds.isEmpty()) {
@@ -1792,7 +1787,7 @@ class DeliveryDispatcherTest {
         var item = createRequestRoute(703L, 20L, 0L, createPrefillEndpoint());
         when(item.ctx()
                         .data()
-                        .getLifecycle()
+                        .getRequestScheduler()
                         .tryStartSend(item.ctx().snapshot().delivery().identity()))
                 .thenReturn(false);
         var completed = new CompletableFuture<Delivery.Result>();
@@ -1807,12 +1802,12 @@ class DeliveryDispatcherTest {
                 .batchEnqueueAsync(anyString(), anyInt(), any());
     }
 
-    private RequestRoute createRequestRoute(
+    private RouteExecution createRequestRoute(
             long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
         return createRequestRoute(requestId, seqLen, hitCacheLen, prefillEp, 0);
     }
 
-    private RequestRoute createRequestRoute(
+    private RouteExecution createRequestRoute(
             long requestId,
             long seqLen,
             long hitCacheLen,
@@ -1847,13 +1842,13 @@ class DeliveryDispatcherTest {
         prefill.setDebugInfo(debugInfo);
 
         ctx.data().setFuture(new CompletableFuture<>());
-        SchedulerTestSupport.bindOwner(ctx, mock(RequestLifecycle.class));
+        SchedulerTestSupport.bindOwner(ctx, mock(AbstractRequestScheduler.class));
         long now = System.currentTimeMillis();
         ctx.register(String.valueOf(requestId), now, Long.MAX_VALUE, 60_000L);
         var route =
                 SchedulingTestConfig.createRoute(
                         ctx, null, prefill, null, prefillEp, null, null, now);
-        var placement = (AdmissionHandle) ctx.beginPlacement(null);
+        var placement = (PlacementOperation) ctx.beginPlacement(null);
         ctx.bindPlacement(placement, route, PublicationResult.PREPARED);
         ctx.bindPlacement(placement, route, PublicationResult.PUBLISHED);
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
@@ -1869,7 +1864,7 @@ class DeliveryDispatcherTest {
                                 requestId,
                                 now);
         ctx.publishDelivery(delivery);
-        when(ctx.data().getLifecycle().tryStartSend(delivery.identity())).thenReturn(true);
+        when(ctx.data().getRequestScheduler().tryStartSend(delivery.identity())).thenReturn(true);
         return route;
     }
 
@@ -1886,7 +1881,7 @@ class DeliveryDispatcherTest {
 
     // ---- Test callback ----
 
-    private static class TestCallback implements BiConsumer<RequestRoute, Delivery.Result> {
+    private static class TestCallback implements BiConsumer<RouteExecution, Delivery.Result> {
         final AtomicInteger successCount = new AtomicInteger(0);
         final AtomicInteger failureCount = new AtomicInteger(0);
         final AtomicInteger uncertainCount = new AtomicInteger(0);
@@ -1896,7 +1891,7 @@ class DeliveryDispatcherTest {
         volatile Throwable lastError;
 
         @Override
-        public void accept(RequestRoute exactItem, Delivery.Result completion) {
+        public void accept(RouteExecution exactItem, Delivery.Result completion) {
             if (completion.status() == Delivery.Result.Status.DELIVERED) {
                 successCount.incrementAndGet();
                 successLatch.countDown();
@@ -2022,7 +2017,7 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         // Exhaust the single admission permit with one in-flight batch.
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
         DeliveryPermit permit = reservePermit();
         assertDoesNotThrow(() -> submit(permit, List.of(item), 1L, 100, "inflight_hold", callback));
 
@@ -2051,7 +2046,7 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
         // Force a deterministic pre-send build failure: null generateInput
         // bytes path is hard to force; use an oversize payload instead by
         // mocking the config to throw in requireBatchDispatcher — simplest
@@ -2059,7 +2054,7 @@ class DeliveryDispatcherTest {
         when(configService.loadBalanceConfig())
                 .thenThrow(new IllegalStateException("config unavailable before send"));
         CountDownLatch failed = new CountDownLatch(1);
-        BiConsumer<RequestRoute, Delivery.Result> failureCallback =
+        BiConsumer<RouteExecution, Delivery.Result> failureCallback =
                 (exactItem, completion) -> {
                     if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failed.countDown();
@@ -2152,13 +2147,13 @@ class DeliveryDispatcherTest {
         runtime.deliveries().stopDeliveryAdmission();
         dispatcher = createDispatcher(1, 0, null);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(7L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(7L, 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> pending =
                 new CompletableFuture<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
                 .thenAnswer(invocation -> pending);
         CountDownLatch uncertain = new CountDownLatch(1);
-        BiConsumer<RequestRoute, Delivery.Result> uncertainCallback =
+        BiConsumer<RouteExecution, Delivery.Result> uncertainCallback =
                 (exactItem, completion) -> {
                     if (completion.status() == Delivery.Result.Status.UNCERTAIN) {
                         uncertain.countDown();
@@ -2212,9 +2207,9 @@ class DeliveryDispatcherTest {
         // must be rejected pre-serialization.
         dispatcher = createDispatcher(1, 0, null, 64L);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        RequestRoute item = createRequestRoute(1L, 500, 200, prefillEp);
+        RouteExecution item = createRequestRoute(1L, 500, 200, prefillEp);
         CountDownLatch failed = new CountDownLatch(1);
-        BiConsumer<RequestRoute, Delivery.Result> failureCallback =
+        BiConsumer<RouteExecution, Delivery.Result> failureCallback =
                 (exactItem, completion) -> {
                     if (completion.status() == Delivery.Result.Status.NOT_SENT) {
                         failed.countDown();

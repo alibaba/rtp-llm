@@ -14,13 +14,13 @@ import static org.flexlb.balance.scheduler.ContextResult.CancelEvidenceKind;
 import static org.flexlb.balance.scheduler.ContextResult.CleanupAcknowledgement;
 import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.flexlb.balance.scheduler.RequestChangeAssertions.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -38,7 +38,8 @@ class RequestDeliveryClaimStateTest {
     void deliveryPreparationDoesNotPublishUntransferredOwnership() {
         var context = new RequestContext(mock(FlexlbConfig.class));
         context.register("7503", 1000L, 100_000L, 10_000L);
-        var route = mock(RequestRoute.class);
+        var route = mock(RouteExecution.class);
+        when(route.selectedEndpointsAvailable()).thenReturn(true);
         when(route.requestId()).thenReturn(String.valueOf(7503L));
         when(route.ctx()).thenReturn(context);
         var placement = RequestCleanupPassTest.requireValue(context.beginPlacement(null));
@@ -74,12 +75,12 @@ class RequestDeliveryClaimStateTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         context,
                         observedRequest ->
-                                observedRequest.recordEngineEvidence(
-                                        new EngineEvidence(
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
                                                 fixture.route(),
                                                 fixture.reservation(),
                                                 fusion ? RoleType.PDFUSION : RoleType.DECODE,
-                                                EngineKind.COMPLETED,
+                                                WorkerRequestEventType.COMPLETED,
                                                 0L,
                                                 null,
                                                 1002L)));
@@ -197,12 +198,12 @@ class RequestDeliveryClaimStateTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordEngineEvidence(
-                                new EngineEvidence(
+                        observedRequest.recordWorkerRequestEvent(
+                                new WorkerRequestEvent(
                                         fixture.route(),
                                         fixture.reservation(),
                                         RoleType.DECODE,
-                                        EngineKind.ACTIVE,
+                                        WorkerRequestEventType.ACTIVE,
                                         0L,
                                         null,
                                         99_999L)));
@@ -240,12 +241,12 @@ class RequestDeliveryClaimStateTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordEngineEvidence(
-                                new EngineEvidence(
+                        observedRequest.recordWorkerRequestEvent(
+                                new WorkerRequestEvent(
                                         fixture.route(),
                                         fixture.reservation(),
                                         RoleType.DECODE,
-                                        EngineKind.COMPLETED,
+                                        WorkerRequestEventType.COMPLETED,
                                         0L,
                                         null,
                                         1003L)));
@@ -280,12 +281,12 @@ class RequestDeliveryClaimStateTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         context,
                         observedRequest ->
-                                observedRequest.recordEngineEvidence(
-                                        new EngineEvidence(
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
                                                 fixture.route(),
                                                 fixture.reservation(),
                                                 RoleType.DECODE,
-                                                EngineKind.COMPLETED,
+                                                WorkerRequestEventType.COMPLETED,
                                                 0L,
                                                 null,
                                                 1003L)));
@@ -316,12 +317,12 @@ class RequestDeliveryClaimStateTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         context,
                         observedRequest ->
-                                observedRequest.recordEngineEvidence(
-                                        new EngineEvidence(
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
                                                 fixture.route(),
                                                 fixture.reservation(),
                                                 RoleType.DECODE,
-                                                EngineKind.ACTIVE,
+                                                WorkerRequestEventType.ACTIVE,
                                                 0L,
                                                 null,
                                                 1007L)));
@@ -339,12 +340,14 @@ class RequestDeliveryClaimStateTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordEngineEvidence(
-                                new EngineEvidence(
+                        observedRequest.recordWorkerRequestEvent(
+                                new WorkerRequestEvent(
                                         fixture.route(),
                                         null,
                                         RoleType.PDFUSION,
-                                        failed ? EngineKind.FAILED : EngineKind.COMPLETED,
+                                        failed
+                                                ? WorkerRequestEventType.FAILED
+                                                : WorkerRequestEventType.COMPLETED,
                                         failed ? 42L : 0L,
                                         null,
                                         1003L)));
@@ -389,12 +392,12 @@ class RequestDeliveryClaimStateTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordEngineEvidence(
-                                new EngineEvidence(
+                        observedRequest.recordWorkerRequestEvent(
+                                new WorkerRequestEvent(
                                         fixture.route(),
                                         null,
                                         RoleType.PDFUSION,
-                                        EngineKind.COMPLETED,
+                                        WorkerRequestEventType.COMPLETED,
                                         0L,
                                         null,
                                         1002L)));
@@ -450,12 +453,13 @@ class RequestDeliveryClaimStateTest {
         var reservation =
                 fusion
                         ? null
-                        : new DecodeResources.ReservationHandle(1L, String.valueOf(7502L), 1L);
-        var route = mock(RequestRoute.class);
+                        : new DecodeResources.RequestReservation(1L, String.valueOf(7502L), 1L);
+        var route = mock(RouteExecution.class);
+        when(route.selectedEndpointsAvailable()).thenReturn(true);
         when(route.requestId()).thenReturn(String.valueOf(7502L));
         when(route.ctx()).thenReturn(context);
-        when(route.prefillEp()).thenReturn(prefill);
-        when(route.decodeEp()).thenReturn(decode);
+        when(route.prefillEndpoint()).thenReturn(prefill);
+        when(route.decodeEndpoint()).thenReturn(decode);
         when(route.decodeReservation()).thenReturn(reservation);
         var placement = RequestCleanupPassTest.requireValue(context.beginPlacement(null));
         org.junit.jupiter.api.Assertions.assertTrue(
@@ -480,9 +484,9 @@ class RequestDeliveryClaimStateTest {
 
     record Fixture(
             RequestContext context,
-            RequestRoute route,
+            RouteExecution route,
             PrefillEndpoint prefill,
             DecodeEndpoint decode,
-            DecodeResources.ReservationHandle reservation,
+            DecodeResources.RequestReservation reservation,
             Delivery.Member delivery) {}
 }

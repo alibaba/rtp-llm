@@ -3,9 +3,9 @@ package org.flexlb.balance.eviction;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionProposal;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -60,7 +60,7 @@ class DecodePreemptionTest {
 
     private DeliveryDispatcher dispatcher;
 
-    private RequestLifecycle requests;
+    private AbstractRequestScheduler requests;
 
     private DecodeEndpoint blockedEndpoint;
 
@@ -82,7 +82,7 @@ class DecodePreemptionTest {
                 .when(reporter)
                 .reportPreemptionCancelRequests(any(), any());
         dispatcher = mock(DeliveryDispatcher.class);
-        requests = mock(RequestLifecycle.class);
+        requests = mock(AbstractRequestScheduler.class);
         blockedEndpoint = mock(DecodeEndpoint.class);
         var config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
@@ -142,6 +142,7 @@ class DecodePreemptionTest {
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(1L);
 
         var endpoint = org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
+        org.mockito.Mockito.doReturn(true).when(endpoint).acceptsNewRequests();
         var routing = mock(DecodeResources.DecodeRoutingView.class);
         var view = mock(DecodeResources.ResourceSnapshot.class);
         var victim =
@@ -178,14 +179,14 @@ class DecodePreemptionTest {
         var frozenRequest = context.data().getRequest();
         configureAdmission(config);
         org.mockito.Mockito.doReturn(completion).when(acquirer).preempt(any(), any());
-        when(requests.isAdmissionOpen("902", future)).thenReturn(admissionOpen);
+        when(requests.isAdmissionOpen(context)).thenReturn(admissionOpen);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests(99L);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxKvUsagePercent(1L);
         var changed = incoming.toBuilder().seqLen(4_096L).maxNewTokens(1_024).build();
         assertEquals(4_096L, changed.getSeqLen());
 
         var outcome = acquirer.tryReclaim(context, endpoint);
-        verify(requests).isAdmissionOpen("902", future);
+        verify(requests).isAdmissionOpen(context);
         verifyNoMoreInteractions(requests);
         if (!admissionOpen) {
             assertNull(outcome);
@@ -205,7 +206,7 @@ class DecodePreemptionTest {
         assertSame(frozenRequest, command.getValue().request());
         assertEquals(List.of(victim), command.getValue().victims());
 
-        var exact = new DecodeResources.ReservationHandle(7L, String.valueOf(902L), 31L);
+        var exact = new DecodeResources.RequestReservation(7L, String.valueOf(902L), 31L);
         completion.complete(new DecodePreemption.PreemptionResult(exact, false, "committed"));
         assertSame(exact, outcome.join().reservation());
         assertNull(
@@ -244,6 +245,7 @@ class DecodePreemptionTest {
         configureAdmission(config);
         when(context.data().getFuture()).thenReturn(new CompletableFuture<>());
         var endpoint = org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
+        org.mockito.Mockito.doReturn(true).when(endpoint).acceptsNewRequests();
         var snapshot = mock(DecodeResources.ResourceSnapshot.class);
         var routing = mock(DecodeResources.DecodeRoutingView.class);
         when(endpoint.resourceSnapshot()).thenReturn(snapshot);
@@ -366,10 +368,10 @@ class DecodePreemptionTest {
         var context = ctx(1);
         when(context.data().getFuture()).thenReturn(new CompletableFuture<>());
         var endpoint = org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
-        when(endpoint.isRetired()).thenReturn(true);
+        org.mockito.Mockito.doReturn(false).when(endpoint).acceptsNewRequests();
         assertNull(acquirer.tryReclaim(context, endpoint));
         verify(endpoint).resourceSnapshot();
-        verify(endpoint).isRetired();
+        verify(endpoint).acceptsNewRequests();
         verifyNoInteractions(dispatcher, requests, reporter);
     }
 

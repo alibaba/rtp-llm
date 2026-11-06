@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
@@ -20,6 +20,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.runWithStateLock;
+import static org.flexlb.balance.endpoint.EndpointTestSupport.withStateLock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -35,7 +37,7 @@ class PrefillRequestCapacityTest {
     private final PrefillEndpoint state =
             org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                     lock,
-                    PrefillActiveIndex.ordered(
+                    OrderedPrefillRequestQueue.ordered(
                             16,
                             Comparator.comparing(
                                     org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
@@ -44,7 +46,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void duplicateDirectAdmissionDoesNotReplaceOrReleaseTheOriginalOwner() {
-        RequestRoute route = item(1);
+        RouteExecution route = item(1);
         var original = reserve(route, 1L).value();
         assertNotNull(original);
         try {
@@ -63,7 +65,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void queuedOwnersDoNotConsumeImmediateDeliveryCapacity() {
-        RequestRoute queued = item(1), immediate = item(2), another = item(3);
+        RouteExecution queued = item(1), immediate = item(2), another = item(3);
         assertTrue(enqueue(queued, 2L));
         var first = reserve(immediate, 2L).value();
         assertNotNull(first);
@@ -72,7 +74,9 @@ class PrefillRequestCapacityTest {
         assertEquals(
                 CapacityBoundary.Resource.PREFILL_REQUEST,
                 reserve(item(4), 2L).boundary().resource());
-        try (var handoff = commit(immediate, first)) {}
+        {
+            var handoff = commit(immediate, first);
+        }
         EndpointTestSupport.rollback(first);
         assertFalse(state.requestCapacityAvailable(2, 1), "committed execution retains its slot");
         assertTrue(EndpointTestSupport.releaseRequest(state, immediate));
@@ -85,7 +89,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void workerDetailsDeduplicateLocalRequestsAndForeignRequestIds() {
-        RequestRoute local = item(1);
+        RouteExecution local = item(1);
         var registration = reserve(local, 4L).value();
         var localObservation = observed(1);
         var foreign = observed(2);
@@ -94,7 +98,9 @@ class PrefillRequestCapacityTest {
                 2L,
                 state.admissionSummary(0, 0L).occupiedRequests(),
                 "early Engine observation and prepared local ownership are one request");
-        try (var handoff = commit(local, registration)) {}
+        {
+            var handoff = commit(local, registration);
+        }
         EndpointTestSupport.rollback(registration);
         heartbeat(Map.of("local", localObservation, "foreign", foreign), 2L);
         assertEquals(2L, state.admissionSummary(0, 0L).occupiedRequests());
@@ -140,13 +146,15 @@ class PrefillRequestCapacityTest {
 
     @Test
     void batchRequestCountDoesNotLimitWaitingAndBatchPermitWaitsForLastMember() {
-        RequestRoute first = item(1), second = item(2);
+        RouteExecution first = item(1), second = item(2);
         assertTrue(enqueue(first, 0L));
         assertTrue(enqueue(second, 0L));
         var generation = new EndpointRetirementTestSupport(() -> {});
-        var reservation = state.reserveBatch(10L, 1, generation.tryPinGeneration()).value();
-        try (var handoff =
-                EndpointTestSupport.commitBatch(state, reservation, List.of(first, second), 0L)) {}
+        var reservation = state.reserveBatch(10L, 1).value();
+        {
+            var handoff =
+                    EndpointTestSupport.commitBatch(state, reservation, List.of(first, second), 0L);
+        }
         assertFalse(state.batchCapacityAvailable(1));
         assertTrue(enqueue(item(3), 0L));
         assertTrue(EndpointTestSupport.releaseRequest(state, first));
@@ -159,7 +167,7 @@ class PrefillRequestCapacityTest {
 
     @Test
     void staleOwnerCannotReleaseAReusedRequestId() {
-        RequestRoute previous = item(1);
+        RouteExecution previous = item(1);
         var old = reserve(previous, 1L).value();
         EndpointTestSupport.rollback(old);
         var current = reserve(item(1), 1L).value();
@@ -185,28 +193,41 @@ class PrefillRequestCapacityTest {
 
     @Test
     void progressReadersDoNotWaitForTheOwnershipLock() throws Exception {
-        RequestRoute queued = item(1);
+        RouteExecution queued = item(1);
         assertTrue(enqueue(queued, 2L));
         try (var reader = Executors.newSingleThreadExecutor()) {
-            lock.lock();
-            try {
-                assertFalse(
-                        reader.submit(() -> state.progress().queueDepth() < 1L)
-                                .get(5, TimeUnit.SECONDS));
-                assertTrue(
-                        reader.submit(() -> state.progress().queueDepth() < 2L)
-                                .get(5, TimeUnit.SECONDS));
-                assertSame(
-                        queued,
-                        org.flexlb.balance.endpoint.EndpointTestSupport.removeQueued(
-                                state, queued));
-                assertTrue(
-                        reader.submit(() -> state.progress().queueDepth() < 1L)
-                                .get(5, TimeUnit.SECONDS),
-                        "removal publishes queue progress before the ownership lock is released");
-            } finally {
-                lock.unlock();
-            }
+            runWithStateLock(
+                    lock,
+                    () ->
+                            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                                    () -> {
+                                        assertFalse(
+                                                reader.submit(
+                                                                () ->
+                                                                        state.progress()
+                                                                                        .queueDepth()
+                                                                                < 1L)
+                                                        .get(5, TimeUnit.SECONDS));
+                                        assertTrue(
+                                                reader.submit(
+                                                                () ->
+                                                                        state.progress()
+                                                                                        .queueDepth()
+                                                                                < 2L)
+                                                        .get(5, TimeUnit.SECONDS));
+                                        assertSame(
+                                                queued,
+                                                org.flexlb.balance.endpoint.EndpointTestSupport
+                                                        .removeQueued(state, queued));
+                                        assertTrue(
+                                                reader.submit(
+                                                                () ->
+                                                                        state.progress()
+                                                                                        .queueDepth()
+                                                                                < 1L)
+                                                        .get(5, TimeUnit.SECONDS),
+                                                "removal publishes queue progress before the ownership lock is released");
+                                    }));
         }
     }
 
@@ -216,10 +237,10 @@ class PrefillRequestCapacityTest {
         CountDownLatch selected = new CountDownLatch(contenders);
         CountDownLatch admit = new CountDownLatch(1);
         try (var executor = Executors.newFixedThreadPool(contenders)) {
-            List<Future<CapacityBoundary.Attempt<PrefillEndpoint.RouteReservation>>> attempts =
+            List<Future<CapacityBoundary.Attempt<PrefillEndpoint.RequestRecord>>> attempts =
                     new ArrayList<>();
             for (int i = 0; i < contenders; i++) {
-                RequestRoute request = item(i + 1);
+                RouteExecution request = item(i + 1);
                 attempts.add(
                         executor.submit(
                                 () -> {
@@ -235,7 +256,7 @@ class PrefillRequestCapacityTest {
             } finally {
                 admit.countDown();
             }
-            List<PrefillEndpoint.RouteReservation> acquired = new ArrayList<>();
+            List<PrefillEndpoint.RequestRecord> acquired = new ArrayList<>();
             for (var attempt : attempts) {
                 var result = attempt.get(5, TimeUnit.SECONDS);
                 if (result.value() != null) {
@@ -273,23 +294,24 @@ class PrefillRequestCapacityTest {
     void failedQueueInsertionDoesNotConsumePublishedCapacity() {
         var direct =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                        lock, PrefillActiveIndex.disabled(), System::currentTimeMillis);
-        lock.lock();
-        try {
-            assertThrows(
-                    IllegalStateException.class,
-                    () -> org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(direct, item(1)));
-            assertTrue(direct.admissionSummary(0, 0L).occupiedRequests() < 1L);
-            assertEquals(0L, direct.admissionSummary(0, 0L).occupiedRequests());
-        } finally {
-            lock.unlock();
-        }
+                        lock, OrderedPrefillRequestQueue.disabled(), System::currentTimeMillis);
+        runWithStateLock(
+                lock,
+                () -> {
+                    assertThrows(
+                            IllegalStateException.class,
+                            () ->
+                                    org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
+                                            direct, item(1)));
+                    assertTrue(direct.admissionSummary(0, 0L).occupiedRequests() < 1L);
+                    assertEquals(0L, direct.admissionSummary(0, 0L).occupiedRequests());
+                });
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void failedReplacementInsertionKeepsVictimsAndCapacityForRetry(boolean fatal) {
-        RequestRoute first = item(1), second = item(2), incoming = item(3);
+        RouteExecution first = item(1), second = item(2), incoming = item(3);
         when(first.priority()).thenReturn(20);
         when(second.priority()).thenReturn(20);
         when(incoming.priority()).thenReturn(80);
@@ -310,44 +332,50 @@ class PrefillRequestCapacityTest {
                 };
         PrefillEndpoint ledger =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
-                        lock, PrefillActiveIndex.ordered(16, ordering), System::currentTimeMillis);
-        lock.lock();
-        try {
-            assertSame(
-                    first, org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(ledger, first));
-            assertSame(
-                    second,
-                    org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(ledger, second));
-            Class<? extends Throwable> failureType =
-                    fatal ? AssertionError.class : IllegalStateException.class;
-            assertThrows(
-                    failureType,
-                    () ->
+                        lock,
+                        OrderedPrefillRequestQueue.ordered(16, ordering),
+                        System::currentTimeMillis);
+        runWithStateLock(
+                lock,
+                () -> {
+                    assertSame(
+                            first,
+                            org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(ledger, first));
+                    assertSame(
+                            second,
+                            org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
+                                    ledger, second));
+                    Class<? extends Throwable> failureType =
+                            fatal ? AssertionError.class : IllegalStateException.class;
+                    assertThrows(
+                            failureType,
+                            () ->
+                                    org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
+                                            ledger, incoming));
+                    assertEquals(
+                            List.of(first, second), ledger.captureQueue(Integer.MAX_VALUE).items());
+                    assertEquals(2L, ledger.admissionSummary(0, 0L).occupiedRequests());
+
+                    failInsertion.set(false);
+                    assertSame(
+                            incoming,
                             org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
                                     ledger, incoming));
-            assertEquals(List.of(first, second), ledger.captureQueue(Integer.MAX_VALUE).items());
-            assertEquals(2L, ledger.admissionSummary(0, 0L).occupiedRequests());
-
-            failInsertion.set(false);
-            assertSame(
-                    incoming,
-                    org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(ledger, incoming));
-            assertEquals(
-                    List.of(first, second, incoming),
-                    ledger.captureQueue(Integer.MAX_VALUE).items());
-            assertEquals(3L, ledger.admissionSummary(0, 0L).occupiedRequests());
-            assertNull(
-                    org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(ledger, item(3)),
-                    "a reused id cannot replace its current queue owner");
-            assertTrue(ledger.requestCapacityAvailable(1L, 1));
-        } finally {
-            lock.unlock();
-        }
+                    assertEquals(
+                            List.of(first, second, incoming),
+                            ledger.captureQueue(Integer.MAX_VALUE).items());
+                    assertEquals(3L, ledger.admissionSummary(0, 0L).occupiedRequests());
+                    assertNull(
+                            org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
+                                    ledger, item(3)),
+                            "a reused id cannot replace its current queue owner");
+                    assertTrue(ledger.requestCapacityAvailable(1L, 1));
+                });
     }
 
     @Test
     void admissionSummaryKeepsOneRevisionAndReflectsReleaseAndUnknownEngineWork() {
-        RequestRoute lower = item(1), same = item(2), higher = item(3);
+        RouteExecution lower = item(1), same = item(2), higher = item(3);
         when(lower.priority()).thenReturn(10);
         when(same.priority()).thenReturn(50);
         when(higher.priority()).thenReturn(90);
@@ -392,24 +420,24 @@ class PrefillRequestCapacityTest {
         assertTrue(state.admissionSummary(0, 0L).occupiedRequests() < 2L);
     }
 
-    private CapacityBoundary.Attempt<PrefillEndpoint.RouteReservation> reserve(
-            RequestRoute item, long limit) {
+    private CapacityBoundary.Attempt<PrefillEndpoint.RequestRecord> reserve(
+            RouteExecution item, long limit) {
         return state.reserveUnqueuedRoute(item, 0L, limit);
     }
 
     private org.flexlb.balance.scheduler.Delivery commit(
-            RequestRoute item, PrefillEndpoint.RouteReservation registration) {
+            RouteExecution item, PrefillEndpoint.RequestRecord registration) {
         return org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
                 state, item, registration);
     }
 
-    private boolean enqueue(RequestRoute item, long limit) {
-        lock.lock();
-        try {
-            return org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, item) == item;
-        } finally {
-            lock.unlock();
-        }
+    private boolean enqueue(RouteExecution item, long limit) {
+        return withStateLock(
+                lock,
+                () -> {
+                    return org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, item)
+                            == item;
+                });
     }
 
     private void heartbeat(Map<String, WorkerStatus.TaskObservation> tasks, long reportedActive) {
@@ -419,13 +447,12 @@ class PrefillRequestCapacityTest {
         when(engine.waitingQueryLen()).thenReturn(reportedActive);
         when(observation.engine()).thenReturn(engine);
         when(observation.activeTasks()).thenReturn(tasks);
-        lock.lock();
-        try {
-            state.commitStatusLocked(
-                    state.prepareStatusLocked(observation, false), java.util.Map.of());
-        } finally {
-            lock.unlock();
-        }
+        runWithStateLock(
+                lock,
+                () -> {
+                    state.commitStatusLocked(
+                            state.prepareStatusLocked(observation, false), java.util.Map.of());
+                });
     }
 
     private static WorkerStatus.TaskObservation observed(long id) {
@@ -447,8 +474,8 @@ class PrefillRequestCapacityTest {
                 null);
     }
 
-    private static RequestRoute item(long id) {
-        RequestRoute item = mock(RequestRoute.class);
+    private static RouteExecution item(long id) {
+        RouteExecution item = mock(RouteExecution.class);
         when(item.requestId()).thenReturn(String.valueOf(id));
         return item;
     }

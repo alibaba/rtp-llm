@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -23,7 +23,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-class PrefillActiveIndexTest {
+class OrderedPrefillRequestQueueTest {
     private static final Comparator<org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem>
             ORDER =
                     Comparator.comparingInt(
@@ -36,7 +36,7 @@ class PrefillActiveIndexTest {
 
     @Test
     void directModeNeverAcquiresQueueMembership() {
-        var index = PrefillActiveIndex.disabled();
+        var index = OrderedPrefillRequestQueue.disabled();
         var request = item(1, 50);
         var empty = index.capture();
         assertThrows(IllegalStateException.class, () -> index.add(request));
@@ -53,12 +53,12 @@ class PrefillActiveIndexTest {
         assertSame(empty, index.capture());
         assertTrue(empty.items().isEmpty());
         assertFalse(index.iterator().hasNext());
-        assertSame(index, PrefillActiveIndex.disabled());
+        assertSame(index, OrderedPrefillRequestQueue.disabled());
     }
 
     @Test
     void capturedEmptinessDoesNotMaterializeOrFollowLaterQueueChanges() {
-        var index = PrefillActiveIndex.ordered(4, ORDER);
+        var index = OrderedPrefillRequestQueue.ordered(4, ORDER);
         var request = item(1, 50);
         when(request.seqLen())
                 .thenThrow(new AssertionError("must not materialize prediction input"));
@@ -74,8 +74,8 @@ class PrefillActiveIndexTest {
 
     @Test
     void additionsAndRemovalsMatchReferenceOrderAndPreserveOldCaptures() {
-        var index = PrefillActiveIndex.ordered(16, ORDER);
-        var expected = new ArrayList<RequestRoute>();
+        var index = OrderedPrefillRequestQueue.ordered(16, ORDER);
+        var expected = new ArrayList<RouteExecution>();
         var random = new Random(36);
         for (int step = 0; step < 400; step++) {
             long oldVersion = index.version();
@@ -131,13 +131,13 @@ class PrefillActiveIndexTest {
 
     @Test
     void equalOrderingKeysStillRequireExactIdentity() {
-        var index = PrefillActiveIndex.ordered(2, ORDER);
+        var index = OrderedPrefillRequestQueue.ordered(2, ORDER);
         var first = item(1, 50);
         var second = item(1, 50);
         assertTrue(index.add(first));
         assertTrue(index.add(second));
         assertFalse(index.remove(item(1, 50)));
-        var ordered = new ArrayList<RequestRoute>();
+        var ordered = new ArrayList<RouteExecution>();
         index.forEach(ordered::add);
         assertEquals(List.of(first, second), ordered);
         var captured = index.capture();
@@ -156,7 +156,7 @@ class PrefillActiveIndexTest {
     @Test
     @Timeout(10)
     void concurrentCapturesShareMaterializationAndUnchangedRequestValues() throws Exception {
-        var index = PrefillActiveIndex.ordered(2, ORDER);
+        var index = OrderedPrefillRequestQueue.ordered(2, ORDER);
         var first = item(1, 50);
         index.add(first);
         var old = index.capture();
@@ -188,7 +188,7 @@ class PrefillActiveIndexTest {
 
     @Test
     void captureDoesNotReadPlanningInputs() {
-        var index = PrefillActiveIndex.ordered(2, ORDER);
+        var index = OrderedPrefillRequestQueue.ordered(2, ORDER);
         var first = item(1, 50);
         var second = item(2, 40);
         when(second.seqLen()).thenThrow(new IllegalStateException("test failure")).thenReturn(10L);
@@ -210,8 +210,8 @@ class PrefillActiveIndexTest {
         return capture.items().size();
     }
 
-    private static RequestRoute item(long id, int priority) {
-        var request = mock(RequestRoute.class);
+    private static RouteExecution item(long id, int priority) {
+        var request = mock(RouteExecution.class);
         when(request.requestId()).thenReturn(String.valueOf(id));
         when(request.enqueueSeq()).thenReturn(id);
         when(request.priority()).thenReturn(priority);

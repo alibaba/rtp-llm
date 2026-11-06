@@ -4,9 +4,9 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.Candidate;
-import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Candidate;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Probe;
 import org.junit.jupiter.api.Test;
 
@@ -94,7 +94,7 @@ class RequestTimeEstimationTest {
                                 "disabled execution budget must not construct a prefix predictor");
                     }
                 };
-        QueueSnapshot snapshot =
+        ProjectionQueueSnapshot snapshot =
                 queue(
                         false,
                         constraints(2, 0L),
@@ -156,7 +156,7 @@ class RequestTimeEstimationTest {
 
     @Test
     void liveMembersOnBothSidesOfProbeKeepTheirBatchAndRouteCosts() {
-        QueueSnapshot snapshot =
+        ProjectionQueueSnapshot snapshot =
                 queue(
                         true,
                         constraints(5, 30L),
@@ -218,9 +218,11 @@ class RequestTimeEstimationTest {
                             TOKEN_EVALUATOR,
                             probe(99L, 50, 20L, 0L),
                             delivery);
-            assertEquals(Candidate.State.MODELED, result.state());
+            assertEquals(RequestTimeEstimation.State.MODELED, result.state());
             assertEquals(20L, result.projectedTtftMsValue());
-            assertEquals(Candidate.InitialHeadDisposition.NONE, result.initialHeadDisposition());
+            assertEquals(
+                    RequestTimeEstimation.InitialHeadDisposition.NONE,
+                    result.initialHeadDisposition());
         }
     }
 
@@ -310,7 +312,7 @@ class RequestTimeEstimationTest {
 
     @Test
     void inputsRejectSnapshotsFromDifferentLinearizationPoints() {
-        QueueSnapshot queue = queue(false, constraints(1, 0L), List.of());
+        ProjectionQueueSnapshot queue = queue(false, constraints(1, 0L), List.of());
         WorkSnapshot later = new WorkSnapshot(NOW_MS + 1L, List.of(), List.of(), 0L);
 
         assertThrows(
@@ -340,9 +342,12 @@ class RequestTimeEstimationTest {
 
         assertModeled(fifo, 130L);
         assertModeled(priority, 30L);
-        assertEquals(Candidate.InitialHeadDisposition.BEFORE_PROBE, fifo.initialHeadDisposition());
         assertEquals(
-                Candidate.InitialHeadDisposition.BEFORE_PROBE, priority.initialHeadDisposition());
+                RequestTimeEstimation.InitialHeadDisposition.BEFORE_PROBE,
+                fifo.initialHeadDisposition());
+        assertEquals(
+                RequestTimeEstimation.InitialHeadDisposition.BEFORE_PROBE,
+                priority.initialHeadDisposition());
     }
 
     @Test
@@ -422,9 +427,9 @@ class RequestTimeEstimationTest {
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(Candidate.State.UNAVAILABLE, result.state());
+        assertEquals(RequestTimeEstimation.State.UNAVAILABLE, result.state());
         assertEquals("SINGLE_PREDICTION_FAILED", result.detail());
-        assertEquals(Candidate.UNKNOWN, result.projectedTtftMsValue());
+        assertEquals(RequestTimeEstimation.UNKNOWN, result.projectedTtftMsValue());
     }
 
     @Test
@@ -492,7 +497,7 @@ class RequestTimeEstimationTest {
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(Candidate.State.MODELED, candidate.state());
+        assertEquals(RequestTimeEstimation.State.MODELED, candidate.state());
         assertTrue(candidate.selectable());
         assertEquals(20L, candidate.projectedTtftMsValue());
         assertEquals(20L, candidate.incomingPrefillMs());
@@ -518,7 +523,7 @@ class RequestTimeEstimationTest {
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(Candidate.State.MODELED, result.state());
+        assertEquals(RequestTimeEstimation.State.MODELED, result.state());
         assertTrue(result.selectable());
         assertEquals(20L, result.projectedTtftMsValue());
     }
@@ -535,7 +540,8 @@ class RequestTimeEstimationTest {
 
         assertModeled(result, 20L);
         assertEquals(
-                Candidate.InitialHeadDisposition.TERMINAL_PRUNED, result.initialHeadDisposition());
+                RequestTimeEstimation.InitialHeadDisposition.TERMINAL_PRUNED,
+                result.initialHeadDisposition());
     }
 
     @Test
@@ -566,7 +572,8 @@ class RequestTimeEstimationTest {
 
         assertModeled(result, 30L);
         assertEquals(
-                Candidate.InitialHeadDisposition.BEFORE_PROBE, result.initialHeadDisposition());
+                RequestTimeEstimation.InitialHeadDisposition.BEFORE_PROBE,
+                result.initialHeadDisposition());
     }
 
     @Test
@@ -628,7 +635,7 @@ class RequestTimeEstimationTest {
                         List.of(
                                 item(1L, 50, 1L, 1L, NOW_MS + 5L),
                                 item(2L, 50, 2L, 1L, NOW_MS + 5L)));
-        for (QueueSnapshot snapshot : List.of(blockedSuffix, consumedPrefix)) {
+        for (ProjectionQueueSnapshot snapshot : List.of(blockedSuffix, consumedPrefix)) {
             AtomicInteger planningSessions = new AtomicInteger();
             PrefillTimePredictor.Evaluator counted =
                     new PrefillTimePredictor.Evaluator() {
@@ -686,7 +693,7 @@ class RequestTimeEstimationTest {
 
     @Test
     void futureExpiryDoesNotEraseKnownWorkInLaterGroups() {
-        QueueSnapshot snapshot =
+        ProjectionQueueSnapshot snapshot =
                 queue(
                         false,
                         constraints(5, 30L),
@@ -712,7 +719,8 @@ class RequestTimeEstimationTest {
             // Both groups are alive at capture: 15 ms followed by 600 + 50 + 700 + 80 ms.
             assertModeled(result, 1445L);
             assertEquals(
-                    Candidate.InitialHeadDisposition.BEFORE_PROBE, result.initialHeadDisposition());
+                    RequestTimeEstimation.InitialHeadDisposition.BEFORE_PROBE,
+                    result.initialHeadDisposition());
         }
     }
 
@@ -737,7 +745,7 @@ class RequestTimeEstimationTest {
 
         assertModeled(afterInvalidHead, 120L);
         assertEquals(
-                Candidate.InitialHeadDisposition.BEFORE_PROBE,
+                RequestTimeEstimation.InitialHeadDisposition.BEFORE_PROBE,
                 afterInvalidHead.initialHeadDisposition());
         assertModeled(invalidProbe, 100L);
     }
@@ -755,7 +763,7 @@ class RequestTimeEstimationTest {
                         probe(99L, 90, 20L, 0L),
                         ROUTE);
 
-        assertEquals(Candidate.State.MODELED, result.state());
+        assertEquals(RequestTimeEstimation.State.MODELED, result.state());
         assertEquals(30L, result.projectedTtftMsValue());
         assertEquals("SERIAL_FROZEN_QUEUE", result.detail());
     }
@@ -770,7 +778,7 @@ class RequestTimeEstimationTest {
                         probe(99L, 90, 20L, 0L),
                         BATCH);
 
-        assertEquals(Candidate.State.MODELED, result.state());
+        assertEquals(RequestTimeEstimation.State.MODELED, result.state());
         assertEquals(20L, result.projectedTtftMsValue());
     }
 
@@ -779,7 +787,8 @@ class RequestTimeEstimationTest {
         GroupPlanner.Item expiringSuffix = item(1L, 10, 1L, 100L, NOW_MS + 10L);
         GroupPlanner.Constraints splitByComputeShape =
                 new GroupPlanner.Constraints(2, 150L, 1_000_000L, 0L, 30L);
-        QueueSnapshot snapshot = queue(true, splitByComputeShape, List.of(expiringSuffix));
+        ProjectionQueueSnapshot snapshot =
+                queue(true, splitByComputeShape, List.of(expiringSuffix));
         Probe probe = probe(99L, 90, NOW_MS - 30L, Long.MAX_VALUE, 20L, 0L);
         Candidate result = project(snapshot, noCommittedWork(), TOKEN_EVALUATOR, probe, ROUTE);
 
@@ -799,9 +808,11 @@ class RequestTimeEstimationTest {
                         probe(99L, 100, 20L, 0L),
                         ROUTE);
 
-        assertEquals(Candidate.State.MODELED, result.state());
+        assertEquals(RequestTimeEstimation.State.MODELED, result.state());
         assertEquals(20L, result.projectedTtftMsValue());
-        assertEquals(Candidate.InitialHeadDisposition.AFTER_PROBE, result.initialHeadDisposition());
+        assertEquals(
+                RequestTimeEstimation.InitialHeadDisposition.AFTER_PROBE,
+                result.initialHeadDisposition());
     }
 
     @Test
@@ -828,9 +839,9 @@ class RequestTimeEstimationTest {
                         probe(99L, 50, 20L, 0L),
                         ROUTE);
 
-        assertEquals(Candidate.State.UNAVAILABLE, active.state());
+        assertEquals(RequestTimeEstimation.State.UNAVAILABLE, active.state());
         assertEquals("INCOMING_ALREADY_ACTIVE", active.detail());
-        assertEquals(Candidate.State.UNAVAILABLE, committed.state());
+        assertEquals(RequestTimeEstimation.State.UNAVAILABLE, committed.state());
         assertEquals("INCOMING_ALREADY_COMMITTED", committed.detail());
     }
 
@@ -880,7 +891,7 @@ class RequestTimeEstimationTest {
         PrefillTimePredictor.Evaluator second =
                 sharedEvaluator(sharedSnapshot, singleCalls, batchCalls);
 
-        QueueSnapshot empty =
+        ProjectionQueueSnapshot empty =
                 queue(
                         false,
                         new GroupPlanner.Constraints(1, 1_000_000L, 1_000_000L, 500L, 0L),
@@ -916,15 +927,15 @@ class RequestTimeEstimationTest {
     }
 
     private static void assertModeled(Candidate result, long ttftMs) {
-        assertEquals(Candidate.State.MODELED, result.state());
+        assertEquals(RequestTimeEstimation.State.MODELED, result.state());
         assertEquals(ttftMs, result.projectedTtftMsValue());
         assertTrue(result.selectable());
     }
 
     private static void assertInvalidPrediction(Candidate result) {
-        assertEquals(Candidate.State.UNAVAILABLE, result.state());
+        assertEquals(RequestTimeEstimation.State.UNAVAILABLE, result.state());
         assertEquals("PREDICTOR_RETURNED_INVALID_VALUE", result.detail());
-        assertEquals(Candidate.UNKNOWN, result.projectedTtftMsValue());
+        assertEquals(RequestTimeEstimation.UNKNOWN, result.projectedTtftMsValue());
         assertFalse(result.selectable());
     }
 

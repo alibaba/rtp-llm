@@ -262,14 +262,14 @@ class StopExecutorSafetyTest {
             for (int i = 0; i < 30; i++) {
                 var context = context();
                 org.flexlb.balance.scheduler.SchedulerTestServices.bind(
-                        context.data().getLifecycle(), runtime);
+                        context.data().getRequestScheduler(), runtime);
                 when(context.snapshot().delivery()).thenReturn(null);
                 when(context.snapshot().cancellation()).thenReturn(null);
                 var claim =
                         new PreemptionRegistration(
                                 context,
                                 i,
-                                new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
+                                new org.flexlb.balance.endpoint.DecodeResources.RequestReservation(
                                         1, String.valueOf(i + 1), i + 1),
                                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
                 answers.add(cleanup.preempt(claim, null, "priority preemption", 500L));

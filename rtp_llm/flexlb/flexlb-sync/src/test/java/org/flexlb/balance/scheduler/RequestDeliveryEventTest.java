@@ -5,11 +5,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
 import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.flexlb.balance.scheduler.RequestChangeAssertions.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -98,12 +98,12 @@ class RequestDeliveryEventTest {
             org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                     fixture.context(),
                     observedRequest ->
-                            observedRequest.recordEngineEvidence(
-                                    new EngineEvidence(
+                            observedRequest.recordWorkerRequestEvent(
+                                    new WorkerRequestEvent(
                                             fixture.route(),
                                             fixture.reservation(),
                                             RoleType.DECODE,
-                                            EngineKind.ACTIVE,
+                                            WorkerRequestEventType.ACTIVE,
                                             0L,
                                             null,
                                             1002L)));

@@ -25,7 +25,7 @@ class OperationCompletionTest {
     @ValueSource(booleans = {false, true})
     void deliveryCompletionIsRetainedBeforeAndAfterSubscription(boolean completeFirst)
             throws Exception {
-        var member = new Delivery.Member(mock(RequestRoute.class), null);
+        var member = new Delivery.Member(mock(RouteExecution.class), null);
         if (completeFirst) member.complete();
         var observed = member.completion().toCompletableFuture();
         assertEquals(completeFirst, observed.isDone());
@@ -37,7 +37,7 @@ class OperationCompletionTest {
 
     @Test
     void observersCannotCompleteOrCancelCanonicalDelivery() throws Exception {
-        var member = new Delivery.Member(mock(RequestRoute.class), null);
+        var member = new Delivery.Member(mock(RouteExecution.class), null);
         var forged = member.completion().toCompletableFuture();
         assertTrue(forged.complete(null));
         assertFalse(member.completion().toCompletableFuture().isDone());
@@ -55,7 +55,7 @@ class OperationCompletionTest {
                 new PreemptionRegistration(
                         mock(RequestContext.class),
                         1L,
-                        mock(DecodeResources.ReservationHandle.class),
+                        mock(DecodeResources.RequestReservation.class),
                         new CancelTarget("127.0.0.1", 9000));
         var result =
                 new VictimResolution(String.valueOf(1L), VictimResolution.Outcome.DELIVERY_RESUMED);

@@ -41,7 +41,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
 
     @Test
     @Timeout(15)
-    void grpcTimeout_requestExpiresWithoutEngineEvidenceAndRecovers() throws Exception {
+    void grpcTimeout_requestExpiresWithoutWorkerRequestEventAndRecovers() throws Exception {
         CompletableFuture<Response> future = submitRequest(10001);
 
         // The RPC expires before the request lease: uncertainty remains pending briefly.

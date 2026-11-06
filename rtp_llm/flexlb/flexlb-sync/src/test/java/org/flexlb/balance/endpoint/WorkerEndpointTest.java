@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
@@ -18,7 +18,6 @@ import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -69,8 +68,8 @@ class WorkerEndpointTest {
 
     @Test
     void releaseBatch_decreasesCommittedWork() {
-        RequestRoute first = item(100L, 1000);
-        RequestRoute second = item(101L, 500);
+        RouteExecution first = item(100L, 1000);
+        RouteExecution second = item(101L, 500);
         registerBatch(1L, 500, first);
         registerBatch(2L, 300, second);
 
@@ -80,16 +79,16 @@ class WorkerEndpointTest {
 
     @Test
     void releaseBatch_unknownBatchId_noEffect() {
-        RequestRoute committed = item(100L, 1000);
+        RouteExecution committed = item(100L, 1000);
         registerBatch(1L, 500, committed);
-        RequestRoute unknown = item(999L, 1000);
+        RouteExecution unknown = item(999L, 1000);
         assertTrue(!endpoint.releaseRequest(unknown));
         assertCommittedWorkNear(500);
     }
 
     @Test
     void releaseBatch_neverGoesNegative() {
-        RequestRoute item = item(100L, 1000);
+        RouteExecution item = item(100L, 1000);
         registerBatch(1L, 100, item);
         assertTrue(endpoint.releaseRequest(item));
         assertTrue(!endpoint.releaseRequest(item));
@@ -164,9 +163,9 @@ class WorkerEndpointTest {
 
     @Test
     void repackBatch_removesFailedRequests() {
-        RequestRoute first = item(100L, 1000);
-        RequestRoute failed = item(101L, 2000);
-        RequestRoute third = item(102L, 3000);
+        RouteExecution first = item(100L, 1000);
+        RouteExecution failed = item(101L, 2000);
+        RouteExecution third = item(102L, 3000);
         registerBatch(5L, 9999, first, failed, third);
         assertTrue(endpoint.releaseRequest(failed));
 
@@ -175,7 +174,7 @@ class WorkerEndpointTest {
 
     @Test
     void repackBatch_allFailed_removesBatch() {
-        RequestRoute item = item(100L, 1000);
+        RouteExecution item = item(100L, 1000);
         registerBatch(5L, 500, item);
         assertTrue(endpoint.releaseRequest(item));
 
@@ -189,22 +188,12 @@ class WorkerEndpointTest {
     }
 
     @Test
-    void generationPinCanBeReleasedByCompletionThread() {
-        WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration();
-        try (pin) {
-            assertEquals(status.getGenerationId(), pin.generationId());
-            endpoint.requirePinnedGeneration(pin);
-            WorkerEndpoint anotherEndpoint = new WorkerEndpoint(status);
-            assertThrows(
-                    IllegalArgumentException.class,
-                    () -> anotherEndpoint.requirePinnedGeneration(pin));
-            endpoint.beginRetirement();
-            endpoint.requirePinnedGeneration(pin);
-            assertEquals(status.getGenerationId(), pin.generationId());
-            CompletableFuture.runAsync(pin::close).join();
-        }
-
-        assertThrows(IllegalArgumentException.class, () -> endpoint.requirePinnedGeneration(pin));
+    void endpointIdentityRemainsStableAfterRetirement() {
+        WorkerEndpoint selectedEndpoint = endpoint;
+        assertSame(status, selectedEndpoint.getStatus());
+        endpoint.close();
+        assertTrue(selectedEndpoint.isRetired());
+        assertSame(status, selectedEndpoint.getStatus());
     }
 
     // ==================== getStatus() returns live reference ====================
@@ -344,8 +333,8 @@ class WorkerEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, response).run();
     }
 
-    private void registerBatch(long batchId, long predictedMs, RequestRoute... items) {
-        for (RequestRoute item : items) {
+    private void registerBatch(long batchId, long predictedMs, RouteExecution... items) {
+        for (RouteExecution item : items) {
             if (!EndpointTestSupport.offer(endpoint, item)) {
                 throw new IllegalStateException("test item could not be offered to endpoint queue");
             }
@@ -357,7 +346,7 @@ class WorkerEndpointTest {
         }
     }
 
-    private RequestRoute item(long requestId, long seqLen) {
+    private RouteExecution item(long requestId, long seqLen) {
         return SchedulingTestConfig.createRoute(
                 ctx(requestId, seqLen), null, null, null, endpoint, null, null, 0L);
     }

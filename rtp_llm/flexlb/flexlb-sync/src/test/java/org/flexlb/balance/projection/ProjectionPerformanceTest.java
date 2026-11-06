@@ -4,7 +4,7 @@ import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
-import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.config.DispatcherConfig;
 import org.junit.jupiter.api.Tag;
@@ -37,7 +37,7 @@ class ProjectionPerformanceTest {
                     }
                 };
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         1000,
                         true,
                         BuiltinGroupPlanner.FIXED_WINDOW,
@@ -66,7 +66,7 @@ class ProjectionPerformanceTest {
             long checksum = 0;
             for (int index = 0; index < operations; index++) {
                 var result =
-                        estimator.projectRankingView(
+                        estimator.projectCandidate(
                                 inputs,
                                 String.valueOf(2 + index / 750),
                                 50,

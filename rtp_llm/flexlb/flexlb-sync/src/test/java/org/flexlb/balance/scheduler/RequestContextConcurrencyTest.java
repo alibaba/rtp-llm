@@ -44,7 +44,8 @@ class RequestContextConcurrencyTest {
                         .setRequest(
                                 Request.builder().requestId(String.valueOf(round + 1L)).build());
                 context.register(String.valueOf(round + 1L), 1000L, 100_000L, 10_000L);
-                var route = mock(RequestRoute.class);
+                var route = mock(RouteExecution.class);
+                when(route.selectedEndpointsAvailable()).thenReturn(true);
                 when(route.ctx()).thenReturn(context);
                 when(route.requestId()).thenReturn(String.valueOf(round + 1L));
                 var placement = context.beginPlacement(null);

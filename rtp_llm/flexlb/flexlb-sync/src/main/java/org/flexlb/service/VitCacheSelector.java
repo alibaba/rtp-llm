@@ -3,7 +3,7 @@ package org.flexlb.service;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.balance.strategy.VitSelectionStrategy;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -101,23 +101,25 @@ public class VitCacheSelector {
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        try (var pin = workers.capture(RoleType.VIT, selected.getLogicalIpPort())) {
-            WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
-            if (selected.getRole() != RoleType.VIT
-                    || worker == null
-                    || (group != null && !Objects.equals(group, worker.getGroup()))
-                    || selected.getGrpcPort() != worker.getGrpcPort()
-                    || !Objects.equals(selected.getGroup(), worker.getGroup())
-                    || selected.getWorkerGeneration() != pin.generationId()) {
-                return errorStatus(StrategyErrorType.NO_VIT_WORKER);
-            }
-            return status(worker, ctx.data().getRequestId());
+        var selectedEndpoint = workers.selectEndpoint(RoleType.VIT, selected.getLogicalIpPort());
+        WorkerStatus worker = selectedEndpoint == null ? null : selectedEndpoint.getStatus();
+        if (selected.getRole() != RoleType.VIT
+                || worker == null
+                || (group != null && !Objects.equals(group, worker.getGroup()))
+                || selected.getGrpcPort() != worker.getGrpcPort()
+                || !Objects.equals(selected.getGroup(), worker.getGroup())
+                || selected.getWorkerGeneration()
+                        != selectedEndpoint.getStatus().getGenerationId()) {
+            return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
+        return status(worker, ctx.data().getRequestId());
     }
 
-    /** Holds the selected endpoint generation through the admission handoff. */
-    public synchronized ServerStatus selectPinned(
-            RequestContext ctx, String group, RequestRoute route) {
+    /**
+     * Adds the current VIT Endpoint and its routing metadata to the route.
+     */
+    public synchronized ServerStatus selectForRoute(
+            RequestContext ctx, String group, RouteResult.Builder route) {
         ServerStatus result =
                 ctx.data().getRequest().getSelectedVit() == null
                         ? select(ctx, group)
@@ -125,15 +127,15 @@ public class VitCacheSelector {
         if (!result.isSuccess()) {
             return null;
         }
-        WorkerEndpoint.GenerationPin pin = workers.capture(RoleType.VIT, result.getLogicalIpPort());
-        if (pin == null) {
+        WorkerEndpoint selectedEndpoint =
+                workers.selectEndpoint(RoleType.VIT, result.getLogicalIpPort());
+        if (selectedEndpoint == null) {
             return null;
         }
-        if (pin.generationId() != result.getWorkerGeneration()) {
-            pin.close();
+        if (selectedEndpoint.getStatus().getGenerationId() != result.getWorkerGeneration()) {
             return null;
         }
-        return route.add(pin, result, -1L, 0L);
+        return route.add(selectedEndpoint, result, -1L, 0L);
     }
 
     private static ServerStatus errorStatus(StrategyErrorType error) {

@@ -73,7 +73,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
-/** External contract for temporary P/D capacity pressure. */
+/**
+ * External contract for temporary P/D capacity pressure.
+ */
 class TransientCapacityQueueContractTest {
 
     @Test
@@ -165,15 +167,15 @@ class TransientCapacityQueueContractTest {
                     (java.util.concurrent.ThreadPoolExecutor)
                             ReflectionTestUtils.getField(completions, "completionWorkers");
             long submittedCompletions = completionWorkers.getTaskCount();
-            var actualLock =
-                    (java.util.concurrent.locks.ReentrantLock)
-                            ReflectionTestUtils.getField(fixture.decodeEndpoint, "admissionLock");
+            var actualEvents =
+                    org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(
+                            fixture.decodeEndpoint);
             var cancelling = new java.util.concurrent.atomic.AtomicReference<Thread>();
             var blockedOnce = new java.util.concurrent.atomic.AtomicBoolean();
             var intercepted =
                     org.mockito.Mockito.mock(
-                            java.util.concurrent.locks.ReentrantLock.class,
-                            org.mockito.AdditionalAnswers.delegatesTo(actualLock));
+                            ReentrantLock.class,
+                            org.mockito.AdditionalAnswers.delegatesTo(actualEvents));
             org.mockito.Mockito.doAnswer(
                             invocation -> {
                                 if (Thread.currentThread() == cancelling.get()
@@ -181,12 +183,12 @@ class TransientCapacityQueueContractTest {
                                     releaseEntered.countDown();
                                     assertTrue(releaseAllowed.await(5, TimeUnit.SECONDS));
                                 }
-                                actualLock.lock();
+                                actualEvents.lock();
                                 return null;
                             })
                     .when(intercepted)
                     .lock();
-            ReflectionTestUtils.setField(fixture.decodeEndpoint, "admissionLock", intercepted);
+            ReflectionTestUtils.setField(fixture.decodeEndpoint, "stateLock", intercepted);
             var cancellation =
                     CompletableFuture.runAsync(
                             () -> {
@@ -282,13 +284,15 @@ class TransientCapacityQueueContractTest {
     private static void verifyRetryWaitsForDecodeSettlementFence(
             FlexlbConfig config, long requestId) throws Exception {
         try (Fixture fixture = new Fixture(null, config)) {
-            DecodeResources.ReservationHandle settled;
-            try (WorkerEndpoint.GenerationPin pin = fixture.decodeEndpoint.tryPinGeneration()) {
+            DecodeResources.RequestReservation settled;
+            {
+                WorkerEndpoint selectedEndpoint = fixture.decodeEndpoint;
+
                 settled =
                         fixture.decodeEndpoint
                                 .tryReserveQueuedRequest(
-                                        pin, String.valueOf(requestId), 128L, 136L, 50, null)
-                                .handle();
+                                        String.valueOf(requestId), 128L, 136L, 50, null)
+                                .value();
             }
             assertEquals(
                     ReservationReleaseResult.RELEASED,
@@ -994,10 +998,10 @@ class TransientCapacityQueueContractTest {
             awaitCompletedResponses(admitted, 2, 2, TimeUnit.SECONDS);
             assertEquals(2, completedResponses(admitted));
 
-            List<RequestRoute> delivered =
+            List<RouteExecution> delivered =
                     List.of(fixture.runtime.activeRoute(800L), fixture.runtime.activeRoute(801L));
             assertEquals(2, delivered.size());
-            for (RequestRoute item : delivered) {
+            for (RouteExecution item : delivered) {
                 assertTrue(item != null);
                 assertTrue(fixture.prefillEndpoint.releaseRequest(item));
             }
@@ -1185,7 +1189,7 @@ class TransientCapacityQueueContractTest {
             runtime.placementAvailability().addListener(metrics::recordPlacementWakeup);
             runtime.bindRouter(
                     new RecordingRouter(
-                            new RequestWorkerSelector(
+                            new RequestRouteSelector(
                                     workers,
                                     prefillSelector,
                                     decodeSelector,
@@ -1339,12 +1343,12 @@ class TransientCapacityQueueContractTest {
         }
     }
 
-    private static final class RecordingRouter extends RequestWorkerSelector {
-        private final RequestWorkerSelector delegate;
+    private static final class RecordingRouter extends RequestRouteSelector {
+        private final RequestRouteSelector delegate;
         private final PlacementMetrics metrics;
 
         private RecordingRouter(
-                RequestWorkerSelector delegate,
+                RequestRouteSelector delegate,
                 PlacementMetrics metrics,
                 ConfigService configService) {
             super(
@@ -1364,7 +1368,7 @@ class TransientCapacityQueueContractTest {
         }
 
         @Override
-        public PlacementResult<RequestRoute, PlacementKey> select(
+        public PlacementResult<RouteResult, PlacementKey> select(
                 RequestContext context, String policyGroup) {
             long startedAt = metrics.placementStarted(context);
             try {

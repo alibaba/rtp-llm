@@ -25,6 +25,33 @@ import static org.mockito.Mockito.when;
 
 class SchedulerExecutionTest {
     @Test
+    void releasedRouteRestoresOneQueueEntryWithoutChangingItsOriginalSequence() {
+        var lifecycle = owner();
+        var scheduler = (QueuedRequestScheduler) SchedulerTestServices.scheduler(lifecycle);
+        var queue = (OrderedRequestQueue) ReflectionTestUtils.getField(scheduler, "orderedQueue");
+        var first = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 99010L);
+        var second = RequestProtocolTestSupport.context(SchedulingTestConfig.batchConfig(), 99011L);
+        try {
+            RequestProtocolTestSupport.submitForManualPlacement(lifecycle, first);
+            RequestProtocolTestSupport.submitForManualPlacement(lifecycle, second);
+            scheduler.onRequest(first);
+            scheduler.onRequest(second);
+            long originalSequence = first.data().getPlacementSequence();
+            assertEquals(2, queue.size());
+            scheduler.onRequest(first);
+            assertEquals(2, queue.size());
+            assertEquals(originalSequence, first.data().getPlacementSequence());
+            assertEquals(
+                    List.of(first, second),
+                    queue.scanForPlanningCandidates(2, 2, entry -> true).stream()
+                            .map(GlobalQueueEntry::context)
+                            .toList());
+        } finally {
+            SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(lifecycle));
+        }
+    }
+
+    @Test
     @Timeout(10)
     void changeDuringSchedulingRunsAgainWithoutAnotherExternalNotification() throws Exception {
         var lifecycle = owner();
@@ -106,7 +133,7 @@ class SchedulerExecutionTest {
         org.mockito.Mockito.verify(queue, org.mockito.Mockito.atLeastOnce()).drain();
     }
 
-    private static RequestLifecycle owner() {
+    private static AbstractRequestScheduler owner() {
         return SchedulerTestSupport.create(
                 SchedulingTestConfig.configService(SchedulingTestConfig.batchConfig()),
                 mock(DeliveryMetricsReporter.class),

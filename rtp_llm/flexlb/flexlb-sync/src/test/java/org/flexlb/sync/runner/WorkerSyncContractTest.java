@@ -114,7 +114,7 @@ class WorkerSyncContractTest {
         assertEquals(
                 WorkerStatus.RetirementReason.CONSECUTIVE_WORKER_FAILURES,
                 status.retirementReason());
-        assertNull(registry.capture(status.getRole(), status.getLogicalIpPort()));
+        assertNull(registry.selectEndpoint(status.getRole(), status.getLogicalIpPort()));
         applications.remove().run();
         org.flexlb.sync.runner.RunnerTestSupport.awaitCondition(
                 () -> registry.statusSnapshot(status.getRole()).isEmpty());

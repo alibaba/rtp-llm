@@ -11,10 +11,10 @@ import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.CloseProgress;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -24,7 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Closing records physical proof monotonically; execution is serialized by Scheduler. */
+/**
+ * Closing records physical proof monotonically; execution is serialized by Scheduler.
+ */
 class RequestCleanupPassTest {
     @Test
     void partialCompletionRetainsProofAndCannotRewriteAnArchivedRequest() {
@@ -156,12 +158,12 @@ class RequestCleanupPassTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordEngineEvidence(
-                                new EngineEvidence(
+                        observedRequest.recordWorkerRequestEvent(
+                                new WorkerRequestEvent(
                                         route,
                                         null,
                                         org.flexlb.dao.route.RoleType.PREFILL,
-                                        EngineKind.FAILED,
+                                        WorkerRequestEventType.FAILED,
                                         42L,
                                         "worker failed",
                                         1001L)));
@@ -300,12 +302,12 @@ class RequestCleanupPassTest {
         assertTrue(context.bindPlacement(placement, route, PublicationResult.PREPARED));
         Runnable worker =
                 () ->
-                        context.recordEngineEvidence(
-                                new EngineEvidence(
+                        context.recordWorkerRequestEvent(
+                                new WorkerRequestEvent(
                                         route,
                                         route.decodeReservation(),
                                         org.flexlb.dao.route.RoleType.DECODE,
-                                        EngineKind.COMPLETED,
+                                        WorkerRequestEventType.COMPLETED,
                                         0L,
                                         "worker complete",
                                         1001L));
@@ -324,27 +326,27 @@ class RequestCleanupPassTest {
         assertSame(outcome, context.snapshot().outcome());
     }
 
-    static RequestRoute route(RequestContext context, long id) {
-        var route = mock(RequestRoute.class);
+    static RouteExecution route(RequestContext context, long id) {
+        var route = mock(RouteExecution.class);
         when(route.ctx()).thenReturn(context);
         when(route.requestId()).thenReturn(String.valueOf(id));
         var decode = SchedulerTestSupport.mockDecodeEndpoint();
-        when(route.decodeEp()).thenReturn(decode);
+        when(route.decodeEndpoint()).thenReturn(decode);
         when(route.decodeReservation())
-                .thenReturn(new DecodeResources.ReservationHandle(1L, String.valueOf(id), 1L));
+                .thenReturn(new DecodeResources.RequestReservation(1L, String.valueOf(id), 1L));
         return route;
     }
 
     static RequestContext openContext(long id) {
         var context = new RequestContext(mock(FlexlbConfig.class));
         context.register(String.valueOf(id), 1000L, 100_000L, 10_000L);
-        var route = mock(RequestRoute.class);
+        var route = mock(RouteExecution.class);
         when(route.ctx()).thenReturn(context);
         when(route.requestId()).thenReturn(String.valueOf(id));
         var decode = SchedulerTestSupport.mockDecodeEndpoint();
-        when(route.decodeEp()).thenReturn(decode);
+        when(route.decodeEndpoint()).thenReturn(decode);
         when(route.decodeReservation())
-                .thenReturn(new DecodeResources.ReservationHandle(1L, String.valueOf(id), 1L));
+                .thenReturn(new DecodeResources.RequestReservation(1L, String.valueOf(id), 1L));
         var placement = requireValue(context.beginPlacement(null));
         org.junit.jupiter.api.Assertions.assertTrue(
                 context.bindPlacement(placement, route, PublicationResult.PREPARED));
