@@ -2247,6 +2247,9 @@ class Runner:
             raise SmokeFailure(f"{name}: required orthogonal stage was skipped")
 
     def _orthogonal_device_blocks(self, tag: str = "full") -> int | None:
+        cached = getattr(self, "_observed_device_pool_blocks", {})
+        if tag in cached:
+            return cached[tag]
         engine_log = getattr(self.args, "prefill_engine_log", None)
         if engine_log is None:
             return None
@@ -2256,14 +2259,18 @@ class Runner:
             stream.seek(0, 2)
             stream.seek(max(0, stream.tell() - 16 * 1024 * 1024))
             tail = stream.read()
-        matches = re.findall(
-            rf"kvc raw pool\[DEVICE/{re.escape(tag)}\]:[^\n]*?\btotal=(\d+)", tail
-        )
-        if not matches:
+        if __package__:
+            from .k31_smoke_capacity import device_pool_usable_blocks
+        else:
+            from k31_smoke_capacity import device_pool_usable_blocks
+        count = device_pool_usable_blocks(tail, tag)
+        if count is None:
             raise SmokeFailure(
                 f"Prefill Device/{tag} pool capacity is missing from engine log"
             )
-        return int(matches[-1])
+        cached[tag] = count
+        self._observed_device_pool_blocks = cached
+        return count
 
     def _orthogonal_cache_seed(self) -> None:
         # K3 defaults to its complete checkpoint span. Model-specific traffic

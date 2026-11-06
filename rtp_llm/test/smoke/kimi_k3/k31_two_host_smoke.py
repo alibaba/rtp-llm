@@ -68,12 +68,16 @@ def require(condition, message):
         raise ValueError(message)
 
 
-def stage_configs(base):
+def stage_configs(base, stages=STAGES):
     require(
         base.get("target_only", False) is False, "default smoke requires native MTP"
     )
     configs = []
     for stage, decode_dp, block_count in (("regular", 2, 96), ("long", 1, 140)):
+        if stage not in stages:
+            continue
+        if stage == "regular":
+            decode_dp = base.get("decode_dp", decode_dp)
         config = copy.deepcopy(base)
         # The public cache-store implementation uses TCP. An internally
         # linked RDMA implementation can still be selected explicitly.
@@ -436,7 +440,7 @@ def audit_stage(config, output):
                     "--decode-engine",
                     str(decode_logs / "engine.log"),
                     "--decode-tp",
-                    "4",
+                    str(8 // launcher.decode_dp_size(config)),
                 ],
                 cwd=Path(__file__).resolve().parents[4],
                 stdout=log,
@@ -520,13 +524,17 @@ def run_stage(config, output, startup_timeout):
     return record
 
 
-def run(base, output, startup_timeout):
-    configs = stage_configs(base)
+def run(base, output, startup_timeout, stages=STAGES):
+    configs = stage_configs(base, stages)
     output.mkdir(parents=True, exist_ok=False)
     launcher.atomic(output / "config.json", base)
-    result = {"passed": False, "stages": {}, "expected_counts": EXPECTED_COUNTS}
+    stage_counts = {"regular": dict(total=304, formal=267, preparation=37),
+                    "long": dict(total=2, formal=1, preparation=1)}
+    expected = {key: sum(stage_counts[stage][key] for stage in stages) for key in EXPECTED_COUNTS}
+    result = {"passed": False, "stages": {}, "expected_counts": expected}
     try:
-        for stage, config in zip(STAGES, configs):
+        for config in configs:
+            stage = config["k31_smoke_stage"]
             record = run_stage(config, output / stage, startup_timeout)
             result["stages"][stage] = record
             if not record["cleanup_complete"]:
@@ -536,7 +544,7 @@ def run(base, output, startup_timeout):
                 record.get("request_counts", {}).get(key, 0)
                 for record in result["stages"].values()
             )
-            for key in EXPECTED_COUNTS
+            for key in expected
         }
         result["request_counts"] = counts
         checkpoints = [
@@ -547,8 +555,8 @@ def run(base, output, startup_timeout):
                 "the two stages did not use the same target and native MTP checkpoints"
             )
         result["passed"] = (
-            len(result["stages"]) == len(STAGES)
-            and counts == EXPECTED_COUNTS
+            len(result["stages"]) == len(stages)
+            and counts == expected
             and "error" not in result
             and all(record["passed"] for record in result["stages"].values())
         )
@@ -571,12 +579,13 @@ def main(argv=None):
     entry.add_argument("--request-control", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--startup-timeout", type=int, default=14400)
+    parser.add_argument("--stages", nargs="+", choices=STAGES, default=list(STAGES))
     args = parser.parse_args(argv)
     if args.request_control:
         return run_requests(args.request_control)
     if args.output is None or args.startup_timeout < 1:
         parser.error("--config requires --output and a positive --startup-timeout")
-    return run(read_json(args.config), args.output.resolve(), args.startup_timeout)
+    return run(read_json(args.config), args.output.resolve(), args.startup_timeout, tuple(dict.fromkeys(args.stages)))
 
 
 if __name__ == "__main__":

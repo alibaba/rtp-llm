@@ -107,6 +107,41 @@ time.sleep(120)
             with self.assertRaisesRegex(ValueError, "draft"):
                 cache_geometry(path, "prefill", 8, long_case=True)
 
+    def test_block_tree_capacity_uses_physical_spec_and_verified_cp_span(self):
+        def log(stride=1024, sharded="true"):
+            return "".join(
+                f"CP sharded KV cache enabled: cp_rank={rank}, cp_size=8, "
+                "block_size=1024, virtual_block_size=8192\n"
+                f"[RANK {rank}] cache manager initialized with config CacheConfig{{\n"
+                "  layer_num=93\n  layer_all_num=94\n"
+                f"  seq_size_per_block=1024\n  local_kv_cache_sharded={sharded}\n"
+                "  group_block_nums=96,96,96\n"
+                "    kernel_seq_size_per_block=128\n"
+                "  LinearKVCacheSpec{\n"
+                f"    cache_key_token_stride={stride}\n  }}\n"
+                "  group_tags=[full,indexer_kv,linear]\n"
+                "  layers_by_group=[[3,93],[3],[0]]\n"
+                for rank in range(8)
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "engine.log"
+            path.write_text(log())
+            self.assertEqual(cache_geometry(path, "prefill", 8, long_case=False)["checkpoint_span"], 8192)
+            for text in (log(stride=512), log(sharded="false")):
+                path.write_text(text)
+                with self.assertRaisesRegex(ValueError, "eight-page"):
+                    cache_geometry(path, "prefill", 8, long_case=False)
+
+    def test_block_tree_pool_counts_exclude_reserved_zero(self):
+        from rtp_llm.test.smoke.kimi_k3.k31_smoke_capacity import device_pool_usable_blocks
+        line = "DeviceBlockPool.cc:598] init success: pool_name=linear total_layers=69 physical_block_count=96\n"
+        self.assertEqual(device_pool_usable_blocks(line * 8, "linear"), 95)
+        self.assertEqual(device_pool_usable_blocks("kvc raw pool[DEVICE/full]: total=95\n", "full"), 95)
+        self.assertIsNone(device_pool_usable_blocks(line, "full"))
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
+            device_pool_usable_blocks(line + line.replace("count=96", "count=97"), "linear")
+
     def test_all_ranks_must_report_target_and_draft_loader_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
             logs = Path(tmp)

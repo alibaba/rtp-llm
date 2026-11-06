@@ -37,6 +37,23 @@ def base_config():
 
 
 class K31TwoHostSmokeTest(unittest.TestCase):
+    def test_regular_only_honors_tp8_decode_and_excludes_one_million_stage(self):
+        base = {**base_config(), "decode_dp": 1}
+        configs = smoke.stage_configs(base, ("regular",))
+        self.assertEqual(len(configs), 1)
+        self.assertEqual(configs[0]["k31_smoke_stage"], "regular")
+        self.assertEqual(configs[0]["decode_dp"], 1)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "result"
+            record = dict(passed=True, cleanup_complete=True,
+                          request_counts=dict(total=304, formal=267, preparation=37))
+            with patch.object(smoke, "run_stage", return_value=record) as run_stage:
+                self.assertEqual(smoke.run(base, output, 1, ("regular",)), 0)
+            run_stage.assert_called_once()
+            result = json.loads((output / "RESULT.json").read_text())
+            self.assertEqual(list(result["stages"]), ["regular"])
+            self.assertEqual(result["expected_counts"], record["request_counts"])
+
     def test_direct_entry_preserves_runfiles_package_and_finds_smoke_modules(self):
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory) / "rtp_llm"

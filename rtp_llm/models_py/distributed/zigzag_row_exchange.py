@@ -207,10 +207,12 @@ class DirectedRowExchange:
                 self._ready = [torch.cuda.Event() for _ in range(2)]
                 self._free = [torch.cuda.Event() for _ in range(2)]
                 self._readers_done = torch.cuda.Event()
+                self._pulls_done = torch.cuda.Event()
                 self._done = torch.cuda.Event()
                 self._entry = torch.cuda.Event()
                 # Force event creation now, before the allocation vote.
-                for event in (*self._ready, *self._free, self._readers_done, self._done, self._entry):
+                for event in (*self._ready, *self._free, self._readers_done, self._pulls_done,
+                              self._done, self._entry):
                     event.record(self._stream)
                 self._stream.synchronize()
         except Exception as exc:
@@ -350,11 +352,18 @@ class DirectedRowExchange:
         """
         return self._run(values, plan, direction, self.chunk_capacity, out=out)
 
-    def consume_chunks(self, values, plan, direction, chunk_rows, consumer):
+    def consume_chunks(self, values, plan, direction, chunk_rows, consumer, *, before_consume=None):
         """Call consumer(start, slot) in destination order on the caller stream."""
-        self._run(values, plan, direction, chunk_rows, consumer=consumer, consuming=True)
+        self._run(values, plan, direction, chunk_rows, consumer=consumer,
+                  consuming=True, before_consume=before_consume)
 
-    def _run(self, values, plan, direction, chunk_rows, *, out=None, consumer=None, consuming=False):
+    def produce_and_exchange(self, plan, direction, producer, out=None):
+        """Queue a complete producer into owned publication storage, without staging copy."""
+        return self._run(None, plan, direction, self.chunk_capacity,
+                         out=out, producer=producer)
+
+    def _run(self, values, plan, direction, chunk_rows, *, out=None, consumer=None,
+             consuming=False, before_consume=None, producer=None):
         with self._lock:
             if not self.enabled:
                 raise RuntimeError("directed exchange is disabled after a setup or asynchronous failure")
@@ -368,7 +377,21 @@ class DirectedRowExchange:
                         raise ValueError("chunk_rows exceeds fixed receive capacity")
                     validate_plan(plan, direction, self.size, self.rank, self.max_rows)
                     self._require_prepared(plan, chunk_rows)
-                    self._validate_tensor(values, plan.local_rows, "values")
+                    if producer is None:
+                        self._validate_tensor(values, plan.local_rows, "values")
+                    else:
+                        if not callable(producer) or consuming:
+                            raise TypeError("producer must be callable and cannot consume chunks")
+                        # This source may still be read by a peer after the
+                        # previous return. A direct producer must join that
+                        # global lifetime fence before overwriting it.
+                        caller.wait_event(self._readers_done)
+                        values = self._source[:plan.local_rows]
+                        result = producer(values)
+                        if result is not None or torch.cuda.current_stream(self.device) != caller:
+                            raise RuntimeError("producer must return None and keep the caller stream")
+                    if before_consume is not None and not callable(before_consume):
+                        raise TypeError("before_consume must be callable")
                     if consuming:
                         if not callable(consumer):
                             raise TypeError("consumer must be callable")
@@ -376,24 +399,32 @@ class DirectedRowExchange:
                         if out is None:
                             out = torch.empty_like(values)
                         self._validate_tensor(out, plan.local_rows, "out")
-                    self._submit(values, plan, direction, chunk_rows, caller, out, consumer, consuming)
+                    self._submit(values, plan, direction, chunk_rows, caller, out, consumer,
+                                 consuming, before_consume, producer is None)
             except Exception:
                 self.enabled = False
                 raise
             return out
 
-    def _submit(self, values, plan, direction, chunk_rows, caller, out, consumer, consuming):
+    def _submit(self, values, plan, direction, chunk_rows, caller, out, consumer, consuming,
+                before_consume=None, publish_source=True):
         comm = self._stream
         self._entry.record(caller)
         with torch.cuda.stream(comm):
             comm.wait_event(self._done)
             comm.wait_event(self._entry)
-            values.record_stream(comm)
-            self._source[:plan.local_rows].copy_(values)
+            if publish_source:
+                values.record_stream(comm)
+                self._source[:plan.local_rows].copy_(values)
             self._handle.barrier(channel=0, timeout_ms=_TIMEOUT_SECONDS * 1000)
             if not consuming:
                 out.record_stream(comm)
             self._slots.record_stream(comm)
+        if before_consume is not None:
+            with torch.cuda.stream(caller):
+                result = before_consume()
+                if result is not None or torch.cuda.current_stream(self.device) != caller:
+                    raise RuntimeError("before_consume must return None and keep the caller stream")
         slots_used = [False, False]
         for number, start in enumerate(range(0, plan.local_rows, chunk_rows)):
             end = min(start + chunk_rows, plan.local_rows)
@@ -416,9 +447,13 @@ class DirectedRowExchange:
                     self._free[slot].record(caller)
                 slots_used[slot] = True
         with torch.cuda.stream(comm):
+            self._pulls_done.record(comm)
             # Protect remote sources until every peer has finished its pulls.
             self._handle.barrier(channel=1, timeout_ms=_TIMEOUT_SECONDS * 1000)
             self._readers_done.record(comm)
         with torch.cuda.stream(caller):
-            caller.wait_event(self._readers_done)
+            # Only local pulls are needed to consume the owned output. Keep
+            # the global readers fence on comm, where it protects source reuse
+            # without delaying unrelated downstream caller work.
+            caller.wait_event(self._pulls_done)
             self._done.record(caller)

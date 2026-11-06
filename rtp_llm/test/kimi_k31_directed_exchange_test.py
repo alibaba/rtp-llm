@@ -460,6 +460,13 @@ def production_shape_regression(module, plans, group, device, assert_bits):
             # relying on a forward/reverse pair cancelling the same mistake.
             reverse = transport.exchange(expected, plan, "to_natural")
             assert_bits(reverse, values)
+            def produce(destination):
+                assert destination.data_ptr() == transport.source.data_ptr()
+                if rank == size - 1:
+                    torch.cuda._sleep(100_000)
+                destination.copy_(expected)
+            direct = transport.produce_and_exchange(plan, "to_natural", produce)
+            assert_bits(direct, values)
             consumed = torch.empty_like(values)
 
             def consume(start, received):
@@ -467,13 +474,20 @@ def production_shape_regression(module, plans, group, device, assert_bits):
                     torch.cuda._sleep(100_000)
                 consumed[start:start + len(received)].copy_(received)
 
-            transport.consume_chunks(values, plan, "to_zigzag", 1023, consume)
+            side = []
+            def before_consume():
+                side.append(True)
+                if rank == 0:
+                    torch.cuda._sleep(100_000)
+            transport.consume_chunks(values, plan, "to_zigzag", 1023, consume,
+                                     before_consume=before_consume)
+            assert side == [True]
             assert_bits(consumed, expected)
-            checks += 3
+            checks += 4
         # Bound live caller-owned outputs and their allocator lifetime in this
         # test; transport capacity stays fixed through all repeated calls.
         streams[iteration % 2].synchronize()
-        del values, expected, result, reverse, consumed
+        del values, expected, result, reverse, direct, consumed
     torch.cuda.synchronize(device)
     print(json.dumps({"proof": "production_64k_bf16_directed_rows", "rank": rank,
                       "cp_size": size, "hidden_size": hidden, "physical_rows": 65536,

@@ -10,6 +10,21 @@ MAX_OUTPUT_TOKENS = 256
 MTP_RESERVE_TOKENS = 4
 
 
+def device_pool_usable_blocks(text, tag):
+    legacy = re.findall(rf"kvc raw pool\[DEVICE/{re.escape(tag)}\]:[^\n]*?\btotal=(\d+)", text)
+    physical = re.findall(
+        rf"DeviceBlockPool\.cc:[^\n]*init success: pool_name={re.escape(tag)} "
+        r"[^\n]*\bphysical_block_count=(\d+)", text,
+    )
+    # BlockTreeCache includes its reserved block zero in the physical count.
+    usable = [int(value) for value in legacy] + [int(value) - 1 for value in physical]
+    if not usable:
+        return None
+    if min(usable) <= 0 or len(set(usable)) != 1:
+        raise ValueError(f"Device/{tag}: inconsistent usable pool capacity")
+    return usable[0]
+
+
 def fastsafetensors_proof(logs):
     evidence = {}
     marker = re.compile(r"load method: ([\w-]+), finally choose load method: ([\w-]+)")
@@ -72,8 +87,26 @@ def cache_geometry(engine_log, role, local_tp, *, long_case):
             raise ValueError(f"{role} rank {rank}: target/draft full cache group is missing")
         if "kernel_seq_size_per_block=128" not in body:
             raise ValueError(f"{role} rank {rank}: expected 128-token kernel pages")
-        if role == "prefill" and field(body, "linear_step") != "8":
-            raise ValueError(f"{role} rank {rank}: expected eight-page KDA checkpoints")
+        if role == "prefill":
+            legacy_step = re.search(r"^  linear_step=(.*)$", body, re.MULTILINE)
+            if legacy_step is not None:
+                valid_step = legacy_step[1] == "8"
+            else:
+                # BlockTreeCache publishes CP key strides on its cloned
+                # topology; CacheConfig logs the physical per-shard spec.
+                # The CP rows above prove the corresponding virtual span.
+                target = body.split("# MTP Configurations:", 1)[0]
+                linear = re.search(r"LinearKVCacheSpec\{([^}]+)\}", target)
+                valid_step = (
+                    field(body, "seq_size_per_block") == "1024"
+                    and field(body, "local_kv_cache_sharded") == "true"
+                    and local_tp == 8
+                    and linear is not None
+                    and re.search(r"^    cache_key_token_stride=1024$", linear[1], re.MULTILINE)
+                    is not None
+                )
+            if not valid_step:
+                raise ValueError(f"{role} rank {rank}: expected eight-page KDA checkpoints")
         usable = {tag: count - 1 for tag, count in zip(tags, blocks)}
         if long_case:
             max_sequence = LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS

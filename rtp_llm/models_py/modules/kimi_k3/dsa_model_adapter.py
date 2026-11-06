@@ -2,6 +2,7 @@
 
 import copy
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import torch
 
@@ -15,17 +16,15 @@ class KimiK31ModelAdapter:
     """No decoder loop: K3 keeps its shared layers, MoE and output handling."""
 
     def _setup_dsa(self):
-        from .natural_dsa import outer_natural_enabled
-
         self._query_layout = None
         self._query_layout_buffers = {}
         self._outer_layout = None
         self._outer_layout_buffers = {}
         self._row_exchange = None
         self._routing_plan = None
-        self._outer_natural_enabled = (
-            outer_natural_enabled() and self.prefill_query_cp and not self.config.is_mtp
-        )
+        self._natural_layout_cache = {}
+        self._natural_validation_cache = {}
+        self._outer_natural_enabled = self.prefill_query_cp and not self.config.is_mtp
         self.dsa_workspace = None
         self.register_buffer("_mtp_prefill_hidden_buffer", None, persistent=False)
         self._mtp_prefill_hidden_valid_rows = 0
@@ -50,19 +49,25 @@ class KimiK31ModelAdapter:
         from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
         from rtp_llm.models_py.distributed.zigzag_row_exchange import DirectedRowExchange
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import CudaFp8GEMMLinear
         from .natural_dsa import route_allocation_budget
 
         for layer in self.layers:
             if layer.layer_type == HybridAttentionType.LINEAR:
                 attention = layer.attention
-                if attention._fp8_output_norm or any(
-                    not isinstance(p, CudaF16Linear) or p.weight.dtype != torch.bfloat16
+                if any(
+                    not ((isinstance(p, CudaF16Linear) and p.weight.dtype == torch.bfloat16)
+                         or (isinstance(p, CudaFp8GEMMLinear) and p.weight.dtype == torch.float8_e4m3fn))
                     or p.bias is not None for p in (attention.input, attention.f_b, attention.output)
                 ):
-                    raise ValueError("natural outer requires BF16 KDA projections and output norm")
+                    raise ValueError("natural outer requires supported CUDA KDA projections")
+                if attention._fp8_output_norm and not (
+                    isinstance(attention.output, CudaFp8GEMMLinear) and attention.output.scale_ue8m0
+                ):
+                    raise ValueError("natural outer FP8 KDA output requires UE8M0 scales")
             elif getattr(layer.attention, "indexer", None) is not None:
                 if not hasattr(layer.attention, "natural_q_input"):
-                    raise ValueError("natural outer requires the supported BF16 SFA split projection backend")
+                    raise ValueError("natural outer requires a supported SFA split projection backend")
         if self.norm.weight.dtype != torch.bfloat16:
             raise ValueError("natural outer requires BF16 hidden states")
         global_rows = self.config.moe_prefill_max_tokens_per_rank
@@ -97,10 +102,31 @@ class KimiK31ModelAdapter:
                 lengths = info.prefill_actual_input_lengths_cpu.tolist()
                 if not lengths or any(length <= 0 for length in lengths):
                     raise ValueError("natural outer Prefill requires nonempty real requests")
-            layout = QueryLayout(
-                info, self.tp_size, self.tp_rank, inputs.input_ids.device,
-                primary.valid_token_mask, self._query_layout_buffers,
-            )
+            lengths = tuple(info.prefill_actual_input_lengths_cpu.tolist())
+            prefixes = tuple(info.prefill_prefix_lengths_cpu.tolist())
+            cacheable = (outer and primary.valid_token_mask is None
+                         and sum(lengths) == info.prefill_qkv_restore_indice.numel())
+            key = (lengths, prefixes, self.tp_size, self.tp_rank, str(inputs.input_ids.device))
+            if not hasattr(self, "_natural_layout_cache"):
+                self._natural_layout_cache, self._natural_validation_cache = {}, {}
+            cached = self._natural_layout_cache.pop(key, None) if cacheable else None
+            if cached is not None:
+                layout, self._outer_layout, self._routing_plan = cached
+                layout._natural_attention_views.clear()
+                self._outer_layout._natural_attention_views.clear()
+            else:
+                # A native producer may recycle its metadata in-place. Cached
+                # layouts must own their snapshots rather than alias that pool.
+                owned_info = (SimpleNamespace(
+                    prefill_actual_input_lengths_cpu=info.prefill_actual_input_lengths_cpu.clone(),
+                    prefill_prefix_lengths_cpu=info.prefill_prefix_lengths_cpu.clone(),
+                    prefill_qkv_restore_indice=info.prefill_qkv_restore_indice.clone(),
+                    prefill_qkv_padding_mask=info.prefill_qkv_padding_mask.clone(),
+                ) if cacheable else info)
+                layout = QueryLayout(
+                    owned_info, self.tp_size, self.tp_rank, inputs.input_ids.device,
+                    primary.valid_token_mask, self._query_layout_buffers,
+                )
             if outer:
                 if is_cuda_graph:
                     raise ValueError("natural outer Query-CP Prefill requires eager execution")
@@ -110,10 +136,20 @@ class KimiK31ModelAdapter:
                 from rtp_llm.models_py.modules.hybrid.natural_zigzag_plan import NaturalZigzagPlan
                 from .natural_dsa import validate_shared_restore
 
-                plan = NaturalZigzagPlan(layout.lengths, self.tp_size, self.tp_rank)
-                validate_shared_restore(layout, plan)
-                self._outer_layout = NaturalOuterLayout(layout, self._outer_layout_buffers)
-                self._routing_plan = plan
+                plan = (self._routing_plan if cached is not None else
+                        NaturalZigzagPlan(layout.lengths, self.tp_size, self.tp_rank))
+                current = SimpleNamespace(
+                    physical_rows=info.prefill_qkv_restore_indice.numel(), local_rows=layout.local_rows,
+                    restore=info.prefill_qkv_restore_indice, padding_mask=info.prefill_qkv_padding_mask,
+                )
+                validate_shared_restore(current, plan, self._natural_validation_cache)
+                if cached is None:
+                    self._outer_layout = NaturalOuterLayout(layout, self._outer_layout_buffers)
+                    self._routing_plan = plan
+                if cacheable:
+                    self._natural_layout_cache[key] = (layout, self._outer_layout, plan)
+                    while len(self._natural_layout_cache) > 8:
+                        self._natural_layout_cache.pop(next(iter(self._natural_layout_cache)))
                 self._row_exchange.prepare_plan(plan, chunk_rows=self.dsa_workspace.route_chunk_rows)
             kda_layout = self._outer_layout if outer else layout
             for layer in self.layers:
@@ -134,7 +170,14 @@ class KimiK31ModelAdapter:
             if layout is not None:
                 tensors.extend(x for x in layout.__dict__.values()
                                if isinstance(x, torch.Tensor) and x.device == layout.device)
+        for layouts in getattr(self, "_natural_layout_cache", {}).values():
+            for layout in layouts[:2]:
+                tensors.extend(x for x in layout.__dict__.values() if isinstance(x, torch.Tensor))
+        for entry in getattr(self, "_natural_validation_cache", {}).values():
+            tensors.extend(entry)
         for tensor in tensors:
+            if tensor.device != inputs.input_ids.device:
+                continue
             storage = tensor.untyped_storage()
             storages[storage.data_ptr()] = storage.nbytes()
         owner.layout_bytes = sum(storages.values())
