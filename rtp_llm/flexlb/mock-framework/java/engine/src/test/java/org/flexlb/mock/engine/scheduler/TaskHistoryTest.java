@@ -16,7 +16,9 @@ class TaskHistoryTest {
         var warnings = new ArrayList<String>();
         var logger = Logger.getLogger(TaskHistory.class.getName());
         var handler = new Handler() {
-            public void publish(LogRecord record) { warnings.add(record.getMessage()); }
+            public void publish(LogRecord record) {
+                assertFalse(Thread.holdsLock(history)); warnings.add(record.getMessage());
+            }
             public void flush() {}
             public void close() {}
         };
@@ -27,9 +29,11 @@ class TaskHistoryTest {
             assertEquals(active, snapshot.tasks()); assertEquals(1, snapshot.waiting());
             assertEquals(1024, snapshot.finished().size()); assertEquals(2, snapshot.finished().getFirst().requestId());
             assertEquals(1025, snapshot.finishedVersion());
+            assertTrue(warnings.isEmpty()); history.reportGaps();
             assertEquals(List.of("finished_history_gap requested_version=0 dropped_through=1 latest_version=1025 retained=1024"), warnings);
             assertTrue(history.snapshot(snapshot.finishedVersion(), active, 1, 0).finished().isEmpty());
             assertEquals(1024, history.snapshot(1, active, 1, 0).finished().size());
+            history.snapshot(0, active, 1, 0); history.reportGaps();
             assertEquals(1, warnings.size());
         } finally { logger.removeHandler(handler); }
     }

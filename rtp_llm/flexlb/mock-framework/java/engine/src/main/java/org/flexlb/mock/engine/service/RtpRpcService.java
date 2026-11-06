@@ -44,6 +44,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     private final Map<String, String> metricTags;
     private final Config config;
     private final KvCache cache;
+    private final TaskHistory finished;
     private final PrefillRpcServer prefill;
     private final DecodeRpcServer decode;
     private final boolean groups;
@@ -54,7 +55,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
                          RtpEngineLoop engine, boolean groups) {
         this.config = config;
         this.groups = groups;
-        this.cache = cache;
+        this.cache = cache; this.finished = finished;
         var tags = new HashMap<>(MetricTags.fromEnvironment(System.getenv()));
         tags.put("dp_rank", "0");
         metricTags = Map.copyOf(tags);
@@ -183,6 +184,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
             var result = read.get(); value = result.value(); completed = result.collected();
         } catch (RuntimeException error) { failure = error; completed = System.nanoTime(); }
         long elapsed = completed - started;
+        finished.reportGaps();
         rpcMetrics.increment("rtp_llm_rpc_" + kind + "_qps");
         rpcMetrics.observe("rtp_llm_rpc_" + kind + "_total_rt_us", elapsed / 1000.0);
         if (failure != null) {
