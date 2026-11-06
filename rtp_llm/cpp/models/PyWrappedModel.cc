@@ -1260,11 +1260,24 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
             } else
 #endif
             {
-                logits = torch::mm(hidden.to(kernel.dtype()), kernel.t()).to(torch::kFloat32);
+            logits = torch::mm(hidden.to(kernel.dtype()), kernel.t());
+#if USING_ROCM
+            // TP all-gather only copies logits. Keep native BF16 values until
+            // after the collective to halve communication for a BF16 LM head.
+            if (device_props_.tp_size == 1 || kernel.scalar_type() != torch::kBFloat16) {
+                logits = logits.to(torch::kFloat32);
             }
+#else
+            logits = logits.to(torch::kFloat32);
+#endif
+        }
         }
     }
-    return logits;
+    if (device_props_.tp_size > 1) {
+        RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(tp_sync_logits)");
+        logits = tpSyncEmbeddingOrLogits(logits);
+    }
+    return logits.to(torch::kFloat32);
 }
 
 torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
@@ -1373,10 +1386,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             }
         }
         printTorchTensorData(logits, "logits");
-        if (device_props_.tp_size > 1) {
-            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
-            logits = tpSyncEmbeddingOrLogits(logits);
-        }
         if (description_.output_vocab_size > 0) {
             RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
                                         && static_cast<size_t>(logits.size(1)) == description_.output_vocab_padded_size,
@@ -1427,10 +1436,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     torch::Tensor last_hidden = hidden;
     auto          logits      = computeLogits(last_hidden);
     printTorchTensorData(logits, "logits");
-    if (device_props_.tp_size > 1) {
-        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
-        logits = tpSyncEmbeddingOrLogits(logits);
-    }
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
