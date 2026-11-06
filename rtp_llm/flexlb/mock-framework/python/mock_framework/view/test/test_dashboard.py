@@ -253,3 +253,12 @@ def test_tps_window_counts_rates_and_priority_aggregation_have_distinct_contract
         assert '墙钟 TPS' in items[panel_id]['title']
         assert 'rtp_llm_forward_tokens_total' in items[panel_id]['targets'][0]['expr']
     assert 'py_rtp_vit_embedding_tps{' in items[310691]['targets'][0]['expr']
+
+
+def test_vit_native_work_and_blocking_request_sources_are_explicit():
+    expressions = [t['expr'] for p in panels() for t in p['targets']]
+    qps = next(expr for expr in expressions if 'py_rtp_vit_qps{' in expr)
+    assert 'source="mm_embedding"' in qps
+    request_rt = next(expr for expr in expressions if 'py_rtp_vit_request_rt_sum{' in expr)
+    assert request_rt.count('source="get_embedding_result"') == 2
+    assert 'status=' not in request_rt  # Success and error retain original sample weights.

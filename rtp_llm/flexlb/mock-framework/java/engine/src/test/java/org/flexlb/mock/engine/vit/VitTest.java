@@ -34,12 +34,80 @@ class VitTest {
             .setMultimodalType(1).setMultimodalUrl(key).setMmPreprocessConfig(MMPreprocessConfigPB.newBuilder().setWidth(56).setHeight(28))).build();
     }
     static double sample(String text, String name) {
-        return text.lines().filter(line -> line.startsWith(name + "{") && line.contains("role=\"vit\""))
-            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).findFirst().orElseThrow();
+        var values=text.lines().filter(line -> line.startsWith(name + "{") && line.contains("role=\"vit\""))
+            .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).toArray();
+        assertTrue(values.length>0,"Missing metric: "+name);
+        return Arrays.stream(values).sum();
     }
     static ManagedChannel channel(VitNode node) {
         return ManagedChannelBuilder.forTarget((String)node.endpoints().get("rpc")).usePlaintext().build();
     }
+    private static <T> CompletableFuture<T> response(java.util.function.Consumer<io.grpc.stub.StreamObserver<T>> call) {
+        var result=new CompletableFuture<T>();
+        call.accept(new io.grpc.stub.StreamObserver<>() {
+            public void onNext(T value) { result.complete(value); }
+            public void onError(Throwable error) { result.completeExceptionally(error); }
+            public void onCompleted() {}
+        });
+        return result;
+    }
+    @Test void nativeWorkRatesCountUniqueMediaAcrossRpcCacheAndAsyncPaths() throws Exception {
+        var clock=new java.util.concurrent.atomic.AtomicLong();
+        var metrics=new VitMetrics(clock::get);
+        try(var service=new VitService(config("1",4096,4096,4096,0),metrics)) {
+            var multi=input("one").toBuilder().addMultimodalInputs(input("two").getMultimodalInputs(0))
+                .addMultimodalInputs(input("one").getMultimodalInputs(0)).build();
+            VitTest.<MultimodalOutputPB>response(out->service.remoteMultimodalEmbedding(multi,out)).get(3,TimeUnit.SECONDS);
+            VitTest.<MultimodalOutputPB>response(out->service.remoteMultimodalEmbedding(multi,out)).get(3,TimeUnit.SECONDS);
+            VitTest.<EmptyPB>response(out->service.asyncSubmitEmbedding(input("three"),out)).get(3,TimeUnit.SECONDS);
+            // Waiting on the same async media must not create another embedding work item.
+            VitTest.<MultimodalOutputPB>response(out->service.remoteMultimodalEmbedding(input("three"),out)).get(3,TimeUnit.SECONDS);
+            clock.set(TimeUnit.SECONDS.toNanos(1));
+            var text=service.metrics();
+            assertEquals(3,sample(text,"py_rtp_vit_qps"));
+            assertEquals(3,sample(text,"py_rtp_vit_success_qps"));
+            assertEquals(0,sample(text,"py_rtp_vit_error_qps"));
+            assertEquals(15,sample(text,"py_rtp_vit_embedding_tps"));
+            assertEquals(7,sample(text,"py_rtp_vit_image_count_sum"));
+            assertEquals(35,sample(text,"py_rtp_vit_embedding_length_sum"));
+            assertEquals(3,sample(text,"py_rtp_vit_request_rt_count"));
+            assertTrue(text.contains("source=\"mm_embedding\""));
+            assertTrue(text.contains("source=\"get_embedding_result\",status=\"success\""));
+        }
+    }
+    @Test void sharedWorkFailureIsCountedOnceAndAsyncFailuresAreVisible() throws Exception {
+        var clock=new java.util.concurrent.atomic.AtomicLong();
+        var metrics=new VitMetrics(clock::get);
+        var settings=config("1",4096,4096,4096,0);
+        try(var cache=new VitCache(settings,metrics)) {
+            var claims=cache.acquire(List.of("shared","shared"));
+            var error=Status.UNAVAILABLE.withDescription("download failed").asRuntimeException();
+            metrics.started();
+            cache.publish(claims.getFirst(),null,error);
+            for(var claim:claims) {
+                assertTrue(claim.result().isCompletedExceptionally());
+                metrics.error(error,claim);
+                metrics.error(Status.DEADLINE_EXCEEDED.asRuntimeException(),claim);
+                VitCache.release(claim);
+            }
+            clock.set(TimeUnit.SECONDS.toNanos(1));
+            String text=org.flexlb.mock.metrics.MetricTags.scrape(metrics.registry,Map.of());
+            assertEquals(1,sample(text,"py_rtp_vit_error_qps"));
+            assertEquals(0,sample(text,"py_rtp_vit_success_qps"));
+        }
+    }
+
+    @Test void gpuEvictionWithoutHostRoomStillCountsLogicalRemoval() throws Exception {
+        var clock=new java.util.concurrent.atomic.AtomicLong();
+        var metrics=new VitMetrics(clock::get);
+        try(var service=new VitService(config("1",40,0,4096,0),metrics)) {
+            for(String key:List.of("first","second"))
+                VitTest.<MultimodalOutputPB>response(out->service.remoteMultimodalEmbedding(input(key),out)).get(3,TimeUnit.SECONDS);
+            clock.set(TimeUnit.SECONDS.toNanos(1));
+            assertEquals(1,sample(service.metrics(),"py_rtp_vit_embedding_cache_eviction_qps"));
+        }
+    }
+
     @Test void acceptsNativeFrontendTwoHourRpcBudgetForEmbeddingAndHashRequests() throws Exception {
         try (var node=VitNode.start(config("1",1024,1024,1024,0),0,0)) {
             var channel=channel(node);

@@ -426,3 +426,27 @@ GENERATE 后 D 不因 P 输出流断连或取消而停止；初始 ALLOCATE/LOAD
 计算结束后，RPC 为剩余输出保留固定十分钟交付期限（独立于 Fetch 接入期限）。到期移除输出注册记录，并通过串行发送路径以 DEADLINE_EXCEEDED 结束连接；不调用计算取消。正常交付或连接取消时撤销计时器。若底层 onNext 尚未返回，注册清理仍执行，错误通知等该调用返回后发送，不并发调用 observer。
 
 LLM Mock Engine 的装配类统一命名为 `execution/LLMMockEngine`，缓存管理类为 `cache/KvCacheManager`。`execution/EngineLoop` 主链使用 enqueue → loop/step → schedule → forward → processOutputs，沿用 real 的普通执行术语。请求控制入口为 updateRequest，KV 回调为 onKvTransferCompleted；RPC 输出发送不参与 Forward 就绪判断。
+
+
+### ViT 指标口径
+
+对照本分支 real 的 `mm_process_engine.py`、`mm_scheduler.py`、`mm_preprocess.py` 和 `mm_embedding_cache.py`。这是源码合同对齐，不代表已核验 TH 生产镜像的版本。当前异步缓存路径按去重后的单媒体 entry 执行；多图 RPC、内部工作、Forward batch 是三个计数单位。
+
+| 指标 | 样本与边界 |
+| --- | --- |
+| `py_rtp_vit_qps` | `source=mm_embedding`；唯一未命中工作真正开始执行时加一。多图可产生多个工作；缓存命中和 in-flight 消费者不加，异步提交启动的工作也计入；排队期间过期不补 QPS。 |
+| `py_rtp_vit_success_qps` | 唯一工作成功发布一次；无 source 标签。缓存重复消费不加。 |
+| `py_rtp_vit_error_qps` | 首次观察到失败时计一次；entry 标志防止共享结果的不同异常重复计数，异常标志防止工作与 RPC 层重复计数。入口校验和超时也可能计入错误，因此不以 success/QPS 代替客户端成功率。 |
+| `py_rtp_vit_request_rt` | ms，`source=get_embedding_result`、`status=success/error`；阻塞调用入口到返回或失败，包含下载、共享等待，不包含异步 ACK、RPC 传输、输出编码。纯 hash 命中不调用该路径；hash 缺失只处理缺失媒体。 |
+| `py_rtp_vit_image_count` / `py_rtp_vit_embedding_length` | 每个阻塞调用的图片数 / 成功返回的 embedding 行数。缓存返回仍记录；异步提交 ACK 不记录。 |
+| `py_rtp_vit_embedding_tps` | 成功实际计算的 embedding 行数，SDK 原生累计后折算速率；Prometheus 为墙钟每秒速率。失败、缓存和共享消费者不重复计入。 |
+| `py_rtp_vit_embedding_batch_size` / `forward_rt` | 每次 Forward 的工作 chunk 数 / 实际模拟执行毫秒。不是 RPC 数，也不是 embedding 行数。 |
+| `py_rtp_vit_embedding_queue_size` / `queue_wait_rt` / `embedding_rt` | 等待 Forward 的队列项数 / 首次入批前等待毫秒 / 成功工作提交 GPU 队列到 Forward 完成毫秒。最后一个不含下载和调用者晚取结果的时间。 |
+| `py_rtp_vit_embedding_overload_qps` | GPU scheduler 拒绝提交次数；CPU admission 拒绝走错误指标，不混为 GPU 队列溢出。 |
+| `py_rtp_vit_preprocess_queue_size` | 尚未完成准备的媒体数，含排队和执行中；不含等待 Forward 的工作。 |
+| `py_rtp_vit_preprocess_rt` / `download_rt` / `preprocess_other_rt` | 成功准备的总毫秒 / 下载毫秒 / 两者之差；跳过下载不制造样本。Mock 非下载部分只有读取尺寸、摘要及几何规划，没有真实像素处理。 |
+| `rtp_llm_vit_image_fetch_rt_us` | 成功下载微秒；当前 DeepSeek V4.1 图片规划使用 `model=deepseek_v41,mm_type=image`。 |
+| `py_rtp_vit_embedding_cache_{hit,miss,inflight,eviction}_qps` | 每 key 获取时区分驻留命中、新工作、共享等待；eviction 只计逻辑结果被容量淘汰，GPU→CPU 保留不计。GPU 淘汰且 CPU 放不下也必须计。 |
+| `py_rtp_vit_embedding_cache_tokens` / `bytes` | GPU+CPU 逻辑 embedding 驻留量。Mock 用形状计费，不代表真实 Tensor、GPU 内存或 JVM 物理内存。 |
+
+本地 View 显式筛选上述 source；请求耗时合并成功/失败的原始 sum/count 后求平均，不平均实例均值。没有模拟的 CUDA Graph、GreenNet、预处理进程 IPC、像素 decode/resize/processor、真实 Tensor 数据面和代理转发指标保持无样本，不用估计值伪装真实测量。RPC handler/lifecycle、payload bytes 不由 engine 请求耗时或逻辑缓存 bytes 冒充。

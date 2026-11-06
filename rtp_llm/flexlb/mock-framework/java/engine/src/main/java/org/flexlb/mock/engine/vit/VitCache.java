@@ -3,18 +3,19 @@ package org.flexlb.mock.engine.vit;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /** Byte-budgeted embedding/hash LRU. Results held by callers outlive cache residency. */
 final class VitCache implements AutoCloseable {
     record Claim(String key, CompletableFuture<VitGeometry.Image> result, AtomicInteger users, boolean producer,
-                 AtomicReference<Runnable> abandoned) {
+                 AtomicReference<Runnable> abandoned, AtomicBoolean errorReported) {
         void onAbandon(Runnable action) { abandoned.set(action); if(users.get()==0) action.run(); }
     }
     private final VitConfig config;
     private final VitMetrics metrics;
     private record Pending(CompletableFuture<VitGeometry.Image> result, AtomicInteger users,
-                           AtomicReference<Runnable> abandoned) {}
+                           AtomicReference<Runnable> abandoned, AtomicBoolean errorReported) {}
     private final Map<String, Pending> pending = new HashMap<>();
     private final LinkedHashMap<String, VitGeometry.Image> device = new LinkedHashMap<>(16,.75f,true), host = new LinkedHashMap<>(16,.75f,true), hashes = new LinkedHashMap<>(16,.75f,true);
     private long deviceBytes, hostBytes, hashBytes;
@@ -41,17 +42,17 @@ final class VitCache implements AutoCloseable {
         if(result!=null) {
             metrics.events.increment("py_rtp_vit_embedding_cache_hit_qps");
             return new Claim(key,CompletableFuture.completedFuture(result),new AtomicInteger(1),false,
-                new AtomicReference<>());
+                new AtomicReference<>(),new AtomicBoolean());
         }
         var waiting=pending.get(key);
         boolean producer=waiting==null;
         if(producer) {
-            waiting=new Pending(new CompletableFuture<>(),new AtomicInteger(),new AtomicReference<>());
+            waiting=new Pending(new CompletableFuture<>(),new AtomicInteger(),new AtomicReference<>(),new AtomicBoolean());
             pending.put(key,waiting);
         }
         metrics.events.increment(producer?"py_rtp_vit_embedding_cache_miss_qps":"py_rtp_vit_embedding_cache_inflight_qps");
         waiting.users.incrementAndGet();
-        return new Claim(key,waiting.result,waiting.users,producer,waiting.abandoned);
+        return new Claim(key,waiting.result,waiting.users,producer,waiting.abandoned,waiting.errorReported);
     }
     void publish(Claim claim, VitGeometry.Image image, Throwable error) {
         synchronized(this) {
@@ -81,21 +82,30 @@ final class VitCache implements AutoCloseable {
         }
         // Storage and metadata are visible before consumers observe the terminal result.
         // Never execute consumer callbacks under the cache lock.
-        if(error==null) claim.result.complete(image); else claim.result.completeExceptionally(error);
+        if(error==null) {
+            metrics.events.increment("py_rtp_vit_success_qps");
+            claim.result.complete(image);
+        } else {
+            metrics.error(error,claim);
+            claim.result.completeExceptionally(error);
+        }
     }
     private void retain(VitGeometry.Image image) {
         if (device.containsKey(image.key()) || host.containsKey(image.key())) return;
         long bytes = bytes(image);
         if (bytes <= config.deviceBytes() && config.deviceBytes() > 0) {
             while (deviceBytes > config.deviceBytes() - bytes) {
-                var old = device.pollFirstEntry(); deviceBytes -= bytes(old.getValue()); storeHost(old.getValue());
+                var old = device.pollFirstEntry(); deviceBytes -= bytes(old.getValue()); storeHost(old.getValue(),true);
             }
             device.put(image.key(),image); deviceBytes += bytes;
-        } else storeHost(image);
+        } else storeHost(image,false);
     }
-    private void storeHost(VitGeometry.Image image) {
+    private void storeHost(VitGeometry.Image image, boolean evictedFromDevice) {
         long bytes = bytes(image);
-        if (bytes > config.hostBytes() || config.hostBytes() == 0) return;
+        if (bytes > config.hostBytes() || config.hostBytes() == 0) {
+            if(evictedFromDevice) metrics.events.increment("py_rtp_vit_embedding_cache_eviction_qps");
+            return;
+        }
         while (hostBytes > config.hostBytes() - bytes) { var old = host.pollFirstEntry(); hostBytes -= bytes(old.getValue()); metrics.events.increment("py_rtp_vit_embedding_cache_eviction_qps"); }
         host.put(image.key(),image); hostBytes += bytes;
     }

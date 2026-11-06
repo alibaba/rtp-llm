@@ -12,10 +12,24 @@ final class VitMetrics {
     VitMetrics(java.util.function.LongSupplier clock) {
         events = new EventMetrics("vit", clock);
         events.register(registry);
-        for (String name : List.of("py_rtp_vit_qps", "py_rtp_vit_success_qps", "py_rtp_vit_error_qps",
+        events.observe("py_rtp_vit_qps", 0, Map.of("source", "mm_embedding"));
+        for (String name : List.of("py_rtp_vit_success_qps", "py_rtp_vit_error_qps",
                 "py_rtp_vit_embedding_cache_hit_qps", "py_rtp_vit_embedding_cache_miss_qps",
                 "py_rtp_vit_embedding_cache_inflight_qps", "py_rtp_vit_embedding_cache_eviction_qps",
                 "py_rtp_vit_embedding_overload_qps", "py_rtp_vit_embedding_tps")) events.observe(name, 0);
+    }
+    void started() { events.observe("py_rtp_vit_qps", 1, Map.of("source", "mm_embedding")); }
+    // Like real's entry/exception markers: shared work and its RPC waiters report one failure.
+    private static final class ReportedError extends Throwable {
+        ReportedError() { super(null, null, false, false); }
+    }
+    void error(Throwable error, VitCache.Claim claim) {
+        synchronized(error) {
+            boolean reported = Arrays.stream(error.getSuppressed()).anyMatch(ReportedError.class::isInstance);
+            boolean entryReported = claim != null && !claim.errorReported().compareAndSet(false, true);
+            if (!reported) error.addSuppressed(new ReportedError());
+            if (!reported && !entryReported) events.increment("py_rtp_vit_error_qps");
+        }
     }
     List<Collector.MetricFamilySamples> collect(VitScheduler scheduler, VitCache cache, VitPreparation preparation) {
         var state = new TreeMap<>(scheduler.snapshot()); state.putAll(cache.snapshot());
