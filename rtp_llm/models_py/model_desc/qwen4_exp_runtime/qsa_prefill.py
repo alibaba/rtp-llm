@@ -570,13 +570,17 @@ def _incremental_prefill_selection(
         and not draft
         and not draft_prefix_reuse
         and step is not None
+        and step.prefix_reuse_fused_supported
         and step.selection_valid_rows is not None
         and step.padded_score_weights is not None
         and not qsa_strict_validation_enabled()
     ):
         # The frozen step plan carries every table the fused preparation
-        # writer consumes. Strict validation keeps the legacy staged writer
-        # with its per-check host diagnostics.
+        # writer consumes, and its ``prefix_reuse_fused_supported`` gate
+        # decided the step-invariant writer geometry once per step, so the
+        # writer re-checks only the per-layer projection layout. Strict
+        # validation keeps the legacy staged writer with its per-check host
+        # diagnostics.
         from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton import (
             write_prefix_reuse_prefill,
         )
@@ -603,6 +607,7 @@ def _incremental_prefill_selection(
             kv_tokens_per_block=int(plan.kv_tokens_per_block),
             state_tokens_per_block=int(plan.state_tokens_per_block),
             norm_eps=float(indexer.norm_eps),
+            trusted_geometry=True,
         )
     if fused is None and raw_query:
         # The fused writer declined this geometry: apply the model-level norm

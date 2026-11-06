@@ -744,6 +744,57 @@ def _prefix_reuse_k_compress(
         )
 
 
+def _prefix_reuse_trusted_decline_reason(
+    q,
+    raw_keys,
+    q_norm_gamma,
+    k_norm_gamma,
+    kv_table,
+    state_table,
+    *,
+    tokens: int,
+    head_num: int,
+) -> str:
+    """Per-layer layout decline check for a ``trusted_geometry`` caller.
+
+    The production caller guarantees the step geometry (the frozen step
+    plan's ``prefix_reuse_fused_supported`` gate decided every step-invariant
+    precondition once per step) and the plan/geometry constructions already
+    validated the metadata tensors (pool views, block tables, cu/prefix
+    mirrors, RoPE tables).  What genuinely varies per layer is the projection
+    layout (``q``/``raw_keys`` strides), the indexer gamma tensors and the
+    block tables' contiguity, so only those stay in this decline check.
+    Returns ``""`` when the layout is accepted.
+    """
+    if not (
+        q.dim() == 3
+        and tuple(q.shape) == (tokens, head_num, 128)
+        and q.dtype == torch.bfloat16
+        and q.stride(2) == 1
+        and q.stride(1) == 128
+        and q.stride(0) >= head_num * 128
+        and raw_keys.dim() == 2
+        and tuple(raw_keys.shape) == (tokens, 128)
+        and raw_keys.dtype == torch.bfloat16
+        and raw_keys.stride(1) == 1
+        and raw_keys.stride(0) >= 128
+        and tuple(q_norm_gamma.shape) == (128,)
+        and q_norm_gamma.dtype in (torch.bfloat16, torch.float32)
+        and q_norm_gamma.is_contiguous()
+        and q_norm_gamma.device == raw_keys.device
+        and tuple(k_norm_gamma.shape) == (128,)
+        and k_norm_gamma.dtype in (torch.bfloat16, torch.float32)
+        and k_norm_gamma.is_contiguous()
+        and k_norm_gamma.device == raw_keys.device
+        and kv_table.is_contiguous()
+        and kv_table.dtype == torch.int32
+        and state_table.is_contiguous()
+        and state_table.dtype == torch.int32
+    ):
+        return "per-layer projection/gamma/table layout"
+    return ""
+
+
 def write_prefix_reuse_prefill(
     q,
     raw_keys,
@@ -765,8 +816,16 @@ def write_prefix_reuse_prefill(
     kv_tokens_per_block,
     state_tokens_per_block,
     norm_eps,
+    trusted_geometry: bool = False,
 ) -> dict | None:
     """Fused prefix-reuse preparation; ``None`` for unsupported geometry.
+
+    ``trusted_geometry`` (production only) declares that the caller's frozen
+    step plan gated the step-invariant geometry
+    (``prefix_reuse_fused_supported``) and the plan/geometry constructions
+    validated the metadata tensors, so the per-call guard below reduces to
+    the per-layer projection/gamma/table layout check; component callers
+    keep the full guard.
 
     ``q`` is the RAW (un-normed) packed projection ``[tokens, heads, 128]``
     and ``raw_keys`` its key head ``[tokens, 128]``, both bf16. Both may be
@@ -801,7 +860,22 @@ def write_prefix_reuse_prefill(
     tokens = sum(lengths)
     head_num = int(q.shape[1]) if q.dim() == 3 else -1
     device = raw_keys.device
-    if not (
+    if trusted_geometry:
+        # The frozen step plan's gate decided every step-invariant
+        # precondition once per step; only the per-layer projection/gamma/
+        # table layout is re-checked on this path.
+        if _prefix_reuse_trusted_decline_reason(
+            q,
+            raw_keys,
+            q_norm_gamma,
+            k_norm_gamma,
+            kv_table,
+            state_table,
+            tokens=tokens,
+            head_num=head_num,
+        ):
+            return None
+    elif not (
         batch > 0
         and kv_tokens_per_block == 128
         and state_tokens_per_block == 128

@@ -8,6 +8,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
     host_input_mirror,
+    prefill_mirror_facts,
 )
 
 
@@ -326,15 +327,34 @@ def validate_qsa_before_side_write(
     if self.is_target_verify or is_incremental_prefill:
         sequence_bases = self.attn_inputs.prefix_lengths
         query_lengths = self.attn_inputs.input_lengths
-        # Fail-fast on the per-step CPU mirrors: a device source
-        # (RTP_LLM_DEVICE_INPUT) was read back once this step by the
-        # gate/plan build, so these checks never synchronize per layer.
-        bases_host = host_input_mirror(self.attn_inputs, "prefix_lengths")
-        lengths_host = host_input_mirror(self.attn_inputs, "input_lengths")
-        if bases_host is None:
-            bases_host = sequence_bases
-        if lengths_host is None:
-            lengths_host = query_lengths
+        # Fail-fast on the frozen per-step mirror facts: one pass per step
+        # replaces the per-layer ``any``/``sum().item()`` host reads; a
+        # device source (RTP_LLM_DEVICE_INPUT) was read back once this step
+        # by the gate/plan build, so these checks never synchronize per layer.
+        facts = (
+            None
+            if qsa_strict_validation_enabled()
+            else prefill_mirror_facts(self.attn_inputs)
+        )
+        if facts is not None:
+            if not facts.prefixes_nonneg or not facts.lengths_positive:
+                raise RuntimeError(
+                    "qwen4_exp QSA paged sequence bases must be non-negative and "
+                    "query lengths positive"
+                )
+            if int(hidden_states.shape[0]) != facts.lengths_sum:
+                raise RuntimeError(
+                    "qwen4_exp QSA paged token count does not match batch/query geometry"
+                )
+            bases_host = None
+            lengths_host = None
+        else:
+            bases_host = host_input_mirror(self.attn_inputs, "prefix_lengths")
+            lengths_host = host_input_mirror(self.attn_inputs, "input_lengths")
+            if bases_host is None:
+                bases_host = sequence_bases
+            if lengths_host is None:
+                lengths_host = query_lengths
     else:
         sequence_bases = self.attn_inputs.sequence_lengths
         query_lengths = torch.ones_like(sequence_bases)
@@ -342,13 +362,20 @@ def validate_qsa_before_side_write(
         lengths_host = query_lengths
     # Host fail-fast on the pinned length mirrors; free, and it lets
     # _validate_main_paged_geometry drop its own device-synchronizing sign
-    # reads for the non-graph path.
-    if bool(torch.any(bases_host < 0)) or bool(torch.any(lengths_host <= 0)):
+    # reads for the non-graph path.  A facts hit already validated above.
+    if (
+        bases_host is not None
+        and (
+            bool(torch.any(bases_host < 0)) or bool(torch.any(lengths_host <= 0))
+        )
+    ):
         raise RuntimeError(
             "qwen4_exp QSA paged sequence bases must be non-negative and "
             "query lengths positive"
         )
-    if int(hidden_states.shape[0]) != int(lengths_host.sum().item()):
+    if bases_host is not None and int(hidden_states.shape[0]) != int(
+        lengths_host.sum().item()
+    ):
         raise RuntimeError(
             "qwen4_exp QSA paged token count does not match batch/query geometry"
         )

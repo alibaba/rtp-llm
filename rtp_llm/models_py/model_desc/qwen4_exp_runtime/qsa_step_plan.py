@@ -96,13 +96,18 @@ _STEP_PLAN_STATS = {"hits": 0, "misses": 0, "invalidations": 0}
 
 def step_plan_cache_stats() -> dict:
     """Cache counters for benches and diagnostics (hits/misses/invalidations)."""
-    return dict(_STEP_PLAN_STATS, mirror_readbacks=_MIRROR_STATS["readbacks"])
+    return dict(
+        _STEP_PLAN_STATS,
+        mirror_readbacks=_MIRROR_STATS["readbacks"],
+        fact_computes=_PREFILL_FACTS_STATS["computes"],
+    )
 
 
 def clear_step_plan_cache() -> None:
     """Drop every cached plan (tests isolate cases that share inputs objects)."""
     _STEP_PLAN_CACHE.clear()
     _MIRROR_CACHE.clear()
+    _PREFILL_FACTS_CACHE.clear()
 
 
 def _tensor_fingerprint(tensor: Any) -> tuple[int, int] | None:
@@ -171,6 +176,96 @@ def host_input_mirror(main_inputs: Any, name: str) -> torch.Tensor | None:
     while len(_MIRROR_CACHE) > _MIRROR_CACHE_LIMIT:
         _MIRROR_CACHE.popitem(last=False)
     return mirror
+
+
+@dataclass(frozen=True)
+class PrefillMirrorFacts:
+    """Host facts over one step's input_lengths/prefix_lengths mirrors.
+
+    Freezes the derived python values every layer of one step shares: the
+    partition lists, the token count, the nonzero-prefix gate and the
+    fail-fast sign checks.  The legacy paths recomputed these per layer with
+    host tensor ops (``torch.any`` / ``tolist`` / ``sum().item()``); the
+    facts compute them once per mirror pair.
+    """
+
+    lengths: list[int]
+    prefixes: list[int]
+    lengths_sum: int
+    has_nonzero_prefix: bool
+    lengths_positive: bool
+    prefixes_nonneg: bool
+
+
+# Per-step host facts over the pinned length/prefix mirror pair.  Keyed by
+# both mirrors' identities and validated by their fingerprints, so an in-place
+# edit (version bump) or a fresh step's tensors recompute the facts; the
+# layers of one step only read the frozen values.
+_PREFILL_FACTS_LIMIT = 64
+_PREFILL_FACTS_CACHE: "OrderedDict[tuple, tuple[torch.Tensor, torch.Tensor, PrefillMirrorFacts, tuple]]" = (
+    OrderedDict()
+)
+_PREFILL_FACTS_STATS = {"computes": 0}
+
+
+def prefill_mirror_facts(main_inputs: Any) -> PrefillMirrorFacts | None:
+    """Frozen per-step host facts over the length/prefix mirrors.
+
+    The mirror cache already collapses any device readback to once per step;
+    this additionally freezes the derived values.  Returns ``None`` when the
+    inputs object carries no usable mirrors (callers keep their legacy
+    per-call computation in that case).
+    """
+    lengths_mirror = host_input_mirror(main_inputs, "input_lengths")
+    prefixes_mirror = host_input_mirror(main_inputs, "prefix_lengths")
+    if not isinstance(lengths_mirror, torch.Tensor) or not isinstance(
+        prefixes_mirror, torch.Tensor
+    ):
+        return None
+    fingerprint = (
+        _tensor_fingerprint(lengths_mirror),
+        _tensor_fingerprint(prefixes_mirror),
+    )
+    key = (id(lengths_mirror), id(prefixes_mirror))
+    entry = _PREFILL_FACTS_CACHE.get(key)
+    if entry is not None:
+        cached_lengths, cached_prefixes, facts, cached_fp = entry
+        if (
+            cached_lengths is lengths_mirror
+            and cached_prefixes is prefixes_mirror
+            and cached_fp == fingerprint
+        ):
+            _PREFILL_FACTS_CACHE.move_to_end(key)
+            return facts
+        del _PREFILL_FACTS_CACHE[key]
+    facts = PrefillMirrorFacts(
+        lengths=[int(value) for value in lengths_mirror.tolist()],
+        prefixes=[int(value) for value in prefixes_mirror.tolist()],
+        lengths_sum=int(lengths_mirror.sum().item()),
+        has_nonzero_prefix=bool(prefixes_mirror.numel())
+        and bool(torch.any(prefixes_mirror != 0).item()),
+        lengths_positive=not bool(torch.any(lengths_mirror <= 0).item()),
+        prefixes_nonneg=not bool(torch.any(prefixes_mirror < 0).item()),
+    )
+    _PREFILL_FACTS_STATS["computes"] += 1
+    _PREFILL_FACTS_CACHE[key] = (lengths_mirror, prefixes_mirror, facts, fingerprint)
+    while len(_PREFILL_FACTS_CACHE) > _PREFILL_FACTS_LIMIT:
+        _PREFILL_FACTS_CACHE.popitem(last=False)
+    return facts
+
+
+def has_nonzero_prefill_prefix(main_inputs: Any) -> bool:
+    """Whether any request in this step carries a non-zero reused prefix.
+
+    The per-layer sparse-GQA dispatch gate (three-plus calls per layer) reads
+    this frozen verdict instead of recomputing ``torch.any(prefixes !=
+    0).item()`` on the mirror.
+    """
+    facts = prefill_mirror_facts(main_inputs)
+    if facts is None:
+        prefixes = host_input_mirror(main_inputs, "prefix_lengths")
+        return bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
+    return facts.has_nonzero_prefix
 
 
 def rope_signature(rope_config: Any) -> tuple:
@@ -267,6 +362,11 @@ class Qwen4ExpPrefillStepPlan:
     rope_table_sin: torch.Tensor | None = None
     # Whether the build ran the cold-path cu partition preflight.
     cu_checked: bool = False
+    # Step-geometry gate for the fused prefix-reuse preparation writer: the
+    # writer's step-invariant preconditions hold, so the production caller
+    # passes ``trusted_geometry`` and the writer re-checks only the
+    # per-layer projection tensors.
+    prefix_reuse_fused_supported: bool = False
 
 
 def _cache_regions(context: Any) -> tuple:
@@ -354,19 +454,12 @@ def _step_plan_applies(
     for name, fingerprint in plan.source_fingerprints.items():
         if _tensor_fingerprint(getattr(context.main_inputs, name, None)) != fingerprint:
             return False
-    # Per-step CPU mirrors: a device source (RTP_LLM_DEVICE_INPUT) was read
-    # back once for this step; the layers of one step compare host values
-    # without another synchronization.
-    lengths_mirror = host_input_mirror(context.main_inputs, "input_lengths")
-    if lengths_mirror is None:
-        return False
-    if [int(value) for value in lengths_mirror.tolist()] != plan.lengths:
-        return False
-    prefixes_mirror = host_input_mirror(context.main_inputs, "prefix_lengths")
-    if prefixes_mirror is None:
-        return False
-    if [int(value) for value in prefixes_mirror.tolist()] != plan.prefix_values:
-        return False
+    # Per-step CPU mirrors: the build read the mirrors once and froze their
+    # values into the plan.  The source fingerprints above already cover the
+    # guarantee the per-layer value comparison used to re-establish (an
+    # unchanged tensor keeps the build's verdict; anything swapped, rebound
+    # or edited in place falls back to the full rebuild), so hits no longer
+    # re-read mirror values.
     if (plan.kv_tokens_per_block, plan.state_tokens_per_block) != (
         int(context.indexer_kv_cache.seq_size_per_block),
         int(context.indexer_state_cache.seq_size_per_block),
@@ -474,6 +567,37 @@ def _build_kv_lens_rows(
         .unsqueeze(0)
         .contiguous()
         for request_idx, length in enumerate(lengths)
+    )
+
+
+def prefix_reuse_fused_geometry_supported(
+    *,
+    batch_size: int,
+    head_dim: int,
+    head_num: int,
+    ratio: int,
+    lengths: list[int],
+    prefixes: list[int],
+    kv_tokens_per_block: int,
+    state_tokens_per_block: int,
+) -> bool:
+    """Whether the fused prefix-reuse preparation writer's step geometry holds.
+
+    Every precondition of :func:`write_prefix_reuse_prefill` that depends only
+    on step metadata (page/dims geometry, bounds, page-aligned prefixes) is
+    decided once per step here; the writer then re-checks only the per-layer
+    projection tensors when the caller passes ``trusted_geometry``.
+    """
+    return bool(
+        batch_size > 0
+        and head_dim == 128
+        and 0 < head_num <= 65535
+        and all(isinstance(n, int) and n > 0 for n in lengths)
+        and max(lengths, default=0) <= 65535
+        and kv_tokens_per_block == 128
+        and state_tokens_per_block == 128
+        and ratio == 4
+        and all(value % 128 == 0 for value in prefixes)
     )
 
 
@@ -876,6 +1000,16 @@ def build_incremental_step_plan(
         padded_score_weights=padded_score_weights,
         kv_lens_rows=kv_lens_rows,
         padded_kv_lens=padded_kv_lens,
+        prefix_reuse_fused_supported=prefix_reuse_fused_geometry_supported(
+            batch_size=batch_size,
+            head_dim=head_dim,
+            head_num=head_num,
+            ratio=ratio,
+            lengths=lengths,
+            prefixes=prefix_values,
+            kv_tokens_per_block=kv_tokens_per_block,
+            state_tokens_per_block=state_tokens_per_block,
+        ),
     )
 
 
@@ -1136,10 +1270,7 @@ def lookup_prefill_step_plan(
 ) -> Qwen4ExpPrefillStepPlan | None:
     """Find the frozen plan for this step's inputs, any prefill mode.
 
-    Consumers (sparse-GQA FMHA input planning) re-read the pinned length
-    mirrors and compare them with the plan before consuming any field, so a
-    plan whose lengths/prefixes changed can never be used.  Strict validation
-    bypasses the cache, so it never serves a plan there.
+    Strict validation bypasses the cache, so it never serves a plan there.
     """
     if qsa_strict_validation_enabled():
         return None
@@ -1147,3 +1278,34 @@ def lookup_prefill_step_plan(
         if tokens == token_count and owner is main_inputs:
             return plan
     return None
+
+
+def prefill_step_plan_hit(
+    main_inputs: Any,
+    token_count: int,
+    *,
+    device: torch.device | None = None,
+    batch_size: int | None = None,
+) -> Qwen4ExpPrefillStepPlan | None:
+    """Lookup a frozen plan and re-check only fingerprints (no value reads).
+
+    The plan build validated the mirror values once; per-layer consumers call
+    this instead of re-reading the mirrors (``tolist``/``any``/list
+    comparisons).  The source fingerprints carry the same guarantee the
+    per-layer value comparison used to establish: unchanged tensors keep the
+    build's verdict, and anything swapped, rebound or edited in place falls
+    back to the caller's legacy path.  Strict validation never serves a hit.
+    """
+    if qsa_strict_validation_enabled():
+        return None
+    plan = lookup_prefill_step_plan(main_inputs, token_count)
+    if plan is None:
+        return None
+    if device is not None and plan.device != device:
+        return None
+    if batch_size is not None and plan.batch_size != batch_size:
+        return None
+    for name, fingerprint in plan.source_fingerprints.items():
+        if _tensor_fingerprint(getattr(main_inputs, name, None)) != fingerprint:
+            return None
+    return plan

@@ -1,6 +1,7 @@
 """Validated paged FMHA reader inputs, materialized before main-cache mutation."""
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -33,3 +34,7 @@ class IncrementalPrefillInputs:
     requests: list[PrefillRequest]
     selected_indices: torch.Tensor
     prefixes_device: torch.Tensor
+    # The frozen step plan the prepare pass served this ragged plan from
+    # (fingerprint-validated hit); downstream consumers trust its frozen
+    # padding constants instead of re-validating mirror values per layer.
+    step_plan: Any = None
