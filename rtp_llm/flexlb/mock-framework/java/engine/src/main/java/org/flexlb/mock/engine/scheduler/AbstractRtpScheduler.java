@@ -216,18 +216,27 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
     protected final void admitPrefill(ArrayDeque<Entry> queue, List<Entry> selected, int uncachedLimit) {
         long uncached = 0;
         var admitted = new ArrayList<Entry>();
+        boolean capped = config.maxInitedKvStreams() > 0;
+        long initialized = capped ? active.values().stream().filter(this::ownsKv).count() : 0;
         for (var entry : List.copyOf(queue)) {
-            if (!live(entry) || entry.preparation instanceof KvCache.Loading) continue;
-            if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
-            if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
-            if (entry.lease == null && config.maxInitedKvStreams() > 0
-                    && active.values().stream().filter(e -> e.lease != null || e.preparation instanceof KvCache.Loading).count() >= config.maxInitedKvStreams()) continue;
-            if (workTokens(entry) <= 0 || !fitsPrefill(admitted, entry)) continue;
-            if (!reserve(entry)) continue;
-            admitted.add(entry);
-            queue.remove(entry); running.add(entry); selected.add(entry);
-            uncached += uncachedTokens(entry);
+            boolean ownedBefore = capped && ownsKv(entry);
+            try {
+                if (!live(entry) || entry.preparation instanceof KvCache.Loading) continue;
+                if (admitted.size() >= config.maxGenerateBatchSize() || config.forceSinglePrefill() && !admitted.isEmpty()) break;
+                if (uncachedLimit > 0 && uncached >= uncachedLimit) continue;
+                if (entry.lease == null && capped && initialized >= config.maxInitedKvStreams()) continue;
+                if (workTokens(entry) <= 0 || !fitsPrefill(admitted, entry)) continue;
+                if (!reserve(entry)) continue;
+                admitted.add(entry);
+                queue.remove(entry); running.add(entry); selected.add(entry);
+                uncached += uncachedTokens(entry);
+            } finally {
+                if (capped) initialized += (ownsKv(entry) ? 1 : 0) - (ownedBefore ? 1 : 0);
+            }
         }
+    }
+    private boolean ownsKv(Entry entry) {
+        return active.get(entry.input.identity()) == entry && (entry.lease != null || entry.preparation instanceof KvCache.Loading);
     }
     protected void removeWaiting(Entry entry) { waiting.remove(entry); }
 

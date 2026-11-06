@@ -280,12 +280,11 @@ public final class KvCache implements AutoCloseable {
     }
     private int deviceAvailable() { return deviceBlocks - pool.snapshot().active(); }
     private boolean makePoolFree(int count) {
-        while (pool.snapshot().free() < count) {
-            var evicted = tree.evict();
-            if (evicted == null) return false;
-            evictionLifetime.accept(System.nanoTime() - evicted.insertedNanos);
-        }
-        return true;
+        int missing = count - pool.snapshot().free();
+        if (missing > 0)
+            for (var evicted : tree.evict(missing))
+                evictionLifetime.accept(System.nanoTime() - evicted.insertedNanos);
+        return pool.snapshot().free() >= count;
     }
     private long blocksFor(long tokens) {
         if (tokens < 0) throw new IllegalArgumentException("Negative Token capacity");

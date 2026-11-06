@@ -63,18 +63,26 @@ final class BlockTree {
     }
 
     Node evict() {
-        for (var iterator = leaves.iterator(); iterator.hasNext();) {
-            var node = iterator.next();
-            if (node.cache.inUse()) continue;
-            iterator.remove();
-            nodes.remove(node.key);
-            (node.parent == null ? roots : node.parent.children).remove(node.key);
-            node.cache.close();
-            if (node.parent != null && node.parent.children.isEmpty()) leaves.add(node.parent);
-            changed(node.key, false);
-            return node;
-        }
-        return null;
+        var evicted = evict(1);
+        return evicted.isEmpty() ? null : evicted.getFirst();
+    }
+    List<Node> evict(int count) {
+        var evicted = new ArrayList<Node>();
+        var pinned = new ArrayList<Node>();
+        try {
+            while (evicted.size() < count && !leaves.isEmpty()) {
+                var node = leaves.pollFirst();
+                // Pins cannot change under KvCache's monitor. Skip each pinned leaf once per reclamation.
+                if (node.cache.inUse()) { pinned.add(node); continue; }
+                nodes.remove(node.key);
+                (node.parent == null ? roots : node.parent.children).remove(node.key);
+                node.cache.close();
+                if (node.parent != null && node.parent.children.isEmpty()) leaves.add(node.parent);
+                changed(node.key, false);
+                evicted.add(node);
+            }
+        } finally { leaves.addAll(pinned); }
+        return evicted;
     }
 
     int size() { return nodes.size(); }
