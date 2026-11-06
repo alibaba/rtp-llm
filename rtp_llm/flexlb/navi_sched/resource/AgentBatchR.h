@@ -250,14 +250,11 @@ public:
     bool getExecutionState(ExecutionState &state) const;
     bool beginBatchExecution(int64_t batchId);
     struct ExecutionUtilizationSnapshot {
-        double busyEma = 0.0;
         double busyWindow = 0.0;
         int64_t windowBusyUs = 0;
         int64_t windowElapsedUs = 0;
         int64_t windowSampleMonoUs = 0;
         size_t activeCount = 0;
-        int64_t sampleBusyUs = 0;
-        int64_t sampleElapsedUs = 0;
         int32_t runningRequests = 0;
         int32_t queuedRequests = 0;
         double utilization = 0.0;
@@ -423,7 +420,6 @@ private:
     int64_t _readyWithoutRunningStartTimeUs = 0;
     int64_t _executionBusyTimeUs = 0;
     int64_t _executionBusyStartTimeUs = 0;
-    ExecutionUtilizationEstimator _executionUtilizationEstimator;
     ExecutionUtilizationWindow _executionUtilizationWindow;
     std::shared_ptr<std::atomic<double>> _backendExecutionUtilization =
         std::make_shared<std::atomic<double>>(0.0);
