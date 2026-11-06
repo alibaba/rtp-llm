@@ -10,13 +10,14 @@ import argparse,asyncio,hashlib,json,os
 from pathlib import Path
 import subprocess,sys
 from unittest.mock import patch
+from qwen38_log_redaction import redact_data
 
 
 def digest(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def write(path,value):
-    Path(path).write_text(json.dumps(value,indent=2)+'\n')
+    Path(path).write_text(json.dumps(redact_data(value),indent=2)+'\n')
 
 
 def profile(environment=None):
@@ -25,7 +26,10 @@ def profile(environment=None):
            'PYTORCH_ALLOC_CONF','PYTORCH_CUDA_ALLOC_CONF','OMP_NUM_THREADS',
            'WORLD_SIZE','WORLD_RANK','LOCAL_WORLD_SIZE','TP_SIZE','DP_SIZE',
            'EP_SIZE','FFN_SP_SIZE','PP_SIZE','GANG_CONFIG_STRING',
-           'HF_HUB_OFFLINE','TRANSFORMERS_OFFLINE','PYTHONDONTWRITEBYTECODE')
+           'HF_HUB_OFFLINE','TRANSFORMERS_OFFLINE','PYTHONDONTWRITEBYTECODE',
+           'TOKENIZER_PATH','CHECKPOINT_PATH','PTUNING_PATH','EXTRA_DATA_PATH',
+           'LOCAL_EXTRA_DATA_PATH','SP_CHECKPOINT_PATH','SP_TYPE','SP_MODEL_TYPE',
+           'LORA_INFO','JSON_MODEL_OVERRIDE_ARGS','QUANTIZATION')
     def allowed(key):
         sensitive=('SECRET','PASSWORD','CREDENTIAL','AUTH','API_KEY','ACCESS_KEY','COOKIE','BEARER')
         return (key in names or key.startswith(('RTP_','RLLM_','Q38_','NCCL_'))) \
@@ -35,9 +39,11 @@ def profile(environment=None):
 
 def shim(role):
     args=sys.argv[3:];real=os.environ['Q38_CHAIN_REAL_PYTHON'];root=Path(os.environ['Q38_CHAIN_OUTPUT'])
-    target=['-m','run_qwen38_bf16_state_rtp_training'] if role=='training' else ['-m','rtp_llm.start_server']
+    target=['-m','run_qwen38_bf16_state_rtp_training'] if role=='training' else ['-m',os.environ['Q38_CHAIN_NATIVE_ENTRYPOINT']]
     if args[:2]!=target:
-        os.execv(real,[real,*args])  # Preserve the real stdin validators exactly.
+        if args[:1]==['-']:
+            os.execv(real,[real,*args])  # Preserve only the real stdin validators.
+        raise RuntimeError('CPU chain blocks every unknown module/script before execution')
     record=dict(role=role,argv=args,environment=profile(),entrypoint_intercepted_before_execution=True)
     capture=root/(role+'-entrypoint-capture.json');write(capture,record)
     if role=='training':
@@ -93,6 +99,7 @@ def main():
     parser.add_argument('--recipe',type=Path,required=True);parser.add_argument('--real-python',type=Path,required=True)
     parser.add_argument('--input',type=Path,required=True);parser.add_argument('--node-index',type=int,required=True)
     parser.add_argument('--cpu-checker',type=Path,required=True);parser.add_argument('--output-dir',type=Path,required=True)
+    parser.add_argument('--native-entrypoint',choices=['qwen38_world72_entrypoint'],default='qwen38_world72_entrypoint')
     args=parser.parse_args();assert 0<=args.node_index<18
     for path in (args.recipe,args.real_python,args.input,args.cpu_checker):assert path.is_file()
     root=args.output_dir.resolve();root.mkdir(parents=True,exist_ok=False)
@@ -103,6 +110,7 @@ def main():
         shim_path.chmod(0o700)
     env=dict(os.environ,Q38_CHAIN_REAL_PYTHON=str(args.real_python.absolute()),Q38_CHAIN_OUTPUT=str(root),
         Q38_CHAIN_INPUT=str(args.input.resolve()),Q38_CHAIN_NODE_INDEX=str(args.node_index),
+        Q38_CHAIN_NATIVE_ENTRYPOINT=args.native_entrypoint,
         Q38_CHAIN_CPU_CHECKER=str(args.cpu_checker.resolve()),Q38_CHAIN_NATIVE_SHIM=str(root/'native-python-shim'),
         Q38_TRAIN_PYTHON=str(root/'training-python-shim'),Q38_RUN_ROOT=str(root/'recipe-run'),CUDA_VISIBLE_DEVICES='')
     write(root/'SOURCE.json',dict(recipe_sha256=digest(args.recipe),driver_sha256=digest(script),input_sha256=digest(args.input),
