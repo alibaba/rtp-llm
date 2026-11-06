@@ -340,7 +340,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "disk_cache_sync_timeout_ms"),
         type=int,
         default=30000,
-        help="磁盘 KV cache 同步超时，单位毫秒。",
+        help="磁盘 KV cache load 传输超时，包含排队时间，单位毫秒；evict/store 未单独配置时也沿用此值。",
+    )
+    kv_cache_group.add_argument(
+        "--disk_cache_evict_timeout_ms",
+        env_name="DISK_CACHE_EVICT_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "disk_cache_evict_timeout_ms"),
+        type=int,
+        default=-1,
+        help="磁盘 KV cache evict/store 写盘传输超时，包含排队时间，单位毫秒；必须为正数，默认 -1 沿用 DISK_CACHE_SYNC_TIMEOUT_MS。",
     )
     kv_cache_group.add_argument(
         "--disk_cache_staging_block_count",

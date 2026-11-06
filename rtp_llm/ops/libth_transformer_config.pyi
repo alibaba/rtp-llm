@@ -771,6 +771,7 @@ class KVCacheConfig:
     disk_cache_size_mb: int
     disk_cache_buffered_io: bool
     disk_cache_sync_timeout_ms: int
+    disk_cache_evict_timeout_ms: int
     disk_cache_staging_block_count: int
     memory_cache_max_descriptors_per_transfer_batch: int
     multi_task_prompt: str

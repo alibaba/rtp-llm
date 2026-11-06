@@ -64,9 +64,12 @@ struct BlockTreeCacheConfig {
     size_t transfer_worker_count{4};
     size_t transfer_queue_max_size{10000};
 
-    // ---- Cross-rank transfer timeout ----
+    // ---- Transfer deadlines, including queue wait and cross-rank work ----
     int host_cache_sync_timeout_ms{10000};
+    // Preserve the existing name for disk loads.
     int disk_cache_sync_timeout_ms{30000};
+    // Outbound disk transfers from both eviction and store.
+    int disk_cache_evict_timeout_ms{30000};
 
     // Total max-stride staging blocks per rank, split evenly across Full/SWA pools.
     // Default guarantees at least 64 Full blocks; actual capacities depend on payload sizes.
