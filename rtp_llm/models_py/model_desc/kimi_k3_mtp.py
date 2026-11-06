@@ -135,7 +135,9 @@ class KimiK3MtpModel(KimiK3Model):
         # The embedding gathers hidden shards across TP. Project only this
         # rank's token rows after that gather, before entering the SP layer.
         embedded = self._embed_inputs(inputs, tp_gather=self._gather_modeling_boundary)
-        embedded = embedded.narrow(0, local_start, local_rows).contiguous()
+        # A contiguous narrow is still a view. Detach the local rows so the
+        # projection does not retain the complete gathered embedding storage.
+        embedded = embedded.narrow(0, local_start, local_rows).clone()
         previous_h = inputs.input_hiddens.narrow(0, local_start, local_rows)
         return self.eh_proj(
             torch.cat(
@@ -148,11 +150,34 @@ class KimiK3MtpModel(KimiK3Model):
         recurrent = self._forward_layers(
             hidden, inputs, fmha_impl, sequence_parallel_input=True, gather_output=False
         )
+        del hidden
+        terminal = getattr(inputs, "mtp_prefill_output_indexes", None)
+        if terminal is not None:
+            if self._query_layout is not None:
+                raise ValueError("Native MTP terminal selection must not use query CP")
+            recurrent = self._gather_terminal_rows(recurrent, terminal)
+            output = PyModelOutputs(self.norm(recurrent) if terminal.numel() else recurrent, recurrent)
+            output.lm_output_already_selected = True
+            return output
         if self._query_layout is None:
             recurrent = self._gather_modeling_boundary(recurrent)
         else:
             self._publish_mtp_last_hidden(recurrent)
         return PyModelOutputs(self.norm(recurrent), recurrent)
+
+    def _gather_terminal_rows(self, recurrent, indexes):
+        """Gather only pre-norm terminal rows, preserving request order."""
+        if indexes.numel() == 0:
+            return recurrent.new_empty((0, recurrent.shape[-1]))
+        local_rows = recurrent.shape[0]
+        local_indexes = indexes - self.tp_rank * local_rows
+        owned = (local_indexes >= 0) & (local_indexes < local_rows)
+        selected = recurrent.index_select(0, local_indexes.clamp(0, local_rows - 1))
+        selected = torch.where(owned[:, None], selected, 0)
+        if self.tp_size == 1:
+            return selected
+        gathered = all_gather(selected, Group.TP)
+        return gathered.view(self.tp_size, indexes.numel(), recurrent.shape[-1]).sum(0)
 
     def _initialize_mtp_last_handoff(self, init_resource):
         if not self.has_mtp_hidden_buffer():

@@ -13,6 +13,19 @@ launch=importlib.util.module_from_spec(spec);spec.loader.exec_module(launch)
 
 
 class K31LaunchContract(unittest.TestCase):
+    def test_tcp_cache_store_keeps_disaggregated_role_and_topology(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            args.cache_store_rdma_mode = False
+            with patch.object(launch.socket, "socket") as route:
+                route.return_value.getsockname.return_value = ("127.0.0.1", 0)
+                _, argv = launch.launch_config(args)
+            options = dict(zip(argv[1::2], argv[2::2]))
+            self.assertEqual(options["--cache_store_rdma_mode"], "0")
+            self.assertEqual(options["--cache_store_tcp_anet_rpc_queue_num"], "8192")
+            self.assertEqual(options["--role_type"], "PREFILL")
+            self.assertEqual(options["--prefill_cp_size"], "8")
+
     def fixture(self,root,layers):
         target=root/'target';draft=root/'draft';target.mkdir();draft.mkdir()
         target_config={'model_type':'kimi_k31','text_config':{'num_hidden_layers':layers,'num_nextn_predict_layers':0,'hidden_size':64,'vocab_size':128}}

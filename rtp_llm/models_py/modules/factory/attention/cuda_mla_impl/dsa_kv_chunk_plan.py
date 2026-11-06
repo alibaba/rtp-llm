@@ -4,6 +4,14 @@ from dataclasses import dataclass
 from typing import Callable, Sequence
 
 
+def prefill_indexer_score_bytes(rows: int, columns: int) -> int:
+    """FP32 dense MQA storage, including SM100's extra K tile and row stride."""
+    # Retain the planner's conservative row alignment across MQA backends.
+    aligned_rows = (rows + 63) // 64 * 64
+    aligned_columns = (columns + 256 + 255) // 256 * 256
+    return aligned_rows * aligned_columns * 4
+
+
 def indexer_selection_scratch_bytes(rows: int, columns: int, topk: int) -> int:
     """Conservative CUDA radix-select and bounded selected-K sort scratch.
 

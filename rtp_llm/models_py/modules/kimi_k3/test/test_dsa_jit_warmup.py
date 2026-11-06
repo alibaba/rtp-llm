@@ -69,7 +69,7 @@ class DsaJitWarmupTest(unittest.TestCase):
             (3, page * (132 if fp8_indexer else 256)), 0x5A, dtype=torch.uint8
         )
         caches = [
-            NS(tag="default", seq_size_per_block=page, kv_cache_base=sfa),
+            NS(tag="full", seq_size_per_block=page, kv_cache_base=sfa),
             NS(tag="indexer_kv", seq_size_per_block=page, kv_cache_base=indexer),
         ]
         attention = NS(

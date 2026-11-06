@@ -127,7 +127,7 @@ def warmup_kimi_k31_dsa_jit(model, init_resource):
                 # codec as inference, including BF16 draft reinterpretation.
                 view = op.cache_view(cache, page)
                 indexer_fp8 = view.dtype == torch.uint8
-            elif cache.tag == "default":
+            elif cache.tag in ("full", "default"):
                 raw = cache.kv_cache_base
                 if raw.dtype in (torch.float8_e4m3fn, torch.uint8):
                     # SFA's packed 656-byte codec is not the 132-byte Indexer

@@ -1144,7 +1144,7 @@ class Runner:
         sys.path[:0] = [str(root) for root in roots]
         return self._request_cases_group(cases)
 
-    def _request_cases_group(self, cases, *, decode_relay_port=None):
+    def _request_cases_group(self, cases, *, decode_relay_ports=None):
         try:
             import grpc
             import torch
@@ -1204,9 +1204,10 @@ class Runner:
                 role_addrs=[
                     RoleAddr(
                         role=RoleType.DECODE,
-                        ip="127.0.0.1" if decode_relay_port is not None else role["ip"],
+                        ip="127.0.0.1" if decode_relay_ports is not None else role["ip"],
                         http_port=role["http_port"],
-                        grpc_port=decode_relay_port if decode_relay_port is not None else role["grpc_port"],
+                        grpc_port=(decode_relay_ports[case.decode_owner_rank]
+                                   if decode_relay_ports is not None else role["grpc_port"]),
                     )
                 ],
             )

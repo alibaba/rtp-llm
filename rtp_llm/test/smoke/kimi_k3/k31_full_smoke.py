@@ -128,18 +128,17 @@ class K31FullRunner(legacy.Runner):
         return max(decode_batch_sizes(
             getattr(getattr(self, 'args', None), 'decode_batch_profile', 'smoke')))
 
-    def _request_cases_group(self, cases, *, decode_relay_port=None):
-        if len(cases) < 63 or len(self.decode_role_addrs) != 1:
-            return super()._request_cases_group(cases, decode_relay_port=decode_relay_port)
+    def _request_cases_group(self, cases, *, decode_relay_ports=None):
+        if len(cases) < 63 or decode_relay_ports is not None:
+            return super()._request_cases_group(cases, decode_relay_ports=decode_relay_ports)
         if __package__:
             from .pd_group_relay import PdGroupRelay
         else:
             from pd_group_relay import PdGroupRelay
-        role = self.decode_role_addrs[0]
-        endpoint = f"{role['ip']}:{role['grpc_port']}"
+        endpoints = [f"{role['ip']}:{role['grpc_port']}" for role in self.decode_role_addrs]
         artifact = self.args.output.parent / f'pd-group-relay-{time.time_ns()}.jsonl'
-        with PdGroupRelay(endpoint, len(cases), artifact) as relay:
-            return super()._request_cases_group(cases, decode_relay_port=relay.port)
+        with PdGroupRelay(endpoints, len(cases), artifact) as relay:
+            return super()._request_cases_group(cases, decode_relay_ports=relay.ports)
 
     def record_case(self, name, owner, *, words=1):
         # Batch transitions test membership and state, not long copying.

@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpClient.h"
 
+#include <algorithm>
+
 #include "aios/network/arpc/arpc/metric/KMonitorANetClientMetricReporter.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -10,7 +12,8 @@ TcpClient::~TcpClient() {
     stop();
 }
 
-bool TcpClient::init(int io_thread_count) {
+bool TcpClient::init(int io_thread_count, uint32_t queue_size) {
+    queue_limit_ = std::max<uint32_t>(1000, queue_size);
     if (rpc_channel_transport_ == nullptr) {
         rpc_channel_transport_.reset(new anet::Transport(io_thread_count));
         if (!rpc_channel_transport_ || !rpc_channel_transport_->start()) {
@@ -32,7 +35,7 @@ bool TcpClient::init(int io_thread_count) {
         }
         rpc_channel_manager_->SetMetricReporter(metricReporter);
     }
-    RTP_LLM_LOG_INFO("tcp client init success, io thread count %d", io_thread_count);
+    RTP_LLM_LOG_INFO("tcp client init success, io thread count %d, queue limit %u", io_thread_count, queue_limit_);
     return true;
 }
 
@@ -78,7 +81,7 @@ std::shared_ptr<arpc::RPCChannelBase> TcpClient::openChannel(const std::string& 
     // the RPC callback, and the cache-load state machine applies its bounded
     // transfer retry policy without starving healthy peers.
     return std::shared_ptr<arpc::RPCChannelBase>(
-        dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, 1000ul)));
+        dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, queue_limit_)));
 }
 
 std::shared_ptr<TransferConnection>

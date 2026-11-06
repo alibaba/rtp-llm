@@ -385,6 +385,10 @@ struct PyModelInputs {
     // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
     bool capture_hidden_states = false;
 
+    // Undefined for the ordinary/Decode contract; possibly empty for an
+    // internal prefill round which only writes KV and has no terminal row.
+    torch::Tensor mtp_prefill_output_indexes;
+
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
     }
@@ -392,6 +396,7 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    bool lm_output_already_selected = false;
     // Optional model-side features consumed by speculative decoders.  This is
     // a first-class forward output because CUDA graph replay does not execute
     // Python and therefore cannot safely recover it from mutable model state.

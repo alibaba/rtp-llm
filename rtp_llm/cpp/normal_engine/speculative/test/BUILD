@@ -3,6 +3,12 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "mtp_prefill_chunk_plan_test",
+    srcs = ["MtpPrefillChunkPlanTest.cc"],
+    deps = ["//rtp_llm/cpp/normal_engine:mtp_prefill_chunk_plan"],
+)
+
 test_copts = [
     "-fno-access-control",
 ] + copts()

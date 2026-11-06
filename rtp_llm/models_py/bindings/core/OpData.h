@@ -113,6 +113,9 @@ struct GptModelInputs {
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
     bool is_mtp_draft_update = false;
+    // Internal MTP-only prefill round: select lm_output_indexes before the
+    // Python output gather/norm. Set after TP input sync on every rank.
+    bool mtp_prefill_terminal_output = false;
     int64_t sp_logical_requests = 0;
     int64_t sp_logical_tokens = 0;
 

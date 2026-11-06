@@ -176,5 +176,5 @@ def init_cache_store_group_args(parser, cache_store_config):
         bind_to=(cache_store_config, "cache_store_tcp_anet_rpc_queue_num"),
         type=int,
         default=100,
-        help="P2P TCP 控制面 ANetRPCServer queueNum。",
+        help="P2P TCP 控制面 ANetRPCServer 队列容量。PD TCP CacheStore 至少保留 1000 项。",
     )

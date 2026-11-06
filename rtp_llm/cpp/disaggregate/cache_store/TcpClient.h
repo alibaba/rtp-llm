@@ -12,7 +12,7 @@ public:
     ~TcpClient();
 
 public:
-    bool                                  init(int io_thread_count);
+    bool                                  init(int io_thread_count, uint32_t queue_size);
     std::shared_ptr<arpc::RPCChannelBase> getChannel(const std::string& ip, uint32_t port);
     std::shared_ptr<TransferConnection>   getTransferConnection(const std::string& ip, uint32_t port, int device_id);
 
@@ -27,6 +27,7 @@ private:
 
     std::unique_ptr<anet::Transport>             rpc_channel_transport_;
     std::shared_ptr<arpc::ANetRPCChannelManager> rpc_channel_manager_;
+    uint32_t                                    queue_limit_ = 1000;
 };
 
 }  // namespace rtp_llm

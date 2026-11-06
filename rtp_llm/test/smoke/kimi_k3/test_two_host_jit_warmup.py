@@ -3,6 +3,8 @@
 import argparse
 import importlib.util
 import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -12,6 +14,7 @@ from types import ModuleType
 from unittest.mock import patch
 
 from rtp_llm.test.smoke.kimi_k3 import two_host_launcher as launcher
+from rtp_llm.test.smoke.kimi_k3.k31_smoke_capacity import cache_geometry, fastsafetensors_proof
 
 
 def config():
@@ -37,6 +40,101 @@ def config():
 
 
 class TwoHostJitWarmupTest(unittest.TestCase):
+    @unittest.skipUnless(Path("/proc/self/stat").is_file(), "requires Linux /proc")
+    def test_stop_reaps_child_created_during_shutdown(self):
+        code = """
+import signal, subprocess, sys, time
+from pathlib import Path
+
+def shutdown(*_):
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])
+    Path(sys.argv[1]).write_text(str(child.pid))
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, shutdown)
+print('ready', flush=True)
+time.sleep(120)
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            child_file = Path(tmp) / "child.pid"
+            run_id = "jit-late-child"
+            with subprocess.Popen(
+                [sys.executable, "-c", code, str(child_file)],
+                env={**os.environ, "K31_PD_SMOKE_RUN_ID": run_id},
+                start_new_session=True, text=True, stdout=subprocess.PIPE,
+            ) as leader:
+                try:
+                    self.assertEqual(leader.stdout.readline().strip(), "ready")
+                    identity = dict(uid=os.getuid(), pid_namespace=os.readlink("/proc/self/ns/pid"),
+                                    server_pid=leader.pid, pgid=leader.pid, run_id=run_id,
+                                    server_start_ticks=launcher.start_ticks(leader.pid))
+                    launcher.stop_owned_group(identity)
+                    child = Path("/proc") / child_file.read_text()
+                    if (child / "stat").is_file():
+                        self.assertEqual((child / "stat").read_text().rsplit(")", 1)[1].split()[0], "Z")
+                finally:
+                    try:
+                        os.killpg(leader.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_realized_capacity_requires_draft_and_generation_headroom(self):
+        def log(blocks, draft_layer=93, linear_blocks=135):
+            return "".join(
+                f"CP sharded KV cache enabled: cp_rank={rank}, cp_size=8, "
+                "block_size=1024, virtual_block_size=8192\n"
+                f"[RANK {rank}] cache manager initialized with config CacheConfig{{\n"
+                "  layer_num=93\n  layer_all_num=94\n  linear_step=8\n"
+                f"  group_block_nums={blocks},{blocks},{linear_blocks}\n"
+                "    kernel_seq_size_per_block=128\n"
+                "  group_tags=[full,indexer_kv,linear]\n"
+                f"  layers_by_group=[[3,{draft_layer}],[3],[0]]\n"
+                for rank in range(8)
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "engine.log"
+            path.write_text(log(131))
+            proof = cache_geometry(path, "prefill", 8, long_case=True)
+            self.assertEqual(proof["usable_pages"]["7"]["full"], 130)
+            path.write_text(log(130))
+            with self.assertRaisesRegex(ValueError, "capacity"):
+                cache_geometry(path, "prefill", 8, long_case=True)
+            path.write_text(log(131, linear_blocks=134))
+            with self.assertRaisesRegex(ValueError, "capacity"):
+                cache_geometry(path, "prefill", 8, long_case=True)
+            path.write_text(log(131, draft_layer=92))
+            with self.assertRaisesRegex(ValueError, "draft"):
+                cache_geometry(path, "prefill", 8, long_case=True)
+
+    def test_all_ranks_must_report_target_and_draft_loader_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp)
+            marker = "load method: fastsafetensors, finally choose load method: fastsafetensors\n"
+            for rank in range(8):
+                (logs / f"main_{rank}.log").write_text(marker * 2)
+            self.assertEqual(fastsafetensors_proof(logs)["7"], [1, 2])
+            (logs / "main_7.log").write_text(marker + marker.replace("fastsafetensors", "scratch"))
+            with self.assertRaisesRegex(ValueError, "unexpected checkpoint loader"):
+                fastsafetensors_proof(logs)
+
+    def test_default_and_explicit_prefill_workspace_budget(self):
+        value = config()
+        self.assertEqual(
+            launcher.prefill_workspace_environment(value),
+            {"RTP_PREFILL_KV_WORKSPACE_BUDGET_GIB": "8"},
+        )
+        value["prefill_kv_workspace_budget_gib"] = 10
+        self.assertIs(launcher.validate(value), value)
+        self.assertEqual(
+            launcher.prefill_workspace_environment(value),
+            {"RTP_PREFILL_KV_WORKSPACE_BUDGET_GIB": "10"},
+        )
+        for invalid in (True, "10", 0, -1, float("inf"), float("nan"), 1e-20):
+            value["prefill_kv_workspace_budget_gib"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "GiB"):
+                launcher.validate(value)
+
     def test_target_only_does_not_require_or_preflight_draft_paths(self):
         value = config()
         value["target_only"] = True
@@ -160,7 +258,7 @@ class TwoHostJitWarmupTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "receipt"):
                 launcher.jit_keys(value, "decode")
 
-    def launch(self, value, output, *, changed_role=None, empty_role=None):
+    def launch(self, value, output, *, changed_role=None, empty_role=None, failed_stop=None):
         calls = {role: 0 for role in launcher.ROLES}
 
         def remote(_config, role, operation):
@@ -169,6 +267,8 @@ class TwoHostJitWarmupTest(unittest.TestCase):
             if operation == "requests":
                 return {"exit_code": 0}
             if operation == "stop-role":
+                if role == failed_stop:
+                    raise OSError("remote stop failed")
                 return {"stop_requested": True}
             if operation != "jit-keys":
                 raise AssertionError(operation)
@@ -229,6 +329,15 @@ class TwoHostJitWarmupTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "JIT"):
                 self.launch(config(), output, empty_role="decode")
             self.assertTrue((output / "jit-warmup-before.json").exists())
+
+    def test_stop_failure_does_not_skip_the_other_role(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "control"
+            with self.assertRaisesRegex(RuntimeError, "Failed to stop"):
+                self.launch(config(), output, failed_stop="decode")
+            cleanup = json.loads((output / "stop-receipts.json").read_text())
+            self.assertIn("remote stop failed", cleanup["decode"]["error"])
+            self.assertTrue(cleanup["prefill"]["stop_requested"])
 
 
 if __name__ == "__main__":

@@ -297,7 +297,7 @@ def launch_config(args):
         "moe_strategy": getattr(args, "moe_strategy", None)
         or ("mega_moe" if args.role == "PREFILL" else "mega_moe_se"),
         "enable_cuda_graph": int(args.role == "DECODE" if enable_cuda_graph is None else enable_cuda_graph),
-        "cache_store_rdma_mode": 1,
+        "cache_store_rdma_mode": int(getattr(args, "cache_store_rdma_mode", True)),
         "cache_store_rdma_connect_timeout_ms": 30000,
         # Formal smoke must expose the first failure, including PD retries.
         "prefill_retry_times": 0,
@@ -316,6 +316,10 @@ def launch_config(args):
         options["kv_cache_mem_mb"] = kv_cache_mem_mb
     if model_type == "kimi_k31":
         options["cp_force_single_prefill"] = 0
+        if orthogonal_smoke and not options["cache_store_rdma_mode"]:
+            # A single decode owner can load one RPC per cache group/layer
+            # for 32 concurrent requests from the same Prefill peer.
+            options["cache_store_tcp_anet_rpc_queue_num"] = 8192
         if orthogonal_smoke and args.role == "PREFILL":
             # Retain the full inventory's short-input Decode63/64 groups.
             # Existing64K token admission limits still bound the rectangle.

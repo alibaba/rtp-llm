@@ -6,7 +6,12 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.indexer_topk import native_candidate_selection_supported
 
-from .dsa_kv_chunk_plan import indexer_selection_scratch_bytes, plan_dsa_kv_chunks
+from ..mla_prefill_plan import prefill_kv_workspace_budget_bytes
+from .dsa_kv_chunk_plan import (
+    indexer_selection_scratch_bytes,
+    plan_dsa_kv_chunks,
+    prefill_indexer_score_bytes,
+)
 from .dsa_kv_workspace import _bytes, indexer_candidate_workspace_shapes, staged_workspace_bytes
 
 
@@ -83,6 +88,7 @@ class DsaKVExecution:
             tuple(params.block_table.shape),
             lengths,
             owner.budgets[name],
+            prefill_kv_workspace_budget_bytes() if prefill else None,
             owner.other_resident_bytes(phase),
             owner.native_exact_topk,
             owner.indexer_use_fp8,
@@ -101,6 +107,7 @@ class DsaKVExecution:
         self.fp8_indexer = name == "indexer" and owner.indexer_use_fp8
         self.fp8_sfa = name == "sfa" and owner.sfa_use_fp8
         self.prefill = params.is_prefill
+        kv_budget = prefill_kv_workspace_budget_bytes() if self.prefill else None
         self.rows = (
             params.query_positions.numel()
             if self.prefill
@@ -311,8 +318,13 @@ class DsaKVExecution:
             # Charge MQA's padded output allocation. Prefill selects directly
             # from it; Decode retains the separate score arena above for its
             # existing owner-local DCP path.
-            native = (((capacity_rows + 63) // 64) * 64
-                      * ((block.tokens + 63) // 64) * 64 * 4) if self.fp8_indexer else 0
+            native = 0
+            if self.fp8_indexer:
+                if kv_budget is None:
+                    native = ((capacity_rows + 63) // 64 * 64
+                              * ((block.tokens + 63) // 64 * 64) * 4)
+                else:
+                    native = prefill_indexer_score_bytes(capacity_rows, block.tokens)
             return selection + native
 
         def metadata_bytes(plan):
@@ -352,16 +364,29 @@ class DsaKVExecution:
                 else sum(_bytes(*v) for v in specs.values())
             ) + scratch(block)
 
-        budget = owner.budgets[name]
+        def kv_workspace_bytes(shapes):
+            # BF16 scores and fallback selector keys live in the workspace.
+            # Native FP8 scores and selector scratch are charged by scratch().
+            return sum(
+                _bytes(*value) for key, value in shapes.items()
+                if key.startswith("cache.") or key in ("score", "block.keys")
+            )
+
+        def temporary_kv(block):
+            specs = specifications(block)
+            return kv_workspace_bytes(specs[0] if staged_sfa else specs) + scratch(block)
+
+        budget = owner.budgets[name] if kv_budget is None else kv_budget
         planning_budget = budget
+        page_limit = frozen["pages"] if frozen is not None else None
         while True:
             plan = plan_dsa_kv_chunks(
                 lengths,
                 page_tokens=params.page_size,
                 budget_bytes=planning_budget,
-                fixed_bytes=external,
-                temporary_bytes=temporary,
-                max_page_capacity=frozen["pages"] if frozen is not None else None,
+                fixed_bytes=external if kv_budget is None else 0,
+                temporary_bytes=temporary if kv_budget is None else temporary_kv,
+                max_page_capacity=page_limit,
             )
             stages = [{}, {}] if staged_sfa else [{}]
             for block in plan.blocks:
@@ -376,13 +401,20 @@ class DsaKVExecution:
                 if staged_sfa
                 else self.workspace.required_bytes(shapes)
             )
-            required += max((scratch(b) for b in plan.blocks), default=0)
-            required += metadata_bytes(plan)
+            scratch_bytes = max((scratch(b) for b in plan.blocks), default=0)
+            required += scratch_bytes + metadata_bytes(plan)
             # Different ragged blocks can maximize different named buffers.
             # Account for the union of capacities, not only the largest block.
-            if required <= budget:
-                break
-            planning_budget -= required - budget
+            if kv_budget is not None:
+                if kv_workspace_bytes(shapes) + scratch_bytes <= kv_budget:
+                    break
+                page_limit = plan.page_capacity - 1
+                if page_limit <= 0:
+                    raise ValueError("Prefill KV workspace budget cannot fit the ragged arena")
+            else:
+                if required <= budget:
+                    break
+                planning_budget -= required - budget
         self.plan, self.shapes, self.required_bytes = plan, shapes, required
         self.stages = stages if staged_sfa else None
         if frozen is not None and plan.page_capacity != frozen["pages"]:

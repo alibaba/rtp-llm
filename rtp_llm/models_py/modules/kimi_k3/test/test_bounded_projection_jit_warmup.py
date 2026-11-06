@@ -3,6 +3,7 @@
 import ast
 import math
 import os
+import runpy
 import sys
 import types
 import unittest
@@ -243,10 +244,9 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
         sample = mock.Mock(side_effect=lambda maximum, *_, **__: (1, maximum))
 
         bf16 = mock.Mock(wraps=self.warmup._warmup_bf16)
-        plan = source_module(
-            ROOT.parent / "factory/attention/mla_prefill_plan.py",
-            ["plan_expanded_kv_capacity"],
-        )
+        plan = NS(**runpy.run_path(
+            str(ROOT.parent / "factory/attention/mla_prefill_plan.py")
+        ))
         dense = NS(
             _get_deep_gemm_num_sms=lambda *_: 152,
             _release_cuda_cache=lambda *_: None,
@@ -315,6 +315,12 @@ class BoundedProjectionWarmupTest(unittest.TestCase):
                 )
         with self.assertRaisesRegex(RuntimeError, "needs at least"):
             self._prepare("6.0", FP8, 1048576, 1, True, False, free=0)
+
+    def test_shared_budget_bounds_bf16_kv_up_warmup(self):
+        with mock.patch.dict(os.environ, {"RTP_PREFILL_KV_WORKSPACE_BUDGET_GIB": "1"}):
+            observed, _ = self._prepare("6.0", BF16, 1048576, 1)
+        # Four heads with 320 BF16 elements, plus the live latent and RoPE input.
+        self.assertEqual(observed, 289262)
 
     def test_launch_routes_and_scratch_memory_guards(self):
         with dependencies(torch=metadata_torch()):

@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -28,6 +29,23 @@ def decode_dp_size(config):
 
 ROLES = ("prefill", "decode")
 SCRIPT = "rtp_llm/test/smoke/kimi_k3/two_host_launcher.py"
+KV_WORKSPACE_ENV = "RTP_PREFILL_KV_WORKSPACE_BUDGET_GIB"
+DEFAULT_KV_WORKSPACE_GIB = 8
+
+
+def prefill_workspace_environment(config):
+    key = "prefill_kv_workspace_budget_gib"
+    value = config.get(key, DEFAULT_KV_WORKSPACE_GIB)
+    error = f"{key} must be a finite positive number of GiB"
+    if type(value) not in (int, float):
+        raise ValueError(error)
+    try:
+        size = float(value) * 1024**3
+    except OverflowError as exc:
+        raise ValueError(error) from exc
+    if not math.isfinite(size) or size < 1:
+        raise ValueError(error)
+    return {KV_WORKSPACE_ENV: str(value)}
 
 
 def checkpoint_fields(config):
@@ -35,9 +53,10 @@ def checkpoint_fields(config):
 
 
 def validate(config):
+    prefill_workspace_environment(config)
     if type(decode_dp_size(config)) is not int or decode_dp_size(config) not in (1, 2):
         raise ValueError("The smoke supports Decode DP1 or DP2")
-    for key in ("fp8_gemm", "fp8_kv_cache"):
+    for key in ("fp8_gemm", "fp8_kv_cache", "cache_store_rdma_mode"):
         if key in config and type(config[key]) is not bool:
             raise ValueError(f"{key} must be boolean")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", config["run_id"]):
@@ -255,27 +274,38 @@ def serve(config, role):
     sockets = []
     try:
         for port in range(host["port"], host["port"] + 72):
-            sock = socket.socket(); sockets.append(sock); sock.bind(("0.0.0.0", port))
+            sock = socket.socket()
+            sockets.append(sock)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("0.0.0.0", port))
+            except OSError as exc:
+                raise OSError(exc.errno, f"{role} smoke port {port}: {exc.strerror}") from exc
     finally:
         for sock in sockets: sock.close()
-    links = subprocess.check_output(["rdma", "link", "show"], text=True)
-    devices = subprocess.check_output(["ibv_devices"], text=True)
-    hcas = host.get("rdma_hcas")
-    candidates = list(dict.fromkeys(word.split("/")[0] for line in links.splitlines()
-                      if "ACTIVE" in line and "LINK_UP" in line for word in line.split()
-                      if word.startswith("mlx5_") and "/" in word))
-    usable = usable_rdma_hcas(candidates)
-    if hcas and set(hcas.split(",")) - set(usable):
-        raise ValueError("Selected HCA lacks a usable GID/netdev in this container")
-    hcas = hcas or ",".join(usable)
-    layers = {(port / "link_layer").read_text().strip()
-              for name in hcas.split(",") if name
-              for port in (Path("/sys/class/infiniband") / name / "ports").glob("*")}
-    if len(layers) != 1:
-        raise ValueError("Choose rdma_hcas from one link layer; do not mix InfiniBand and Ethernet")
-    hcas = validate_rdma_hcas(hcas, devices, links)
-    atomic(directory / "rdma-preflight.json", dict(active_hcas=candidates,
-        usable_hcas=usable, selected_hcas=hcas.split(","), link_layer=next(iter(layers))))
+    rdma = config.get("cache_store_rdma_mode", True)
+    hcas = None
+    transport = {"cache_store_transport": "rdma" if rdma else "tcp"}
+    if rdma:
+        links = subprocess.check_output(["rdma", "link", "show"], text=True)
+        devices = subprocess.check_output(["ibv_devices"], text=True)
+        hcas = host.get("rdma_hcas")
+        candidates = list(dict.fromkeys(word.split("/")[0] for line in links.splitlines()
+                          if "ACTIVE" in line and "LINK_UP" in line for word in line.split()
+                          if word.startswith("mlx5_") and "/" in word))
+        usable = usable_rdma_hcas(candidates)
+        if hcas and set(hcas.split(",")) - set(usable):
+            raise ValueError("Selected HCA lacks a usable GID/netdev in this container")
+        hcas = hcas or ",".join(usable)
+        layers = {(port / "link_layer").read_text().strip()
+                  for name in hcas.split(",") if name
+                  for port in (Path("/sys/class/infiniband") / name / "ports").glob("*")}
+        if len(layers) != 1:
+            raise ValueError("Choose rdma_hcas from one link layer; do not mix InfiniBand and Ethernet")
+        hcas = validate_rdma_hcas(hcas, devices, links)
+        transport.update(active_hcas=candidates, usable_hcas=usable,
+                         selected_hcas=hcas.split(","), link_layer=next(iter(layers)))
+    atomic(directory / "rdma-preflight.json", transport)
     binary = (source / host.get("server", "bazel-bin/rtp_llm/rtp_llm_server")).resolve(strict=True)
     dp = 1 if role == "prefill" else decode_dp_size(config)
     args = argparse.Namespace(role=role.upper(), server=str(binary), checkpoint=host["checkpoint"],
@@ -291,8 +321,9 @@ def serve(config, role):
         test_block_num=host.get("test_block_num"),
         prefill_token_capacity=host.get("prefill_token_capacity"),
         max_seq_len=host.get("max_seq_len"), request_capacity=host.get("request_capacity"),
-        decode_capture_batches=host.get("decode_capture_batches"))
+        decode_capture_batches=host.get("decode_capture_batches"), cache_store_rdma_mode=rdma)
     explicit, command = launch_config(args)
+    explicit.update(prefill_workspace_environment(config))
     service = json.loads(explicit["MODEL_SERVICE_CONFIG"])
     service["service_id"] = config["run_id"]
     service["role_endpoints"][0]["group"] = config["run_id"]
@@ -302,8 +333,10 @@ def serve(config, role):
     cache = prepare_jit_cache(config, role)
     explicit.update(RTP_LLM_CPU_TP_BROADCASTER_DIR=uds.name,
         RTP_LLM_CPU_TP_BROADCASTER_ID=config["run_id"], TMPDIR=temporary.name,
-        TMP=temporary.name, TEMP=temporary.name, ACCL_USE_NICS=hcas,
+        TMP=temporary.name, TEMP=temporary.name,
         K31_PD_SMOKE_RUN_ID=config["run_id"], HF_HUB_OFFLINE="1")
+    if hcas is not None:
+        explicit["ACCL_USE_NICS"] = hcas
     for key, leaf in {"TRITON_CACHE_DIR":"triton", "DG_JIT_CACHE_DIR":"deep-gemm",
                       "FLASHINFER_WORKSPACE_BASE":"flashinfer", "HF_MODULES_CACHE":"hf-modules",
                       "TORCH_EXTENSIONS_DIR":"torch-extensions"}.items():
@@ -320,7 +353,9 @@ def serve(config, role):
         stop = True
     signal.signal(signal.SIGTERM, on_signal); signal.signal(signal.SIGINT, on_signal)
     with (directory / "server.log").open("x") as log:
-        process = subprocess.Popen(command, cwd=source, env=env, stdout=log,
+        # Native alog writes ./logs/engine.log. Keep each stage's native
+        # records beside its rank logs, including startup failures.
+        process = subprocess.Popen(command, cwd=directory, env=env, stdout=log,
                                    stderr=subprocess.STDOUT, start_new_session=True)
         identity = dict(role=role, uid=os.getuid(), hostname=socket.gethostname(),
             manager_pid=os.getpid(), manager_start_ticks=start_ticks(os.getpid()),
@@ -341,8 +376,8 @@ def serve(config, role):
     return {"exit_code": process.returncode, "stop_requested": stop}
 
 
-def stop_owned_group(identity):
-    """Stop the recorded session after validating UID, namespace and start ticks."""
+def owned_group_members(identity, *, verified=()):
+    """Return live members of the recorded personal server session."""
     if identity["uid"] != os.getuid() or os.readlink("/proc/self/ns/pid") != identity["pid_namespace"]:
         raise ValueError("Service receipt belongs to another UID or PID namespace")
     root_verified = False
@@ -356,41 +391,89 @@ def stop_owned_group(identity):
     except (FileNotFoundError, ProcessLookupError):
         pass
     members = []
+    tag = ("K31_PD_SMOKE_RUN_ID=" + identity["run_id"]).encode()
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit(): continue
+        pid = int(entry.name)
         try:
-            if os.getpgid(int(entry.name)) != identity["pgid"]: continue
+            if os.getpgid(pid) != identity["pgid"]: continue
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            if fields[0] == "Z" or int(fields[2]) != identity["pgid"]: continue
             if entry.stat().st_uid != os.getuid(): raise ValueError("Foreign process in service group")
-            if os.getsid(int(entry.name)) != identity["pgid"]:
+            ticks = int(fields[19])
+            if int(fields[3]) != identity["pgid"] or ticks < identity["server_start_ticks"]:
                 raise ValueError("Process no longer belongs to the service session")
             # start_new_session plus the verified leader's start ticks establish
             # ownership even when a child makes /proc/PID/environ unreadable.
-            if not root_verified and ("K31_PD_SMOKE_RUN_ID=" + identity["run_id"]).encode() not in (entry/"environ").read_bytes().split(b"\0"):
+            member = (pid, ticks)
+            if (not root_verified and member not in verified
+                    and tag not in (entry / "environ").read_bytes().split(b"\0")):
                 raise ValueError("Process group no longer belongs to this run")
-            members.append((int(entry.name), start_ticks(int(entry.name))))
+            members.append(member)
         except (FileNotFoundError, ProcessLookupError): pass
-    if members:
-        os.killpg(identity["pgid"], signal.SIGTERM)
-        deadline = time.monotonic() + 55
-        while time.monotonic() < deadline:
-            alive = False
-            for pid, ticks in members:
-                try:
-                    fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-                    alive |= fields[0] != "Z" and int(fields[19]) == ticks
-                except (FileNotFoundError, ProcessLookupError): pass
-            if not alive: return
-            time.sleep(.2)
-        # Validate ownership again before escalation, including PID reuse.
+    return members
+
+
+def stop_owned_group(identity):
+    """Recheck the whole session because teardown can spawn late children."""
+    def send(pid, ticks, signum):
+        path = Path(f"/proc/{pid}")
+        try:
+            if (path.stat().st_uid != os.getuid() or start_ticks(pid) != ticks
+                    or os.getpgid(pid) != identity["pgid"] or os.getsid(pid) != identity["pgid"]):
+                raise ValueError("Refusing to signal a replaced PID")
+            os.kill(pid, signum)
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+
+    signaled = set()
+    deadline = time.monotonic() + 55
+    while members := owned_group_members(identity, verified=signaled):
+        if time.monotonic() >= deadline:
+            break
         for pid, ticks in members:
-            path = Path(f"/proc/{pid}")
-            try:
-                if os.getpgid(pid) != identity["pgid"]: continue
-                if (path.stat().st_uid != os.getuid() or start_ticks(pid) != ticks
-                        or os.getsid(pid) != identity["pgid"]):
-                    raise ValueError("Refusing to signal a replaced PID")
-                os.kill(pid, signal.SIGKILL)
-            except (FileNotFoundError, ProcessLookupError): pass
+            if (pid, ticks) not in signaled:
+                send(pid, ticks, signal.SIGTERM)
+                signaled.add((pid, ticks))
+        time.sleep(.2)
+    else:
+        return
+
+    deadline = time.monotonic() + 10
+    while members := owned_group_members(identity, verified=signaled):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Smoke service process group did not exit")
+        for pid, ticks in members:
+            send(pid, ticks, signal.SIGKILL)
+            signaled.add((pid, ticks))
+        time.sleep(.2)
+
+
+def rank_workspace_receipts(identity):
+    """Read only the budget and run ID of the worker processes owned by this run."""
+    receipts = {}
+    tag = ("K31_PD_SMOKE_RUN_ID=" + identity["run_id"]).encode()
+    key = (KV_WORKSPACE_ENV + "=").encode()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            pid = int(entry.name)
+            if os.getsid(pid) != identity["pgid"] or entry.stat().st_uid != identity["uid"]:
+                continue
+            match = re.fullmatch(r"rtp_llm_rank-([0-7])", (entry / "comm").read_text().strip())
+            if match is None:
+                continue
+            env = (entry / "environ").read_bytes().split(b"\0")
+            rank = match.group(1)
+            values = [line[len(key):].decode() for line in env if line.startswith(key)]
+            if tag in env and len(values) == 1:
+                if rank in receipts:
+                    raise ValueError(f"Duplicate workspace budget receipt for rank {rank}")
+                receipts[rank] = dict(pid=pid, gib=values[0])
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return receipts
 
 
 def status(config, role):
@@ -398,7 +481,11 @@ def status(config, role):
     sys.path.insert(0, str(Path(config[role]["repo_root"]) / Path(SCRIPT).parent))
     from worker import pd_endpoints, listening_tcp_ports
     directory = run_dir(config, role)
-    if (directory/"exit.json").exists(): return {"healthy":False, "exited":json.loads((directory/"exit.json").read_text())}
+    if (directory / "exit.json").exists():
+        instance = directory / "instance.json"
+        remaining = owned_group_members(json.loads(instance.read_text())) if instance.exists() else []
+        return {"healthy": False, "exited": json.loads((directory / "exit.json").read_text()),
+                "live_group_members": [pid for pid, _ in remaining]}
     if not (directory/"instance.json").exists(): return {"healthy":False, "starting":True}
     identity=json.loads((directory/"instance.json").read_text())
     try:
@@ -406,6 +493,9 @@ def status(config, role):
             return {"healthy":False,"error":"manager PID changed"}
     except FileNotFoundError: return {"healthy":False,"error":"manager exited"}
     endpoints=pd_endpoints(config[role]["port"],1 if role=="prefill" else decode_dp_size(config))
+    rdma = config.get("cache_store_rdma_mode", True)
+    if not rdma:
+        endpoints = [endpoint for endpoint in endpoints if endpoint["kind"] != "cache_rdma"]
     listeners=listening_tcp_ports(config[role]["ip"])
     missing=[x for x in endpoints if x["port"] not in listeners]
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));unhealthy=[]
@@ -416,7 +506,34 @@ def status(config, role):
                 if response.status!=200: unhealthy.append(item)
         except OSError: unhealthy.append(item)
     result=dict(healthy=not missing and not unhealthy,missing_listeners=missing,unhealthy_http=unhealthy,
+                cache_store_transport="rdma" if rdma else "tcp",
                 rdma_transfer_verified=False,smoke_passed=None)
+    expected = prefill_workspace_environment(config)
+    if result["healthy"]:
+        receipts = rank_workspace_receipts(identity)
+        result["rank_prefill_kv_workspace_budget"] = receipts
+        result["healthy"] = (
+            len(receipts) == 8 and all(
+                row["gib"] == expected[KV_WORKSPACE_ENV] for row in receipts.values()
+            )
+        )
+    if result["healthy"] and config.get("k31_smoke_stage"):
+        if __package__:
+            from .k31_smoke_capacity import cache_geometry, fastsafetensors_proof
+        else:
+            from k31_smoke_capacity import cache_geometry, fastsafetensors_proof
+        try:
+            geometry = cache_geometry(
+                directory / "logs" / "engine.log", role,
+                8 if role == "prefill" else 8 // decode_dp_size(config),
+                long_case=config["k31_smoke_stage"] == "long",
+            )
+            result["fastsafetensors_rank_log_lines"] = fastsafetensors_proof(directory / "logs")
+        except (OSError, ValueError, TypeError) as exc:
+            result.update(healthy=False, error=str(exc))
+        else:
+            atomic(directory / "runtime-geometry.json", geometry)
+            result["runtime_geometry"] = geometry
     atomic(directory/"readiness.json",result);return result
 
 
@@ -525,7 +642,15 @@ def controller(args, config):
         return 0
     finally:
         if not args.keep_services:
-            for role in started: remote(config,role,"stop-role")
+            cleanup = {}
+            for role in started:
+                try:
+                    cleanup[role] = remote(config, role, "stop-role")
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    cleanup[role] = {"error": f"{type(exc).__name__}: {exc}"}
+            atomic(root / "stop-receipts.json", cleanup)
+            if sys.exc_info()[0] is None and any("error" in row for row in cleanup.values()):
+                raise RuntimeError(f"Failed to stop a smoke role: {cleanup}")
 
 
 def main():

@@ -289,6 +289,7 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("attention_inputs")      = PyAttentionInputs(),
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
         .def_readwrite("need_all_logits", &PyModelInputs::need_all_logits)
+        .def_readwrite("mtp_prefill_output_indexes", &PyModelInputs::mtp_prefill_output_indexes)
         .def_readwrite("need_all_hidden_states", &PyModelInputs::need_all_hidden_states)
         .def_readwrite("engram_token_windows", &PyModelInputs::engram_token_windows)
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
@@ -336,6 +337,7 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("mtp_target_hidden_states"),
              "Initialize with hidden states and speculative target features")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("lm_output_already_selected", &PyModelOutputs::lm_output_already_selected)
         .def_readwrite("mtp_target_hidden_states",
                        &PyModelOutputs::mtp_target_hidden_states,
                        "Optional target features consumed by speculative decoding");

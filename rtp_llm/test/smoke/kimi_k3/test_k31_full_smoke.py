@@ -1,17 +1,34 @@
 """The full K3.1 entry keeps MTP active and cannot pass incomplete coverage."""
 import json
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from k31_full_smoke import (K31FullRunner, legacy, parse_args, pending_host_load,
                            decode_batch_sizes, request_budget)
 
 
 class FullK31SmokeTest(unittest.TestCase):
+    def test_bs63_shares_one_barrier_across_both_decode_owners(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(output=Path("/tmp/smoke/RESULT.json"))
+        runner.decode_role_addrs = [
+            dict(ip="10.0.0.2", grpc_port=20001), dict(ip="10.0.0.2", grpc_port=20037),
+        ]
+        cases = [object() for _ in range(63)]
+        relay = MagicMock()
+        relay.return_value.__enter__.return_value.ports = [10001, 10002]
+        module = SimpleNamespace(PdGroupRelay=relay)
+        with patch.dict(sys.modules, {"pd_group_relay": module}), \
+             patch.object(legacy.Runner, "_request_cases_group", create=True) as submit:
+            self.assertEqual(runner._request_cases_group(cases), submit.return_value)
+            self.assertEqual(relay.call_args.args[:2], (["10.0.0.2:20001", "10.0.0.2:20037"], 63))
+            submit.assert_called_once_with(cases, decode_relay_ports=[10001, 10002])
+
     def test_group_failure_cancels_before_waiting_for_earlier_stream(self):
         cancelled = threading.Event()
         calls = []

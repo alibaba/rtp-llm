@@ -1,13 +1,25 @@
 """KV budget/coverage contracts, independent of checkpoint precision."""
 
+import os
 import unittest
+from unittest import mock
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.dsa_kv_chunk_plan import (
     plan_dsa_kv_chunks,
+    prefill_indexer_score_bytes,
+)
+from rtp_llm.models_py.modules.factory.attention.mla_prefill_plan import (
+    Bf16MlaWorkspaceBudget,
+    plan_prefix_chunks,
+    prefill_kv_workspace_budget_bytes,
 )
 
 
 class DsaKVChunkPlanTest(unittest.TestCase):
+    def test_fp8_prefill_score_budget_includes_storage_padding(self):
+        # The allocator snapshot has 8 MiB of row padding beyond the logical score.
+        self.assertEqual(prefill_indexer_score_bytes(8192, 154624), 4840 * 2**20)
+
     def test_full_history_that_fits_is_not_split(self):
         plan = plan_dsa_kv_chunks(
             [17, 2048, 4097],
@@ -76,6 +88,54 @@ class DsaKVChunkPlanTest(unittest.TestCase):
         )
         self.assertEqual(plan.blocks, ())
         self.assertEqual(plan.required_bytes, 1024)
+
+
+class SharedPrefillKVBudgetTest(unittest.TestCase):
+    def test_budget_defaults_to_eight_gib_and_accepts_override(self):
+        key = "RTP_PREFILL_KV_WORKSPACE_BUDGET_GIB"
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(prefill_kv_workspace_budget_bytes(), 8 * 2**30)
+        with mock.patch.dict(os.environ, {key: "4.5"}):
+            self.assertEqual(prefill_kv_workspace_budget_bytes(), 4608 * 2**20)
+        for value in ("0", "-1", "nan", "inf", "invalid"):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {key: value}):
+                with self.assertRaisesRegex(ValueError, key):
+                    prefill_kv_workspace_budget_bytes()
+
+    def test_mtp_budget_charges_the_overlapping_reader_and_kv_up_buffers(self):
+        plan = plan_prefix_chunks(
+            (8192,), (1040384,), page_tokens=1024, bytes_per_token=7680,
+            workspace_budget=Bf16MlaWorkspaceBudget(6 * 2**30, 8, 512, 64),
+        )
+        self.assertTrue(plan.chunked)
+        self.assertEqual(plan.capacity_tokens, 576512)
+        self.assertEqual(
+            [(s.start, s.length) for s in plan.slices],
+            [(0, 576512), (576512, 463872)],
+        )
+
+    def test_mtp_full_path_checks_padding_per_request(self):
+        # Eight tiny prefixes still need eight independent owner pages if read
+        # together. Reading each through the existing slice loop fits 20 MiB.
+        workspace = Bf16MlaWorkspaceBudget(20 * 2**20, 8, 512, 64)
+        small = plan_prefix_chunks(
+            (8,), (1,), page_tokens=1024, bytes_per_token=7680,
+            workspace_budget=workspace,
+        )
+        self.assertFalse(small.chunked)
+        ragged = plan_prefix_chunks(
+            (1,) * 8, (1,) * 8, page_tokens=1024, bytes_per_token=7680,
+            pack_requests=True, workspace_budget=workspace,
+        )
+        self.assertTrue(ragged.chunked)
+        self.assertEqual([s.owner for s in ragged.slices], list(range(8)))
+
+    def test_mtp_cold_query_must_fit_packed_kv_without_history(self):
+        with self.assertRaisesRegex(ValueError, "current-query BF16 MLA KV"):
+            plan_prefix_chunks(
+                (8192,), (0,), page_tokens=1024, bytes_per_token=7680,
+                workspace_budget=Bf16MlaWorkspaceBudget(60 * 2**20, 8, 512, 64),
+            )
 
 
 if __name__ == "__main__":

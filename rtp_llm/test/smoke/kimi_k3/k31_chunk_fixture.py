@@ -50,7 +50,7 @@ def install(module):
                     'local_query_rows': params.query_positions.numel(),
                     'kv_tokens': sum(params.kv_lens_host),
                     'max_page_capacity': limit,
-                    'budget_bytes': params.workspace_owner.budgets[name],
+                    'budget_bytes': self.plan.budget_bytes,
                     'actual_chunks': len(self.plan.blocks),
                 }), flush=True)
         finally:

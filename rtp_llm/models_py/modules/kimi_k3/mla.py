@@ -17,7 +17,11 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
 )
-from rtp_llm.models_py.modules.factory.attention.mla_prefill_plan import plan_prefix_chunks
+from rtp_llm.models_py.modules.factory.attention.mla_prefill_plan import (
+    Bf16MlaWorkspaceBudget,
+    plan_prefix_chunks,
+    prefill_kv_workspace_budget_bytes,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_page_rr_cache_gather import MlaPageRRCacheGather
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
 from rtp_llm.utils.model_weight import W
@@ -252,10 +256,23 @@ class KimiK3MlaImpl(MlaImplBase):
         self._prefix_q_offsets = mla_params.q_offsets_host
         self._prefix_lens = tuple(mla_params.prefix_lens_host)
         q_lens = tuple(mla_params.q_lens_host)
-        budget_gib = float(os.environ.get(
-            "RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB", "6.0"
-        ))
         fp8 = self.kv_cache_type == KvCacheDataType.FP8
+        shared_budget = None if fp8 else prefill_kv_workspace_budget_bytes()
+        self._require_packed_prefill_kv = shared_budget is not None
+        workspace_budget = None
+        budget_gib = 0.0
+        if shared_budget is None:
+            budget_gib = float(os.environ.get(
+                "RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB", "6.0"
+            ))
+        else:
+            workspace_budget = Bf16MlaWorkspaceBudget(
+                shared_budget,
+                self._page_rr_adapter.shard_size,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                query_rows=int(mla_params.attn_inputs.physical_token_count),
+            )
         self._prefix_plan = plan_prefix_chunks(
             q_lens,
             self._prefix_lens,
@@ -268,6 +285,7 @@ class KimiK3MlaImpl(MlaImplBase):
             ),
             budget_gib=budget_gib,
             pack_requests=not fp8,
+            workspace_budget=workspace_budget,
         )
         self.block_table = mla_params.attn_inputs.kv_cache_kernel_block_id_device
 
@@ -313,7 +331,7 @@ class KimiK3MlaImpl(MlaImplBase):
             None, self.quant_config,
         )
 
-    def _project_kv(self, projection, compressed_kv, k_pe):
+    def _project_kv(self, projection, compressed_kv, k_pe, *, require_packed=False):
         """Project K/V into the optional packed layout around the RoPE gap."""
         left, middle, right = (
             self.qk_nope_head_dim, self.qk_rope_head_dim, self.v_head_dim
@@ -328,6 +346,8 @@ class KimiK3MlaImpl(MlaImplBase):
             )
             return packed[..., : left + middle], packed[..., -right:]
 
+        if require_packed:
+            raise RuntimeError("The shared prefill KV budget requires BF16 skip-head-mid KV-up")
         projected = projection(compressed_kv).view(
             -1, self.num_heads, left + right
         )
@@ -544,7 +564,8 @@ class KimiK3MlaImpl(MlaImplBase):
             compressed_kv, k_pe, kv_cache
         )
         key, value = self._project_kv(
-            self._make_kv_b_proj(layer_id), compressed_kv, k_pe
+            self._make_kv_b_proj(layer_id), compressed_kv, k_pe,
+            require_packed=self._require_packed_prefill_kv,
         )
         del compressed_kv, k_pe
         output, _ = self._run_bf16_partial(
