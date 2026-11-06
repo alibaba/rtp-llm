@@ -78,3 +78,5 @@ View 的 `annotation_steps` 只配置默认选择，省略则全部显示，空�
 原来使用 max 聚合事件窗口均值的面板，明确标为“实例均值最大值”，展示各实例在查询区间内事件均值的最大值；这不是单个事件峰值或 P99。每请求图片数和 Embedding 长度改为请求加权均值，不再把各实例均值相加。状态 Gauge、周期 TPS/QPS、Client Histogram 保持各自口径。线上 KMonitor 大盘不修改。
 
 Forward 平均耗时、输入、计算和输出长度均先汇总各实例的耗时或 token 增量，再除以 Forward 次数增量之和，保留批次权重。原生周期 TPS 的实例均值、集群墙钟 TPS 合计和按批次加权长度是不同统计量，标题和说明必须写清，不能相互替代。
+
+P/D 的 DEVICE 容量指标使用 `test_block_num - 1` 及其驻留占用，不使用统一缓存保留总量。`rtp_llm_kv_cache_item_num` 与 CacheStatus key 列表来自统一索引；设置更大的 `mock.cache.total.blocks` 后，索引条目数可超过 device 总块数。缓存命中仍受 device 驻留额度约束，不模拟分层搬运耗时。

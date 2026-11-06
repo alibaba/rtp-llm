@@ -6,7 +6,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CancellationException;
 import static org.flexlb.mock.engine.cache.BlockPool.Kind.*;
 
-/** One local RTP Full-KV pool with synchronous LRU reclamation. */
+/** One logical KV pool with synchronous LRU and a separate device residency bound. */
 public final class KvCache implements AutoCloseable {
     public enum Failure { PERMANENT, RETRYABLE }
     /** A Mock restore source reports the number of consecutive suffix blocks read successfully.
@@ -90,9 +90,9 @@ public final class KvCache implements AutoCloseable {
     /** Keys are a detached copy, safe to encode after releasing the cache monitor. */
     public record Snapshot(int totalBlocks, int availableBlocks, int freeBlocks, int heldBlocks,
                            int referencedBlocks, long version, long[] keys) {}
-    private final BlockPool device;
+    private final BlockPool pool;
     private final BlockTree tree = new BlockTree();
-    private final int blockSize, reserve;
+    private final int blockSize, deviceBlocks, reserve;
     private final boolean deviceCache;
     private final RemotePrefixLoader remote;
     private final Set<Loading> pending = new HashSet<>();
@@ -120,9 +120,15 @@ public final class KvCache implements AutoCloseable {
     }
 
     public KvCache(int blockSize, int blocks, int reserve, boolean deviceCache, RemotePrefixLoader remote) {
-        if (blockSize < 1 || blocks <= 0 || reserve < 0 || reserve > blocks)
-            throw new IllegalArgumentException("Invalid block capacity/reserve");
-        device = new BlockPool(blocks);
+        this(blockSize, blocks, blocks, reserve, deviceCache, remote);
+    }
+
+    public KvCache(int blockSize, int deviceBlocks, int totalBlocks, int reserve,
+                   boolean deviceCache, RemotePrefixLoader remote) {
+        if (blockSize < 1 || deviceBlocks <= 0 || totalBlocks < deviceBlocks || reserve < 0 || reserve > deviceBlocks)
+            throw new IllegalArgumentException("Invalid device/total block capacity or reserve");
+        pool = new BlockPool(totalBlocks);
+        this.deviceBlocks = deviceBlocks;
         this.blockSize = blockSize;
         this.reserve = reserve;
         this.deviceCache = deviceCache;
@@ -130,7 +136,7 @@ public final class KvCache implements AutoCloseable {
     }
 
     /** Maximum size of one request, independent of current leases and evictable cache entries. */
-    public synchronized long maxRequestTokens() { return (long) (device.snapshot().total() - reserve) * blockSize; }
+    public synchronized long maxRequestTokens() { return (long) (deviceBlocks - reserve) * blockSize; }
 
     public synchronized Preparation prepare(long requiredTokens, List<Long> keys) {
         var admission = acquire(requiredTokens, keys);
@@ -166,13 +172,15 @@ public final class KvCache implements AutoCloseable {
         var matched = tree.match(keys);
         long matchNanos = System.nanoTime() - matchStarted;
         var slots = new ArrayList<Slot>();
-        for (var node : matched) slots.add(new Slot(device.retain(node.cache, REQUEST), node));
+        for (var node : matched) slots.add(new Slot(pool.retain(node.cache, REQUEST), node));
         int need = demand - matched.size();
-        if ((long) need + reserve > device.snapshot().available() || !makeDeviceFree(need)) {
+        // Active references are exactly device-resident blocks, including shared cached prefixes.
+        // Retaining a cached match pins it before checking the device bound; failure rolls it back.
+        if ((long) need + reserve > deviceAvailable() || !makePoolFree(need)) {
             for (var slot : slots) slot.reference.close();
             return rejected(Failure.RETRYABLE);
         }
-        for (var ref : Objects.requireNonNull(device.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
+        for (var ref : Objects.requireNonNull(pool.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
         var lease = new Lease(slots, matched.size());
         active.add(lease);
         return new Admission(lease, null, matchNanos);
@@ -191,11 +199,13 @@ public final class KvCache implements AutoCloseable {
     }
     private Admission rejected(Failure failure) { return new Admission(null, failure, 0); }
     /** Both freed capacity and newly reusable prefixes can make a rejected request admissible. */
-    private long allocationGeneration() { return device.generation() + tree.version(); }
+    private long allocationGeneration() { return pool.generation() + tree.version(); }
     public synchronized Snapshot snapshot(long latestVersion, boolean needKeys) {
-        var state = device.snapshot();
-        int indexed = device.cachedActiveBlocks();
-        return new Snapshot(state.total(), state.available(), state.free(), state.active() - indexed, indexed,
+        var state = pool.snapshot();
+        int indexed = pool.cachedActiveBlocks();
+        // Idle cached blocks may occupy otherwise unused device slots, but never reduce available capacity.
+        int free = Math.max(0, deviceBlocks - (state.total() - state.free()));
+        return new Snapshot(deviceBlocks, deviceAvailable(), free, state.active() - indexed, indexed,
             needKeys ? tree.version() : latestVersion, needKeys && latestVersion != tree.version() ? tree.keys() : EMPTY_KEYS);
     }
 
@@ -212,10 +222,10 @@ public final class KvCache implements AutoCloseable {
                 requireOpen();
                 long target = blocksFor(requiredTokens);
                 if (target <= slots.size()) return null;
-                if (target > device.snapshot().total()) return Failure.PERMANENT;
+                if (target > deviceBlocks) return Failure.PERMANENT;
                 int need = (int) target - slots.size();
-                if (need > device.snapshot().available() || !makeDeviceFree(need)) return Failure.RETRYABLE;
-                for (var ref : Objects.requireNonNull(device.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
+                if (need > deviceAvailable() || !makePoolFree(need)) return Failure.RETRYABLE;
+                for (var ref : Objects.requireNonNull(pool.allocate(need, REQUEST))) slots.add(new Slot(ref, null));
                 return null;
             }
         }
@@ -237,7 +247,7 @@ public final class KvCache implements AutoCloseable {
                     var slot = slots.get(i);
                     var node = tree.find(keys.get(i));
                     if (node == null) {
-                        node = tree.insert(keys.get(i), parent, device.retain(slot.reference, CACHE));
+                        node = tree.insert(keys.get(i), parent, pool.retain(slot.reference, CACHE));
                         slot.key = node.key;
                     }
                     parent = node;
@@ -249,12 +259,12 @@ public final class KvCache implements AutoCloseable {
         @Override public void close() {
             synchronized (KvCache.this) {
                 if (terminal) return;
-                int available = device.snapshot().available();
+                int available = pool.snapshot().available();
                 for (var slot : slots) {
                     slot.reference.close();
                 }
                 slots.clear(); terminal = true; active.remove(this);
-                if (device.snapshot().available() > available) changed.run();
+                if (pool.snapshot().available() > available) changed.run();
             }
         }
         private void requireOpen() { if (terminal) throw new IllegalStateException("Lease is closed"); }
@@ -268,8 +278,9 @@ public final class KvCache implements AutoCloseable {
             tree.clear();
         }
     }
-    private boolean makeDeviceFree(int count) {
-        while (device.snapshot().free() < count) {
+    private int deviceAvailable() { return deviceBlocks - pool.snapshot().active(); }
+    private boolean makePoolFree(int count) {
+        while (pool.snapshot().free() < count) {
             var evicted = tree.evict();
             if (evicted == null) return false;
             evictionLifetime.accept(System.nanoTime() - evicted.insertedNanos);

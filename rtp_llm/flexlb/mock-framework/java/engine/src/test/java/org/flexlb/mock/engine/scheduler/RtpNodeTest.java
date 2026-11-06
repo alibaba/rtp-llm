@@ -30,7 +30,8 @@ public class RtpNodeTest {
 
     @Test void servesProductionNativeProtocolAndLiveCacheCapacity() throws Exception {
         var root = JSON.<com.fasterxml.jackson.databind.node.ObjectNode>valueToTree(configuration("prefill"));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config")).put("dp_size", 3);
+        ((com.fasterxml.jackson.databind.node.ObjectNode) root.path("component").path("config"))
+            .put("dp_size", 3).put("mock.cache.total.blocks", 16);
         try (var node = RtpNode.start(RtpConfig.load(root))) {
             var channel = ManagedChannelBuilder.forTarget(node.rpcAddress()).usePlaintext().build();
             try {
@@ -50,6 +51,13 @@ public class RtpNodeTest {
                 var snapshot = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
                 assertEquals(Set.of(1L, -2L), snapshot.getCacheKeysMap().keySet());
                 assertEquals(16, snapshot.getBlockSize()); assertEquals(128, snapshot.getAvailableKvCache());
+                try (var extra = node.cache().acquire(112, List.of()).lease()) {
+                    assertTrue(extra.publish(List.of(10L, 11L, 12L, 13L, 14L, 15L, 16L), 112));
+                }
+                assertEquals(9, node.cache().itemCount()); // Logical cache now exceeds eight device blocks.
+                assertEquals(128, rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getTotalKvCache());
+                snapshot = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build());
+                assertEquals(9, snapshot.getCacheKeysCount());
                 var pinned = node.cache().acquire(16, List.of(1L)).lease();
                 var unchanged = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(snapshot.getVersion()).build());
                 assertEquals(snapshot.getVersion(), unchanged.getVersion()); assertEquals(0, unchanged.getCacheKeysCount());

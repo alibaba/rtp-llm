@@ -63,11 +63,11 @@ Runner 管理声明了 background 的 Step 任务。任务属于当前 Phase，P
 
 ### KV 容量的明确简化边界
 
-每个 Engine 使用一套统一的逻辑 KV block 容量计量。不同模型网络层的 KV 成本合并在这个预算中；不实现按模型层分池、Full/SWA/Linear 多资源组、各组独立配额及它们之间的联合分配。这是有意的 Mock 模型边界，不是后续必须补齐的 real 能力。Device/Host 仅表示已有的缓存存放介质，不扩展成每层或每种注意力各自的资源池。涉及真实混合池瓶颈和逐层容量的实验不由此模型给出结论。
+每个 Engine 使用统一的逻辑 KV block 记账，同时约束缓存保留总量和 device 驻留量。不同模型网络层的 KV 成本合并在这些预算中；不实现按模型层分池、Full/SWA/Linear 多资源组、各组独立配额及它们之间的联合分配。这是有意的 Mock 模型边界，不是后续必须补齐的 real 能力。不记录每个缓存 key 的 Device/Host 存放位置，不扩展成每层或每种注意力各自的资源池。涉及真实混合池瓶颈和逐层容量的实验不由此模型给出结论。
 
 EngineScheduler 决定申请、增长和提交时机；KvCache 管匹配、分配、索引及引用。正常结束且 Compute/PD 使用结束后，P 提交已计算 prompt；D 提交 prompt 加实际已计算的输出前缀，排除最后一个仅采样、尚未计算 KV 的 token。共享 CacheSequence 保存语义输入和 cache-only 多模态区间，并统一生成完整 block key；生成 token 值由接入层从原生 GENERATE 传入，不能猜测为 prompt 最后一个 token。失败或取消不发布新缓存。
 
-当前 Host↔Device 保持瞬时逻辑迁移。对齐的 feature 源码中，Host→Device 加载使用异步任务和完成上下文，Device→Host 转存也由后台任务执行；调用方在源/目标资源尚未就绪时保留引用。因而瞬时模型不覆盖搬运延迟、传输重叠和在途额外占用，不能表述成 real 使用同步瞬时迁移。
+当前仅模拟 device 驻留额度的取得与归还，Host↔Device 恢复视为瞬时，不实现真实数据迁移。对齐的 feature 源码中，Host→Device 加载使用异步任务和完成上下文，Device→Host 转存也由后台任务执行；调用方在源/目标资源尚未就绪时保留引用。因而瞬时模型不覆盖搬运延迟、传输重叠和在途额外占用，不能表述成 real 使用同步瞬时迁移。
 
 ### 公共 Engine 与独立调度域
 
@@ -108,18 +108,20 @@ EngineScheduler 调用在同一短锁下串行化；锁不覆盖计算等待或�
 
 批次取消按成员处理：取消成员不再提交结果，但资源引用保留到该 Forward 结束。只有全部成员终止或 Engine 关闭时才取消整个模拟执行。旧回调按执行对象和请求句柄核验，不能用复用的请求 ID 找到新请求继续推进。一次完成的 Forward 只记录一次耗时，计算量包含这轮实际执行的全部成员，输出量只计有效提交。
 
+KV 使用一个统一索引/LRU和两项容量约束：`test_block_num - 1` 限制 device 驻留，`mock.cache.total.blocks` 限制统一池保留（默认等于 device）。现有物理 block 引用计数同时承担驻留记账：活动请求、Loading 和 PD-held 引用必须共同满足 device 上限，共享块只计一次；缓存命中不绕过容量检查。临时 device 不足不驱逐统一池缓存。引用释放后归还 device 额度，缓存 key 保留；恢复视为瞬时，不引入 mem/device 搬运队列。Scheduler 仍只面对 `Ready / Loading / Failed`，容量代次及失败重试继续由 KV 层管理。WorkerStatus 和 DEVICE 指标报告 device 容量，统一索引 key 数允许超过 device 容量。
+
 ### 队列模型、观察与注入
 
 队列模型属于 EngineScheduler，不另建强制共享的 QueueModel 层。一个实现可以有独立 loading 队列，另一个可以把 loading 作为 waiting 成员的状态；抢占也可能回到 waiting 重新计算，而不是进入 swap。外部只通过操作和快照契约交互。公共请求事实需要逐步覆盖输入、缓存命中、已完成 Prefill、生成进度和本轮工作量；尚未实现分块 Prefill，不能把重复执行当作分块支持。
 
-当前 RTP 保留普通 FIFO waiting、显式 batch 队列、持续 running 和请求上的容量/输出/传输就绪状态。`concurrency_limit` 控制 P/D 每批请求数，默认 32。P 按完整输入长度和 `最长序列长度×序列数` 检查 `max_batch_tokens_size`，生成模式额外保留一个 token；合法 singleton 可超过该 batch token 预算。预算为 0 时 P 仍可执行 singleton，不表示无限组 batch。D 按请求数上限接纳，不复用 P 的 token/矩形限制。Compute 使用扣除命中后的实际计算长度。P/D 初始分配遇到临时容量不足等待容量变化；已进入生成的 D 增长 KV 失败则终止，对齐当前 real RTP，不实现 vLLM 抢占/重算策略。
+当前 RTP 保留普通 FIFO waiting、显式 batch 队列、持续 running 和请求上的容量/加载/传输就绪状态。`concurrency_limit` 控制 P/D 每批请求数，默认 32。P 按完整输入长度和 `最长序列长度×序列数` 检查 `max_batch_tokens_size`，生成模式额外保留一个 token；合法 singleton 可超过该 batch token 预算。输入预算为 0 或缺省时，启动前解析为 `max_context_batch_size × max_seq_len`，context batch 默认 1；它不直接限制请求数。D 按请求数上限接纳，不复用 P 的 token/矩形限制。Compute 使用扣除命中后的实际计算长度。P/D 初始分配遇到临时容量不足等待容量变化；已进入生成的 D 增长 KV 失败则终止，对齐当前 real RTP，不实现 vLLM 抢占/重算策略。
 
 `max_inited_kv_cache_streams` 为正时限制 P 已取得 KV 的请求数，包含仍持有数据等待 PD 的来源；0 不限制。普通 P 准入达到 `max_batch_tokens_without_cache` 后停止继续接纳，本轮最后一个成员可跨过阈值，不把它实现成严格总和上限。该配额不额外套到 real 的显式组路径。CP padding 和多序列宽度仍不展开模拟。
 
 按请求计数，不能直接使用 group/batch 容器的 size：
 
 - `waiting`：等待计算准入或初始 KV 容量的请求。
-- `running`：已进入持续计算集合的请求，包含轮次之间等待输出交给协议容器的 D；不等于此刻 Forward 的成员数。
+- `running`：已进入持续计算集合的请求，包含 Forward 轮次之间的 D；输出交付不影响其计算资格，不等于此刻 Forward 的成员数。
 - `loading`：资源已预留，等待 KV 加载或生成许可的请求。
 - `ready`：P 计算阶段已完成，仍持有传输数据的请求。
 

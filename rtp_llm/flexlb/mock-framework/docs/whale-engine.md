@@ -90,10 +90,13 @@ ENV 路径始终使用入口传入的环境，包括模型下载和 DSV4.1 names
 
 - `max_batch_tokens_size` 缺省或为 0 时，使用 `max_context_batch_size × max_seq_len`；context batch 默认 1。显式非零预算保持不变，超出支持的整数范围会在启动前报错。
 - `seq_size_per_block` 缺省或为 0 时使用普通设备路径的 64。Mock 不根据宿主硬件推断 ROCm/XPU；需要这些布局时显式设置原生参数。
-- DSV4.1 未显式配置 `max_seq_len` 时从模型 `text_config.max_position_embeddings` 读取；无模型元信息时回落 8192。其他模型尚未实现对应初始化规则时，要求显式设置，避免猜测模型长度。
+- `max_seq_len` 缺省或为 0 时使用 8192；Mock 不从 checkpoint 推导长度，模拟长上下文时显式配置。
 - CP 开启时，`cp_force_single_prefill` 默认 true；设为 false 才允许同轮接纳多个 Prefill。uncached token 配额按 real 的 `2 × CP size` 对齐计数。
 - `dp_size` 一致用于计算参数、KVCM 元信息及 WorkerStatus；当前实例表示 rank 0，不创建或模拟其他 DP rank 的独立执行。
 - ViT 将 `vit_concurrency` 归一为至少 1，`vit_max_queue_size` 归一为至少 0；不额外限制一小时超时上限。
 
-容量自动推算仍不模拟：P/D 必须显式提供包含 null block 的 `test_block_num`（至少 2），Host cache 开启时必须提供 `mock.cache.memory.blocks`。
-`memory_cache_size_mb` 及真实 GPU 显存预算不用于推测 Mock block 数；没有实现的 real 配置继续忽略。
+容量只保留两个入口：`test_block_num` 必填，表示包含 null block 的真实 device 块数（至少 2）；可选 `mock.cache.total.blocks` 表示统一缓存保留容量，不含 null block，默认 `test_block_num - 1` 且不能更小。ENV 分别为 `TEST_BLOCK_NUM`、`MOCK_CACHE_TOTAL_BLOCKS`。`reserve_block_ratio` 只按 device 容量计算。
+
+例如 `TEST_BLOCK_NUM=1025 MOCK_CACHE_TOTAL_BLOCKS=4096` 表示 device 最多容纳 1024 个不同的活动 KV block，统一索引最多保留 4096 个 block。缓存命中同样需要 device 额度，初次容量不足等待重试，Decode 增长不足失败；不模拟 Host/device 搬运耗时。
+
+`device_blocks`、`reserve_blocks` 仅为派生输出。旧 `mock.cache.memory.blocks`、`capacity.*` 和 `device_eviction_policy` 不再接受，LRU 固定；不要为扩大统一池配置 `enable_memory_cache`。`memory_cache_size_mb` 及真实 GPU 显存预算不用于推算 block 数。Mock Case 应只保留实际消费的参数。
