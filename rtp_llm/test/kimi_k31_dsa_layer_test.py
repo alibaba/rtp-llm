@@ -172,7 +172,7 @@ def check_cache(step, recorded, pools, snapshot, tp, rank):
             mine = slots >= 0
             if mine.any():
                 expected[tag].append((slots[mine], torch.nonzero(mine).flatten() + rows.start))
-    full = pools["full"].cache.view(-1, LATENT + ROPE)
+    full_pool = pools["full"].cache
     latent = torch.cat((recorded["latent"], recorded["suffix"]), dim=-1)
     index_pool = pools["indexer_kv"].cache
     for tag, entries in expected.items():
@@ -181,7 +181,19 @@ def check_cache(step, recorded, pools, snapshot, tp, rank):
         slots = torch.cat([s for s, _ in entries])
         rows = torch.cat([r for _, r in entries])
         if tag == "full":
-            if not torch.equal(full[slots], latent[rows]):
+            if full_pool.dtype == torch.uint8:
+                scratch = torch.zeros(1 + rows.numel() // fx.KERNEL_PAGE + 1, fx.KERNEL_PAGE, fx.SFA_FP8_ENTRY,
+                                      dtype=torch.uint8, device="cuda")
+                scratch_slots = fx.KERNEL_PAGE + torch.arange(rows.numel(), device="cuda")
+                scale = torch.ones((), dtype=torch.float32, device="cuda")
+                fx.rtp_llm_ops.concat_and_cache_mla(
+                    recorded["latent"][rows].contiguous(), recorded["suffix"][rows].contiguous(),
+                    scratch, scratch_slots, "fp8_ds_mla", scale, use_ue8m0=True,
+                )
+                if not torch.equal(full_pool.view(-1, fx.SFA_FP8_ENTRY)[slots],
+                                   scratch.view(-1, fx.SFA_FP8_ENTRY)[scratch_slots]):
+                    failures.append("latent cache entries differ from the layer's quantized latent/suffix")
+            elif not torch.equal(full_pool.view(-1, LATENT + ROPE)[slots], latent[rows]):
                 failures.append("latent cache entries differ from the layer's latent/suffix")
         else:
             scratch = torch.zeros(1 + rows.numel() // fx.KERNEL_PAGE + 1, fx.KERNEL_PAGE, fx.INDEX_ENTRY,
@@ -337,13 +349,17 @@ def check_attention(step, recorded, pools, weights, tp, rank, softmax_scale, chu
         # The decode prologue's absorbed all-head query in the kernel's head layout.
         query = query[:rows, :heads].float()
     else:
-        gathered = [torch.empty_like(query) for _ in range(tp)]
-        dist.all_gather(gathered, query.contiguous())
-        query = torch.stack(gathered, 1).flatten(1, 2)[:rows].float()  # [rows, heads, 192]
+        if query.shape[1] != heads:
+            gathered = [torch.empty_like(query) for _ in range(tp)]
+            dist.all_gather(gathered, query.contiguous())
+            query = torch.stack(gathered, 1).flatten(1, 2)
+        query = query[:rows].float()  # [rows, heads, 192]
         absorbed = torch.einsum("rhd,hdl->rhl", query[..., :NOPE], weights.key_up.float())
         query = torch.cat((absorbed, query[..., NOPE:]), dim=-1)
     selected = recorded["selected"][:rows].long()
-    latent = pools["full"].cache.view(-1, LATENT + ROPE)
+    full_cache = pools["full"].cache
+    fp8_full = full_cache.dtype == torch.uint8
+    latent = full_cache.view(-1, fx.SFA_FP8_ENTRY if fp8_full else LATENT + ROPE)
     request_of = torch.arange(len(step.requests), device="cuda").repeat_interleave(step.queries)
     partial = torch.zeros(rows, heads, V_HEAD, device="cuda")
     lse = torch.full((rows, heads), -float("inf"), device="cuda")
@@ -354,7 +370,8 @@ def check_attention(step, recorded, pools, weights, tp, rank, softmax_scale, chu
             request = step.requests[int(request_of[row])]
             slots[row - first] = owned_slots(request, "full", pools["full"], selected[row], tp, rank)
         mine = slots >= 0
-        kv = latent[slots.clamp(min=0)].float()  # [n, TOPK, 576]
+        raw_kv = latent[slots.clamp(min=0)]
+        kv = fx.dequant_fp8_ds_mla(raw_kv) if fp8_full else raw_kv.float()  # [n, TOPK, 576]
         logits = torch.einsum("rhd,rkd->rhk", query[first:last], kv) * softmax_scale
         logits.masked_fill_(~mine[:, None, :], -float("inf"))
         peak = logits.amax(-1, keepdim=True)
@@ -453,6 +470,8 @@ def main():
     parser.add_argument("--attn-tolerance", type=float, default=2e-2, help="max row error / row max")
     parser.add_argument("--seed", type=int, default=3101)
     parser.add_argument("--step-timeout", type=int, default=1800)
+    parser.add_argument("--fp8-gemm", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--fp8-kv-cache", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     parallel = fx.init_distributed(int(os.environ["WORLD_SIZE"]))
     tp, rank = parallel.tp_size, parallel.tp_rank
@@ -461,10 +480,13 @@ def main():
     for queries in json.loads(args.queries):
         buckets = json.loads(args.buckets) if args.buckets else buckets_for(queries)
         buckets = [b for b in buckets if b * queries <= fx.MAX_TOKENS]
-        config = fx.load_config(args.config_json, max_seq_len=args.max_seq_len, queries=queries)
+        config = fx.load_config(
+            args.config_json, max_seq_len=args.max_seq_len, queries=queries,
+            fp8_kv_cache=args.fp8_kv_cache, fp8_gemm=args.fp8_gemm,
+        )
         layer_index = config.k3_runtime_config.dsa.layers[0]
         weights, global_weights = fx.layer_weights(config, parallel, seed=args.seed)
-        pools = {tag: fx.Pool(tag, args.pool_pages, "cuda") for tag in fx.TAGS}
+        pools = {tag: fx.Pool(tag, args.pool_pages, "cuda", fp8_kv_cache=args.fp8_kv_cache) for tag in fx.TAGS}
         arms = [Arm(name, config, parallel, weights, global_weights, layer_index, buckets, queries)
                 for name in json.loads(args.arms)]
         server = Server(queries, pools, max_seq_len=args.max_seq_len, tp=tp, rank=rank, seed=args.seed + queries)

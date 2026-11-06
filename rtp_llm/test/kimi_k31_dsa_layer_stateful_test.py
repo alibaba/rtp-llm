@@ -87,13 +87,18 @@ def main():
                         help="start MegaTopk's exchange epochs here (uint32, e.g. 4294967255 wraps within a few launches)")
     parser.add_argument("--seed", type=int, default=3101)
     parser.add_argument("--step-timeout", type=int, default=1800)
+    parser.add_argument("--fp8-gemm", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--fp8-kv-cache", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     parallel = fx.init_distributed(int(os.environ["WORLD_SIZE"]))
     tp, rank = parallel.tp_size, parallel.tp_rank
     faulthandler.enable(file=sys.stderr, all_threads=True)
     queries = args.queries
     buckets = [b for b in json.loads(args.buckets) if b * queries <= fx.MAX_TOKENS]
-    config = fx.load_config(args.config_json, max_seq_len=args.max_seq_len, queries=queries, layers=93)
+    config = fx.load_config(
+        args.config_json, max_seq_len=args.max_seq_len, queries=queries, layers=93,
+        fp8_kv_cache=args.fp8_kv_cache, fp8_gemm=args.fp8_gemm,
+    )
     indices = list(config.k3_runtime_config.dsa.layers)
     indices = indices[: args.layers] if args.layers else indices
     weights_by_layer = [None] * config.num_layers
@@ -109,7 +114,7 @@ def main():
         config, parallel, [(i, weights_by_layer[i]) for i in indices],
         max_requests=max(math.ceil(b / unit) * unit for b in buckets), queries=queries,
     )
-    pools = {tag: fx.Pool(tag, args.pool_pages, "cuda") for tag in fx.TAGS}
+    pools = {tag: fx.Pool(tag, args.pool_pages, "cuda", fp8_kv_cache=args.fp8_kv_cache) for tag in fx.TAGS}
     pool_handle = torch.cuda.graph_pool_handle()
     decisions = random.Random(args.seed)
     graphs = []

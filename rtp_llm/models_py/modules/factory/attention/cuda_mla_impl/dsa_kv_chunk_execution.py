@@ -277,19 +277,21 @@ class DsaKVExecution:
             else:
                 add("slots", (capacity_rows, owner.topk), torch.int32)
                 if not self.prefill:
+                    add("lengths", (capacity_rows,), torch.int32)
                     add("partial_lse", (capacity_rows, owner.heads), torch.float32)
                 if not staged_sfa:
-                    add(
-                        "projected",
-                        (capacity_rows, owner.heads, owner.value_dim),
-                        torch.bfloat16,
-                    )
-                    add(
-                        "running",
-                        (capacity_rows, owner.heads, owner.value_dim),
-                        torch.float32,
-                    )
-                    add("running_lse", (capacity_rows, owner.heads), torch.float32)
+                    if block.tokens < total_history:
+                        add(
+                            "projected",
+                            (capacity_rows, owner.heads, owner.value_dim),
+                            torch.bfloat16,
+                        )
+                        add(
+                            "running",
+                            (capacity_rows, owner.heads, owner.value_dim),
+                            torch.float32,
+                        )
+                        add("running_lse", (capacity_rows, owner.heads), torch.float32)
                     add(
                         "output",
                         (capacity_rows, owner.heads, owner.value_dim),
@@ -536,7 +538,7 @@ class DsaKVExecution:
                 prepared = DsaPreparedKVBlock(
                     None, start, width, positions, dcp_positions=gathered_positions
                 )
-                if (self.fp8_indexer and owner.native_exact_topk
+                if (self.fp8_indexer and owner.native_exact_topk and not self.mega_topk
                         and not native_page_rr_selection_supported(
                             width, owner.topk, shards=self.shards, page=params.page_size, start=start,
                         )):
@@ -566,6 +568,7 @@ class DsaKVExecution:
             # captured stream: represent this as an external Graph wait node.
             self.metadata_ready = torch.cuda.Event(external=self.graph)
             self.metadata_ready.record(stream)
+        self.metadata_waited = False
 
     def update_indexer_metadata(self, params):
         """Refresh bounded native metadata during prepare, before Graph replay."""
@@ -619,11 +622,14 @@ class DsaKVExecution:
             stream = torch.cuda.current_stream(self.owner.device)
             self.metadata_stream = stream.cuda_stream
             self.metadata_ready.record(stream)
+        self.metadata_waited = False
 
     def begin(self):
-        if self.metadata_ready is not None:
+        if self.metadata_ready is not None and not self.metadata_waited:
             stream = torch.cuda.current_stream(self.owner.device)
-            if stream.cuda_stream != self.metadata_stream:
+            if stream.cuda_stream != self.metadata_stream and not (
+                self.graph and torch.cuda.is_current_stream_capturing()
+            ):
                 stream.wait_event(self.metadata_ready)
                 for block in self.blocks:
                     for tensor in (
@@ -639,6 +645,7 @@ class DsaKVExecution:
                     ):
                         if isinstance(tensor, torch.Tensor):
                             tensor.record_stream(stream)
+            self.metadata_waited = True
         if not self.graph:
             if self.stages is None:
                 self.workspace.reserve(self.shapes)

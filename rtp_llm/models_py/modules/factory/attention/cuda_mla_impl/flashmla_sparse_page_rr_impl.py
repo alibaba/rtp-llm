@@ -73,7 +73,7 @@ class PageRRSparseMlaOp(SparseMlaOp):
                 )
             self._fp8_metadata, self._fp8_num_splits = self._fp8_schedules[key]
         self.mega_a2a = None
-        if not params.is_prefill and self.workspace_owner is not None and self.workspace_owner.mega_a2a:
+        if not params.is_prefill and getattr(self.workspace_owner, "mega_a2a", False):
             from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
             from rtp_llm.models_py.kernels.cuda.dsa_mega_a2a import get_mega_a2a_buffers
 
@@ -242,51 +242,73 @@ class PageRRSparseMlaOp(SparseMlaOp):
             )
         if params.is_prefill:
             return self._prefill_kv_chunks(query, kv, topk_indices, layer_id, workspace)
-        running = workspace("running", (rows, heads, value_dim), torch.float32)
-        running_lse = workspace("running_lse", (rows, heads), torch.float32)
-        projected = workspace("projected", (rows, heads, value_dim), torch.bfloat16)
-        partial_lse = workspace("partial_lse", (rows, heads), torch.float32)
+        chunked = len(execution.blocks) > 1
+        lengths = workspace("lengths", (rows,), torch.int32)
         slots = workspace("slots", (rows, self.top_k), torch.int32)
-        running.zero_()
-        running_lse.fill_(-float("inf"))
         weights = self.workspace_owner.value_weights[layer_id]
-        for block in execution.blocks:
+        if chunked:
+            running = workspace("running", (rows, heads, value_dim), torch.float32)
+            running_lse = workspace("running_lse", (rows, heads), torch.float32)
+            projected = workspace("projected", (rows, heads, value_dim), torch.bfloat16)
+            partial_lse = workspace("partial_lse", (rows, heads), torch.float32)
+            running.zero_()
+            running_lse.fill_(-float("inf"))
+            lse_scale = 1.0
+        elif self.mega_a2a is not None:
+            projected = self.mega_a2a.output(rows)
+            partial_lse = self.mega_a2a.lse(rows)
+            lse_scale = 1.0 / math.log(2)
+        else:
+            projected = workspace("output", (rows, heads, value_dim), torch.bfloat16)
+            partial_lse = workspace("partial_lse", (rows, heads), torch.float32)
+            lse_scale = 1.0 / math.log(2)
+        for number, block in enumerate(execution.blocks):
             # Decode retains owner-local paged reads and projected-state DCP
             # combine. The Prefill latent merge policy is selected above.
             history = kv.view(-1, kv.shape[-1])
             with profile_scope("RTP::attention.dsa.sfa.chunk_slot_map"):
                 map_dsa_chunk_slots(
-                    topk_indices, params, block, slots, block_table=execution.block_ids
+                    topk_indices,
+                    params,
+                    block,
+                    slots,
+                    block_table=execution.block_ids,
+                    lengths=lengths if number == 0 else None,
                 )
             with profile_scope("RTP::attention.dsa.sfa.chunk_qk_pv"):
                 partial, lse = self._attention(query, history.unsqueeze(1), slots)
-                normalize_sparse_partial(partial, lse, heads, partial_lse)
+                normalize_sparse_partial(
+                    partial, lse, heads, partial_lse, lengths, lse_scale=lse_scale
+                )
             # Linear V-up is per head and preserves the original attention LSE.
-            # Keep only the 128-dimensional FP32 running state between blocks.
             with profile_scope("RTP::attention.dsa.sfa.chunk_v_up"):
                 torch.bmm(
                     partial[:, :heads].transpose(0, 1),
                     weights,
                     out=projected.transpose(0, 1),
                 )
-            with profile_scope("RTP::attention.dsa.sfa.chunk_lse_merge"):
-                merge_mla_states_in_place(running, running_lse, projected, partial_lse)
+            if chunked:
+                with profile_scope("RTP::attention.dsa.sfa.chunk_lse_merge"):
+                    merge_mla_states_in_place(running, running_lse, projected, partial_lse)
             del partial, lse, history
-        lengths = (topk_indices >= 0).sum(-1).to(torch.int32).contiguous()
         if self.mega_a2a is not None:
             # MegaA2A: the merged state and its base-2 LSE (-inf without local keys) go straight to
             # the symmetric sources the peers pull from.
             with profile_scope("RTP::attention.dsa.sfa.mega_a2a"):
-                self.mega_a2a.output(rows).copy_(running)
-                lse = torch.mul(running_lse, 1.0 / math.log(2), out=self.mega_a2a.lse(rows))
-                lse.masked_fill_((lengths <= 0)[:, None], -float("inf"))
+                if chunked:
+                    self.mega_a2a.output(rows).copy_(running)
+                    lse = torch.mul(running_lse, 1.0 / math.log(2), out=self.mega_a2a.lse(rows))
+                    lse.masked_fill_((lengths <= 0)[:, None], -float("inf"))
                 output = self.mega_a2a.merge(rows).transpose(0, 1)
             execution.finish()
             return output
-        output = workspace("output", (rows, heads, value_dim), torch.bfloat16)
-        output.copy_(running)
-        # Only the DCP boundary converts to the established base-2 contract.
-        lse_base2 = (running_lse / math.log(2)).contiguous()
+        if chunked:
+            output = workspace("output", (rows, heads, value_dim), torch.bfloat16)
+            output.copy_(running)
+            # Only the DCP boundary converts to the established base-2 contract.
+            lse_base2 = (running_lse / math.log(2)).contiguous()
+        else:
+            output, lse_base2 = projected, partial_lse
         output = self.communicator.combine(
             output, lse_base2, lengths, output_dim=value_dim
         ).transpose(0, 1)
@@ -346,16 +368,15 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         For producers that compute all heads on every rank (DSA_DCP_PROLOGUE): the result skips
         the query all-gather and padding of forward(); kc must hold every head.
         """
-        rows, heads = query.shape[:2]
+        from rtp_llm.models_py.kernels.cuda.dsa_buffer_ops import absorbed_query
+
+        heads = query.shape[1]
         key_up = self.weights[layer_id][W.mla_kc]
         if key_up.shape[0] != heads:
             raise ValueError("an all-head decode query needs the all-head kc weight")
-        output = query.new_empty((rows, self.fmha_impl.kernel_heads, self.kv_lora_rank + self.rope_head_dim))
-        nope, pe = query.split([self.nope_head_dim, self.rope_head_dim], dim=-1)
-        output[:, :heads, self.kv_lora_rank :] = pe
-        output[:, heads:].zero_()
-        torch.bmm(nope.transpose(0, 1), key_up, out=output[:, :heads, : self.kv_lora_rank].transpose(0, 1))
-        return output
+        return absorbed_query(
+            query, key_up, self.kv_lora_rank, self.fmha_impl.kernel_heads
+        )
 
     def write_decode_cache(self, latent, suffix, kv_cache):
         """forward()'s cache write, for producers of decode_query (K3.1 applies no RoPE here)."""

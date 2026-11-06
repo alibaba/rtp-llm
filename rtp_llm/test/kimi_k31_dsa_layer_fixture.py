@@ -37,9 +37,21 @@ from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 PAGE, KERNEL_PAGE = 1024, 128
+SFA_FP8_ENTRY = 512 + 16 + 128  # 512B E4M3 latent + 4xFP32 scales (16B) + 64xBF16 rope (128B)
 INDEX_ENTRY = 128 + 4  # E4M3 key bytes, then one FP32 scale per token
 TAGS = ("full", "indexer_kv")
 MAX_TOKENS = 512  # largest decode batch in tokens (requests x queries)
+
+
+def dequant_fp8_ds_mla(entries):
+    """Dequantize [..., 656] uint8 fp8_ds_mla entries to float32 [..., 576]."""
+    prefix = entries.shape[:-1]
+    flat = entries.reshape(-1, SFA_FP8_ENTRY)
+    nope = flat[:, :512].view(torch.float8_e4m3fn).float().view(-1, 4, 128)
+    scales = flat[:, 512:528].view(torch.float32).unsqueeze(-1)
+    nope = (nope * scales).view(-1, 512)
+    rope = flat[:, 528:656].view(torch.bfloat16).float()
+    return torch.cat((nope, rope), dim=-1).view(*prefix, 576)
 
 
 def init_distributed(tp_size):
@@ -64,7 +76,7 @@ def init_distributed(tp_size):
     return parallel
 
 
-def load_config(path, *, max_seq_len, queries, layers=None):
+def load_config(path, *, max_seq_len, queries, layers=None, fp8_kv_cache=True, fp8_gemm=True):
     """K3.1 target config; `layers` widens a short checkpoint to the full 93-layer schedule."""
     with open(path) as reader:
         config_json = json.load(reader)
@@ -79,7 +91,11 @@ def load_config(path, *, max_seq_len, queries, layers=None):
         text["linear_attn_config"]["kda_layers"] = [n for n in range(1, layers + 1) if n not in dsa]
         text["dsa_config"]["dsa_layers"] = dsa
     config = KimiK31._from_config_json(config_json)
-    config.init_precision_config(kv_cache_config=None, act_type="BF16")
+    if fp8_gemm:
+        config.quantization = "FP8_PER_BLOCK"
+    config.init_precision_config(
+        kv_cache_config=SimpleNamespace(fp8_kv_cache=fp8_kv_cache), act_type="BF16"
+    )
     if not config.k3_runtime_config.dsa.indexer_use_fp8:
         raise ValueError("the K3.1 target layer must bind the FP8 Indexer")
     config.attn_config.tokens_per_block = PAGE
@@ -126,10 +142,40 @@ def layer_weights(config, parallel, seed):
         randn(a.q_lora_rank, index_heads * index_dim, fan_in=a.q_lora_rank)
     )
     index_k, index_k_scale = _fp8_projection(randn(hidden, index_dim, fan_in=hidden))
+    fp8_attn = getattr(config, "attention_projection_quant_config", None) is not None
+    if fp8_attn:
+        qkv_cols = a.q_lora_rank + a.kv_lora_rank + a.rope_head_dim
+        pad_cols = (-qkv_cols) % 128
+        fused_in = torch.cat(
+            (
+                q_a,
+                kv_a,
+                q_a.new_zeros((hidden, pad_cols)),
+                shard(gate, 1),
+            ),
+            dim=1,
+        )
+        fused_w, fused_s = _fp8_projection(fused_in)
+        qb_sharded_w, qb_sharded_s = _fp8_projection(shard(q_b, 1))
+        qb_full_w, qb_full_s = _fp8_projection(q_b)
+        out_w, out_s = _fp8_projection(shard(output, 0))
+        proj_weights = {
+            W.mla_fusedqkrope_w: fused_w,
+            W.mla_fusedqkrope_s: fused_s,
+            W.mla_q_b_w: qb_sharded_w,
+            W.mla_q_b_s: qb_sharded_s,
+            W.attn_o_w: out_w,
+            W.attn_o_s: out_s,
+        }
+    else:
+        qb_full_w, qb_full_s = q_b, None
+        proj_weights = {
+            W.mla_fusedqkrope_w: torch.cat((q_a, kv_a, shard(gate, 1)), dim=1),
+            W.mla_q_b_w: shard(q_b, 1),
+            W.attn_o_w: shard(output, 0),
+        }
     weights = {
-        W.mla_fusedqkrope_w: torch.cat((q_a, kv_a, shard(gate, 1)), dim=1),
-        W.mla_q_b_w: shard(q_b, 1),
-        W.attn_o_w: shard(output, 0),
+        **proj_weights,
         W.mla_q_a_ln_gamma: torch.ones(a.q_lora_rank, dtype=torch.bfloat16, device="cuda"),
         W.mla_kv_a_ln_gamma: torch.ones(a.kv_lora_rank, dtype=torch.bfloat16, device="cuda"),
         W.mla_kc: shard(key_up, 0),
@@ -142,7 +188,9 @@ def layer_weights(config, parallel, seed):
         W.mla_indexer_k_norm_b: torch.zeros(index_dim, dtype=torch.bfloat16, device="cuda"),
         W.mla_indexer_weights_proj_w: randn(hidden, index_heads, fan_in=hidden, dtype=torch.float32),
     }
-    return weights, SimpleNamespace(key_up=key_up, value_up=value_up, q_b=q_b)
+    return weights, SimpleNamespace(
+        key_up=key_up, value_up=value_up, q_b=qb_full_w, q_b_scale=qb_full_s
+    )
 
 
 def loader_weights(config, parallel, seed):
@@ -153,7 +201,10 @@ def loader_weights(config, parallel, seed):
 
 def query_head_weights(weights, global_weights):
     """Decode loader layout: q_b and kc of every head on every rank."""
-    return {**weights, W.mla_q_b_w: global_weights.q_b, W.mla_kc: global_weights.key_up}
+    extra = {W.mla_q_b_w: global_weights.q_b, W.mla_kc: global_weights.key_up}
+    if getattr(global_weights, "q_b_scale", None) is not None:
+        extra[W.mla_q_b_s] = global_weights.q_b_scale
+    return {**weights, **extra}
 
 
 def build_layer(config, parallel, weights, layer_index):
@@ -215,10 +266,13 @@ def sp_unit(tp, queries):
 class Pool:
     """One cache group's pages on this rank; page 0 stays reserved for dummy requests."""
 
-    def __init__(self, tag, pages, device):
+    def __init__(self, tag, pages, device, *, fp8_kv_cache=True):
         self.tag = tag
         if tag == "full":
-            self.cache = torch.zeros(pages, KERNEL_PAGE, 512 + 64, dtype=torch.bfloat16, device=device)
+            if fp8_kv_cache:
+                self.cache = torch.zeros(pages, KERNEL_PAGE, SFA_FP8_ENTRY, dtype=torch.uint8, device=device)
+            else:
+                self.cache = torch.zeros(pages, KERNEL_PAGE, 512 + 64, dtype=torch.bfloat16, device=device)
         else:
             self.cache = torch.zeros(pages, KERNEL_PAGE, INDEX_ENTRY, dtype=torch.uint8, device=device)
         self.free = list(range(pages - 1, 0, -1))
@@ -280,10 +334,18 @@ class Request:
         """Random history at positions [start, prefix) through the production writers."""
         begin, end = local_tokens(start, tp, rank), local_tokens(self.prefix, tp, rank)
         gen = torch.Generator(device="cuda").manual_seed(self.seed * 8191 + rank)
+        scale = torch.ones((), dtype=torch.float32, device="cuda")
         for first in range(begin, end, chunk):
             local = torch.arange(first, min(first + chunk, end), device="cuda")
             latent = torch.randn(local.numel(), 576, generator=gen, device="cuda").bfloat16()
-            pools["full"].cache.view(-1, 576)[pools["full"].slots(self.pages["full"], local)] = latent
+            full_slots = pools["full"].slots(self.pages["full"], local)
+            if pools["full"].cache.dtype == torch.uint8:
+                rtp_llm_ops.concat_and_cache_mla(
+                    latent[:, :512].contiguous(), latent[:, 512:].contiguous(),
+                    pools["full"].cache, full_slots, "fp8_ds_mla", scale, use_ue8m0=True,
+                )
+            else:
+                pools["full"].cache.view(-1, 576)[full_slots] = latent
             keys = torch.randn(local.numel(), 128, generator=gen, device="cuda").bfloat16()
             rtp_llm_ops.indexer_k_quant_and_cache(
                 keys, pools["indexer_kv"].cache, pools["indexer_kv"].slots(self.pages["indexer_kv"], local),
@@ -362,13 +424,13 @@ class Recorder:
 
         indexer._quantize_q_k, indexer._compute_topk = record_quantize, record_select
         # The decode prologue (DSA_DCP_PROLOGUE) writes keys and builds the sparse-MLA query itself.
-        write_keys = indexer.indexer_op.write_keys
+        write_key = indexer.indexer_op.write_key
 
-        def record_write_keys(key, *args, **kwargs):
+        def record_write_key(key, *args, **kwargs):
             self.last["index_key"] = key
-            return write_keys(key, *args, **kwargs)
+            return write_key(key, *args, **kwargs)
 
-        indexer.indexer_op.write_keys = record_write_keys
+        indexer.indexer_op.write_key = record_write_key
 
     def attach(self, sfa):
         forward, write_cache, forward_prepared = sfa.forward, sfa.write_decode_cache, sfa.forward_decode_prepared

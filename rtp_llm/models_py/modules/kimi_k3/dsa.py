@@ -1,6 +1,8 @@
 """K3.1 sparse policy composed from shared K3 projections and Indexer kernels."""
 
 import torch
+import triton
+import triton.language as tl
 
 from rtp_llm.models_py.distributed.collective_torch import (
     Group, all_gather, reduce_scatter_bf16,
@@ -28,6 +30,31 @@ def split_bf16x3(weight):
     mid = (weight - hi.float()).bfloat16()
     lo = (weight - hi.float() - mid.float()).bfloat16()
     return torch.cat((hi, mid, lo), dim=1).contiguous()
+
+
+@triton.jit
+def _fold_head_gate_kernel(
+    Gate, PackedScale, Out, Scale, G_ROW: tl.constexpr, S_ROW: tl.constexpr, HEADS: tl.constexpr
+):
+    row = tl.program_id(0)
+    h = tl.arange(0, HEADS)
+    g0 = tl.load(Gate + row * G_ROW + h)
+    g1 = tl.load(Gate + row * G_ROW + HEADS + h)
+    g2 = tl.load(Gate + row * G_ROW + 2 * HEADS + h)
+    packed = tl.load(PackedScale + (row * HEADS + h) * S_ROW)
+    q_scale = ((packed & 0xFF) << 23).to(tl.float32, bitcast=True)
+    tl.store(Out + row * HEADS + h, (g0 + g1 + g2) * q_scale * Scale)
+
+
+def fold_head_gate_scales(head_gate, packed_scale, scale, heads):
+    rows = head_gate.shape[0]
+    out = torch.empty((rows, heads, 1), dtype=torch.float32, device=head_gate.device)
+    if rows:
+        _fold_head_gate_kernel[(rows,)](
+            head_gate, packed_scale, out, float(scale),
+            head_gate.stride(0), packed_scale.stride(0), heads, num_warps=1,
+        )
+    return out
 
 
 class KimiK31DSA(KimiK3MLA):
@@ -178,10 +205,10 @@ class KimiK31DSA(KimiK3MLA):
     def _index_queries(self, s):
         indexer = self.indexer
         query = indexer.wq_b(s.q).view(-1, indexer.index_n_heads, indexer.index_head_dim)
-        s.index_query, scale = indexer.indexer_op.encode_query(query)
-        gate = s.head_gate.view(-1, 3, indexer.index_n_heads)
-        gate = gate[:, 0] + gate[:, 1] + gate[:, 2]
-        s.index_weights = gate.unsqueeze(-1) * scale * self._head_gate_scale
+        s.index_query, scale = indexer.indexer_op.encode_query(query, unpack_scale=False)
+        s.index_weights = fold_head_gate_scales(
+            s.head_gate, scale, self._head_gate_scale, indexer.index_n_heads
+        )
 
     def _topk(self, s):
         fmha = s.indexer

@@ -122,6 +122,8 @@ def main():
     parser.add_argument("--replays", type=int, default=5)
     parser.add_argument("--seed", type=int, default=3101)
     parser.add_argument("--kernels", action="store_true", help="also print rank 0's per-kernel GPU time")
+    parser.add_argument("--fp8-gemm", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--fp8-kv-cache", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
     parallel = fx.init_distributed(int(os.environ["WORLD_SIZE"]))
     tp, rank = parallel.tp_size, parallel.tp_rank
@@ -131,7 +133,10 @@ def main():
         queries, contexts = parse_case(case)
         by_queries.setdefault(queries, []).append(contexts)
     for queries, cases in by_queries.items():
-        config = fx.load_config(args.config_json, max_seq_len=args.max_seq_len, queries=queries)
+        config = fx.load_config(
+            args.config_json, max_seq_len=args.max_seq_len, queries=queries,
+            fp8_kv_cache=args.fp8_kv_cache, fp8_gemm=args.fp8_gemm,
+        )
         layer_index = config.k3_runtime_config.dsa.layers[0]
         weights, _ = fx.loader_weights(config, parallel, seed=args.seed)
         layer = fx.build_layer(config, parallel, weights, layer_index)
@@ -144,7 +149,7 @@ def main():
         columns = sum(
             max(fx.owner_columns(n, tp, r) for r in range(tp)) for n in max(cases, key=lambda c: sum(c))
         )
-        pools = {tag: fx.Pool(tag, columns + 2, "cuda") for tag in fx.TAGS}
+        pools = {tag: fx.Pool(tag, columns + 2, "cuda", fp8_kv_cache=args.fp8_kv_cache) for tag in fx.TAGS}
         pool_handle = torch.cuda.graph_pool_handle()
         generator = torch.Generator().manual_seed(args.seed + rank)
         hidden_gen = torch.Generator(device="cuda").manual_seed(args.seed * 13 + rank)
