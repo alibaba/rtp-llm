@@ -1017,7 +1017,7 @@ def prepare_fused_tile(starts, lengths, ratio, slot_layouts, tile, scratch):
         starts.ndim != 1
         or lengths.shape != starts.shape
         or starts.dtype != torch.int64
-        or lengths.dtype != torch.int64
+        or lengths.dtype not in (torch.int32, torch.int64)
         or starts.device != lengths.device
         or not starts.is_cuda
         or not _slot_layouts_supported(slot_layouts, ratio, len(starts), starts.device)

@@ -1027,7 +1027,8 @@ class FusedProducerMetadataCUDA(unittest.TestCase):
         prefixes = tuple(0 if i % 11 == 0 else 31744 + i % 2 for i in range(64))
         _, pos_cpu, req_cpu, starts_cpu, lengths_cpu = inputs(prefixes, sizes)
         pos, req = pos_cpu.cuda(), req_cpu.cuda()
-        starts, lengths = starts_cpu.cuda(), lengths_cpu.cuda()
+        starts = starts_cpu.cuda()
+        lengths = lengths_cpu.to(device="cuda", dtype=torch.int32)
         columns = (max(p + n for p, n in zip(prefixes, sizes)) + 127) // 128 + 4
         table = torch.arange(
             1, 64 * columns + 1, dtype=torch.int32, device="cuda"

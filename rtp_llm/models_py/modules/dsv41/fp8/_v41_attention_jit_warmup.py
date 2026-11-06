@@ -778,7 +778,7 @@ def _warm_fused_producer_metadata(layouts, cp_size, cp_rank, device):
                 dtype=torch.int64,
                 device=device,
             )
-            lengths = torch.full((batch,), 2, dtype=torch.int64, device=device)
+            lengths = torch.full((batch,), 2, dtype=torch.int32, device=device)
             tile_layouts = tuple(
                 producer.SlotLayout(
                     torch.ones((batch, 2), dtype=table_dtype, device=device),

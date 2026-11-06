@@ -5040,3 +5040,84 @@ BS=11 约117.2 ms前置区间包含 schedule约20.2 ms、input/prepare约18.6 ms
 **下一优化判断。** 单 cohort 的源 AG 暴露最多约 0.7 ms/卡，继续增加同类首包事件/分支的收益上限低。优先用匹配时窗确认 BS8×100K 点差及周期性 EPLB 轮；再定位四源层 CPU cohort 规划和压缩器 tile 元数据的重复工作，核实是否能在一次 forward 内共享且不新增 shape 门槛。在线 BS8 多 cohort 的 AG 暴露仍较高，若要显著降通信，应论证 ratio=1/2 的本地压缩后交换及跨 zigzag 边界 carry、各 rank 一致的 Global/Indexer 池写入，不能只替换 Broadcast/AG API 或增加经验阈值分支。
 
 **源层 CPU 细分观察。** 同批 target 的 rank0 Torch profiler CPU 注释中，L2/L8/L14 注意力作用域在 BS32×32K 分别约 6.57/6.04/5.75 ms，直接消费层 L3/L9/L15 约 1.64/1.60/1.59 ms；BS64×32K 为 8.03/7.13/7.00 vs 1.70/1.63/1.67 ms；BS4×100K 为 6.26/5.63/5.52 vs 1.50/1.53/1.51 ms；BS8×100K 为 9.43/7.97/8.08 vs 2.05/2.00/1.95 ms；混合 BS9 为 6.70/5.80/5.72 vs 1.63/1.62/1.62 ms。BS8×100K 的 L2 内有 603 个 `cpu_op` 事件、56 次 `aten::empty`，L3 为 103/16；L2 的 `aten::record_stream` 23 次合计约 0.044 ms，四次 `c10d::_allgather_base_` CPU 作用域合计约 0.498 ms。这些 CPU 事件嵌套且 profiler 增加开销，不能相加当 RT，也不能仅凭“比消费层多”判定冗余：源层还承担投影、状态、压缩、索引和池写。下一次 CPU 变更应在 `_prefill_projected_x_cohorts` 与 `_produce_global` 的计划、分配、恢复和压缩边界分别定位可复用的 host 工作与真正的同步点；验证删除了多少操作并另测 profiler-off 完整批次。
+
+### 2026-11-06：下一轮 CPU/小算子逐段账本（进行中）
+
+**测量身份与边界。** 选定 OSS 工作树 `feature/dsv41-dev-main-202161013`，本轮起点 `0cd62868e33c91e1ef49eda4f90f00cb23ca03b7`；容器 `ruixuan.zrx_GPU_RDMA_dsv41_20261105`，GPU4–7 上已有同 checkpoint `/mnt/hf3fs/3fs/models/DeepSeek-V4.1-Flash` 的 CP4 DSpark Prefill 服务。下列数据从上一轮四 rank profile 的 rank0 target step 读取，原始 JSON：`rdma_container_20261105/ag_overlap_reorder_20261105/multi_round_20261106/profiles/{b9_mixed,b8_100k}/timelines/`。BS9 混合为全批 prefix/fresh 645120/32290；BS8×100K 为 753664/65536。profile-on CPU scope 含等待与嵌套操作，只用于定位，不与 profiler-off engine RT 互减。
+
+| 阶段 | BS9 CPU 作用域 | BS8×100K CPU 作用域 | 关键观察与源码 |
+| --- | ---: | ---: | --- |
+| target forward 起点至 L0 | 8.99 ms、416 个 CPU op | 6.05 ms、381 个 | 分别 49 次 `aten::to`，19 次 `_to_copy`，30–31 次 `copy_`；包括 `prefill/forward.py::forward_layers` 的 CP context、embedding、FP8 prefill 元数据传播。BS9 L0 前有一次约 51 MB pinned H2D Engram 搬运，GPU 驻留约 0.96 ms；是否在关键路径暴露仍须同流依赖核验。 |
+| L2 / L8 / L14 | 7.56 / 6.64 / 7.20 ms | 10.53 / 9.04 / 10.01 ms | L2 对应 537 / 655 个 CPU op；来源混合了 `_prefill_projected_x_cohorts`、`_produce_global`、索引检索、SWA 与 MoE。邻近消费层 L3 仅 2.40 / 3.09 ms，不等于源层差额全部可删。 |
+| L20 | 11.96 ms、775 个 CPU op | 11.39 ms、741 个 | ratio=1 源层同时承担全局写、索引检索与 MoE，须用分段 scope 再区分 producer/query；不能把总量都归咎于通信。 |
+| L20 与 L21 间 | 1.99 ms、118 个 CPU op | 1.54 ms、53 个 | `prefill/forward.py` 的 CED compact/元数据重建附近；BS9 多出的 AllToAll/索引视图需以调用链确认归属。 |
+| L21 / L24 / L39 | 3.17 / 3.54 / 2.69 ms | 3.73 / 4.66 / 3.18 ms | 非源层仍有重复元数据、SWA、attention 与 MoE；按连续层/重新索引层分开计数。 |
+| L39 后至 target forward 结束 | 2.32 ms、151 个 CPU op | 2.60 ms、151 个 | hidden 归并、norm、CED restore、lm-head 附近；需要细分 GPU 与 host。 |
+| target sample 后 draft forward | 11.75 ms、491 个 CPU op | 7.69 ms、491 个 | `MtpExecutor.cc::prefillStep` 的 `tpSyncModelInputs`、草稿输入准备和 draft forward；相同 491 op 提示固定的 host 处理成本，但没有函数级 self-time，尚不能把整个作用域视作可省。 |
+| draft 后 cache publication | 0.76 ms | 41.20 ms | `MtpExecutor.cc::finishDSparkPrefillCachePublication` 等待 target/draft cache-store 发布；这是可能暴露的传输完成等待，不能当作 CPU 小算子删除。 |
+
+**首个窄改动。** `_produce_global` 的 ratio=2 tile 在压缩后原先每次各 clone 最后一行 value 与 score，末 tile 也 clone。当前工作树候选只在 `t1 < rows` 时构造 carry；中间 tile 将两行 cat 为一份 4 KiB FP32 存储并用两个 `[1,512]` view 交给既有 compressor，末 tile 无拷贝。它不改变 pair、旧 CSA state、slot 写入和池格式。CPU 跨 tile 测试 7/7 通过，GPU 交错 carry view 对照独立快照的 latent/main/index/state 精确比较通过；单卡 1000 次循环 CUDA event 的构造时间中位约 9.28→8.45 µs/次。该单算子结果与 model RT 分离，尚未在加载新代码的整模型服务验证，不能报告整体加速或生产完成。
+
+**已证伪的低优先级 CPU 候选。** `_prefill_x_cohort_plan` 在 B8短/B32×32K/B64×32K/B8×100K/B128/B1024 的纯 host 单次中位分别约 2.44/6.95/12.46/2.57/23.65/165.17 µs。四源层每 forward 重算确实存在，但主流 B≤64 合计仅约 10–50 µs；为此增加跨层缓存状态与失效分支不划算，暂不改。
+
+**下一步顺序。** 先针对 L2/L8/L14/L20 分开记录 producer 投影/AG/restore、元数据、压缩写池、query 的 CPU self-time 与 GPU launch 数，确认实质重复项；再查 L0 前实际 `_to_copy` 的来源及 CED 的 AllToAll 布局；随后查 draft `tpSyncModelInputs` 的固定 host 构造和非源层共享元数据。每组改动先做真实 shape 的算子/数值与显存上界，再在相同 3FS checkpoint 和后四卡上做无 profiler 完整 batch Prefill engine RT；对照保留所有轮次和异常值。当前候选尚未经过最终 code-simplifier、独立 review 或加载新代码的 E2E 门禁。
+
+**更新：carry 候选退役。** 上述 carry 合并候选已加载进四卡 Prefill 服务并完成六种典型形状的五轮完整 batch 请求；中位 RT 依次为 98.114、132.876、239.631、131.246、217.542、129.079 ms。它们与前一服务时窗的 91.465、135.625、240.123、128.504、219.707、129.863 ms 无稳定的同向改善，且实现增加了末 tile 判断及 view 生命周期复杂度。因本轮目标优先代码简化，已从工作树撤回此候选及专项测试，不把单算子约 0.8 µs 的差值计作模型收益。原始完整请求结果在 `rdma_container_20261105/ag_overlap_reorder_20261105/multi_round_20261106/result/carry_smallops_20261106/summary.json`。
+
+**下一候选：去掉源层重复的长度转换。** `cp.py::build_cp_context` 已将全局 fresh 长度装到 GPU int32；`attention_v41.py::_prefill_produce` 对四个 KV 源层各自调用 `.long()`，但融合元数据 kernel 在加载长度后本来就转换到 int64 再参与绝对位置计算。修正版保留前缀的 int64 转换，仅让融合 tile 接口接受 int32 或 int64 fresh 长度；非融合回退路径保留既有转换，没有新准入分支或额外缓冲。BS64 混合长度与前缀、ratio=1/2、CP 四 rank 的槽位 oracle 测试通过。此候选的修正版整模型性能、精度与显存尚未验证。
+
+**真实请求纠错。** 上段记录的是初版方案。第一次服务重载后，Prefill 预热请求在四 rank 的 `prepare_fused_tile` 报 `invalid fused source tile`：`common.prefix_lengths` 在此处仍是 int32，而接口要求 `starts` 为 int64；此前单算子测试只使用 int64 starts，未覆盖这个上游实际 dtype。已把源层前缀的 `.long()` 恢复，仅移除 `input_lengths_global` 的 `.long()`，并在测试中固定 int64 starts + int32 lengths。`_v41_prefill_pools.try_gather_prefill_pools` 还要求 `seq_ends` 为 int64，保留前缀转换同时保证该条件。该失败服务的请求不可计为 E2E 通过或性能样本。融合 tile 的 JIT 预热输入已同步改为 int32 lengths，避免生产首请求临时编译。GPU4–7 随后出现容器外进程约 50 GiB/卡、接近满载；待四卡恢复后重载修正版并测量。
+
+**L0 前 HC 展开门槛。** 上一有效 BS9 混合 target timeline 的本卡行数为 8082，低于 `prefill/forward.py` 的 8192 门槛，走 `unsqueeze.repeat`；该阶段出现一笔 `[1,4,1,8082,1,5120]` BF16 拷贝，约 331 MiB，算子本身按原记录约 333 µs。相同 BF16 `[8082,5120]` 输入的 Triton `expand_hc` 与 `repeat` 位级一致，单算子 CUDA event 中位约 85 µs；1、3、128、8193、16384、126980 行的独立残差流与写后不串扰测试通过。1–64 行的 Triton 算子在受干扰 GPU 上可能慢约 2–5 µs，模型级影响未验。工作树把 `>=8192` 改为 `>0`，只保留空输入回退，既不增加输出内存也不增加执行分支数量。必须用完整 batch Prefill RT 与新的 timeline 检查此 kernel 的实际激活和首层前 CPU/GPU 暴露时间。
+
+**待定位的两个边界。** CED 在 L20/L21 间重新建立 query domain 和 SWA 元数据，`prefill/ced.py::CEDPlan.create` 的 bounded replay 通常走 host 向量布局并上传行映射；旧 BS9 timeline 中该间隔约 1.99 ms、118 个 CPU op，但还不能把它全归因于 CED，下一步应分别采样 `_query_layout`、row exchange、L21 元数据重建。非源层的 `_swa_prefill_workspace` 每层读取 CP host 长度并复制为 Python list，再根据 continuation/replay 建本层 SWA 视图；单次量小，需先统计 40 层累计 self-time 才能决定是否值得去掉复制或合并 host 计划。Draft 前 `MtpExecutor.cc::prefillStep` 再次执行 `tpSyncModelInputs`，但它在 CP/DSpark 分支清空跨 rank 不可广播的 hidden，再绑定本 rank target hidden；`snapshotMutableHostInput` 的 clone+pin 保护可变 host 输入的异步生命周期，不能仅因为 timeline 有 `pin_memory` 就删除。上述三处均尚未改代码。
+
+**服务预热门禁补充。** 第一次修正版服务在 `/worker_status` 已报告 `alive` 后，固定形状压测与 `start_server.py::_run_v41_startup_real_warmup_probes` 的 `reuse_prime` 重叠；后者未完成，目标请求停在 `TASK_PHASE_RECEIVED`，该轮没有性能或精度结论。已终止本次测试并重启自有服务。后续运行须同时看到 `main_0.log` 的 `phase=ragged_probe ... finished` 及 `/worker_status` 空闲，才准许发正式语料。单靠 `alive` 不足以证明启动预热结束。
+
+**CED 逐操作补证。** 在旧 BS9 target rank0 的 `forward(layer=20)` 结束到 L21 开始的约 1.99 ms 内，118 个 CPU op 包含 5 次 `c10d::alltoall_base_`、6 次 `aten::index_select`、6 次 `aten::gather` 与 15 次 `aten::empty`。`ced.py::_RowExchange.compact` 每次执行 select、AllToAll 和可能的 index_copy；`Block.forward_prefill_ced_l20` 在全量 L20 源写后分别 compact residual、post、comb、input_ids、HC pre_mix_out，随后还 compact x_pre、qr 与查询频率。五次 collective 对应候选是控制流推断，尚需带函数 scope 的同轮 trace 对齐。各张量的宽度与 dtype 不同，合包若增加 pack/unpack、整块临时缓冲或 CPU 分支，可能更差；先核实 exposed collective 及 layout，再设计统一传输布局，不能直接合并调用次数当作收益。
+
+**修正版成组验收。** 在 GPU4–7 的 DSpark CP4 Prefill-only 服务、同一 3FS checkpoint、FP8 KV、CED 默认开启、无 profiler 的完整 batch 请求中，六种形状每种一轮预热、五轮正式；全部实际 prefix/fresh 计数吻合，和上一服务时窗的 750 个单 token 输出 ID 逐项相同。下表旧臂为本轮修改前同工作树的五轮服务时窗，当前臂为“源层 int32 fresh 长度直入融合 tile + 非空 HC 统一 Triton”的五轮服务时窗；两臂启动时窗与 GPU 其它驻留不同，不能把点差归因于补丁。
+
+| 形状（全批 prefix/fresh） | 旧臂中位 RT ms | 当前臂中位 RT ms |
+| --- | ---: | ---: |
+| BS8 短，16384/1032 | 91.465 | 90.229 |
+| BS32×32K，1015808/32768 | 135.625 | 135.222 |
+| BS64×32K，2031616/65536 | 240.123 | 243.181 |
+| BS4×100K，376832/32768 | 128.504 | 132.558 |
+| BS8×100K，753664/65536 | 219.707 | 223.384 |
+| 混合 BS9，645120/32290 | 129.863 | 132.545 |
+
+当前臂原始逐轮结果：`rdma_container_20261105/ag_overlap_reorder_20261105/multi_round_20261106/result/int32_hc_final_20261106/summary.json`。当前服务完成后 GPU4–7 驻留分别为 242551/239475/245499/241403 MiB；代码没有新增持久缓冲，HC 输出形状与原 `repeat` 相同，去掉的长度转换只会减少 B 元素临时张量。旧臂的启动环境与缓存分配不同，单靠 NVML 快照不能量化峰值显存或 KV 容量收益；PD4+4 的 MAL 与质量门禁未在本四卡 Prefill 服务执行。
+
+**新旧 BS9 target timeline 的机制核对。** 当前臂四 rank 原始 trace 位于 `source_compact_exchange_20261105/smallops_20261106/profile_b9_final/timelines/`，旧臂为 `multi_round_20261106/profiles/b9_mixed/timelines/`。rank0 的 L0 前大 `gpu_kernel_impl_nocast` 为旧 335.33 µs、当前消失；当前出现 `_expand_hc_kernel` 62.88 µs。L0 前 CPU 作用域却为 8.991→9.027 ms，说明这笔 GPU copy 不是等量转化成 exposed CPU/整批 RT 节省；该阶段仍有 Engram 约 51 MB H2D 和其它元数据工作。源层 L2/L8/L14/L20 各自的 `_to_copy` 次数分别从 6/3/3/5 降为 5/2/2/4，`aten::to` 各少一次，符合每源层少一次 fresh 长度转换。L20 至 L21 的 5 次 AllToAll 与 118 个 CPU op 未变，profile-on gap 在两个独立轮次为 1.99/2.64 ms，不能判作改动导致的回退。当前臂 profile-on target RT 153.343 ms 与上表 profiler-off 值分属不同测量边界。
+
+**CED 通信之前的空档复核。** 当前 BS9 rank0 的 `dsv41.ced.compact` 作用域从 L20 结束后约 0.021 ms 开始；第一笔 `index_select` 在 0.056 ms，第一笔 `c10d::alltoall_base_` 到 0.806 ms 才提交，随后四笔在 1.039/1.158/1.288/1.376 ms 提交。同一代码的旧 BS9 trace，第一笔在 0.151 ms 已提交。因此这约 0.65 ms 的额外首包间隔不能直接归因于当前补丁或 CED 必然的 CPU 规划；现有 Torch trace 在 `index_select` 完成至首次 c10d 提交之间没有可归因的 CPU op，可能受 Python/运行时调度影响，尚无证据支持合并五次 AllToAll。`_RowExchange.compact` 当前每次执行行选择、可选的结果重排，并为残差、HC post/comb、input_ids、pre_mix 分别执行通信；须取得多轮同负载的各字段 dtype/shape、实际 GPU 暴露时间后，才设计合包或减少传输。
+
+**本轮局部收口。** 完整差异经一次 code-simplifier 约束检查：没有新增状态、替代算法路径或形状阈值；保留 `starts.long()` 是融合 tile 和已有池读取的 int64 合同所需。独立只读代码 review 未发现确定的正确性或可维护性 blocker；review 同时指出非 CP 整模型、PD4+4 MAL 和小输入完整 batch RT 尚未由本轮四卡证据覆盖。本轮成果应计作代码/计算简化与已测 CP4 Prefill 精度通过，不计模型性能加速或生产验收完成。
+
+**随后追加的非源层 host 小项。** `attention_v41.py::_host_prefill_lengths/_host_prefill_prefixes` 在 CP Prefill 时直接返回 `CPContext` 中已有的不可变 tuple，删去每层两次 `list(...)` 复制；非 CP `.tolist()` 回退不变。`_swa_prefill_workspace` 仅迭代、索引这些序列，`SwaRows` 自己保留 tuple，故不改变请求行切分或缓存生命周期。SWA 专项 33 个测试通过，独立 reviewer 对该增量未发现确定问题。
+
+**CED 的同组简化。** `ced.py::_RowExchange.compact/restore` 删除 `index_select(0, indices)` 之后的 `.contiguous()` 调用。行选择已产生独立连续发送缓冲；ragged、重排、空行、BF16/int64 的 CPU 布局测试验证两方向 send 均连续、数值和拆分顺序不变，8 项通过。它只删除每次 CED row exchange 的一次 Python/Tensor 方法调用，未改变五次 AllToAll、通信字节或 CED 行域；独立 reviewer 未发现确定 blocker。
+
+**追加两项后的成组 E2E。** 自有 GPU4–7 服务重载完整候选并完成启动 ragged probe、队列空闲门禁后，对原六份不可变语料各跑一轮预热、五轮正式；全部 750 个单 token 输出 ID 与追加前服务逐项相同，所有轮次的全批 prefix/fresh 数量符合预期。原始逐轮结果在 `rdma_container_20261105/ag_overlap_reorder_20261105/multi_round_20261106/result/int32_hc_hostced_group2_20261106/summary.json`。以下两臂同为该 3FS checkpoint、CP4 DSpark Prefill-only、FP8 KV、CED 开启、无 profiler 的完整 batch `engine_cost_max_ms`；“追加前”含 int32 长度和 HC 统一 Triton，“追加后”再去掉 CP host list 复制与 CED 冗余 contiguous，服务启动时窗不同。
+
+| 形状（全批 prefix/fresh） | 追加前中位 RT ms | 追加后中位 RT ms |
+| --- | ---: | ---: |
+| BS8 短，16384/1032 | 90.229 | 88.308 |
+| BS32×32K，1015808/32768 | 135.222 | 133.520 |
+| BS64×32K，2031616/65536 | 243.181 | 239.918 |
+| BS4×100K，376832/32768 | 132.558 | 128.955 |
+| BS8×100K，753664/65536 | 223.384 | 218.552 |
+| 混合 BS9，645120/32290 | 132.545 | 129.824 |
+
+六组点差同向，但修改只删除 Python list 与无效 contiguous 调用，且并非同一服务时窗 ABBA；不能把 1.7–4.8 ms 差额证明为该追加改动的因果收益。追加后空闲服务的 GPU4–7 NVML 已用显存为 242655/238553/244574/239456 MiB，`available_kv_cache=450381824`；这是运行后快照而非请求过程峰值，和上一服务的分配初态不同，不能量化显存增减。代码静态上没有新增持久缓冲或复制，CED AllToAll 数量与字节未改变。PD4+4 MAL、非 CP 整模型及长期稳定性仍不在此四卡结果覆盖内。
+
+### P2+D2 RDMA 的独立验收与续做摘要（2026-11-06）
+
+**身份与路径。** 在上述 OSS 分支同一未提交候选、3FS checkpoint `/mnt/hf3fs/3fs/models/DeepSeek-V4.1-Flash` 上，任务本地启动配置位于 `/data0/ruixuan.zrx/rtp_llm_eval/runs/deepseek_v41/pd22_smallops_20261106_093000/`：GPU4–5 为 Prefill TP2/EP2/CP2，GPU6–7 为 Decode DP2/EP2，FP8 KV、DSpark、CED、真实内部 RDMA 后端。两端 rank 健康空闲、Prefill ragged 启动探针完成后才发正式请求。独立只读 review 对最终代码差异未发现确定阻断项；它指出 CP2 真实 Prefill 与 P→D 仍需运行时证明，以下结果补齐该局部证据。
+
+**质量与 MAL。** `quality_gsm300_lb160/` 的不可变 manifest 共 460 个 ID/调用，460/460 HTTP 200 且 `pd_sep=true`，生成和评分错误均为 0；标准 scorer：GSM8K 289/300=0.96333、截断 0；LongBench 0.57994、截断 8/160。`raw_mal_64.py` 用同 manifest 中 GSM8K/LongBench 各 32 条、自然拒绝采样、最多 256 输出 token：64/64 `pd_sep=true`、零错误，1694 个 draft round 接受 5401 个草稿 token，MAL=`1+5401/1694`=4.18831。旧 PD4+4 服务同 ID/预算的诊断分数为 GSM8K 0.8125、LongBench 0.20522、MAL 3.86609；旧服务的源/拓扑/启动时窗不同，输出文本也完全不同，不能据这些差值声称当前补丁提升质量或 MAL。原始响应、打分和 manifest SHA 保存在上述目录。
+
+**形状、传输与内存。** CP2 Prefill-only 原始接口的 BS8 短输入实测 prefix/fresh=16384/1032，单条 100K 实测=94208/8192；一个输出 token 的原始接口响应未标 `pd_sep`，不作为 P→D 证据。追加的多 token 请求中，BS8 八条均生成 32 token、`pd_sep=true` 且精确复用 16384；单条 102400 输入生成 32 token、`pd_sep=true` 且精确复用 94208。Decode 日志出现 `RdmaClientHostConnections::connectSuccess`，三端在验收后均健康空闲，未见 CacheStore 超时或 CUDA OOM。质量窗口 NVML 峰值 GPU4–7 为 271743/270713/264464/264258 MiB（每卡总 275040 MiB），Prefill 最低仅余约 3.2 GiB；这是 P2+D2 的容量警戒，不能推导更大并发/更长形状可准入。验收并未对同拓扑未修改代码做 RT A/B，因此没有新的因果性能收益结论。
+
+**后续三模块账本。** ① 源层 L2/L8/L14/L20：本轮只删除每源层一次 fresh 长度转换；继续按 producer 投影/AG/restore、压缩写池和 query 分段找真正暴露的 CPU 自耗时与 GPU 空档，保持固定显存预算。② L0 前、CED、draft 前后：L0 HC 大 copy 已消失，但 CPU 前段没有等量缩短；CED 的五次 AllToAll 未变，跨两轮首次提交间隔相差约 0.65 ms 且缺可归因 CPU op；draft 的 `tpSyncModelInputs` 和 host snapshot 有跨 rank/异步生命周期用途，须先测 self-time 再动。③ 非源层：CPContext host tuple 的逐层 list 复制已删除；下一步定位其余重复 host 元数据和 SWA 视图构造，避免新增按 shape 切算法的分支。上述均为下一阶段目标，不是已完成的优化收益。

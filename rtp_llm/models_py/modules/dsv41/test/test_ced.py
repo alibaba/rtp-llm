@@ -994,6 +994,7 @@ class CedBatchedBoundedReplayTest(_SingleThreadTest):
                         )
 
                     def restore_receive(out, send, **kwargs):
+                        self.assertTrue(send.is_contiguous())
                         torch.testing.assert_close(send, inverse_sends[rank])
                         self.assertEqual(
                             kwargs["input_split_sizes"],
@@ -1127,6 +1128,7 @@ class CedLayoutTest(_SingleThreadTest):
                     destinations = []
 
                     def receive(destination, send, **kwargs):
+                        self.assertTrue(send.is_contiguous())
                         destinations.append(destination)
                         destination.copy_(
                             expected.index_select(0, exchange.receive_positions)

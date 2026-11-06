@@ -477,7 +477,7 @@ def forward_layers(
                 and h.dtype == torch.bfloat16
                 and h.is_contiguous()
                 and h.ndim == 2
-                and h.shape[0] >= 8192
+                and h.shape[0] > 0
                 and h.shape[1] == 5120
                 and v4.hc_mult == 4
                 and not torch.cuda.is_current_stream_capturing()

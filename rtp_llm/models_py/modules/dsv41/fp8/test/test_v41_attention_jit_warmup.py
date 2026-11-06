@@ -154,6 +154,12 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                     )
                     self.assertEqual(producer.prepare_raw.call_count, 12)
                     self.assertEqual(producer.prepare_fused_tile.call_count, 8)
+                    self.assertTrue(
+                        all(
+                            call.args[1].dtype == torch.int32
+                            for call in producer.prepare_fused_tile.call_args_list
+                        )
+                    )
                     self.assertEqual(
                         [
                             call.args[0].numel()

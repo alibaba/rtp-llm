@@ -145,7 +145,7 @@ class _RowExchange:
     _layout_host_buffer: Optional[torch.Tensor] = field(default=None, repr=False)
 
     def compact(self, value):
-        send = value.index_select(0, self.send_indices).contiguous()
+        send = value.index_select(0, self.send_indices)
         received = value.new_empty((sum(self.receive_sizes), *value.shape[1:]))
         torch.distributed.all_to_all_single(
             received,
@@ -160,7 +160,7 @@ class _RowExchange:
         return output.index_copy_(0, self.receive_positions, received)
 
     def restore(self, value, out=None):
-        send = value.index_select(0, self.receive_positions).contiguous()
+        send = value.index_select(0, self.receive_positions)
         received = value.new_empty((sum(self.send_sizes), *value.shape[1:]))
         torch.distributed.all_to_all_single(
             received,

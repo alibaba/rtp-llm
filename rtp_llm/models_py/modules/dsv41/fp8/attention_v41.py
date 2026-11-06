@@ -2023,7 +2023,7 @@ class AttentionV41FP8(AttentionFP8):
         shared["topk"] = {self.layer_id: out}
         return out
 
-    def _host_prefill_lengths(self, common) -> list:
+    def _host_prefill_lengths(self, common) -> list | tuple:
         """Per-request new-token counts as host ints, without a GPU->CPU sync.
 
         Under CP the authoritative host copy already lives on
@@ -2034,15 +2034,15 @@ class AttentionV41FP8(AttentionFP8):
         """
         cp = common.cp_ctx
         if cp is not None and cp.input_lengths_global_host is not None:
-            return list(cp.input_lengths_global_host)
+            return cp.input_lengths_global_host
         t = common.cp_ctx.input_lengths_global if common.cp_on else common.input_lengths
         return t.detach().tolist()
 
-    def _host_prefill_prefixes(self, common) -> list:
+    def _host_prefill_prefixes(self, common) -> list | tuple:
         """Per-request KV prefix lengths as host ints (no GPU->CPU sync)."""
         cp = common.cp_ctx
         if cp is not None and cp.prefix_lengths_host is not None:
-            return list(cp.prefix_lengths_host)
+            return cp.prefix_lengths_host
         return common.prefix_lengths.detach().tolist()
 
     def _can_fuse_swa_fresh(self, qkv, common):
@@ -2385,7 +2385,7 @@ class AttentionV41FP8(AttentionFP8):
         lengths = (
             common.cp_ctx.input_lengths_global if common.cp_on else common.input_lengths
         )
-        starts, lengths = starts.long(), lengths.long()
+        starts = starts.long()
         rows = common.cp_ctx.seq_len_full if common.cp_on else x.shape[0]
         x_full = x
         stream_metadata = (
