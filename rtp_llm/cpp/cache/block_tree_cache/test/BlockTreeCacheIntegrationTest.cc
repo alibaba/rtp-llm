@@ -2776,7 +2776,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskContextAbortRestoresSources) 
     environment->expectFullyReclaimed();
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
+TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureKeepsSuccessfulHostTargets) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -2807,12 +2807,18 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
     struct SourceRef {
         IBlockPool*  pool;
         BlockIdxType block;
+        bool         released;
     };
-    bool                                                     saw_host = false;
-    bool                                                     saw_disk = false;
-    std::vector<TransferDescriptor>                          host_load_descs;
-    std::vector<SourceRef>                                   source_refs;
-    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> target_blocks;
+    struct TargetRef {
+        DeviceBlockPoolPtr pool;
+        BlockIdxType       block;
+        bool               installed;
+    };
+    bool                            saw_host = false;
+    bool                            saw_disk = false;
+    std::vector<TransferDescriptor> host_load_descs;
+    std::vector<SourceRef>          source_refs;
+    std::vector<TargetRef>          target_blocks;
     for (size_t desc_index = 0; desc_index < context->loadDescs().size(); ++desc_index) {
         const TransferDescriptor& desc = context->loadDescs()[desc_index];
         ASSERT_TRUE(desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK);
@@ -2826,7 +2832,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
                                       static_cast<IBlockPool*>(environment->disk_pools.at(desc.group_set_id).get());
         for (const BlockIdxType block : desc.source_blocks) {
             EXPECT_EQ(source_pool->treeRefCount(block), 2u);
-            source_refs.push_back({source_pool, block});
+            source_refs.push_back({source_pool, block, desc.source_tier == Tier::HOST});
         }
 
         std::vector<BlockIdxType> targets;
@@ -2835,7 +2841,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
             ASSERT_EQ(blocks.size(), 1u);
             pool->incRef(blocks);
             targets.push_back(blocks.front());
-            target_blocks.emplace_back(pool, blocks.front());
+            target_blocks.push_back({pool, blocks.front(), desc.source_tier == Tier::HOST});
         }
         context->setTargetBlocks(desc_index, std::move(targets));
     }
@@ -2876,25 +2882,44 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
         ASSERT_EQ(resources_after.size(), resources_before[path_index].size());
         for (size_t group_id = 0; group_id < resources_after.size(); ++group_id) {
             SCOPED_TRACE("path_index=" + std::to_string(path_index) + " group_id=" + std::to_string(group_id));
-            EXPECT_EQ(resources_after[group_id].device_blocks, resources_before[path_index][group_id].device_blocks);
-            EXPECT_EQ(resources_after[group_id].host_block, resources_before[path_index][group_id].host_block);
+            const auto&  before      = resources_before[path_index][group_id];
+            const size_t reuse_count = environment->groups[group_id]->computeReuseBlockCount(environment->keys.size());
+            ASSERT_LE(reuse_count, environment->keys.size());
+            const size_t reuse_begin = environment->keys.size() - reuse_count;
+            const bool   host_loaded = path_index >= reuse_begin && before.hasTier(Tier::HOST);
+            if (host_loaded) {
+                EXPECT_TRUE(resources_after[group_id].hasTier(Tier::DEVICE));
+                EXPECT_EQ(resources_after[group_id].host_block, NULL_BLOCK_IDX);
+            } else {
+                EXPECT_EQ(resources_after[group_id].device_blocks, before.device_blocks);
+                EXPECT_EQ(resources_after[group_id].host_block, before.host_block);
+            }
             EXPECT_EQ(resources_after[group_id].disk_block, resources_before[path_index][group_id].disk_block);
             EXPECT_EQ(resources_after[group_id].transfer_state, GroupSetTransferState::IDLE);
         }
     }
-    for (const SourceRef& source : source_refs) {
-        EXPECT_EQ(source.pool->treeRefCount(source.block), 1u);
+    for (const auto& desc : context->loadDescs()) {
+        if (desc.source_tier == Tier::HOST) {
+            EXPECT_EQ(desc.node->group_set_resources[desc.group_set_id].device_blocks, desc.target_blocks);
+        }
     }
-    for (const auto& [pool, block] : target_blocks) {
-        EXPECT_EQ(pool->refCount(block), 1u);
+    for (const SourceRef& source : source_refs) {
+        ASSERT_EQ(source.pool->isAllocated(source.block), !source.released);
+        if (!source.released) {
+            EXPECT_EQ(source.pool->treeRefCount(source.block), 1u);
+        }
+    }
+    for (const auto& target : target_blocks) {
+        // The caller retains one reference; successful HOST targets also belong to the cache.
+        EXPECT_EQ(target.pool->refCount(target.block), target.installed ? 2u : 1u);
     }
     environment->expectPayloads();
 
     result.async_context.reset();
     context.reset();
     environment->reclaimAll();
-    for (const auto& [pool, block] : target_blocks) {
-        releaseDeviceBlocks(*environment->cache, pool, {block});
+    for (const auto& target : target_blocks) {
+        releaseDeviceBlocks(*environment->cache, target.pool, {target.block});
     }
     environment->reclaimAll();
     environment->expectFullyReclaimed();

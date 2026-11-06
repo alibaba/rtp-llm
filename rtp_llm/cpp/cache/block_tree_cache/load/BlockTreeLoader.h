@@ -23,6 +23,7 @@ struct CompletionStageContext;
 
 struct BlockTreeMatchResult {
     size_t                                              matched_device_blocks{0};
+    size_t                                              matched_device_host_blocks{0};
     std::vector<MultiNodeResource>                      matched_device_resources;
     std::shared_ptr<LoadAsyncContext>                   async_context;
     std::vector<BlockTreeCacheReuseTimeMetricsSnapshot> reuse_time_metrics_snapshots;
@@ -82,10 +83,16 @@ private:
     void                 scheduleContextSettlement(const LoadTaskRunner::TaskPtr&           task,
                                                    const std::shared_ptr<LoadAsyncContext>& context);
     bool                 validateLoadTaskLocked(const LoadTaskRunner::Task& task) const;
-    bool                  settleLoadLocked(LoadTaskRunner::Task&                           task,
-                                           bool                                            aggregate_success,
-                                           std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts,
-                                           CompletionStageContext                          observation);
+    struct JoinedLoadCompletion {
+        std::shared_ptr<LoadAsyncContext> context;
+        Tier                              source_tier;
+        bool                              success;
+    };
+    bool settleLoadLocked(LoadTaskRunner::Task&              task,
+                          bool                               aggregate_success,
+                          bool&                              host_success,
+                          std::vector<JoinedLoadCompletion>& joined_contexts,
+                          CompletionStageContext             observation);
 
     bool changeTransferState(TreeNode*             node,
                              size_t                group_set_id,
