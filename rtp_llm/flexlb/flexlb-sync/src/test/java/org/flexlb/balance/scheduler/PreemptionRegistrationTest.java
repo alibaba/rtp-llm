@@ -10,9 +10,9 @@ import org.junit.jupiter.api.Test;
 
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.PreemptionReport;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -83,7 +83,7 @@ class PreemptionRegistrationTest {
                 .setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(50, 100_000L));
         context.data()
                 .register(
-                        mock(RequestLifecycle.class),
+                        mock(AbstractRequestScheduler.class),
                         new RequestFuture((kind, response, failure) -> false));
         assertThrows(
                 IllegalStateException.class,
@@ -122,12 +122,12 @@ class PreemptionRegistrationTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordEngineEvidence(
-                                new EngineEvidence(
+                        observedRequest.recordWorkerRequestEvent(
+                                new WorkerRequestEvent(
                                         route,
                                         route.decodeReservation(),
                                         RoleType.DECODE,
-                                        EngineKind.COMPLETED,
+                                        WorkerRequestEventType.COMPLETED,
                                         0L,
                                         "worker complete",
                                         1003L)));
@@ -179,12 +179,12 @@ class PreemptionRegistrationTest {
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
-                        observedRequest.recordEngineEvidence(
-                                new EngineEvidence(
+                        observedRequest.recordWorkerRequestEvent(
+                                new WorkerRequestEvent(
                                         route,
                                         route.decodeReservation(),
                                         RoleType.DECODE,
-                                        EngineKind.ALLOCATED,
+                                        WorkerRequestEventType.ALLOCATED,
                                         0L,
                                         null,
                                         1003L)));

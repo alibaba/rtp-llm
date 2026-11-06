@@ -1,8 +1,8 @@
 package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -33,12 +33,12 @@ import static org.mockito.Mockito.when;
  */
 class FlexlbScheduleEngineIndexTest {
 
-    private RequestLifecycle routeService;
+    private AbstractRequestScheduler routeService;
     private FlexlbServiceImpl service;
 
     @BeforeEach
     void setUp() {
-        routeService = mock(RequestLifecycle.class);
+        routeService = mock(AbstractRequestScheduler.class);
         MasterStatusService consistencyService = mock(MasterStatusService.class);
         when(consistencyService.isNeedConsistency()).thenReturn(false);
 

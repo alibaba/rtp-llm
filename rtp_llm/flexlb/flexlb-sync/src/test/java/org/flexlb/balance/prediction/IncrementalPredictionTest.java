@@ -4,9 +4,10 @@ import org.flexlb.balance.planner.BuiltinGroupPlanner;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Candidate;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -137,7 +138,7 @@ class IncrementalPredictionTest {
             }
             items.sort(order);
             var queue =
-                    new QueueSnapshot(
+                    new ProjectionQueueSnapshot(
                             1000,
                             true,
                             org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -201,9 +202,9 @@ class IncrementalPredictionTest {
                     }
                 };
         var mode = org.flexlb.config.DispatcherConfig.Type.BATCH;
-        var items = new ArrayList<org.flexlb.balance.scheduler.RequestRoute>();
+        var items = new ArrayList<org.flexlb.balance.scheduler.RouteExecution>();
         for (int i = 0; i < 4; i++) {
-            var request = mock(org.flexlb.balance.scheduler.RequestRoute.class);
+            var request = mock(org.flexlb.balance.scheduler.RouteExecution.class);
             org.mockito.Mockito.when(request.seqLen()).thenReturn(100L);
             org.mockito.Mockito.when(request.hitCache()).thenReturn(0L);
             items.add(request);
@@ -286,14 +287,14 @@ class IncrementalPredictionTest {
         assertEquals(1, recomputed[0]);
     }
 
-    private static RequestTimeEstimation.Candidate project(
+    private static Candidate project(
             PrefillTimePredictor.Evaluator evaluator, int probeId, long budget) {
         var active = new ArrayList<GroupPlanner.Item>();
         for (int id = 1; id <= 4; id++) {
             if (id != probeId) active.add(item(id, 100, 0, 100_000));
         }
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         1000,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,

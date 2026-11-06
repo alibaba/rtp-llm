@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
-import org.flexlb.balance.endpoint.PrefillActiveIndex;
+import org.flexlb.balance.endpoint.OrderedPrefillRequestQueue;
 import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.eviction.DecodePreemptionPolicy;
@@ -83,20 +83,6 @@ public class PlacementConfiguration {
         return deliveries;
     }
 
-    @Lazy
-    @Bean
-    public RequestLifecycle requestLifecycle(
-            RequestRepository requests,
-            RequestTaskPool tasks,
-            ExpirationTimer deadlines,
-            DeliveryDispatcher dispatcher,
-            ResponseCompletionExecutor completions,
-            DeliveryMetricsReporter reporter,
-            TheoryCacheHitReporter trace) {
-        return new RequestLifecycle(
-                requests, tasks, deadlines, dispatcher, completions, reporter, trace);
-    }
-
     @Bean
     @Lazy
     @ConditionalOnMissingBean(PrefillSelectionStrategy.class)
@@ -128,7 +114,7 @@ public class PlacementConfiguration {
     @Bean
     @ConditionalOnMissingBean(PrefillRequestQueue.Factory.class)
     public PrefillRequestQueue.Factory workerQueues() {
-        return order -> PrefillActiveIndex.ordered(16, order);
+        return order -> OrderedPrefillRequestQueue.ordered(16, order);
     }
 
     @Bean
@@ -178,36 +164,45 @@ public class PlacementConfiguration {
 
     @Bean(destroyMethod = "")
     @ConditionalOnMissingBean(RequestScheduler.class)
-    public RequestScheduler requestScheduler(
-            @Lazy RequestWorkerSelector router,
+    public AbstractRequestScheduler requestScheduler(
+            @Lazy RequestRouteSelector router,
             @Lazy DecodePreemption decodePreemption,
             PlacementAvailability availability,
-            RequestLifecycle lifecycle,
+            RequestRepository requests,
+            RequestTaskPool tasks,
+            ExpirationTimer deadlines,
+            DeliveryDispatcher dispatcher,
+            ResponseCompletionExecutor responseCompletions,
+            DeliveryMetricsReporter deliveryReporter,
+            TheoryCacheHitReporter cacheTrace,
             ConfigService configService,
             GroupPlanner grouping,
             @Lazy PlacementQueue queue) {
         FlexlbConfig config = configService.loadBalanceConfig();
-        return create(lifecycle, config, router, decodePreemption, availability, grouping, queue);
-    }
-
-    static AbstractRequestScheduler create(
-            RequestLifecycle lifecycle,
-            FlexlbConfig config,
-            RequestWorkerSelector router,
-            DecodePreemption decodePreemption,
-            PlacementAvailability availability,
-            GroupPlanner grouping,
-            PlacementQueue placementQueue) {
         if (config.isQueue()) {
             return new QueuedRequestScheduler(
                     config,
                     router,
                     decodePreemption,
-                    lifecycle,
+                    requests,
+                    tasks,
+                    deadlines,
+                    dispatcher,
+                    responseCompletions,
+                    deliveryReporter,
+                    cacheTrace,
                     availability,
-                    placementQueue,
+                    queue,
                     grouping);
         }
-        return new DirectRequestScheduler(router, lifecycle);
+        return new DirectRequestScheduler(
+                router,
+                requests,
+                tasks,
+                deadlines,
+                dispatcher,
+                responseCompletions,
+                deliveryReporter,
+                cacheTrace);
     }
 }

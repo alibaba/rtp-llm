@@ -44,20 +44,21 @@ class PrefillEndpointDirectSchedulerTest {
                                 runtime.events()),
                         mock(DeliveryMetricsReporter.class));
         try (var executor = Executors.newFixedThreadPool(8)) {
-            List<Future<CapacityBoundary.Attempt<PrefillEndpoint.RouteReservation>>> futures =
+            List<Future<CapacityBoundary.Attempt<PrefillEndpoint.RequestRecord>>> futures =
                     new ArrayList<>();
             for (long id = 1; id <= 64; id++) {
                 long requestId = id;
                 futures.add(
                         executor.submit(
                                 () -> {
-                                    try (var pin = endpoint.tryPinGeneration()) {
-                                        return endpoint.reserveUnqueuedRoute(
-                                                pin, item(requestId), 10L);
+                                    {
+                                        var selectedEndpoint = endpoint;
+
+                                        return endpoint.reserveUnqueuedRoute(item(requestId), 10L);
                                     }
                                 }));
             }
-            List<PrefillEndpoint.RouteReservation> owned = new ArrayList<>();
+            List<PrefillEndpoint.RequestRecord> owned = new ArrayList<>();
             for (var future : futures) {
                 var result = future.get();
                 if (result.accepted()) {
@@ -70,8 +71,10 @@ class PrefillEndpointDirectSchedulerTest {
             }
             assertEquals(4, owned.size());
             assertEquals(4, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
-            try (var pin = endpoint.tryPinGeneration()) {
-                var full = endpoint.reserveUnqueuedRoute(pin, item(100L), 10L);
+            {
+                var selectedEndpoint = endpoint;
+
+                var full = endpoint.reserveUnqueuedRoute(item(100L), 10L);
                 assertEquals(
                         CapacityBoundary.Resource.PREFILL_REQUEST,
                         full.boundary().resource(),
@@ -79,8 +82,10 @@ class PrefillEndpointDirectSchedulerTest {
             }
             owned.forEach(reservation -> endpoint.rollback(reservation));
             assertEquals(0, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
-            try (var pin = endpoint.tryPinGeneration()) {
-                var result = endpoint.reserveUnqueuedRoute(pin, item(65L), 10L);
+            {
+                var selectedEndpoint = endpoint;
+
+                var result = endpoint.reserveUnqueuedRoute(item(65L), 10L);
                 assertTrue(result.accepted());
                 endpoint.rollback(result.value());
                 endpoint.rollback(result.value());
@@ -115,8 +120,8 @@ class PrefillEndpointDirectSchedulerTest {
         endpoint.close();
     }
 
-    private static org.flexlb.balance.scheduler.RequestRoute item(long requestId) {
-        var item = mock(org.flexlb.balance.scheduler.RequestRoute.class);
+    private static org.flexlb.balance.scheduler.RouteExecution item(long requestId) {
+        var item = mock(org.flexlb.balance.scheduler.RouteExecution.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(String.valueOf(requestId));
         org.mockito.Mockito.when(item.seqLen()).thenReturn(128L);
         return item;

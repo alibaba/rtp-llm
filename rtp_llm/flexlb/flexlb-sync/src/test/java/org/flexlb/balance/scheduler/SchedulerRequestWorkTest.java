@@ -475,7 +475,7 @@ class SchedulerRequestWorkTest {
     private static RequestContext requestContext(long requestId) {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         RequestContext context = RequestProtocolTestSupport.context(config, requestId);
-        var owner = org.mockito.Mockito.mock(RequestLifecycle.class);
+        var owner = org.mockito.Mockito.mock(AbstractRequestScheduler.class);
         SchedulerTestSupport.bindOwner(context, owner);
         return context;
     }

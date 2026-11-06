@@ -2,13 +2,12 @@ package org.flexlb.service.grace;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.DeliveryExecution;
 import org.flexlb.balance.scheduler.ExpirationTimer;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRepository;
-import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestTaskPool;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor;
 import org.flexlb.balance.scheduler.ScheduledTaskTimer;
@@ -39,10 +38,9 @@ import static org.mockito.Mockito.verify;
 /** Exercises the production application shutdown entry, rather than a test runtime's teardown. */
 class SchedulingShutdownTest {
     static void registerComponents(AnnotationConfigApplicationContext context) {
-        var scheduler = mock(RequestScheduler.class);
-        context.registerBean(RequestScheduler.class, () -> scheduler);
+        var scheduler = mock(AbstractRequestScheduler.class);
+        context.registerBean(AbstractRequestScheduler.class, () -> scheduler);
         context.registerBean(DecodePreemption.class, () -> mock(DecodePreemption.class));
-        context.registerBean(RequestLifecycle.class, () -> mock(RequestLifecycle.class));
         context.registerBean(RequestRepository.class, RequestRepository::new);
         context.registerBean(EndpointRegistry.class, () -> mock(EndpointRegistry.class));
         context.registerBean(DeliveryExecution.class, () -> mock(DeliveryExecution.class));
@@ -72,7 +70,6 @@ class SchedulingShutdownTest {
                         f.grpc,
                         f.scheduler,
                         f.preemption,
-                        f.owner,
                         f.deliveries,
                         f.endpoints,
                         f.deadlines,
@@ -85,15 +82,15 @@ class SchedulingShutdownTest {
         order.verify(f.preemption).stopAdmission();
         order.verify(f.scheduler).close();
         order.verify(f.preemption).close();
-        order.verify(f.owner).stopAdmissionsAndAwaitCompletion();
+        order.verify(f.scheduler).stopAdmissionsAndAwaitCompletion();
         order.verify(f.deliveries).awaitDeliveries();
-        order.verify(f.owner).awaitDeliveryCleanup(true);
+        order.verify(f.scheduler).awaitDeliveryCleanup(true);
         order.verify(f.endpoints).close();
-        order.verify(f.owner).awaitDeliveryCleanup(false);
+        order.verify(f.scheduler).awaitDeliveryCleanup(false);
         order.verify(f.deadlines).close();
         order.verify(f.deadlineTimer).close();
         order.verify(f.tasks).awaitIdle();
-        order.verify(f.owner).closeOutstandingAndTerminalize();
+        order.verify(f.scheduler).closeOutstandingAndTerminalize();
         order.verify(f.dispatcher).awaitStops();
         order.verify(f.tasks).close();
         order.verify(f.completions).close();
@@ -138,14 +135,14 @@ class SchedulingShutdownTest {
         var shutdown = CompletableFuture.supplyAsync(f.application::offline);
         try {
             assertThrows(TimeoutException.class, () -> shutdown.get(100, TimeUnit.MILLISECONDS));
-            verify(f.owner, never()).closeOutstandingAndTerminalize();
+            verify(f.scheduler, never()).closeOutstandingAndTerminalize();
             verify(f.completions, never()).close();
         } finally {
             release.countDown();
             assertTrue(shutdown.get(3, TimeUnit.SECONDS));
             tasks.close();
         }
-        verify(f.owner).closeOutstandingAndTerminalize();
+        verify(f.scheduler).closeOutstandingAndTerminalize();
         verify(f.completions).close();
     }
 
@@ -176,9 +173,8 @@ class SchedulingShutdownTest {
 
     private static class Fixture {
         final RequestRepository requests = new RequestRepository();
-        final RequestScheduler scheduler = mock(RequestScheduler.class);
+        final AbstractRequestScheduler scheduler = mock(AbstractRequestScheduler.class);
         final DecodePreemption preemption = mock(DecodePreemption.class);
-        final RequestLifecycle owner = mock(RequestLifecycle.class);
         final EndpointRegistry endpoints = mock(EndpointRegistry.class);
         final DeliveryExecution deliveries = mock(DeliveryExecution.class);
         final RequestTaskPool tasks;
@@ -200,7 +196,7 @@ class SchedulingShutdownTest {
                             new MockEnvironment(),
                             new org.flexlb.listener.ApplicationWarmupState(),
                             0L);
-            application.configureScheduling(scheduler, owner, requests, endpoints, preemption);
+            application.configureScheduling(scheduler, requests, endpoints, preemption);
             application.configureExecution(deliveries, tasks, completions, dispatcher);
             application.configureTimers(deadlines, deadlineTimer, timer);
         }

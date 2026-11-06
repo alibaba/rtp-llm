@@ -4,6 +4,8 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.service.TheoryCacheHitReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.util.Logger;
 
 import java.util.Objects;
@@ -11,12 +13,27 @@ import java.util.Objects;
 /** Accepts DIRECT requests and completes one immediate endpoint selection and handoff. */
 public final class DirectRequestScheduler extends AbstractRequestScheduler {
 
-    private final RequestWorkerSelector router;
+    private final RequestRouteSelector router;
     private final java.util.concurrent.ConcurrentLinkedQueue<RequestContext> pending =
             new java.util.concurrent.ConcurrentLinkedQueue<>();
 
-    DirectRequestScheduler(RequestWorkerSelector router, RequestLifecycle lifecycle) {
-        super(lifecycle);
+    DirectRequestScheduler(
+            RequestRouteSelector router,
+            RequestRepository requests,
+            RequestTaskPool tasks,
+            ExpirationTimer deadlines,
+            DeliveryDispatcher dispatcher,
+            ResponseCompletionExecutor responseCompletions,
+            DeliveryMetricsReporter deliveryReporter,
+            TheoryCacheHitReporter cacheTrace) {
+        super(
+                requests,
+                tasks,
+                deadlines,
+                dispatcher,
+                responseCompletions,
+                deliveryReporter,
+                cacheTrace);
         this.router = Objects.requireNonNull(router, "router");
     }
 
@@ -50,7 +67,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
     }
 
     private void submitSelection(RequestContext request) {
-        try (var task = lifecycle.tasks.registerRequestWork(request)) {
+        try (var task = tasks.registerRequestWork(request)) {
             acceptedWork.incrementAndGet();
             try {
                 task.submit(
@@ -76,7 +93,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
 
     @Override
     public boolean awaitStopped(long deadlineNanos) {
-        if (acceptedWork.get() != 0 && lifecycle.tasks.isExecutingOnCurrentThread()) return false;
+        if (acceptedWork.get() != 0 && tasks.isExecutingOnCurrentThread()) return false;
         while (scheduling.get() || acceptedWork.get() != 0) {
             if (deadlineNanos != Long.MAX_VALUE && System.nanoTime() >= deadlineNanos) return false;
             java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
@@ -95,7 +112,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
     }
 
     @Override
-    public void onRequestChanged(RequestContext request) {
+    protected void removeRequest(RequestContext request) {
         pending.remove(request);
     }
 
@@ -104,7 +121,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
         if (!checkRequestMode(context, false)) return;
         Objects.requireNonNull(context, "context");
         if (stopped) {
-            lifecycle.cancel(context, 0L, CancelReason.SHUTDOWN);
+            cancel(context, 0L, CancelReason.SHUTDOWN);
             return;
         }
         pending.add(context);
@@ -113,7 +130,7 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
     }
 
     private void dispatchRegistered(RequestContext context) {
-        AdmissionHandle operation = lifecycle.claimAdmissionHandle(context);
+        PlacementOperation operation = claimPlacement(context);
         if (operation == null) return;
         Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
         try {
@@ -134,27 +151,40 @@ public final class DirectRequestScheduler extends AbstractRequestScheduler {
                     context.data().getRequestId(),
                     problem);
         } finally {
-            if (failure != null) lifecycle.publish(context, failure, false);
+            if (failure != null) publish(context, failure, false);
         }
     }
 
-    /** Admission and generation pins finish before response callbacks can retire an endpoint. */
-    private PlacementResult<RequestRoute, PlacementKey> selectAndCommit(
-            RequestContext context, AdmissionHandle operation) {
+    /**
+     * Finish admission before publishing the route response.
+     */
+    private PlacementResult<RouteExecution, PlacementKey> selectAndCommit(
+            RequestContext context, PlacementOperation operation) {
         try {
             var group = router.resolvePolicyGroup(context);
-            var selection = router.select(context, group);
-            if (selection.status() == PlacementResult.Status.ENDPOINT_CHANGED) {
-                selection = router.select(context, group);
+            // Selection and admission share one retry budget. Never replay a delivered route.
+            for (int attempt = 0; ; attempt++) {
+                var result = prepareSelectedRoute(context, router.select(context, group));
+                context.data().setSchedulingDiagnostics(result.diagnostics());
+                if (result.status() == PlacementResult.Status.SUCCESS) {
+                    var publishing = operation;
+                    operation = null;
+                    result = publishPlacement(result.value(), publishing, null);
+                    if (result.status() == PlacementResult.Status.BLOCKED)
+                        return PlacementResult.rejected(
+                                Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
+                }
+                if (result.status() == PlacementResult.Status.ENDPOINT_CHANGED && attempt == 0) {
+                    if (operation == null) {
+                        operation = claimPlacement(context);
+                        if (operation == null) return PlacementResult.closed();
+                    }
+                    continue;
+                }
+                return result;
             }
-            context.data().setSchedulingDiagnostics(selection.diagnostics());
-            if (selection.status() != PlacementResult.Status.SUCCESS) return selection.asFailure();
-            var committed = lifecycle.dispatcher.submitRoute(selection.value(), operation);
-            return committed.status() == PlacementResult.Status.BLOCKED
-                    ? PlacementResult.rejected(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED))
-                    : committed;
         } finally {
-            operation.finish();
+            if (operation != null) AbstractRequestScheduler.finishPlacement(operation);
         }
     }
 }

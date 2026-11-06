@@ -12,7 +12,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.slf4j.LoggerFactory;
-import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -22,6 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.runWithStateLock;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -41,19 +41,20 @@ class ReviewLifecycleRegressionTest {
                 EndpointTestSupport.routeStrategy(EndpointTestSupport.requestRuntime()),
                 new PlacementAvailability(),
                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()),
-                order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
+                order -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(16, order));
     }
 
     @Test
     void failedCleanupCannotRunASuccessfulGenerationFinalizer() {
-        var lifecycle = new EndpointRetirementTestSupport(() -> {});
+        var failure = new IllegalStateException("cleanup failed");
+        var lifecycle =
+                new EndpointRetirementTestSupport(
+                        () -> {
+                            throw failure;
+                        });
         AtomicBoolean finalized = new AtomicBoolean();
         lifecycle.onRetired(() -> finalized.set(true));
-        lifecycle.beginRetirement();
-        assertTrue(lifecycle.tryStartCleanup());
-        lifecycle.beginCleanup();
-        var failure = new IllegalStateException("cleanup failed");
-        lifecycle.completeRetirement(failure);
+        assertSame(failure, assertThrows(IllegalStateException.class, lifecycle::close));
         assertFalse(finalized.get());
         assertSame(
                 failure,
@@ -123,23 +124,24 @@ class ReviewLifecycleRegressionTest {
                         registry, role, status.getLogicalIpPort(), status);
         ReentrantLock lock =
                 role == RoleType.PREFILL
-                        ? ((PrefillEndpoint) endpoint).resourceLock()
-                        : (ReentrantLock) ReflectionTestUtils.getField(endpoint, "admissionLock");
+                        ? ((PrefillEndpoint) endpoint).stateLock()
+                        : endpoint.stateLock();
         CountDownLatch held = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         try (var owner = Executors.newSingleThreadExecutor()) {
             var holding =
                     owner.submit(
                             () -> {
-                                lock.lock();
-                                try {
-                                    held.countDown();
-                                    release.await();
-                                } catch (InterruptedException failure) {
-                                    Thread.currentThread().interrupt();
-                                } finally {
-                                    lock.unlock();
-                                }
+                                runWithStateLock(
+                                        lock,
+                                        () -> {
+                                            try {
+                                                held.countDown();
+                                                release.await();
+                                            } catch (InterruptedException failure) {
+                                                Thread.currentThread().interrupt();
+                                            }
+                                        });
                             });
             try {
                 assertTrue(held.await(2L, TimeUnit.SECONDS));

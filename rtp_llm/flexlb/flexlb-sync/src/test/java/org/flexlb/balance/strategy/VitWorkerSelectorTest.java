@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.strategy.StrategyTestSupport.Selection;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -55,8 +55,9 @@ class VitWorkerSelectorTest {
     void returnsPinnedVitMetadata() {
         registerVit("127.0.0.3", 8080, "group-a");
 
-        try (RequestRoute selected =
-                StrategyTestSupport.select(endpoints, strategy, 3L, RoleType.VIT, "group-a")) {
+        {
+            Selection selected =
+                    StrategyTestSupport.select(endpoints, strategy, 3L, RoleType.VIT, "group-a");
             assertNotNull(selected);
             assertEquals(RoleType.VIT, StrategyTestSupport.vit(selected).getRole());
             assertEquals("3", StrategyTestSupport.vit(selected).getRequestId());
@@ -81,9 +82,10 @@ class VitWorkerSelectorTest {
         Map<String, Integer> counts = new HashMap<>();
 
         for (int request = 0; request < 3_000; request++) {
-            try (RequestRoute selected =
-                    StrategyTestSupport.select(
-                            endpoints, strategy, 10_000L + request, RoleType.VIT, null)) {
+            {
+                Selection selected =
+                        StrategyTestSupport.select(
+                                endpoints, strategy, 10_000L + request, RoleType.VIT, null);
                 assertNotNull(selected);
                 counts.merge(StrategyTestSupport.vit(selected).getServerIp(), 1, Integer::sum);
             }
@@ -115,9 +117,10 @@ class VitWorkerSelectorTest {
         VitWorkerSelector grouped = new VitWorkerSelector();
         Map<String, Integer> counts = new HashMap<>();
         for (int request = 0; request < 4_000; request++) {
-            try (RequestRoute selected =
-                    StrategyTestSupport.select(
-                            directory, grouped, request, RoleType.VIT, "target")) {
+            {
+                Selection selected =
+                        StrategyTestSupport.select(
+                                directory, grouped, request, RoleType.VIT, "target");
                 assertNotNull(selected);
                 assertEquals("target", StrategyTestSupport.vit(selected).getGroup());
                 counts.merge(StrategyTestSupport.vit(selected).getServerIp(), 1, Integer::sum);

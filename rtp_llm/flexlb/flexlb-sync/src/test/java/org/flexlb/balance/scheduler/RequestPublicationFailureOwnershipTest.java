@@ -22,11 +22,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.ResponseKind;
 import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -60,7 +60,7 @@ class RequestPublicationFailureOwnershipTest {
     void rejectedCloseRegistrationIsReportedOnceAndDoesNotClaimCleanup() {
         try (var f = new Fixture()) {
             var context = RequestProtocolTestSupport.context(f.config, 9390L);
-            RequestProtocolTestSupport.register(f.owner, context);
+            RequestProtocolTestSupport.submitForManualPlacement(f.owner, context);
             context.beginClose(
                     EndEvidence.failure(
                             null,
@@ -99,7 +99,7 @@ class RequestPublicationFailureOwnershipTest {
     void deliveryPublicationFailureSettlesTheTransferredOwnership() throws Exception {
         try (var f = new Fixture()) {
             var context = spy(RequestProtocolTestSupport.context(f.config, 9305L));
-            var future = RequestProtocolTestSupport.register(f.owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(f.owner, context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
                     SchedulingTestConfig.createRoute(
@@ -156,7 +156,7 @@ class RequestPublicationFailureOwnershipTest {
         try (var f = new Fixture();
                 var workers = java.util.concurrent.Executors.newFixedThreadPool(2)) {
             var context = RequestProtocolTestSupport.context(f.config, 9304L);
-            var future = RequestProtocolTestSupport.register(f.owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(f.owner, context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
                     SchedulingTestConfig.createRoute(
@@ -232,7 +232,7 @@ class RequestPublicationFailureOwnershipTest {
             boolean beforeFreeze) throws Exception {
         try (var f = new Fixture()) {
             var context = spy(RequestProtocolTestSupport.context(f.config, 9301L));
-            var future = RequestProtocolTestSupport.register(f.owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(f.owner, context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
                     spy(
@@ -299,7 +299,7 @@ class RequestPublicationFailureOwnershipTest {
             boolean timerFailure) throws Exception {
         try (var f = new Fixture()) {
             var context = RequestProtocolTestSupport.context(f.config, 9302L);
-            var future = RequestProtocolTestSupport.register(f.owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(f.owner, context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
                     spy(
@@ -357,13 +357,13 @@ class RequestPublicationFailureOwnershipTest {
                 doCallRealMethod().when(route).successResponse(anyBoolean());
             }
             originalTimer.update(context, context.snapshot().deadlines());
-            f.owner.onEngineEvidence(
+            f.owner.onWorkerRequestEvent(
                     context,
-                    new EngineEvidence(
+                    new WorkerRequestEvent(
                             route,
                             null,
                             RoleType.PDFUSION,
-                            EngineKind.COMPLETED,
+                            WorkerRequestEventType.COMPLETED,
                             0L,
                             null,
                             System.currentTimeMillis()));
@@ -379,7 +379,7 @@ class RequestPublicationFailureOwnershipTest {
             throws Exception {
         try (var f = new Fixture()) {
             var context = RequestProtocolTestSupport.context(f.config, 9305L);
-            var future = RequestProtocolTestSupport.register(f.owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(f.owner, context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
                     SchedulingTestConfig.createRoute(
@@ -438,13 +438,13 @@ class RequestPublicationFailureOwnershipTest {
             } finally {
                 ReflectionTestUtils.setField(publisher, "completionWorkers", originalWorkers);
             }
-            f.owner.onEngineEvidence(
+            f.owner.onWorkerRequestEvent(
                     context,
-                    new EngineEvidence(
+                    new WorkerRequestEvent(
                             route,
                             null,
                             RoleType.PDFUSION,
-                            EngineKind.COMPLETED,
+                            WorkerRequestEventType.COMPLETED,
                             0L,
                             null,
                             System.currentTimeMillis()));
@@ -458,7 +458,7 @@ class RequestPublicationFailureOwnershipTest {
     void externalCancelCompletesWhileTheAdmissionOwnerFinishes() throws Exception {
         try (var f = new Fixture()) {
             var context = RequestProtocolTestSupport.context(f.config, 9303L);
-            var future = RequestProtocolTestSupport.register(f.owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(f.owner, context);
             var endpoint = mock(PrefillEndpoint.class);
             var route =
                     SchedulingTestConfig.createRoute(
@@ -470,7 +470,7 @@ class RequestPublicationFailureOwnershipTest {
                             null,
                             null,
                             System.currentTimeMillis());
-            try (var admission = f.owner.claimAdmissionHandle("9303", future)) {
+            try (var admission = SchedulerTestSupport.claim(f.owner, "9303", future)) {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -492,7 +492,7 @@ class RequestPublicationFailureOwnershipTest {
                             context.snapshot().placement(),
                             "the real admission owner must remain until it finishes");
                 } finally {
-                    admission.finish();
+                    AbstractRequestScheduler.finishPlacement(admission);
                 }
             }
             SchedulerTestSupport.awaitRequestWork(f.runtime);
@@ -509,7 +509,7 @@ class RequestPublicationFailureOwnershipTest {
             boolean alreadyRunning) throws Exception {
         try (var f = new Fixture()) {
             var context = RequestProtocolTestSupport.context(f.config, 9304L);
-            var future = RequestProtocolTestSupport.register(f.owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(f.owner, context);
             org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(
                     f.runtime, "tasks", spy(f.runtime.tasks));
             var source = f.runtime.tasks.registerRequestWork(context);
@@ -618,7 +618,7 @@ class RequestPublicationFailureOwnershipTest {
 
     private static final class Fixture implements AutoCloseable {
         private final org.flexlb.config.FlexlbConfig config = SchedulingTestConfig.newConfig();
-        private final RequestLifecycle owner;
+        private final AbstractRequestScheduler owner;
         private final SchedulerTestServices runtime;
 
         private Fixture() {

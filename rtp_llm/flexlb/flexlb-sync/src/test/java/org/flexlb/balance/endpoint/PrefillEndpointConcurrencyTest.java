@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Request;
@@ -66,7 +66,7 @@ class PrefillEndpointConcurrencyTest {
         when(evaluator.predictBatchMs(any()))
                 .thenAnswer(
                         call -> {
-                            assertFalse(endpoint.resourceLock().isHeldByCurrentThread());
+                            assertFalse(endpoint.stateLock().isHeldByCurrentThread());
                             int attempt = calls.incrementAndGet();
                             assertTrue(attempt <= 2, "membership stabilization must terminate");
                             if (attempt == 1) {
@@ -124,7 +124,13 @@ class PrefillEndpointConcurrencyTest {
             assertTrue(read.get(5, TimeUnit.SECONDS).locallyOwnedRequests() >= 0);
             assertFalse(reduction.isDone(), "status reduction remains paused in the predictor");
             resumePrediction.countDown();
-            reduction.get(5, TimeUnit.SECONDS);
+            if (change == Change.RETIRE) {
+                var failure =
+                        org.junit.jupiter.api.Assertions.assertThrows(
+                                java.util.concurrent.ExecutionException.class,
+                                () -> reduction.get(5, TimeUnit.SECONDS));
+                assertTrue(failure.getCause() instanceof IllegalStateException);
+            } else reduction.get(5, TimeUnit.SECONDS);
             var work = endpoint.captureRouteProjectionInputs().work();
             long expected =
                     switch (change) {
@@ -160,7 +166,7 @@ class PrefillEndpointConcurrencyTest {
         assertEquals(0, endpoint.stats().batchCount());
     }
 
-    private static RequestRoute route(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
+    private static RouteExecution route(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
         var ctx = new RequestContext(config);
         ctx.data().setRequest(Request.builder().requestId(String.valueOf(id)).seqLen(100L).build());
         var server = new ServerStatus();
@@ -173,10 +179,11 @@ class PrefillEndpointConcurrencyTest {
     }
 
     private static void commit(
-            PrefillEndpoint endpoint, long id, long ms, List<RequestRoute> routes) {
+            PrefillEndpoint endpoint, long id, long ms, List<RouteExecution> routes) {
         for (var route : routes) assertTrue(EndpointTestSupport.offer(endpoint, route));
         try (var ignored = EndpointTestSupport.commitBatch(endpoint, id, ms, routes)) {
-            // Close the temporary pin; leave real resource ownership for the concurrent actors.
+            // Close the temporary Worker selection; leave real resource ownership for the
+            // concurrent actors.
         }
     }
 }

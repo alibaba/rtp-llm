@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 
 import java.util.ArrayList;
@@ -62,23 +62,23 @@ public final class RequestTimeEstimationTestSupport {
                 maxRequests, 1_000_000L, 1_000_000L, 0L, collectionWindowMs);
     }
 
-    static QueueSnapshot queue(
+    static ProjectionQueueSnapshot queue(
             boolean priority,
             GroupPlanner.Constraints constraints,
             List<GroupPlanner.Item> activeItems) {
         return queue(true, priority, constraints, activeItems, null);
     }
 
-    static QueueSnapshot queue(
+    static ProjectionQueueSnapshot queue(
             boolean queueScheduling,
             boolean priority,
             GroupPlanner.Constraints constraints,
             List<GroupPlanner.Item> activeItems,
-            QueueSnapshot.AdmissionBlock admissionBlock) {
+            ProjectionQueueSnapshot.AdmissionBlock admissionBlock) {
         Comparator<GroupPlanner.Item> ordering = priority ? PRIORITY : FIFO;
         List<GroupPlanner.Item> ordered = new ArrayList<>(activeItems);
         ordered.sort(ordering);
-        return new QueueSnapshot(
+        return new ProjectionQueueSnapshot(
                 NOW_MS,
                 queueScheduling,
                 org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -135,8 +135,8 @@ public final class RequestTimeEstimationTestSupport {
         return new WorkSnapshot(NOW_MS, requests, batches, unknownRequestCount);
     }
 
-    static RequestTimeEstimation.Candidate project(
-            QueueSnapshot queue,
+    static Candidate project(
+            ProjectionQueueSnapshot queue,
             WorkSnapshot work,
             PrefillTimePredictor.Evaluator evaluator,
             Probe probe,
@@ -163,16 +163,15 @@ public final class RequestTimeEstimationTestSupport {
         }
     }
 
-    public static RequestTimeEstimation.Candidate project(
-            RequestTimeEstimation.Inputs inputs, Probe probe) {
+    public static Candidate project(RequestTimeEstimation.Inputs inputs, Probe probe) {
         return project(inputs, probe, inputs.queue().capturedAtMs());
     }
 
-    public static RequestTimeEstimation.Candidate project(
+    public static Candidate project(
             RequestTimeEstimation.Inputs inputs, Probe probe, long planningAtMs) {
         RequestTimeEstimation.CandidateView view =
                 RequestTimeEstimation.current()
-                        .projectRankingView(
+                        .projectCandidate(
                                 inputs,
                                 String.valueOf(probe.requestId()),
                                 probe.priority(),
@@ -182,20 +181,29 @@ public final class RequestTimeEstimationTestSupport {
                                 probe.hitCache(),
                                 probe.routingCacheMatchTokens(),
                                 planningAtMs);
-        return immutable(RequestTimeEstimation.applyAdmissionPolicy(inputs.queue(), view));
+        return immutable(view);
     }
 
-    private static RequestTimeEstimation.Candidate immutable(
-            RequestTimeEstimation.CandidateView source) {
-        return source instanceof RequestTimeEstimation.Candidate candidate
-                ? candidate
-                : new RequestTimeEstimation.Candidate(
-                        source.state(),
-                        source.projectedTtftMsValue(),
-                        source.incomingPrefillMs(),
-                        source.initialHeadDisposition(),
-                        source.detail(),
-                        source.cacheHitTokens(),
-                        source.routingCacheMatchTokens());
+    public record Candidate(
+            RequestTimeEstimation.State state,
+            long projectedTtftMsValue,
+            long incomingPrefillMs,
+            RequestTimeEstimation.InitialHeadDisposition initialHeadDisposition,
+            String detail,
+            long cacheHitTokens,
+            long routingCacheMatchTokens)
+            implements RequestTimeEstimation.CandidateView {}
+
+    private static Candidate immutable(RequestTimeEstimation.CandidateView source) {
+        return new Candidate(
+                source.admissionState(),
+                source.admissionState() == RequestTimeEstimation.State.MODELED
+                        ? source.projectedTtftMsValue()
+                        : RequestTimeEstimation.UNKNOWN,
+                source.incomingPrefillMs(),
+                source.initialHeadDisposition(),
+                source.admissionDetail(),
+                source.cacheHitTokens(),
+                source.routingCacheMatchTokens());
     }
 }

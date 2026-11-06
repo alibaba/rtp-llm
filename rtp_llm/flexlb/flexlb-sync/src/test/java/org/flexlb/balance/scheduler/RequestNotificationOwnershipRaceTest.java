@@ -55,7 +55,7 @@ class RequestNotificationOwnershipRaceTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(
                         SchedulerTestServices.lifecycle(owner));
         var context = RequestProtocolTestSupport.context(config, 9401L);
-        var future = RequestProtocolTestSupport.register(owner, context);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
         var originalTimer = runtime.deadlines();
         var timer = spy(originalTimer);
         var notificationStarted = new CountDownLatch(1);

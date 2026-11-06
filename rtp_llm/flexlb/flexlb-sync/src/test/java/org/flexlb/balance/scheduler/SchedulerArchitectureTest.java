@@ -2,7 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.eviction.DecodePreemption;
 import org.flexlb.balance.planner.GroupPlanner;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.junit.jupiter.api.Test;
 import org.springframework.asm.ClassReader;
 import org.springframework.asm.ClassVisitor;
@@ -23,7 +23,7 @@ class SchedulerArchitectureTest {
     @Test
     void lifecycleDoesNotCommitDeliveryResources() throws IOException {
         inspectCalls(
-                RequestLifecycle.class,
+                AbstractRequestScheduler.class,
                 (owner, name) ->
                         assertFalse(
                                 owner.equals(
@@ -37,7 +37,7 @@ class SchedulerArchitectureTest {
     @Test
     void defaultSchedulingDoesNotOwnDeliveryFacilities() throws IOException {
         assertNoImplementationDependency(QueuedRequestScheduler.class, DeliveryExecution.class);
-        assertNoImplementationDependency(EndpointWork.class, DeliveryExecution.class);
+        assertNoImplementationDependency(PrefillQueueScheduler.class, DeliveryExecution.class);
         assertNoImplementationDependency(Delivery.class, DeliveryExecution.class);
     }
 
@@ -55,7 +55,7 @@ class SchedulerArchitectureTest {
                             assertFalse(
                                     owner.equals(Type.getInternalName(RequestContext.class))
                                             && name.equals("selectResponse"),
-                                    "RequestLifecycle owns response arbitration; the executor only runs accepted work"));
+                                    "AbstractRequestScheduler owns response arbitration; the executor only runs accepted work"));
         }
     }
 
@@ -64,7 +64,7 @@ class SchedulerArchitectureTest {
         assertNoImplementationDependency(
                 org.flexlb.balance.endpoint.PrefillEndpoint.class, QueuedRequestScheduler.class);
         assertNoImplementationDependency(
-                org.flexlb.balance.endpoint.PrefillEndpoint.class, EndpointWork.class);
+                org.flexlb.balance.endpoint.PrefillEndpoint.class, PrefillQueueScheduler.class);
         assertNoImplementationDependency(
                 org.flexlb.balance.endpoint.PrefillEndpoint.class, DeliveryDispatcher.class);
     }
@@ -75,7 +75,7 @@ class SchedulerArchitectureTest {
                 org.flexlb.balance.endpoint.PrefillEndpoint.class,
                 (owner, name) ->
                         assertFalse(
-                                owner.equals(Type.getInternalName(RequestLifecycle.class))
+                                owner.equals(Type.getInternalName(AbstractRequestScheduler.class))
                                         && name.equals("rejectRoute"),
                                 "Scheduler settles drained requests; Endpoint only returns their exact membership"));
     }
@@ -92,11 +92,12 @@ class SchedulerArchitectureTest {
     void queueImplementationsDoNotOwnResourcesOrRequestSettlement() throws IOException {
         for (Class<?> queue :
                 new Class<?>[] {
-                    OrderedRequestQueue.class, org.flexlb.balance.endpoint.PrefillActiveIndex.class
+                    OrderedRequestQueue.class,
+                    org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.class
                 }) {
             for (Class<?> owner :
                     new Class<?>[] {
-                        RequestLifecycle.class,
+                        AbstractRequestScheduler.class,
                         DeliveryDispatcher.class,
                         org.flexlb.balance.endpoint.PrefillEndpoint.class,
                         org.flexlb.balance.endpoint.DecodeEndpoint.class
@@ -109,10 +110,10 @@ class SchedulerArchitectureTest {
     @Test
     void selectionConsumersDependOnContractsInsteadOfStrategyImplementations() throws IOException {
         assertNoImplementationDependency(
-                RequestWorkerSelector.class,
+                RequestRouteSelector.class,
                 org.flexlb.balance.strategy.CostBasedPrefillStrategy.class);
         assertNoImplementationDependency(
-                RequestWorkerSelector.class, org.flexlb.balance.strategy.DecodeSelector.class);
+                RequestRouteSelector.class, org.flexlb.balance.strategy.DecodeSelector.class);
         assertNoImplementationDependency(
                 org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry.class,
                 org.flexlb.balance.strategy.CostBasedPrefillStrategy.class);
@@ -136,9 +137,9 @@ class SchedulerArchitectureTest {
     @Test
     void queueExecutionDoesNotDefineOrderingOrCollectionPolicy() throws IOException {
         assertNoImplementationDependency(
-                EndpointWork.class, org.flexlb.util.PriorityOrdering.class);
+                PrefillQueueScheduler.class, org.flexlb.util.PriorityOrdering.class);
         inspectCalls(
-                EndpointWork.class,
+                PrefillQueueScheduler.class,
                 (owner, name) ->
                         assertFalse(
                                 owner.equals(Type.getInternalName(GroupPlanner.class))
@@ -148,7 +149,7 @@ class SchedulerArchitectureTest {
 
     @Test
     void requestLifecycleDoesNotOwnTheTransportTimer() {
-        for (var field : RequestLifecycle.class.getDeclaredFields()) {
+        for (var field : AbstractRequestScheduler.class.getDeclaredFields()) {
             assertFalse(
                     TaskTimer.class.isAssignableFrom(field.getType()),
                     "transport timeout facilities belong to Dispatcher, not request settlement");
@@ -157,7 +158,7 @@ class SchedulerArchitectureTest {
 
     @Test
     void lifecycleAndSchedulerDoNotCarryExecutionCapacity() {
-        for (var type : new Class<?>[] {RequestLifecycle.class, AbstractRequestScheduler.class}) {
+        for (var type : new Class<?>[] {AbstractRequestScheduler.class}) {
             for (var field : type.getDeclaredFields()) {
                 assertFalse(
                         org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity.class
@@ -178,8 +179,8 @@ class SchedulerArchitectureTest {
                     new Class<?>[] {
                         org.flexlb.balance.endpoint.EndpointRegistry.class,
                         org.flexlb.balance.endpoint.PrefillEndpoint.class,
-                        org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin.class,
-                        RequestRoute.class,
+                        org.flexlb.balance.endpoint.WorkerEndpoint.class,
+                        RouteExecution.class,
                         org.flexlb.service.monitor.EngineHealthReporter.class,
                         org.flexlb.cache.telemetry.CacheMetricsReporter.class
                     }) {
@@ -190,12 +191,12 @@ class SchedulerArchitectureTest {
 
     @Test
     void queueExecutionCannotChooseFacilitiesFromAnIndividualRequest() throws IOException {
-        assertNoImplementationDependency(EndpointWork.class, SchedulerTestServices.class);
+        assertNoImplementationDependency(PrefillQueueScheduler.class, SchedulerTestServices.class);
         inspectCalls(
-                EndpointWork.class,
+                PrefillQueueScheduler.class,
                 (owner, name) ->
                         assertFalse(
-                                owner.equals(Type.getInternalName(RequestLifecycle.class))
+                                owner.equals(Type.getInternalName(AbstractRequestScheduler.class))
                                         && name.equals("runtime"),
                                 "queue facilities must be bound before publication"));
     }
@@ -211,7 +212,7 @@ class SchedulerArchitectureTest {
             for (Class<?> dependency :
                     new Class<?>[] {
                         RequestContext.class,
-                        RequestRoute.class,
+                        RouteExecution.class,
                         org.flexlb.balance.endpoint.PrefillEndpoint.class
                     }) {
                 assertNoImplementationDependency(reporter, dependency);
@@ -229,11 +230,11 @@ class SchedulerArchitectureTest {
                 }) {
             assertNoDependency(consumer, RequestScheduler.class);
         }
-        assertNoDependency(RequestLifecycle.class, RequestWorkerSelector.class);
+        assertNoDependency(AbstractRequestScheduler.class, RequestRouteSelector.class);
     }
 
     @Test
-    void defaultSchedulersShareWiringWithoutInheritingRequestLifecycle() {
+    void defaultSchedulersInheritSharedRequestManagement() {
         assertTrue(
                 Arrays.stream(GroupPlanner.class.getDeclaredFields())
                         .allMatch(f -> Modifier.isStatic(f.getModifiers())));
@@ -243,18 +244,22 @@ class SchedulerArchitectureTest {
                 AbstractRequestScheduler.class, DirectRequestScheduler.class.getSuperclass());
         org.junit.jupiter.api.Assertions.assertEquals(
                 AbstractRequestScheduler.class, QueuedRequestScheduler.class.getSuperclass());
-        assertFalse(RequestLifecycle.class.isAssignableFrom(AbstractRequestScheduler.class));
+        for (var field : AbstractRequestScheduler.class.getDeclaredFields()) {
+            assertFalse(
+                    RequestScheduler.class.isAssignableFrom(field.getType()),
+                    "the base must not hold a second scheduler or require binding");
+        }
         assertTrue(AutoCloseable.class.isAssignableFrom(DirectRequestScheduler.class));
     }
 
     @Test
-    void schedulingContractExposesTimingHooksButKeepsSettlementInTheSharedLifecycle() {
+    void schedulingContractExposesTimingHooksAndBaseImplementsRequestCleanup() {
         org.junit.jupiter.api.Assertions.assertEquals(
                 java.util.Set.of(
                         "start",
                         "onRequest",
-                        "onRequestChanged",
                         "onEndpointChanged",
+                        "shouldRetryRouteFailure",
                         "schedule",
                         "stop",
                         "awaitStopped",
@@ -266,7 +271,7 @@ class SchedulerArchitectureTest {
                         .collect(java.util.stream.Collectors.toSet()));
         for (Class<?> type :
                 new Class<?>[] {
-                    RequestLifecycle.class,
+                    AbstractRequestScheduler.class,
                     DirectRequestScheduler.class,
                     QueuedRequestScheduler.class
                 }) {
@@ -275,32 +280,39 @@ class SchedulerArchitectureTest {
                             .anyMatch(i -> i.getSimpleName().equals("Control")));
         }
         assertFalse(
-                Arrays.stream(RequestLifecycle.class.getDeclaredMethods())
+                Arrays.stream(AbstractRequestScheduler.class.getDeclaredMethods())
                         .anyMatch(
-                                method ->
-                                        java.util.Set.of(
-                                                        "schedule",
-                                                        "commitDirectRoute",
-                                                        "enqueueRoute")
-                                                .contains(method.getName())));
+                                method -> java.util.Set.of("schedule").contains(method.getName())));
     }
 
     @Test
-    void defaultSchedulersDoNotExposeRequestAdmissionOrCancellation() {
+    void defaultSchedulersInheritAdmissionAndCancellationWithoutForwarders() throws Exception {
         for (var type :
                 java.util.List.of(DirectRequestScheduler.class, QueuedRequestScheduler.class)) {
+            org.junit.jupiter.api.Assertions.assertEquals(
+                    AbstractRequestScheduler.class,
+                    type.getMethod("submit", RequestContext.class).getDeclaringClass());
+            org.junit.jupiter.api.Assertions.assertEquals(
+                    AbstractRequestScheduler.class,
+                    type.getMethod("cancel", RequestContext.class, long.class, CancelReason.class)
+                            .getDeclaringClass());
             assertFalse(
-                    Arrays.stream(type.getMethods())
+                    Arrays.stream(type.getDeclaredMethods())
                             .anyMatch(
                                     method ->
-                                            java.util.Set.of("submit", "cancel", "lifecycle")
+                                            java.util.Set.of(
+                                                            "submit",
+                                                            "cancel",
+                                                            "lifecycle",
+                                                            "bindScheduler")
                                                     .contains(method.getName())));
         }
     }
 
     @Test
     void commonProtocolDoesNotCallOrCastToTheQueueImplementation() throws IOException {
-        assertNoImplementationDependency(RequestLifecycle.class, QueuedRequestScheduler.class);
+        assertNoImplementationDependency(
+                AbstractRequestScheduler.class, QueuedRequestScheduler.class);
         assertNoImplementationDependency(RequestContext.class, QueuedRequestScheduler.class);
     }
 
@@ -331,50 +343,45 @@ class SchedulerArchitectureTest {
     @Test
     void routeConstructionCannotInitializeRequestQueueOrder() throws IOException {
         inspectCalls(
-                RequestRoute.class,
+                RouteExecution.class,
                 (owner, name) ->
                         assertFalse(
                                 owner.equals(Type.getInternalName(RequestContext.class))
                                         && name.equals("initializeExecutionOrder"),
-                                "RequestRoute must not assign request FIFO identity"));
+                                "RouteExecution must not assign request FIFO identity"));
     }
 
     @Test
-    void lifecycleCannotChooseQueueRulesOrInterpretTransportReplies() throws IOException {
+    void schedulerBaseCannotChooseQueueRulesOrInterpretTransportReplies() throws IOException {
         for (Class<?> dependency :
                 new Class<?>[] {
                     OrderedRequestQueue.class,
-                    org.flexlb.balance.endpoint.PrefillActiveIndex.class,
-                    QueueExecutionSettings.class,
+                    org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.class,
                     DeliveryExecution.class,
                     org.flexlb.engine.grpc.EngineGrpcClient.CancelReply.class,
                     org.flexlb.balance.eviction.DefaultDecodePreemption.class,
                     org.flexlb.balance.planner.BuiltinGroupPlanner.class
                 }) {
-            assertNoImplementationDependency(RequestLifecycle.class, dependency);
+            assertNoImplementationDependency(AbstractRequestScheduler.class, dependency);
         }
-        assertNoDependency(RequestLifecycle.class, org.flexlb.config.FlexlbConfig.class);
+        assertNoDependency(AbstractRequestScheduler.class, org.flexlb.config.FlexlbConfig.class);
         inspectCalls(
-                RequestLifecycle.class,
+                AbstractRequestScheduler.class,
                 (owner, name) ->
                         assertFalse(
                                 owner.equals(
                                                 Type.getInternalName(
                                                         org.flexlb.config.FlexlbConfig.class))
-                                        && java.util.Set.of(
-                                                        "isQueue",
-                                                        "isDirect",
-                                                        "queueScheduler",
-                                                        "decisionPolicy")
+                                        && java.util.Set.of("queueScheduler", "decisionPolicy")
                                                 .contains(name),
-                                "lifecycle must not choose scheduling or queue rules"));
+                                "the scheduler base may validate mode but must not choose queue rules"));
         inspectCalls(
-                RequestLifecycle.class,
+                DeliveryDispatcher.class,
                 (owner, name) ->
                         assertFalse(
-                                owner.equals(Type.getInternalName(RequestData.class))
-                                        && name.equals("initializeExecutionOrder"),
-                                "queue entry owns its FIFO identity"));
+                                owner.equals(Type.getInternalName(AbstractRequestScheduler.class))
+                                        && name.equals("finishPlacement"),
+                                "the scheduler owns placement completion"));
     }
 
     @Test
@@ -383,7 +390,8 @@ class SchedulerArchitectureTest {
         for (Class<?> consumer :
                 new Class<?>[] {
                     DirectRequestScheduler.class, QueuedRequestScheduler.class,
-                    OrderedRequestQueue.class, org.flexlb.balance.endpoint.PrefillActiveIndex.class
+                    OrderedRequestQueue.class,
+                            org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.class
                 }) {
             for (Class<?> dependency :
                     new Class<?>[] {

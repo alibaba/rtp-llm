@@ -4,14 +4,14 @@ import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
 import org.flexlb.balance.endpoint.DecodeResources.CapacityUsage;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.balance.endpoint.DecodeResources.DecodeRoutingView;
-import org.flexlb.balance.endpoint.DecodeResources.ReservationHandle;
+import org.flexlb.balance.endpoint.DecodeResources.RequestReservation;
 import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.DecodePreemptionPolicy.DecodeEvictionProposal;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementConfiguration;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.balance.scheduler.SchedulerTestSupport;
@@ -48,7 +48,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** Independent implementations exercise the public extension points and executor authority. */
+/**
+ * Independent implementations exercise the public extension points and executor authority.
+ */
 class CustomDecodePreemptionContractTest {
     @Test
     void customServiceAndPolicyReplaceDefaultsWithoutConstructingExecutorDependencies() {
@@ -166,9 +168,8 @@ class CustomDecodePreemptionContractTest {
                 .thenReturn(new CapacityUsage(2L, 20_000L, 10_000L, 0L, 10_000L));
         when(snapshot.requests())
                 .thenReturn(Map.of(first.requestId(), first, chosen.requestId(), chosen));
-        var owner = mock(RequestLifecycle.class);
+        var owner = mock(AbstractRequestScheduler.class);
         var scheduler = mock(RequestScheduler.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(owner, "owner", scheduler);
         var dispatcher = mock(DeliveryDispatcher.class);
         var context = new RequestContext(config);
         context.data()
@@ -180,7 +181,7 @@ class CustomDecodePreemptionContractTest {
         var future = new RequestFuture((kind, response, failure) -> false);
         ReflectionTestUtils.invokeMethod(context.data(), "register", owner, future);
         SchedulerTestSupport.bindOwner(context, owner);
-        when(owner.isAdmissionOpen("903", future)).thenReturn(true);
+        when(owner.isAdmissionOpen(context)).thenReturn(true);
         DecodePreemptionPolicy policy =
                 (request, priority, capacity, view, allowed, reasons) -> {
                     assertSame(snapshot, view);
@@ -226,7 +227,7 @@ class CustomDecodePreemptionContractTest {
                                 SchedulingTestConfig.configService(config),
                                 SchedulingTestConfig.capacity(config),
                                 policy));
-        var exact = new ReservationHandle(7L, String.valueOf(903L), 31L);
+        var exact = new RequestReservation(7L, String.valueOf(903L), 31L);
         doAnswer(
                         invocation -> {
                             DefaultDecodePreemption.PreemptionCommand command =

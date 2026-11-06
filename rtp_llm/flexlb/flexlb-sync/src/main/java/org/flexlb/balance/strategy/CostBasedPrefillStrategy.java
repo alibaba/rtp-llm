@@ -400,7 +400,7 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
                             : routingCacheMatchTokens;
             RequestTimeEstimation.Inputs projectionInputs = input.projectionInputs();
             RequestTimeEstimation.CandidateView projection =
-                    estimator.projectRankingView(
+                    estimator.projectCandidate(
                             projectionInputs,
                             request.getRequestId(),
                             metadata.priority(),
@@ -424,11 +424,9 @@ public class CostBasedPrefillStrategy implements PrefillSelectionStrategy {
 
             candidates.addCandidate(
                     endpointAddress, input, projection, projectionInputs.ownershipVersion());
-            var admission =
-                    RequestTimeEstimation.applyAdmissionPolicy(
-                            projectionInputs.queue(), projection);
-            if (!admission.selectable() && !admission.engineWorkUnmodeled()) {
-                candidates.admissionBlocks[candidates.size - 1] = admission.detail();
+            if (projection.admissionState() == RequestTimeEstimation.State.BLOCKED
+                    || projection.admissionState() == RequestTimeEstimation.State.UNAVAILABLE) {
+                candidates.admissionBlocks[candidates.size - 1] = projection.admissionDetail();
             }
             logProjection(endpointAddress, cacheHit, projection);
         }

@@ -19,11 +19,13 @@ import static com.google.common.base.Preconditions.checkArgument;
 /** Builds EnqueueBatch requests and validates complete responses against the exact sent members. */
 final class BatchEnqueueHelper {
     /** O(1) wire-size bound using the route's exact, immutable endpoint addresses. */
-    static long payloadSizeUpperBound(RequestRoute route) {
+    static long payloadSizeUpperBound(RouteExecution route) {
         return route.ctx().data().getGenerateInputSize()
                 + 64L
-                + addressSizeUpperBound(route.prefillEp().getIp())
-                + (route.decodeEp() == null ? 0L : addressSizeUpperBound(route.decodeEp().getIp()));
+                + addressSizeUpperBound(route.prefillEndpoint().getIp())
+                + (route.decodeEndpoint() == null
+                        ? 0L
+                        : addressSizeUpperBound(route.decodeEndpoint().getIp()));
     }
 
     private static long addressSizeUpperBound(String ip) {
@@ -204,7 +206,7 @@ final class BatchEnqueueHelper {
     }
 
     private static EngineRpcService.GenerateInputPB input(
-            RequestRoute item, RoleAddresses addresses) throws Exception {
+            RouteExecution item, RoleAddresses addresses) throws Exception {
         var data = item.ctx().data();
         var prepared = data.getGenerateInput();
         if (prepared == null) {

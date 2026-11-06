@@ -19,7 +19,7 @@ class RequestDrainTest {
     @Test
     void responseCompletionWakesDrainWithoutReleasingOrArchivingTheRequest() throws Exception {
         var requests = new RequestRepository();
-        var owner = mock(RequestLifecycle.class);
+        var owner = mock(AbstractRequestScheduler.class);
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 1L);
         var response = new RequestFuture((kind, result, failure) -> false);
         assertEquals(
@@ -51,7 +51,7 @@ class RequestDrainTest {
     @Test
     void failedAndCancelledResponsesAreDrainedButUnfinishedResponsesAreNot() {
         var requests = new RequestRepository();
-        var owner = mock(RequestLifecycle.class);
+        var owner = mock(AbstractRequestScheduler.class);
         var failed = new RequestFuture((kind, result, failure) -> false);
         var cancelled = new RequestFuture((kind, result, failure) -> false);
         var pending = new RequestFuture((kind, result, failure) -> false);
@@ -78,7 +78,7 @@ class RequestDrainTest {
         var requests = new RequestRepository();
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 1L);
         var response = new RequestFuture((kind, result, failure) -> false);
-        requests.register(context, mock(RequestLifecycle.class), response);
+        requests.register(context, mock(AbstractRequestScheduler.class), response);
         requests.stopAccepting();
         Thread.currentThread().interrupt();
         try {

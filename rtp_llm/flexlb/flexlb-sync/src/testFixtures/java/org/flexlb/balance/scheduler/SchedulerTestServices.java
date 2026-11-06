@@ -1,12 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
-
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -31,7 +26,7 @@ import static com.google.common.base.Preconditions.checkState;
 /** Shared test setup and teardown for scheduler protocol tests. */
 public final class SchedulerTestServices {
 
-    public static RequestLifecycle entry(AbstractRequestScheduler scheduler) {
+    public static AbstractRequestScheduler entry(AbstractRequestScheduler scheduler) {
         return SchedulerTestServices.lifecycle(scheduler);
     }
 
@@ -48,14 +43,13 @@ public final class SchedulerTestServices {
     private final DeliveryExecution deliveries;
     final EngineGrpcClient engineClient;
 
-
     DeliveryExecution deliveries() {
         return deliveries;
     }
 
-
     private final ScheduledTaskTimer taskTimer = new ScheduledTaskTimer();
-    private final ScheduledTaskTimer deadlineTaskTimer = new ScheduledTaskTimer(1, "request-scheduler-expiration-");
+    private final ScheduledTaskTimer deadlineTaskTimer =
+            new ScheduledTaskTimer(1, "request-scheduler-expiration-");
 
     public TaskTimer taskTimer() {
         return taskTimer;
@@ -63,8 +57,8 @@ public final class SchedulerTestServices {
 
     final RequestTaskPool tasks = new RequestTaskPool();
 
-    public static RequestScheduler scheduler(RequestLifecycle owner) {
-        return (RequestScheduler) org.springframework.test.util.ReflectionTestUtils.getField(owner, "owner");
+    public static RequestScheduler scheduler(AbstractRequestScheduler owner) {
+        return owner;
     }
 
     public RequestTaskExecutor tasks() {
@@ -86,18 +80,18 @@ public final class SchedulerTestServices {
         return timer;
     }
 
-    private static final java.util.Map<RequestLifecycle, SchedulerTestServices> owners =
+    private static final java.util.Map<AbstractRequestScheduler, SchedulerTestServices> owners =
             java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
 
-    public static RequestLifecycle lifecycle(RequestScheduler scheduler) {
-        if (scheduler instanceof AbstractRequestScheduler concrete) return concrete.lifecycle;
-        return (RequestLifecycle) org.springframework.test.util.ReflectionTestUtils.getField(
-                scheduler, "lifecycle");
+    public static AbstractRequestScheduler lifecycle(RequestScheduler scheduler) {
+        return (AbstractRequestScheduler) scheduler;
     }
 
     public static SchedulerTestServices forOwner(Object value) {
         var owner =
-                value instanceof RequestLifecycle r ? r : lifecycle((RequestScheduler) value);
+                value instanceof AbstractRequestScheduler r
+                        ? r
+                        : lifecycle((RequestScheduler) value);
         synchronized (owners) {
             var found = owners.get(owner);
             if (found != null) return found;
@@ -116,24 +110,24 @@ public final class SchedulerTestServices {
     public static void setDependency(SchedulerTestServices fixture, String name, Object value) {
         org.springframework.test.util.ReflectionTestUtils.setField(fixture, name, value);
         if (name.equals("deliveries")) {
-            org.springframework.test.util.ReflectionTestUtils.setField(fixture.dispatcher, "execution", value);
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    fixture.dispatcher, "execution", value);
             return;
         }
         if (name.equals("taskTimer")) {
-            org.springframework.test.util.ReflectionTestUtils.setField(fixture.dispatcher, "timer", value);
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    fixture.dispatcher, "timer", value);
             return;
         }
         if (name.equals("dispatcher")) {
-            org.springframework.test.util.ReflectionTestUtils.setField(value, "execution", fixture.deliveries());
-            org.springframework.test.util.ReflectionTestUtils.setField(value, "timer", fixture.taskTimer());
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    value, "execution", fixture.deliveries());
+            org.springframework.test.util.ReflectionTestUtils.setField(
+                    value, "timer", fixture.taskTimer());
         }
         String field = name.equals("timer") ? "expirationTimer" : name;
         if (!java.util.Set.of(
-                        "tasks",
-                        "dispatcher",
-                        "responseCompletions",
-                        "deliveryReporter",
-                        "timer")
+                        "tasks", "dispatcher", "responseCompletions", "deliveryReporter", "timer")
                 .contains(name)) return;
         synchronized (owners) {
             for (var entry : owners.entrySet()) {
@@ -152,19 +146,14 @@ public final class SchedulerTestServices {
         return workFailure != null ? workFailure : fixture.failure;
     }
 
-    public static void bind(RequestLifecycle owner, SchedulerTestServices runtime) {
+    public static void bind(AbstractRequestScheduler owner, SchedulerTestServices runtime) {
         owners.put(owner, runtime);
         for (String name :
-                new String[] {
-                    "tasks",
-                    "dispatcher",
-                    "responseCompletions",
-                    "deliveryReporter"
-                }) {
+                new String[] {"tasks", "dispatcher", "responseCompletions", "deliveryReporter"}) {
             try {
                 var source = SchedulerTestServices.class.getDeclaredField(name);
                 source.setAccessible(true);
-                var target = RequestLifecycle.class.getDeclaredField(name);
+                var target = AbstractRequestScheduler.class.getDeclaredField(name);
                 target.setAccessible(true);
                 target.set(owner, source.get(runtime));
             } catch (ReflectiveOperationException e) {
@@ -175,31 +164,23 @@ public final class SchedulerTestServices {
                 owner, "expirationTimer", runtime.deadlines());
     }
 
-    public RequestLifecycle newLifecycle(
+    public AbstractRequestScheduler newLifecycle(
             org.flexlb.config.FlexlbConfig config,
             org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity,
             org.flexlb.service.TheoryCacheHitReporter trace) {
-        org.springframework.test.util.ReflectionTestUtils.setField(dispatcher, "decodeAdmissionCapacity", capacity);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                dispatcher, "decodeAdmissionCapacity", capacity);
         var owner =
-                new RequestLifecycle(requests(),
-tasks,
-deadlines(),
-dispatcher,
-responseCompletions(),
-deliveryReporter,
-trace);
+                new PassiveScheduler(
+                        requests(),
+                        tasks,
+                        deadlines(),
+                        dispatcher,
+                        responseCompletions(),
+                        deliveryReporter,
+                        trace);
         owners.put(owner, this);
         return owner;
-    }
-
-    public RequestLifecycle boundLifecycle(
-            RequestScheduler scheduler,
-            org.flexlb.config.FlexlbConfig config,
-            org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity capacity,
-            org.flexlb.service.TheoryCacheHitReporter trace) {
-        var lifecycle = newLifecycle(config, capacity, trace);
-        lifecycle.bindScheduler(scheduler);
-        return lifecycle;
     }
 
     private final Object schedulerLock = new Object();
@@ -223,6 +204,9 @@ trace);
             checkState(isAccepting(), "scheduler is closed");
             checkState(this.scheduler == null, "scheduler already registered");
             this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
+            if (scheduler instanceof AbstractRequestScheduler requestScheduler) {
+                owners.put(requestScheduler, this);
+            }
         }
     }
 
@@ -262,7 +246,8 @@ trace);
         deliveryReporter.registerExecutor(deliveries);
         this.requestReporter = Objects.requireNonNull(requestReporter, "requestReporter");
         this.dispatcher = Objects.requireNonNull(dispatcher, "dispatcher");
-        org.springframework.test.util.ReflectionTestUtils.setField(dispatcher, "execution", deliveries);
+        org.springframework.test.util.ReflectionTestUtils.setField(
+                dispatcher, "execution", deliveries);
         org.springframework.test.util.ReflectionTestUtils.setField(dispatcher, "timer", taskTimer);
         if (org.springframework.test.util.ReflectionTestUtils.getField(dispatcher, "grpcClient")
                 == null) {
@@ -317,15 +302,14 @@ trace);
                 endpoints::prefillStats,
                 deliveryReporter::reportPrefill,
                 (address, endpoint) ->
-                        requestReporter.reportPrefillQueueDepth(
-                                address,
-                                endpoint.queueDepth()));
+                        requestReporter.reportPrefillQueueDepth(address, endpoint.queueDepth()));
         reportEndpoints(
                 "Decode",
                 endpoints::decodeStats,
                 deliveryReporter::reportDecode,
                 (address, endpoint) ->
-                        requestReporter.reportDecodePreemption(address, endpoint.resourceSnapshot()));
+                        requestReporter.reportDecodePreemption(
+                                address, endpoint.resourceSnapshot()));
     }
 
     private static <T> void reportEndpoints(
@@ -458,8 +442,7 @@ trace);
             Throwable firstFailure = null;
             if (requestedMode == ShutdownMode.DRAIN) {
                 try {
-                    drained =
-                            requests.awaitResponses(deadlineNanos);
+                    drained = requests.awaitResponses(deadlineNanos);
                 } catch (Throwable failure) {
                     firstFailure = failure;
                 }
@@ -474,12 +457,12 @@ trace);
                 firstFailure = Failures.run(firstFailure, scheduler::stop);
                 firstFailure = Failures.run(firstFailure, scheduler::close);
             }
-            var owners = new java.util.LinkedHashSet<RequestLifecycle>();
+            var owners = new java.util.LinkedHashSet<AbstractRequestScheduler>();
             if (scheduler != null) {
                 owners.add(lifecycle(scheduler));
             }
             for (var context : requests.snapshotActive()) {
-                owners.add(context.data().getLifecycle());
+                owners.add(context.data().getRequestScheduler());
             }
             for (var owner : owners) {
                 firstFailure = Failures.run(firstFailure, owner::stopAdmissionsAndAwaitCompletion);
@@ -490,7 +473,7 @@ trace);
                                 firstFailure,
                                 () ->
                                         context.data()
-                                                .getLifecycle()
+                                                .getRequestScheduler()
                                                 .cancel(context, 0L, CancelReason.SHUTDOWN));
             }
             firstFailure = Failures.run(firstFailure, deliveries::awaitDeliveries);
@@ -546,5 +529,128 @@ trace);
         } catch (ArithmeticException overflow) {
             return Long.MAX_VALUE;
         }
+    }
+
+    public static DirectRequestScheduler direct(
+            RequestRouteSelector router, AbstractRequestScheduler dependencies) {
+        return new DirectRequestScheduler(
+                router,
+                dependencies.requests,
+                dependencies.tasks,
+                dependencies.expirationTimer,
+                dependencies.dispatcher,
+                dependencies.responseCompletions,
+                dependencies.deliveryReporter,
+                dependencies.cacheTrace);
+    }
+
+    public static QueuedRequestScheduler queued(
+            org.flexlb.config.FlexlbConfig config,
+            RequestRouteSelector router,
+            org.flexlb.balance.eviction.DecodePreemption preemption,
+            AbstractRequestScheduler dependencies,
+            PlacementAvailability availability,
+            PlacementQueue queue,
+            org.flexlb.balance.planner.GroupPlanner grouping) {
+        return new QueuedRequestScheduler(
+                config,
+                router,
+                preemption,
+                dependencies.requests,
+                dependencies.tasks,
+                dependencies.expirationTimer,
+                dependencies.dispatcher,
+                dependencies.responseCompletions,
+                dependencies.deliveryReporter,
+                dependencies.cacheTrace,
+                availability,
+                queue,
+                grouping);
+    }
+
+    public static AbstractRequestScheduler create(
+            AbstractRequestScheduler dependencies,
+            org.flexlb.config.FlexlbConfig config,
+            RequestRouteSelector router,
+            org.flexlb.balance.eviction.DecodePreemption preemption,
+            PlacementAvailability availability,
+            org.flexlb.balance.planner.GroupPlanner grouping,
+            PlacementQueue queue) {
+        return config.isQueue()
+                ? queued(config, router, preemption, dependencies, availability, queue, grouping)
+                : direct(router, dependencies);
+    }
+
+    public static Object[] constructorArguments(
+            RequestRouteSelector router, AbstractRequestScheduler d) {
+        return new Object[] {
+            router,
+            d.requests,
+            d.tasks,
+            d.expirationTimer,
+            d.dispatcher,
+            d.responseCompletions,
+            d.deliveryReporter,
+            d.cacheTrace
+        };
+    }
+
+    public static Object[] constructorArguments(
+            org.flexlb.config.FlexlbConfig config,
+            RequestRouteSelector router,
+            org.flexlb.balance.eviction.DecodePreemption preemption,
+            AbstractRequestScheduler d,
+            PlacementAvailability availability,
+            PlacementQueue queue,
+            org.flexlb.balance.planner.GroupPlanner grouping) {
+        return new Object[] {
+            config,
+            router,
+            preemption,
+            d.requests,
+            d.tasks,
+            d.expirationTimer,
+            d.dispatcher,
+            d.responseCompletions,
+            d.deliveryReporter,
+            d.cacheTrace,
+            availability,
+            queue,
+            grouping
+        };
+    }
+
+    /**
+     * Real request management without automatic placement, for protocol tests that drive events explicitly.
+     */
+    public static class PassiveScheduler extends AbstractRequestScheduler {
+        public PassiveScheduler(
+                RequestRepository requests,
+                RequestTaskPool tasks,
+                ExpirationTimer deadlines,
+                DeliveryDispatcher dispatcher,
+                ResponseCompletionExecutor responses,
+                DeliveryMetricsReporter reporter,
+                org.flexlb.service.TheoryCacheHitReporter trace) {
+            super(requests, tasks, deadlines, dispatcher, responses, reporter, trace);
+        }
+
+        public void start() {}
+
+        public void schedule() {}
+
+        public void onRequest(RequestContext request) {}
+
+        public void removeRequest(RequestContext request) {}
+
+        public void onEndpointChanged(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {}
+
+        public void stop() {}
+
+        public boolean awaitStopped(long deadlineNanos) {
+            return true;
+        }
+
+        public void close() {}
     }
 }

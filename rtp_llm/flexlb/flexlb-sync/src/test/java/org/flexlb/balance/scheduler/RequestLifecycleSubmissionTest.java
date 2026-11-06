@@ -53,7 +53,7 @@ class RequestLifecycleSubmissionTest {
         if (!mode.equals("BATCH")) {
             SchedulingTestConfig.useNonBatchDispatcher(config);
         }
-        var router = mock(RequestWorkerSelector.class);
+        var router = mock(RequestRouteSelector.class);
         var owner = owner(config, mock(TheoryCacheHitReporter.class), router);
         var context = RequestProtocolTestSupport.context(config, 700L);
         Span span = mock(Span.class);
@@ -110,7 +110,7 @@ class RequestLifecycleSubmissionTest {
                         })
                 .when(reporter)
                 .report(context);
-        var pending = owner.register(context, () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
+        var pending = owner.submit(context, () -> {});
         try {
             var response = new Response();
             response.setSuccess(true);
@@ -125,7 +125,7 @@ class RequestLifecycleSubmissionTest {
                             null,
                             System.currentTimeMillis());
             Delivery.Member claim;
-            try (var admission = owner.claimAdmissionHandle("702", pending)) {
+            try (var admission = SchedulerTestSupport.claim(owner, "702", pending)) {
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
@@ -133,7 +133,7 @@ class RequestLifecycleSubmissionTest {
                 claim =
                         RequestProtocolTestSupport.claimRouteWithoutPrediction(
                                 owner, route, () -> true);
-                admission.finish();
+                AbstractRequestScheduler.finishPlacement(admission);
             }
             owner.onDeliveryResult(
                     new ContextResult.RouteDelivered(claim, 0L, System.currentTimeMillis()));
@@ -200,8 +200,8 @@ class RequestLifecycleSubmissionTest {
         }
     }
 
-    private static RequestLifecycle owner(
-            FlexlbConfig config, TheoryCacheHitReporter trace, RequestWorkerSelector router) {
+    private static AbstractRequestScheduler owner(
+            FlexlbConfig config, TheoryCacheHitReporter trace, RequestRouteSelector router) {
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         return SchedulerTestSupport.create(
@@ -214,7 +214,8 @@ class RequestLifecycleSubmissionTest {
                 new PlacementAvailability());
     }
 
-    private static RequestLifecycle owner(FlexlbConfig config, TheoryCacheHitReporter trace) {
+    private static AbstractRequestScheduler owner(
+            FlexlbConfig config, TheoryCacheHitReporter trace) {
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         return SchedulerTestSupport.create(

@@ -30,6 +30,18 @@ import static org.mockito.Mockito.mock;
 
 class EndpointRegistryRoleTest {
 
+    @Test
+    void vitSelectionSkipsRetiringEndpointsBeforeTheirRegistryEntriesAreRemoved() {
+        var worker = status(RoleType.VIT, 8001);
+        var address = worker.getLogicalIpPort();
+        var endpoint = EndpointTestSupport.publishEndpoint(registry, RoleType.VIT, address, worker);
+        assertEquals(List.of(address), registry.endpointAddressSnapshot(RoleType.VIT));
+        endpoint.beginRetirement();
+        assertSame(endpoint, registry.get(RoleType.VIT, address));
+        assertTrue(registry.endpointAddressSnapshot(RoleType.VIT).isEmpty());
+        assertNull(registry.selectEndpoint(RoleType.VIT, address));
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.EnumSource(
             value = RoleType.class,
@@ -81,7 +93,9 @@ class EndpointRegistryRoleTest {
                         availability,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
-                        order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
+                        order ->
+                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                        16, order));
     }
 
     @AfterEach
@@ -136,11 +150,11 @@ class EndpointRegistryRoleTest {
                                         registry, role, address, status)));
 
         assertNull(registry.get(role, address));
-        assertNull(registry.capture(role, address));
+        assertNull(registry.selectEndpoint(role, address));
         assertTrue(registry.endpointAddressSnapshot(role).isEmpty());
         assertNotNull(published.get());
         org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(published.get());
-        assertNull(published.get().tryPinGeneration());
+        assertTrue(published.get().isRetired());
         registry.close();
     }
 
@@ -249,15 +263,17 @@ class EndpointRegistryRoleTest {
                                 registry, RoleType.DECODE, address, replacementStatus);
 
         assertNull(
-                registry.captureDecodeGeneration(oldView),
-                "an old view must not pin a same-address replacement");
+                registry.selectDecodeEndpoint(oldView),
+                "an old view must not selectedEndpoint a same-address replacement");
         DecodeResources.DecodeRoutingView replacementView =
                 decodeRoutingSnapshot(registry, null).getFirst();
         assertEquals(address, replacementView.address());
         assertTrue(oldView.generationId() != replacementView.generationId());
-        try (WorkerEndpoint.GenerationPin pin = registry.captureDecodeGeneration(replacementView)) {
-            assertNotNull(pin);
-            assertSame(replacement, pin.endpoint());
+        {
+            WorkerEndpoint selectedEndpoint = registry.selectDecodeEndpoint(replacementView);
+
+            assertNotNull(selectedEndpoint);
+            assertSame(replacement, selectedEndpoint);
         }
     }
 
@@ -315,14 +331,14 @@ class EndpointRegistryRoleTest {
                         .findFirst()
                         .orElseThrow()
                         .endpoint());
-        WorkerEndpoint.GenerationPin replacementPin =
-                registry.capture(RoleType.PREFILL, originalDirectory.getFirst().address());
-        assertNotNull(replacementPin);
-        try (replacementPin) {
-            assertSame(replacement, replacementPin.endpoint());
+        WorkerEndpoint replacementWorker =
+                registry.selectEndpoint(RoleType.PREFILL, originalDirectory.getFirst().address());
+        assertNotNull(replacementWorker);
+        {
+            assertSame(replacement, replacementWorker);
             assertNotSame(
                     originalDirectory.getFirst().endpoint(),
-                    replacementPin.endpoint(),
+                    replacementWorker,
                     "winner identity validation must reject the stale route");
         }
 
@@ -369,7 +385,7 @@ class EndpointRegistryRoleTest {
                 EndpointTestSupport.publishEndpoint(registry, RoleType.VIT, ipPort, replacement);
 
         assertNotSame(oldEndpoint, newEndpoint);
-        assertNull(oldEndpoint.tryPinGeneration());
+        assertTrue(oldEndpoint.isRetired());
         assertSame(newEndpoint, registry.get(RoleType.VIT, ipPort));
 
         EndpointRegistry.Retirement detached =
@@ -389,13 +405,15 @@ class EndpointRegistryRoleTest {
                 (DecodeEndpoint)
                         EndpointTestSupport.publishEndpoint(
                                 registry, RoleType.DECODE, ipPort, status(RoleType.DECODE, 8080));
-        DecodeResources.ReservationHandle oldReservation;
-        try (WorkerEndpoint.GenerationPin pin = oldEndpoint.tryPinGeneration()) {
-            assertTrue(pin != null);
+        DecodeResources.RequestReservation oldReservation;
+        {
+            WorkerEndpoint selectedEndpoint = oldEndpoint;
+
+            assertTrue(selectedEndpoint != null);
             oldReservation =
                     oldEndpoint
-                            .tryReserveQueuedRequest(pin, String.valueOf(41L), 100L, 110L, 50, null)
-                            .handle();
+                            .tryReserveQueuedRequest(String.valueOf(41L), 100L, 110L, 50, null)
+                            .value();
         }
 
         retire(RoleType.DECODE, ipPort, oldEndpoint.getStatus());

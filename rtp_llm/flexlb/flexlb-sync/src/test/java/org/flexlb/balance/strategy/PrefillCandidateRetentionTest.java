@@ -143,14 +143,15 @@ class PrefillCandidateRetentionTest {
         doAnswer(
                         invocation -> {
                             if (reentered.compareAndSet(false, true)) {
-                                try (var selected =
-                                        StrategyTestSupport.select(
-                                                        strategy,
-                                                        nested,
-                                                        metadata,
-                                                        RoleType.PREFILL,
-                                                        null)
-                                                .value()) {
+                                {
+                                    var selected =
+                                            StrategyTestSupport.select(
+                                                            strategy,
+                                                            nested,
+                                                            metadata,
+                                                            RoleType.PREFILL,
+                                                            null)
+                                                    .value();
                                     assertNotNull(selected);
                                 }
                             }
@@ -160,9 +161,11 @@ class PrefillCandidateRetentionTest {
                 .reportSelectionCache(
                         eq(RoleType.PREFILL), anyLong(), anyLong(), anyLong(), anyLong());
         try {
-            try (var selected =
-                    StrategyTestSupport.select(strategy, outer, metadata, RoleType.PREFILL, null)
-                            .value()) {
+            {
+                var selected =
+                        StrategyTestSupport.select(
+                                        strategy, outer, metadata, RoleType.PREFILL, null)
+                                .value();
                 assertNotNull(selected);
             }
             verify(metrics).reportSelectionCache(RoleType.PREFILL, 1000L, 100L, 100L, 100L);
@@ -204,15 +207,16 @@ class PrefillCandidateRetentionTest {
                         .blockCacheKeys(List.of())
                         .build();
         try {
-            try (var selected =
-                    StrategyTestSupport.select(
-                                    strategy,
-                                    request,
-                                    SchedulingMetadata.explicit(
-                                            50, System.currentTimeMillis() + 60_000L),
-                                    RoleType.PREFILL,
-                                    null)
-                            .value()) {
+            {
+                var selected =
+                        StrategyTestSupport.select(
+                                        strategy,
+                                        request,
+                                        SchedulingMetadata.explicit(
+                                                50, System.currentTimeMillis() + 60_000L),
+                                        RoleType.PREFILL,
+                                        null)
+                                .value();
                 assertNotNull(selected);
             }
             return new WeakReference<>(endpoint);

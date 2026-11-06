@@ -1,0 +1,2312 @@
+{
+  "description": "本轮 FlexLB 改动、UT 和性能记录集中存放于此；commit 仅保留一行说明，不再附加性能 notes。",
+  "performance_status": "尚未通过性能验收；原始失败及未完成测量均保留。",
+  "commit_identity_note": "性能测试使用 original_commit 标识的源码。前三笔仅缩短提交说明；最后一笔另加入本记录文件，生产代码不变。",
+  "commits": [
+    {
+      "original_commit": "5386925f1b79e9ae0f27812e8c2f1d85eaf09a33",
+      "subject": "build(flexlb): package test fixtures",
+      "change_and_validation_details": "build(flexlb): package shared test fixtures as test jars\n\nValidate the isolated seven-POM change with 4147 reactor tests (0 failures, 0 errors, 3 skipped) and full Spotless. On B300, all 1296 compiled production class hashes match HEAD. Existing E2E latency and receiving-limit failures also reproduce on HEAD; this commit does not claim the absolute performance gates pass.",
+      "rewritten_commit": "22a279dcd38de9968b55d608ebd2b8905f8a7fb3"
+    },
+    {
+      "original_commit": "595f08951cb21ce94d1746a7029afbd2f6d5896f",
+      "subject": "refactor(flexlb): remove unused health metric",
+      "change_and_validation_details": "refactor(flexlb): remove unused status failure latency reporting\n\nRemove the uncalled failure-latency reporter, metric registration and\nconstant. Keep the existing failure counters and their tags unchanged.\n\nValidation: isolated EngineHealthReporterTest, 42 tests passed; full-reactor\nSpotless passed. An independent perf run for this commit is pending.\nBATCH end-to-end perf failures also occur on the baseline; this commit\nis explicitly authorized without claiming that perf acceptance passed.",
+      "performance": {
+        "recorded_at_utc": "2026-11-06T07:27:58.311145+00:00",
+        "test": "MasterBatchEndToEndPerformanceTest#masterMeetsRateSloAcrossEngineScaleMatrix",
+        "environment": {
+          "host": "B300",
+          "container": "luoli_gpu",
+          "heap_gb": 8,
+          "extra_jvm_args": "",
+          "topology": "750P/750D",
+          "offered_qps": [
+            3000,
+            10000
+          ],
+          "warmup_ms": 10000,
+          "measurement_ms": 10000,
+          "client_p99_limit_ms": 50,
+          "server_p99_limit_ms": 50,
+          "batch_wait_p99_limit_ms": 50,
+          "minimum_qps_ratio": 0.98
+        },
+        "execution": "serial baseline -> first commit -> second commit; loopback RPC benchmark, not GPU inference",
+        "authorization": "User explicitly authorized these two cleanup commits before perf acceptance; failures retained. Scheduler refactor remains uncommitted.",
+        "baseline": {
+          "commit": "5386925f1b79e9ae0f27812e8c2f1d85eaf09a33",
+          "source_manifest_verified": true,
+          "source_file_count": 773,
+          "modes": {
+            "BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 711.558 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 711.558 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 52.494,
+                    "client_p99_ms": 711.558,
+                    "client_qps": 2996.8,
+                    "master_avg_ms": 22.268,
+                    "master_p99": "180ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2996.8",
+                      "master_qps": "3000.9",
+                      "master_avg": "22.268ms",
+                      "client_p50": "10.930ms",
+                      "client_p90": "87.296ms",
+                      "client_p95": "403.403ms",
+                      "client_p99": "711.558ms",
+                      "master_p50": "10ms",
+                      "master_p90": "23ms",
+                      "master_p95": "155ms",
+                      "master_p99": "180ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "30000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "11ms",
+                      "batch_wait_p95": "17ms",
+                      "batch_wait_p99": "136ms",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "12ms",
+                      "delivery_wait_p95": "18ms",
+                      "delivery_wait_p99": "137ms",
+                      "dispatch_ack_count": "4270",
+                      "dispatch_ack_p99": "4ms",
+                      "engine_batches": "29338",
+                      "batch_full": "0",
+                      "window_timeout": "29338",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.02",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "159ms",
+                      "ack_response_count": "4270",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "25730"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 155.378 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 155.378 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 24.802,
+                    "client_p99_ms": 155.378,
+                    "client_qps": 9984.5,
+                    "master_avg_ms": 15.636,
+                    "master_p99": "82ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9984.5",
+                      "master_qps": "10017.8",
+                      "master_avg": "15.636ms",
+                      "client_p50": "10.936ms",
+                      "client_p90": "73.651ms",
+                      "client_p95": "108.788ms",
+                      "client_p99": "155.378ms",
+                      "master_p50": "10ms",
+                      "master_p90": "31ms",
+                      "master_p95": "40ms",
+                      "master_p99": "82ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "100000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "16ms",
+                      "batch_wait_p95": "20ms",
+                      "batch_wait_p99": "72ms",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "17ms",
+                      "delivery_wait_p95": "20ms",
+                      "delivery_wait_p99": "73ms",
+                      "dispatch_ack_count": "27878",
+                      "dispatch_ack_p99": "4ms",
+                      "engine_batches": "95780",
+                      "batch_full": "0",
+                      "window_timeout": "95780",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.04",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "32ms",
+                      "ack_response_count": "27878",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "72122"
+                    }
+                  }
+                }
+              }
+            },
+            "NON_BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": true,
+                  "issues": [],
+                  "measurement": {
+                    "client_avg_ms": 0.613,
+                    "client_p99_ms": 1.298,
+                    "client_qps": 2999.5,
+                    "master_avg_ms": 0.038,
+                    "master_p99": "1ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2999.5",
+                      "master_qps": "3000.5",
+                      "master_avg": "0.038ms",
+                      "client_p50": "0.506ms",
+                      "client_p90": "0.643ms",
+                      "client_p95": "0.725ms",
+                      "client_p99": "1.298ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "<1ms",
+                      "master_p99": "1ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "<1ms",
+                      "delivery_wait_p99": "1ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "<1ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 1154.138 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 1154.138 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 114.496,
+                    "client_p99_ms": 1154.138,
+                    "client_qps": 9992.6,
+                    "master_avg_ms": 66.986,
+                    "master_p99": "1116ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9992.6",
+                      "master_qps": "10007.9",
+                      "master_avg": "66.986ms",
+                      "client_p50": "0.493ms",
+                      "client_p90": "552.546ms",
+                      "client_p95": "931.358ms",
+                      "client_p99": "1154.138ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "224ms",
+                      "master_p95": "446ms",
+                      "master_p99": "1116ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "13ms",
+                      "delivery_wait_p95": "36ms",
+                      "delivery_wait_p99": "286ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "1063ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "commit_result": {
+          "commit": "595f08951cb21ce94d1746a7029afbd2f6d5896f",
+          "source_manifest_verified": true,
+          "source_file_count": 773,
+          "modes": {
+            "BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 255.855 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 255.855 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 22.384,
+                    "client_p99_ms": 255.855,
+                    "client_qps": 2985.1,
+                    "master_avg_ms": 12.783,
+                    "master_p99": "40ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2985.1",
+                      "master_qps": "2989.1",
+                      "master_avg": "12.783ms",
+                      "client_p50": "11.042ms",
+                      "client_p90": "12.805ms",
+                      "client_p95": "108.574ms",
+                      "client_p99": "255.855ms",
+                      "master_p50": "10ms",
+                      "master_p90": "12ms",
+                      "master_p95": "27ms",
+                      "master_p99": "40ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "30000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "10ms",
+                      "batch_wait_p95": "12ms",
+                      "batch_wait_p99": "20ms",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "11ms",
+                      "delivery_wait_p95": "12ms",
+                      "delivery_wait_p99": "20ms",
+                      "dispatch_ack_count": "3422",
+                      "dispatch_ack_p99": "6ms",
+                      "engine_batches": "29876",
+                      "batch_full": "0",
+                      "window_timeout": "29876",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.00",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "19ms",
+                      "ack_response_count": "3422",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "26578"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 147.076 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 147.076 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 23.176,
+                    "client_p99_ms": 147.076,
+                    "client_qps": 9989.0,
+                    "master_avg_ms": 15.032,
+                    "master_p99": "78ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9989.0",
+                      "master_qps": "10002.1",
+                      "master_avg": "15.032ms",
+                      "client_p50": "11.018ms",
+                      "client_p90": "63.562ms",
+                      "client_p95": "94.204ms",
+                      "client_p99": "147.076ms",
+                      "master_p50": "10ms",
+                      "master_p90": "29ms",
+                      "master_p95": "35ms",
+                      "master_p99": "78ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "100000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "15ms",
+                      "batch_wait_p95": "19ms",
+                      "batch_wait_p99": "73ms",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "15ms",
+                      "delivery_wait_p95": "20ms",
+                      "delivery_wait_p99": "74ms",
+                      "dispatch_ack_count": "30933",
+                      "dispatch_ack_p99": "9ms",
+                      "engine_batches": "96107",
+                      "batch_full": "0",
+                      "window_timeout": "96107",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.04",
+                      "max_batch": "11",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "23ms",
+                      "ack_response_count": "30933",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "69067"
+                    }
+                  }
+                }
+              }
+            },
+            "NON_BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 386.248 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 386.248 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 18.191,
+                    "client_p99_ms": 386.248,
+                    "client_qps": 2998.8,
+                    "master_avg_ms": 16.092,
+                    "master_p99": "382ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2998.8",
+                      "master_qps": "3000.6",
+                      "master_avg": "16.092ms",
+                      "client_p50": "0.487ms",
+                      "client_p90": "0.763ms",
+                      "client_p95": "142.182ms",
+                      "client_p99": "386.248ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "63ms",
+                      "master_p99": "382ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "4ms",
+                      "delivery_wait_p99": "66ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "3ms",
+                      "route_submit_p99": "338ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 690.515 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 690.515 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 58.145,
+                    "client_p99_ms": 690.515,
+                    "client_qps": 9992.4,
+                    "master_avg_ms": 17.859,
+                    "master_p99": "333ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9992.4",
+                      "master_qps": "10001.0",
+                      "master_avg": "17.859ms",
+                      "client_p50": "0.445ms",
+                      "client_p90": "255.853ms",
+                      "client_p95": "434.249ms",
+                      "client_p99": "690.515ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "71ms",
+                      "master_p95": "125ms",
+                      "master_p99": "333ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "10ms",
+                      "delivery_wait_p95": "18ms",
+                      "delivery_wait_p99": "70ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "5ms",
+                      "route_submit_p99": "149ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parent_result": {
+          "commit": "5386925f1b79e9ae0f27812e8c2f1d85eaf09a33",
+          "source_manifest_verified": true,
+          "source_file_count": 773,
+          "modes": {
+            "BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 711.558 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 711.558 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 52.494,
+                    "client_p99_ms": 711.558,
+                    "client_qps": 2996.8,
+                    "master_avg_ms": 22.268,
+                    "master_p99": "180ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2996.8",
+                      "master_qps": "3000.9",
+                      "master_avg": "22.268ms",
+                      "client_p50": "10.930ms",
+                      "client_p90": "87.296ms",
+                      "client_p95": "403.403ms",
+                      "client_p99": "711.558ms",
+                      "master_p50": "10ms",
+                      "master_p90": "23ms",
+                      "master_p95": "155ms",
+                      "master_p99": "180ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "30000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "11ms",
+                      "batch_wait_p95": "17ms",
+                      "batch_wait_p99": "136ms",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "12ms",
+                      "delivery_wait_p95": "18ms",
+                      "delivery_wait_p99": "137ms",
+                      "dispatch_ack_count": "4270",
+                      "dispatch_ack_p99": "4ms",
+                      "engine_batches": "29338",
+                      "batch_full": "0",
+                      "window_timeout": "29338",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.02",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "159ms",
+                      "ack_response_count": "4270",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "25730"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 155.378 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 155.378 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 24.802,
+                    "client_p99_ms": 155.378,
+                    "client_qps": 9984.5,
+                    "master_avg_ms": 15.636,
+                    "master_p99": "82ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9984.5",
+                      "master_qps": "10017.8",
+                      "master_avg": "15.636ms",
+                      "client_p50": "10.936ms",
+                      "client_p90": "73.651ms",
+                      "client_p95": "108.788ms",
+                      "client_p99": "155.378ms",
+                      "master_p50": "10ms",
+                      "master_p90": "31ms",
+                      "master_p95": "40ms",
+                      "master_p99": "82ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "100000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "16ms",
+                      "batch_wait_p95": "20ms",
+                      "batch_wait_p99": "72ms",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "17ms",
+                      "delivery_wait_p95": "20ms",
+                      "delivery_wait_p99": "73ms",
+                      "dispatch_ack_count": "27878",
+                      "dispatch_ack_p99": "4ms",
+                      "engine_batches": "95780",
+                      "batch_full": "0",
+                      "window_timeout": "95780",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.04",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "32ms",
+                      "ack_response_count": "27878",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "72122"
+                    }
+                  }
+                }
+              }
+            },
+            "NON_BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": true,
+                  "issues": [],
+                  "measurement": {
+                    "client_avg_ms": 0.613,
+                    "client_p99_ms": 1.298,
+                    "client_qps": 2999.5,
+                    "master_avg_ms": 0.038,
+                    "master_p99": "1ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2999.5",
+                      "master_qps": "3000.5",
+                      "master_avg": "0.038ms",
+                      "client_p50": "0.506ms",
+                      "client_p90": "0.643ms",
+                      "client_p95": "0.725ms",
+                      "client_p99": "1.298ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "<1ms",
+                      "master_p99": "1ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "<1ms",
+                      "delivery_wait_p99": "1ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "<1ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 1154.138 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 1154.138 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 114.496,
+                    "client_p99_ms": 1154.138,
+                    "client_qps": 9992.6,
+                    "master_avg_ms": 66.986,
+                    "master_p99": "1116ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9992.6",
+                      "master_qps": "10007.9",
+                      "master_avg": "66.986ms",
+                      "client_p50": "0.493ms",
+                      "client_p90": "552.546ms",
+                      "client_p95": "931.358ms",
+                      "client_p99": "1154.138ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "224ms",
+                      "master_p95": "446ms",
+                      "master_p99": "1116ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "13ms",
+                      "delivery_wait_p95": "36ms",
+                      "delivery_wait_p99": "286ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "1063ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "ut": {
+          "focused_tests_passed": 42,
+          "cumulative_reactor_tests": null
+        },
+        "spotless": "full reactor passed",
+        "evidence_archive": "/tmp/flexlb-two-commit-performance.tar.gz"
+      },
+      "rewritten_commit": "327b21e07081e8028f0b28fe3ce9c18e07a66b2b"
+    },
+    {
+      "original_commit": "381b0f0b55cf6bd2cc2856a56dba7a947e0ae003",
+      "subject": "refactor(flexlb): deduplicate routing telemetry",
+      "change_and_validation_details": "refactor(flexlb): keep routing reasons in decision snapshots\n\nRemove the duplicate selectionReasons map and its test-only writer.\nRead selection reasons from RoutingDecision and serialize only the\nexisting routing-decision snapshot in PV logs.\n\nValidation: isolated cumulative reactor, 4147 tests, no failures/errors,\n3 skipped; focused reporter/PV tests, 56 passed; full-reactor Spotless passed.\nB300 E2E performance was measured against 5386925f1b with identical source\nexcept these two cleanup commits. BATCH perf acceptance did not pass;\nreceiving-limit errors and long JVM safepoint waits affected the runs.\nThis commit is explicitly authorized with those failures retained.",
+      "performance": {
+        "recorded_at_utc": "2026-11-06T07:27:58.311145+00:00",
+        "test": "MasterBatchEndToEndPerformanceTest#masterMeetsRateSloAcrossEngineScaleMatrix",
+        "environment": {
+          "host": "B300",
+          "container": "luoli_gpu",
+          "heap_gb": 8,
+          "extra_jvm_args": "",
+          "topology": "750P/750D",
+          "offered_qps": [
+            3000,
+            10000
+          ],
+          "warmup_ms": 10000,
+          "measurement_ms": 10000,
+          "client_p99_limit_ms": 50,
+          "server_p99_limit_ms": 50,
+          "batch_wait_p99_limit_ms": 50,
+          "minimum_qps_ratio": 0.98
+        },
+        "execution": "serial baseline -> first commit -> second commit; loopback RPC benchmark, not GPU inference",
+        "authorization": "User explicitly authorized these two cleanup commits before perf acceptance; failures retained. Scheduler refactor remains uncommitted.",
+        "baseline": {
+          "commit": "5386925f1b79e9ae0f27812e8c2f1d85eaf09a33",
+          "source_manifest_verified": true,
+          "source_file_count": 773,
+          "modes": {
+            "BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 711.558 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 711.558 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 52.494,
+                    "client_p99_ms": 711.558,
+                    "client_qps": 2996.8,
+                    "master_avg_ms": 22.268,
+                    "master_p99": "180ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2996.8",
+                      "master_qps": "3000.9",
+                      "master_avg": "22.268ms",
+                      "client_p50": "10.930ms",
+                      "client_p90": "87.296ms",
+                      "client_p95": "403.403ms",
+                      "client_p99": "711.558ms",
+                      "master_p50": "10ms",
+                      "master_p90": "23ms",
+                      "master_p95": "155ms",
+                      "master_p99": "180ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "30000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "11ms",
+                      "batch_wait_p95": "17ms",
+                      "batch_wait_p99": "136ms",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "12ms",
+                      "delivery_wait_p95": "18ms",
+                      "delivery_wait_p99": "137ms",
+                      "dispatch_ack_count": "4270",
+                      "dispatch_ack_p99": "4ms",
+                      "engine_batches": "29338",
+                      "batch_full": "0",
+                      "window_timeout": "29338",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.02",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "159ms",
+                      "ack_response_count": "4270",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "25730"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 155.378 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 155.378 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 24.802,
+                    "client_p99_ms": 155.378,
+                    "client_qps": 9984.5,
+                    "master_avg_ms": 15.636,
+                    "master_p99": "82ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9984.5",
+                      "master_qps": "10017.8",
+                      "master_avg": "15.636ms",
+                      "client_p50": "10.936ms",
+                      "client_p90": "73.651ms",
+                      "client_p95": "108.788ms",
+                      "client_p99": "155.378ms",
+                      "master_p50": "10ms",
+                      "master_p90": "31ms",
+                      "master_p95": "40ms",
+                      "master_p99": "82ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "100000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "16ms",
+                      "batch_wait_p95": "20ms",
+                      "batch_wait_p99": "72ms",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "17ms",
+                      "delivery_wait_p95": "20ms",
+                      "delivery_wait_p99": "73ms",
+                      "dispatch_ack_count": "27878",
+                      "dispatch_ack_p99": "4ms",
+                      "engine_batches": "95780",
+                      "batch_full": "0",
+                      "window_timeout": "95780",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.04",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "32ms",
+                      "ack_response_count": "27878",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "72122"
+                    }
+                  }
+                }
+              }
+            },
+            "NON_BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": true,
+                  "issues": [],
+                  "measurement": {
+                    "client_avg_ms": 0.613,
+                    "client_p99_ms": 1.298,
+                    "client_qps": 2999.5,
+                    "master_avg_ms": 0.038,
+                    "master_p99": "1ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2999.5",
+                      "master_qps": "3000.5",
+                      "master_avg": "0.038ms",
+                      "client_p50": "0.506ms",
+                      "client_p90": "0.643ms",
+                      "client_p95": "0.725ms",
+                      "client_p99": "1.298ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "<1ms",
+                      "master_p99": "1ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "<1ms",
+                      "delivery_wait_p99": "1ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "<1ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 1154.138 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 1154.138 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 114.496,
+                    "client_p99_ms": 1154.138,
+                    "client_qps": 9992.6,
+                    "master_avg_ms": 66.986,
+                    "master_p99": "1116ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9992.6",
+                      "master_qps": "10007.9",
+                      "master_avg": "66.986ms",
+                      "client_p50": "0.493ms",
+                      "client_p90": "552.546ms",
+                      "client_p95": "931.358ms",
+                      "client_p99": "1154.138ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "224ms",
+                      "master_p95": "446ms",
+                      "master_p99": "1116ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "13ms",
+                      "delivery_wait_p95": "36ms",
+                      "delivery_wait_p99": "286ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "1063ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "commit_result": {
+          "commit": "381b0f0b55cf6bd2cc2856a56dba7a947e0ae003",
+          "source_manifest_verified": true,
+          "source_file_count": 773,
+          "modes": {
+            "BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "error",
+                      "message": "io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached",
+                      "detail": "java.util.concurrent.ExecutionException: io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.runTraffic(MasterBatchEndToEndPerformanceTest.java:1059)\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:639)\nCaused by: io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached"
+                    }
+                  ],
+                  "measurement": null
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "error",
+                      "message": "io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached",
+                      "detail": "java.util.concurrent.ExecutionException: io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.runTraffic(MasterBatchEndToEndPerformanceTest.java:1059)\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:668)\nCaused by: io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached"
+                    }
+                  ],
+                  "measurement": null
+                }
+              }
+            },
+            "NON_BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 177.611 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 177.611 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 5.003,
+                    "client_p99_ms": 177.611,
+                    "client_qps": 2999.5,
+                    "master_avg_ms": 0.332,
+                    "master_p99": "13ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2999.5",
+                      "master_qps": "3000.5",
+                      "master_avg": "0.332ms",
+                      "client_p50": "0.481ms",
+                      "client_p90": "0.632ms",
+                      "client_p95": "0.783ms",
+                      "client_p99": "177.611ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "<1ms",
+                      "master_p99": "13ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "1ms",
+                      "delivery_wait_p99": "3ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "9ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 69.979 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 69.979 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 2.382,
+                    "client_p99_ms": 69.979,
+                    "client_qps": 9984.8,
+                    "master_avg_ms": 0.661,
+                    "master_p99": "24ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9984.8",
+                      "master_qps": "10004.2",
+                      "master_avg": "0.661ms",
+                      "client_p50": "0.472ms",
+                      "client_p90": "0.630ms",
+                      "client_p95": "1.738ms",
+                      "client_p99": "69.979ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "<1ms",
+                      "master_p99": "24ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "1ms",
+                      "delivery_wait_p99": "7ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "14ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parent_result": {
+          "commit": "595f08951cb21ce94d1746a7029afbd2f6d5896f",
+          "source_manifest_verified": true,
+          "source_file_count": 773,
+          "modes": {
+            "BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 255.855 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 255.855 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 22.384,
+                    "client_p99_ms": 255.855,
+                    "client_qps": 2985.1,
+                    "master_avg_ms": 12.783,
+                    "master_p99": "40ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2985.1",
+                      "master_qps": "2989.1",
+                      "master_avg": "12.783ms",
+                      "client_p50": "11.042ms",
+                      "client_p90": "12.805ms",
+                      "client_p95": "108.574ms",
+                      "client_p99": "255.855ms",
+                      "master_p50": "10ms",
+                      "master_p90": "12ms",
+                      "master_p95": "27ms",
+                      "master_p99": "40ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "30000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "10ms",
+                      "batch_wait_p95": "12ms",
+                      "batch_wait_p99": "20ms",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "11ms",
+                      "delivery_wait_p95": "12ms",
+                      "delivery_wait_p99": "20ms",
+                      "dispatch_ack_count": "3422",
+                      "dispatch_ack_p99": "6ms",
+                      "engine_batches": "29876",
+                      "batch_full": "0",
+                      "window_timeout": "29876",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.00",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "19ms",
+                      "ack_response_count": "3422",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "26578"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 147.076 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 147.076 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 23.176,
+                    "client_p99_ms": 147.076,
+                    "client_qps": 9989.0,
+                    "master_avg_ms": 15.032,
+                    "master_p99": "78ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9989.0",
+                      "master_qps": "10002.1",
+                      "master_avg": "15.032ms",
+                      "client_p50": "11.018ms",
+                      "client_p90": "63.562ms",
+                      "client_p95": "94.204ms",
+                      "client_p99": "147.076ms",
+                      "master_p50": "10ms",
+                      "master_p90": "29ms",
+                      "master_p95": "35ms",
+                      "master_p99": "78ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "100000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "15ms",
+                      "batch_wait_p95": "19ms",
+                      "batch_wait_p99": "73ms",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "15ms",
+                      "delivery_wait_p95": "20ms",
+                      "delivery_wait_p99": "74ms",
+                      "dispatch_ack_count": "30933",
+                      "dispatch_ack_p99": "9ms",
+                      "engine_batches": "96107",
+                      "batch_full": "0",
+                      "window_timeout": "96107",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.04",
+                      "max_batch": "11",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "23ms",
+                      "ack_response_count": "30933",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "69067"
+                    }
+                  }
+                }
+              }
+            },
+            "NON_BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 386.248 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 386.248 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 18.191,
+                    "client_p99_ms": 386.248,
+                    "client_qps": 2998.8,
+                    "master_avg_ms": 16.092,
+                    "master_p99": "382ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2998.8",
+                      "master_qps": "3000.6",
+                      "master_avg": "16.092ms",
+                      "client_p50": "0.487ms",
+                      "client_p90": "0.763ms",
+                      "client_p95": "142.182ms",
+                      "client_p99": "386.248ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "63ms",
+                      "master_p99": "382ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "4ms",
+                      "delivery_wait_p99": "66ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "3ms",
+                      "route_submit_p99": "338ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 690.515 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 690.515 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 58.145,
+                    "client_p99_ms": 690.515,
+                    "client_qps": 9992.4,
+                    "master_avg_ms": 17.859,
+                    "master_p99": "333ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9992.4",
+                      "master_qps": "10001.0",
+                      "master_avg": "17.859ms",
+                      "client_p50": "0.445ms",
+                      "client_p90": "255.853ms",
+                      "client_p95": "434.249ms",
+                      "client_p99": "690.515ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "71ms",
+                      "master_p95": "125ms",
+                      "master_p99": "333ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "10ms",
+                      "delivery_wait_p95": "18ms",
+                      "delivery_wait_p99": "70ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "5ms",
+                      "route_submit_p99": "149ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "ut": {
+          "focused_tests_passed": 56,
+          "cumulative_reactor_tests": {
+            "tests": 4147,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 3
+          }
+        },
+        "spotless": "full reactor passed",
+        "evidence_archive": "/tmp/flexlb-two-commit-performance.tar.gz"
+      },
+      "rewritten_commit": "d265d0b30c8b7672fd69304df287363c3bd62b66"
+    },
+    {
+      "original_commit": "1abf74c5e31420d44736facea8174ba354451f16",
+      "subject": "refactor(flexlb): simplify scheduling and placement",
+      "change_and_validation_details": "refactor(flexlb): checkpoint scheduler and placement simplification\n\nConsolidate common request handling in AbstractRequestScheduler and retain\nscheduling timing and request selection in concrete scheduling policies.\nSeparate immutable route selections/results from execution resources, and\ncentralize placement publication and cleanup. Include the related endpoint,\nprojection, tests, fixtures and architecture updates from the working tree.\n\nThis is an explicitly requested checkpoint so further validation can move\nto an isolated worktree and the current workspace can be used for new work.\n\nValidation evidence: prior full working-tree UT run completed 4207 tests,\n0 failures/errors, 3 skipped; later focused routing tests passed 81 cases.\nIndependent telemetry cleanup reactor completed 4147 tests with no failures.\nFull-reactor formatting checks passed before checkpoint creation.\n\nPerformance acceptance remains open. Prior B300 runs include P99 failures,\nreceiving-limit errors and long JVM safepoint waits; they are not claimed\nas passing performance validation of this exact checkpoint. Follow-up\nmeasurements must identify this commit and preserve failed runs.",
+      "performance": {
+        "commit_result": {
+          "commit": "1abf74c5e31420d44736facea8174ba354451f16",
+          "source_manifest_verified": true,
+          "source_file_count": 775,
+          "modes": {
+            "BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 1139.943 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 1139.943 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 113.385,
+                    "client_p99_ms": 1139.943,
+                    "client_qps": 2996.8,
+                    "master_avg_ms": 22.222,
+                    "master_p99": "85ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2996.8",
+                      "master_qps": "3000.6",
+                      "master_avg": "22.222ms",
+                      "client_p50": "10.920ms",
+                      "client_p90": "460.885ms",
+                      "client_p95": "768.267ms",
+                      "client_p99": "1139.943ms",
+                      "master_p50": "10ms",
+                      "master_p90": "64ms",
+                      "master_p95": "78ms",
+                      "master_p99": "85ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "30000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "19ms",
+                      "batch_wait_p95": "26ms",
+                      "batch_wait_p99": "46ms",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "20ms",
+                      "delivery_wait_p95": "27ms",
+                      "delivery_wait_p99": "46ms",
+                      "dispatch_ack_count": "6464",
+                      "dispatch_ack_p99": "31ms",
+                      "engine_batches": "28397",
+                      "batch_full": "0",
+                      "window_timeout": "28397",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.06",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "67ms",
+                      "ack_response_count": "6464",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "23536"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 183.903 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 183.903 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 26.946,
+                    "client_p99_ms": 183.903,
+                    "client_qps": 9988.7,
+                    "master_avg_ms": 14.975,
+                    "master_p99": "88ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9988.7",
+                      "master_qps": "10005.4",
+                      "master_avg": "14.975ms",
+                      "client_p50": "10.933ms",
+                      "client_p90": "78.887ms",
+                      "client_p95": "115.510ms",
+                      "client_p99": "183.903ms",
+                      "master_p50": "10ms",
+                      "master_p90": "27ms",
+                      "master_p95": "34ms",
+                      "master_p99": "88ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "100000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "15ms",
+                      "batch_wait_p95": "20ms",
+                      "batch_wait_p99": "80ms",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "16ms",
+                      "delivery_wait_p95": "20ms",
+                      "delivery_wait_p99": "81ms",
+                      "dispatch_ack_count": "34638",
+                      "dispatch_ack_p99": "7ms",
+                      "engine_batches": "94489",
+                      "batch_full": "8",
+                      "window_timeout": "94481",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.06",
+                      "max_batch": "16",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "20ms",
+                      "ack_response_count": "34638",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "65362"
+                    }
+                  }
+                }
+              }
+            },
+            "NON_BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": true,
+                  "issues": [],
+                  "measurement": {
+                    "client_avg_ms": 1.181,
+                    "client_p99_ms": 19.226,
+                    "client_qps": 2999.5,
+                    "master_avg_ms": 0.06,
+                    "master_p99": "3ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2999.5",
+                      "master_qps": "3000.4",
+                      "master_avg": "0.060ms",
+                      "client_p50": "0.467ms",
+                      "client_p90": "0.588ms",
+                      "client_p95": "0.694ms",
+                      "client_p99": "19.226ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "<1ms",
+                      "master_p99": "3ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "1ms",
+                      "delivery_wait_p99": "1ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "2ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 258.831 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 258.831 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 11.594,
+                    "client_p99_ms": 258.831,
+                    "client_qps": 9989.9,
+                    "master_avg_ms": 5.971,
+                    "master_p99": "161ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9989.9",
+                      "master_qps": "10002.0",
+                      "master_avg": "5.971ms",
+                      "client_p50": "0.467ms",
+                      "client_p90": "0.834ms",
+                      "client_p95": "98.664ms",
+                      "client_p99": "258.831ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "39ms",
+                      "master_p99": "161ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "1ms",
+                      "delivery_wait_p95": "7ms",
+                      "delivery_wait_p99": "20ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "138ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "environment": {
+          "host": "B300",
+          "container": "luoli_gpu",
+          "heap_gb": 8,
+          "extra_jvm_args": "",
+          "topology": "750P/750D",
+          "offered_qps": [
+            3000,
+            10000
+          ],
+          "warmup_ms": 10000,
+          "measurement_ms": 10000,
+          "client_p99_limit_ms": 50,
+          "server_p99_limit_ms": 50,
+          "batch_wait_p99_limit_ms": 50,
+          "minimum_qps_ratio": 0.98
+        },
+        "baseline_reference": {
+          "commit": "5386925f1b79e9ae0f27812e8c2f1d85eaf09a33",
+          "source_manifest_verified": true,
+          "source_file_count": 773,
+          "modes": {
+            "BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 711.558 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 711.558 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 52.494,
+                    "client_p99_ms": 711.558,
+                    "client_qps": 2996.8,
+                    "master_avg_ms": 22.268,
+                    "master_p99": "180ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2996.8",
+                      "master_qps": "3000.9",
+                      "master_avg": "22.268ms",
+                      "client_p50": "10.930ms",
+                      "client_p90": "87.296ms",
+                      "client_p95": "403.403ms",
+                      "client_p99": "711.558ms",
+                      "master_p50": "10ms",
+                      "master_p90": "23ms",
+                      "master_p95": "155ms",
+                      "master_p99": "180ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "30000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "11ms",
+                      "batch_wait_p95": "17ms",
+                      "batch_wait_p99": "136ms",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "12ms",
+                      "delivery_wait_p95": "18ms",
+                      "delivery_wait_p99": "137ms",
+                      "dispatch_ack_count": "4270",
+                      "dispatch_ack_p99": "4ms",
+                      "engine_batches": "29338",
+                      "batch_full": "0",
+                      "window_timeout": "29338",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.02",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "159ms",
+                      "ack_response_count": "4270",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "25730"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 155.378 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 155.378 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 24.802,
+                    "client_p99_ms": 155.378,
+                    "client_qps": 9984.5,
+                    "master_avg_ms": 15.636,
+                    "master_p99": "82ms",
+                    "raw_metrics": {
+                      "delivery": "BATCH",
+                      "decision": "FIXED_WINDOW",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9984.5",
+                      "master_qps": "10017.8",
+                      "master_avg": "15.636ms",
+                      "client_p50": "10.936ms",
+                      "client_p90": "73.651ms",
+                      "client_p95": "108.788ms",
+                      "client_p99": "155.378ms",
+                      "master_p50": "10ms",
+                      "master_p90": "31ms",
+                      "master_p95": "40ms",
+                      "master_p99": "82ms",
+                      "active_prefill_rpc": "750",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "100000",
+                      "batch_wait_p50": "10ms",
+                      "batch_wait_p90": "16ms",
+                      "batch_wait_p95": "20ms",
+                      "batch_wait_p99": "72ms",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "10ms",
+                      "delivery_wait_p90": "17ms",
+                      "delivery_wait_p95": "20ms",
+                      "delivery_wait_p99": "73ms",
+                      "dispatch_ack_count": "27878",
+                      "dispatch_ack_p99": "4ms",
+                      "engine_batches": "95780",
+                      "batch_full": "0",
+                      "window_timeout": "95780",
+                      "predicted_execution_cap": "0",
+                      "single_request": "0",
+                      "avg_batch": "1.04",
+                      "max_batch": "2",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "32ms",
+                      "ack_response_count": "27878",
+                      "ack_response_p99": "<1ms",
+                      "terminal_without_ack_count": "72122"
+                    }
+                  }
+                }
+              }
+            },
+            "NON_BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": true,
+                  "issues": [],
+                  "measurement": {
+                    "client_avg_ms": 0.613,
+                    "client_p99_ms": 1.298,
+                    "client_qps": 2999.5,
+                    "master_avg_ms": 0.038,
+                    "master_p99": "1ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2999.5",
+                      "master_qps": "3000.5",
+                      "master_avg": "0.038ms",
+                      "client_p50": "0.506ms",
+                      "client_p90": "0.643ms",
+                      "client_p95": "0.725ms",
+                      "client_p99": "1.298ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "<1ms",
+                      "master_p99": "1ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "<1ms",
+                      "delivery_wait_p99": "1ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "<1ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 1154.138 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 1154.138 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 114.496,
+                    "client_p99_ms": 1154.138,
+                    "client_qps": 9992.6,
+                    "master_avg_ms": 66.986,
+                    "master_p99": "1116ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9992.6",
+                      "master_qps": "10007.9",
+                      "master_avg": "66.986ms",
+                      "client_p50": "0.493ms",
+                      "client_p90": "552.546ms",
+                      "client_p95": "931.358ms",
+                      "client_p99": "1154.138ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "224ms",
+                      "master_p95": "446ms",
+                      "master_p99": "1116ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "13ms",
+                      "delivery_wait_p95": "36ms",
+                      "delivery_wait_p99": "286ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "1063ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parent_reference": {
+          "commit": "381b0f0b55cf6bd2cc2856a56dba7a947e0ae003",
+          "source_manifest_verified": true,
+          "source_file_count": 773,
+          "modes": {
+            "BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "error",
+                      "message": "io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached",
+                      "detail": "java.util.concurrent.ExecutionException: io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.runTraffic(MasterBatchEndToEndPerformanceTest.java:1059)\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:639)\nCaused by: io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached"
+                    }
+                  ],
+                  "measurement": null
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "error",
+                      "message": "io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached",
+                      "detail": "java.util.concurrent.ExecutionException: io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.runTraffic(MasterBatchEndToEndPerformanceTest.java:1059)\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:668)\nCaused by: io.grpc.StatusRuntimeException: RESOURCE_EXHAUSTED: receiving request limit reached"
+                    }
+                  ],
+                  "measurement": null
+                }
+              }
+            },
+            "NON_BATCH": {
+              "exit_code": 1,
+              "cases": {
+                "3000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 177.611 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 177.611 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 5.003,
+                    "client_p99_ms": 177.611,
+                    "client_qps": 2999.5,
+                    "master_avg_ms": 0.332,
+                    "master_p99": "13ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "3000",
+                      "requests": "30000",
+                      "client_qps": "2999.5",
+                      "master_qps": "3000.5",
+                      "master_avg": "0.332ms",
+                      "client_p50": "0.481ms",
+                      "client_p90": "0.632ms",
+                      "client_p95": "0.783ms",
+                      "client_p99": "177.611ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "<1ms",
+                      "master_p99": "13ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "30000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "1ms",
+                      "delivery_wait_p99": "3ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "9ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                },
+                "10000": {
+                  "passed": false,
+                  "issues": [
+                    {
+                      "type": "failure",
+                      "message": "client E2E P99 69.979 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+                      "detail": "org.opentest4j.AssertionFailedError: client E2E P99 69.979 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>\n\tat org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix(MasterBatchEndToEndPerformanceTest.java:795)"
+                    }
+                  ],
+                  "measurement": {
+                    "client_avg_ms": 2.382,
+                    "client_p99_ms": 69.979,
+                    "client_qps": 9984.8,
+                    "master_avg_ms": 0.661,
+                    "master_p99": "24ms",
+                    "raw_metrics": {
+                      "delivery": "NON_BATCH",
+                      "decision": "SINGLE",
+                      "prefill": "750",
+                      "decode": "750",
+                      "target_qps": "10000",
+                      "requests": "100000",
+                      "client_qps": "9984.8",
+                      "master_qps": "10004.2",
+                      "master_avg": "0.661ms",
+                      "client_p50": "0.472ms",
+                      "client_p90": "0.630ms",
+                      "client_p95": "1.738ms",
+                      "client_p99": "69.979ms",
+                      "master_p50": "<1ms",
+                      "master_p90": "<1ms",
+                      "master_p95": "<1ms",
+                      "master_p99": "24ms",
+                      "active_prefill_rpc": "0",
+                      "active_prefill_route": "750",
+                      "active_decode_route": "750",
+                      "batch_wait_count": "0",
+                      "batch_wait_p50": "N/A",
+                      "batch_wait_p90": "N/A",
+                      "batch_wait_p95": "N/A",
+                      "batch_wait_p99": "N/A",
+                      "delivery_wait_count": "100000",
+                      "delivery_wait_p50": "<1ms",
+                      "delivery_wait_p90": "<1ms",
+                      "delivery_wait_p95": "1ms",
+                      "delivery_wait_p99": "7ms",
+                      "dispatch_ack_count": "0",
+                      "dispatch_ack_p99": "N/A",
+                      "engine_batches": "0",
+                      "batch_full": "N/A",
+                      "window_timeout": "N/A",
+                      "predicted_execution_cap": "N/A",
+                      "single_request": "N/A",
+                      "avg_batch": "N/A",
+                      "max_batch": "N/A",
+                      "grpc_queue_p99": "<1ms",
+                      "route_submit_p99": "14ms",
+                      "ack_response_count": "0",
+                      "ack_response_p99": "N/A",
+                      "terminal_without_ack_count": "0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "reference_note": "Baseline and parent are earlier same-configuration runs, not a fresh interleaved comparison.",
+        "authorization": "User requested a unified checkpoint and follow-up in an isolated worktree. Perf failures are retained, not waived as passing.",
+        "validation": {
+          "exact_checkpoint_full_reactor_spotless": "passed",
+          "prior_working_tree_full_ut": {
+            "tests": 4207,
+            "failures": 0,
+            "errors": 0,
+            "skipped": 3
+          },
+          "later_focused_routing_tests": 81,
+          "isolated_optimizer_tests": 14,
+          "exact_checkpoint_full_ut_rerun": false
+        },
+        "followup_worktree": "/Users/hena/Documents/project/RTP-LLM-flexlb-followup-20261106",
+        "branch": "codex/flexlb-followup-20261106",
+        "evidence_archive": "/tmp/flexlb-checkpoint-performance.tar.gz"
+      }
+    }
+  ]
+}

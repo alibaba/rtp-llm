@@ -6,7 +6,7 @@ import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.Delivery;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -40,6 +40,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.runWithStateLock;
+import static org.flexlb.balance.endpoint.EndpointTestSupport.withStateLock;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -58,6 +60,33 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PrefillEndpointTest {
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void eitherClosedAdmissionGateRejectsNewWorkButAllowsRollback(boolean retired) {
+        var prepared = createRequestRoute(9910L, 100L, 0L);
+        var queued = createRequestRoute(9911L, 100L, 0L);
+        var incoming = createRequestRoute(9912L, 100L, 0L);
+        var reservation = endpoint.reserveUnqueuedRoute(prepared, 10L).value();
+        var batch = endpoint.reserveBatch(9910L, 10).value();
+        assertNotNull(reservation);
+        assertNotNull(batch);
+        if (retired) endpoint.beginRetirement();
+        else endpoint.getStatus().markRemovedFromDiscovery();
+
+        assertEquals(retired, endpoint.isRetired());
+        assertEquals(retired, endpoint.getStatus().isAvailableForScheduling());
+        assertFalse(endpoint.acceptsNewRequests());
+        assertFalse(endpoint.tryEnqueueRoute(queued));
+        assertFalse(endpoint.reserveUnqueuedRoute(incoming, 10L).accepted());
+        assertFalse(endpoint.reserveBatch(9911L, 10).accepted());
+        assertNull(endpoint.commitDirect(prepared, reservation));
+
+        endpoint.rollback(reservation);
+        endpoint.rollback(batch);
+        assertEquals(0L, endpoint.admissionSummary(0, 0).occupiedRequests());
+        assertEquals(0, endpoint.stats().batchCount());
+    }
 
     private PrefillEndpoint endpoint;
     private FlexlbConfig config;
@@ -107,23 +136,25 @@ class PrefillEndpointTest {
                         settings.maxRequests(),
                         settings.collectionWaitMs(),
                         settings.executionBudgetMs());
-        try (var pin = endpoint.tryPinGeneration()) {
+        {
+            var selectedEndpoint = endpoint;
+
             assertThrows(IllegalArgumentException.class, () -> endpoint.enableQueue(different));
-            var route = mock(RequestRoute.class);
+            var route = mock(RouteExecution.class);
             org.mockito.Mockito.when(route.requestId()).thenReturn("1");
             var context = new org.flexlb.balance.scheduler.RequestContext(config);
             org.flexlb.balance.scheduler.SchedulerTestSupport.bindOwner(
                     context, requestRuntime.events());
             org.mockito.Mockito.when(route.ctx()).thenReturn(context);
-            org.mockito.Mockito.when(route.prefillEp()).thenReturn(endpoint);
-            assertTrue(endpoint.offerPinned(pin, route, settings));
+            org.mockito.Mockito.when(route.prefillEndpoint()).thenReturn(endpoint);
+            assertTrue(endpoint.enqueueRoute(route, settings));
             long sequence = context.data().getWorkerEnqueueSequence();
             long firstEnqueue = context.data().getFirstWorkerEnqueueTime();
             assertTrue(sequence > 0L);
             assertTrue(firstEnqueue > 0L);
-            assertFalse(endpoint.offerPinned(pin, route, settings));
+            assertFalse(endpoint.enqueueRoute(route, settings));
             assertTrue(endpoint.removeQueued(route));
-            assertTrue(endpoint.offerPinned(pin, route, settings));
+            assertTrue(endpoint.enqueueRoute(route, settings));
             assertEquals(sequence, context.data().getWorkerEnqueueSequence());
             assertEquals(firstEnqueue, context.data().getFirstWorkerEnqueueTime());
             assertTrue(endpoint.removeQueued(route));
@@ -152,24 +183,30 @@ class PrefillEndpointTest {
             org.mockito.Mockito.doReturn(true).when(queued).requestExpired(nowMs);
         }
         try {
-            state.resourceLock().lock();
-            try {
-                assertSame(
-                        queued,
-                        org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, queued));
-                assertNull(
-                        local.commitLocked(
-                                org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                        List.of(selected), null, new long[] {10L}, null, nowMs)));
-                assertEquals(List.of(queued), state.captureQueue(2).items());
-                WorkSnapshot committed = state.committedSnapshot();
-                assertFalse(committed.containsRequest("999"));
-                assertEquals(0L, committed.totalRemainingWorkMs().orElseThrow());
-            } finally {
-                state.resourceLock().unlock();
-            }
-            org.mockito.Mockito.verify(local, org.mockito.Mockito.never()).tryPinGeneration();
-            try (var handoff = local.tryPinGeneration()) {
+            runWithStateLock(
+                    state.stateLock(),
+                    () -> {
+                        assertSame(
+                                queued,
+                                org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(
+                                        state, queued));
+                        assertNull(
+                                local.commitLocked(
+                                        org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                                                List.of(selected),
+                                                null,
+                                                new long[] {10L},
+                                                null,
+                                                nowMs)));
+                        assertEquals(List.of(queued), state.captureQueue(2).items());
+                        WorkSnapshot committed = state.committedSnapshot();
+                        assertFalse(committed.containsRequest("999"));
+                        assertEquals(0L, committed.totalRemainingWorkMs().orElseThrow());
+                    });
+            org.mockito.Mockito.verify(local, org.mockito.Mockito.never());
+            {
+                var handoff = local;
+
                 org.junit.jupiter.api.Assertions.assertNotNull(handoff);
             }
         } finally {
@@ -188,7 +225,7 @@ class PrefillEndpointTest {
             var empty = direct.captureRouteProjectionInputs();
             assertFalse(empty.queue().queueScheduling());
             assertSame(empty, direct.captureRouteProjectionInputs());
-            RequestRoute item = createRequestRoute(direct, directConfig, 999L, 100, 0);
+            RouteExecution item = createRequestRoute(direct, directConfig, 999L, 100, 0);
             {
                 var reservation = EndpointTestSupport.reserveUnqueued(direct, item, 100L);
                 try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
@@ -253,17 +290,20 @@ class PrefillEndpointTest {
                 endpoint, "predictor", predictor);
 
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            endpoint.resourceLock().lock();
-            try {
-                var after =
-                        executor.submit(endpoint::captureRouteProjectionInputs)
-                                .get(5, TimeUnit.SECONDS);
-                assertSame(model, after.evaluator());
-                assertSame(before.queue(), after.queue());
-                assertSame(before.work(), after.work());
-            } finally {
-                endpoint.resourceLock().unlock();
-            }
+            runWithStateLock(
+                    endpoint.stateLock(),
+                    () ->
+                            org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                                    () -> {
+                                        var after =
+                                                executor.submit(
+                                                                endpoint
+                                                                        ::captureRouteProjectionInputs)
+                                                        .get(5, TimeUnit.SECONDS);
+                                        assertSame(model, after.evaluator());
+                                        assertSame(before.queue(), after.queue());
+                                        assertSame(before.work(), after.work());
+                                    }));
         }
     }
 
@@ -321,7 +361,7 @@ class PrefillEndpointTest {
         org.mockito.Mockito.when(predictor.evaluator())
                 .thenAnswer(
                         call -> {
-                            assertFalse(endpoint.resourceLock().isHeldByCurrentThread());
+                            assertFalse(endpoint.stateLock().isHeldByCurrentThread());
                             captures.incrementAndGet();
                             return evaluator;
                         });
@@ -351,7 +391,7 @@ class PrefillEndpointTest {
                         endpointReporter,
                         new org.flexlb.balance.scheduler.PlacementAvailability(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                        order -> PrefillActiveIndex.ordered(16, order));
+                        order -> OrderedPrefillRequestQueue.ordered(16, order));
         try {
             var inputs = actual.captureRouteProjectionInputs();
             assertEquals(
@@ -380,7 +420,7 @@ class PrefillEndpointTest {
                         new org.flexlb.balance.scheduler.PlacementAvailability(),
                         grouping,
                         ignored ->
-                                PrefillActiveIndex.ordered(
+                                OrderedPrefillRequestQueue.ordered(
                                         4,
                                         java.util.Comparator.comparingLong(
                                                         org.flexlb.balance.endpoint
@@ -393,8 +433,8 @@ class PrefillEndpointTest {
                     org.flexlb.balance.scheduler.QueueExecutionSettings.capture(config, grouping));
             var shortRequest = createRequestRoute(actual, config, 1L, 10, 0);
             var longRequest = createRequestRoute(actual, config, 2L, 30, 0);
-            assertTrue(actual.offerQueued(shortRequest));
-            assertTrue(actual.offerQueued(longRequest));
+            assertTrue(actual.tryEnqueueRoute(shortRequest));
+            assertTrue(actual.tryEnqueueRoute(longRequest));
             var projection = actual.captureRouteProjectionInputs().queue();
             var execution = actual.captureQueue(4).items();
             assertEquals(
@@ -431,7 +471,7 @@ class PrefillEndpointTest {
         try {
             assertEquals(0, routeEndpoint.progress().queueDepth());
 
-            RequestRoute queued = createRequestRoute(routeEndpoint, routeConfig, 1L, 500, 200);
+            RouteExecution queued = createRequestRoute(routeEndpoint, routeConfig, 1L, 500, 200);
             assertTrue(EndpointTestSupport.offer(routeEndpoint, queued));
             assertEquals(1, routeEndpoint.progress().queueDepth());
 
@@ -498,7 +538,7 @@ class PrefillEndpointTest {
         assertEquals(0, endpoint.stats().batchCount());
         WorkSnapshot empty = endpoint.captureRouteProjectionInputs().work();
 
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         assertEquals(1, endpoint.stats().batchCount());
@@ -512,7 +552,7 @@ class PrefillEndpointTest {
 
     @Test
     void releaseBatchDecreasesInflightCount() {
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
         WorkSnapshot committed = endpoint.captureRouteProjectionInputs().work();
         assertTrue(endpoint.releaseRequest(item));
@@ -527,8 +567,8 @@ class PrefillEndpointTest {
 
     @Test
     void expireBatchMemberReleasesOnlyItsExactOwnership() {
-        RequestRoute first = createRequestRoute(101L, 500, 200);
-        RequestRoute sibling = createRequestRoute(102L, 300, 100);
+        RouteExecution first = createRequestRoute(101L, 500, 200);
+        RouteExecution sibling = createRequestRoute(102L, 300, 100);
         registerBatch(endpoint, 7L, 100, List.of(first, sibling));
         WorkSnapshot committed = endpoint.captureRouteProjectionInputs().work();
         assertEquals(2, endpoint.stats().locallyOwnedRequests());
@@ -562,11 +602,11 @@ class PrefillEndpointTest {
 
     @Test
     void staleExpirationCannotReleaseReusedRequestId() {
-        RequestRoute original = createRequestRoute(101L, 500, 200);
+        RouteExecution original = createRequestRoute(101L, 500, 200);
         registerBatch(endpoint, 7L, 100, List.of(original));
         assertTrue(endpoint.releaseRequest(original));
 
-        RequestRoute replacement = createRequestRoute(101L, 300, 100);
+        RouteExecution replacement = createRequestRoute(101L, 300, 100);
         registerBatch(endpoint, 8L, 100, List.of(replacement));
         assertFalse(endpoint.releaseRequest(original));
         assertEquals(1, endpoint.stats().batchCount());
@@ -577,9 +617,9 @@ class PrefillEndpointTest {
 
     @Test
     void commitMultipleBatches() {
-        RequestRoute item1 = createRequestRoute(1L, 500, 200);
-        RequestRoute item2 = createRequestRoute(2L, 300, 100);
-        RequestRoute item3 = createRequestRoute(3L, 400, 0);
+        RouteExecution item1 = createRequestRoute(1L, 500, 200);
+        RouteExecution item2 = createRequestRoute(2L, 300, 100);
+        RouteExecution item3 = createRequestRoute(3L, 400, 0);
 
         registerBatch(endpoint, 1L, 100, List.of(item1, item2));
         registerBatch(endpoint, 2L, 50, List.of(item3));
@@ -592,8 +632,8 @@ class PrefillEndpointTest {
 
     @Test
     void localMemberCleanupPreservesBatchPrediction() {
-        RequestRoute item1 = createRequestRoute(1L, 500, 200);
-        RequestRoute item2 = createRequestRoute(2L, 300, 100);
+        RouteExecution item1 = createRequestRoute(1L, 500, 200);
+        RouteExecution item2 = createRequestRoute(2L, 300, 100);
         registerBatch(endpoint, 1L, 100, List.of(item1, item2));
 
         assertTrue(endpoint.releaseRequest(item2));
@@ -608,7 +648,7 @@ class PrefillEndpointTest {
 
     @Test
     void repackBatchAllFailedReturnsNull() {
-        RequestRoute item1 = createRequestRoute(1L, 500, 200);
+        RouteExecution item1 = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item1));
 
         assertTrue(endpoint.releaseRequest(item1));
@@ -623,8 +663,8 @@ class PrefillEndpointTest {
     void invalidRepackPredictionUsesDefaultFormula(String formula) {
         PrefillEndpoint invalidPredictorEndpoint = newEndpointWithFormula(formula);
         try {
-            RequestRoute survivor = createRequestRoute(invalidPredictorEndpoint, 1L, 500L, 200L);
-            RequestRoute failed = createRequestRoute(invalidPredictorEndpoint, 2L, 300L, 100L);
+            RouteExecution survivor = createRequestRoute(invalidPredictorEndpoint, 1L, 500L, 200L);
+            RouteExecution failed = createRequestRoute(invalidPredictorEndpoint, 2L, 300L, 100L);
             registerBatch(invalidPredictorEndpoint, 1L, 100L, List.of(survivor, failed));
 
             assertDoesNotThrow(() -> reportRejectedBatchMember(invalidPredictorEndpoint, 1L, 2L));
@@ -665,8 +705,8 @@ class PrefillEndpointTest {
     @Test
     @org.junit.jupiter.api.Timeout(5)
     void repackReusesPredictionAcrossUnrelatedQueueMutation() {
-        RequestRoute survivor = createRequestRoute(1L, 500L, 200L);
-        RequestRoute finished = createRequestRoute(2L, 300L, 100L);
+        RouteExecution survivor = createRequestRoute(1L, 500L, 200L);
+        RouteExecution finished = createRequestRoute(2L, 300L, 100L);
         registerBatch(endpoint, 1L, 100L, List.of(survivor, finished));
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         PrefillTimePredictor.Evaluator evaluator = mock(PrefillTimePredictor.Evaluator.class);
@@ -676,7 +716,7 @@ class PrefillEndpointTest {
         org.mockito.Mockito.when(evaluator.predictBatchMs(org.mockito.ArgumentMatchers.any()))
                 .thenAnswer(
                         call -> {
-                            assertFalse(state.resourceLock().isHeldByCurrentThread());
+                            assertFalse(state.stateLock().isHeldByCurrentThread());
                             int n = predictions.incrementAndGet();
                             assertTrue(
                                     n <= 2,
@@ -712,7 +752,7 @@ class PrefillEndpointTest {
         when(evaluator.predictBatchMs(org.mockito.ArgumentMatchers.any()))
                 .thenAnswer(
                         call -> {
-                            assertFalse(endpoint.resourceLock().isHeldByCurrentThread());
+                            assertFalse(endpoint.stateLock().isHeldByCurrentThread());
                             int attempt = predictions.incrementAndGet();
                             if (attempt == 1) {
                                 assertTrue(endpoint.releaseRequest(removed));
@@ -744,29 +784,35 @@ class PrefillEndpointTest {
         AtomicInteger notifications = new AtomicInteger();
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            assertFalse(state.resourceLock().isHeldByCurrentThread());
+                            assertFalse(state.stateLock().isHeldByCurrentThread());
                             notifications.incrementAndGet();
                             return null;
                         })
                 .when(availability)
                 .changed(org.mockito.ArgumentMatchers.any());
         var first = createRequestRoute(90L, 100L, 0L);
-        PrefillEndpoint.RouteReservation open;
-        try (var pin = endpoint.tryPinGeneration()) {
-            open = endpoint.reserveUnqueuedRoute(pin, first, 10L).value();
+        PrefillEndpoint.RequestRecord open;
+        {
+            var selectedEndpoint = endpoint;
+
+            open = endpoint.reserveUnqueuedRoute(first, 10L).value();
         }
         endpoint.rollback(open);
         endpoint.rollback(open);
         assertEquals(1, notifications.get());
         assertEquals(0L, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
         var second = createRequestRoute(91L, 100L, 0L);
-        PrefillEndpoint.RouteReservation consumed;
-        try (var pin = endpoint.tryPinGeneration()) {
-            consumed = endpoint.reserveUnqueuedRoute(pin, second, 10L).value();
+        PrefillEndpoint.RequestRecord consumed;
+        {
+            var selectedEndpoint = endpoint;
+
+            consumed = endpoint.reserveUnqueuedRoute(second, 10L).value();
         }
-        try (var handoff =
-                org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                        endpoint, second, consumed)) {
+        {
+            var handoff =
+                    org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
+                            endpoint, second, consumed);
+
             endpoint.rollback(consumed);
             assertEquals(1, notifications.get(), "successful admission releases no capacity");
         }
@@ -783,7 +829,7 @@ class PrefillEndpointTest {
         AtomicInteger notifications = new AtomicInteger();
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            assertFalse(state.resourceLock().isHeldByCurrentThread());
+                            assertFalse(state.stateLock().isHeldByCurrentThread());
                             notifications.incrementAndGet();
                             return null;
                         })
@@ -800,9 +846,11 @@ class PrefillEndpointTest {
         var replacement = createRequestRoute(90L, 100L, 0L);
         var replacementPreparation =
                 EndpointTestSupport.reserveUnqueued(endpoint, replacement, 20L);
-        try (var handoff =
-                org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                        endpoint, replacement, replacementPreparation)) {
+        {
+            var handoff =
+                    org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
+                            endpoint, replacement, replacementPreparation);
+
             assertFalse(endpoint.releaseRequest(first));
             assertEquals(
                     1L, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
@@ -819,13 +867,13 @@ class PrefillEndpointTest {
                 org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
                         config, org.flexlb.balance.planner.BuiltinGroupPlanner.from(config)));
         var route = createRequestRoute(91L, 100L, 0L);
-        assertTrue(endpoint.offerQueued(route));
+        assertTrue(endpoint.tryEnqueueRoute(route));
         var availability = mock(org.flexlb.balance.scheduler.PlacementAvailability.class);
         org.springframework.test.util.ReflectionTestUtils.setField(
                 endpoint, "placementAvailability", availability);
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            assertFalse(endpoint.resourceLock().isHeldByCurrentThread());
+                            assertFalse(endpoint.stateLock().isHeldByCurrentThread());
                             assertEquals(0, endpoint.queueDepth());
                             assertEquals(0L, endpoint.admissionSummary(0, 0L).occupiedRequests());
                             return null;
@@ -839,8 +887,8 @@ class PrefillEndpointTest {
 
     @Test
     void throwingRepackPredictorUsesDefaultFormula() throws Exception {
-        RequestRoute survivor = createRequestRoute(1L, 500L, 200L);
-        RequestRoute finished = createRequestRoute(2L, 300L, 100L);
+        RouteExecution survivor = createRequestRoute(1L, 500L, 200L);
+        RouteExecution finished = createRequestRoute(2L, 300L, 100L);
         registerBatch(endpoint, 1L, 100L, List.of(survivor, finished));
         PrefillTimePredictor failingPredictor = mock(PrefillTimePredictor.class);
         org.mockito.Mockito.when(failingPredictor.evaluator())
@@ -868,8 +916,8 @@ class PrefillEndpointTest {
     @ParameterizedTest
     @CsvSource({"500,600,15", "500,-1,65", "-1,20,15"})
     void repackNormalizesInvalidFeatures(long seqLen, long hitCache, long expectedMs) {
-        RequestRoute survivor = org.mockito.Mockito.spy(createRequestRoute(1L, 500L, 200L));
-        RequestRoute finished = createRequestRoute(2L, 300L, 100L);
+        RouteExecution survivor = org.mockito.Mockito.spy(createRequestRoute(1L, 500L, 200L));
+        RouteExecution finished = createRequestRoute(2L, 300L, 100L);
         var malformed = new java.util.concurrent.atomic.AtomicBoolean();
         org.mockito.Mockito.doAnswer(call -> malformed.get() ? seqLen : call.callRealMethod())
                 .when(survivor)
@@ -895,7 +943,7 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateRemovesBatchOnSuccess() {
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         Map<String, TaskInfo> finished = new HashMap<>();
@@ -927,8 +975,8 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateRepacksOnPartialFailure() {
-        RequestRoute item1 = createRequestRoute(1L, 500, 200);
-        RequestRoute item2 = createRequestRoute(2L, 300, 100);
+        RouteExecution item1 = createRequestRoute(1L, 500, 200);
+        RouteExecution item2 = createRequestRoute(2L, 300, 100);
         registerBatch(endpoint, 1L, 100, List.of(item1, item2));
 
         Map<String, TaskInfo> finished = new HashMap<>();
@@ -947,8 +995,8 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateKeepsBatchInflightUntilEveryMemberFinishes() {
-        RequestRoute shortItem = createRequestRoute(1L, 500, 200);
-        RequestRoute longItem = createRequestRoute(2L, 10_000, 0);
+        RouteExecution shortItem = createRequestRoute(1L, 500, 200);
+        RouteExecution longItem = createRequestRoute(2L, 10_000, 0);
         registerBatch(endpoint, 1L, 2_000, List.of(shortItem, longItem));
 
         TaskInfo finishedShort = taskInfo(1L, 1L, null, 0, 40);
@@ -973,9 +1021,9 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateMixedTerminalMembersKeepsOnlyRunningSurvivor() {
-        RequestRoute succeeded = createRequestRoute(1L, 500, 200);
-        RequestRoute failed = createRequestRoute(2L, 300, 100);
-        RequestRoute running = createRequestRoute(3L, 10_000, 0);
+        RouteExecution succeeded = createRequestRoute(1L, 500, 200);
+        RouteExecution failed = createRequestRoute(2L, 300, 100);
+        RouteExecution running = createRequestRoute(3L, 10_000, 0);
         registerBatch(endpoint, 1L, 2_000, List.of(succeeded, failed, running));
 
         TaskInfo success = taskInfo(1L, 1L, null, 0, 40);
@@ -1117,7 +1165,7 @@ class PrefillEndpointTest {
 
     @Test
     void runningObservationRefreshesBatchInactivityTtl() throws InterruptedException {
-        RequestRoute longItem = createRequestRoute(1L, 10_000, 0);
+        RouteExecution longItem = createRequestRoute(1L, 10_000, 0);
         registerBatch(endpoint, 1L, 2_000, List.of(longItem));
 
         Thread.sleep(150);
@@ -1145,8 +1193,8 @@ class PrefillEndpointTest {
 
     @Test
     void partialCompletionKeepsFixedWindowMaxInflightGateClosed() throws Exception {
-        RequestRoute shortItem = createRequestRoute(101L, 500, 200);
-        RequestRoute longItem = createRequestRoute(102L, 10_000, 0);
+        RouteExecution shortItem = createRequestRoute(101L, 500, 200);
+        RouteExecution longItem = createRequestRoute(102L, 10_000, 0);
         registerBatch(endpoint, 700L, 2_000, List.of(shortItem, longItem));
         assertFalse(endpoint.batchCapacityAvailable(1));
 
@@ -1168,7 +1216,7 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateHandlesTaskWithNoBatchId() {
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         Map<String, TaskInfo> finished = new HashMap<>();
@@ -1211,7 +1259,7 @@ class PrefillEndpointTest {
 
     @Test
     void directRegistrationCanRollbackFromAsyncCompletionThread() throws Exception {
-        PrefillEndpoint.RouteReservation registration =
+        PrefillEndpoint.RequestRecord registration =
                 EndpointTestSupport.reserveUnqueued(
                         endpoint, createRequestRoute(102L, 100, 0), 100L);
         assertEquals(1, endpoint.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
@@ -1303,30 +1351,29 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateMissingBatchIdDoesNotGuessAcrossDuplicateLiveBatches() {
-        RequestRoute first = createRequestRoute(101L, 500, 200);
-        RequestRoute reusedRequestId = createRequestRoute(101L, 300, 100);
+        RouteExecution first = createRequestRoute(101L, 500, 200);
+        RouteExecution reusedRequestId = createRequestRoute(101L, 300, 100);
         registerBatch(endpoint, 700L, 100, List.of(first));
 
-        CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> duplicate =
+        CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> duplicate =
                 endpoint.reserveBatch(701L, 10);
 
         assertTrue(duplicate.accepted(), "batch slots are independent of request identity");
         try {
-            var guard = endpoint.resourceLock();
-            guard.lock();
-            try {
-                assertNull(
-                        endpoint.commitLocked(
-                                org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                        List.of(reusedRequestId),
-                                        duplicate.value(),
-                                        new long[] {100L},
-                                        null,
-                                        System.currentTimeMillis())),
-                        "commit rejects a replacement identity for a live request");
-            } finally {
-                guard.unlock();
-            }
+            var guard = endpoint.stateLock();
+            runWithStateLock(
+                    guard,
+                    () -> {
+                        assertNull(
+                                endpoint.commitLocked(
+                                        org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                                                List.of(reusedRequestId),
+                                                duplicate.value(),
+                                                new long[] {100L},
+                                                null,
+                                                System.currentTimeMillis())),
+                                "commit rejects a replacement identity for a live request");
+                    });
         } finally {
             endpoint.rollback(duplicate.value());
         }
@@ -1336,8 +1383,8 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateMissingBatchIdPreservesExactBatchMember() {
-        RequestRoute firstItem = createRequestRoute(101L, 500, 200);
-        RequestRoute sibling = createRequestRoute(102L, 300, 100);
+        RouteExecution firstItem = createRequestRoute(101L, 500, 200);
+        RouteExecution sibling = createRequestRoute(102L, 300, 100);
         registerBatch(endpoint, 700L, 100, List.of(firstItem, sibling));
 
         calibrate(Map.of("102", priorityCanceledTask(102L, -1L)), Map.of());
@@ -1358,7 +1405,7 @@ class PrefillEndpointTest {
 
     @Test
     void authoritativeWorkerTerminalSettlesBatchMemberImmediately() {
-        RequestRoute firstItem = createRequestRoute(101L, 500, 200);
+        RouteExecution firstItem = createRequestRoute(101L, 500, 200);
         registerBatch(endpoint, 700L, 100, List.of(firstItem));
         WorkSnapshot committed = endpoint.captureRouteProjectionInputs().work();
 
@@ -1400,7 +1447,7 @@ class PrefillEndpointTest {
 
             long batchId = 8_004L;
             long requestId = 9_004L;
-            RequestRoute firstItem = createRequestRoute(learningEndpoint, requestId, 500L, 200L);
+            RouteExecution firstItem = createRequestRoute(learningEndpoint, requestId, 500L, 200L);
             registerBatch(learningEndpoint, batchId, 100L, List.of(firstItem));
 
             reportSuccessfulBatchMember(learningEndpoint, batchId, requestId, 104L);
@@ -1425,7 +1472,7 @@ class PrefillEndpointTest {
                     learningEndpoint.predictor.evaluator();
             long batchId = 8_101L;
             long requestId = 9_101L;
-            RequestRoute firstItem = createRequestRoute(learningEndpoint, requestId, 500L, 200L);
+            RouteExecution firstItem = createRequestRoute(learningEndpoint, requestId, 500L, 200L);
             registerBatch(learningEndpoint, batchId, 100L, List.of(firstItem));
 
             reportSuccessfulBatchMember(learningEndpoint, batchId, requestId, 101L);
@@ -1443,7 +1490,7 @@ class PrefillEndpointTest {
 
     @Test
     void finishedSettlementMakesLateExpirationANoOp() {
-        RequestRoute item = createRequestRoute(101L, 500, 200);
+        RouteExecution item = createRequestRoute(101L, 500, 200);
         registerBatch(endpoint, 700L, 100, List.of(item));
 
         calibrate(Map.of("101", taskInfo(101L, 700L, null, 0, 10)), Map.of());
@@ -1476,7 +1523,7 @@ class PrefillEndpointTest {
     @Test
     void calibrateDoesNotRemoveBatchWithForeignRequestId() {
         // Commit batch with requestId=100
-        RequestRoute item = createRequestRoute(100L, 500, 200);
+        RouteExecution item = createRequestRoute(100L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
         assertEquals(1, endpoint.stats().batchCount());
 
@@ -1495,7 +1542,7 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateRemovesBatchWithMatchingRequestId() {
-        RequestRoute item = createRequestRoute(100L, 500, 200);
+        RouteExecution item = createRequestRoute(100L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         Map<String, TaskInfo> finished = new HashMap<>();
@@ -1511,8 +1558,8 @@ class PrefillEndpointTest {
 
     @Test
     void calibrateSuccessOnlyRetiresSiblingWhileBatchMemberReconciles() {
-        RequestRoute reconciling = createRequestRoute(101L, 500, 200);
-        RequestRoute sibling = createRequestRoute(102L, 300, 100);
+        RouteExecution reconciling = createRequestRoute(101L, 500, 200);
+        RouteExecution sibling = createRequestRoute(102L, 300, 100);
         registerBatch(endpoint, 7L, 100, List.of(reconciling, sibling));
 
         TaskInfo siblingSuccess = new TaskInfo();
@@ -1544,8 +1591,8 @@ class PrefillEndpointTest {
 
     @Test
     void batchMemberFailuresSettleFromOneWorkerSnapshot() {
-        RequestRoute firstItem = createRequestRoute(101L, 500, 200);
-        RequestRoute sibling = createRequestRoute(102L, 300, 100);
+        RouteExecution firstItem = createRequestRoute(101L, 500, 200);
+        RouteExecution sibling = createRequestRoute(102L, 300, 100);
         registerBatch(endpoint, 7L, 100, List.of(firstItem, sibling));
 
         TaskInfo firstFailure = taskInfo(101L, 7L, null, 500, 40);
@@ -1575,7 +1622,7 @@ class PrefillEndpointTest {
 
     @Test
     void committedWorkMetricReflectsInflightPrediction() {
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 5000, List.of(item)); // 5s prediction
 
         long remainingWorkMs = endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow();
@@ -1586,7 +1633,7 @@ class PrefillEndpointTest {
 
     @Test
     void runningCommittedWorkMetricDecreasesWithElapsedTime() throws InterruptedException {
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 5000, List.of(item));
 
         long remainingBefore = endpoint.committedSnapshot().totalRemainingWorkMs().orElseThrow();
@@ -1612,7 +1659,7 @@ class PrefillEndpointTest {
 
     @Test
     void evictExpiredBatchesCleansUpStaleEntries() throws InterruptedException {
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         assertEquals(1, endpoint.stats().batchCount());
@@ -1627,7 +1674,7 @@ class PrefillEndpointTest {
 
     @Test
     void evictExpiredBatchesFreshEntriesSurvive() {
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         int evicted =
@@ -1639,7 +1686,7 @@ class PrefillEndpointTest {
 
     @Test
     void expireUnobservedBatchDoesNotWaitForAnEngineReply() {
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
 
         assertTrue(endpoint.releaseRequest(item));
@@ -1732,7 +1779,7 @@ class PrefillEndpointTest {
                     queuedEndpoint
                             .admissionSummary(0, queuedEndpoint.requestLimit)
                             .occupiedRequests());
-            RequestRoute item = createRequestRoute(queuedEndpoint, 1L, 500L, 200L);
+            RouteExecution item = createRequestRoute(queuedEndpoint, 1L, 500L, 200L);
             assertTrue(EndpointTestSupport.offer(queuedEndpoint, item));
 
             assertEquals(
@@ -1750,7 +1797,7 @@ class PrefillEndpointTest {
     void projectionCapturesExactPublishedIdentityBeforeActiveRemoval() {
         PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
         try {
-            RequestRoute active = createRequestRoute(handoffEndpoint, 111L, 500L, 0L);
+            RouteExecution active = createRequestRoute(handoffEndpoint, 111L, 500L, 0L);
             assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
 
             org.flexlb.balance.projection.RequestTimeEstimation.Inputs snapshot =
@@ -1767,7 +1814,7 @@ class PrefillEndpointTest {
         PrefillEndpoint handoffEndpoint = newFixedWindowEndpoint(60_000);
         long requestId = 222L;
         try {
-            RequestRoute active = createRequestRoute(handoffEndpoint, requestId, 500L, 0L);
+            RouteExecution active = createRequestRoute(handoffEndpoint, requestId, 500L, 0L);
             assertTrue(EndpointTestSupport.offer(handoffEndpoint, active));
             try (var committed =
                     EndpointTestSupport.commitQueuedRoutes(
@@ -1863,7 +1910,7 @@ class PrefillEndpointTest {
         EndpointTestSupport.TestRequestRuntime runtime =
                 new EndpointTestSupport.TestRequestRuntime() {
                     @Override
-                    void onRetired(org.flexlb.balance.scheduler.RequestRoute item) {
+                    void onRetired(org.flexlb.balance.scheduler.RouteExecution item) {
                         reentrantCloseEntered.countDown();
                         try {
                             retirementEndpointRef.get().close();
@@ -1884,7 +1931,7 @@ class PrefillEndpointTest {
         retirementEndpointRef.set(retirementEndpoint);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
-            RequestRoute item =
+            RouteExecution item =
                     createRequestRoute(retirementEndpoint, retirementConfig, 8_101L, 128, 0);
             assertTrue(EndpointTestSupport.offer(retirementEndpoint, item));
 
@@ -1946,8 +1993,8 @@ class PrefillEndpointTest {
         try {
             DecodeEndpoint decode =
                     org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
-            DecodeResources.ReservationHandle decodeReservation =
-                    mock(DecodeResources.ReservationHandle.class);
+            DecodeResources.RequestReservation decodeReservation =
+                    mock(DecodeResources.RequestReservation.class);
             org.mockito.Mockito.when(decodeReservation.requestId())
                     .thenReturn(String.valueOf(8_201L));
             DecodeEndpoint.EngineDispatchPermit permit =
@@ -1955,7 +2002,7 @@ class PrefillEndpointTest {
             org.mockito.Mockito.when(
                             decode.acquireDispatchPermit(
                                     org.mockito.Mockito.any(
-                                            DecodeResources.ReservationHandle.class),
+                                            DecodeResources.RequestReservation.class),
                                     org.mockito.Mockito.any(
                                             DecodeResources.AdmissionCapacity.class)))
                     .thenReturn(
@@ -1968,7 +2015,7 @@ class PrefillEndpointTest {
                             DecodeResources.ResourceChange.of(
                                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                                     false));
-            RequestRoute admitted =
+            RouteExecution admitted =
                     createRequestRoute(
                             retirementEndpoint,
                             retirementConfig,
@@ -2028,7 +2075,7 @@ class PrefillEndpointTest {
                     firstPreparation.countDown();
                 });
         try {
-            RequestRoute waiting = createRequestRoute(routeEndpoint, routeConfig, 8_301L, 128, 0);
+            RouteExecution waiting = createRequestRoute(routeEndpoint, routeConfig, 8_301L, 128, 0);
             assertTrue(EndpointTestSupport.offer(routeEndpoint, waiting));
             assertTrue(firstPreparation.await(2, TimeUnit.SECONDS));
             assertTrue(
@@ -2094,7 +2141,7 @@ class PrefillEndpointTest {
             status.setRunningTaskInfo(Map.of("8402", unknown));
             status.setRunningQueryLen(1L);
             EndpointTestSupport.applyStatus(routeEndpoint, status).run();
-            RequestRoute waiting = createRequestRoute(routeEndpoint, routeConfig, 8_401L, 128, 0);
+            RouteExecution waiting = createRequestRoute(routeEndpoint, routeConfig, 8_401L, 128, 0);
             assertTrue(EndpointTestSupport.offer(routeEndpoint, waiting));
             assertTrue(firstPreparation.await(2, TimeUnit.SECONDS));
             assertTrue(
@@ -2135,8 +2182,8 @@ class PrefillEndpointTest {
     }
 
     @Test
-    void closePreservesRegisteredLifecycleAndRejectsNewBatchReservations() {
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+    void closePreservesRegisteredLifecycleAndRejectsNewBatchRecords() {
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         registerBatch(endpoint, 1L, 100, List.of(item));
         assertEquals(1, endpoint.stats().batchCount());
 
@@ -2148,7 +2195,8 @@ class PrefillEndpointTest {
                 retirement.ownedItems().contains(item),
                 "retirement must publish the exact canonical owner");
         assertEquals(
-                CapacityBoundary.Status.FAILED, endpoint.reserveBatch(2L, 1).boundary().status());
+                CapacityBoundary.Status.OWNERSHIP_LOST,
+                endpoint.reserveBatch(2L, 1).boundary().status());
         endpoint.close();
     }
 
@@ -2176,14 +2224,10 @@ class PrefillEndpointTest {
         var secondReportFailure = new AssertionError("second report failed");
         doThrow(schedulerFailure)
                 .when(requestRuntime.events())
-                .onEngineEvidence(
+                .onEndpointRetired(
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.argThat(
-                                e ->
-                                        e.kind()
-                                                        == org.flexlb.balance.scheduler
-                                                                .ContextResult.EngineKind.RETIRED
-                                                && e.route().prefillEp() == endpoint));
+                                e -> e.route().prefillEndpoint() == endpoint));
         doThrow(firstReportFailure)
                 .when(endpointReporter)
                 .reportBatchCompletion(anyString(), eq(100L), eq(40L));
@@ -2207,7 +2251,7 @@ class PrefillEndpointTest {
     @Test
     void closeProjectsEveryCommittedRouteAcrossSchedulingModes() {
         registerDirect(endpoint, 100L, 100L);
-        RequestRoute route = createRequestRoute(200L, 200L, 0L);
+        RouteExecution route = createRequestRoute(200L, 200L, 0L);
         // A queue route can only be reserved after its canonical item has been
         // offered into the ACTIVE queue; reserveRoute rejects a non-active
         // identity with REQUEST_NOT_ACTIVE.
@@ -2237,7 +2281,7 @@ class PrefillEndpointTest {
     @Test
     void closeShutsDownBatcher() {
         endpoint.close();
-        RequestRoute item = createRequestRoute(1L, 500, 200);
+        RouteExecution item = createRequestRoute(1L, 500, 200);
         assertFalse(EndpointTestSupport.offer(endpoint, item));
         assertEquals(0, endpoint.progress().queueDepth());
     }
@@ -2282,7 +2326,7 @@ class PrefillEndpointTest {
         return created;
     }
 
-    private RequestRoute createPriorityRequestRoute(
+    private RouteExecution createPriorityRequestRoute(
             PrefillEndpoint owner, long requestId, int priority) {
         long now = System.currentTimeMillis();
         Request request =
@@ -2352,34 +2396,33 @@ class PrefillEndpointTest {
 
     private static WorkSnapshot.Phase batchServicePhase(PrefillEndpoint target, long batchId) {
         PrefillEndpoint state = (PrefillEndpoint) target;
-        state.resourceLock().lock();
-        try {
-            Map<?, ?> batches =
-                    (Map<?, ?>)
+        return withStateLock(
+                state.stateLock(),
+                () -> {
+                    Map<?, ?> batches =
+                            (Map<?, ?>)
+                                    org.springframework.test.util.ReflectionTestUtils.getField(
+                                            state, "batches");
+                    assertEquals(1, batches.size());
+                    Object batch = batches.get(batchId);
+                    assertNotNull(batch);
+                    return (WorkSnapshot.Phase)
                             org.springframework.test.util.ReflectionTestUtils.getField(
-                                    state, "batches");
-            assertEquals(1, batches.size());
-            Object batch = batches.get(batchId);
-            assertNotNull(batch);
-            return (WorkSnapshot.Phase)
-                    org.springframework.test.util.ReflectionTestUtils.getField(
-                            batch, "servicePhase");
-        } finally {
-            state.resourceLock().unlock();
-        }
+                                    batch, "servicePhase");
+                });
     }
 
-    private RequestRoute createRequestRoute(long requestId, long seqLen, long hitCacheLen) {
+    private RouteExecution createRequestRoute(long requestId, long seqLen, long hitCacheLen) {
         return createRequestRoute(endpoint, requestId, seqLen, hitCacheLen);
     }
 
-    private static RequestRoute createRequestRoute(
+    private static RouteExecution createRequestRoute(
             PrefillEndpoint owner, long requestId, long seqLen, long hitCacheLen) {
         return createRequestRoute(
                 owner, SchedulingTestConfig.newConfig(), requestId, seqLen, hitCacheLen);
     }
 
-    private static RequestRoute createRequestRoute(
+    private static RouteExecution createRequestRoute(
             PrefillEndpoint owner,
             FlexlbConfig requestConfig,
             long requestId,
@@ -2388,14 +2431,14 @@ class PrefillEndpointTest {
         return createRequestRoute(owner, requestConfig, requestId, seqLen, hitCacheLen, null, null);
     }
 
-    private static RequestRoute createRequestRoute(
+    private static RouteExecution createRequestRoute(
             PrefillEndpoint owner,
             FlexlbConfig requestConfig,
             long requestId,
             long seqLen,
             long hitCacheLen,
             DecodeEndpoint decode,
-            DecodeResources.ReservationHandle decodeReservation) {
+            DecodeResources.RequestReservation decodeReservation) {
         Request request =
                 Request.builder().requestId(String.valueOf(requestId)).seqLen(seqLen).build();
 
@@ -2464,8 +2507,8 @@ class PrefillEndpointTest {
     }
 
     private static void registerBatch(
-            PrefillEndpoint target, long batchId, long predictedMs, List<RequestRoute> items) {
-        for (RequestRoute item : items) {
+            PrefillEndpoint target, long batchId, long predictedMs, List<RouteExecution> items) {
+        for (RouteExecution item : items) {
             if (!EndpointTestSupport.offer(target, item)) {
                 throw new IllegalStateException(
                         "test item could not be offered to the endpoint queue");
@@ -2473,7 +2516,7 @@ class PrefillEndpointTest {
         }
         try (org.flexlb.balance.scheduler.Delivery ignored =
                 EndpointTestSupport.commitBatch(target, batchId, predictedMs, items)) {
-            // Keep canonical ledger ownership; release only the generation pin.
+            // Keep canonical ledger ownership; release only the selected Worker.
         }
     }
 

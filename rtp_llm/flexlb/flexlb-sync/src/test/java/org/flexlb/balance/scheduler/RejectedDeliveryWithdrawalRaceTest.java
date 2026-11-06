@@ -48,7 +48,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** Real request owner and Decode ledger: releasing an unsent permit cannot expose a committed route to withdrawal. */
+/**
+ * Real request owner and Decode ledger: releasing an unsent permit cannot expose a committed route to withdrawal.
+ */
 @Timeout(15)
 class RejectedDeliveryWithdrawalRaceTest {
     @Test
@@ -90,6 +92,7 @@ class RejectedDeliveryWithdrawalRaceTest {
         doReturn(701L).when(execution).nextBatchId();
         var ledger = new DeliverySettlementTestSupport();
         var prefill = mock(PrefillEndpoint.class);
+        when(prefill.acceptsNewRequests()).thenReturn(true);
         when(prefill.getIp()).thenReturn("127.0.0.1");
         when(prefill.getGrpcPort()).thenReturn(8090);
         when(prefill.reserveBatch(anyLong(), anyInt()))
@@ -99,15 +102,17 @@ class RejectedDeliveryWithdrawalRaceTest {
                         call ->
                                 EndpointTestSupport.releaseRequest(
                                         ledger.prefill, call.getArgument(0)));
-        when(prefill.commitLocked(any()))
-                .thenAnswer(call -> ledger.prefill.commitLocked(call.getArgument(0)));
+        when(prefill.commitDelivery(any()))
+                .thenAnswer(call -> ledger.prefill.commitDelivery(call.getArgument(0)));
         doAnswer(
                         call -> {
-                            var released = ledger.prefill.rollback(call.getArgument(0));
+                            var released =
+                                    ledger.prefill.rollback(
+                                            call.getArgument(0, PrefillEndpoint.BatchRecord.class));
                             return released;
                         })
                 .when(prefill)
-                .rollback(any(org.flexlb.balance.endpoint.PrefillEndpoint.Reservation.class));
+                .rollback(any(org.flexlb.balance.endpoint.PrefillEndpoint.BatchRecord.class));
         DecodeEndpoint decode =
                 EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
@@ -138,10 +143,14 @@ class RejectedDeliveryWithdrawalRaceTest {
                                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder())
                                 .build()
                                 .toByteString());
-        var future = RequestProtocolTestSupport.register(owner, context);
-        DecodeResources.ReservationHandle handle;
-        try (var pin = decode.tryPinGeneration()) {
-            handle = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 1L, 1L, 2L, 50);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
+        DecodeResources.RequestReservation handle;
+        {
+            var selectedEndpoint = decode;
+
+            handle =
+                    EndpointTestSupport.reserveUnqueuedDecode(
+                            decode, selectedEndpoint, 1L, 1L, 2L, 50);
         }
         assertNotNull(handle);
         DeliverySettlementTestSupport.queueDecode(decode, handle);
@@ -166,15 +175,13 @@ class RejectedDeliveryWithdrawalRaceTest {
         ledger.enqueue(item);
 
         var attempts = new AtomicInteger();
-        var invalidWithdrawal = new AtomicReference<AdmissionHandle>();
+        var invalidWithdrawal = new AtomicReference<PlacementOperation>();
         Runnable preemptionContender =
                 () -> {
                     attempts.incrementAndGet();
                     // This is synchronous on the permit/resource release path, so no timing or
                     // sleeps are needed.
-                    var withdrawal =
-                            AdmissionHandle.tryBeginPreemption(
-                                    owner, decode, handle, Integer.MAX_VALUE);
+                    var withdrawal = owner.beginPreemption(decode, handle, Integer.MAX_VALUE);
                     if (withdrawal != null) {
                         invalidWithdrawal.compareAndSet(null, withdrawal);
                     }
@@ -250,7 +257,7 @@ class RejectedDeliveryWithdrawalRaceTest {
             stopWatching.run();
             var outstanding = invalidWithdrawal.get();
             if (outstanding != null) {
-                outstanding.finish();
+                AbstractRequestScheduler.finishPlacement(outstanding);
             }
             SchedulerTestSupport.shutdown(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner));

@@ -19,9 +19,7 @@ import static org.flexlb.balance.scheduler.ContextResult.DeliveryFacts;
 import static org.flexlb.balance.scheduler.ContextResult.End;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EngineFacts;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Identity;
 import static org.flexlb.balance.scheduler.ContextResult.PlacementFacts;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
@@ -35,8 +33,12 @@ import static org.flexlb.balance.scheduler.ContextResult.RouteDelivered;
 import static org.flexlb.balance.scheduler.ContextResult.SendState;
 import static org.flexlb.balance.scheduler.ContextResult.Snapshot;
 import static org.flexlb.balance.scheduler.ContextResult.TransportResult;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 
-/** Atomic request facts; Lifecycle settles results and Dispatcher performs transport outside this lock. */
+/**
+ * Atomic request facts; Scheduler settles results and Dispatcher performs transport outside this lock.
+ */
 public final class RequestContext {
     private static final AtomicLong INCARNATIONS = new AtomicLong();
     private final RequestData data;
@@ -54,13 +56,14 @@ public final class RequestContext {
                     null,
                     null,
                     null,
+                    null,
                     new CloseFacts(true, true, false, false, false),
                     new ExpirationTimer.Plan(0L, null, null, null),
                     null,
                     0L,
                     0L,
                     0L);
-    private RequestRoute route;
+    private RouteExecution route;
     private PlacementFacts placement;
     private DeliveryFacts delivery;
     private EngineFacts engine = EMPTY.engine();
@@ -68,6 +71,7 @@ public final class RequestContext {
     private CancellationFacts cancellation;
     private End outcome;
     private EndEvidence pendingEnd;
+    private ContextResult.RouteFailure routeFailure;
     private ResponseCandidate selected;
     private CloseFacts close = EMPTY.close();
     private ExpirationTimer.Plan deadlines = EMPTY.deadlines();
@@ -112,7 +116,74 @@ public final class RequestContext {
         return state;
     }
 
-    public synchronized AdmissionHandle beginPlacement(RequestRoute withdrawing) {
+    /**
+     * Record an unsent route failure once. An active placement finishes before withdrawal starts.
+     */
+    synchronized boolean failUnsentRoute(
+            ContextResult.RouteFailure failure, DeliveryEvidence evidence) {
+        if (route != failure.route()) return false;
+        var beforeDelivery = delivery;
+        if (evidence instanceof TransportResult transport
+                && transport.result().status() == Delivery.Result.Status.NOT_SENT
+                && delivery != null
+                && delivery.identity() == transport.delivery()
+                && (delivery.send() == SendState.SENDING
+                        || delivery.send() == SendState.NOT_STARTED))
+            delivery = delivery.withSend(SendState.NOT_SENT);
+        if (!canWithdrawRoute()) {
+            delivery = beforeDelivery;
+            return false;
+        }
+        if (routeFailure == null) routeFailure = failure;
+        commitSnapshot(System.currentTimeMillis());
+        return true;
+    }
+
+    private boolean canWithdrawRoute() {
+        return outcome == null
+                && cancellation == null
+                && pendingEnd == null
+                && selected == null
+                && preemption == null
+                && !engine.decodeAccepted()
+                && !engine.prefillObserved()
+                && (delivery == null
+                        || delivery.identity().kind() == Delivery.SendMode.BATCH_ENQUEUE
+                                && (delivery.send() == SendState.NOT_STARTED
+                                        || delivery.send() == SendState.NOT_SENT));
+    }
+
+    synchronized PlacementOperation beginRouteWithdrawal() {
+        if (routeFailure == null || placement != null || preemption != null || !canWithdrawRoute())
+            return null;
+        var operation = new PlacementOperation(this, route);
+        placement = new PlacementFacts(operation, false, true, null, false);
+        commitSnapshot(System.currentTimeMillis());
+        return operation;
+    }
+
+    synchronized ContextResult.RouteFailure unsentDeliveryFailure(DeliveryEvidence evidence) {
+        RouteExecution failedRoute;
+        String detail;
+        if (evidence instanceof PreparationFailure preparation && preparation.delivery() == null) {
+            failedRoute = preparation.route();
+            detail = preparation.detail();
+        } else if (evidence instanceof TransportResult transport
+                && transport.result().status() == Delivery.Result.Status.NOT_SENT) {
+            if (delivery == null || delivery.identity() != transport.delivery()) return null;
+            failedRoute = transport.delivery().route();
+            detail = "Transport confirmed that the request was not sent";
+        } else return null;
+        if (route != failedRoute) return null;
+        return new ContextResult.RouteFailure(
+                failedRoute,
+                failedRoute.selectedEndpointsAvailable()
+                        ? ContextResult.RouteFailureReason.PREPARATION_FAILED
+                        : ContextResult.RouteFailureReason.ENDPOINT_UNAVAILABLE,
+                detail);
+    }
+
+    public synchronized PlacementOperation beginPlacement(RouteExecution withdrawing) {
         var before = state;
         if (key == null
                 || outcome != null
@@ -127,14 +198,14 @@ public final class RequestContext {
                 : route != withdrawing || delivery != null || engine.decodeAccepted()) {
             return null;
         }
-        var token = new AdmissionHandle(this, withdrawing);
-        placement = new PlacementFacts(token, withdrawing != null, null, false);
+        var token = new PlacementOperation(this, withdrawing);
+        placement = new PlacementFacts(token, false, withdrawing != null, null, false);
         commitSnapshot(before.updatedAtMs());
         return token;
     }
 
     public synchronized boolean bindPlacement(
-            AdmissionHandle exact, RequestRoute acquired, PublicationResult result) {
+            PlacementOperation exact, RouteExecution acquired, PublicationResult result) {
         var before = state;
         Objects.requireNonNull(acquired);
         if (placement == null || placement.operation() != exact || exact.owner() != this) {
@@ -150,6 +221,7 @@ public final class RequestContext {
             placement = placement.withPublished(result == PublicationResult.PUBLISHED);
             if (withdrawn) {
                 route = null;
+                routeFailure = null;
                 close = close.withSettlement(true, true);
             }
             commitSnapshot(before.updatedAtMs());
@@ -165,14 +237,44 @@ public final class RequestContext {
         route = acquired;
         close =
                 close.withSettlement(
-                        false, acquired.decodeEp() == null || acquired.decodeReservation() == null);
+                        false,
+                        acquired.decodeEndpoint() == null || acquired.decodeReservation() == null);
         boolean publishable = outcome == null && cancellation == null;
         commitSnapshot(before.updatedAtMs());
         return publishable;
     }
 
+    /**
+     * Claim completion before resource cleanup, keeping placement visible until cleanup finishes.
+     */
+    synchronized boolean beginPlacementCompletion(PlacementOperation exact) {
+        if (placement == null || placement.operation() != exact || placement.completing()) {
+            return false;
+        }
+        placement = placement.withCompleting(true);
+        commitSnapshot(state.updatedAtMs());
+        return true;
+    }
+
+    synchronized void requirePlacementCompletion(PlacementOperation exact) {
+        com.google.common.base.Preconditions.checkState(
+                placement == null || placement.operation() != exact || placement.completing(),
+                "placement must be explicitly finished");
+    }
+
+    synchronized void recordPlacementDiagnostics(
+            PlacementOperation exact, java.util.Map<String, Object> diagnostics) {
+        if (diagnostics != null
+                && placement != null
+                && placement.operation() == exact
+                && !placement.completing()
+                && cancellation == null) {
+            data.setSchedulingDiagnostics(java.util.Map.copyOf(diagnostics));
+        }
+    }
+
     public synchronized Snapshot completePlacement(
-            AdmissionHandle exact, PublicationResult result, long nowMs) {
+            PlacementOperation exact, PublicationResult result, long nowMs) {
         if (placement == null || placement.operation() != exact) {
             return null;
         }
@@ -182,6 +284,8 @@ public final class RequestContext {
                 || result == PublicationResult.ROLLBACK_COMPLETED) {
             route = null;
             delivery = null;
+            routeFailure = null;
+            engine = new EngineFacts(false, 0L, false, 0L, false, null);
             close = close.withSettlement(true, true);
         }
         boolean rolledBack = route == null && close.prefillSettled() && close.decodeSettled();
@@ -193,7 +297,13 @@ public final class RequestContext {
         if (admissionFailure && pendingEnd != null && pendingEnd.kind() == EndKind.SHUTDOWN) {
             pendingEnd = null;
         }
-        if (pendingEnd == null && outcome == null && retained.pendingRetirement() != null) {
+        // Retirement of a rolled-back preparation must not end the request: no route
+        // was delivered, so the scheduler can select another endpoint. Keep all other endings.
+        boolean unpublishedRollback = rolledBack && delivery == null && !engine.decodeAccepted();
+        if (pendingEnd == null
+                && outcome == null
+                && retained.pendingRetirement() != null
+                && !unpublishedRollback) {
             var retired = retained.pendingRetirement();
             retainEnd(
                     new EndEvidence(
@@ -224,7 +334,7 @@ public final class RequestContext {
      */
     public synchronized DeliveryFacts prepareDelivery(
             Delivery.Member claim, Delivery.SendMode kind, long batchId, long nowMs) {
-        RequestRoute exact = claim.route();
+        RouteExecution exact = claim.route();
         if (route != exact || !state.preparedDelivery()) {
             return null;
         }
@@ -255,12 +365,14 @@ public final class RequestContext {
                         null,
                         false,
                         false,
-                        exact.decodeEp() == null || exact.decodeReservation() == null,
+                        exact.decodeEndpoint() == null || exact.decodeReservation() == null,
                         nowMs);
         return prepared;
     }
 
-    /** Dispatcher retains this monitor from preparation through Decode transfer and publication. */
+    /**
+     * Dispatcher retains this monitor from preparation through Decode transfer and publication.
+     */
     synchronized void publishDelivery(DeliveryFacts prepared) {
         delivery = prepared;
         commitSnapshot(prepared.startedAtMs());
@@ -268,12 +380,17 @@ public final class RequestContext {
 
     public enum SendResult {
         STARTED,
+        ENDPOINT_UNAVAILABLE,
         CANCELLED,
         UNAVAILABLE
     }
 
     public synchronized SendResult beginSend(Delivery.Member exact, long nowMs) {
         if (delivery == null || delivery.identity() != exact) {
+            return SendResult.UNAVAILABLE;
+        }
+        if (routeFailure != null
+                || placement != null && placement.operation().withdrawingRoute() != null) {
             return SendResult.UNAVAILABLE;
         }
         if (delivery.send() != SendState.NOT_STARTED
@@ -290,6 +407,7 @@ public final class RequestContext {
                 || nowMs - lastWorkerAtMs >= inactivityMs) {
             return SendResult.CANCELLED;
         }
+        if (!route.selectedEndpointsAvailable()) return SendResult.ENDPOINT_UNAVAILABLE;
         delivery = delivery.withSend(SendState.SENDING);
         commitSnapshot(nowMs);
         return SendResult.STARTED;
@@ -335,50 +453,76 @@ public final class RequestContext {
         return commitSnapshot(evidence.nowMs());
     }
 
-    public synchronized Snapshot recordEngineEvidence(EngineEvidence evidence) {
+    public synchronized Snapshot recordWorkerRequestEvent(WorkerRequestEvent evidence) {
         if (!matches(evidence.route(), evidence.reservation(), evidence.role())
                 || terminalRecord != null) {
             return null;
         }
         boolean isDecode = evidence.role() == RoleType.DECODE;
-        engine = engine.observe(evidence, route.decodeEp() != null);
-        if (evidence.kind() != EngineKind.RETIRED)
-            lastWorkerAtMs = Math.max(lastWorkerAtMs, evidence.nowMs());
+        engine = engine.observe(evidence, route.decodeEndpoint() != null);
+        lastWorkerAtMs = Math.max(lastWorkerAtMs, evidence.nowMs());
         if (preemption != null
                 && !preemption.finished()
                 && !preemption.restorationObserved()
                 && (isDecode
-                        ? evidence.kind() == EngineKind.ALLOCATED
-                        : evidence.kind() == EngineKind.ACTIVE)) {
+                        ? evidence.type() == WorkerRequestEventType.ALLOCATED
+                        : evidence.type() == WorkerRequestEventType.ACTIVE)) {
             preemption = preemption.withRestorationObserved(true);
         }
         if (!evidence.terminal()) return commitSnapshot(evidence.nowMs());
-        if (delivery != null) {
-            delivery =
-                    delivery.mergeReleaseProof(
-                            isDecode || evidence.role() == RoleType.PDFUSION, !isDecode, isDecode);
-        }
-        close = close.mergeSettlement(!isDecode, isDecode);
+        recordWorkerResourceRelease(evidence.role());
         boolean ending =
                 isDecode
                         || evidence.role() == RoleType.PDFUSION
                         || evidence.role() == RoleType.ENCODER
-                        || evidence.kind() == EngineKind.FAILED
-                        || evidence.kind() == EngineKind.PRIORITY_CANCELLED
+                        || evidence.type() == WorkerRequestEventType.FAILED
+                        || evidence.type() == WorkerRequestEventType.PRIORITY_CANCELLED
                                 && preemption != null
                                 && !preemption.finished()
                                 && preemption.phase().acceptsPriorityTerminal();
-        if (evidence.kind() == EngineKind.RETIRED && !isDecode) {
-            ending =
-                    evidence.role() == RoleType.ENCODER
-                            || delivery == null && !engine.decodeAccepted() && preemption == null;
-            if (placement != null && ending) {
-                placement = placement.withPendingRetirement(evidence);
-                return commitSnapshot(evidence.nowMs());
-            }
-        }
         if (outcome == null && ending) retainEnd(evidence.end());
         return commitSnapshot(evidence.nowMs());
+    }
+
+    synchronized boolean isCurrentEndpointRetirement(ContextResult.EndpointRetirement retired) {
+        if (!matches(retired.route(), retired.reservation(), retired.role())
+                || terminalRecord != null
+                || retired.endpoint() == null) return false;
+        return switch (retired.role()) {
+            case DECODE -> route.decodeEndpoint() == retired.endpoint();
+            case ENCODER -> route.encoderEndpoint() == retired.endpoint();
+            case PREFILL, PDFUSION -> route.prefillEndpoint() == retired.endpoint();
+            default -> false;
+        };
+    }
+
+    public synchronized Snapshot recordEndpointRetirement(
+            ContextResult.EndpointRetirement retired) {
+        if (!isCurrentEndpointRetirement(retired)) return null;
+        boolean isDecode = retired.role() == RoleType.DECODE;
+        recordWorkerResourceRelease(retired.role());
+        boolean ending =
+                isDecode
+                        || retired.role() == RoleType.ENCODER
+                        || delivery == null && !engine.decodeAccepted() && preemption == null;
+        if (placement != null
+                && ending
+                && (!isDecode || delivery == null && !engine.decodeAccepted())) {
+            placement = placement.withPendingRetirement(retired);
+            return commitSnapshot(retired.nowMs());
+        }
+        if (outcome == null && ending) retainEnd(retired.end());
+        return commitSnapshot(retired.nowMs());
+    }
+
+    private void recordWorkerResourceRelease(RoleType role) {
+        boolean isDecode = role == RoleType.DECODE;
+        if (delivery != null) {
+            delivery =
+                    delivery.mergeReleaseProof(
+                            isDecode || role == RoleType.PDFUSION, !isDecode, isDecode);
+        }
+        close = close.mergeSettlement(!isDecode, isDecode);
     }
 
     public synchronized boolean requestCancel(Cancellation request) {
@@ -483,7 +627,7 @@ public final class RequestContext {
     }
 
     public synchronized PreemptionRegistration beginPreemption(
-            DecodeResources.ReservationHandle exact, long attempt, CancelTarget target) {
+            DecodeResources.RequestReservation exact, long attempt, CancelTarget target) {
         var before = state;
         if (outcome != null
                 || route == null
@@ -612,7 +756,9 @@ public final class RequestContext {
         return true;
     }
 
-    /** A transport receipt does not select or publish the frontend response. */
+    /**
+     * A transport receipt does not select or publish the frontend response.
+     */
     synchronized boolean confirmDelivery(long nowMs) {
         if (!state.canConfirmDelivery()) return false;
         if (preemption != null && !preemption.finished() && !delivery.acknowledged()) {
@@ -643,7 +789,9 @@ public final class RequestContext {
         return true;
     }
 
-    /** Publisher capacity is reserved by Scheduler before freezing the outcome. */
+    /**
+     * Publisher capacity is reserved by Scheduler before freezing the outcome.
+     */
     synchronized boolean readyToClose(EndKind ending) {
         return !waitsForPlacement(ending) && !waitsForPreemption(ending);
     }
@@ -865,7 +1013,7 @@ public final class RequestContext {
     }
 
     private boolean matches(
-            RequestRoute exact, DecodeResources.ReservationHandle reservation, RoleType role) {
+            RouteExecution exact, DecodeResources.RequestReservation reservation, RoleType role) {
         if (route == null
                 || route != exact
                 || exact.ctx() != this
@@ -918,6 +1066,7 @@ public final class RequestContext {
                 && Objects.equals(cancellation, state.cancellation())
                 && Objects.equals(outcome, state.outcome())
                 && Objects.equals(pendingEnd, state.pendingEnd())
+                && Objects.equals(routeFailure, state.routeFailure())
                 && Objects.equals(selected, state.selectedResponse())
                 && Objects.equals(close, state.close())
                 && Objects.equals(deadlines, state.deadlines())
@@ -937,6 +1086,7 @@ public final class RequestContext {
                         cancellation,
                         outcome,
                         pendingEnd,
+                        routeFailure,
                         selected,
                         close,
                         deadlines,

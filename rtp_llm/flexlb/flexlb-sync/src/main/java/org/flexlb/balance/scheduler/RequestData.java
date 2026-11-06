@@ -42,7 +42,7 @@ public final class RequestData {
     private java.util.List<org.flexlb.dao.route.RoleType> requestedRoles = java.util.List.of();
     private volatile SchedulingMetadata schedulingMetadata;
     private volatile CompletableFuture<Response> future;
-    private volatile RequestLifecycle lifecycle;
+    private volatile AbstractRequestScheduler requestScheduler;
 
     @Getter(lombok.AccessLevel.NONE)
     private volatile FutureTask<EngineRpcService.GenerateInputPB> generateInput;
@@ -81,17 +81,17 @@ public final class RequestData {
     private final EnumMap<RoleType, Integer> routingAttempts = new EnumMap<>(RoleType.class);
 
     public synchronized void setOriginalNumericRequestId(long id) {
-        checkState(lifecycle == null, "registered request identity is immutable");
+        checkState(requestScheduler == null, "registered request identity is immutable");
         originalNumericRequestId = id;
     }
 
     public synchronized void setPhase(org.flexlb.dao.route.RequestPhase value) {
-        checkState(lifecycle == null, "registered request phase is immutable");
+        checkState(requestScheduler == null, "registered request phase is immutable");
         phase = Objects.requireNonNull(value);
     }
 
     public synchronized void setRequestedRoles(java.util.List<RoleType> roles) {
-        checkState(lifecycle == null, "registered requested roles are immutable");
+        checkState(requestScheduler == null, "registered requested roles are immutable");
         requestedRoles = java.util.List.copyOf(roles);
     }
 
@@ -122,21 +122,23 @@ public final class RequestData {
     }
 
     /** Binding happens under the Repository -> Context lock; no callbacks execute here. */
-    synchronized void register(RequestLifecycle owner, RequestFuture response) {
-        checkState(lifecycle == null, "request data already registered");
+    synchronized void register(AbstractRequestScheduler owner, RequestFuture response) {
+        checkState(requestScheduler == null, "request data already registered");
         Objects.requireNonNull(request, "request");
-        Objects.requireNonNull(owner, "lifecycle");
+        Objects.requireNonNull(owner, "requestScheduler");
         Objects.requireNonNull(response, "response");
         if (schedulingMetadata == null) {
             schedulingMetadata =
                     SchedulingMetadata.explicit(
                             request.getRawPriority(), config.resolveExpiresAtMs(startTime));
         }
-        lifecycle = owner;
+        requestScheduler = owner;
         future = response;
     }
 
-    /** Error classification for a scheduling deadline, independent of lifecycle settlement. */
+    /**
+     * Classifies scheduling timeouts before request resources have been fully released.
+     */
     public StrategyErrorType schedulingTimeoutError() {
         return config.isQueue()
                 ? StrategyErrorType.RESOURCE_EXHAUSTED

@@ -174,7 +174,7 @@ classDiagram
     DecodePreemptionCoordinator ..> DecodeBinding : 读取请求需求
     RequestRoute *-- DecodeBinding : 嵌套类型及路由绑定
     DecodeBinding --> DecodeEndpoint : 所选节点
-    DecodeBinding --> ReservationHandle : 所获资源
+    DecodeBinding --> RequestReservation : 所获资源
 ```
 
 源码依据：RequestRoute.java:176–217 的 DecodeBinding 同时包含请求 ID、优先级、
@@ -234,7 +234,7 @@ State 不应接受 DeliveryStrategy.Transaction 或调用发送逻辑，否则�
 
 #### 一个更具体的可删候选：Route 提交拆成了两次所有权转移
 
-RouteDeliveryStrategy.java:240–264 先逐成员从 RequestRoute 取走 publishedRouteReservation，
+RouteDeliveryStrategy.java:240–264 先逐成员从 RequestRoute 取走 publishedRequestRecord，
 保存 transferredReservations 前缀计数，再调用 State 提交；失败时 :293–307 依据该计数关闭前缀。
 PrefillState.java:984–1055 又在同一资源锁内校验精确 lease、创建 handoff 并提交资源账本。
 
@@ -243,7 +243,7 @@ sequenceDiagram
     participant T as RouteTransaction
     participant I as RequestRoute
     participant S as PrefillState
-    T->>I: 逐个取走 publishedRouteReservation
+    T->>I: 逐个取走 publishedRequestRecord
     Note over T: 保存已转移前缀供失败回滚
     T->>S: commitRouteGroup(items, leases)
     S->>S: 校验 lease，创建 handoff，提交账本
@@ -350,10 +350,10 @@ classDiagram
     DecodePreemptionCoordinator ..> RequestRequirements : 读取需求及策略
     ProvisionalRoute --> RequestRequirements : final共享引用
     ProvisionalRoute --> SelectedRole : 所选节点及pin
-    ProvisionalRoute --> ReservationHandle : 提交前拥有
+    ProvisionalRoute --> RequestReservation : 提交前拥有
     RequestRoute --> RequestRequirements : 同一实例
     RequestRoute --> DecodeEndpoint : 精确节点
-    RequestRoute --> ReservationHandle : 精确资源
+    RequestRoute --> RequestReservation : 精确资源
 ```
 
 公开工厂仍在初始化 FIFO 之前拒绝空需求与另一请求的 reservation；新增真实 Context 测试
@@ -671,7 +671,7 @@ RequestSchedulerTest 39/39 通过，日志 /tmp/flexlb-capacity-stubbing-final-t
 ## 27. 选路资源交接与清理边界（2026-09-25）
 
 `RouteAdmission` 更名为 `ProvisionalRoute`，`ScheduledRequest` 更名为 `RequestRoute`。
-前者拥有本次选路的 generation pin 和尚未交出的 Decode reservation；后者标识一次精确的
+前者拥有本次选路的 selected Worker 和尚未交出的 Decode reservation；后者标识一次精确的
 Worker 分配，创建时尚未提交，提交后承接容量与后续回调身份。BalanceContext 仍记录整个请求，
 RequestScheduler 执行阶段变化；没有增加管理层或第二份请求状态。
 
@@ -679,7 +679,7 @@ RequestScheduler 执行阶段变化；没有增加管理层或第二份请求状
 | ---------------------------------- | -------------------------------------------------- | --------------------------------------------------- |
 | 选中 Worker                        | 拥有 pin，后续取得 Decode reservation              | 尚未绑定请求                                        |
 | 创建 RequestRoute                  | 仍负责失败回滚                                     | 只有精确身份，尚未拥有容量                          |
-| QUEUE offerPinned 成功             | 交出 Decode reservation 的回滚责任                 | 队列接收精确 route，Scheduler 推进 READY_TO_DELIVER |
+| QUEUE enqueueRoute 成功             | 交出 Decode reservation 的回滚责任                 | 队列接收精确 route，Scheduler 推进 READY_TO_DELIVER |
 | DIRECT commit + claimDelivery 成功 | 交出 Decode reservation 的回滚责任                 | Endpoint/发送 claim 接收容量及发送责任              |
 | 选路作用域退出                     | try-with-resources 关闭 pin；仅未交接时回滚 Decode | 已交接容量依据后续精确证据清理                      |
 
@@ -687,7 +687,7 @@ RequestScheduler 执行阶段变化；没有增加管理层或第二份请求状
 commitRoute 的 finally 只撤销失败 publication 的绑定；阶段推进和唤醒发生在发布成功之后，
 其异常不能再触发 publication rollback。pin 的作用域由现有 try-with-resources/Plan.close 结束。
 
-新增异常测试在本轮旧实现下均失败：pin 关闭错误发生在 offerQueued 内；通知错误导致尝试
+新增异常测试在本轮旧实现下均失败：pin 关闭错误发生在 tryEnqueueRoute 内；通知错误导致尝试
 回滚已提交绑定并追加错误 suppressed。改后针对性 141 项通过。
 日志：`/tmp/flexlb-route-ownership-baseline-tests.log`、`/tmp/flexlb-route-ownership-tests.log`。
 这些测试证明本地交接与回滚边界，不证明性能改善。
@@ -886,7 +886,7 @@ offline 无条件先发关闭信号，修复 observer 同步下线时的丢信�
 - EndpointRegistry.prefillDirectory/publishPrefillDirectory：目录选择与发布直接位于
   mutateEndpointMap 的同一 lifecycleGate 事务。保留预构建目录 → 精确 CHM 更新 → volatile 发布顺序。
   supportsPrefill 仅包括 PREFILL/PDFUSION，因此原发布 helper 的非法 role 分支不可达。
-- PrefillState.putRequestUnderLock/openGenerationHandoff：直接使用本类 requests 和 lease.generationHandoff。
+- PrefillState.putRequestUnderLock/openGenerationHandoff：直接使用本类 requests 和 lease.selectedWorker。
   enqueueActiveUnderLock、commitBatchUnderLock 的入口 requireLock，以及 reserveUnqueuedRoute
   的 lock/finally 均保留；原函数没有独立状态变化或约束。
 - PrefillAdmissionResources.decodeCapacityFull：在唯一 CAPACITY_FULL 分支直接构造同一拒绝结果。
@@ -1022,7 +1022,7 @@ git diff --check 通过。最终 486 份 Java/POM 已同步指定目录和容器
 DecodePreemptionCoordinator 551 → 522；DefaultBatchDispatcher 735 → 734。
 
 - ClaimedVictim 不再保存整份 DecodeRequestView，只引用 beginPreemption 已使用的同一
-  ReservationHandle。REQUEST_FENCED 直接消费该冻结代际/请求/token，不在回执时重建身份；
+  RequestReservation。REQUEST_FENCED 直接消费该冻结代际/请求/token，不在回执时重建身份；
   删除 reservation helper。命令的完整 view 仍用于 victim phase 和唯一性校验。
 - 删除仅创建并追加 ClaimedVictim 的 add 包装、私有构造器重复 token 校验。
   nextToken 的溢出/正值校验保留。删除 protocol 结果为空的不可达兜底：两条上游路径
@@ -1076,7 +1076,7 @@ git diff --check 通过。第 38 节全量结果仍只对应其版本；本轮�
 
 生产 Java **26,114 → 26,101，净减 13 行**；距 25,000 仍有 1101 行。
 
-- 真实回归复现：BatchReservation.commit 收到同一 RequestRoute 两次，旧实现先移除首项，
+- 真实回归复现：BatchRecord.commit 收到同一 RequestRoute 两次，旧实现先移除首项，
   再在第二次移除抛错，ACTIVE 队列从 2 项变成 1 项。预约仍 OPEN，索引却已被破坏。
 - validateGroup 统一以 identity set 拒绝重复成员，在 Route/Batch 任一索引、lease 修改前完成。
   新测试断言失败前后队列快照和 batchSlots 不变，同一预约随后合法提交成功，
@@ -1253,7 +1253,7 @@ ownsPreparedDeliveryLocked 加精确 Decode endpoint/reservation、优先级和�
 ### Worker 流程
 
 删除 headBoundary、awaitPrefillKvCapacity、notifyAdmissionFailure、
-releaseUnconsumedRouteReservation 四个单调用函数：头部阶段与期限判断、KV 等待直接
+releaseUnconsumedRequestRecord 四个单调用函数：头部阶段与期限判断、KV 等待直接
 呈现在 processQueue；失败回调合并在原错误隔离边界内；停止路径通过 TWR 关闭取回的
 精确 reservation，然后继续原 callback → ACK 流程。
 删除 commitPreparedSelection 的重复非空校验：唯一调用方已排除空项，
@@ -1595,7 +1595,7 @@ Master RT 主因。JFR 也观察到约 8–17ms 的多次 GC 暂停，但目前�
 ### 54.2 现有阶段指标的边界需要准确解释
 
 `RequestScheduler.enqueueRoute` 在 reserveDecode 和 createRequestRoute 后设置
-routeSubmittedNanos，然后才调用 commitRoute/offerQueued。因此：
+routeSubmittedNanos，然后才调用 commitRoute/tryEnqueueRoute。因此：
 
 - 原 route_submit 只覆盖到该标记。
 - 原 batch_wait 还包含剩余路由提交，不是纯 Worker 队列等待。
@@ -1679,7 +1679,7 @@ GCPhasePause 时间对齐（墙钟换算约毫秒精度）。测量窗口中 7 �
 | ProvisionalRoute.reserveDecode        | 123.51ms | 113.26ms |
 | createRequestRoute                    |  15.50ms |  16.12ms |
 | 绑定请求 item 的第一次上下文临界区    |  24.99ms |  12.93ms |
-| ProvisionalRoute.offerQueued          | 173.13ms | 194.60ms |
+| ProvisionalRoute.tryEnqueueRoute          | 173.13ms | 194.60ms |
 | READY_TO_DELIVER 状态转换临界区       |   5.14ms |   4.21ms |
 | signalRouteReady                      |  58.01ms |  28.24ms |
 | route 观测及 submitRoute 返回剩余部分 |  21.86ms |  47.02ms |
@@ -1709,7 +1709,7 @@ WorkerBatcher.signalSchedulingInputsChanged 的实际锁边界增加计时。
 | READY 唤醒等待同一 queueLock      |  **31.80ms** |  **40.06ms** |
 | READY 唤醒持锁执行                |       1.30ms |       1.31ms |
 
-对应 offerQueued 总耗时为 204.42/197.64ms，仅 Prefill 锁等待就占约 76%/66%。
+对应 tryEnqueueRoute 总耗时为 204.42/197.64ms，仅 Prefill 锁等待就占约 76%/66%。
 READY 唤醒总耗时 38.11/45.83ms，其中等待锁占约 83%/87%；其锁内本体平均
 只有 0.159μs。Decode reserve 也有等待，但占比和绝对值较小。
 本次完整 handler 累计 508.25/521.17ms，Master P99 为 147/120ms，均未通过 50ms。
@@ -1723,7 +1723,7 @@ READY 唤醒总耗时 38.11/45.83ms，其中等待锁占约 83%/87%；其锁内�
 
 一次 QUEUE 发布目前顺序为：
 
-1. 上下文仍处于 ROUTING 时，offerQueued → WorkerBatcher.offer 获取 Prefill 锁，
+1. 上下文仍处于 ROUTING 时，tryEnqueueRoute → WorkerBatcher.offer 获取 Prefill 锁，
    写入 ACTIVE 索引，并发出一次 stateChanged 信号。
 2. commitRoute 将上下文改为 READY_TO_DELIVER。
 3. signalRouteReady 再次获取同一 Prefill 锁，更新 schedulingInputVersion 并唤醒。
@@ -3246,14 +3246,14 @@ P99 <50ms 仍未验收。reserveUnqueued 的测试混合两种真实资源语义
 
 ## 84. PrefillState 独占 NON_BATCH 预约，删除请求对象上的镜像所有权
 
-删除 RequestRoute.publishedRouteReservation 原子字段及 bind/take/read 三个接口。
-RouteReservation 现在只存于 PrefillState.RequestEntry.reservation；投递准备调用
+删除 RequestRoute.publishedRequestRecord 原子字段及 bind/take/read 三个接口。
+RequestRecord 现在只存于 PrefillState.RequestEntry.reservation；投递准备调用
 PrefillEndpoint.prepareRoute，在 State 锁内核验精确 RequestRoute、OPEN 状态并更新预测，
 返回借用句柄。commitRouteGroup 仍在任何 detach 之前验证所有成员的 canonical identity、
 entry.reservation、originalOwner 和 OPEN 状态，准备之后发生抢占或停止会使提交失败。
 
-removeQueuedUnderLock 合并原 terminalizeActiveUnderLock，只关闭 canonical RouteReservation；
-BatchReservation 的 OPEN lease 和 generation handoff 仍归准备事务。抢占在同一锁内先成功
+removeQueuedUnderLock 合并原 terminalizeActiveUnderLock，只关闭 canonical RequestRecord；
+BatchRecord 的 OPEN lease 和 generation handoff 仍归准备事务。抢占在同一锁内先成功
 接纳 incoming 再删除 victims，删除整套从 RequestRoute 取出预约、逐个核对和失败恢复流程。
 入队失败由 finally 回滚 canonical entry。停止路径由 State 完成索引摘除与 Route lease
 关闭，在 finally 解锁后通知容量变化；STOP_DETACHED 身份仍保留到回调成功确认，回调失败
@@ -3327,7 +3327,7 @@ handoff、OWNED 状态检查和 orphan handoff 释放继续保留。
 
 PrefillEndpoint 删除私有 appendRetirementFailure，使用既有 Failures.append：首因不变，
 后续异常加入 suppressed，诊断聚合自身失败不阻止后续清理。reserveBatch 的异常与拒绝
-两处 pin 关闭合并到 finally；成功移交给 BatchReservation 后不关闭。
+两处 pin 关闭合并到 finally；成功移交给 BatchRecord 后不关闭。
 
 生产净减 **70 行**（PrefillState -54、PrefillEndpoint -16），当前 **102 文件、26041
 物理行**，距 25000 仍差 1041 行。未搬移生产代码或压缩格式。
@@ -3691,9 +3691,9 @@ size 仍用 PREFILL role，age 仍用 SCHEDULER role。Runtime 仍在同一 Runt
 
 ## 98. 关闭流程删除重复状态
 
-CommittedHandoff 的 generationHandoff 改为 final，删除置空与重复 null 分支，由下层
+CommittedHandoff 的 selectedWorker 改为 final，删除置空与重复 null 分支，由下层
 HandoffPermit CAS 保证只释放一次。保留 synchronized close：并发第二次关闭仍等待首次
-释放和退休回调返回，同线程重入依靠可重入锁与下层 CAS 返回。BatchReservation 的 nullable
+释放和退休回调返回，同线程重入依靠可重入锁与下层 CAS 返回。BatchRecord 的 nullable
 handoff 仍表示 OPEN→OWNED 真实转交，不删除；提交末次精确归属校验也继续保留。
 
 RequestContinuationExecutor 删除 closing/closed 两个字段及第二关闭者的专用等待分支。
@@ -3753,10 +3753,10 @@ sync1318）；补强入口验证后95项相关测试通过。三路review无阻�
 证据：/tmp/flexlb-converge100/{before,change.patch,manifest.json,tests.log,tests-final.log}。
 目标继续进行中，行数及完整系统P99<50ms仍未完成。
 
-## 101. GenerationPin 删除派生身份，退役等待直接传播异常
+## 101. SelectedWorker 删除派生身份，退役等待直接传播异常
 
-WorkerEndpoint.status 和 WorkerStatus.generationId 均为final；GenerationPin持有精确endpoint，
-故删除generationId副本，访问器从endpoint.status派生。requirePinnedGeneration保留endpoint对象
+WorkerEndpoint.status 和 WorkerStatus.generationId 均为final；SelectedWorker持有精确endpoint，
+故删除generationId副本，访问器从endpoint.status派生。requireSelectedWorker保留endpoint对象
 身份和permit.isOpen校验，删除恒等generation比较；SelectedRole删除同一恒等检查。
 Registry/DecodeSelector对选择快照的generation复验继续保留，它们比较的是不同来源。
 
@@ -4218,7 +4218,7 @@ were not collapsed into this infrastructure lifetime.
 DecodeEndpoint.dispatch now owns the entire permit settlement under the exact
 permit monitor. Removed applyDispatch and EngineDispatchPermit.resolve, eliminating
 the endpoint-to-permit-to-endpoint round trip. The sequence remains cached-result
-check, generation pin, state mutation, capacity notification, pin release, then
+check, selected Worker, state mutation, capacity notification, pin release, then
 result caching. Returning an unused permit still cannot grant later sending
 ownership; old-generation and wrong-endpoint validation remain intact.
 
@@ -7301,7 +7301,7 @@ Three read-only reviewers find no whole redundant flow safe to remove:
 
 - ClaimDelivery arbitrates current request identity, cancellation and expiration
   under the Context lock before transferring the exact Decode dispatch permit.
-  The endpoint generation pin and Decode ledger transition cover separate facts.
+  The endpoint selected Worker and Decode ledger transition cover separate facts.
 - setDeliveryPrediction consumes the delivered membership's prediction once and
   reconciles actual Engine acceptance; deadline cancellation/installation has its
   own exact-handle race protocol. It cannot simply be removed from the send path.
@@ -8399,7 +8399,7 @@ specified contract rather than merely reducing CPU work:
   WorkerBatcherRequestCapacityTest.defaultBatchLimitAllowsTwoReservationsAndReopensAfterRelease,
   and PrefillRequestCapacityTest.batchRequestCountDoesNotLimitWaitingAndBatchPermitWaitsForLastMember
   explicitly cover queue admission independently of batch permits.
-- Existing queued-seat replacement requires a RouteReservation. A BATCH ACTIVE member
+- Existing queued-seat replacement requires a RequestRecord. A BATCH ACTIVE member
   has no such reservation, so the proposed cap would introduce a full-queue condition
   that high-priority arrivals cannot resolve through that replacement path.
 - Global planning currently sees those endpoints as eligible. A commit-only hidden cap
@@ -9191,7 +9191,7 @@ CacheLeaderBench.java,remote.log,results/,micro-results/ and source manifests.
 ## Round196 — remove duplicate Decode availability reduction state
 
 Inspection found Decode routing already reuses coherent versioned endpoint views.
-Retain its full-fleet availability pass, preferred-class cost pass, generation pin
+Retain its full-fleet availability pass, preferred-class cost pass, selected Worker
 recheck, and dispatch/placement usage distinctions. The boolean allWorkersTooSmall
 was redundant with an availability reduction except that IMMEDIATE mode had been
 mixed into the reduction itself. Delete the boolean and its per-worker update;
@@ -12249,7 +12249,7 @@ Runtime、Binding 与 Scheduler 共用一次捕获的 SchedulerSettings，删除
 | 修复无效计算   | GrpcWorkerStatusRunner.logWorkerStatusUpdate，297                                              | DEBUG 关闭仍求值参数并 stream 遍历全部任务。先判断日志级别，开启时保留现有字段和计时。                                                                                                  |
 | 修复观测一致性 | PvLogData 构造器，46–47                                                                        | seqLen 从可变 Request 读取，与注册时冻结的 RequestRequirements 可能不一致；已有注册测试证明原 Request 可改而调度输入不变。已注册读取冻结值，注册前拒绝仍需原输入回退。                  |
 | 修复故障传播   | EndpointRegistry.evictExpiredOrphans，736；MasterEngineSynchronizer.reportExecutorMetrics，104 | 前者一个 endpoint 的指标异常终止其余 TTL 清理；后者第一 executor 上报失败跳过第二个。只隔离观察者故障，账本结算异常继续报告。                                                           |
-| 小型删除       | ProvisionalRoute.offerQueued，112                                                              | 全仓零生产调用、仅一处测试，重复 QueuePublication.publish 的发布及资源转移。测试可改用真实生产入口，删除旧函数。                                                                        |
+| 小型删除       | ProvisionalRoute.tryEnqueueRoute，112                                                              | 全仓零生产调用、仅一处测试，重复 QueuePublication.publish 的发布及资源转移。测试可改用真实生产入口，删除旧函数。                                                                        |
 | 小型删除       | AbstractRequestScheduler.reporter，58/69；QueuedRequestScheduler.drainOnClose，703/713         | 前者字段初始化后无读取；后者首次 List.copyOf(all) 被后续赋值覆盖，造成无效分配。                                                                                                        |
 | 小型合并       | PrefillState.appendRetirementInvariant，1530                                                   | 重复既有 Failures.append 的首因及 suppressed 处理，可删除私有 helper，沿用现有错误聚合。                                                                                                |
 | 无效补偿       | EvictionManager.replaceQueuedDecodeReservations，279–284                                       | claimed 按 victims.size 预分配；add 周围 catch 调未结束 AdmissionHandle.close，而 close 仅校验显式结束、不执行补偿。保持外层 finally 的真实 completeWithdrawal 责任，清理这段无效处理。 |
@@ -12261,7 +12261,7 @@ Runtime、Binding 与 Scheduler 共用一次捕获的 SchedulerSettings，删除
 | 类或类组                                                  | 目前职责                                                | 审查判断                                                                                                                                                                                                                                                                                                                                        |
 | --------------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | BalanceContext / AbstractRequestScheduler                 | 请求状态决策 / 原 owner 的外部动作及排空                | 边界尚未完全收敛。Context 的 settleAdmissionLocked(1787)、processRequestEndLocked(1872)、acknowledgeDeliveryLocked(1944) 返回执行 Runnable 并反向调用 Scheduler 的 effect 工厂；Scheduler 的 acceptDeliveryResult(804)、applyPrefillStatusLocked(894)、cancelRequest(1013) 仍组装细粒度请求判断。应该按完整请求事件聚合判断，再收窄细粒度入口。 |
-| DefaultRouter / ProvisionalRoute / RequestRoute           | 一次多角色选择 / 未转交资源及 pin 的作用域 / 已选路身份 | 分工有实际所有权依据；offerQueued 是残留重复接口，其余不是同一请求输入的重复捕获。                                                                                                                                                                                                                                                              |
+| DefaultRouter / ProvisionalRoute / RequestRoute           | 一次多角色选择 / 未转交资源及 pin 的作用域 / 已选路身份 | 分工有实际所有权依据；tryEnqueueRoute 是残留重复接口，其余不是同一请求输入的重复捕获。                                                                                                                                                                                                                                                              |
 | PrefillState / DecodeState                                | 唯一端点资源账本、复验、提交、Worker 事实归并           | 多索引和状态反映独立事实。Route 与 Batch 的提交校验和容量边界不同，合并成带布尔参数的统一流程会增加耦合。没有证明可安全大块删除。                                                                                                                                                                                                               |
 | WorkerBatcher / DeliveryStrategy / DefaultBatchDispatcher | 等待唤醒与成组 / 资源交接 / 提交额度及 RPC ACK          | PREPARED 与 SUBMITTED 的额度归还不同；两次身份检查跨越准备副作用；同步 ACK 屏障也有实际作用。保留。                                                                                                                                                                                                                                             |
 | GroupPlanner / RouteTimelineProjector                     | 纯成组规则 / 冻结队列与工作量预测                       | 职责清晰。可复用游标和缓存有性能依据；按代码形状合并单请求和批量预测会改变模型。                                                                                                                                                                                                                                                                |
@@ -12358,7 +12358,7 @@ candidate-a 3000 QPS 的 Master P99=30ms，7219 / 8526（84.7%）Java execution 
 
 ### 3. 两版本共有的分配与暂停
 
-正常 3000 QPS 轮的 >=20ms 请求几乎全部跨越 GC 暂停。分配采样主要来自 GenerateInputPB.Builder.mergeFrom、EndpointRegistry.decodeRoutingSnapshot、DecodeSelector.select、GroupPlanner.selectWithPrediction、CostBasedPrefillStrategy.discoverAvailableEndpoints 及 RouteTimelineProjector 的队列投影。候选和基线规模相近；未看到新增状态字段引入数量级分配增长。后续应减少每请求的完整 Decode 视图 / list / 数组和投影中间对象，保留 generation pin、版本与容量复验。Protobuf 路径同时包含 Master 和 Mock Engine 网络解析，不可通过去掉必要解析制造成绩。JFR allocation weight 是统计权重；native epoll sample 和闲置 Condition park 不作为 CPU 热点。
+正常 3000 QPS 轮的 >=20ms 请求几乎全部跨越 GC 暂停。分配采样主要来自 GenerateInputPB.Builder.mergeFrom、EndpointRegistry.decodeRoutingSnapshot、DecodeSelector.select、GroupPlanner.selectWithPrediction、CostBasedPrefillStrategy.discoverAvailableEndpoints 及 RouteTimelineProjector 的队列投影。候选和基线规模相近；未看到新增状态字段引入数量级分配增长。后续应减少每请求的完整 Decode 视图 / list / 数组和投影中间对象，保留 selected Worker、版本与容量复验。Protobuf 路径同时包含 Master 和 Mock Engine 网络解析，不可通过去掉必要解析制造成绩。JFR allocation weight 是统计权重；native epoll sample 和闲置 Condition park 不作为 CPU 热点。
 
 ### 4. 请求归档失败：两版本共有的 inactivity timer 竞态
 

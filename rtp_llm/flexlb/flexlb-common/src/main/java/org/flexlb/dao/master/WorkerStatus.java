@@ -624,6 +624,16 @@ public class WorkerStatus {
     public void publishPreparedStatus(PreparedStatus prepared) {
         requireGenerationLock();
         requireActiveGeneration();
+        publishReducedStatus(prepared);
+    }
+
+    /**
+     * Commit a prepared observation after its Endpoint has reduced the request records.
+     * The Endpoint serializes this commit with retirement; the source cursor CAS
+     * rejects stale and duplicate observations.
+     */
+    public void publishReducedStatus(PreparedStatus prepared) {
+        checkState(!retiring, "WorkerStatus generation is retiring: %s", generationId);
         checkArgument(
                 prepared.observation.owner == this,
                 "prepared status belongs to another worker generation");

@@ -111,10 +111,10 @@ class ApplicationLifecycleTest {
             context.refresh();
             assertNotNull(context.getBean(ApplicationLifecycle.class));
             var scheduler = context.getBean(org.flexlb.balance.scheduler.RequestScheduler.class);
-            var lifecycle = context.getBean(org.flexlb.balance.scheduler.RequestLifecycle.class);
-            var order = org.mockito.Mockito.inOrder(lifecycle, scheduler);
-            order.verify(lifecycle).bindScheduler(scheduler);
-            order.verify(scheduler).start();
+            var lifecycle =
+                    context.getBean(org.flexlb.balance.scheduler.AbstractRequestScheduler.class);
+            org.junit.jupiter.api.Assertions.assertSame(scheduler, lifecycle);
+            verify(scheduler).start();
         }
     }
 

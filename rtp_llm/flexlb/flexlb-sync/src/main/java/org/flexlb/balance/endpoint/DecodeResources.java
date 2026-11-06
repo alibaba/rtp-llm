@@ -10,14 +10,16 @@ import java.util.function.Predicate;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Immutable Decode resource identities, capacity arithmetic, snapshots and observed facts. */
+/**
+ * Immutable Decode resource identities, capacity arithmetic, snapshots and observed facts.
+ */
 public final class DecodeResources {
     private DecodeResources() {}
 
-    public record ReservationHandle(
+    public record RequestReservation(
             long endpointGenerationId, String requestId, long reservationToken) {
 
-        public ReservationHandle {
+        public RequestReservation {
             checkArgument(
                     endpointGenerationId > 0L && reservationToken > 0L,
                     "Decode reservation identity must be positive");
@@ -40,8 +42,10 @@ public final class DecodeResources {
         }
     }
 
-    /** Resource acquisition always carries a domain status and, only on success, its exact capability. */
-    public record Acquisition<S, H>(S status, H handle) {
+    /**
+     * Resource acquisition always carries a domain status and, only on success, its exact capability.
+     */
+    public record Acquisition<S, T>(S status, T value) {
         private static final Acquisition<?, ?>[] RESERVE_FAILURES =
                 failures(ReserveStatus.values());
         private static final Acquisition<?, ?>[] DISPATCH_FAILURES =
@@ -53,12 +57,12 @@ public final class DecodeResources {
                             || status instanceof EngineDispatchPermitAcquireStatus,
                     "unsupported Decode acquisition status");
             checkArgument(
-                    ownsHandle(status) == (handle != null),
-                    "only ACQUIRED or ALREADY_ACCEPTED acquisitions carry a resource handle");
+                    hasValue(status) == (value != null),
+                    "only ACQUIRED or ALREADY_ACCEPTED acquisitions carry a resource value");
         }
 
         @SuppressWarnings("unchecked")
-        public static <S extends Enum<S>, H> Acquisition<S, H> unavailable(S status) {
+        public static <S extends Enum<S>, T> Acquisition<S, T> unavailable(S status) {
             java.util.Objects.requireNonNull(status, "status");
             Acquisition<?, ?>[] failures =
                     status instanceof ReserveStatus
@@ -68,28 +72,30 @@ public final class DecodeResources {
                                     : null;
             checkArgument(
                     failures != null && failures[status.ordinal()] != null,
-                    "acquisition status requires an exact handle or is unsupported");
-            return (Acquisition<S, H>) failures[status.ordinal()];
+                    "acquisition status requires an exact value or is unsupported");
+            return (Acquisition<S, T>) failures[status.ordinal()];
         }
 
         private static Acquisition<?, ?>[] failures(Enum<?>[] statuses) {
             Acquisition<?, ?>[] failures = new Acquisition<?, ?>[statuses.length];
             for (Enum<?> status : statuses) {
-                if (!ownsHandle(status)) {
+                if (!hasValue(status)) {
                     failures[status.ordinal()] = new Acquisition<>(status, null);
                 }
             }
             return failures;
         }
 
-        private static boolean ownsHandle(Object status) {
+        private static boolean hasValue(Object status) {
             return status == ReserveStatus.ACQUIRED
                     || status == EngineDispatchPermitAcquireStatus.ACQUIRED
                     || status == EngineDispatchPermitAcquireStatus.ALREADY_ACCEPTED;
         }
     }
 
-    /** Resource mutations share one passive result. Every status/edge combination is preallocated. */
+    /**
+     * Resource mutations share one passive result. Every status/edge combination is preallocated.
+     */
     public record ResourceChange<S>(S status, boolean capacityReleased) {
         private static final ResourceChange<?>[] RELEASES =
                 changes(ReservationReleaseResult.values());
@@ -128,7 +134,9 @@ public final class DecodeResources {
         }
     }
 
-    /** A cheap, exact resource query; it never grants a reservation or dispatch right. */
+    /**
+     * A cheap, exact resource query; it never grants a reservation or dispatch right.
+     */
     public enum Ownership {
         NONE,
         HELD,
@@ -150,6 +158,10 @@ public final class DecodeResources {
 
     public enum ReleaseReason {
         LOCAL_ROLLBACK,
+        /**
+         * Context revoked an unsent route; release its reservation without fencing a retry.
+         */
+        UNSENT_ROUTE_ROLLBACK,
         COUNTERPART_FINISHED,
         NOT_SENT,
         REMOTE_CLEANUP,
@@ -165,19 +177,33 @@ public final class DecodeResources {
     }
 
     public enum EngineDispatchPermitAcquireStatus {
-        /** An exact-reservation permit now owns one Decode hard-gate slot. */
+        /**
+         * An exact-reservation permit now owns one Decode hard-gate slot.
+         */
         ACQUIRED,
-        /** Engine already owns this reservation; the permit carries identity without charging capacity. */
+        /**
+         * Engine already owns this reservation; the permit carries identity without charging capacity.
+         */
         ALREADY_ACCEPTED,
-        /** Concurrency or Decode KV has no unreserved hard capacity. */
+        /**
+         * Concurrency or Decode KV has no unreserved hard capacity.
+         */
         CAPACITY_FULL,
-        /** The request no longer owns a live shadow reservation. */
+        /**
+         * The request no longer owns a live shadow reservation.
+         */
         NOT_OWNED,
-        /** The reservation is already engine-facing rather than Prefill-queued. */
+        /**
+         * The reservation is already engine-facing rather than Prefill-queued.
+         */
         NOT_QUEUED,
-        /** Another pre-delivery attempt already owns this request's permit. */
+        /**
+         * Another pre-delivery attempt already owns this request's permit.
+         */
         ALREADY_ACQUIRED,
-        /** This exact Decode endpoint generation no longer accepts delivery. */
+        /**
+         * This exact Decode endpoint generation no longer accepts delivery.
+         */
         ENDPOINT_RETIRED
     }
 
@@ -203,8 +229,10 @@ public final class DecodeResources {
         ATTEMPT_ALREADY_EXISTS
     }
 
-    /** The caller has resolved request protocol; this operation changes only exact resource ownership. */
-    public record PreemptionUpdate(Kind kind, ReservationHandle reservation) {
+    /**
+     * The caller has resolved request protocol; this operation changes only exact resource ownership.
+     */
+    public record PreemptionUpdate(Kind kind, RequestReservation reservation) {
         public enum Kind {
             CANCEL_HANDED_OFF,
             CANCELED,
@@ -218,23 +246,23 @@ public final class DecodeResources {
             java.util.Objects.requireNonNull(reservation, "reservation");
         }
 
-        public static PreemptionUpdate handedOff(ReservationHandle victim) {
+        public static PreemptionUpdate handedOff(RequestReservation victim) {
             return new PreemptionUpdate(Kind.CANCEL_HANDED_OFF, victim);
         }
 
-        public static PreemptionUpdate canceled(ReservationHandle victim) {
+        public static PreemptionUpdate canceled(RequestReservation victim) {
             return new PreemptionUpdate(Kind.CANCELED, victim);
         }
 
-        public static PreemptionUpdate fenced(ReservationHandle victim) {
+        public static PreemptionUpdate fenced(RequestReservation victim) {
             return new PreemptionUpdate(Kind.REQUEST_FENCED, victim);
         }
 
-        public static PreemptionUpdate active(ReservationHandle victim) {
+        public static PreemptionUpdate active(RequestReservation victim) {
             return new PreemptionUpdate(Kind.ACTIVE, victim);
         }
 
-        public static PreemptionUpdate finished(ReservationHandle victim) {
+        public static PreemptionUpdate finished(RequestReservation victim) {
             return new PreemptionUpdate(Kind.FINISHED, victim);
         }
 
@@ -243,9 +271,11 @@ public final class DecodeResources {
         }
     }
 
-    /** Request status matched to its exact Decode reservation, published after ledger reconciliation. */
+    /**
+     * Request status matched to its exact Decode reservation, published after ledger reconciliation.
+     */
     public record DecodeRequestStatus(
-            Kind kind, ReservationHandle reservation, long errorCode, boolean allocationObserved) {
+            Kind kind, RequestReservation reservation, long errorCode, boolean allocationObserved) {
         public DecodeRequestStatus {
             java.util.Objects.requireNonNull(kind, "kind");
             java.util.Objects.requireNonNull(reservation, "reservation");
@@ -254,15 +284,15 @@ public final class DecodeResources {
                     "only a terminal Decode request status may carry an error code");
         }
 
-        public static DecodeRequestStatus active(ReservationHandle reservation) {
+        public static DecodeRequestStatus active(RequestReservation reservation) {
             return new DecodeRequestStatus(Kind.ACTIVE, reservation, 0L, false);
         }
 
-        public static DecodeRequestStatus allocated(ReservationHandle reservation) {
+        public static DecodeRequestStatus allocated(RequestReservation reservation) {
             return new DecodeRequestStatus(Kind.ACTIVE, reservation, 0L, true);
         }
 
-        public static DecodeRequestStatus terminal(ReservationHandle reservation, long errorCode) {
+        public static DecodeRequestStatus terminal(RequestReservation reservation, long errorCode) {
             return new DecodeRequestStatus(Kind.TERMINAL, reservation, errorCode, false);
         }
 
@@ -272,7 +302,9 @@ public final class DecodeResources {
         }
     }
 
-    /** One immutable request table and capacity view captured under the admission lock. */
+    /**
+     * One immutable request table and capacity view captured in one Endpoint lock.
+     */
     public record ResourceSnapshot(
             DecodeRoutingView routing,
             Map<String, DecodeRequestView> requests,
@@ -363,7 +395,9 @@ public final class DecodeResources {
         }
     }
 
-    /** Failure-only priority summary, shared until the admission revision changes. */
+    /**
+     * Failure-only priority summary, shared until the admission revision changes.
+     */
     public static final class AdmissionSummary {
         private final DecodeRoutingView routing;
         private final CapacityRelease[] placementOccupancy;
@@ -401,7 +435,9 @@ public final class DecodeResources {
                     "Decode admission limits are outside their domain");
         }
 
-        /** Use the same occupancy scope for the observation and every exact victim release. */
+        /**
+         * Use the same occupancy scope for the observation and every exact victim release.
+         */
         public CapacityDeficit evaluate(
                 CapacityUsage usage,
                 long hardKvTokens,
@@ -442,7 +478,9 @@ public final class DecodeResources {
                     : new CapacityDeficit(requests, hard, expected);
         }
 
-        /** Integer arithmetic never rounds the configured KV budget up. */
+        /**
+         * Integer arithmetic never rounds the configured KV budget up.
+         */
         public long kvBudget(long totalKv) {
             checkArgument(totalKv >= 0L, "negative KV capacity");
             return totalKv / 100L * maxKvUsagePercent + totalKv % 100L * maxKvUsagePercent / 100L;

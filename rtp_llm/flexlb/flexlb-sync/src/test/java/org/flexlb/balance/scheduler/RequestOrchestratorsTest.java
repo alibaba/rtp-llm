@@ -55,8 +55,6 @@ class RequestOrchestratorsTest {
                                 configuration(),
                                 mock(EngineGrpcClient.class)));
         var owner = mock(AbstractRequestScheduler.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                owner, "lifecycle", mock(RequestLifecycle.class));
         runtime.registerScheduler(owner);
         var first = new IllegalStateException("placement close failed");
         var second = new IllegalStateException("dispatcher failed");
@@ -92,8 +90,6 @@ class RequestOrchestratorsTest {
                                 configuration(),
                                 mock(EngineGrpcClient.class)));
         var owner = mock(AbstractRequestScheduler.class);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                owner, "lifecycle", mock(RequestLifecycle.class));
         runtime.registerScheduler(owner);
         var executions = org.mockito.Mockito.spy(runtime.deliveries());
         org.flexlb.balance.scheduler.SchedulerTestServices.setDependency(

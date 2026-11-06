@@ -75,7 +75,7 @@ class ExpirationTimerTest {
         ReflectionTestUtils.setField(
                 timer, "clock", (java.util.function.LongSupplier) wallClock::get);
         try {
-            var future = RequestProtocolTestSupport.register(owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
             if (kind == ExpirationTimer.Kind.VISIBILITY) {
                 var endpoint = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
                 var route =
@@ -175,7 +175,7 @@ class ExpirationTimerTest {
     void lateCallbackFromReplacementTimerCannotReachLifecycleAfterClose() {
         var requests = mock(RequestRepository.class);
         var context = registeredContext();
-        var owner = mock(RequestLifecycle.class);
+        var owner = mock(AbstractRequestScheduler.class);
         when(context.data()).thenReturn(data(owner));
         when(requests.isCurrent(context)).thenReturn(true);
         var callback = new AtomicReference<Runnable>();
@@ -415,7 +415,7 @@ class ExpirationTimerTest {
             String kind, boolean earlyFire, boolean installed, boolean cancel) {
         var requests = mock(RequestRepository.class);
         var context = registeredContext();
-        var owner = mock(RequestLifecycle.class);
+        var owner = mock(AbstractRequestScheduler.class);
         when(context.data()).thenReturn(data(owner));
         when(requests.isCurrent(context)).thenReturn(true);
         var executor = mock(TaskTimer.class);
@@ -486,7 +486,7 @@ class ExpirationTimerTest {
         return context;
     }
 
-    private static RequestData data(RequestLifecycle owner) {
+    private static RequestData data(AbstractRequestScheduler owner) {
         var data = new RequestData(new FlexlbConfig());
         var request = mock(Request.class);
         data.setRequest(request);
@@ -497,7 +497,7 @@ class ExpirationTimerTest {
 
     private static final class Fixture implements AutoCloseable {
         private final RequestContext context = registeredContext();
-        private final RequestLifecycle owner = mock(RequestLifecycle.class);
+        private final AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
         private final ExpirationTimer timer;
         private final Object[] handles;
         private final ScheduledFuture<?> inactivityTask;

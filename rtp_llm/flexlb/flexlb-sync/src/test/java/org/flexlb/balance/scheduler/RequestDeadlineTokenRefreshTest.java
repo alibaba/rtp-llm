@@ -6,10 +6,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 import static org.flexlb.balance.scheduler.ContextResult.CancellationFacts;
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.Prediction;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.flexlb.balance.scheduler.RequestChangeAssertions.UpdateKind;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -98,12 +98,12 @@ class RequestDeadlineTokenRefreshTest {
             org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                     context,
                     observedRequest ->
-                            observedRequest.recordEngineEvidence(
-                                    new EngineEvidence(
+                            observedRequest.recordWorkerRequestEvent(
+                                    new WorkerRequestEvent(
                                             fixture.route(),
                                             fixture.reservation(),
                                             RoleType.PREFILL,
-                                            EngineKind.ACTIVE,
+                                            WorkerRequestEventType.ACTIVE,
                                             0L,
                                             null,
                                             current.atMs() - 1L)));

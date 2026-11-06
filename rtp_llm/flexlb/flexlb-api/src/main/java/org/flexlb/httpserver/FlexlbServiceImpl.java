@@ -5,12 +5,12 @@ import io.grpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import io.opentelemetry.api.trace.Span;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.balance.scheduler.RequestRepository;
+import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.scheduler.RequestState;
-import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.MasterStatusService;
@@ -59,7 +59,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
-    private final RequestLifecycle requestEntry;
+    private final AbstractRequestScheduler requestEntry;
     private final FlexlbConfig config;
     private final RequestRepository requestState;
     private final MasterStatusView masterStatusView;
@@ -69,7 +69,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     private final RequestSchedulerReporter requestSchedulerReporter;
 
-    private RequestWorkerSelector selector;
+    private RequestRouteSelector selector;
     private List<RoleType> modelRoles = List.of();
     private org.flexlb.cache.match.CacheAwareService cacheService;
 
@@ -82,13 +82,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     @Autowired
-    public void configureRouting(RequestWorkerSelector selector) {
+    public void configureRouting(RequestRouteSelector selector) {
         this.selector = java.util.Objects.requireNonNull(selector);
     }
 
     @Autowired
     public FlexlbServiceImpl(
-            @Lazy RequestLifecycle requestEntry,
+            @Lazy AbstractRequestScheduler requestEntry,
             ConfigService configService,
             RequestRepository requestState,
             MasterStatusService masterStatusService,
@@ -110,7 +110,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     FlexlbServiceImpl(
-            RequestLifecycle requestEntry,
+            AbstractRequestScheduler requestEntry,
             FlexlbConfig config,
             RequestRepository requestState,
             MasterStatusView masterStatusView,
@@ -948,12 +948,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private void cancelUndeliveredRoute(RequestContext exact) {
-        if (exact == null || exact.data().getLifecycle() == null) {
+        if (exact == null || exact.data().getRequestScheduler() == null) {
             return;
         }
         try {
             exact.data()
-                    .getLifecycle()
+                    .getRequestScheduler()
                     .cancel(exact, 0L, org.flexlb.balance.scheduler.CancelReason.CLIENT_CANCELLED);
         } catch (Exception error) {
             Logger.warn(

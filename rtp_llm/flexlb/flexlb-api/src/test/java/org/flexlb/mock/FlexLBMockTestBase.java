@@ -7,13 +7,13 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestLifecycle;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
-import org.flexlb.balance.scheduler.RequestWorkerSelector;
+import org.flexlb.balance.scheduler.RouteResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.InternalRuntimeSettings;
@@ -52,7 +52,7 @@ import static org.mockito.Mockito.withSettings;
 /**
  * Base class for mock-worker integration tests.
  *
- * <p>Sets up a real {@link RequestLifecycle} backed by a real
+ * <p>Sets up a real {@link AbstractRequestScheduler} backed by a real
  * {@link EngineGrpcClient} that creates real Netty gRPC channels to
  * mock workers.  No Spring Boot context, no model loading, no GPU.
  *
@@ -61,14 +61,14 @@ import static org.mockito.Mockito.withSettings;
  *
  * <p>Architecture:
  * <pre>
- * Real RequestLifecycle (test-only composition root)
+ * Real AbstractRequestScheduler (test-only composition root)
  *   ├── Real DeliveryDispatcher
  *   │     └── Real EngineGrpcClient (real Netty channels)
  *   │           ↕  real gRPC (Netty)
  *   │     MockPrefillWorker (gRPC server, no model)
  *   │     MockDecodeWorker  (gRPC server, no model)
  *   ├── Real EndpointRegistry
- *   └── Mock RequestWorkerSelector (returns mock worker addresses)
+ *   └── Mock RequestRouteSelector (returns mock worker addresses)
  * </pre>
  */
 public abstract class FlexLBMockTestBase {
@@ -80,7 +80,7 @@ public abstract class FlexLBMockTestBase {
 
     protected MockDecodeWorker mockDecodeWorker;
 
-    protected RequestLifecycle scheduler;
+    protected AbstractRequestScheduler scheduler;
 
     protected EndpointRegistry endpointRegistry;
 
@@ -88,7 +88,7 @@ public abstract class FlexLBMockTestBase {
 
     protected ConfigService configService;
 
-    protected RequestWorkerSelector router;
+    protected RequestRouteSelector router;
 
     protected EngineGrpcClient grpcClient;
 
@@ -314,13 +314,13 @@ public abstract class FlexLBMockTestBase {
         return MockWorkerBehavior.builder().build();
     }
 
-    protected RequestWorkerSelector createRouter() {
-        RequestWorkerSelector fixedRouter = mock(RequestWorkerSelector.class);
+    protected RequestRouteSelector createRouter() {
+        RequestRouteSelector fixedRouter = mock(RequestRouteSelector.class);
         when(fixedRouter.select(any(RequestContext.class), any()))
                 .thenAnswer(
                         inv -> {
                             RequestContext ctx = inv.getArgument(0);
-                            return schedulerRuntime.admittedRoute(
+                            return schedulerRuntime.routeResult(
                                     ctx, successRoute(Long.parseLong(ctx.data().getRequestId())));
                         });
         return fixedRouter;
@@ -329,9 +329,9 @@ public abstract class FlexLBMockTestBase {
     /**
      * Build the exact pinned queue admission for a fixture response.
      */
-    protected final PlacementResult<RequestRoute, PlacementKey> admittedRoute(
+    protected final PlacementResult<RouteResult, PlacementKey> routeResult(
             RequestContext context, Response response) {
-        return schedulerRuntime.admittedRoute(context, response);
+        return schedulerRuntime.routeResult(context, response);
     }
 
     protected DeliveryMetricsReporter createDeliveryMetricsReporter() {

@@ -37,10 +37,6 @@ public final class GlobalQueueEntry {
         return sequence;
     }
 
-    public boolean isRemoved() {
-        return removed;
-    }
-
     /** Called only by the owning queue while holding its caller's synchronization boundary. */
     public void markQueued(long sequence) {
         if (!removed || sequence <= 0) throw new IllegalStateException("invalid queue membership");

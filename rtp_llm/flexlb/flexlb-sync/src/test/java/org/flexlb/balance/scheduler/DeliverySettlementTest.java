@@ -56,7 +56,7 @@ import static org.mockito.Mockito.when;
  */
 class DeliverySettlementTest {
     private FlexlbConfig config;
-    private RequestLifecycle registry;
+    private AbstractRequestScheduler registry;
     private DeliverySettlementTestSupport ledger;
     private PrefillEndpoint prefill;
     private final java.util.Map<
@@ -87,10 +87,11 @@ class DeliverySettlementTest {
                                         ignored -> new java.util.concurrent.CompletableFuture<>()));
         ledger = new DeliverySettlementTestSupport();
         prefill = mock(PrefillEndpoint.class);
+        when(prefill.acceptsNewRequests()).thenReturn(true);
         when(prefill.releaseRequest(any()))
                 .thenAnswer(
                         invocation -> {
-                            RequestRoute item = invocation.getArgument(0);
+                            RouteExecution item = invocation.getArgument(0);
                             RequestContext requestContext =
                                     registry.requests.findActive(item.requestId());
                             assertTrue(
@@ -130,11 +131,11 @@ class DeliverySettlementTest {
         cleaned(member);
         assertOccupancy(0, 0);
         assertFalse(registry.requests.isCurrent(member.requestContext()));
-        verify(member.item().decodeEp())
+        verify(member.item().decodeEndpoint())
                 .release(
                         member.item().decodeReservation(),
                         DecodeResources.ReleaseReason.REMOTE_CLEANUP);
-        verify(member.item().decodeEp(), never())
+        verify(member.item().decodeEndpoint(), never())
                 .release(any(), eq(DecodeResources.ReleaseReason.NOT_SENT));
     }
 
@@ -147,9 +148,13 @@ class DeliverySettlementTest {
                                 WorkerStatus.createDiscovered(
                                         RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
                                 registry.requests));
-        DecodeResources.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) {
-            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 2L, 1L, 1L, 50);
+        DecodeResources.RequestReservation reservation;
+        {
+            var selectedEndpoint = decode;
+
+            reservation =
+                    EndpointTestSupport.reserveUnqueuedDecode(
+                            decode, selectedEndpoint, 2L, 1L, 1L, 50);
         }
         Member member = member(2L, 12L, decode, reservation);
         ledger.commit(12L, List.of(member.item()));
@@ -190,7 +195,7 @@ class DeliverySettlementTest {
                     .route()
                     .ctx()
                     .data()
-                    .getLifecycle()
+                    .getRequestScheduler()
                     .onDeliveryResult(
                             new ContextResult.TransportResult(
                                     member.claim(),
@@ -199,23 +204,26 @@ class DeliverySettlementTest {
             ledger.finish(20L, member.item())
                     .forEach(
                             status ->
-                                    registry.onEngineEvidence(
+                                    registry.onWorkerRequestEvent(
                                             status.route().ctx(),
-                                            new ContextResult.EngineEvidence(
-                                                    (status.route().prefillEp() == prefill
+                                            new ContextResult.WorkerRequestEvent(
+                                                    (status.route().prefillEndpoint() == prefill
                                                             ? status.route()
                                                             : null),
                                                     null,
                                                     RoleType.PREFILL,
                                                     switch (status.kind()) {
                                                         case ACTIVE ->
-                                                                ContextResult.EngineKind.ACTIVE;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .ACTIVE;
                                                         case COMPLETED ->
-                                                                ContextResult.EngineKind.COMPLETED;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .COMPLETED;
                                                         case FAILED ->
-                                                                ContextResult.EngineKind.FAILED;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .FAILED;
                                                         case PRIORITY_CANCELED ->
-                                                                ContextResult.EngineKind
+                                                                ContextResult.WorkerRequestEventType
                                                                         .PRIORITY_CANCELLED;
                                                     },
                                                     status.errorCode(),
@@ -238,7 +246,7 @@ class DeliverySettlementTest {
                     .route()
                     .ctx()
                     .data()
-                    .getLifecycle()
+                    .getRequestScheduler()
                     .onDeliveryResult(
                             new ContextResult.TransportResult(
                                     successful.claim(),
@@ -305,21 +313,26 @@ class DeliverySettlementTest {
         ledger.finish(50L, old.item())
                 .forEach(
                         status ->
-                                registry.onEngineEvidence(
+                                registry.onWorkerRequestEvent(
                                         status.route().ctx(),
-                                        new ContextResult.EngineEvidence(
-                                                (status.route().prefillEp() == prefill
+                                        new ContextResult.WorkerRequestEvent(
+                                                (status.route().prefillEndpoint() == prefill
                                                         ? status.route()
                                                         : null),
                                                 null,
                                                 RoleType.PREFILL,
                                                 switch (status.kind()) {
-                                                    case ACTIVE -> ContextResult.EngineKind.ACTIVE;
+                                                    case ACTIVE ->
+                                                            ContextResult.WorkerRequestEventType
+                                                                    .ACTIVE;
                                                     case COMPLETED ->
-                                                            ContextResult.EngineKind.COMPLETED;
-                                                    case FAILED -> ContextResult.EngineKind.FAILED;
+                                                            ContextResult.WorkerRequestEventType
+                                                                    .COMPLETED;
+                                                    case FAILED ->
+                                                            ContextResult.WorkerRequestEventType
+                                                                    .FAILED;
                                                     case PRIORITY_CANCELED ->
-                                                            ContextResult.EngineKind
+                                                            ContextResult.WorkerRequestEventType
                                                                     .PRIORITY_CANCELLED;
                                                 },
                                                 status.errorCode(),
@@ -370,7 +383,7 @@ class DeliverySettlementTest {
                 member.requestContext().snapshot().close().decodeSettled(),
                 "the successfully released side remains settled");
         verify(prefill, after(150).times(3)).releaseRequest(member.item());
-        verify(member.item().decodeEp(), times(1))
+        verify(member.item().decodeEndpoint(), times(1))
                 .release(
                         member.item().decodeReservation(),
                         DecodeResources.ReleaseReason.REMOTE_CLEANUP);
@@ -394,7 +407,7 @@ class DeliverySettlementTest {
                 SchedulerTestSupport.failure(registry),
                 "actual recovery must retain the recorded facility failure");
         verify(prefill, times(4)).releaseRequest(member.item());
-        verify(member.item().decodeEp(), times(1))
+        verify(member.item().decodeEndpoint(), times(1))
                 .release(
                         member.item().decodeReservation(),
                         DecodeResources.ReleaseReason.REMOTE_CLEANUP);
@@ -410,15 +423,25 @@ class DeliverySettlementTest {
                                         RoleType.DECODE, null, "127.0.0.1", 8180, 8181, null),
                                 registry.requests));
         try {
-            DecodeResources.ReservationHandle reservation;
-            try (var pin = decode.tryPinGeneration()) {
+            DecodeResources.RequestReservation reservation;
+            {
+                var selectedEndpoint = decode;
+
                 reservation =
-                        EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 131L, 1L, 2L, 50);
+                        EndpointTestSupport.reserveUnqueuedDecode(
+                                decode, selectedEndpoint, 131L, 1L, 2L, 50);
             }
             var member = member(131L, 131L, decode, reservation, Delivery.SendMode.ROUTE_DECISION);
             ledger.commit(131L, List.of(member.item()));
             DeliverySettlementTestSupport.dispatchDecode(decode, reservation);
             DeliverySettlementTestSupport.decodeStatus(decode, 131L, false);
+            doAnswer(
+                            call -> {
+                                assertFalse(Thread.holdsLock(member.requestContext()));
+                                return call.callRealMethod();
+                            })
+                    .when(decode)
+                    .ownership(reservation);
             registry.onDeliveryResult(
                     new ContextResult.RouteDelivered(
                             member.claim(), 0L, System.currentTimeMillis()));
@@ -471,9 +494,13 @@ class DeliverySettlementTest {
                                 WorkerStatus.createDiscovered(
                                         RoleType.DECODE, null, "127.0.0.1", 8180, 8181, null),
                                 registry.requests));
-        DecodeResources.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) {
-            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 91L, 1L, 2L, 50);
+        DecodeResources.RequestReservation reservation;
+        {
+            var selectedEndpoint = decode;
+
+            reservation =
+                    EndpointTestSupport.reserveUnqueuedDecode(
+                            decode, selectedEndpoint, 91L, 1L, 2L, 50);
         }
         var context = RequestProtocolTestSupport.context(config, 91L);
         var item =
@@ -496,12 +523,11 @@ class DeliverySettlementTest {
             context.completeClose(
                     new ContextResult.CloseProgress(false, true, false, false),
                     System.currentTimeMillis());
-            var failure =
-                    RequestLifecycle.releaseResources(
-                            context,
-                            source == Delivery.Result.Status.NOT_SENT
-                                    ? DecodeResources.ReleaseReason.NOT_SENT
-                                    : null);
+            Throwable failure =
+                    source == Delivery.Result.Status.NOT_SENT
+                            ? AbstractRequestScheduler.releaseRouteResources(
+                                    item, DecodeResources.ReleaseReason.NOT_SENT)
+                            : null;
             boolean released = source == Delivery.Result.Status.NOT_SENT && !accepted;
             assertEquals(released, context.snapshot().close().decodeSettled());
             assertTrue(context.snapshot().close().prefillSettled());
@@ -512,7 +538,6 @@ class DeliverySettlementTest {
                     .release(reservation, DecodeResources.ReleaseReason.NOT_SENT);
         } finally {
             decode.release(reservation, DecodeResources.ReleaseReason.REMOTE_CLEANUP).status();
-            item.close();
         }
     }
 
@@ -520,7 +545,7 @@ class DeliverySettlementTest {
     void notSentReleasesLocalReservationsOutsideTheRequestLock() throws Exception {
         Member member = member(80L, 80L);
         ledger.commit(80L, List.of(member.item()));
-        when(member.item().decodeEp().ownership(member.item().decodeReservation()))
+        when(member.item().decodeEndpoint().ownership(member.item().decodeReservation()))
                 .thenAnswer(
                         invocation -> {
                             assertFalse(Thread.holdsLock(member.requestContext()));
@@ -530,7 +555,7 @@ class DeliverySettlementTest {
                 .route()
                 .ctx()
                 .data()
-                .getLifecycle()
+                .getRequestScheduler()
                 .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 member.claim(),
@@ -543,7 +568,7 @@ class DeliverySettlementTest {
         assertFalse(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(0, 0);
         assertTrue(cancellations.isEmpty());
-        verify(member.item().decodeEp())
+        verify(member.item().decodeEndpoint())
                 .release(member.item().decodeReservation(), DecodeResources.ReleaseReason.NOT_SENT);
     }
 
@@ -555,7 +580,7 @@ class DeliverySettlementTest {
                 .route()
                 .ctx()
                 .data()
-                .getLifecycle()
+                .getRequestScheduler()
                 .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 member.claim(),
@@ -579,13 +604,14 @@ class DeliverySettlementTest {
         assertTrue(
                 registry.onPreemption(
                         preemption,
-                        new RequestLifecycle.PreemptionEvent(
+                        new AbstractRequestScheduler.PreemptionEvent(
                                 PreemptionCancelPhase.CANCEL_IN_FLIGHT, false, null, null, null)));
         if (phase != PreemptionCancelPhase.CANCEL_IN_FLIGHT) {
             assertTrue(
                     registry.onPreemption(
                             preemption,
-                            new RequestLifecycle.PreemptionEvent(phase, false, null, null, null)));
+                            new AbstractRequestScheduler.PreemptionEvent(
+                                    phase, false, null, null, null)));
         }
         reject(member);
         assertFalse(member.item().ctx().data().getFuture().get(2, TimeUnit.SECONDS).isSuccess());
@@ -619,7 +645,7 @@ class DeliverySettlementTest {
                                             .route()
                                             .ctx()
                                             .data()
-                                            .getLifecycle()
+                                            .getRequestScheduler()
                                             .onDeliveryResult(
                                                     new ContextResult.TransportResult(
                                                             member.claim(),
@@ -655,9 +681,13 @@ class DeliverySettlementTest {
                                 WorkerStatus.createDiscovered(
                                         RoleType.DECODE, null, "127.0.0.1", 8180, 8181, null),
                                 registry.requests));
-        DecodeResources.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) {
-            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, 70L, 1L, 2L, 50);
+        DecodeResources.RequestReservation reservation;
+        {
+            var selectedEndpoint = decode;
+
+            reservation =
+                    EndpointTestSupport.reserveUnqueuedDecode(
+                            decode, selectedEndpoint, 70L, 1L, 2L, 50);
         }
         Member member = member(70L, 70L, decode, reservation);
         ledger.commit(70L, List.of(member.item()));
@@ -670,7 +700,7 @@ class DeliverySettlementTest {
                                 .route()
                                 .ctx()
                                 .data()
-                                .getLifecycle()
+                                .getRequestScheduler()
                                 .onDeliveryResult(
                                         new ContextResult.TransportResult(
                                                 member.claim(),
@@ -680,10 +710,10 @@ class DeliverySettlementTest {
                         ledger.finish(70L, member.item())
                                 .forEach(
                                         status ->
-                                                registry.onEngineEvidence(
+                                                registry.onWorkerRequestEvent(
                                                         status.route().ctx(),
-                                                        new ContextResult.EngineEvidence(
-                                                                (status.route().prefillEp()
+                                                        new ContextResult.WorkerRequestEvent(
+                                                                (status.route().prefillEndpoint()
                                                                                 == prefill
                                                                         ? status.route()
                                                                         : null),
@@ -691,16 +721,20 @@ class DeliverySettlementTest {
                                                                 RoleType.PREFILL,
                                                                 switch (status.kind()) {
                                                                     case ACTIVE ->
-                                                                            ContextResult.EngineKind
+                                                                            ContextResult
+                                                                                    .WorkerRequestEventType
                                                                                     .ACTIVE;
                                                                     case COMPLETED ->
-                                                                            ContextResult.EngineKind
+                                                                            ContextResult
+                                                                                    .WorkerRequestEventType
                                                                                     .COMPLETED;
                                                                     case FAILED ->
-                                                                            ContextResult.EngineKind
+                                                                            ContextResult
+                                                                                    .WorkerRequestEventType
                                                                                     .FAILED;
                                                                     case PRIORITY_CANCELED ->
-                                                                            ContextResult.EngineKind
+                                                                            ContextResult
+                                                                                    .WorkerRequestEventType
                                                                                     .PRIORITY_CANCELLED;
                                                                 },
                                                                 status.errorCode(),
@@ -734,21 +768,26 @@ class DeliverySettlementTest {
         ledger.finish(70L, member.item())
                 .forEach(
                         status ->
-                                registry.onEngineEvidence(
+                                registry.onWorkerRequestEvent(
                                         status.route().ctx(),
-                                        new ContextResult.EngineEvidence(
-                                                (status.route().prefillEp() == prefill
+                                        new ContextResult.WorkerRequestEvent(
+                                                (status.route().prefillEndpoint() == prefill
                                                         ? status.route()
                                                         : null),
                                                 null,
                                                 RoleType.PREFILL,
                                                 switch (status.kind()) {
-                                                    case ACTIVE -> ContextResult.EngineKind.ACTIVE;
+                                                    case ACTIVE ->
+                                                            ContextResult.WorkerRequestEventType
+                                                                    .ACTIVE;
                                                     case COMPLETED ->
-                                                            ContextResult.EngineKind.COMPLETED;
-                                                    case FAILED -> ContextResult.EngineKind.FAILED;
+                                                            ContextResult.WorkerRequestEventType
+                                                                    .COMPLETED;
+                                                    case FAILED ->
+                                                            ContextResult.WorkerRequestEventType
+                                                                    .FAILED;
                                                     case PRIORITY_CANCELED ->
-                                                            ContextResult.EngineKind
+                                                            ContextResult.WorkerRequestEventType
                                                                     .PRIORITY_CANCELLED;
                                                 },
                                                 status.errorCode(),
@@ -770,7 +809,8 @@ class DeliverySettlementTest {
                 Delivery.Result.uncertain(new IllegalStateException("reply lost"));
         try {
             if (decodeStatusFirst) {
-                DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 122L, false);
+                DeliverySettlementTestSupport.decodeStatus(
+                        member.item().decodeEndpoint(), 122L, false);
             } else {
                 registry.onDeliveryResult(
                         new ContextResult.TransportResult(
@@ -788,7 +828,8 @@ class DeliverySettlementTest {
                         new ContextResult.TransportResult(
                                 member.claim(), unknown, System.currentTimeMillis()));
             } else {
-                DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 122L, false);
+                DeliverySettlementTestSupport.decodeStatus(
+                        member.item().decodeEndpoint(), 122L, false);
             }
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
@@ -810,35 +851,38 @@ class DeliverySettlementTest {
                     member.claim().completion().toCompletableFuture().isDone(),
                     "acknowledgement must retain execution ownership until Worker terminal");
             assertOccupancy(1, 1);
-            assertEquals(1, member.item().decodeEp().routingView().engineCapacityUsed());
+            assertEquals(1, member.item().decodeEndpoint().routingView().engineCapacityUsed());
             assertTrue(cancellations.isEmpty(), "delivery confirmation must not cancel execution");
         } finally {
             ledger.finish(122L, member.item())
                     .forEach(
                             status ->
-                                    registry.onEngineEvidence(
+                                    registry.onWorkerRequestEvent(
                                             member.requestContext(),
-                                            new ContextResult.EngineEvidence(
-                                                    (status.route().prefillEp() == prefill
+                                            new ContextResult.WorkerRequestEvent(
+                                                    (status.route().prefillEndpoint() == prefill
                                                             ? status.route()
                                                             : null),
                                                     null,
                                                     RoleType.PREFILL,
                                                     switch (status.kind()) {
                                                         case ACTIVE ->
-                                                                ContextResult.EngineKind.ACTIVE;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .ACTIVE;
                                                         case COMPLETED ->
-                                                                ContextResult.EngineKind.COMPLETED;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .COMPLETED;
                                                         case FAILED ->
-                                                                ContextResult.EngineKind.FAILED;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .FAILED;
                                                         case PRIORITY_CANCELED ->
-                                                                ContextResult.EngineKind
+                                                                ContextResult.WorkerRequestEventType
                                                                         .PRIORITY_CANCELLED;
                                                     },
                                                     status.errorCode(),
                                                     null,
                                                     System.currentTimeMillis())));
-            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 122L, true);
+            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEndpoint(), 122L, true);
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         }
@@ -872,29 +916,32 @@ class DeliverySettlementTest {
             ledger.finish(120L, member.item())
                     .forEach(
                             status ->
-                                    registry.onEngineEvidence(
+                                    registry.onWorkerRequestEvent(
                                             member.requestContext(),
-                                            new ContextResult.EngineEvidence(
-                                                    (status.route().prefillEp() == prefill
+                                            new ContextResult.WorkerRequestEvent(
+                                                    (status.route().prefillEndpoint() == prefill
                                                             ? status.route()
                                                             : null),
                                                     null,
                                                     RoleType.PREFILL,
                                                     switch (status.kind()) {
                                                         case ACTIVE ->
-                                                                ContextResult.EngineKind.ACTIVE;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .ACTIVE;
                                                         case COMPLETED ->
-                                                                ContextResult.EngineKind.COMPLETED;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .COMPLETED;
                                                         case FAILED ->
-                                                                ContextResult.EngineKind.FAILED;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .FAILED;
                                                         case PRIORITY_CANCELED ->
-                                                                ContextResult.EngineKind
+                                                                ContextResult.WorkerRequestEventType
                                                                         .PRIORITY_CANCELLED;
                                                     },
                                                     status.errorCode(),
                                                     null,
                                                     System.currentTimeMillis())));
-            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 120L, true);
+            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEndpoint(), 120L, true);
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
 
@@ -927,10 +974,11 @@ class DeliverySettlementTest {
                             ledger.finish(123L, member.item())
                                     .forEach(
                                             status ->
-                                                    registry.onEngineEvidence(
+                                                    registry.onWorkerRequestEvent(
                                                             member.requestContext(),
-                                                            new ContextResult.EngineEvidence(
-                                                                    (status.route().prefillEp()
+                                                            new ContextResult.WorkerRequestEvent(
+                                                                    (status.route()
+                                                                                            .prefillEndpoint()
                                                                                     == prefill
                                                                             ? status.route()
                                                                             : null),
@@ -939,19 +987,19 @@ class DeliverySettlementTest {
                                                                     switch (status.kind()) {
                                                                         case ACTIVE ->
                                                                                 ContextResult
-                                                                                        .EngineKind
+                                                                                        .WorkerRequestEventType
                                                                                         .ACTIVE;
                                                                         case COMPLETED ->
                                                                                 ContextResult
-                                                                                        .EngineKind
+                                                                                        .WorkerRequestEventType
                                                                                         .COMPLETED;
                                                                         case FAILED ->
                                                                                 ContextResult
-                                                                                        .EngineKind
+                                                                                        .WorkerRequestEventType
                                                                                         .FAILED;
                                                                         case PRIORITY_CANCELED ->
                                                                                 ContextResult
-                                                                                        .EngineKind
+                                                                                        .WorkerRequestEventType
                                                                                         .PRIORITY_CANCELLED;
                                                                     },
                                                                     status.errorCode(),
@@ -959,7 +1007,7 @@ class DeliverySettlementTest {
                                                                     System.currentTimeMillis())));
                     case 'D' ->
                             DeliverySettlementTestSupport.decodeStatus(
-                                    member.item().decodeEp(), 123L, true);
+                                    member.item().decodeEndpoint(), 123L, true);
                     case 'S' ->
                             registry.onDeliveryResult(
                                     new ContextResult.TransportResult(
@@ -1024,9 +1072,9 @@ class DeliverySettlementTest {
                             () -> {
                                 await(start);
                                 DeliverySettlementTestSupport.decodeStatus(
-                                        member.item().decodeEp(), 124L, false);
+                                        member.item().decodeEndpoint(), 124L, false);
                                 DeliverySettlementTestSupport.decodeStatus(
-                                        member.item().decodeEp(), 124L, false);
+                                        member.item().decodeEndpoint(), 124L, false);
                             });
             start.countDown();
             sender.get(5, TimeUnit.SECONDS);
@@ -1035,35 +1083,38 @@ class DeliverySettlementTest {
             RequestProtocolTestSupport.awaitCondition(() -> published.get() == 1);
             assertFalse(member.claim().completion().toCompletableFuture().isDone());
             assertOccupancy(1, 1);
-            assertEquals(1, member.item().decodeEp().routingView().engineCapacityUsed());
+            assertEquals(1, member.item().decodeEndpoint().routingView().engineCapacityUsed());
             assertTrue(cancellations.isEmpty());
         } finally {
             ledger.finish(124L, member.item())
                     .forEach(
                             status ->
-                                    registry.onEngineEvidence(
+                                    registry.onWorkerRequestEvent(
                                             member.requestContext(),
-                                            new ContextResult.EngineEvidence(
-                                                    (status.route().prefillEp() == prefill
+                                            new ContextResult.WorkerRequestEvent(
+                                                    (status.route().prefillEndpoint() == prefill
                                                             ? status.route()
                                                             : null),
                                                     null,
                                                     RoleType.PREFILL,
                                                     switch (status.kind()) {
                                                         case ACTIVE ->
-                                                                ContextResult.EngineKind.ACTIVE;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .ACTIVE;
                                                         case COMPLETED ->
-                                                                ContextResult.EngineKind.COMPLETED;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .COMPLETED;
                                                         case FAILED ->
-                                                                ContextResult.EngineKind.FAILED;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .FAILED;
                                                         case PRIORITY_CANCELED ->
-                                                                ContextResult.EngineKind
+                                                                ContextResult.WorkerRequestEventType
                                                                         .PRIORITY_CANCELLED;
                                                     },
                                                     status.errorCode(),
                                                     null,
                                                     System.currentTimeMillis())));
-            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 124L, true);
+            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEndpoint(), 124L, true);
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
         }
@@ -1080,29 +1131,33 @@ class DeliverySettlementTest {
             ledger.finish(121L, member.item())
                     .forEach(
                             status ->
-                                    registry.onEngineEvidence(
+                                    registry.onWorkerRequestEvent(
                                             member.requestContext(),
-                                            new ContextResult.EngineEvidence(
-                                                    (status.route().prefillEp() == prefill
+                                            new ContextResult.WorkerRequestEvent(
+                                                    (status.route().prefillEndpoint() == prefill
                                                             ? status.route()
                                                             : null),
                                                     null,
                                                     RoleType.PREFILL,
                                                     switch (status.kind()) {
                                                         case ACTIVE ->
-                                                                ContextResult.EngineKind.ACTIVE;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .ACTIVE;
                                                         case COMPLETED ->
-                                                                ContextResult.EngineKind.COMPLETED;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .COMPLETED;
                                                         case FAILED ->
-                                                                ContextResult.EngineKind.FAILED;
+                                                                ContextResult.WorkerRequestEventType
+                                                                        .FAILED;
                                                         case PRIORITY_CANCELED ->
-                                                                ContextResult.EngineKind
+                                                                ContextResult.WorkerRequestEventType
                                                                         .PRIORITY_CANCELLED;
                                                     },
                                                     status.errorCode(),
                                                     null,
                                                     System.currentTimeMillis())));
-            DeliverySettlementTestSupport.decodeStatus(member.item().decodeEp(), 121L, true, 42L);
+            DeliverySettlementTestSupport.decodeStatus(
+                    member.item().decodeEndpoint(), 121L, true, 42L);
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(registry));
             synchronized (member.requestContext()) {
@@ -1158,28 +1213,33 @@ class DeliverySettlementTest {
         ledger.finish(125L, member.item())
                 .forEach(
                         status ->
-                                registry.onEngineEvidence(
+                                registry.onWorkerRequestEvent(
                                         member.requestContext(),
-                                        new ContextResult.EngineEvidence(
-                                                (status.route().prefillEp() == prefill
+                                        new ContextResult.WorkerRequestEvent(
+                                                (status.route().prefillEndpoint() == prefill
                                                         ? status.route()
                                                         : null),
                                                 null,
                                                 RoleType.PREFILL,
                                                 switch (status.kind()) {
-                                                    case ACTIVE -> ContextResult.EngineKind.ACTIVE;
+                                                    case ACTIVE ->
+                                                            ContextResult.WorkerRequestEventType
+                                                                    .ACTIVE;
                                                     case COMPLETED ->
-                                                            ContextResult.EngineKind.COMPLETED;
-                                                    case FAILED -> ContextResult.EngineKind.FAILED;
+                                                            ContextResult.WorkerRequestEventType
+                                                                    .COMPLETED;
+                                                    case FAILED ->
+                                                            ContextResult.WorkerRequestEventType
+                                                                    .FAILED;
                                                     case PRIORITY_CANCELED ->
-                                                            ContextResult.EngineKind
+                                                            ContextResult.WorkerRequestEventType
                                                                     .PRIORITY_CANCELLED;
                                                 },
                                                 status.errorCode(),
                                                 null,
                                                 System.currentTimeMillis())));
         DeliverySettlementTestSupport.decodeStatus(
-                member.item().decodeEp(), 125L, true, workerSuccessful ? 0L : 42L);
+                member.item().decodeEndpoint(), 125L, true, workerSuccessful ? 0L : 42L);
         member.item().ctx().data().getFuture().get(5, TimeUnit.SECONDS);
         long responseObservedAtNanos = System.nanoTime();
         if (!senderFirst) {
@@ -1212,9 +1272,13 @@ class DeliverySettlementTest {
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8180, 8181, null),
                         registry.requests);
-        DecodeResources.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) {
-            reservation = EndpointTestSupport.reserveUnqueuedDecode(decode, pin, id, 1L, 2L, 50);
+        DecodeResources.RequestReservation reservation;
+        {
+            var selectedEndpoint = decode;
+
+            reservation =
+                    EndpointTestSupport.reserveUnqueuedDecode(
+                            decode, selectedEndpoint, id, 1L, 2L, 50);
         }
         Member member = member(id, id, decode, reservation);
         ledger.commit(id, List.of(member.item()));
@@ -1224,8 +1288,12 @@ class DeliverySettlementTest {
 
     private void assertTerminalsSettledAndArchived(Member member) {
         assertOccupancy(0, 0);
-        assertEquals(0, member.item().decodeEp().routingView().engineCapacityUsed());
-        assertFalse(member.item().decodeEp().ownership(member.item().decodeReservation()).owned());
+        assertEquals(0, member.item().decodeEndpoint().routingView().engineCapacityUsed());
+        assertFalse(
+                member.item()
+                        .decodeEndpoint()
+                        .ownership(member.item().decodeReservation())
+                        .owned());
         assertAll(
                 "both Worker terminals and sender exit must finish request cleanup",
                 () ->
@@ -1243,14 +1311,14 @@ class DeliverySettlementTest {
                 id,
                 batchId,
                 RequestProtocolTestSupport.decodeEndpoint(),
-                new DecodeResources.ReservationHandle(1L, String.valueOf(id), id));
+                new DecodeResources.RequestReservation(1L, String.valueOf(id), id));
     }
 
     private Member member(
             long id,
             long batchId,
             DecodeEndpoint decode,
-            DecodeResources.ReservationHandle reservation) {
+            DecodeResources.RequestReservation reservation) {
         return member(id, batchId, decode, reservation, Delivery.SendMode.BATCH_ENQUEUE);
     }
 
@@ -1258,7 +1326,7 @@ class DeliverySettlementTest {
             long id,
             long batchId,
             DecodeEndpoint decode,
-            DecodeResources.ReservationHandle reservation,
+            DecodeResources.RequestReservation reservation,
             Delivery.SendMode kind) {
         var context = RequestProtocolTestSupport.context(config, id);
         context.data()
@@ -1268,7 +1336,7 @@ class DeliverySettlementTest {
                                 .addTokenIds(7)
                                 .build()
                                 .toByteString());
-        var future = RequestProtocolTestSupport.register(registry, context);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(registry, context);
         context.data().setFuture(future);
         var prefillServer = new org.flexlb.dao.loadbalance.ServerStatus();
         prefillServer.setServerIp("127.0.0.1");
@@ -1292,7 +1360,7 @@ class DeliverySettlementTest {
                                 registry, item, () -> true);
         assertNotNull(claim);
         if (kind == Delivery.SendMode.BATCH_ENQUEUE) {
-            assertTrue(claim.route().ctx().data().getLifecycle().tryStartSend(claim));
+            assertTrue(claim.route().ctx().data().getRequestScheduler().tryStartSend(claim));
         }
         return new Member(item, registry.requests.findActive(String.valueOf(id)), claim);
     }
@@ -1313,7 +1381,7 @@ class DeliverySettlementTest {
                 .route()
                 .ctx()
                 .data()
-                .getLifecycle()
+                .getRequestScheduler()
                 .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 member.claim(),
@@ -1345,7 +1413,7 @@ class DeliverySettlementTest {
         RequestProtocolTestSupport.applyDecodeStatus(
                 registry,
                 member.requestContext(),
-                member.item().decodeEp(),
+                member.item().decodeEndpoint(),
                 DecodeResources.DecodeRequestStatus.terminal(
                         member.item().decodeReservation(), 601L));
     }
@@ -1365,5 +1433,5 @@ class DeliverySettlementTest {
     }
 
     private record Member(
-            RequestRoute item, RequestContext requestContext, Delivery.Member claim) {}
+            RouteExecution item, RequestContext requestContext, Delivery.Member claim) {}
 }

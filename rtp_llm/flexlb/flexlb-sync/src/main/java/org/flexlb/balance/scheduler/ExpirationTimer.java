@@ -338,7 +338,7 @@ public final class ExpirationTimer implements AutoCloseable {
             }
             try {
                 if (requests.isCurrent(token.owner())) {
-                    token.owner().data().getLifecycle().onDeadline(token, clock.getAsLong());
+                    token.owner().data().getRequestScheduler().onDeadline(token, clock.getAsLong());
                 }
             } finally {
                 endRegistration();

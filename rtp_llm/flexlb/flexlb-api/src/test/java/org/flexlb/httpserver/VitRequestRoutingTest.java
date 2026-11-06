@@ -2,8 +2,8 @@ package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
-import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.consistency.MasterStatusService;
@@ -41,7 +41,7 @@ class VitRequestRoutingTest {
         if (!queued) config.setScheduler(ConfigTestSupport.direct());
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        var selector = mock(RequestWorkerSelector.class);
+        var selector = mock(RequestRouteSelector.class);
         var batches = mock(DeliveryMetricsReporter.class);
         var reports = mock(RequestSchedulerReporter.class);
         var engine = mock(EngineGrpcClient.class);

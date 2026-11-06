@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
@@ -45,7 +45,9 @@ class EndpointRetirementLinearizationTest {
                         new PlacementAvailability(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 configService.loadBalanceConfig()),
-                        order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
+                        order ->
+                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                        16, order));
         String prefillAddress = "127.0.0.1:8100@0";
         String decodeAddress = "127.0.0.1:8200@0";
         WorkerStatus prefillStatus = status(RoleType.PREFILL, 8100);
@@ -77,20 +79,30 @@ class EndpointRetirementLinearizationTest {
                                 referencesCaptured.countDown();
                                 assertTrue(resumeAdmission.await(2, TimeUnit.SECONDS));
 
-                                boolean queueOfferAccepted =
-                                        EndpointTestSupport.offer(
-                                                prefill, mock(RequestRoute.class));
-                                boolean directPinAvailable;
-                                try (WorkerEndpoint.GenerationPin pin =
-                                        prefill.tryPinGeneration()) {
-                                    directPinAvailable = pin != null;
+                                var lateRoute = mock(RouteExecution.class);
+                                org.mockito.Mockito.when(lateRoute.prefillEndpoint())
+                                        .thenReturn(prefill);
+                                boolean queueOfferAccepted = prefill.tryEnqueueRoute(lateRoute);
+                                boolean prefillAdmissionAvailable;
+                                {
+                                    WorkerEndpoint selectedEndpoint = prefill;
+
+                                    prefillAdmissionAvailable =
+                                            prefill.reserveBatch(900L, 1).accepted();
                                 }
-                                boolean decodePinAvailable;
-                                try (WorkerEndpoint.GenerationPin pin = decode.tryPinGeneration()) {
-                                    decodePinAvailable = pin != null;
+                                boolean decodeAdmissionAvailable;
+                                {
+                                    WorkerEndpoint selectedEndpoint = decode;
+
+                                    decodeAdmissionAvailable =
+                                            decode.tryReserveQueuedRequest("late", 1L, 1L, 50, null)
+                                                            .status()
+                                                    == DecodeResources.ReserveStatus.ACQUIRED;
                                 }
                                 return new AdmissionAttempt(
-                                        queueOfferAccepted, directPinAvailable, decodePinAvailable);
+                                        queueOfferAccepted,
+                                        prefillAdmissionAvailable,
+                                        decodeAdmissionAvailable);
                             });
 
             assertTrue(referencesCaptured.await(2, TimeUnit.SECONDS));
@@ -113,8 +125,8 @@ class EndpointRetirementLinearizationTest {
             resumeAdmission.countDown();
             AdmissionAttempt attempt = delayedAdmission.get(2, TimeUnit.SECONDS);
             assertFalse(attempt.queueOfferAccepted());
-            assertFalse(attempt.directPinAvailable());
-            assertFalse(attempt.decodePinAvailable());
+            assertFalse(attempt.prefillAdmissionAvailable());
+            assertFalse(attempt.decodeAdmissionAvailable());
             assertTrue(capturedDecode.resourceSnapshot().reservedCount() == 0);
         } finally {
             resumeAdmission.countDown();
@@ -158,5 +170,7 @@ class EndpointRetirementLinearizationTest {
     }
 
     private record AdmissionAttempt(
-            boolean queueOfferAccepted, boolean directPinAvailable, boolean decodePinAvailable) {}
+            boolean queueOfferAccepted,
+            boolean prefillAdmissionAvailable,
+            boolean decodeAdmissionAvailable) {}
 }

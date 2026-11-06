@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.balance.scheduler.RequestLifecycle;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.route.RoleType;
@@ -30,7 +30,6 @@ import static org.flexlb.balance.endpoint.EndpointTestSupport.decodeRoutingSnaps
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
@@ -45,11 +44,11 @@ import static org.mockito.Mockito.when;
 
 class EndpointRegistryCloseTest {
     @Test
-    void asynchronousRetirementsDoNotOccupyThreadsNeededToDrainTheirPins() throws Exception {
+    void asynchronousRetirementsDoNotOccupyThreadsNeededToDrainTheirWorkers() throws Exception {
         PlacementAvailability availability = mock(PlacementAvailability.class);
         EndpointRegistry registry = registry(availability);
         CacheAwareService cache = mock(CacheAwareService.class);
-        var pins = new java.util.ArrayList<WorkerEndpoint.GenerationPin>();
+        var selectedWorkers = new java.util.ArrayList<WorkerEndpoint>();
         var statuses = new java.util.ArrayList<org.flexlb.dao.master.WorkerStatus>();
         CountDownLatch retirementStarted = new CountDownLatch(4);
         try {
@@ -63,7 +62,7 @@ class EndpointRegistryCloseTest {
                 var endpoint =
                         EndpointTestSupport.publishEndpoint(
                                 registry, RoleType.DECODE, status.getLogicalIpPort(), status);
-                pins.add(endpoint.tryPinGeneration());
+                selectedWorkers.add(endpoint);
                 statuses.add(status);
             }
             doAnswer(
@@ -82,7 +81,7 @@ class EndpointRegistryCloseTest {
                 retirement.completeAsync(cache, LoggerFactory.getLogger(getClass()));
             }
             assertTrue(retirementStarted.await(5, TimeUnit.SECONDS));
-            pins.forEach(WorkerEndpoint.GenerationPin::close);
+            selectedWorkers.forEach(WorkerEndpoint::close);
             assertTimeoutPreemptively(
                     java.time.Duration.ofSeconds(5),
                     () -> {
@@ -92,7 +91,7 @@ class EndpointRegistryCloseTest {
                     });
             assertEquals(0, registry.discoveredCount());
         } finally {
-            pins.forEach(WorkerEndpoint.GenerationPin::close);
+            selectedWorkers.forEach(WorkerEndpoint::close);
             registry.close();
         }
     }
@@ -156,7 +155,7 @@ class EndpointRegistryCloseTest {
                 WorkerEndpoint published = publication.get(2, TimeUnit.SECONDS);
                 owner.get(2, TimeUnit.SECONDS);
                 waiter.get(2, TimeUnit.SECONDS);
-                assertNull(published.tryPinGeneration());
+                assertTrue(published.isRetired());
                 assertTrue(decodeRoutingSnapshot(registry, null).isEmpty());
             } finally {
                 finishPublication.countDown();
@@ -233,7 +232,7 @@ class EndpointRegistryCloseTest {
                     registry.close();
                 }
                 assertEquals(1, cleanups.get());
-                assertNull(endpoint.tryPinGeneration());
+                assertTrue(endpoint.isRetired());
             } finally {
                 finishCleanup.countDown();
             }
@@ -451,12 +450,25 @@ class EndpointRegistryCloseTest {
         registry.currentOrDiscover(RoleType.PREFILL, address, () -> status);
         WorkerEndpoint endpoint =
                 EndpointTestSupport.publishEndpoint(registry, RoleType.PREFILL, address, status);
+        var finishCleanup = new CountDownLatch(1);
+        WorkerEndpoint slowEndpoint = org.mockito.Mockito.spy(endpoint);
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            assertTrue(finishCleanup.await(5, TimeUnit.SECONDS));
+                            return call.callRealMethod();
+                        })
+                .when(slowEndpoint)
+                .closeEndpoint();
+        endpointMaps(registry).get(RoleType.PREFILL).put(address, slowEndpoint);
+        endpoint = slowEndpoint;
         CacheAwareService cache = mock(CacheAwareService.class);
         var callbackOutsideMonitor = new java.util.concurrent.atomic.AtomicBoolean();
         CountDownLatch actualRetirement = new CountDownLatch(1);
         Object lifecycle = ReflectionTestUtils.getField(endpoint, "retirementCompleted");
-        try (var pin = registry.capture(RoleType.PREFILL, address)) {
-            assertNotNull(pin);
+        {
+            var selectedEndpoint = registry.selectEndpoint(RoleType.PREFILL, address);
+
+            assertNotNull(selectedEndpoint);
             EndpointRegistry.Retirement retirement;
             status.lock.lock();
             try {
@@ -464,6 +476,7 @@ class EndpointRegistryCloseTest {
             } finally {
                 status.lock.unlock();
             }
+            endpoint.closeAsynchronously();
             assertTimeoutPreemptively(
                     java.time.Duration.ofSeconds(2),
                     () ->
@@ -500,6 +513,7 @@ class EndpointRegistryCloseTest {
                         actualRetirement.countDown();
                     });
         }
+        finishCleanup.countDown();
         assertTrue(actualRetirement.await(2, TimeUnit.SECONDS));
         assertTrue(
                 callbackOutsideMonitor.get(),
@@ -676,12 +690,12 @@ class EndpointRegistryCloseTest {
         return new EndpointRegistry(
                 config,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
-                        mock(RequestLifecycle.class)),
+                        mock(AbstractRequestScheduler.class)),
                 mock(DeliveryMetricsReporter.class),
                 org.flexlb.balance.scheduler.SchedulerTestSupport.dispatcher(),
                 availability,
                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(config.loadBalanceConfig()),
-                order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
+                order -> org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(16, order));
     }
 
     @SuppressWarnings("unchecked")

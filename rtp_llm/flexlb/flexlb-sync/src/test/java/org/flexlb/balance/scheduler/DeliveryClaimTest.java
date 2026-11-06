@@ -67,7 +67,7 @@ class DeliveryClaimTest {
                     .scheduleClose(f.context);
             try {
                 f.clearDecodeResourceOwnership();
-                f.owner.onEngineEvidence(
+                f.owner.onWorkerRequestEvent(
                         f.context,
                         f.decodeEvidence(
                                 f.decode,
@@ -103,7 +103,7 @@ class DeliveryClaimTest {
                                     });
             try {
                 f.clearDecodeResourceOwnership();
-                f.owner.onEngineEvidence(
+                f.owner.onWorkerRequestEvent(
                         f.context,
                         f.decodeEvidence(
                                 f.decode,
@@ -126,7 +126,9 @@ class DeliveryClaimTest {
             var scheduler =
                     (RequestScheduler)
                             org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(f.owner);
-            doThrow(failure).when(scheduler).onRequestChanged(f.context);
+            doThrow(failure)
+                    .when(SchedulerTestServices.lifecycle(scheduler))
+                    .removeRequest(f.context);
 
             assertSame(
                     failure,
@@ -423,15 +425,15 @@ class DeliveryClaimTest {
             f.prefillOwned.set(false);
             f.prefillClearedByState.set(true);
             var failedEvidence =
-                    new ContextResult.EngineEvidence(
+                    new ContextResult.WorkerRequestEvent(
                             f.claim.route(),
                             null,
                             org.flexlb.dao.route.RoleType.PREFILL,
-                            ContextResult.EngineKind.FAILED,
+                            ContextResult.WorkerRequestEventType.FAILED,
                             9L,
                             null,
                             System.currentTimeMillis());
-            f.owner.onEngineEvidence(f.context, failedEvidence);
+            f.owner.onWorkerRequestEvent(f.context, failedEvidence);
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
             var retained = f.context.snapshot();
@@ -439,7 +441,7 @@ class DeliveryClaimTest {
             assertFalse(retained.close().decodeSettled());
             assertNull(retained.outcome());
             verify(f.decode, times(3)).updatePreemption(4L, proof);
-            f.owner.onEngineEvidence(f.context, failedEvidence);
+            f.owner.onWorkerRequestEvent(f.context, failedEvidence);
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
             assertSame(retained, f.context.snapshot());
@@ -707,7 +709,7 @@ class DeliveryClaimTest {
             var attempt = granted;
             f.owner.onPreemption(
                     attempt,
-                    new RequestLifecycle.PreemptionEvent(
+                    new AbstractRequestScheduler.PreemptionEvent(
                             org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT,
                             false,
                             null,
@@ -721,7 +723,7 @@ class DeliveryClaimTest {
             try {
                 f.owner.onPreemption(
                         attempt,
-                        new RequestLifecycle.PreemptionEvent(
+                        new AbstractRequestScheduler.PreemptionEvent(
                                 org.flexlb.balance.preemption.PreemptionCancelPhase
                                         .CANCEL_REQUESTED,
                                 false,
@@ -938,7 +940,7 @@ class DeliveryClaimTest {
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(f.owner));
             assertTrue(f.owner.requests.isCurrent(f.context));
-            verify(f.prefill, never()).rollback(any());
+            verify(f.prefill, never()).rollback(any(PrefillEndpoint.BatchRecord.class));
             verify(f.prefill, never()).releaseRequest(any());
             verify(f.decode, never()).release(any(), any());
         }
@@ -1231,7 +1233,7 @@ class DeliveryClaimTest {
             f.recordDecodeStatus(
                     f.decode,
                     DecodeResources.DecodeRequestStatus.terminal(
-                            new DecodeResources.ReservationHandle(1L, String.valueOf(41L), 99L),
+                            new DecodeResources.RequestReservation(1L, String.valueOf(41L), 99L),
                             0L));
             f.owner.scheduleClose(f.claim.owner());
             assertFalse(f.settlement().isDone(), "another reservation is not proof");
@@ -1346,7 +1348,7 @@ class DeliveryClaimTest {
                                 Delivery.Result.notSent(new IllegalStateException("not sent")),
                                 System.currentTimeMillis()));
                 assertFalse(accepted.isEmpty(), "failure effects are deliberately paused");
-                f.owner.onEngineEvidence(
+                f.owner.onWorkerRequestEvent(
                         f.context,
                         f.decodeEvidence(
                                 f.decode,
@@ -1517,7 +1519,8 @@ class DeliveryClaimTest {
             var terminal = f.owner.requests.findTerminal("41");
             assertTrue(f.owner.requests.removeExactTerminal(terminal, Long.MAX_VALUE));
             var replacement = RequestProtocolTestSupport.context(f.context.data().getConfig(), 41L);
-            var replacementFuture = RequestProtocolTestSupport.register(f.owner, replacement);
+            var replacementFuture =
+                    RequestProtocolTestSupport.submitForManualPlacement(f.owner, replacement);
             try {
                 f.owner.onDeliveryResult(
                         new ContextResult.CleanupAcknowledgement(
@@ -1525,14 +1528,15 @@ class DeliveryClaimTest {
                                 ContextResult.CancelEvidenceKind.CLEANED,
                                 System.currentTimeMillis()));
                 f.applyDecodeTerminal();
-                f.owner.onEngineEvidence(
+                f.owner.onEndpointRetired(
                         f.claim.route().ctx(),
-                        new ContextResult.EngineEvidence(
-                                (f.claim.route().prefillEp() == f.prefill ? f.claim.route() : null),
+                        new ContextResult.EndpointRetirement(
+                                (f.claim.route().prefillEndpoint() == f.prefill
+                                        ? f.claim.route()
+                                        : null),
                                 null,
                                 org.flexlb.dao.route.RoleType.PREFILL,
-                                ContextResult.EngineKind.RETIRED,
-                                0L,
+                                f.prefill,
                                 "Prefill generation retired",
                                 System.currentTimeMillis()));
                 SchedulerTestSupport.awaitRequestWork(
@@ -1586,11 +1590,11 @@ class DeliveryClaimTest {
             assertEquals(
                     DeliveryDispatcher.StopResult.UNRESOLVED, f.driver().get(6, TimeUnit.SECONDS));
             f.cancel.complete(EngineGrpcClient.CancelReply.REQUEST_FENCED);
-            f.owner.onEngineEvidence(
+            f.owner.onWorkerRequestEvent(
                     f.context,
-                    new ContextResult.EngineEvidence(
+                    new ContextResult.WorkerRequestEvent(
                             (f.context.snapshot().route() != null
-                                            && f.context.snapshot().route().decodeEp()
+                                            && f.context.snapshot().route().decodeEndpoint()
                                                     == RequestProtocolTestSupport.decodeEndpoint()
                                     ? f.context.snapshot().route()
                                     : null),
@@ -1599,50 +1603,51 @@ class DeliveryClaimTest {
                             org.flexlb.dao.route.RoleType.DECODE,
                             (DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L).kind()
                                             == DecodeResources.DecodeRequestStatus.Kind.ACTIVE
-                                    ? ContextResult.EngineKind.ACTIVE
+                                    ? ContextResult.WorkerRequestEventType.ACTIVE
                                     : DecodeResources.DecodeRequestStatus.terminal(
                                                                     f.reservation, 0L)
                                                             .errorCode()
                                                     == 0L
-                                            ? ContextResult.EngineKind.COMPLETED
-                                            : ContextResult.EngineKind.FAILED),
+                                            ? ContextResult.WorkerRequestEventType.COMPLETED
+                                            : ContextResult.WorkerRequestEventType.FAILED),
                             DecodeResources.DecodeRequestStatus.terminal(f.reservation, 0L)
                                     .errorCode(),
                             null,
                             System.currentTimeMillis()));
-            f.owner.onEngineEvidence(
+            f.owner.onWorkerRequestEvent(
                     f.context,
-                    new ContextResult.EngineEvidence(
+                    new ContextResult.WorkerRequestEvent(
                             (f.context.snapshot().route() != null
-                                            && f.context.snapshot().route().decodeEp() == f.decode
+                                            && f.context.snapshot().route().decodeEndpoint()
+                                                    == f.decode
                                     ? f.context.snapshot().route()
                                     : null),
                             DecodeResources.DecodeRequestStatus.terminal(
-                                            new DecodeResources.ReservationHandle(
+                                            new DecodeResources.RequestReservation(
                                                     1L, String.valueOf(41L), 99L),
                                             0L)
                                     .reservation(),
                             org.flexlb.dao.route.RoleType.DECODE,
                             (DecodeResources.DecodeRequestStatus.terminal(
-                                                            new DecodeResources.ReservationHandle(
+                                                            new DecodeResources.RequestReservation(
                                                                     1L, String.valueOf(41L), 99L),
                                                             0L)
                                                     .kind()
                                             == DecodeResources.DecodeRequestStatus.Kind.ACTIVE
-                                    ? ContextResult.EngineKind.ACTIVE
+                                    ? ContextResult.WorkerRequestEventType.ACTIVE
                                     : DecodeResources.DecodeRequestStatus.terminal(
                                                                     new DecodeResources
-                                                                            .ReservationHandle(
+                                                                            .RequestReservation(
                                                                             1L,
                                                                             String.valueOf(41L),
                                                                             99L),
                                                                     0L)
                                                             .errorCode()
                                                     == 0L
-                                            ? ContextResult.EngineKind.COMPLETED
-                                            : ContextResult.EngineKind.FAILED),
+                                            ? ContextResult.WorkerRequestEventType.COMPLETED
+                                            : ContextResult.WorkerRequestEventType.FAILED),
                             DecodeResources.DecodeRequestStatus.terminal(
-                                            new DecodeResources.ReservationHandle(
+                                            new DecodeResources.RequestReservation(
                                                     1L, String.valueOf(41L), 99L),
                                             0L)
                                     .errorCode(),
@@ -1945,11 +1950,11 @@ class DeliveryClaimTest {
             var reservation =
                     switch (mismatch) {
                         case "foreignToken" ->
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(41L), 2L);
+                                new DecodeResources.RequestReservation(1L, String.valueOf(41L), 2L);
                         case "foreignGeneration" ->
-                                new DecodeResources.ReservationHandle(2L, String.valueOf(41L), 1L);
+                                new DecodeResources.RequestReservation(2L, String.valueOf(41L), 1L);
                         case "foreignRequest" ->
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(42L), 1L);
+                                new DecodeResources.RequestReservation(1L, String.valueOf(42L), 1L);
                         default -> f.reservation;
                     };
             var requestStatus =
@@ -2363,7 +2368,7 @@ class DeliveryClaimTest {
             var registration = grant;
             f.owner.onPreemption(
                     registration,
-                    new RequestLifecycle.PreemptionEvent(
+                    new AbstractRequestScheduler.PreemptionEvent(
                             org.flexlb.balance.preemption.PreemptionCancelPhase.CANCEL_IN_FLIGHT,
                             false,
                             null,
@@ -2474,13 +2479,14 @@ class DeliveryClaimTest {
             assertTrue(
                     f.owner.onPreemption(
                             oldAttempt,
-                            new RequestLifecycle.PreemptionEvent(null, true, null, null, null)));
+                            new AbstractRequestScheduler.PreemptionEvent(
+                                    null, true, null, null, null)));
             var newAttempt = f.owner.tryClaim(f.reservation, 92L).orElseThrow();
             assertTrue(oldAttempt != newAttempt);
             assertSame(newAttempt, f.context.snapshot().preemption().identity());
 
             var event =
-                    new RequestLifecycle.PreemptionEvent(
+                    new AbstractRequestScheduler.PreemptionEvent(
                             null,
                             false,
                             f.decode,
@@ -2507,7 +2513,8 @@ class DeliveryClaimTest {
             assertTrue(
                     f.owner.onPreemption(
                             newAttempt,
-                            new RequestLifecycle.PreemptionEvent(null, true, null, null, null)));
+                            new AbstractRequestScheduler.PreemptionEvent(
+                                    null, true, null, null, null)));
             f.owner.cancel("41", 0L, CancelReason.CLIENT_CANCELLED);
             f.owner.onDeliveryResult(
                     new ContextResult.TransportResult(
@@ -2796,7 +2803,7 @@ class DeliveryClaimTest {
     private static final class Fixture implements AutoCloseable {
         final EngineGrpcClient channel = mock(EngineGrpcClient.class);
         final CompletableFuture<EngineGrpcClient.CancelReply> cancel = new CompletableFuture<>();
-        final RequestLifecycle owner;
+        final AbstractRequestScheduler owner;
         final RequestContext context;
         final PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         final java.util.concurrent.atomic.AtomicBoolean prefillOwned =
@@ -2808,8 +2815,8 @@ class DeliveryClaimTest {
         final java.util.concurrent.atomic.AtomicBoolean prefillClearedByState =
                 new java.util.concurrent.atomic.AtomicBoolean();
         final DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
-        final DecodeResources.ReservationHandle reservation =
-                new DecodeResources.ReservationHandle(1L, String.valueOf(41L), 1L);
+        final DecodeResources.RequestReservation reservation =
+                new DecodeResources.RequestReservation(1L, String.valueOf(41L), 1L);
         final Delivery.Member claim;
 
         Fixture() {
@@ -2832,14 +2839,17 @@ class DeliveryClaimTest {
                     channel);
             when(channel.cancelAsync(any(), anyInt(), any(), anyLong())).thenReturn(cancel);
             context = RequestProtocolTestSupport.context(config, 41L);
-            var future = RequestProtocolTestSupport.register(owner, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
             var response = new Response();
             response.setSuccess(true);
+            var selectedPrefill = new org.flexlb.dao.loadbalance.ServerStatus();
+            selectedPrefill.setServerIp("127.0.0.1");
+            selectedPrefill.setGrpcPort(9000);
             var item =
                     org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(
                             context,
                             response,
-                            null,
+                            selectedPrefill,
                             null,
                             prefill,
                             decode,
@@ -2890,11 +2900,6 @@ class DeliveryClaimTest {
         }
 
         PreemptionRegistration preempt() {
-            var selected =
-                    (org.flexlb.dao.loadbalance.ServerStatus)
-                            ReflectionTestUtils.getField(claim.route(), "prefill");
-            selected.setServerIp("127.0.0.1");
-            selected.setGrpcPort(9000);
             return owner.tryClaim(reservation, 4L).orElseThrow();
         }
 
@@ -2914,20 +2919,21 @@ class DeliveryClaimTest {
             org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                     context,
                     observedRequest ->
-                            observedRequest.recordEngineEvidence(decodeEvidence(source, status)));
+                            observedRequest.recordWorkerRequestEvent(
+                                    decodeEvidence(source, status)));
         }
 
-        ContextResult.EngineEvidence decodeEvidence(
+        ContextResult.WorkerRequestEvent decodeEvidence(
                 DecodeEndpoint source, DecodeResources.DecodeRequestStatus status) {
             var current = context.snapshot().route();
-            var exact = current != null && current.decodeEp() == source ? current : null;
+            var exact = current != null && current.decodeEndpoint() == source ? current : null;
             var kind =
                     status.kind() == DecodeResources.DecodeRequestStatus.Kind.ACTIVE
-                            ? ContextResult.EngineKind.ACTIVE
+                            ? ContextResult.WorkerRequestEventType.ACTIVE
                             : status.errorCode() == 0L
-                                    ? ContextResult.EngineKind.COMPLETED
-                                    : ContextResult.EngineKind.FAILED;
-            return new ContextResult.EngineEvidence(
+                                    ? ContextResult.WorkerRequestEventType.COMPLETED
+                                    : ContextResult.WorkerRequestEventType.FAILED;
+            return new ContextResult.WorkerRequestEvent(
                     exact,
                     status.reservation(),
                     org.flexlb.dao.route.RoleType.DECODE,
@@ -2937,7 +2943,9 @@ class DeliveryClaimTest {
                     System.currentTimeMillis());
         }
 
-        /** Freeze the outcome before the test controls submission of its closing effects. */
+        /**
+         * Freeze the outcome before the test controls submission of its closing effects.
+         */
         void prepareClose() {
             recordDecodeStatus(
                     decode, DecodeResources.DecodeRequestStatus.terminal(reservation, 0L));
@@ -2948,7 +2956,7 @@ class DeliveryClaimTest {
 
         void applyDecodeTerminal() {
             clearDecodeResourceOwnership();
-            owner.onEngineEvidence(
+            owner.onWorkerRequestEvent(
                     context,
                     decodeEvidence(
                             decode, DecodeResources.DecodeRequestStatus.terminal(reservation, 0L)));
@@ -2959,14 +2967,13 @@ class DeliveryClaimTest {
             if (prefillOwned.getAndSet(false)) {
                 prefillClearedByState.set(true);
             }
-            owner.onEngineEvidence(
+            owner.onEndpointRetired(
                     claim.route().ctx(),
-                    new ContextResult.EngineEvidence(
-                            (claim.route().prefillEp() == prefill ? claim.route() : null),
+                    new ContextResult.EndpointRetirement(
+                            (claim.route().prefillEndpoint() == prefill ? claim.route() : null),
                             null,
                             org.flexlb.dao.route.RoleType.PREFILL,
-                            ContextResult.EngineKind.RETIRED,
-                            0L,
+                            prefill,
                             "Prefill generation retired",
                             System.currentTimeMillis()));
         }
@@ -2975,14 +2982,13 @@ class DeliveryClaimTest {
             clearDecodeResourceOwnership();
             when(decode.isRetired()).thenReturn(true);
             var route = context.snapshot().route();
-            owner.onEngineEvidence(
+            owner.onEndpointRetired(
                     context,
-                    new ContextResult.EngineEvidence(
-                            route != null && route.decodeEp() == decode ? route : null,
+                    new ContextResult.EndpointRetirement(
+                            route != null && route.decodeEndpoint() == decode ? route : null,
                             reservation,
                             org.flexlb.dao.route.RoleType.DECODE,
-                            ContextResult.EngineKind.RETIRED,
-                            0L,
+                            decode,
                             "Decode generation retired",
                             System.currentTimeMillis()));
         }

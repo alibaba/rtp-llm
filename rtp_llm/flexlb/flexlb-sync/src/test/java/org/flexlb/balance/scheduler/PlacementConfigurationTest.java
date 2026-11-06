@@ -31,9 +31,10 @@ import static org.mockito.Mockito.when;
 
 class PlacementConfigurationTest {
     static class RequestConsumer {
-        final RequestLifecycle entry;
+        final AbstractRequestScheduler entry;
 
-        RequestConsumer(@org.springframework.context.annotation.Lazy RequestLifecycle entry) {
+        RequestConsumer(
+                @org.springframework.context.annotation.Lazy AbstractRequestScheduler entry) {
             this.entry = entry;
         }
     }
@@ -50,7 +51,7 @@ class PlacementConfigurationTest {
         var environment = spy(new MockEnvironment().withProperty("server.port", "7001"));
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        RequestWorkerSelector router = mock(RequestWorkerSelector.class);
+        RequestRouteSelector router = mock(RequestRouteSelector.class);
         var request = RequestProtocolTestSupport.context(config, 8972L);
         when(router.select(request, null))
                 .thenReturn(
@@ -84,7 +85,7 @@ class PlacementConfigurationTest {
                     org.flexlb.service.config.ConfigSource.class,
                     () -> mock(org.flexlb.service.config.ConfigSource.class));
             spring.registerBean(ConfigService.class, () -> service);
-            spring.registerBean(RequestWorkerSelector.class, () -> router);
+            spring.registerBean(RequestRouteSelector.class, () -> router);
             spring.registerBean(
                     org.flexlb.service.VitCacheSelector.class,
                     () -> mock(org.flexlb.service.VitCacheSelector.class));

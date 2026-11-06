@@ -9,14 +9,11 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -29,10 +26,10 @@ import static org.mockito.Mockito.spy;
 
 class RequestRouteTest {
     @Test
-    void successReturnsTheSameScopeAndFreezesFactsWithoutAnotherOwner() {
+    void executionReadsFrozenSelectionFacts() {
         var context = context();
         var worker = prefill();
-        var pin = worker.tryPinGeneration();
+        var selectedEndpoint = worker;
         var metadata = metadata(worker);
         metadata.setDpRank(7L);
         var debug = new DebugInfo();
@@ -43,10 +40,11 @@ class RequestRouteTest {
                     SchedulingTestConfig.prepareRoute(
                             context,
                             route -> {
-                                route.add(pin, metadata, 10L, 5L);
+                                route.add(selectedEndpoint, metadata, 10L, 5L);
                                 return PlacementResult.success(route);
                             });
-            try (var route = result.value()) {
+            {
+                var route = result.value();
                 metadata.setGroup("changed");
                 metadata.setDpRank(99L);
                 debug.setHitCacheLen(99L);
@@ -60,13 +58,12 @@ class RequestRouteTest {
                 assertEquals(17L, route.hitCache());
                 assertEquals(7L, route.prefillDpRank());
                 assertEquals(10L, route.prefillWorkMs());
-                assertSame(pin, route.prefillPin());
-                assertSame(worker, route.prefillEp());
-                assertTrue(pin.isOpen());
+                assertSame(selectedEndpoint, route.prefillEndpoint());
+                assertSame(worker, route.prefillEndpoint());
+                assertTrue(!selectedEndpoint.isRetired());
             }
-            assertFalse(pin.isOpen());
+            assertFalse(selectedEndpoint.isRetired());
             assertEquals("original", result.value().prefill().getGroup());
-            result.value().close();
         } finally {
             worker.close();
             org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
@@ -74,10 +71,10 @@ class RequestRouteTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"failed", "request", "address", "work", "version", "closed", "role"})
-    void validationFailureClosesTheIncomingPin(String invalid) {
+    @ValueSource(strings = {"failed", "request", "address", "work", "version", "role"})
+    void validationFailureLeavesEndpointAvailable(String invalid) {
         var worker = prefill();
-        var pin = worker.tryPinGeneration();
+        var selectedEndpoint = worker;
         var metadata = metadata(worker);
         if (invalid.equals("failed")) {
             metadata.setSuccess(false);
@@ -88,22 +85,21 @@ class RequestRouteTest {
         if (invalid.equals("address")) {
             metadata.setHttpPort(9999);
         }
-        if (invalid.equals("closed")) {
-            pin.close();
-        }
+
         if (invalid.equals("role")) {
             metadata.setRole(RoleType.DECODE);
         }
-        try (var route = new RequestRoute(context())) {
+        try {
+            var route = new RouteResult.Builder(context());
             assertThrows(
                     RuntimeException.class,
                     () ->
                             route.add(
-                                    pin,
+                                    selectedEndpoint,
                                     metadata,
                                     invalid.equals("work") ? -1L : 10L,
                                     invalid.equals("version") ? -1L : 0L));
-            assertFalse(pin.isOpen());
+            assertFalse(selectedEndpoint.isRetired());
         } finally {
             worker.close();
             org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
@@ -111,10 +107,10 @@ class RequestRouteTest {
     }
 
     @Test
-    void duplicateRoleClosesBothPinsThroughTheSingleScope() {
+    void duplicateRoleRejectsRouteWithoutRetiringEndpoint() {
         var worker = prefill();
-        var first = worker.tryPinGeneration();
-        var duplicate = worker.tryPinGeneration();
+        var first = worker;
+        var duplicate = worker;
         try {
             assertThrows(
                     IllegalStateException.class,
@@ -126,8 +122,8 @@ class RequestRouteTest {
                                         route.add(duplicate, metadata(worker), 1L, 0L);
                                         return PlacementResult.success(route);
                                     }));
-            assertFalse(first.isOpen());
-            assertFalse(duplicate.isOpen());
+            assertFalse(first.isRetired());
+            assertFalse(duplicate.isRetired());
         } finally {
             worker.close();
             org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
@@ -135,52 +131,20 @@ class RequestRouteTest {
     }
 
     @Test
-    void blockedResultReleasesPreviouslySelectedPins() {
+    void blockedResultLeavesSelectedEndpointsAvailable() {
         var worker = prefill();
-        var pin = worker.tryPinGeneration();
+        var selectedEndpoint = worker;
         try {
             var result =
                     SchedulingTestConfig.prepareRoute(
                             context(),
                             route -> {
-                                route.add(pin, metadata(worker), 1L, 0L);
+                                route.add(selectedEndpoint, metadata(worker), 1L, 0L);
                                 return PlacementResult.blocked(
                                         new PlacementKey(RoleType.DECODE, null, null));
                             });
             assertEquals(PlacementResult.Status.BLOCKED, result.status());
-            assertFalse(pin.isOpen());
-        } finally {
-            worker.close();
-            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
-        }
-    }
-
-    @Test
-    void closingAnEmptyConstructionPreventsReopeningAndConsumesIncomingPin() {
-        var worker = prefill();
-        var pin = worker.tryPinGeneration();
-        try (var route = new RequestRoute(context())) {
-            route.close();
-            assertThrows(
-                    IllegalStateException.class, () -> route.add(pin, metadata(worker), 1L, 0L));
-            assertFalse(pin.isOpen());
-            assertThrows(IllegalStateException.class, route::prepare);
-        } finally {
-            worker.close();
-            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
-        }
-    }
-
-    @Test
-    void closedConstructionCannotPublishOrAcquireCapacity() {
-        var worker = prefill();
-        var context = context();
-        try (var route = new RequestRoute(context)) {
-            route.add(worker.tryPinGeneration(), metadata(worker), 1L, 0L);
-            assertThrows(IllegalStateException.class, () -> route.attachReservation(null));
-            route.close();
-            assertThrows(IllegalStateException.class, route::prepare);
-            assertThrows(IllegalStateException.class, () -> route.attachReservation(null));
+            assertFalse(selectedEndpoint.isRetired());
         } finally {
             worker.close();
             org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
@@ -192,30 +156,14 @@ class RequestRouteTest {
         var worker = prefill();
         var invalid = metadata(worker);
         invalid.setSuccess(false);
-        try (var route = new RequestRoute(context())) {
-            assertThrows(
-                    IllegalArgumentException.class,
-                    () -> route.add(worker.tryPinGeneration(), invalid, 1L, 0L));
-            var nextPin = worker.tryPinGeneration();
+        try {
+            var route = new RouteResult.Builder(context());
+            assertThrows(IllegalArgumentException.class, () -> route.add(worker, invalid, 1L, 0L));
+            var nextWorker = worker;
             assertThrows(
                     IllegalStateException.class,
-                    () -> route.add(nextPin, metadata(worker), 1L, 0L));
-            assertFalse(nextPin.isOpen());
-            assertThrows(IllegalStateException.class, route::prepare);
-        } finally {
-            worker.close();
-            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
-        }
-    }
-
-    @Test
-    void prepareRejectsAnExternallyClosedPin() {
-        var worker = prefill();
-        var pin = worker.tryPinGeneration();
-        try (var route = new RequestRoute(context())) {
-            route.add(pin, metadata(worker), 1L, 0L);
-            pin.close();
-            assertThrows(IllegalStateException.class, route::prepare);
+                    () -> route.add(nextWorker, metadata(worker), 1L, 0L));
+            assertFalse(nextWorker.isRetired());
             assertThrows(IllegalStateException.class, route::prepare);
         } finally {
             worker.close();
@@ -224,8 +172,55 @@ class RequestRouteTest {
     }
 
     @ParameterizedTest
+    @EnumSource(
+            value = RoleType.class,
+            names = {"PREFILL", "PDFUSION", "DECODE", "ENCODER", "VIT"})
+    void retirementBeforeOrAfterAddInvalidatesSelectionForEveryRole(RoleType role) {
+        for (boolean retireBeforeAdd : List.of(false, true)) {
+            var status =
+                    WorkerStatus.createDiscovered(role, "original", "chosen", 8081, 8091, null);
+            WorkerEndpoint worker =
+                    switch (role) {
+                        case PREFILL, PDFUSION ->
+                                org.flexlb.balance.endpoint.EndpointTestSupport.realPrefill(
+                                        status,
+                                        SchedulingTestConfig.newConfig(),
+                                        mock(DeliveryDispatcher.class),
+                                        new RequestRepository(),
+                                        mock(DeliveryMetricsReporter.class));
+                        case DECODE ->
+                                org.flexlb.balance.endpoint.EndpointTestSupport.decode(
+                                        status, new RequestRepository());
+                        case ENCODER ->
+                                new org.flexlb.balance.endpoint.EncoderEndpoint(
+                                        status, new PlacementAvailability());
+                        case VIT -> new WorkerEndpoint(status);
+                        default -> throw new AssertionError(role);
+                    };
+            var prefill = prefill();
+            try {
+                var route = new RouteResult.Builder(context());
+                if (role == RoleType.DECODE || role == RoleType.VIT)
+                    route.add(prefill, metadata(prefill), 1L, 0L);
+                var metadata = metadata(worker);
+                if (retireBeforeAdd) worker.close();
+                assertSame(metadata, route.add(worker, metadata, 1L, 0L));
+                if (!retireBeforeAdd) worker.close();
+                var selected = route.prepare();
+                var result = route.validateEndpoints(PlacementResult.success(selected));
+                assertEquals(PlacementResult.Status.ENDPOINT_CHANGED, result.status());
+                assertEquals(role, result.blocker().role());
+                assertEquals(selected.roles(), ((RouteResult) result.selection().value()).roles());
+            } finally {
+                worker.close();
+                prefill.close();
+            }
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"PDV", "PVD", "DPV", "DVP", "VPD", "VDP"})
-    void preparationPreservesSelectionOrderAndOnlyReleasesVit(String order) {
+    void preparationPreservesSelectionOrderAndEndpointAvailability(String order) {
         var prefill = prefill();
         var decode =
                 org.flexlb.balance.endpoint.EndpointTestSupport.decode(
@@ -236,9 +231,10 @@ class RequestRouteTest {
                 new WorkerEndpoint(
                         WorkerStatus.createDiscovered(
                                 RoleType.VIT, "original", "vit", 8080, 8090, null));
-        var pins = new java.util.ArrayList<WorkerEndpoint.GenerationPin>();
+        var selectedWorkers = new java.util.ArrayList<WorkerEndpoint>();
         var roles = new java.util.ArrayList<RoleType>();
-        try (var route = new RequestRoute(context())) {
+        try {
+            var route = new RouteResult.Builder(context());
             for (char role : order.toCharArray()) {
                 WorkerEndpoint worker =
                         switch (role) {
@@ -246,26 +242,25 @@ class RequestRouteTest {
                             case 'D' -> decode;
                             default -> vit;
                         };
-                var pin = worker.tryPinGeneration();
-                pins.add(pin);
+                var selectedEndpoint = worker;
+                selectedWorkers.add(selectedEndpoint);
                 roles.add(worker.getStatus().getRole());
-                route.add(pin, metadata(worker), role == 'P' ? 1L : -1L, 0L);
+                route.add(selectedEndpoint, metadata(worker), role == 'P' ? 1L : -1L, 0L);
             }
-            assertSame(route, route.prepare());
+            var selected = route.prepare();
             assertEquals(
                     roles,
-                    route.successResponse(true).getServerStatus().stream()
+                    selected.successResponse(true).getServerStatus().stream()
                             .map(ServerStatus::getRole)
                             .toList());
-            for (var pin : pins) {
-                assertEquals(pin.endpoint() != vit, pin.isOpen());
+            for (var selectedEndpoint : selectedWorkers) {
+                assertFalse(selectedEndpoint.isRetired());
             }
             assertThrows(IllegalStateException.class, route::prepare);
-            route.close();
-            assertTrue(pins.stream().noneMatch(WorkerEndpoint.GenerationPin::isOpen));
+            assertTrue(selectedWorkers.stream().noneMatch(WorkerEndpoint::isRetired));
             assertEquals(
                     roles,
-                    route.successResponse(true).getServerStatus().stream()
+                    selected.successResponse(true).getServerStatus().stream()
                             .map(ServerStatus::getRole)
                             .toList());
         } finally {
@@ -279,110 +274,30 @@ class RequestRouteTest {
     }
 
     @Test
-    void cleanupFailureKeepsTheOriginalValidationFailure() {
+    void validationFailureDoesNotInvokeEndpointCleanup() {
         var worker = prefill();
-        var pin = spy(worker.tryPinGeneration());
-        var cleanup = new IllegalStateException("pin cleanup failed");
+        var selectedEndpoint = spy(worker);
+        var cleanup = new IllegalStateException("selectedEndpoint cleanup failed");
         doAnswer(
                         call -> {
                             call.callRealMethod();
                             throw cleanup;
                         })
-                .when(pin)
+                .when(selectedEndpoint)
                 .close();
         var metadata = metadata(worker);
         metadata.setSuccess(false);
-        try (var route = new RequestRoute(context())) {
+        try {
+            var route = new RouteResult.Builder(context());
             var failure =
                     assertThrows(
-                            IllegalArgumentException.class, () -> route.add(pin, metadata, 1L, 0L));
-            assertEquals(List.of(cleanup), List.of(failure.getSuppressed()));
-            assertFalse(pin.isOpen());
+                            IllegalArgumentException.class,
+                            () -> route.add(selectedEndpoint, metadata, 1L, 0L));
+            assertEquals(List.of(), List.of(failure.getSuppressed()));
+            assertFalse(selectedEndpoint.isRetired());
         } finally {
             worker.close();
             org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
-        }
-    }
-
-    @Test
-    void vitCleanupFailurePreventsPublishingAndReleasesStatefulPins() {
-        var worker = prefill();
-        var vit =
-                new WorkerEndpoint(
-                        WorkerStatus.createDiscovered(
-                                RoleType.VIT, "original", "vit", 8080, 8090, null));
-        var prefillPin = worker.tryPinGeneration();
-        var vitPin = spy(vit.tryPinGeneration());
-        var cleanup = new IllegalStateException("VIT release failed");
-        doAnswer(
-                        call -> {
-                            call.callRealMethod();
-                            throw cleanup;
-                        })
-                .when(vitPin)
-                .close();
-        try {
-            var failure =
-                    assertThrows(
-                            IllegalStateException.class,
-                            () ->
-                                    SchedulingTestConfig.prepareRoute(
-                                            context(),
-                                            route -> {
-                                                route.add(prefillPin, metadata(worker), 1L, 0L);
-                                                route.add(vitPin, metadata(vit), -1L, 0L);
-                                                return PlacementResult.success(route);
-                                            }));
-            assertSame(cleanup, failure);
-            assertFalse(prefillPin.isOpen());
-            assertFalse(vitPin.isOpen());
-        } finally {
-            worker.close();
-            vit.close();
-            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
-            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(vit);
-        }
-    }
-
-    @Test
-    @Timeout(5)
-    void oneRouteOwnsSelectionAndCapacityAndConcurrentCloseDrainsGenerationOnce() throws Exception {
-        var worker = prefill();
-        var pin = worker.tryPinGeneration();
-        var context = context();
-        var route =
-                SchedulingTestConfig.prepareRoute(
-                                context,
-                                scope -> {
-                                    scope.add(pin, metadata(worker), 1L, 0L);
-                                    return PlacementResult.success(scope);
-                                })
-                        .value();
-        var acquired = route.attachReservation(null);
-        assertSame(route, acquired);
-        assertSame(route, route.attachReservation(null));
-        var barrier = new CyclicBarrier(2);
-        try {
-            worker.close();
-            var first = CompletableFuture.runAsync(() -> closeAfterBarrier(route, barrier));
-            var second = CompletableFuture.runAsync(() -> closeAfterBarrier(acquired, barrier));
-            CompletableFuture.allOf(first, second).get(3, TimeUnit.SECONDS);
-            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
-            assertFalse(pin.isOpen());
-        } finally {
-            route.close();
-            acquired.close();
-            worker.close();
-            org.flexlb.balance.endpoint.EndpointTestSupport.awaitRetirement(worker);
-        }
-    }
-
-    private static void closeAfterBarrier(RequestRoute route, CyclicBarrier barrier) {
-        try {
-            barrier.await(2, TimeUnit.SECONDS);
-            route.close();
-        } catch (Exception failure) {
-            throw new AssertionError(failure);
         }
     }
 

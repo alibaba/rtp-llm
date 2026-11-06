@@ -155,7 +155,7 @@ sync 生产 Java：**28,759 → 28,593，净减 166 行**。从初始 30,842 行
 - 删除单调用 commitRoutesUnderLock 层，将 route 提交保留在 commitRouteGroup 的同一锁内。锁前仍冻结 reservation 列表并验证 ledger 身份，锁内先校验所有权与构造 handoff，再移除队列索引及提交成员；不改变资源生效边界。
 - validateActiveGroup 与 validateRouteGroup 合为 validateGroup。queuedOnly 明确区分 batch 必须拥有活动队列索引与 route 可包含 DIRECT 未入队请求；route 原有 queue membership 一致性检查保留，不统一两类资源账本。
 - releaseOpenLease 删除 capacityReleased 标记：非 OPEN 在锁内早退并由 finally 解锁；OPEN 认领回滚后锁外关闭可选 handoff，finally 通知容量。保留非空判断，异常继续由 Failures 保留原 Throwable。
-- 首次 `/tmp/flexlb-prefill-commit-cleanup-focused.log` 出现 30 个错误：误将可空的 route generationHandoff 传给不支持 null 的 Failures.close。三个 reviewer 与本地测试发现同一问题，已恢复非空判断。没有修改通用 Failures 语义或放宽测试。
+- 首次 `/tmp/flexlb-prefill-commit-cleanup-focused.log` 出现 30 个错误：误将可空的 route selectedWorker 传给不支持 null 的 Failures.close。三个 reviewer 与本地测试发现同一问题，已恢复非空判断。没有修改通用 Failures 语义或放宽测试。
 - 修复后 `/tmp/flexlb-prefill-commit-cleanup-final-focused.log` 182 项通过；补两变体后 `/tmp/flexlb-prefill-commit-cleanup-verified.log` **184 项通过**。新测试覆盖 route 无 handoff、batch handoff 关闭抛错、容量通知自身抛错、锁外通知恰好一次、重复 close、批次容量归零及保留 queued owner。
 - sync 生产 Java **28,153 → 28,129，净减 24 行**；累计减少 **2,713 行**，距 25,000 仍差 **3,129 行**。保留原长字符串换行格式，没有压缩格式计入削减。基线 `/tmp/flexlb-before-prefill-commit-cleanup.tar.gz`，差异 `/tmp/flexlb-prefill-commit-cleanup.diff`。
 - 三个 subagent 均复核修复，无剩余本轮阻断问题；git diff --check 通过。只运行本地验证，既有远端 P99 验收缺口保持。
@@ -227,8 +227,8 @@ sync 生产 Java：**28,759 → 28,593，净减 166 行**。从初始 30,842 行
 
 ## 2026-09-25：抢占事务统一使用精确 reservation 身份
 
-- DecodeState.EndpointPreemptionAttempt 直接持有 incoming ReservationHandle，删除拆分 requestId/token 表示和退休时重新构造；过期、COMMIT 与 incoming 匹配复用精确句柄。
-- remainingVictims 从 Map<requestId, ReservationHandle> 改为 Set<ReservationHandle>，去掉重复键；接管 begin 内独占创建的集合，不再复制。所有读写仍受 admissionLock 保护。同一句柄重复输入在集合检查拒绝，同 ID 不同 token 由 isExactReservation 拒绝；退休最后仍排序。
+- DecodeState.EndpointPreemptionAttempt 直接持有 incoming RequestReservation，删除拆分 requestId/token 表示和退休时重新构造；过期、COMMIT 与 incoming 匹配复用精确句柄。
+- remainingVictims 从 Map<requestId, RequestReservation> 改为 Set<RequestReservation>，去掉重复键；接管 begin 内独占创建的集合，不再复制。所有读写仍受 admissionLock 保护。同一句柄重复输入在集合检查拒绝，同 ID 不同 token 由 isExactReservation 拒绝；退休最后仍排序。
 - 采纳设计 review，操作 owner 保留普通 final class，避免可变集合参与 record 的结构 equality。保留请求协议与资源账本各自的阶段，未将 UNKNOWN 视为释放证据。
 - 新增重复 exact/stale token 两个参数场景及活跃抢占退休测试：拒绝时账本版本/claim/incoming 不变；close 两次只回报一次精确 owners，清空账本及事务。
 - 本地相关抢占、Decode、撤回测试 214/214 通过，日志 `/tmp/flexlb-preemption-identity-focused.log`。三个 reviewer 已审查生产变更；测试 reviewer 指出的覆盖缺口已补齐并复核。此轮局部账本表示变化，仅本地回归，未重跑远端 perf；此前端到端性能失败仍待解决。
@@ -272,9 +272,9 @@ sync 生产 Java：**28,759 → 28,593，净减 166 行**。从初始 30,842 行
 
 ## 2026-09-25：Engine 抢占直接交接精确 reservation
 
-- DecodeState 的锁内收尾返回 attempt.incoming；COMMIT 保留精确 token 与 victims 清空校验。对外分为 `commitPreemption` 返回 ReservationHandle、`abortPreemption` 返回 boolean，删除 PreemptionDecision；内部共用收尾逻辑。
+- DecodeState 的锁内收尾返回 attempt.incoming；COMMIT 保留精确 token 与 victims 清空校验。对外分为 `commitPreemption` 返回 RequestReservation、`abortPreemption` 返回 boolean，删除 PreemptionDecision；内部共用收尾逻辑。
 - PreemptionResult 保存 reservation，committed 从非 null 推导。EvictionManager 删除成功后按 requestId 重新查找 reservation 与相应失败分支，直接采用精确结果。
-- RouteAdmission 仍验证 generation pin 与 markQueued 的精确 token，采用失败按原能力释放；不存在从失败 COMMIT 或 ABORT 结果取得可交接能力的路径。
+- RouteAdmission 仍验证 selected Worker 与 markQueued 的精确 token，采用失败按原能力释放；不存在从失败 COMMIT 或 ABORT 结果取得可交接能力的路径。
 - 生产 Java 27,922 → 27,916，净减 6。距离 25,000 仍差 2,916；本轮解决身份交接边界，尚未完成大幅代码收敛。
 - 本地 `*Preemption*Test,*Eviction*Test,*Decode*Test,QueuedDecodeWithdrawalTest` 共 214/214 通过，无失败/跳过。覆盖真实 endpoint 精确句柄、重复提交失败、coordinator 结果传播，以及 manager 采用失败时 RESOURCE_EXHAUSTED、不入队、关闭 admission。
 - 日志 `/tmp/flexlb-preemption-handoff-tests.log`；生产与原调用测试基线 `/tmp/flexlb-before-preemption-handoff.tar.gz`，diff `/tmp/flexlb-preemption-handoff.diff`。随后补强的 EvictionManagerTryAdmitTest 不在这份局部基线中，已在最终 214 项测试中执行。
@@ -324,11 +324,11 @@ sync 生产 Java：**28,759 → 28,593，净减 166 行**。从初始 30,842 行
 - 所有 sync/API/mock-engine 显式构造调用已迁移，无兼容构造器；性能夹具 reporter 保留 stubOnly。生产 Java 27,847 → 27,817，净减 30。
 - 定向 reactor 测试 common 3、cache 7、sync 80，共 90 项通过；API 源码与测试编译通过，本次未执行 API 测试。日志 /tmp/flexlb-cache-metric-delegates-tests.log。
 - mock-engine test-compile 成功，71 个测试源编译；未执行测试。日志 /tmp/flexlb-cache-metric-delegates-mock-compile.log。
-- 并发、设计、测试三个 reviewer 均通过，确认异常时 generation pin 清理与指标断言未弱化。小改动未跑远端性能；既有性能未达标问题仍未解决。
+- 并发、设计、测试三个 reviewer 均通过，确认异常时 selected Worker 清理与指标断言未弱化。小改动未跑远端性能；既有性能未达标问题仍未解决。
 
 ## 2026-09-25: Exact local preemption handoff
 
-- DecodeState returns the exact ReservationHandle from reserveLocked through DecodeEndpoint and RequestScheduler to EvictionManager. Null means no replacement. Both adoption and failure cleanup use this handle; requestId lookups are removed.
+- DecodeState returns the exact RequestReservation from reserveLocked through DecodeEndpoint and RequestScheduler to EvictionManager. Null means no replacement. Both adoption and failure cleanup use this handle; requestId lookups are removed.
 - Production Java: 27,817 to 27,806 (-11); 2,806 remain above target. Baseline: /tmp/flexlb-before-local-handoff.tar.gz; diff: /tmp/flexlb-local-handoff.diff.
 - Scoped tests: 217 passed (/tmp/flexlb-local-handoff-tests.log). Strengthened identity assertions: 56 passed (/tmp/flexlb-local-handoff-identity-tests.log). Final withdrawal class: 13 passed (/tmp/flexlb-local-handoff-reuse-tests.log).
 - New deterministic test replaces the incoming reservation with a new token for the same requestId during requeue, then throws. Cleanup preserves the new reservation and original exception, and terminates the victim.
@@ -419,10 +419,10 @@ sync 生产 Java：**28,759 → 28,593，净减 166 行**。从初始 30,842 行
 ## 2026-09-25：Prefill 预留身份与批次唯一性边界
 
 - sync 生产 Java：27,558 → 27,537，净减 21 行，距目标差 2,537 行。
-- RouteReservation.requestId 与 BatchReservation.headRequestId 均为原始 owner ID 的副本，
+- RequestRecord.requestId 与 BatchRecord.headRequestId 均为原始 owner ID 的副本，
   删除字段和构造参数，直接引用唯一 originalOwner。route commit 改为比较精确 owner 对象。
 - 删除 commitBatchUnderLock 的 findBatchWorkUnderLock 全表扫描及专属方法：
-  reserveBatch 已在同一锁下由 findBatchReservationUnderLock 检查 OPEN/已提交两类批次。
+  reserveBatch 已在同一锁下由 findBatchRecordUnderLock 检查 OPEN/已提交两类批次。
   唯一 OPEN lease 在 commit 中转 OWNED，任何存活成员均保留 batch ID；最后成员结束才能重用。
   保留预留端唯一性检查和 route group 的重复成员防护，不添加批次索引。
 - 新测试覆盖 OPEN 重复 ID、首成员终结后重复 ID、最后成员终结后同 ID 重用及释放。
@@ -582,7 +582,7 @@ sync 生产 Java：**28,759 → 28,593，净减 166 行**。从初始 30,842 行
   申请与绑定，失败 finally 使用 exact lease 撤销新 entry。WorkerBatcher 只检查止收和成功唤醒。
 - 删除 WorkerBatcher.rollbackFreshActiveUnderLock、PrefillEndpoint.reserveRouteOwnership；
   reserveRoute 改锁内精确操作，删除重入锁、结果分配及当前唯一生产调用不可达的拒绝分支。
-- bindPublishedRouteReservation 改 public 供跨包账本使用；其他精确资源交接不变。
+- bindPublishedRequestRecord 改 public 供跨包账本使用；其他精确资源交接不变。
 - 定向回归最终243/243通过，0失败/错误/跳过：`/tmp/flexlb-atomic-enqueue-final-tests.log`。
   覆盖 Worker/Prefill、队列投递、Batch/Route策略、Endpoint清理和Direct准入。
 - 新增退休交错：在 ACTIVE 已发布时关闭退休门槛，offer 拒绝且账本/索引归零、无 item lease；
@@ -599,7 +599,7 @@ sync 生产 Java：**28,759 → 28,593，净减 166 行**。从初始 30,842 行
 - 生产 Java 27,258 → 27,222，净减36行；距离25,000行仍差2,222。
 - PrefillState.replaceQueuedRoutesUnderLock 独占选择、取句柄、入队、终结与失败恢复。
   WorkerBatcher 删除 replaceQueuedRequestsUnderLock，仅保留唤醒和锁外事件通知。
-- 删除原抢占路径单独的 RequestEntry/RouteReservation 构造、索引/目录写入回滚和删除流程；
+- 删除原抢占路径单独的 RequestEntry/RequestRecord 构造、索引/目录写入回滚和删除流程；
   分别复用 enqueueForDeliveryUnderLock、terminalizeActiveUnderLock。选择器改 private，
   删除不再存在外部输入时的名单重复/长度检查，保留实际句柄身份校验。
 - 新请求绑定返回 false 或抛异常均通过共享入队 finally 回滚，再由抢占 finally 恢复 victims。
@@ -659,7 +659,7 @@ sync 生产 Java：**28,759 → 28,593，净减 166 行**。从初始 30,842 行
 
 ## 2026-09-25：排队撤回归入 PrefillState
 
-- WorkerBatcher 三处调用统一进入 PrefillState.removeQueuedUnderLock，删除 removeTerminalActiveUnderLock 与 restoreRouteReservation。取精确句柄、终结及失败 finally 恢复顺序不变；Batch OPEN lease 仍由事务关闭。
+- WorkerBatcher 三处调用统一进入 PrefillState.removeQueuedUnderLock，删除 removeTerminalActiveUnderLock 与 restoreRequestRecord。取精确句柄、终结及失败 finally 恢复顺序不变；Batch OPEN lease 仍由事务关闭。
 - 生产 Java 27,153 → 27,140，净减13行。此次主要收拢职责和删除恢复辅助函数，未删除新的状态机。
 - 基线 `/tmp/flexlb-before-active-removal.tar.gz`；最终diff `/tmp/flexlb-active-removal.diff`。
 - 本地专项134/134通过，日志 `/tmp/flexlb-active-removal-tests.log`。三个 subagent 分别复核并发/资源归属、设计/停止协议、测试覆盖，均无阻断；现有精确身份、错 lease、Batch OPEN lease 与迟到 victim 测试足够支持本次等价改动，无新增镜像测试。
@@ -769,7 +769,7 @@ capacity and cache observations must not become cached request facts.
 ## 2026-09-25：路由提交编排归入 RequestScheduler
 
 QUEUE 调用 Scheduler.enqueueRoute，DIRECT 调用 Scheduler.commitDirectRoute；
-RouteAdmission 不再接收/调用 Scheduler，资源操作 offerQueued、reserveDecode、
+RouteAdmission 不再接收/调用 Scheduler，资源操作 tryEnqueueRoute、reserveDecode、
 blockOnPrefill 仍封装 pin/reservation/阻塞版本事实。DIRECT 的单调用
 commitImmediateRoute 合入主流程；member、handoff、routeCommit、reservation 的
 关闭顺序不变。共享 commitRoute(BooleanSupplier) 仍保护请求绑定与锁外发布，
@@ -823,7 +823,7 @@ IncrementalPredictionTest 的 full evaluator 只实现 estimate/predictBatchMs�
 小范围删除生产死分支仅跑本地，未重跑远端性能；最新836ms仍未达标。
 当前25,000行目标还差1,997行。
 
-pin关闭疑点的补充调查：GenerationPin.close 经 HandoffPermit.close 释放计数；
+pin关闭疑点的补充调查：SelectedWorker.close 经 HandoffPermit.close 释放计数；
 最后一个permit只把退休任务提交给共享executor，closeEndpoint抛出的异常在任务内
 捕获并记录，不回传到发布线程。正常路径没有找到之前假设的退休清理异常回传。
 未为未证明可达的异常增加新的发布标志或补偿状态。

@@ -29,7 +29,7 @@ import static org.mockito.Mockito.when;
  * <p>Flow:
  * 1. Worker A is started by the base class (default behavior)
  * 2. Worker B is started via {@link #addPrefillWorker} (registered in EndpointRegistry)
- * 3. Reconfigure the mock RequestWorkerSelector to alternate between A and B
+ * 3. Reconfigure the mock RequestRouteSelector to alternate between A and B
  * 4. Submit 4 requests
  * 5. Verify: both workers received at least 1 EnqueueBatch call
  * 6. Verify: total EnqueueBatch count matches the number of submitted requests
@@ -40,12 +40,12 @@ import static org.mockito.Mockito.when;
  *       {@code EndpointRegistry} and {@code EndpointRegistry}</li>
  *   <li>{@link #addPrefillWorker} starts an additional worker B, creates its
  *       {@code WorkerStatus} and {@code PrefillEndpoint}, and registers both</li>
- *   <li>The mock {@code RequestWorkerSelector} is reset and reconfigured to return routing
+ *   <li>The mock {@code RequestRouteSelector} is reset and reconfigured to return routing
  *       responses that alternate between A and B</li>
  *   <li>Each routing response contains {@code ServerStatus} entries for the
  *       selected prefill worker and the shared decode worker</li>
  *   <li>The scheduler looks up the prefill endpoint by {@code ip:httpPort}
- *       and offers the request to that worker's {@code EndpointWork}</li>
+ *       and offers the request to that worker's {@code PrefillQueueScheduler}</li>
  * </ul>
  */
 class MultipleWorkersTest extends FlexLBMockTestBase {
@@ -69,7 +69,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         workerBHttpPort = workerB.getHttpPort();
         workerBIpPort = workerIpPort(workerB);
 
-        // 2. Reconfigure RequestWorkerSelector to alternate between worker A and B
+        // 2. Reconfigure RequestRouteSelector to alternate between worker A and B
         AtomicInteger routeCounter = new AtomicInteger(0);
         reset(router);
         when(router.select(any(RequestContext.class), any()))
@@ -77,7 +77,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
                         inv -> {
                             RequestContext ctx = inv.getArgument(0);
                             boolean useB = routeCounter.getAndIncrement() % 2 == 1;
-                            return admittedRoute(
+                            return routeResult(
                                     ctx, buildRouteResponse(ctx.data().getRequestId(), useB));
                         });
 

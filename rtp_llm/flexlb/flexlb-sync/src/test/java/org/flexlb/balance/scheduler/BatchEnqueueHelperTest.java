@@ -134,7 +134,7 @@ class BatchEnqueueHelperTest {
         var prefill = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
         String address = "worker-" + "节点".repeat(80);
         when(prefill.getIp()).thenReturn(address);
-        when(member.route().prefillEp()).thenReturn(prefill);
+        when(member.route().prefillEndpoint()).thenReturn(prefill);
         var status = new org.flexlb.dao.loadbalance.ServerStatus();
         status.setRole(org.flexlb.dao.route.RoleType.PREFILL);
         status.setServerIp(address);
@@ -144,7 +144,7 @@ class BatchEnqueueHelperTest {
         if (separateDecode) {
             var decode = mock(org.flexlb.balance.endpoint.DecodeEndpoint.class);
             when(decode.getIp()).thenReturn(address);
-            when(member.route().decodeEp()).thenReturn(decode);
+            when(member.route().decodeEndpoint()).thenReturn(decode);
             var decoded = org.flexlb.dao.loadbalance.ServerStatus.copyOf(status);
             decoded.setRole(org.flexlb.dao.route.RoleType.DECODE);
             when(member.route().decode()).thenReturn(decoded);
@@ -156,7 +156,7 @@ class BatchEnqueueHelperTest {
 
     private static Delivery.Member claim(long id) {
         var ctx = spy(new RequestContext(SchedulingTestConfig.batchConfig()));
-        var route = mock(RequestRoute.class);
+        var route = mock(RouteExecution.class);
         when(route.ctx()).thenReturn(ctx);
         when(route.requestId()).thenReturn(String.valueOf(id));
         return DeliveryTestSupport.member(route, Delivery.SendMode.BATCH_ENQUEUE, 17);

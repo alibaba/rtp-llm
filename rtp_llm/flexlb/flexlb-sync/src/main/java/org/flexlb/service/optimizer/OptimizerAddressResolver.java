@@ -14,7 +14,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Resolves optimizer addresses from a shared {@link ServiceDiscovery} bean.
@@ -29,19 +28,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 @Slf4j
 public class OptimizerAddressResolver {
+
     private final ServiceDiscovery serviceDiscovery;
     private final String address;
     private final Endpoint endpoint;
-
     private final int port;
     private final long pollIntervalMs;
-
     private final ScheduledExecutorService refreshScheduler =
             Executors.newSingleThreadScheduledExecutor(
                     new NamedThreadFactory("optimizer-discovery-refresh"));
-    private final AtomicBoolean started = new AtomicBoolean(false);
-    private final AtomicBoolean shutdown = new AtomicBoolean(false);
 
+    private boolean started;
+    private volatile boolean shutdown;
     private volatile List<String> resolvedAddresses = Collections.emptyList();
 
     public OptimizerAddressResolver(
@@ -64,19 +62,20 @@ public class OptimizerAddressResolver {
     }
 
     public synchronized void start() {
-        if (shutdown.get()) {
+        if (shutdown) {
             log.info("OptimizerAddressResolver already shutdown, skip start, address={}", address);
             return;
         }
-        if (!started.compareAndSet(false, true)) {
+        if (started) {
             return;
         }
+        started = true;
         if (isDynamicDiscovery()) {
             try {
                 refreshScheduler.scheduleWithFixedDelay(
                         this::refreshSafely, 0, pollIntervalMs, TimeUnit.MILLISECONDS);
             } catch (RejectedExecutionException e) {
-                started.set(false);
+                started = false;
                 log.warn(
                         "Service discovery refresh scheduling failed, address={}, msg={}",
                         address,
@@ -92,17 +91,8 @@ public class OptimizerAddressResolver {
                 resolvedAddresses.size());
     }
 
-    public List<String> getAddresses() {
-        return resolvedAddresses;
-    }
-
-    public synchronized void shutdown() {
-        shutdown.set(true);
-        refreshScheduler.shutdownNow();
-    }
-
     private void refreshSafely() {
-        if (shutdown.get()) {
+        if (shutdown) {
             return;
         }
         try {
@@ -116,7 +106,7 @@ public class OptimizerAddressResolver {
     }
 
     private void updateFromHosts(List<WorkerHost> hosts) {
-        if (shutdown.get()) {
+        if (shutdown) {
             return;
         }
         if (hosts == null || hosts.isEmpty()) {
@@ -149,6 +139,15 @@ public class OptimizerAddressResolver {
                     address,
                     addresses.size());
         }
+    }
+
+    public List<String> getAddresses() {
+        return resolvedAddresses;
+    }
+
+    public synchronized void shutdown() {
+        shutdown = true;
+        refreshScheduler.shutdownNow();
     }
 
     private boolean isDynamicDiscovery() {

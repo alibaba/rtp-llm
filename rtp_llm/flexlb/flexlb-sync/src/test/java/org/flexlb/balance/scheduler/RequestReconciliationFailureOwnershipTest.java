@@ -33,7 +33,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** A failed physical reconciliation retains its facts for the next ledger attempt. */
+/**
+ * A failed physical reconciliation retains its facts for the next ledger attempt.
+ */
 class RequestReconciliationFailureOwnershipTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -54,8 +56,8 @@ class RequestReconciliationFailureOwnershipTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
                 "timer",
                 mock(ExpirationTimer.class));
-        RequestProtocolTestSupport.register(owner, context);
-        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(9721L), 3L);
+        RequestProtocolTestSupport.submitForManualPlacement(owner, context);
+        var reservation = new DecodeResources.RequestReservation(1L, String.valueOf(9721L), 3L);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
         var prefill = mock(PrefillEndpoint.class);
         var server = new ServerStatus();
@@ -77,7 +79,7 @@ class RequestReconciliationFailureOwnershipTest {
                 org.flexlb.balance.PlacementResult.Status.SUCCESS,
                 RequestProtocolTestSupport.commitRoute(
                         owner, route, RequestProtocolTestSupport.publication(() -> true)));
-        admission.finish();
+        AbstractRequestScheduler.finishPlacement(admission);
         var delivery =
                 DeliveryDispatcher.commitDelivery(
                         owner,

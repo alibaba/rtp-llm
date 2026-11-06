@@ -1,6 +1,6 @@
 import com.sun.management.ThreadMXBean;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
-import org.flexlb.balance.endpoint.PrefillActiveIndex;
+import org.flexlb.balance.endpoint.OrderedPrefillRequestQueue;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillRequestQueue;
 import org.flexlb.balance.planner.BuiltinGroupPlanner;
@@ -9,7 +9,7 @@ import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.QueueExecutionSettings;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -48,7 +48,7 @@ public class SnapshotBench {
             PrefillEndpoint endpoint,
             PrefillEndpoint state,
             java.util.concurrent.locks.ReentrantLock lock,
-            RequestRoute member) {
+            RouteExecution member) {
         void changeMembership() {
             lock.lock();
             try {
@@ -64,7 +64,7 @@ public class SnapshotBench {
 
     record Sample(long ns, long cpu, long bytes, long checksum) {}
 
-    static RequestRoute request(FlexlbConfig config, long id, int priority, long tokens) {
+    static RouteExecution request(FlexlbConfig config, long id, int priority, long tokens) {
         var request = Request.builder().requestId(id).seqLen(tokens).rawPriority(priority).build();
         var context = new RequestContext(config);
         context.data().setRequest(request);
@@ -107,7 +107,7 @@ public class SnapshotBench {
                         new PlacementAvailability(),
                         BuiltinGroupPlanner.from(config),
                         (PrefillRequestQueue.Factory)
-                                order -> PrefillActiveIndex.ordered(16, order));
+                                order -> OrderedPrefillRequestQueue.ordered(16, order));
         Field predictorField = PrefillEndpoint.class.getDeclaredField("predictor");
         predictorField.setAccessible(true);
         predictorField.set(endpoint, model);
@@ -116,7 +116,7 @@ public class SnapshotBench {
         endpoint.enableQueue(
                 QueueExecutionSettings.capture(config, BuiltinGroupPlanner.from(config)));
         var random = new Random(seed);
-        RequestRoute last = null;
+        RouteExecution last = null;
         lock.lock();
         try {
             for (int i = 0; i < depth; i++) {
@@ -219,7 +219,7 @@ public class SnapshotBench {
     static void writes(int depth) {
         var config = config();
         var index =
-                PrefillActiveIndex.ordered(
+                OrderedPrefillRequestQueue.ordered(
                         depth,
                         Comparator.comparingInt(
                                         org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
@@ -228,7 +228,7 @@ public class SnapshotBench {
                                 .thenComparingLong(
                                         org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
                                                 ::enqueueSeq));
-        var members = new ArrayList<RequestRoute>();
+        var members = new ArrayList<RouteExecution>();
         for (int i = 0; i < depth; i++) {
             var item = request(config, i, i % 4, 100);
             members.add(item);

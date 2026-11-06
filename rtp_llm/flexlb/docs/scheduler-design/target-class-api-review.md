@@ -184,7 +184,7 @@ classDiagram
         -BalanceContext context
         -PrefillEndpoint prefill
         -DecodeEndpoint decode
-        -ReservationHandle decodeReservation
+        -RequestReservation decodeReservation
         -Response routeResponse
         +requestId() long
         +requirements() RequestRequirements
@@ -251,7 +251,7 @@ NON_BATCH 路由交付不伪造 Enqueue 发送责任。RouteDeliveryStrategy 未
 | ProvisionalRoute / RequestRoute | 前者持有未提交能力，后者表达精确已选路身份；createRequestRoute 静态构造迁入 RequestRoute 工厂                             | 用一个可变对象混淆候选与已提交资源所有权                      |
 | DeliveryStrategy                | 保留 prepare / Transaction / 投影能力；通过精确请求所属 Scheduler 完成准备和本地资源交接，返回 DeliveryClaim              | 依赖一个全局 RequestLifecycle 代理全部请求                    |
 | DefaultBatchDispatcher          | 保留发送许可、RPC、回调排空；真实 RPC 边界接入 claim.tryStartSend，按成员反馈结果                                         | 把调用后的异常标为 NOT_SENT；取消单个成员时无差别取消整批     |
-| PrefillEndpoint                 | offerPinned 显式接收已验证队列执行配置；精确事实直接回到 route.ctx.owner                                                  | 从首个请求读取完整 config 来决定共享队列规则                  |
+| PrefillEndpoint                 | enqueueRoute 显式接收已验证队列执行配置；精确事实直接回到 route.ctx.owner                                                  | 从首个请求读取完整 config 来决定共享队列规则                  |
 | DecodeEndpoint                  | 保留原子账本；仅为只有预留身份的事实查询 Repository，再把精确事实送回 owner 复核                                          | 查到同 ID 就假设属于当前请求                                  |
 | WorkerBatcher                   | 保留队列、组批、容量等待和交付；控制事件指向精确 route / 原 owner                                                         | 注册新请求，决定最终响应或复制全局调度流程                    |
 | DecodeCapacityAcquirer          | 统一组织选定 Decode generation 的本地替换和多 victim Engine 抢占；通过 victim 原 owner 操作单请求，最终预留交回原路由提交 | 自行改变请求状态；把 ACK 当作释放证明；让普通取消依赖抢占开关 |

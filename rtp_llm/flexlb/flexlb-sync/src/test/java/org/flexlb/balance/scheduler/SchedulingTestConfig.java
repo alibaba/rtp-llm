@@ -11,20 +11,24 @@ import org.flexlb.config.VictimStage;
 
 import java.util.EnumSet;
 
-/** Test-only builders for the public scheduler and dispatcher variants. */
+/**
+ * Test-only builders for the public scheduler and dispatcher variants.
+ */
 public final class SchedulingTestConfig {
     private static final java.util.concurrent.atomic.AtomicLong fixtureQueueSequence =
             new java.util.concurrent.atomic.AtomicLong();
 
-    /** Construct protocol fixtures without exposing a production route factory that bypasses selection. */
-    public static RequestRoute createRoute(
+    /**
+     * Construct protocol fixtures without exposing a production route factory that bypasses selection.
+     */
+    public static RouteExecution createRoute(
             RequestContext context,
             org.flexlb.dao.loadbalance.Response response,
             org.flexlb.dao.loadbalance.ServerStatus prefill,
             org.flexlb.dao.loadbalance.ServerStatus decode,
             org.flexlb.balance.endpoint.PrefillEndpoint prefillEndpoint,
             org.flexlb.balance.endpoint.DecodeEndpoint decodeEndpoint,
-            org.flexlb.balance.endpoint.DecodeResources.ReservationHandle reservation,
+            org.flexlb.balance.endpoint.DecodeResources.RequestReservation reservation,
             long enqueuedAtMs) {
         if (context.data().getSchedulingMetadata() == null) {
             context.data()
@@ -53,88 +57,88 @@ public final class SchedulingTestConfig {
             prefill.setGrpcPort(prefillEndpoint.getGrpcPort());
             prefill.setSuccess(true);
         }
-        RequestRoute selected = new RequestRoute(context);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                selected, "routeResponse", response);
-        // State-only fixtures bypass selection; seed its completed construction boundary
-        // explicitly.
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                selected, "constructionState", (byte) 1);
-        org.springframework.test.util.ReflectionTestUtils.setField(selected, "prefill", prefill);
-        org.springframework.test.util.ReflectionTestUtils.setField(selected, "decode", decode);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                selected, "prefillPin", fixturePin(prefillEndpoint));
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                selected, "decodePin", fixturePin(decodeEndpoint));
-        var assignments = new java.util.ArrayList<org.flexlb.dao.loadbalance.ServerStatus>();
-        assignments.add(prefill);
-        if (decode != null) assignments.add(decode);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                selected, "assignments", assignments);
-        RequestRoute route = selected.attachReservation(reservation);
+        if (decode == null && decodeEndpoint != null) {
+            decode = new org.flexlb.dao.loadbalance.ServerStatus();
+            decode.setRequestId(context.data().getRequestId());
+            decode.setRole(org.flexlb.dao.route.RoleType.DECODE);
+            decode.setServerIp(
+                    java.util.Objects.requireNonNullElse(decodeEndpoint.getIp(), "127.0.0.1"));
+            decode.setHttpPort(decodeEndpoint.getHttpPort());
+            decode.setGrpcPort(decodeEndpoint.getGrpcPort());
+            decode.setSuccess(true);
+        }
+        var roles = new java.util.ArrayList<RoleSelection>();
+        prefill = org.flexlb.dao.loadbalance.ServerStatus.copyOf(prefill);
+        if (prefill.getRole() == null) prefill.setRole(org.flexlb.dao.route.RoleType.PREFILL);
+        if (decode != null) {
+            decode = org.flexlb.dao.loadbalance.ServerStatus.copyOf(decode);
+            if (decode.getRole() == null) decode.setRole(org.flexlb.dao.route.RoleType.DECODE);
+        }
+        roles.add(RoleSelection.capture(fixtureWorker(prefillEndpoint), prefill, 0L, 0L));
+        if (decode != null)
+            roles.add(RoleSelection.capture(fixtureWorker(decodeEndpoint), decode, 0L, 0L));
+        RouteExecution selected =
+                new RouteExecution(context, new RouteResult(context.data().getRequestId(), roles));
+        RouteExecution route = selected.attachReservation(reservation);
         context.data()
                 .initializeExecutionOrder(enqueuedAtMs, fixtureQueueSequence.incrementAndGet());
         return route;
     }
 
-    private static org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin fixturePin(
+    private static org.flexlb.balance.endpoint.WorkerEndpoint fixtureWorker(
             org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {
-        if (endpoint == null) {
-            return null;
+        if (endpoint == null) return null;
+        var mock = org.mockito.Mockito.mockingDetails(endpoint);
+        if (mock.isMock()
+                && !mock.isSpy()
+                && mock.getStubbings().stream()
+                        .noneMatch(
+                                stub ->
+                                        stub.getInvocation()
+                                                .getMethod()
+                                                .getName()
+                                                .equals("acceptsNewRequests"))) {
+            // Protocol fixtures represent selected workers; explicit unavailable stubs take
+            // precedence.
+            org.mockito.Mockito.lenient()
+                    .when(endpoint.acceptsNewRequests())
+                    .thenAnswer(
+                            call ->
+                                    !endpoint.isRetired()
+                                            && (endpoint.getStatus() == null
+                                                    || endpoint.getStatus()
+                                                            .isAvailableForScheduling()));
         }
-        var pin =
-                org.mockito.Mockito.mock(
-                        org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin.class);
-        org.mockito.Mockito.when(pin.endpoint()).thenReturn(endpoint);
-        return pin;
+        return endpoint;
     }
 
-    public static org.flexlb.balance.PlacementResult<RequestRoute, PlacementKey> prepareRoute(
+    public static org.flexlb.balance.PlacementResult<RouteResult, PlacementKey> selectRoute(
             RequestContext context,
             java.util.function.Function<
-                            RequestRoute,
-                            org.flexlb.balance.PlacementResult<RequestRoute, PlacementKey>>
+                            RouteResult.Builder,
+                            org.flexlb.balance.PlacementResult<RouteResult.Builder, PlacementKey>>
                     select) {
-        RequestRoute route = new RequestRoute(context);
-        boolean complete = false;
-        Throwable primary = null;
-        try {
-            var result = select.apply(route);
-            if (result.status() == org.flexlb.balance.PlacementResult.Status.SUCCESS) {
-                if (result.value() != route) {
-                    throw new IllegalStateException("fixture returned a foreign route");
-                }
-                route.prepare();
-                complete = true;
-            }
-            return result;
-        } catch (RuntimeException | Error failure) {
-            primary = failure;
-            throw failure;
-        } finally {
-            if (!complete) {
-                Throwable cleanup = org.flexlb.util.Failures.close(route);
-                if (primary != null) {
-                    org.flexlb.util.Failures.append(primary, cleanup);
-                } else {
-                    org.flexlb.util.Failures.rethrow(cleanup, "fixture route cleanup failed");
-                }
-            }
-        }
+        var builder = new RouteResult.Builder(context);
+        var result = select.apply(builder);
+        return result.status() == org.flexlb.balance.PlacementResult.Status.SUCCESS
+                ? org.flexlb.balance.PlacementResult.success(builder.prepare())
+                : result.asFailure();
     }
 
-    /** Read a fixture's nullable template without making it a production API. */
-    public static org.flexlb.dao.loadbalance.Response routeResponse(RequestRoute route) {
-        return org.flexlb.dao.loadbalance.Response.copyOf(
-                (org.flexlb.dao.loadbalance.Response)
-                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                route, "routeResponse"));
+    public static org.flexlb.balance.PlacementResult<RouteExecution, PlacementKey> prepareRoute(
+            RequestContext context,
+            java.util.function.Function<
+                            RouteResult.Builder,
+                            org.flexlb.balance.PlacementResult<RouteResult.Builder, PlacementKey>>
+                    select) {
+        return RouteExecution.fromSelection(context, selectRoute(context, select));
     }
 
-    /** Mutable metadata for deliberate fault injection into a state-only fixture. */
-    static org.flexlb.dao.loadbalance.ServerStatus prefillTemplate(RequestRoute route) {
-        return (org.flexlb.dao.loadbalance.ServerStatus)
-                org.springframework.test.util.ReflectionTestUtils.getField(route, "prefill");
+    /**
+     * Project a fixture's selected roles into an independent response.
+     */
+    public static org.flexlb.dao.loadbalance.Response routeResponse(RouteExecution route) {
+        return route.successResponse(false);
     }
 
     public static org.flexlb.config.ConfigService configService(FlexlbConfig config) {

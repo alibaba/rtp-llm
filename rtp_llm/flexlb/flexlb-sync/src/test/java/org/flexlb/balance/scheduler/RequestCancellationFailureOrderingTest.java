@@ -23,12 +23,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
 import static org.flexlb.balance.scheduler.ContextResult.EndEvidence;
 import static org.flexlb.balance.scheduler.ContextResult.EndKind;
-import static org.flexlb.balance.scheduler.ContextResult.EngineEvidence;
-import static org.flexlb.balance.scheduler.ContextResult.EngineKind;
 import static org.flexlb.balance.scheduler.ContextResult.Phase;
 import static org.flexlb.balance.scheduler.ContextResult.PreemptionReport;
 import static org.flexlb.balance.scheduler.ContextResult.PreparationFailure;
 import static org.flexlb.balance.scheduler.ContextResult.PublicationResult;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -41,7 +41,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** A later delivery failure cannot change the flow responsible for a previously accepted cancellation. */
+/**
+ * A later delivery failure cannot change the flow responsible for a previously accepted cancellation.
+ */
 @Timeout(15)
 class RequestCancellationFailureOrderingTest {
     @ParameterizedTest
@@ -172,10 +174,10 @@ class RequestCancellationFailureOrderingTest {
                         mock(RequestSchedulerReporter.class),
                         mock(TheoryCacheHitReporter.class));
         var context = RequestProtocolTestSupport.context(config, 9503L);
-        var future = RequestProtocolTestSupport.register(owner, context);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
         var prefill = mock(PrefillEndpoint.class);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
-        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(9503L), 1L);
+        var reservation = new DecodeResources.RequestReservation(1L, String.valueOf(9503L), 1L);
         var route =
                 SchedulingTestConfig.createRoute(
                         context,
@@ -198,7 +200,7 @@ class RequestCancellationFailureOrderingTest {
                 .when(completions)
                 .register();
         try {
-            try (var admission = owner.claimAdmissionHandle("9503", future)) {
+            try (var admission = SchedulerTestSupport.claim(owner, "9503", future)) {
                 assertNotNull(admission);
                 try {
                     assertEquals(
@@ -219,13 +221,13 @@ class RequestCancellationFailureOrderingTest {
                     assertNull(context.snapshot().outcome());
                     var inactivity = context.snapshot().deadlines().inactivity();
                     owner.onDeadline(inactivity, inactivity.atMs());
-                    owner.onEngineEvidence(
+                    owner.onWorkerRequestEvent(
                             context,
-                            new EngineEvidence(
+                            new WorkerRequestEvent(
                                     route,
                                     reservation,
                                     RoleType.DECODE,
-                                    EngineKind.ACTIVE,
+                                    WorkerRequestEventType.ACTIVE,
                                     0L,
                                     null,
                                     inactivity.atMs() + TimeUnit.HOURS.toMillis(1L)));
@@ -234,7 +236,7 @@ class RequestCancellationFailureOrderingTest {
                     assertEquals(0, publications.get());
                     assertFalse(future.isDone());
                 } finally {
-                    admission.finish();
+                    AbstractRequestScheduler.finishPlacement(admission);
                 }
             }
             assertFalse(future.get(5, TimeUnit.SECONDS).isSuccess());

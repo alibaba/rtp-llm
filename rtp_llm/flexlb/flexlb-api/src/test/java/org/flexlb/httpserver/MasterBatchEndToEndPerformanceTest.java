@@ -20,7 +20,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.DeliveryDispatcherTestFactory;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestWorkerSelector;
+import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.VitWorkerSelector;
@@ -107,11 +107,11 @@ import static org.mockito.Mockito.withSettings;
  * Loopback end-to-end regression for the Master scheduling delivery path.
  *
  * <p>The exercised path is:
- * client call -> Netty Master gRPC server -> FlexlbServiceImpl -> RequestLifecycle
- * -> RequestLifecycle -> EndpointWork. BATCH continues through EngineGrpcClient
+ * client call -> Netty Master gRPC server -> FlexlbServiceImpl -> AbstractRequestScheduler
+ * -> AbstractRequestScheduler -> PrefillQueueScheduler. BATCH continues through EngineGrpcClient
  * to a Netty mock engine; NON_BATCH publishes the route decision to the frontend.
  * The worker capacities are fixed by the fixture, while worker selection uses the
- * production RequestWorkerSelector with cost-based Prefill and Decode selection.
+ * production RequestRouteSelector with cost-based Prefill and Decode selection.
  */
 @Tag("performance-regression")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -337,7 +337,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     }
 
     @Override
-    protected RequestWorkerSelector createRouter() {
+    protected RequestRouteSelector createRouter() {
         CacheAwareService cache =
                 new CacheAwareService(null, null, null, null) {
                     @Override
@@ -378,7 +378,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 new CostBasedPrefillStrategy(cache, configService);
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class, withSettings().stubOnly());
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
-        return new RequestWorkerSelector(
+        return new RequestRouteSelector(
                 engineWorkerStatus,
                 prefillSelector,
                 new DecodeSelector(
@@ -1016,8 +1016,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         var planners =
                 (java.util.concurrent.ThreadPoolExecutor)
-                        ReflectionTestUtils.getField(
-                                ReflectionTestUtils.getField(scheduler, "owner"), "planners");
+                        ReflectionTestUtils.getField(scheduler, "planners");
         long plannerTasksBefore = planners.getTaskCount();
         long trafficStartEpochMs = System.currentTimeMillis();
         long trafficStartUptimeMs = ManagementFactory.getRuntimeMXBean().getUptime();

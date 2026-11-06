@@ -32,27 +32,24 @@ class DecodeCapacityPreemptionTest {
         DecodeResources.AdmissionCapacity policy = new DecodeResources.AdmissionCapacity(0L, 90L);
         long hardKvTokens = 100L;
         long expectedKvTokens = 250L;
-        DecodeResources.ReservationHandle victim;
-        try (var pin = endpoint.tryPinGeneration()) {
+        DecodeResources.RequestReservation victim;
+        {
+            var selectedEndpoint = endpoint;
+
             victim =
-                    endpoint.tryReserveQueuedRequest(pin, String.valueOf(1L), 100L, 200L, 30, null)
-                            .handle();
+                    endpoint.tryReserveQueuedRequest(String.valueOf(1L), 100L, 200L, 30, null)
+                            .value();
             assertEquals(
                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     endpoint.acquireDispatchPermit(
                                     victim, new DecodeResources.AdmissionCapacity(0, 100L))
-                            .handle()
+                            .value()
                             .dispatch()
                             .status());
             var reservation =
                     endpoint.tryReserveQueuedRequest(
-                                    pin,
-                                    String.valueOf(9L),
-                                    hardKvTokens,
-                                    expectedKvTokens,
-                                    70,
-                                    null)
-                            .handle();
+                                    String.valueOf(9L), hardKvTokens, expectedKvTokens, 70, null)
+                            .value();
             assertNotNull(reservation);
             assertEquals(
                     DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
@@ -106,20 +103,17 @@ class DecodeCapacityPreemptionTest {
         DecodeResources.AdmissionCapacity policy = new DecodeResources.AdmissionCapacity(1L, 90L);
         long hardKvTokens = 100L;
         long expectedKvTokens = 100L;
-        DecodeResources.ReservationHandle victim;
-        try (var pin = endpoint.tryPinGeneration()) {
+        DecodeResources.RequestReservation victim;
+        {
+            var selectedEndpoint = endpoint;
+
             victim =
-                    endpoint.tryReserveQueuedRequest(pin, String.valueOf(1L), 100L, 200L, 30, null)
-                            .handle();
+                    endpoint.tryReserveQueuedRequest(String.valueOf(1L), 100L, 200L, 30, null)
+                            .value();
             assertNull(
                     endpoint.tryReserveQueuedRequest(
-                                    pin,
-                                    String.valueOf(9L),
-                                    hardKvTokens,
-                                    expectedKvTokens,
-                                    70,
-                                    policy)
-                            .handle());
+                                    String.valueOf(9L), hardKvTokens, expectedKvTokens, 70, policy)
+                            .value());
         }
         // The same queued reservation remains soft for ordinary Engine dispatch.
         assertTrue(
@@ -150,11 +144,13 @@ class DecodeCapacityPreemptionTest {
         DecodeResources.AdmissionCapacity policy = new DecodeResources.AdmissionCapacity(0L, 90L);
         long hardKvTokens = 100L;
         long expectedKvTokens = 200L;
-        DecodeResources.ReservationHandle victim;
-        try (var pin = endpoint.tryPinGeneration()) {
+        DecodeResources.RequestReservation victim;
+        {
+            var selectedEndpoint = endpoint;
+
             victim =
-                    endpoint.tryReserveQueuedRequest(pin, String.valueOf(1L), 0L, 900L, 30, null)
-                            .handle();
+                    endpoint.tryReserveQueuedRequest(String.valueOf(1L), 0L, 900L, 30, null)
+                            .value();
         }
         DecodeEvictionProposal proposal =
                 plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);

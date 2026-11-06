@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestWorkerSelector;
+import org.flexlb.balance.scheduler.RequestRouteSelector;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ModelMetaConfig;
@@ -368,8 +368,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
      * so additions and evictions are reflected in routing immediately.
      */
     @Override
-    protected RequestWorkerSelector createRouter() {
-        RequestWorkerSelector roundRobin = mock(RequestWorkerSelector.class);
+    protected RequestRouteSelector createRouter() {
+        RequestRouteSelector roundRobin = mock(RequestRouteSelector.class);
         when(roundRobin.select(any(RequestContext.class), any()))
                 .thenAnswer(
                         inv -> {
@@ -390,10 +390,10 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                             var worker = endpointRegistry.get(RoleType.PREFILL, chosen).getStatus();
                             String ip = worker.getIp();
                             int httpPort = worker.getPort();
-                            // admittedRoute() pins the exact worker generations. The scheduler
+                            // routeResult() pins the exact worker generations. The scheduler
                             // reserves Decode capacity before publishing the Prefill queue entry;
                             // the batcher later acquires a permit against that exact reservation.
-                            return admittedRoute(
+                            return routeResult(
                                     ctx,
                                     routeResponse(
                                             Long.parseLong(ctx.data().getRequestId()),

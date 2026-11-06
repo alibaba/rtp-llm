@@ -42,7 +42,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Cross-component regressions: frontend progress and remote resource ownership are independent. */
+/**
+ * Cross-component regressions: frontend progress and remote resource ownership are independent.
+ */
 @Timeout(15)
 class RequestPreemptionRegressionTest {
     private static final long REQUEST_ID = 9781L;
@@ -53,11 +55,11 @@ class RequestPreemptionRegressionTest {
     private static final DecodeResources.AdmissionCapacity CAPACITY =
             new DecodeResources.AdmissionCapacity(1L, 100L);
 
-    private RequestLifecycle scheduler;
+    private AbstractRequestScheduler scheduler;
     private RequestContext context;
     private DecodeEndpoint decode;
     private PrefillEndpoint prefill;
-    private RequestRoute route;
+    private RouteExecution route;
     private Delivery.Member delivery;
     private CompletableFuture<Response> response;
     private long statusVersion;
@@ -97,24 +99,21 @@ class RequestPreemptionRegressionTest {
                                 .seqLen(KV_TOKENS)
                                 .maxNewTokens(0)
                                 .build());
-        response = RequestProtocolTestSupport.register(scheduler, context);
+        response = RequestProtocolTestSupport.submitForManualPlacement(scheduler, context);
         decode =
                 EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
                                 RoleType.DECODE, null, "127.0.0.1", 8081, 8091, null),
                         scheduler.requests);
         reportDecode(null, false);
-        DecodeResources.ReservationHandle reservation;
-        try (var pin = decode.tryPinGeneration()) {
+        DecodeResources.RequestReservation reservation;
+        {
+            var selectedEndpoint = decode;
+
             reservation =
                     decode.tryReserveQueuedRequest(
-                                    pin,
-                                    String.valueOf(REQUEST_ID),
-                                    KV_TOKENS,
-                                    KV_TOKENS,
-                                    50,
-                                    CAPACITY)
-                            .handle();
+                                    String.valueOf(REQUEST_ID), KV_TOKENS, KV_TOKENS, 50, CAPACITY)
+                            .value();
         }
         assertNotNull(reservation);
         prefill = mock(PrefillEndpoint.class);
@@ -141,7 +140,7 @@ class RequestPreemptionRegressionTest {
                     RequestProtocolTestSupport.commitRoute(
                             scheduler, route, RequestProtocolTestSupport.publication(() -> true)));
         }
-        var permit = decode.acquireDispatchPermit(reservation, CAPACITY).handle();
+        var permit = decode.acquireDispatchPermit(reservation, CAPACITY).value();
         assertNotNull(permit);
         delivery =
                 DeliveryDispatcher.commitDelivery(

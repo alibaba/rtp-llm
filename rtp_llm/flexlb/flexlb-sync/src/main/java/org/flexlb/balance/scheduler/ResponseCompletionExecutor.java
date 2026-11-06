@@ -18,7 +18,7 @@ import static org.flexlb.util.Failures.recover;
 /**
  * Runs asynchronous frontend completion tasks on dedicated workers. External Future
  * mutations use completeNow on their caller to preserve synchronous return semantics.
- * Owns execution registration and drain. After request cleanup, the external lifecycle
+ * Owns execution registration and drain. After request cleanup, the request scheduler
  * owner closes it. Completion callbacks do not own executor shutdown. The scheduler
  * owns request arbitration, lock checks, deadlines and ACK reporting.
  */

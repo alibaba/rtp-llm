@@ -1,9 +1,9 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.endpoint.PrefillActiveIndex;
+import org.flexlb.balance.endpoint.OrderedPrefillRequestQueue;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.flexlb.config.FlexlbConfig;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -13,16 +13,16 @@ public final class RequestExecutionTestSupport {
 
     private RequestExecutionTestSupport() {}
 
-    static CapacityBoundary boundaryOnly(RequestRoute item, CapacityBoundary boundary) {
+    static CapacityBoundary boundaryOnly(RouteExecution item, CapacityBoundary boundary) {
         return boundary;
     }
 
-    public static EndpointWork create(
+    public static PrefillQueueScheduler create(
             String key,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
             DeliveryDispatcher delivery,
-            RequestLifecycle scheduler) {
+            AbstractRequestScheduler scheduler) {
         return create(
                 key,
                 endpoint,
@@ -32,12 +32,12 @@ public final class RequestExecutionTestSupport {
                 org.flexlb.balance.planner.BuiltinGroupPlanner.from(config));
     }
 
-    public static EndpointWork create(
+    public static PrefillQueueScheduler create(
             String key,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
             DeliveryDispatcher delivery,
-            RequestLifecycle scheduler,
+            AbstractRequestScheduler scheduler,
             org.flexlb.balance.planner.GroupPlanner grouping) {
         return create(
                 key,
@@ -49,17 +49,18 @@ public final class RequestExecutionTestSupport {
                 RequestExecutionTestSupport::schedule);
     }
 
-    public static EndpointWork create(
+    public static PrefillQueueScheduler create(
             String key,
             PrefillEndpoint endpoint,
             FlexlbConfig config,
             DeliveryDispatcher delivery,
-            RequestLifecycle scheduler,
+            AbstractRequestScheduler scheduler,
             org.flexlb.balance.planner.GroupPlanner grouping,
-            java.util.function.Function<EndpointWork, EndpointWork.Decision> scheduling) {
+            java.util.function.Function<PrefillQueueScheduler, PrefillQueueScheduler.Decision>
+                    scheduling) {
         var dependencies = SchedulerTestSupport.queueDependencies(scheduler, config);
         var index =
-                PrefillActiveIndex.ordered(
+                OrderedPrefillRequestQueue.ordered(
                         16, QueueExecutionSettings.queueOrder(config.isPriorityOrdering()));
         var state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
@@ -68,7 +69,7 @@ public final class RequestExecutionTestSupport {
         ReflectionTestUtils.setField(delivery, "execution", dependencies);
         var worker =
                 org.mockito.Mockito.mock(
-                        EndpointWork.class,
+                        PrefillQueueScheduler.class,
                         org.mockito.Mockito.withSettings()
                                 .useConstructor(
                                         key,
@@ -84,9 +85,10 @@ public final class RequestExecutionTestSupport {
     }
 
     public static void attachDriver(
-            EndpointWork worker,
-            RequestLifecycle owner,
-            java.util.function.Function<EndpointWork, EndpointWork.Decision> scheduling) {
+            PrefillQueueScheduler worker,
+            AbstractRequestScheduler owner,
+            java.util.function.Function<PrefillQueueScheduler, PrefillQueueScheduler.Decision>
+                    scheduling) {
         var controller = new Controller(worker, scheduling, owner);
         controllers.put(worker, controller);
         var availability =
@@ -125,28 +127,28 @@ public final class RequestExecutionTestSupport {
                 .stopAndAwait();
     }
 
-    public static void start(EndpointWork worker) {
+    public static void start(PrefillQueueScheduler worker) {
         var controller = controllers.get(worker);
         if (controller == null) return; // The real scheduler, or the test caller, owns timing.
         org.junit.jupiter.api.Assertions.assertFalse(controller.active || worker.stopping());
         controller.active = true;
     }
 
-    public static boolean offer(EndpointWork worker, RequestRoute route) {
+    public static boolean offer(PrefillQueueScheduler worker, RouteExecution route) {
         if (worker.stopping()) return false;
         var controller = controllers.get(worker);
-        if (controller == null) return worker.prefillEndpoint().offerQueued(route);
-        if (route.ctx().data().getLifecycle() == null) {
+        if (controller == null) return worker.prefillEndpoint().tryEnqueueRoute(route);
+        if (route.ctx().data().getRequestScheduler() == null) {
             if (controller.owner == null)
                 SchedulerTestSupport.bindEndpointOwner(worker.prefillEndpoint(), route);
             else SchedulerTestSupport.bindOwner(route.ctx(), controller.owner);
         }
-        boolean accepted = controller.active && worker.prefillEndpoint().offerQueued(route);
+        boolean accepted = controller.active && worker.prefillEndpoint().tryEnqueueRoute(route);
         controller.wake();
         return accepted;
     }
 
-    private static final java.util.Map<EndpointWork, Controller> controllers =
+    private static final java.util.Map<PrefillQueueScheduler, Controller> controllers =
             java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
 
     public static void endpointChanged(PrefillEndpoint endpoint, PrefillEndpoint.Signal kind) {
@@ -158,20 +160,22 @@ public final class RequestExecutionTestSupport {
         if (controller != null) controller.wake();
     }
 
-    static QueuedRequestScheduler.EndpointWork schedulingState(EndpointWork execution) {
+    static QueuedRequestScheduler.PrefillQueueScheduler schedulingState(
+            PrefillQueueScheduler execution) {
         var controller = controllers.get(execution);
         return controller == null ? null : controller.work;
     }
 
-    public static EndpointWork.Decision schedule(EndpointWork work) {
-        return QueuedRequestScheduler.decideExecution(work);
+    public static PrefillQueueScheduler.Decision schedule(PrefillQueueScheduler work) {
+        return QueuedRequestScheduler.decideQueueScheduling(work);
     }
 
     private static final class Controller implements RequestScheduler {
-        final EndpointWork execution;
-        final RequestLifecycle owner;
-        final QueuedRequestScheduler.EndpointWork work;
-        final java.util.function.Function<EndpointWork, EndpointWork.Decision> policy;
+        final PrefillQueueScheduler execution;
+        final AbstractRequestScheduler owner;
+        final QueuedRequestScheduler.PrefillQueueScheduler work;
+        final java.util.function.Function<PrefillQueueScheduler, PrefillQueueScheduler.Decision>
+                policy;
         final Thread thread;
         volatile boolean stopped;
         final java.util.concurrent.atomic.AtomicLong notifications =
@@ -179,13 +183,14 @@ public final class RequestExecutionTestSupport {
         volatile boolean active;
         final java.util.concurrent.atomic.AtomicBoolean started =
                 new java.util.concurrent.atomic.AtomicBoolean();
-        EndpointWork.Decision waiting;
+        PrefillQueueScheduler.Decision waiting;
         long next = Long.MAX_VALUE;
 
         Controller(
-                EndpointWork execution,
-                java.util.function.Function<EndpointWork, EndpointWork.Decision> policy,
-                RequestLifecycle owner) {
+                PrefillQueueScheduler execution,
+                java.util.function.Function<PrefillQueueScheduler, PrefillQueueScheduler.Decision>
+                        policy,
+                AbstractRequestScheduler owner) {
             this.owner = owner;
             this.execution = execution;
             this.policy = policy;
@@ -277,10 +282,6 @@ public final class RequestExecutionTestSupport {
 
         public void onRequest(RequestContext request) {}
 
-        public void onRequestChanged(RequestContext request) {
-            wake();
-        }
-
         public void onEndpointChanged(org.flexlb.balance.endpoint.WorkerEndpoint endpoint) {
             wake();
         }
@@ -291,11 +292,11 @@ public final class RequestExecutionTestSupport {
         }
     }
 
-    public static PrefillEndpoint.QueueSnapshot capture(EndpointWork runtime) {
+    public static PrefillEndpoint.QueueSnapshot capture(PrefillQueueScheduler runtime) {
         return state(runtime).captureQueue(Integer.MAX_VALUE);
     }
 
-    public static PrefillEndpoint state(EndpointWork runtime) {
+    public static PrefillEndpoint state(PrefillQueueScheduler runtime) {
         return org.flexlb.balance.endpoint.EndpointTestSupport.resources(runtime.prefillEndpoint());
     }
 }

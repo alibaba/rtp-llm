@@ -29,9 +29,38 @@ import static org.mockito.Mockito.verify;
  */
 class DecodeEndpointTest {
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void eitherClosedAdmissionGateRejectsReservationAndDispatchButAllowsRelease(boolean retired) {
+        var prepared = endpoint.tryReserveQueuedRequest("prepared", 100L, 100L, 50, null).value();
+        var sending = endpoint.tryReserveQueuedRequest("sending", 100L, 100L, 50, null).value();
+        var capacity = new DecodeResources.AdmissionCapacity(10, 90);
+        var permit = endpoint.acquireDispatchPermit(sending, capacity).value();
+        assertNotNull(permit);
+        if (retired) endpoint.beginRetirement();
+        else status.markRemovedFromDiscovery();
+
+        assertEquals(retired, endpoint.isRetired());
+        assertEquals(retired, status.isAvailableForScheduling());
+        assertFalse(endpoint.acceptsNewRequests());
+        assertEquals(
+                DecodeResources.ReserveStatus.ENDPOINT_RETIRED,
+                endpoint.tryReserveQueuedRequest("late", 100L, 100L, 50, null).status());
+        assertEquals(
+                DecodeResources.EngineDispatchPermitAcquireStatus.ENDPOINT_RETIRED,
+                endpoint.acquireDispatchPermit(prepared, capacity).status());
+        assertEquals(
+                DecodeResources.EngineDispatchPermitTransferStatus.ENDPOINT_RETIRED,
+                permit.dispatch().status());
+        endpoint.release(prepared, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        endpoint.release(sending, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
+        assertEquals(0, endpoint.resourceSnapshot().activeDispatchPermits());
+    }
+
     private WorkerStatus status;
     private DecodeEndpoint endpoint;
-    private final Map<Long, DecodeResources.ReservationHandle> reservations = new HashMap<>();
+    private final Map<Long, DecodeResources.RequestReservation> reservations = new HashMap<>();
 
     @BeforeEach
     void setUp() {
@@ -41,6 +70,34 @@ class DecodeEndpointTest {
                         status,
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(
                                 EndpointTestSupport.noopEventSink()));
+    }
+
+    @Test
+    void admissionDuringSummaryConstructionDoesNotCacheTheOlderOccupancy() {
+        var once = new java.util.concurrent.atomic.AtomicBoolean();
+        var lock =
+                new java.util.concurrent.locks.ReentrantLock() {
+                    @Override
+                    public void unlock() {
+                        boolean captureReleased = getHoldCount() == 1;
+                        super.unlock();
+                        if (captureReleased && once.compareAndSet(false, true)) {
+                            assertTrue(
+                                    endpoint.tryReserveQueuedRequest("late", 100L, 150L, 50, null)
+                                                    .status()
+                                            == DecodeResources.ReserveStatus.ACQUIRED);
+                        }
+                    }
+                };
+        org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "stateLock", lock);
+        var beforeAdmission = endpoint.admissionSummary();
+        assertTrue(once.get());
+        assertEquals(0, beforeAdmission.placementOccupancy(50).requests());
+        var afterAdmission = endpoint.admissionSummary();
+        assertEquals(1, afterAdmission.placementOccupancy(50).requests());
+        assertEquals(100L, afterAdmission.placementOccupancy(50).hardKvTokens());
+        assertEquals(0, beforeAdmission.placementOccupancy(50).requests());
+        org.junit.jupiter.api.Assertions.assertSame(afterAdmission, endpoint.admissionSummary());
     }
 
     @Test
@@ -57,21 +114,21 @@ class DecodeEndpointTest {
             assertFalse(
                     permit.belongsTo(
                             endpoint,
-                            new DecodeResources.ReservationHandle(
+                            new DecodeResources.RequestReservation(
                                     reservation.endpointGenerationId() + 1,
                                     String.valueOf(100L),
                                     reservation.reservationToken())));
             assertFalse(
                     permit.belongsTo(
                             endpoint,
-                            new DecodeResources.ReservationHandle(
+                            new DecodeResources.RequestReservation(
                                     reservation.endpointGenerationId(),
                                     String.valueOf(101L),
                                     reservation.reservationToken())));
             assertFalse(
                     permit.belongsTo(
                             endpoint,
-                            new DecodeResources.ReservationHandle(
+                            new DecodeResources.RequestReservation(
                                     reservation.endpointGenerationId(),
                                     String.valueOf(100L),
                                     reservation.reservationToken() + 1)));
@@ -105,20 +162,22 @@ class DecodeEndpointTest {
                         ? DecodeResources.DecodeRequestStatus.allocated(reservation)
                         : DecodeResources.DecodeRequestStatus.active(reservation);
         verify(sink)
-                .onEngineEvidence(
+                .onWorkerRequestEvent(
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.argThat(
                                 e ->
-                                        e.route().decodeEp() == endpoint
+                                        e.route().decodeEndpoint() == endpoint
                                                 && e.reservation()
                                                         .equals(requestStatus.reservation())
-                                                && e.kind()
+                                                && e.type()
                                                         == (allocated
                                                                 ? org.flexlb.balance.scheduler
-                                                                        .ContextResult.EngineKind
+                                                                        .ContextResult
+                                                                        .WorkerRequestEventType
                                                                         .ALLOCATED
                                                                 : org.flexlb.balance.scheduler
-                                                                        .ContextResult.EngineKind
+                                                                        .ContextResult
+                                                                        .WorkerRequestEventType
                                                                         .ACTIVE)));
         assertEquals(allocated, endpoint.ownership(reservation).confirmed());
         assertEquals(allocated ? 0 : 1, endpoint.resourceSnapshot().reservedCount());
@@ -134,20 +193,22 @@ class DecodeEndpointTest {
                 endpoint.applyStatusHeartbeat(
                         status, WorkerStatusTestSupport.freezeStatusResponse(status, response)));
         verify(sink, times(2))
-                .onEngineEvidence(
+                .onWorkerRequestEvent(
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.argThat(
                                 e ->
-                                        e.route().decodeEp() == endpoint
+                                        e.route().decodeEndpoint() == endpoint
                                                 && e.reservation()
                                                         .equals(requestStatus.reservation())
-                                                && e.kind()
+                                                && e.type()
                                                         == (allocated
                                                                 ? org.flexlb.balance.scheduler
-                                                                        .ContextResult.EngineKind
+                                                                        .ContextResult
+                                                                        .WorkerRequestEventType
                                                                         .ALLOCATED
                                                                 : org.flexlb.balance.scheduler
-                                                                        .ContextResult.EngineKind
+                                                                        .ContextResult
+                                                                        .WorkerRequestEventType
                                                                         .ACTIVE)));
         assertEquals(allocated, endpoint.ownership(reservation).confirmed());
 
@@ -155,15 +216,16 @@ class DecodeEndpointTest {
         finished.setFinishedTaskInfo(Map.of("100", task(100L)));
         EndpointTestSupport.applyStatus(endpoint, finished).run();
         verify(sink)
-                .onEngineEvidence(
+                .onWorkerRequestEvent(
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.argThat(
                                 e ->
-                                        e.route().decodeEp() == endpoint
+                                        e.route().decodeEndpoint() == endpoint
                                                 && e.reservation().equals(reservation)
-                                                && e.kind()
+                                                && e.type()
                                                         == org.flexlb.balance.scheduler
-                                                                .ContextResult.EngineKind.COMPLETED
+                                                                .ContextResult
+                                                                .WorkerRequestEventType.COMPLETED
                                                 && e.errorCode() == 0L));
         assertFalse(endpoint.resourceSnapshot().requests().containsKey(String.valueOf(100L)));
         assertEquals(0, endpoint.resourceSnapshot().reservedCount());
@@ -380,7 +442,9 @@ class DecodeEndpointTest {
 
     // ==================== P1-6: evictExpiredRequests counter (PR-C) ====================
 
-    /** Expiration removes the queued phase and all incremental counters together. */
+    /**
+     * Expiration removes the queued phase and all incremental counters together.
+     */
     @Test
     void evictExpiredRequests_prunesQueuedPhase_andRestoresEngineLoad()
             throws InterruptedException {
@@ -410,7 +474,9 @@ class DecodeEndpointTest {
         assertEquals(0, endpoint.routingView().dispatchUsage().expectedKvUsed());
     }
 
-    /** Directly mutate the private counter to simulate drift. */
+    /**
+     * Directly mutate the private counter to simulate drift.
+     */
     private void setQueuedPhaseCount(int value) throws Exception {
         java.lang.reflect.Field usage = DecodeEndpoint.class.getDeclaredField("queuedUsage");
         usage.setAccessible(true);
@@ -432,29 +498,33 @@ class DecodeEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, response).run();
     }
 
-    private DecodeResources.ReservationHandle reserve(
+    private DecodeResources.RequestReservation reserve(
             long requestId, long hardKv, long expectedKv) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            assertNotNull(pin);
-            DecodeResources.ReservationHandle reservation =
+        {
+            WorkerEndpoint selectedEndpoint = endpoint;
+
+            assertNotNull(selectedEndpoint);
+            DecodeResources.RequestReservation reservation =
                     EndpointTestSupport.reserveUnqueuedDecode(
-                            endpoint, pin, requestId, hardKv, expectedKv, 0);
+                            endpoint, selectedEndpoint, requestId, hardKv, expectedKv, 0);
             reservations.put(requestId, reservation);
             return reservation;
         }
     }
 
     private void release(long requestId) {
-        DecodeResources.ReservationHandle reservation = reservations.get(requestId);
+        DecodeResources.RequestReservation reservation = reservations.get(requestId);
         if (reservation != null) {
             endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
         }
     }
 
     private void markQueued(long requestId) {
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            assertNotNull(pin);
-            assertTrue(endpoint.markQueued(pin, reservations.get(requestId)).status().applied());
+        {
+            WorkerEndpoint selectedEndpoint = endpoint;
+
+            assertNotNull(selectedEndpoint);
+            assertTrue(endpoint.markQueued(reservations.get(requestId)).status().applied());
         }
     }
 
@@ -475,7 +545,7 @@ class DecodeEndpointTest {
                                 new DecodeResources.AdmissionCapacity(0, 100L));
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
-        assertNotNull(acquisition.handle());
-        return acquisition.handle();
+        assertNotNull(acquisition.value());
+        return acquisition.value();
     }
 }

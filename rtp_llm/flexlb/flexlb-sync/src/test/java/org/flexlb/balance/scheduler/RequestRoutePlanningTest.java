@@ -17,7 +17,7 @@ import static org.mockito.Mockito.when;
 class RequestRoutePlanningTest {
     @Test
     void failedInputBuildCanRetryAndConcurrentReadersShareTheCompletedInput() throws Exception {
-        var route = mock(RequestRoute.class);
+        var route = mock(RouteExecution.class);
         doCallRealMethod().when(route).planningInput();
         when(route.seqLen())
                 .thenThrow(new IllegalStateException("prediction input unavailable"))

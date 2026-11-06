@@ -55,7 +55,7 @@ class RequestContextLifecycleTest {
 
     private FlexlbConfig config;
 
-    private RequestLifecycle lifecycle;
+    private AbstractRequestScheduler lifecycle;
 
     @BeforeEach
     void setUp() {
@@ -86,7 +86,7 @@ class RequestContextLifecycleTest {
     @Test
     void pendingWorkerEndKeepsInactivityRecheckInstalledUntilPlacementFinishes() throws Exception {
         var context = RequestProtocolTestSupport.context(config, 895L);
-        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         var route =
                 SchedulingTestConfig.createRoute(
                         context,
@@ -97,18 +97,18 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        try (var admission = lifecycle.claimAdmissionHandle("895", future);
+        try (var admission = SchedulerTestSupport.claim(lifecycle, "895", future);
                 var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(lifecycle.beginRoute(route));
-            assertTrue(DeliveryDispatcher.recordRoute(admission, route, true, null));
+            assertTrue(AbstractRequestScheduler.recordRoute(admission, route, true, null));
             var original = context.snapshot().deadlines().inactivity();
-            lifecycle.onEngineEvidence(
+            lifecycle.onWorkerRequestEvent(
                     context,
-                    new ContextResult.EngineEvidence(
+                    new ContextResult.WorkerRequestEvent(
                             route,
                             null,
                             org.flexlb.dao.route.RoleType.PDFUSION,
-                            ContextResult.EngineKind.COMPLETED,
+                            ContextResult.WorkerRequestEventType.COMPLETED,
                             0L,
                             "worker complete",
                             original.atMs() - 1));
@@ -146,23 +146,27 @@ class RequestContextLifecycleTest {
             requestConfig.setScheduler(ConfigTestSupport.direct());
         }
         var context = RequestProtocolTestSupport.context(requestConfig, 894L);
-        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         var repository = SchedulerTestSupport.repository(lifecycle);
         int expectedPending = immediate ? 0 : 1;
         assertEquals(immediate, context.data().getConfig().isDirect());
         assertEquals(Stage.QUEUED, SchedulerTestSupport.stage(context));
         assertEquals(expectedPending, repository.pendingDeliveryRequestCount());
+        var prefill = mock(PrefillEndpoint.class);
+        when(prefill.acceptsNewRequests()).thenReturn(true);
         var item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
                         null,
                         null,
-                        mock(PrefillEndpoint.class),
+                        prefill,
                         null,
                         null,
                         System.currentTimeMillis());
-        try (var admission = lifecycle.claimAdmissionHandle(context.data().getRequestId(), future);
+        try (var admission =
+                        SchedulerTestSupport.claim(
+                                lifecycle, context.data().getRequestId(), future);
                 var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(Stage.ROUTING, SchedulerTestSupport.stage(context));
@@ -173,7 +177,7 @@ class RequestContextLifecycleTest {
                             lifecycle, item, RequestProtocolTestSupport.publication(() -> true)));
             assertEquals(Stage.READY_TO_DELIVER, SchedulerTestSupport.stage(context));
             assertEquals(expectedPending, repository.pendingDeliveryRequestCount());
-            admission.finish();
+            AbstractRequestScheduler.finishPlacement(admission);
         }
         assertEquals(expectedPending, repository.pendingDeliveryRequestCount());
         var delivery =
@@ -201,13 +205,13 @@ class RequestContextLifecycleTest {
         RequestContext context = context(890L);
 
         context.data().setRequest(context.data().getRequest().toBuilder().requestId("891").build());
-        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         assertSame(future, context.data().getFuture());
         assertEquals("891", context.data().getRequestId());
         RequestContext other = context(893L);
         assertThrows(IllegalStateException.class, () -> other.data().setFuture(future));
         assertEquals("893", other.data().getRequestId());
-        var otherFuture = RequestProtocolTestSupport.register(lifecycle, other);
+        var otherFuture = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, other);
         assertFalse(otherFuture.isDone());
         assertSame(otherFuture, other.data().getFuture());
         assertEquals("893", other.data().getRequestId());
@@ -225,7 +229,8 @@ class RequestContextLifecycleTest {
         assertThrows(
                 IllegalStateException.class,
                 () -> context.data().setFuture(new CompletableFuture<>()));
-        assertTrue(RequestProtocolTestSupport.register(lifecycle, context).isDone());
+        assertTrue(
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context).isDone());
         assertSame(future, context.data().getFuture());
     }
 
@@ -239,7 +244,7 @@ class RequestContextLifecycleTest {
                         suppliedMetadata ? SchedulingMetadata.explicit(64, Long.MAX_VALUE) : null);
         int priority = context.data().getPriority();
         long expiresAt = context.data().getRequestExpiresAtMs();
-        RequestProtocolTestSupport.register(lifecycle, context);
+        RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         assertNotNull(context.data().getRequest());
         var metadata = context.data().getSchedulingMetadata();
         assertNotNull(metadata);
@@ -269,7 +274,7 @@ class RequestContextLifecycleTest {
         context.data().setSchedulingMetadata(null);
         context.data()
                 .setRequest(context.data().getRequest().toBuilder().rawPriority(priority).build());
-        RequestProtocolTestSupport.register(lifecycle, context);
+        RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         assertEquals(priority, context.data().getSchedulingMetadata().priority());
         int queuePriority = priority >= 1 && priority <= 100 ? priority : 50;
         var entry = new GlobalQueueEntry(context, null);
@@ -308,7 +313,7 @@ class RequestContextLifecycleTest {
                         .cacheKeyBlockSize(16L)
                         .build();
         context.data().setRequest(inputs);
-        RequestProtocolTestSupport.register(lifecycle, context);
+        RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         context.data().setRequest(inputs);
         assertThrows(
                 IllegalStateException.class,
@@ -352,7 +357,8 @@ class RequestContextLifecycleTest {
                                 null,
                                 null,
                                 null,
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(805L), 1L),
+                                new DecodeResources.RequestReservation(
+                                        1L, String.valueOf(805L), 1L),
                                 123L));
         assertEquals(0L, context.data().getWorkerEnqueueSequence());
         assertEquals(0L, context.data().getFirstWorkerEnqueueTime());
@@ -367,7 +373,8 @@ class RequestContextLifecycleTest {
                 new Thread(
                         () ->
                                 registered.set(
-                                        RequestProtocolTestSupport.register(lifecycle, context)),
+                                        RequestProtocolTestSupport.submitForManualPlacement(
+                                                lifecycle, context)),
                         "registration-test");
         synchronized (context) {
             registrar.start();
@@ -389,7 +396,7 @@ class RequestContextLifecycleTest {
     void duplicateSubmitPreservesCanonicalFutureAndRequestId() {
         RequestContext context = context(800L);
         CompletableFuture<Response> canonical =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         assertThrows(
                 IllegalStateException.class,
                 () ->
@@ -400,7 +407,9 @@ class RequestContextLifecycleTest {
                                                 .build()));
         assertEquals(
                 StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                RequestProtocolTestSupport.register(lifecycle, context).join().getCode());
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context)
+                        .join()
+                        .getCode());
         assertSame(canonical, context.data().getFuture());
         assertEquals("800", context.data().getRequestId());
         assertEquals("800", context.data().getRequest().getRequestId());
@@ -428,10 +437,10 @@ class RequestContextLifecycleTest {
                         org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
         org.mockito.Mockito.doNothing()
                 .when(queue)
-                .onRequestChanged(org.mockito.ArgumentMatchers.any());
+                .removeRequest(org.mockito.ArgumentMatchers.any());
         RequestContext context = context(804L);
         CompletableFuture<Response> canonical =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         lifecycle.cancel("804", 0L, CancelReason.CLIENT_CANCELLED);
 
         assertEquals(
@@ -447,7 +456,8 @@ class RequestContextLifecycleTest {
     @Test
     void expiredTerminalAllowsNewContextButCannotReuseOldContext() {
         RequestContext old = context(802L);
-        CompletableFuture<Response> original = RequestProtocolTestSupport.register(lifecycle, old);
+        CompletableFuture<Response> original =
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, old);
         lifecycle.cancel("802", 0L, CancelReason.CLIENT_CANCELLED);
         original.join();
         assertTrue(
@@ -461,16 +471,18 @@ class RequestContextLifecycleTest {
                                 Long.MAX_VALUE));
         assertEquals(
                 StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                RequestProtocolTestSupport.register(lifecycle, old).join().getCode());
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, old)
+                        .join()
+                        .getCode());
         assertSame(original, old.data().getFuture());
         CompletableFuture<Response> replacement =
-                RequestProtocolTestSupport.register(lifecycle, context(802L));
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(802L));
         assertFalse(replacement.isDone());
         assertSame(replacement, lifecycle.requests.findActive("802").data().getFuture());
         var queue =
                 (QueuedRequestScheduler)
                         org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
-        queue.onRequestChanged(old);
+        queue.removeRequest(old);
         assertNull(SchedulerTestServices.lifecycle(queue).cancel(old, 0L, CancelReason.SHUTDOWN));
         assertSame(replacement, lifecycle.requests.findActive("802").data().getFuture());
         assertFalse(
@@ -482,9 +494,9 @@ class RequestContextLifecycleTest {
     void duplicateRegistrationCannotReplaceTheCanonicalExactGeneration() {
         RequestContext context = context(101L);
         CompletableFuture<Response> canonical =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         CompletableFuture<Response> duplicate =
-                RequestProtocolTestSupport.register(lifecycle, context(101L));
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(101L));
         assertFalse(canonical.isDone());
         assertTrue(duplicate.isDone());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), duplicate.join().getCode());
@@ -498,7 +510,7 @@ class RequestContextLifecycleTest {
     @Test
     void successfulExternalCompletionBeforeDeliveryCannotStrandTheRequest() {
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context(10001L));
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(10001L));
         Response success = new Response();
         success.setSuccess(true);
         assertFalse(future.complete(success));
@@ -521,34 +533,33 @@ class RequestContextLifecycleTest {
         QueuedRequestScheduler queue =
                 (QueuedRequestScheduler)
                         org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
-        org.mockito.Mockito.doNothing()
-                .when(queue)
-                .onRequestChanged(org.mockito.ArgumentMatchers.any());
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context(10003L));
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(10003L));
         RequestContext requestContext = lifecycle.requests.findActive("10003");
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle("10003", future);
+        queue.onRequest(requestContext);
+        PlacementOperation admission = SchedulerTestSupport.claim(lifecycle, "10003", future);
         assertNotNull(admission);
         assertTrue(future.cancel(mayInterruptIfRunning));
         assertTrue(future.isCancelled());
+        assertEquals(0, RequestProtocolTestSupport.queuedCount(queue));
         assertEquals(
                 RequestState.Phase.CANCEL_REQUESTED,
                 RequestState.from(requestContext.snapshot()).state());
-        admission.finish();
+        AbstractRequestScheduler.finishPlacement(admission);
         assertEquals(
                 RequestState.Phase.CANCELLED, RequestState.from(requestContext.snapshot()).state());
         assertEquals(
                 0,
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
                         .liveRequestCount());
-        verify(queue).onRequestChanged(requestContext);
+        assertEquals(0, RequestProtocolTestSupport.queuedCount(queue));
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void schedulingDeadlineDuringAdmissionRetainsItsOwnEntryRuleAfterDeliveryClaim(boolean timer) {
         var context = context(10007L);
-        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         ExpirationTimer.Token deadline =
                 RequestProtocolTestSupport.field(context, "requestDeadline");
         assertNotNull(deadline);
@@ -562,7 +573,9 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        try (var admission = lifecycle.claimAdmissionHandle(context.data().getRequestId(), future);
+        try (var admission =
+                        SchedulerTestSupport.claim(
+                                lifecycle, context.data().getRequestId(), future);
                 var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
@@ -592,7 +605,7 @@ class RequestContextLifecycleTest {
     @Test
     void notificationFailureAfterPublicationKeepsTheExactRouteAndDoesNotRollback() {
         var context = context(10005L);
-        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         var prefill = mock(PrefillEndpoint.class);
         var item =
                 SchedulingTestConfig.createRoute(
@@ -608,7 +621,9 @@ class RequestContextLifecycleTest {
         org.mockito.Mockito.doThrow(failure)
                 .when(prefill)
                 .signal(org.flexlb.balance.endpoint.PrefillEndpoint.Signal.INPUT);
-        try (var admission = lifecycle.claimAdmissionHandle(context.data().getRequestId(), future);
+        try (var admission =
+                        SchedulerTestSupport.claim(
+                                lifecycle, context.data().getRequestId(), future);
                 var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertSame(
@@ -630,7 +645,7 @@ class RequestContextLifecycleTest {
     @Test
     void publicationFailureAfterHandoffPreservesBindingAndWakesDelivery() {
         var context = context(10008L);
-        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         var prefill = mock(PrefillEndpoint.class);
         var item =
                 SchedulingTestConfig.createRoute(
@@ -658,7 +673,9 @@ class RequestContextLifecycleTest {
                         return published;
                     }
                 };
-        try (var admission = lifecycle.claimAdmissionHandle(context.data().getRequestId(), future);
+        try (var admission =
+                        SchedulerTestSupport.claim(
+                                lifecycle, context.data().getRequestId(), future);
                 var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertSame(
                     failure,
@@ -677,7 +694,7 @@ class RequestContextLifecycleTest {
     @ValueSource(booleans = {false, true})
     void failedPublicationUnbindsTheRouteBeforeAdmissionCloses(boolean throwsFailure) {
         var context = context(10006L);
-        var future = RequestProtocolTestSupport.register(lifecycle, context);
+        var future = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         var item =
                 SchedulingTestConfig.createRoute(
                         context,
@@ -689,7 +706,9 @@ class RequestContextLifecycleTest {
                         null,
                         System.currentTimeMillis());
         var failure = new IllegalStateException("publication failed");
-        try (var admission = lifecycle.claimAdmissionHandle(context.data().getRequestId(), future);
+        try (var admission =
+                        SchedulerTestSupport.claim(
+                                lifecycle, context.data().getRequestId(), future);
                 var admissionCompletion3 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             if (throwsFailure) {
@@ -722,13 +741,13 @@ class RequestContextLifecycleTest {
     }
 
     @Test
-    void futureCancelAfterQueuePublicationStillWinsBeforeAdmissionHandleCloses() {
+    void futureCancelAfterQueuePublicationStillWinsBeforePlacementOperationCloses() {
         RequestContext context = context(10004L);
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         context.data().setFuture(future);
-        RequestRoute item =
+        RouteExecution item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -738,7 +757,7 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("10004", future);
+        try (PlacementOperation admission = SchedulerTestSupport.claim(lifecycle, "10004", future);
                 var admissionCompletion4 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
@@ -763,7 +782,7 @@ class RequestContextLifecycleTest {
     @Test
     void globalCloseConsumesAnAcceptedInactivityFactBeforeShutdownFailure() throws Exception {
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context(10002L));
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(10002L));
         RequestContext context = lifecycle.requests.findActive("10002");
         lifecycle.onDeadline(
                 RequestProtocolTestSupport.<ExpirationTimer.Token>field(
@@ -789,7 +808,7 @@ class RequestContextLifecycleTest {
     void terminalRecordPreservesIdentityWithoutRetainingRequestContext() throws Exception {
         RequestContext context = context(103L);
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         lifecycle.cancel("103", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
@@ -809,18 +828,21 @@ class RequestContextLifecycleTest {
                         .getRequestState("103", 0L));
         assertEquals(
                 StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                RequestProtocolTestSupport.register(lifecycle, context(103L)).join().getCode());
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(103L))
+                        .join()
+                        .getCode());
     }
 
     @Test
     void globalWaitingRequestsHaveNoQuantityAdmissionLimit() {
         var low = context(1L);
         low.data().setSchedulingMetadata(SchedulingMetadata.explicit(10, Long.MAX_VALUE));
-        var waiting = RequestProtocolTestSupport.register(lifecycle, low);
+        var waiting = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, low);
         for (long id = 2; id <= 1001; id++) {
             var high = context(id);
             high.data().setSchedulingMetadata(SchedulingMetadata.explicit(90, Long.MAX_VALUE));
-            assertFalse(RequestProtocolTestSupport.register(lifecycle, high).isDone());
+            assertFalse(
+                    RequestProtocolTestSupport.submitForManualPlacement(lifecycle, high).isDone());
         }
         assertFalse(waiting.isDone(), "higher priority arrivals must not evict waiting requests");
         assertEquals(
@@ -829,7 +851,9 @@ class RequestContextLifecycleTest {
                         .liveRequestCount());
         assertEquals(
                 StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                RequestProtocolTestSupport.register(lifecycle, context(1L)).join().getCode());
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(1L))
+                        .join()
+                        .getCode());
         for (long id = 1; id <= 1001; id++) {
             lifecycle.cancel(String.valueOf(id), 0L, CancelReason.CLIENT_CANCELLED);
         }
@@ -846,16 +870,16 @@ class RequestContextLifecycleTest {
                         org.flexlb.balance.scheduler.SchedulerTestServices.scheduler(lifecycle);
         org.mockito.Mockito.doNothing()
                 .when(queue)
-                .onRequestChanged(org.mockito.ArgumentMatchers.any());
+                .removeRequest(org.mockito.ArgumentMatchers.any());
         RequestContext context = context(1002L);
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
 
         assertEquals(
                 RequestState.Phase.CANCELLED,
                 lifecycle.cancel("1002", 0L, CancelReason.CLIENT_CANCELLED).state());
         assertNull(lifecycle.requests.findActive("1002"));
-        verify(queue).onRequestChanged(context);
+        verify(queue).removeRequest(context);
 
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
@@ -869,7 +893,7 @@ class RequestContextLifecycleTest {
 
     @Test
     void publicQueriesOwnTheirLockAndPrivateDecisionsStillRequireIt() {
-        RequestProtocolTestSupport.register(lifecycle, context(102L));
+        RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(102L));
         RequestContext requestContext = lifecycle.requests.findActive("102");
         assertNull(requestContext.snapshot().route());
         assertTrue(SchedulerTestSupport.isOpen(requestContext));
@@ -879,12 +903,12 @@ class RequestContextLifecycleTest {
                 org.flexlb.balance.scheduler.RequestChangeAssertions.record(
                         requestContext,
                         observedRequest ->
-                                observedRequest.recordEngineEvidence(
-                                        new ContextResult.EngineEvidence(
+                                observedRequest.recordWorkerRequestEvent(
+                                        new ContextResult.WorkerRequestEvent(
                                                 null,
                                                 null,
                                                 RoleType.PREFILL,
-                                                ContextResult.EngineKind.ACTIVE,
+                                                ContextResult.WorkerRequestEventType.ACTIVE,
                                                 0L,
                                                 null,
                                                 System.currentTimeMillis())));
@@ -913,19 +937,18 @@ class RequestContextLifecycleTest {
     void itemEntryPointsRejectAnotherSchedulersLiveContext() {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        RequestLifecycle other =
+        AbstractRequestScheduler other =
                 org.flexlb.balance.scheduler.SchedulerTestSupport.create(
                         configService,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
                         mock(TheoryCacheHitReporter.class));
         Registered registered = registerItem(806L);
-        CompletableFuture<Response> otherFuture =
-                other.register(context(806L), () -> {}, StrategyErrorType.BATCH_SLO_EXPIRED);
-        RequestRoute item = registered.item();
+        CompletableFuture<Response> otherFuture = other.submit(context(806L), () -> {});
+        RouteExecution item = registered.item();
         try {
-            try (AdmissionHandle admission =
-                            lifecycle.claimAdmissionHandle("806", registered.future());
+            try (PlacementOperation admission =
+                            SchedulerTestSupport.claim(lifecycle, "806", registered.future());
                     var admissionCompletion5 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
@@ -950,7 +973,7 @@ class RequestContextLifecycleTest {
             synchronized (item.ctx()) {
                 assertFalse(
                         other.requests.isCurrent(item.ctx())
-                                && item.ctx().data().getLifecycle() == other
+                                && item.ctx().data().getRequestScheduler() == other
                                 && item.ctx().snapshot().preparedDelivery());
             }
             assertNull(
@@ -999,8 +1022,8 @@ class RequestContextLifecycleTest {
     void failedPublicationKeepsSchedulingStageAndAllowsExactRetry() {
         Registered registered = registerItem(706L);
         RequestContext requestContext = lifecycle.requests.findActive("706");
-        try (AdmissionHandle admission =
-                        lifecycle.claimAdmissionHandle("706", registered.future());
+        try (PlacementOperation admission =
+                        SchedulerTestSupport.claim(lifecycle, "706", registered.future());
                 var admissionCompletion6 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
@@ -1032,9 +1055,9 @@ class RequestContextLifecycleTest {
     void publicationResultCannotBindAReplacementPlacementScope() {
         Registered registered = registerItem(712L);
         var context = registered.item().ctx();
-        var replacement = new java.util.concurrent.atomic.AtomicReference<AdmissionHandle>();
+        var replacement = new java.util.concurrent.atomic.AtomicReference<PlacementOperation>();
         var expected = new java.util.concurrent.atomic.AtomicReference<ContextResult.Snapshot>();
-        try (var initial = lifecycle.claimAdmissionHandle("712", registered.future())) {
+        try (var initial = SchedulerTestSupport.claim(lifecycle, "712", registered.future())) {
             assertNotNull(initial);
             try {
                 var result =
@@ -1045,14 +1068,14 @@ class RequestContextLifecycleTest {
                                         () -> {
                                             registered
                                                     .item()
-                                                    .prefillEp()
+                                                    .prefillEndpoint()
                                                     .releaseRequest(registered.item());
                                             assertEquals(
                                                     DecodeResources.ReservationReleaseResult
                                                             .RELEASED,
                                                     registered
                                                             .item()
-                                                            .decodeEp()
+                                                            .decodeEndpoint()
                                                             .release(
                                                                     registered
                                                                             .item()
@@ -1065,10 +1088,10 @@ class RequestContextLifecycleTest {
                                                     registered.item(),
                                                     ContextResult.PublicationResult
                                                             .ROLLBACK_COMPLETED);
-                                            initial.finish();
+                                            AbstractRequestScheduler.finishPlacement(initial);
                                             replacement.set(
-                                                    lifecycle.claimAdmissionHandle(
-                                                            "712", registered.future()));
+                                                    SchedulerTestSupport.claim(
+                                                            lifecycle, "712", registered.future()));
                                             assertNotNull(replacement.get());
                                             expected.set(context.snapshot());
                                             return false;
@@ -1082,13 +1105,13 @@ class RequestContextLifecycleTest {
                 assertNull(context.snapshot().route());
                 assertNull(context.snapshot().route());
                 assertFalse(registered.future().isDone());
-                verify(registered.item().prefillEp(), org.mockito.Mockito.never())
+                verify(registered.item().prefillEndpoint(), org.mockito.Mockito.never())
                         .signal(org.flexlb.balance.endpoint.PrefillEndpoint.Signal.INPUT);
             } finally {
                 if (replacement.get() != null) {
-                    replacement.get().finish();
+                    AbstractRequestScheduler.finishPlacement(replacement.get());
                 }
-                initial.finish();
+                AbstractRequestScheduler.finishPlacement(initial);
             }
         }
     }
@@ -1097,10 +1120,10 @@ class RequestContextLifecycleTest {
     void acceptedQueuedCancellationSurvivesEndpointStopFailure() throws Exception {
         RequestContext context = context(707L);
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         context.data().setFuture(future);
-        RequestRoute item =
+        RouteExecution item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -1110,7 +1133,7 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("707", future);
+        try (PlacementOperation admission = SchedulerTestSupport.claim(lifecycle, "707", future);
                 var admissionCompletion7 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
@@ -1139,10 +1162,10 @@ class RequestContextLifecycleTest {
     void stoppedLocalOwnerFallsBackToSharedContinuationInsteadOfTimerThread() throws Exception {
         RequestContext context = context(708L);
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         context.data().setFuture(future);
-        RequestRoute item =
+        RouteExecution item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -1152,7 +1175,7 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("708", future);
+        try (PlacementOperation admission = SchedulerTestSupport.claim(lifecycle, "708", future);
                 var admissionCompletion8 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
@@ -1187,10 +1210,10 @@ class RequestContextLifecycleTest {
     void terminalRecordDropsUnconsumedExactOwnerFactReferences() {
         RequestContext context = context(709L);
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         context.data().setFuture(future);
-        RequestRoute item =
+        RouteExecution item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -1200,7 +1223,7 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("709", future);
+        try (PlacementOperation admission = SchedulerTestSupport.claim(lifecycle, "709", future);
                 var admissionCompletion9 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
@@ -1248,10 +1271,10 @@ class RequestContextLifecycleTest {
     void endpointStopCannotReplaceAnAcceptedTimeoutDuringCleanup() throws Exception {
         RequestContext context = context(710L);
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         context.data().setFuture(future);
-        RequestRoute item =
+        RouteExecution item =
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -1261,7 +1284,7 @@ class RequestContextLifecycleTest {
                         null,
                         null,
                         System.currentTimeMillis());
-        try (AdmissionHandle admission = lifecycle.claimAdmissionHandle("710", future);
+        try (PlacementOperation admission = SchedulerTestSupport.claim(lifecycle, "710", future);
                 var admissionCompletion10 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
@@ -1301,8 +1324,8 @@ class RequestContextLifecycleTest {
     @Test
     void admissionHandleDefersCancellationUntilItsExactCapabilityCloses() {
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context(301L));
-        AdmissionHandle scope = lifecycle.claimAdmissionHandle("301", future);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(301L));
+        PlacementOperation scope = SchedulerTestSupport.claim(lifecycle, "301", future);
         assertNotNull(scope);
 
         RequestState requested = lifecycle.cancel("301", 0L, CancelReason.CLIENT_CANCELLED);
@@ -1311,7 +1334,7 @@ class RequestContextLifecycleTest {
         assertFalse(
                 future.isDone(), "the admission mutation still owns rollback and terminal cleanup");
 
-        scope.finish();
+        AbstractRequestScheduler.finishPlacement(scope);
 
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), future.join().getCode());
         assertEquals(
@@ -1324,15 +1347,15 @@ class RequestContextLifecycleTest {
     @Test
     void repeatedCancellationDuringAdmissionKeepsTheFirstCause() throws Exception {
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context(303L));
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle("303", future);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(303L));
+        PlacementOperation admission = SchedulerTestSupport.claim(lifecycle, "303", future);
         assertNotNull(admission);
 
         lifecycle.cancel("303", 0L, CancelReason.CLIENT_CANCELLED);
         lifecycle.cancel("303", 0L, CancelReason.DEADLINE_EXCEEDED);
         assertFalse(future.isDone());
 
-        admission.finish();
+        AbstractRequestScheduler.finishPlacement(admission);
 
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
@@ -1349,23 +1372,75 @@ class RequestContextLifecycleTest {
     }
 
     @Test
+    void retirementFromAnotherEndpointLeavesCurrentRouteUnchanged() {
+        Registered registered = registerItem(7112L);
+        assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        var route = registered.item();
+        var context = route.ctx();
+        var before = context.snapshot();
+        lifecycle.onEndpointRetired(
+                context,
+                new ContextResult.EndpointRetirement(
+                        route,
+                        route.decodeReservation(),
+                        RoleType.DECODE,
+                        mock(DecodeEndpoint.class),
+                        "old endpoint",
+                        123L));
+        assertSame(before, context.snapshot());
+        assertFalse(registered.future().isDone());
+    }
+
+    @Test
+    void endpointRetirementDoesNotConfirmWorkerExecution() {
+        org.mockito.Mockito.doReturn(true)
+                .when((QueuedRequestScheduler) SchedulerTestServices.scheduler(lifecycle))
+                .enqueue(org.mockito.ArgumentMatchers.any());
+        Registered registered = registerItem(7113L);
+        var route = registered.item();
+        var context = route.ctx();
+        try (var admission = lifecycle.claimPlacement(context);
+                var finish = RequestProtocolTestSupport.finishOnExit(admission)) {
+            assertNotNull(admission);
+            assertEquals(
+                    PlacementResult.Status.SUCCESS,
+                    RequestProtocolTestSupport.commitRoute(
+                            lifecycle, route, RequestProtocolTestSupport.publication(() -> true)));
+            var before = context.snapshot().engine();
+            lifecycle.onEndpointRetired(
+                    context,
+                    new ContextResult.EndpointRetirement(
+                            route,
+                            route.decodeReservation(),
+                            RoleType.DECODE,
+                            route.decodeEndpoint(),
+                            "endpoint retired",
+                            System.currentTimeMillis()));
+            assertSame(before, context.snapshot().engine());
+            assertFalse(context.snapshot().engine().decodeAccepted());
+            assertNotNull(context.snapshot().routeFailure());
+            assertFalse(registered.future().isDone());
+        }
+    }
+
+    @Test
     void workerTerminalDuringAdmissionWinsOverRetirementAndAdmissionFailure() throws Exception {
         Registered registered = registerItem(7111L);
-        RequestRoute original = registered.item();
+        RouteExecution original = registered.item();
         RequestContext context = original.ctx();
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         when(prefill.getStatus())
                 .thenReturn(
                         org.flexlb.dao.master.WorkerStatus.createDiscovered(
                                 RoleType.PREFILL, "test", "127.0.0.1", 8000, 8001, "test"));
-        RequestRoute route =
+        RouteExecution route =
                 SchedulingTestConfig.createRoute(
                         context,
                         SchedulingTestConfig.routeResponse(original),
                         null,
                         null,
                         prefill,
-                        original.decodeEp(),
+                        original.decodeEndpoint(),
                         original.decodeReservation(),
                         original.enqueuedAtMs());
         var callbacks = new java.util.concurrent.atomic.AtomicInteger();
@@ -1378,21 +1453,21 @@ class RequestContextLifecycleTest {
                                     callbacks.incrementAndGet();
                                 });
         try (var admission =
-                        lifecycle.claimAdmissionHandle(route.requestId(), registered.future());
+                        SchedulerTestSupport.claim(
+                                lifecycle, route.requestId(), registered.future());
                 var finish = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.SUCCESS,
                     RequestProtocolTestSupport.commitRoute(
                             lifecycle, route, RequestProtocolTestSupport.publication(() -> true)));
-            lifecycle.onEngineEvidence(
+            lifecycle.onEndpointRetired(
                     route.ctx(),
-                    new ContextResult.EngineEvidence(
+                    new ContextResult.EndpointRetirement(
                             route,
                             route.decodeReservation(),
                             RoleType.PREFILL,
-                            ContextResult.EngineKind.RETIRED,
-                            0L,
+                            route.prefillEndpoint(),
                             "Prefill endpoint generation retired",
                             System.currentTimeMillis()));
             SchedulerTestSupport.awaitRequestWork(
@@ -1410,8 +1485,9 @@ class RequestContextLifecycleTest {
             assertFalse(
                     registered.future().isDone(),
                     "the routing owner still retains all terminal evidence");
-            admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
-            admission.finish();
+            AbstractRequestScheduler.failPlacement(
+                    admission, Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
+            AbstractRequestScheduler.finishPlacement(admission);
         }
         assertEquals(
                 StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(),
@@ -1423,7 +1499,7 @@ class RequestContextLifecycleTest {
         assertEquals(Stage.FINISHED, SchedulerTestSupport.stage(context));
         assertEquals(RequestState.Phase.FAILED, RequestState.from(context.snapshot()).state());
         assertEquals(0, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
-        verify(route.decodeEp())
+        verify(route.decodeEndpoint())
                 .release(
                         route.decodeReservation(),
                         DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
@@ -1433,13 +1509,14 @@ class RequestContextLifecycleTest {
     @Test
     void admissionFailurePreservesAnEarlierCancellation() throws Exception {
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context(304L));
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle("304", future);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(304L));
+        PlacementOperation admission = SchedulerTestSupport.claim(lifecycle, "304", future);
         assertNotNull(admission);
 
         lifecycle.cancel("304", 0L, CancelReason.CLIENT_CANCELLED);
-        admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
-        admission.finish();
+        AbstractRequestScheduler.failPlacement(
+                admission, Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
+        AbstractRequestScheduler.finishPlacement(admission);
 
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
@@ -1458,8 +1535,8 @@ class RequestContextLifecycleTest {
     @Test
     void shutdownIntentSurvivesAdmissionFailureWithoutAnItem() throws Exception {
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context(305L));
-        AdmissionHandle admission = lifecycle.claimAdmissionHandle("305", future);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(305L));
+        PlacementOperation admission = SchedulerTestSupport.claim(lifecycle, "305", future);
         assertNotNull(admission);
         var requestContext = lifecycle.requests.findActive("305");
         synchronized (requestContext) {
@@ -1479,7 +1556,8 @@ class RequestContextLifecycleTest {
             assertNull(ending.outcome());
             assertNotNull(ending.placement());
         }
-        admission.terminate(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
+        AbstractRequestScheduler.failPlacement(
+                admission, Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
         assertEquals(
                 StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                 future.get(5, TimeUnit.SECONDS).getCode());
@@ -1493,7 +1571,7 @@ class RequestContextLifecycleTest {
     @Test
     void queueDecisionResponsePublishesOutsideTheDecisionCaller() throws Exception {
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context(302L));
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(302L));
         CountDownLatch published = new CountDownLatch(1);
         AtomicReference<String> callbackThread = new AtomicReference<>();
         future.thenAccept(
@@ -1512,10 +1590,10 @@ class RequestContextLifecycleTest {
     }
 
     @Test
-    void shutdownGateWaitsForTheExactAdmissionHandleAndRejectsNewWork() throws Exception {
+    void shutdownGateWaitsForTheExactPlacementOperationAndRejectsNewWork() throws Exception {
         CompletableFuture<Response> heldFuture =
-                RequestProtocolTestSupport.register(lifecycle, context(401L));
-        AdmissionHandle held = lifecycle.claimAdmissionHandle("401", heldFuture);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(401L));
+        PlacementOperation held = SchedulerTestSupport.claim(lifecycle, "401", heldFuture);
         assertNotNull(held);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -1532,11 +1610,11 @@ class RequestContextLifecycleTest {
                     "shutdown must not overtake an exact admission mutation");
 
             CompletableFuture<Response> rejected =
-                    RequestProtocolTestSupport.register(lifecycle, context(402L));
+                    RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(402L));
             assertEquals(
                     StrategyErrorType.DISPATCH_FAILED.getErrorCode(), rejected.join().getCode());
 
-            held.finish();
+            AbstractRequestScheduler.finishPlacement(held);
             assertTrue(shutdownOwner.get(5, TimeUnit.SECONDS));
             lifecycle.closeOutstandingAndTerminalize();
             SchedulerTestSupport.timer(
@@ -1555,7 +1633,7 @@ class RequestContextLifecycleTest {
     @Test
     void cancelRequiresTheExpectedBatchGenerationAndUnknownIdsStayAbsent() {
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context(501L));
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(501L));
 
         assertNull(lifecycle.cancel("999", 0L, CancelReason.CLIENT_CANCELLED));
         assertNull(lifecycle.cancel("501", 91L, CancelReason.CLIENT_CANCELLED));
@@ -1575,7 +1653,7 @@ class RequestContextLifecycleTest {
             RequestProtocolTestSupport.applyPrefillStatus(
                     lifecycle,
                     requestContext,
-                    registered.item().prefillEp(),
+                    registered.item().prefillEndpoint(),
                     RoleType.PREFILL,
                     new PrefillEndpoint.PrefillRequestStatus(
                             registered.item(),
@@ -1591,8 +1669,8 @@ class RequestContextLifecycleTest {
                         .getRequestState("602", 0L)
                         .state());
         assertEquals(0, lifecycle.requests.liveRequestCount());
-        verify(registered.item().prefillEp()).releaseRequest(registered.item());
-        verify(registered.item().decodeEp())
+        verify(registered.item().prefillEndpoint()).releaseRequest(registered.item());
+        verify(registered.item().decodeEndpoint())
                 .release(
                         registered.item().decodeReservation(),
                         DecodeResources.ReleaseReason.COUNTERPART_FINISHED);
@@ -1600,7 +1678,7 @@ class RequestContextLifecycleTest {
 
     @Test
     void expiredArrivalDoesNotDisturbTheWaitingRequests() throws Exception {
-        var low = RequestProtocolTestSupport.register(lifecycle, context(1));
+        var low = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(1));
         var expired = context(2);
         expired.data()
                 .setSchedulingMetadata(
@@ -1608,7 +1686,7 @@ class RequestContextLifecycleTest {
         // QUEUE expiry before placement is admission capacity exhaustion (8431).
         assertEquals(
                 StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
-                RequestProtocolTestSupport.register(lifecycle, expired)
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, expired)
                         .get(5, TimeUnit.SECONDS)
                         .getCode());
         assertFalse(low.isDone());
@@ -1624,11 +1702,7 @@ class RequestContextLifecycleTest {
             List<Future<CompletableFuture<Response>>> futures = new ArrayList<>();
             for (long id = 1; id <= 128; id++) {
                 long requestId = id;
-                futures.add(
-                        executor.submit(
-                                () ->
-                                        RequestProtocolTestSupport.register(
-                                                lifecycle, context(requestId))));
+                futures.add(executor.submit(() -> lifecycle.submit(context(requestId))));
             }
             for (var future : futures) {
                 assertFalse(future.get(5, TimeUnit.SECONDS).isDone());
@@ -1652,7 +1726,8 @@ class RequestContextLifecycleTest {
         PreemptionRegistration preemption =
                 lifecycle
                         .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(703L), 1L),
+                                new DecodeResources.RequestReservation(
+                                        1L, String.valueOf(703L), 1L),
                                 19L)
                         .orElseThrow();
         RequestProtocolTestSupport.expireInactiveRequest(
@@ -1665,7 +1740,7 @@ class RequestContextLifecycleTest {
         delivery.route()
                 .ctx()
                 .data()
-                .getLifecycle()
+                .getRequestScheduler()
                 .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 delivery,
@@ -1684,7 +1759,7 @@ class RequestContextLifecycleTest {
                                                 .getRequestState("703", 0L)),
                                 Long.MAX_VALUE));
         CompletableFuture<Response> replacement =
-                RequestProtocolTestSupport.register(lifecycle, context(703L));
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(703L));
         assertSame(registered.future(), registered.item().ctx().data().getFuture());
         assertNotSame(replacement, registered.item().ctx().data().getFuture());
         assertThrows(IllegalStateException.class, () -> old.data().setFuture(replacement));
@@ -1704,16 +1779,17 @@ class RequestContextLifecycleTest {
         assertFalse(
                 lifecycle.onPreemption(
                         preemption,
-                        new RequestLifecycle.PreemptionEvent(
+                        new AbstractRequestScheduler.PreemptionEvent(
                                 null,
                                 false,
-                                registered.item().decodeEp(),
+                                registered.item().decodeEndpoint(),
                                 registered.item().decodeReservation(),
                                 "late engine cancellation")));
         assertFalse(
                 lifecycle.onPreemption(
                         preemption,
-                        new RequestLifecycle.PreemptionEvent(null, true, null, null, null)));
+                        new AbstractRequestScheduler.PreemptionEvent(
+                                null, true, null, null, null)));
         lifecycle.cancel(old, 0L, CancelReason.CLIENT_CANCELLED);
         lifecycle.cancel(
                 registered.item().ctx(),
@@ -1727,14 +1803,14 @@ class RequestContextLifecycleTest {
         RequestProtocolTestSupport.applyPrefillStatus(
                 lifecycle,
                 old,
-                registered.item().prefillEp(),
+                registered.item().prefillEndpoint(),
                 RoleType.PREFILL,
                 new PrefillEndpoint.PrefillRequestStatus(
                         registered.item(), PrefillEndpoint.PrefillRequestStatus.Kind.ACTIVE, 0L));
         RequestProtocolTestSupport.applyPrefillStatus(
                 lifecycle,
                 old,
-                registered.item().prefillEp(),
+                registered.item().prefillEndpoint(),
                 RoleType.PREFILL,
                 new PrefillEndpoint.PrefillRequestStatus(
                         registered.item(),
@@ -1744,12 +1820,12 @@ class RequestContextLifecycleTest {
         RequestProtocolTestSupport.applyDecodeStatus(
                 lifecycle,
                 old,
-                registered.item().decodeEp(),
+                registered.item().decodeEndpoint(),
                 DecodeResources.DecodeRequestStatus.active(registered.item().decodeReservation()));
         RequestProtocolTestSupport.applyDecodeStatus(
                 lifecycle,
                 old,
-                registered.item().decodeEp(),
+                registered.item().decodeEndpoint(),
                 DecodeResources.DecodeRequestStatus.terminal(
                         registered.item().decodeReservation(), 0L));
         SchedulerTestSupport.awaitRequestWork(
@@ -1782,7 +1858,7 @@ class RequestContextLifecycleTest {
         delivery.route()
                 .ctx()
                 .data()
-                .getLifecycle()
+                .getRequestScheduler()
                 .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 delivery,
@@ -1797,13 +1873,14 @@ class RequestContextLifecycleTest {
         var claim =
                 lifecycle
                         .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(706L), 1L),
+                                new DecodeResources.RequestReservation(
+                                        1L, String.valueOf(706L), 1L),
                                 20L)
                         .orElseThrow();
         assertTrue(
                 lifecycle.onPreemption(
                         claim,
-                        new RequestLifecycle.PreemptionEvent(
+                        new AbstractRequestScheduler.PreemptionEvent(
                                 org.flexlb.balance.preemption.PreemptionCancelPhase
                                         .CANCEL_IN_FLIGHT,
                                 false,
@@ -1813,7 +1890,7 @@ class RequestContextLifecycleTest {
         assertTrue(
                 lifecycle.onPreemption(
                         claim,
-                        new RequestLifecycle.PreemptionEvent(
+                        new AbstractRequestScheduler.PreemptionEvent(
                                 acceptedCancel
                                         ? org.flexlb.balance.preemption.PreemptionCancelPhase
                                                 .CANCEL_REQUESTED
@@ -1823,7 +1900,7 @@ class RequestContextLifecycleTest {
                                 null,
                                 null,
                                 null)));
-        var source = registered.item().decodeEp();
+        var source = registered.item().decodeEndpoint();
         verify(source, org.mockito.Mockito.never())
                 .updatePreemption(
                         org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any());
@@ -1877,7 +1954,7 @@ class RequestContextLifecycleTest {
         delivery.route()
                 .ctx()
                 .data()
-                .getLifecycle()
+                .getRequestScheduler()
                 .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 delivery,
@@ -1886,7 +1963,7 @@ class RequestContextLifecycleTest {
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(lifecycle));
         var context = registered.item().ctx();
-        var source = registered.item().decodeEp();
+        var source = registered.item().decodeEndpoint();
         when(source.ownership(registered.item().decodeReservation()))
                 .thenReturn(org.flexlb.balance.endpoint.DecodeResources.Ownership.HELD);
         when(source.updatePreemption(
@@ -1898,13 +1975,14 @@ class RequestContextLifecycleTest {
         var claim =
                 lifecycle
                         .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(707L), 1L),
+                                new DecodeResources.RequestReservation(
+                                        1L, String.valueOf(707L), 1L),
                                 21L)
                         .orElseThrow();
         assertTrue(
                 lifecycle.onPreemption(
                         claim,
-                        new RequestLifecycle.PreemptionEvent(
+                        new AbstractRequestScheduler.PreemptionEvent(
                                 org.flexlb.balance.preemption.PreemptionCancelPhase
                                         .CANCEL_IN_FLIGHT,
                                 false,
@@ -1934,7 +2012,7 @@ class RequestContextLifecycleTest {
         assertTrue(
                 lifecycle.onPreemption(
                         claim,
-                        new RequestLifecycle.PreemptionEvent(
+                        new AbstractRequestScheduler.PreemptionEvent(
                                 org.flexlb.balance.preemption.PreemptionCancelPhase.NOT_FOUND_STALE,
                                 false,
                                 null,
@@ -1982,7 +2060,7 @@ class RequestContextLifecycleTest {
         delivery.route()
                 .ctx()
                 .data()
-                .getLifecycle()
+                .getRequestScheduler()
                 .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 delivery,
@@ -1994,13 +2072,14 @@ class RequestContextLifecycleTest {
         var claim =
                 lifecycle
                         .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(711L), 1L),
+                                new DecodeResources.RequestReservation(
+                                        1L, String.valueOf(711L), 1L),
                                 22L)
                         .orElseThrow();
         assertTrue(
                 lifecycle.onPreemption(
                         claim,
-                        new RequestLifecycle.PreemptionEvent(
+                        new AbstractRequestScheduler.PreemptionEvent(
                                 org.flexlb.balance.preemption.PreemptionCancelPhase
                                         .CANCEL_IN_FLIGHT,
                                 false,
@@ -2010,7 +2089,7 @@ class RequestContextLifecycleTest {
         assertTrue(
                 lifecycle.onPreemption(
                         claim,
-                        new RequestLifecycle.PreemptionEvent(
+                        new AbstractRequestScheduler.PreemptionEvent(
                                 org.flexlb.balance.preemption.PreemptionCancelPhase.NOT_FOUND_STALE,
                                 false,
                                 null,
@@ -2031,7 +2110,7 @@ class RequestContextLifecycleTest {
                             false),
                     System.currentTimeMillis());
         }
-        var source = registered.item().decodeEp();
+        var source = registered.item().decodeEndpoint();
         when(source.updatePreemption(
                         22L,
                         DecodeResources.PreemptionUpdate.finished(
@@ -2141,7 +2220,7 @@ class RequestContextLifecycleTest {
                         claim.route()
                                 .ctx()
                                 .data()
-                                .getLifecycle()
+                                .getRequestScheduler()
                                 .onDeliveryResult(
                                         new ContextResult.TransportResult(
                                                 claim, null, System.currentTimeMillis())));
@@ -2153,7 +2232,7 @@ class RequestContextLifecycleTest {
         claim.route()
                 .ctx()
                 .data()
-                .getLifecycle()
+                .getRequestScheduler()
                 .onDeliveryResult(
                         new ContextResult.TransportResult(
                                 claim,
@@ -2166,7 +2245,7 @@ class RequestContextLifecycleTest {
                         claim.route()
                                 .ctx()
                                 .data()
-                                .getLifecycle()
+                                .getRequestScheduler()
                                 .onDeliveryResult(
                                         new ContextResult.TransportResult(
                                                 claim,
@@ -2181,7 +2260,7 @@ class RequestContextLifecycleTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.repository(lifecycle)
                         .getRequestState("705", 23L)
                         .state());
-        org.mockito.Mockito.verify(registered.item().decodeEp(), org.mockito.Mockito.never())
+        org.mockito.Mockito.verify(registered.item().decodeEndpoint(), org.mockito.Mockito.never())
                 .release(
                         registered.item().decodeReservation(),
                         DecodeResources.ReleaseReason.NOT_SENT);
@@ -2198,41 +2277,45 @@ class RequestContextLifecycleTest {
         assertTrue(
                 lifecycle
                         .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(709L), 2L),
+                                new DecodeResources.RequestReservation(
+                                        1L, String.valueOf(709L), 2L),
                                 23L)
                         .isEmpty());
         PreemptionRegistration claim =
                 lifecycle
                         .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(709L), 1L),
+                                new DecodeResources.RequestReservation(
+                                        1L, String.valueOf(709L), 1L),
                                 24L)
                         .orElseThrow();
         assertEquals(
                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 8090),
                 claim.cancelTarget());
-        SchedulingTestConfig.prefillTemplate(registered.item()).setServerIp("changed-after-claim");
+        var exported = registered.item().prefill();
+        exported.setServerIp("changed-after-claim");
+        exported.setGrpcPort(0);
         assertEquals("127.0.0.1", claim.cancelTarget().prefillIp());
-        SchedulingTestConfig.prefillTemplate(registered.item()).setGrpcPort(0);
         assertTrue(
                 lifecycle
                         .tryClaim(
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(709L), 1L),
+                                new DecodeResources.RequestReservation(
+                                        1L, String.valueOf(709L), 1L),
                                 26L)
                         .isEmpty());
         lifecycle.onPreemption(
-                claim, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+                claim, new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
     }
 
     @Test
     void exactPreemptionRouteWithUnroutableCancelTargetIsAControlFailureAndDoesNotInstallClaim() {
-        Registered registered = registerItem(710L);
-        SchedulingTestConfig.prefillTemplate(registered.item()).setGrpcPort(0);
+        Registered registered = registerItem(710L, 0);
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         assertThrows(
                 IllegalArgumentException.class,
                 () ->
                         lifecycle.tryClaim(
-                                new DecodeResources.ReservationHandle(1L, String.valueOf(710L), 1L),
+                                new DecodeResources.RequestReservation(
+                                        1L, String.valueOf(710L), 1L),
                                 25L));
         assertNull(SchedulerTestSupport.preemption(registered.item().ctx()));
     }
@@ -2243,7 +2326,7 @@ class RequestContextLifecycleTest {
         assertEquals(PlacementResult.Status.SUCCESS, commitRoute(lifecycle, registered));
         var current = registered.item().decodeReservation();
         var stale =
-                new DecodeResources.ReservationHandle(
+                new DecodeResources.RequestReservation(
                         current.endpointGenerationId() + 1L,
                         String.valueOf(current.requestId()),
                         current.reservationToken());
@@ -2254,7 +2337,7 @@ class RequestContextLifecycleTest {
                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 8090),
                 valid.cancelTarget());
         lifecycle.onPreemption(
-                valid, new RequestLifecycle.PreemptionEvent(null, true, null, null, null));
+                valid, new AbstractRequestScheduler.PreemptionEvent(null, true, null, null, null));
     }
 
     private Registered registerItemWithCancelTarget(long requestId) {
@@ -2262,33 +2345,40 @@ class RequestContextLifecycleTest {
         var prefill = new org.flexlb.dao.loadbalance.ServerStatus();
         prefill.setServerIp("127.0.0.1");
         prefill.setGrpcPort(8090);
-        RequestRoute original = registered.item();
+        RouteExecution original = registered.item();
         return new Registered(
                 SchedulingTestConfig.createRoute(
                         original.ctx(),
                         SchedulingTestConfig.routeResponse(original),
                         prefill,
                         original.decode(),
-                        original.prefillEp(),
-                        original.decodeEp(),
+                        original.prefillEndpoint(),
+                        original.decodeEndpoint(),
                         original.decodeReservation(),
                         original.enqueuedAtMs()),
                 registered.future());
     }
 
     private Registered registerItem(long requestId) {
+        return registerItem(requestId, 8090);
+    }
+
+    private Registered registerItem(long requestId, int grpcPort) {
         RequestContext context = context(requestId);
         CompletableFuture<Response> future =
-                RequestProtocolTestSupport.register(lifecycle, context);
+                RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
         DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
-        DecodeResources.ReservationHandle reservation =
-                new DecodeResources.ReservationHandle(1L, String.valueOf(requestId), 1L);
+        DecodeResources.RequestReservation reservation =
+                new DecodeResources.RequestReservation(1L, String.valueOf(requestId), 1L);
         context.data().setFuture(future);
+        var selectedPrefill = new org.flexlb.dao.loadbalance.ServerStatus();
+        selectedPrefill.setServerIp("127.0.0.1");
+        selectedPrefill.setGrpcPort(grpcPort);
         return new Registered(
                 SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
-                        null,
+                        selectedPrefill,
                         null,
                         null,
                         decode,

@@ -25,7 +25,7 @@ flexlb-sync is the core load balancing module of FlexLB. It handles:
 - `QueuedRequestScheduler` owns triggering, planning and capacity waits; queue interfaces own ordering and GroupPlanner owns batching rules
 - `PlacementConfiguration` constructs the fixed-mode scheduler at startup
 - `RequestRepository` owns shared registration, identity lookup, and archival; each request retains its original Scheduler
-- `PrefillEndpoint` directly owns the Prefill generation, resource records, status reconciliation and `PrefillRequestQueue` index. `PrefillState` and `PrefillObservation` have been deleted. Resource release and generation-pin cleanup no longer use a separate State-to-Endpoint release report; notifications run after unlocking. `GroupPlanner` is shared by scheduling and prediction. The merged class is still above budget.
+- `PrefillEndpoint` directly owns the Prefill generation, resource records, status reconciliation and `PrefillRequestQueue` index. `PrefillState` and `PrefillObservation` have been deleted. Resource release and worker-selection cleanup no longer use a separate State-to-Endpoint release report; notifications run after unlocking. `GroupPlanner` is shared by scheduling and prediction. The merged class is still above budget.
 - `DecodeEndpoint` directly owns the Decode resource records and mutation lock; `DecodeState` has been deleted. Queue resource preparation is in `DeliveryDispatcher.enqueueRoute`, with unpublished preparation released by `finishPlacement`. The default scheduler retains retry and preemption timing. These changes do not yet satisfy all class budgets.
 - `PrefillEndpoint` receives the actual dispatch mode as a value and has no Dispatcher dependency. Direct and queued dispatch share Decode reservation preparation; an attachment failure releases the newly acquired exact handle before propagating the original error.
 - `DeliveryDispatcher` chooses NON_BATCH or BATCH delivery without reselecting endpoints, using the exact request owner and the same `Delivery.Member` identity from preparation through delivery
@@ -42,7 +42,7 @@ The system routes requests through multiple worker types based on model requirem
 Key classes:
 
 - `RoleType` (in flexlb-common): Enum defining worker roles
-- `RequestWorkerSelector`: Combines role selections and closes generation pins when selection fails
+- `RequestWorkerSelector`: Combines role selections and closes selected Workers when selection fails
 - `RequestContext`: Owns request facts, exact identities, event acceptance, result precedence, and atomic lifecycle changes; it does not call Endpoint operations or construct execution tasks
 - `RequestRepository`: Owns shared request identities and exact archival only
 - `RequestLifecycle`: Owns admission handles, cancellation, deadlines and request settlement; `ExpirationTimer` schedules exact registrations. `ApplicationLifecycle` in flexlb-api orders shutdown; execution components drain and close their own work
@@ -149,7 +149,7 @@ External dependencies:
 ### Rollback Mechanism
 
 When routing fails for a later role type (e.g., PREFILL succeeds but DECODE fails),
-`RequestWorkerSelector` closes the exact `WorkerAssignment` capabilities already selected.
+`RequestRouteSelector` discards incomplete selections without closing shared Worker endpoints.
 The request scheduler acquires resource reservations after selection and owns
 rollback until queue publication or direct delivery handoff.
 
@@ -206,7 +206,7 @@ Do not proactively create documentation files (\*.md) or README files unless exp
 
 Spring creates one scheduler at startup. The scheduler and request contexts use the ConfigService startup configuration directly; changes to scheduling and shared PrefillEndpoint settings require restart. BATCH abandonment requires sender exit and exact remote cleanup proof before archival; response completion does not release these obligations. Ordinary cancellation capability is checked before using the Engine cleanup protocol.
 
-Prefill policy owns capacity failure classification through read-only CandidateInput methods; RequestWorkerSelector preserves policy results. Endpoint commitDirect owns its lock and reuses the caller’s selection pin through route publication; commitDirectLocked has been removed. Synchronous queued preemption owns incoming-reservation rollback after withdrawal failures; AdmissionHandle has no placement-failure callback protocol.
+Prefill policy owns capacity failure classification through read-only CandidateInput methods; RequestWorkerSelector preserves policy results. Endpoint commitDirect validates the request record, retirement and capacity in its event loop; RequestRoute holds a direct Endpoint reference. Synchronous queued preemption owns incoming-reservation rollback after withdrawal failures; AdmissionHandle has no placement-failure callback protocol.
 
 DeliveryDispatcher receives TaskTimer directly for transport/preemption timeouts. RequestLifecycle has no TaskTimer dependency; it owns request deadlines through ExpirationTimer.
 
@@ -218,7 +218,7 @@ ExpirationTimer borrows TaskTimer and never creates or closes a pool. ScheduledT
 
 PlacementConfiguration creates an unstarted scheduler. ApplicationLifecycle binds and starts both default and custom schedulers. Tests explicitly start their scheduler when background progress is needed; configuration factory methods do not start threads.
 
-QueuedRequestScheduler, its EndpointWork, and Delivery do not own DeliveryExecution. Scheduler constructs the selected delivery input; DeliveryDispatcher uses its injected execution component for capacity checks/subscriptions and resource preparation. Scheduling still chooses candidates and prefix policy. Route-submit telemetry is emitted at Dispatcher publication, not through a scheduler forwarding method.
+QueuedRequestScheduler, its PrefillQueueScheduler, and Delivery do not own DeliveryExecution. Scheduler constructs the selected delivery input; DeliveryDispatcher uses its injected execution component for capacity checks/subscriptions and resource preparation. Scheduling still chooses candidates and prefix policy. Route-submit telemetry is emitted at Dispatcher publication, not through a scheduler forwarding method.
 
 Request observations use one immutable ContextResult.Snapshot; the SnapshotFacts delegate wrapper was removed. No-change observations retain snapshot identity, and later transitions cannot mutate historical snapshots.
 
@@ -228,18 +228,18 @@ Transport confirmation uses RequestContext.confirmDelivery directly; it never se
 
 Prefill status reduction directly returns WorkerEndpoint.StatusChange.Prefill. The redundant StatusReconciliation wrapper was removed; resource changes remain under the endpoint lock and notifications remain outside it.
 
-Direct and queued placement use `DeliveryDispatcher.finishPlacement(route, admission)`: it releases unpublished resources, closes selection pins, then finishes admission. Both paths store the exact Prefill reservation on Route before publication callbacks. ROLLBACK_COMPLETED requires successful release of both endpoints; published routes remain owned by RequestLifecycle. PlacementPlan calls this same complete operation and does not implement rollback. The partial close and close(tasks) protocols are removed.
+Direct and queued placement use `DeliveryDispatcher.finishPlacement(route, admission)`: it releases unpublished resources and finishes admission. Both paths store the exact Prefill reservation on Route before publication callbacks. ROLLBACK_COMPLETED requires successful release of both endpoints; published routes remain owned by RequestLifecycle. PlacementPlan calls this same complete operation and does not implement rollback. The partial close and close(tasks) protocols are removed.
 
 CloseProgress.notificationsDone includes successful deadline registration updates and owner notifications. Context does not duplicate ExpirationTimer state in a timersDone field. Failed or blocked timer updates must keep the request unarchived; RequestTerminalSettlementTest and RequestNotificationOwnershipRaceTest cover those boundaries.
 
-Immediate custom schedulers call `DeliveryDispatcher.submitRoute(route, admission)`. The dispatcher closes selection pins and finishes admission before publishing the existing RouteDelivered evidence; RouteDelivery and commitSelectedRoute are removed. Queued Prefill commits accept only the selected plan, never a caller-supplied generation pin. Decode permit resolution and its resource mutation share admissionLock; transferDispatch and synchronized(permit) are removed. Reservation occupancy remains visible to prediction before commit. These protocol removals do not imply that the five core class budgets are met.
+Immediate custom schedulers call `DeliveryDispatcher.submitRoute(route, admission)`. The dispatcher finishes admission before publishing the existing RouteDelivered evidence; RouteDelivery and commitSelectedRoute are removed. Queued Prefill commits accept only the selected plan, never a caller-supplied selected Worker. Decode permit resolution and its request mutation run in one Endpoint event; transferDispatch and synchronized(permit) are removed. Reservation occupancy remains visible to prediction before commit. These protocol removals do not imply that the five core class budgets are met.
 
-QueuedCommit and CommittedHandoff are deleted. Endpoint validates the prepared Delivery itself; that same object retains its generation pin, preceding-work snapshot and commit fact. Closing a committed Delivery releases temporary permits/pins, never committed request rows. Batch features are built outside the endpoint lock and shared by prediction and the batch record. RequestLifecycle writes release evidence directly to Context.CloseFacts; the intermediate Settlement record is deleted. Delivery errors use the same advanceRequest path as other request events.
+QueuedCommit and CommittedHandoff are deleted. Endpoint validates the prepared Delivery itself; that same object retains its Endpoint reference, preceding-work snapshot and commit fact. Closing a committed Delivery releases temporary dispatch permits, never committed request rows. Batch features are built outside the Endpoint event loop and shared by prediction and the batch record. RequestLifecycle writes release evidence directly to Context.CloseFacts; the intermediate Settlement record is deleted. Delivery errors use the same advanceRequest path as other request events.
 
-Direct commit returns only the preceding WorkSnapshot and reuses the selection pin; no second generation pin or Delivery wrapper is allocated. Dispatcher reads the existing DeliveryPermit state to decide whether the executor owns cleanup; Delivery.transferred is deleted. Failure before executor acceptance remains the submitting caller’s cleanup responsibility. finishPlacement returns resource cleanup errors for reporting; admission completion errors propagate.
+Direct commit returns only the preceding WorkSnapshot. RequestRoute holds its Endpoint reference; no separate selection object or Delivery wrapper is allocated. Dispatcher reads the existing DeliveryPermit state to decide whether the executor owns cleanup; Delivery.transferred is deleted. Failure before executor acceptance remains the submitting caller’s cleanup responsibility. finishPlacement returns resource cleanup errors for reporting; admission completion errors propagate.
 
 Confirmation eligibility is shared through ContextResult.Snapshot.canConfirmDelivery; Context still arbitrates inactivity and preemption. AdmissionHandle delegates request-state eligibility to Context.beginPlacement under the same monitor. Closed request-task admission is not retried; its registration failure propagates. Unaccepted task submission, response registration, physical settlement and deadline recovery remain; DeliveryClaimTest covers recovery without another event. Prefill status application rereads ledger facts under lock and reuses out-of-lock prediction only for identical surviving members; in-lock failure retires before unlocking.
 
-Blocked-head bypass belongs to PrefillRequestQueue: custom queues default to strict order; PrefillActiveIndex retains the existing same-priority, different-Decode, once-per-head rule. PrefillEndpoint records successful dispatch under its existing lock. QueuedRequestScheduler never replaces GroupPlanner.dispatchReason for bypass candidates and retains the planner deadline alongside the blocked head capacity subscription. Queue decisions never settle requests.
+Blocked-head bypass belongs to PrefillRequestQueue: custom queues default to strict order; OrderedPrefillRequestQueue retains the existing same-priority, different-Decode, once-per-head rule. PrefillEndpoint records successful dispatch under its existing lock. QueuedRequestScheduler never replaces GroupPlanner.dispatchReason for bypass candidates and retains the planner deadline alongside the blocked head capacity subscription. Queue decisions never settle requests.
 
 PlacementResult.ENDPOINT_CHANGED distinguishes successful Prefill/Decode selection from failure to capture its exact generation. Its selection field retains the original SUCCESS result; RequestWorkerSelector no longer reselects Decode internally. Default schedulers retain their own retry/rejection behavior. Strategy failures are forwarded unchanged.

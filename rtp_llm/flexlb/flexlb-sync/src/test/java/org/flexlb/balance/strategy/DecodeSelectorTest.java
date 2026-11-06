@@ -6,8 +6,8 @@ import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.strategy.StrategyTestSupport.Selection;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.PreemptionConfig;
@@ -103,11 +103,12 @@ class DecodeSelectorTest {
             DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
             DecodeResources.AdmissionSummary empty = endpoint.admissionSummary();
             Assertions.assertSame(empty, endpoint.admissionSummary());
-            try (var pin = endpoint.tryPinGeneration()) {
+            {
+                var selectedEndpoint = endpoint;
+
                 var reservation =
-                        endpoint.tryReserveQueuedRequest(
-                                        pin, String.valueOf(42L), 128L, 256L, 70, null)
-                                .handle();
+                        endpoint.tryReserveQueuedRequest(String.valueOf(42L), 128L, 256L, 70, null)
+                                .value();
                 var queued = endpoint.admissionSummary();
                 Assertions.assertNotSame(empty, queued);
                 Assertions.assertSame(queued, endpoint.admissionSummary());
@@ -131,7 +132,7 @@ class DecodeSelectorTest {
                         DecodeResources.CapacityRelease.NONE,
                         queued.engineOccupancy(70),
                         "a published summary must remain immutable after ownership changes");
-                Assertions.assertTrue(acquired.handle().release());
+                Assertions.assertTrue(acquired.value().release());
                 endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK)
                         .status();
                 Assertions.assertEquals(
@@ -172,12 +173,8 @@ class DecodeSelectorTest {
         }
         DecodeResources.DecodeRoutingView stale = views.get("127.0.0.1:8080");
         DecodeResources.DecodeRoutingView replacement = views.get("127.0.0.2:8080");
-        WorkerEndpoint.GenerationPin replacementPin =
-                Mockito.mock(WorkerEndpoint.GenerationPin.class);
-        Mockito.when(replacementPin.isOpen()).thenReturn(true);
-        Mockito.when(replacementPin.endpoint())
-                .thenReturn(decodeEndpoint(registry, replacement.address()));
-        Mockito.when(replacementPin.generationId()).thenReturn(replacement.generationId());
+        WorkerEndpoint replacementWorker =
+                Mockito.spy(decodeEndpoint(registry, replacement.address()));
         EndpointRegistry racing = Mockito.mock(EndpointRegistry.class);
         var captures = new java.util.concurrent.atomic.AtomicInteger();
         Mockito.doAnswer(
@@ -188,8 +185,8 @@ class DecodeSelectorTest {
                         })
                 .when(racing)
                 .decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
-        Mockito.when(racing.captureDecodeGeneration(stale)).thenReturn(null);
-        Mockito.when(racing.captureDecodeGeneration(replacement)).thenReturn(replacementPin);
+        Mockito.when(racing.selectDecodeEndpoint(stale)).thenReturn(null);
+        Mockito.when(racing.selectDecodeEndpoint(replacement)).thenReturn(replacementWorker);
 
         var inputs = request(1_000, 1_001L);
         var selector =
@@ -203,19 +200,19 @@ class DecodeSelectorTest {
         Assertions.assertSame(stale, changed.selection().value());
         Assertions.assertEquals(1, captures.get());
         // Only a new scheduling attempt may choose the replacement generation.
-        PlacementResult<RequestRoute, RoleType> result =
+        PlacementResult<Selection, RoleType> result =
                 StrategyTestSupport.select(selector, inputs, SCHEDULING, null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
-        RequestRoute selected = result.value();
+        Selection selected = result.value();
         Assertions.assertEquals("127.0.0.2", selected.decode().getServerIp());
-        Mockito.verify(replacementPin, Mockito.never()).close();
-        selected.close();
-        Mockito.verify(replacementPin).close();
+        Mockito.verify(replacementWorker, Mockito.never()).close();
+
+        Mockito.verify(replacementWorker, Mockito.never()).close();
         Mockito.verify(racing, Mockito.times(2))
                 .decodeRoutingSnapshot(Mockito.isNull(), Mockito.anyList());
-        Mockito.verify(racing).captureDecodeGeneration(stale);
-        Mockito.verify(racing).captureDecodeGeneration(replacement);
+        Mockito.verify(racing).selectDecodeEndpoint(stale);
+        Mockito.verify(racing).selectDecodeEndpoint(replacement);
     }
 
     @Test
@@ -302,7 +299,7 @@ class DecodeSelectorTest {
     }
 
     @Test
-    void concurrentSelectionsKeepTheirOwnViewsAndReleaseGenerationPins() throws Exception {
+    void concurrentSelectionsKeepTheirOwnViewsAndReleaseSelectedWorkers() throws Exception {
         registerWorker("127.0.0.1", 10_000L, 10_000L);
         registerWorker("127.0.0.2", 10_000L, 10_000L);
         EndpointRegistry registry = decodeRegistry();
@@ -680,7 +677,7 @@ class DecodeSelectorTest {
         Request inputs = request(257L, 3_050L);
         inputs = inputs.toBuilder().maxNewTokens(1).build();
 
-        PlacementResult<RequestRoute, RoleType> result =
+        PlacementResult<Selection, RoleType> result =
                 StrategyTestSupport.select(strategy, inputs, SCHEDULING, null);
 
         Assertions.assertEquals(PlacementResult.Status.REJECTED, result.status());
@@ -693,11 +690,10 @@ class DecodeSelectorTest {
         registerWorker("127.0.0.1", 0L, 0L);
         StrategyTestSupport.DecodeRoutingFixture strategy = availableStrategy(decodeRegistry());
 
-        PlacementResult<RequestRoute, RoleType> result =
+        PlacementResult<Selection, RoleType> result =
                 StrategyTestSupport.select(strategy, request(1_000_000L, 3_051L), SCHEDULING, null);
 
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
-        result.value().close();
     }
 
     @ParameterizedTest
@@ -742,17 +738,16 @@ class DecodeSelectorTest {
 
         Request inputs = request(100, 3L);
 
-        PlacementResult<RequestRoute, RoleType> fifoPlacement =
+        PlacementResult<Selection, RoleType> fifoPlacement =
                 StrategyTestSupport.select(strategy, inputs, SCHEDULING, null);
         Assertions.assertEquals(PlacementResult.Status.SUCCESS, fifoPlacement.status());
-        RequestRoute fifoSelection = fifoPlacement.value();
+        Selection fifoSelection = fifoPlacement.value();
         ServerStatus fifoResult = fifoSelection.decode();
         Assertions.assertTrue(fifoResult.isSuccess());
         Assertions.assertEquals(inputs.getRequestId(), fifoResult.getRequestId());
         Assertions.assertFalse(
                 EndpointTestSupport.isQueued(endpoint.resourceSnapshot(), String.valueOf(3L)),
                 "selection must not mutate Decode reservation ownership");
-        fifoSelection.close();
     }
 
     @Test
@@ -819,11 +814,12 @@ class DecodeSelectorTest {
         Map<String, Integer> counts = new HashMap<>();
         for (int index = 0; index < 10; index++) {
             long requestId = 123L + index;
-            PlacementResult<RequestRoute, RoleType> result =
+            PlacementResult<Selection, RoleType> result =
                     StrategyTestSupport.select(
                             strategy, request(100L, requestId), SCHEDULING, null);
             Assertions.assertEquals(PlacementResult.Status.SUCCESS, result.status());
-            try (RequestRoute selected = result.value()) {
+            {
+                Selection selected = result.value();
                 counts.merge(selected.decode().getServerIp(), 1, Integer::sum);
                 Assertions.assertFalse(
                         EndpointTestSupport.isQueued(
@@ -981,15 +977,12 @@ class DecodeSelectorTest {
             long kvTokens,
             long expectedKvTokens,
             int priority) {
-        try (var pin = endpoint.tryPinGeneration()) {
+        {
+            var selectedEndpoint = endpoint;
+
             endpoint.tryReserveQueuedRequest(
-                            pin,
-                            String.valueOf(requestId),
-                            kvTokens,
-                            expectedKvTokens,
-                            priority,
-                            null)
-                    .handle();
+                            String.valueOf(requestId), kvTokens, expectedKvTokens, priority, null)
+                    .value();
         }
     }
 
@@ -1004,20 +997,23 @@ class DecodeSelectorTest {
             long kvTokens,
             long expectedKvTokens,
             int priority) {
-        try (var pin = endpoint.tryPinGeneration()) {
+        {
+            var selectedEndpoint = endpoint;
+
             EndpointTestSupport.reserveUnqueuedDecode(
-                    endpoint, pin, requestId, kvTokens, expectedKvTokens, priority);
+                    endpoint, selectedEndpoint, requestId, kvTokens, expectedKvTokens, priority);
         }
     }
 
     private static ServerStatus selectStatus(
             StrategyTestSupport.DecodeRoutingFixture strategy, Request inputs, String group) {
-        PlacementResult<RequestRoute, RoleType> result =
+        PlacementResult<Selection, RoleType> result =
                 StrategyTestSupport.select(strategy, inputs, SCHEDULING, group);
         if (result.status() != PlacementResult.Status.SUCCESS) {
             return null;
         }
-        try (RequestRoute selected = result.value()) {
+        {
+            Selection selected = result.value();
             return selected.decode();
         }
     }

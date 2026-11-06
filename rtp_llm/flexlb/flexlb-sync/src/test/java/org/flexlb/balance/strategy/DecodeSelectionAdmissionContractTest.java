@@ -8,8 +8,8 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.strategy.StrategyTestSupport.Selection;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -55,30 +55,30 @@ class DecodeSelectionAdmissionContractTest {
 
             for (long requestId = 100L; requestId < 106L; requestId++) {
                 Request request = fixture.request(requestId);
-                PlacementResult<RequestRoute, RoleType> result =
+                PlacementResult<Selection, RoleType> result =
                         StrategyTestSupport.select(
                                 fixture.strategy,
                                 request,
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
                                 null);
                 assertEquals(PlacementResult.Status.SUCCESS, result.status());
-                try (RequestRoute selected = result.value()) {
+                {
+                    Selection selected = result.value();
                     assertEquals(
                             FREE_IP,
                             selected.decode().getServerIp(),
                             "free placement capacity must win over a queued endpoint with only dispatch capacity");
                     fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
-                    WorkerEndpoint.GenerationPin pin = StrategyTestSupport.decodePin(selected);
-                    DecodeEndpoint endpoint = (DecodeEndpoint) pin.endpoint();
-                    DecodeResources.ReservationHandle reservation =
+                    WorkerEndpoint selectedEndpoint = StrategyTestSupport.decodeEndpoint(selected);
+                    DecodeEndpoint endpoint = (DecodeEndpoint) selectedEndpoint;
+                    DecodeResources.RequestReservation reservation =
                             endpoint.tryReserveQueuedRequest(
-                                            pin,
                                             String.valueOf(request.getRequestId()),
                                             request.getHardKvTokens(),
                                             request.getExpectedKvTokens(),
                                             70,
                                             fixture.limits)
-                                    .handle();
+                                    .value();
                     assertNotNull(
                             reservation, "the selected endpoint must pass the same placement gate");
                     try {
@@ -115,14 +115,15 @@ class DecodeSelectionAdmissionContractTest {
             Map<String, Integer> selectedCounts = new HashMap<>();
 
             for (long requestId = 200L; requestId < 206L; requestId++) {
-                PlacementResult<RequestRoute, RoleType> result =
+                PlacementResult<Selection, RoleType> result =
                         StrategyTestSupport.select(
                                 fixture.strategy,
                                 fixture.request(requestId),
                                 org.flexlb.dao.SchedulingMetadata.explicit(70, Long.MAX_VALUE),
                                 null);
                 assertEquals(PlacementResult.Status.SUCCESS, result.status());
-                try (RequestRoute selected = result.value()) {
+                {
+                    Selection selected = result.value();
                     selectedCounts.merge(selected.decode().getServerIp(), 1, Integer::sum);
                     fixture.assertSelectionHasNoReservation(requestId, queuedUsage, freeUsage);
                 }
@@ -210,16 +211,16 @@ class DecodeSelectionAdmissionContractTest {
                                             .loadBalanceConfig()));
 
             long expectedKv = dimension == CapacityDimension.EXPECTED_KV ? 400L : 0L;
-            try (WorkerEndpoint.GenerationPin pin = queued.tryPinGeneration()) {
-                assertNotNull(pin);
+            {
+                WorkerEndpoint selectedEndpoint = queued;
+
+                assertNotNull(selectedEndpoint);
                 assertNotNull(
-                        queued.tryReserveQueuedRequest(
-                                        pin, String.valueOf(1L), 0L, expectedKv, 50, null)
-                                .handle());
+                        queued.tryReserveQueuedRequest(String.valueOf(1L), 0L, expectedKv, 50, null)
+                                .value());
                 assertNotNull(
-                        queued.tryReserveQueuedRequest(
-                                        pin, String.valueOf(2L), 0L, expectedKv, 50, null)
-                                .handle());
+                        queued.tryReserveQueuedRequest(String.valueOf(2L), 0L, expectedKv, 50, null)
+                                .value());
             }
         }
 

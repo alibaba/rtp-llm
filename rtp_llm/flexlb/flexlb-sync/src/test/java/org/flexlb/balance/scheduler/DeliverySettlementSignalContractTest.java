@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.withStateLock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -44,7 +45,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
-/** Transport proof and sender exit cannot stand in for actual local P/D settlement. */
+/**
+ * Transport proof and sender exit cannot stand in for actual local P/D settlement.
+ */
 @Timeout(15)
 class DeliverySettlementSignalContractTest {
     private enum Side {
@@ -122,13 +125,13 @@ class DeliverySettlementSignalContractTest {
     private static final class Fixture implements AutoCloseable {
         private static final long ID = 981_001L;
         private static final long BATCH = 981L;
-        final RequestLifecycle scheduler;
+        final AbstractRequestScheduler scheduler;
         final SchedulerTestServices runtime;
         final DeliveryDispatcher dispatcher;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
         final RequestContext context;
-        final RequestRoute route;
+        final RouteExecution route;
         final Delivery.Member claim;
         final EngineGrpcClient channel = mock(EngineGrpcClient.class);
         final CompletableFuture<EngineGrpcClient.CancelReply> proof = new CompletableFuture<>();
@@ -204,15 +207,17 @@ class DeliverySettlementSignalContractTest {
                 worker.lock.unlock();
             }
             decode.publishStatus(projection);
-            DecodeResources.ReservationHandle reservation;
-            try (var pin = decode.tryPinGeneration()) {
+            DecodeResources.RequestReservation reservation;
+            {
+                var selectedEndpoint = decode;
+
                 reservation =
-                        decode.tryReserveQueuedRequest(pin, String.valueOf(ID), 10L, 10L, 50, null)
-                                .handle();
+                        decode.tryReserveQueuedRequest(String.valueOf(ID), 10L, 10L, 50, null)
+                                .value();
             }
             assertNotNull(reservation);
             context = RequestProtocolTestSupport.context(config, ID);
-            var future = RequestProtocolTestSupport.register(scheduler, context);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(scheduler, context);
             route =
                     SchedulingTestConfig.createRoute(
                             context,
@@ -224,7 +229,8 @@ class DeliverySettlementSignalContractTest {
                             reservation,
                             System.currentTimeMillis());
             var state = prefill;
-            try (var admission = scheduler.claimAdmissionHandle(String.valueOf(ID), future)) {
+            try (var admission =
+                    SchedulerTestSupport.claim(scheduler, String.valueOf(ID), future)) {
                 assertNotNull(admission);
                 assertEquals(
                         org.flexlb.balance.PlacementResult.Status.SUCCESS,
@@ -236,24 +242,21 @@ class DeliverySettlementSignalContractTest {
                                                 org.flexlb.balance.endpoint.EndpointTestSupport
                                                                 .enqueue(state, route)
                                                         == route)));
-                admission.finish();
+                AbstractRequestScheduler.finishPlacement(admission);
             }
             var prepared = prefill.reserveBatch(BATCH, 2);
             assertTrue(prepared.accepted());
-            state.resourceLock().lock();
-            org.flexlb.balance.scheduler.Delivery committed;
-            try {
-                committed =
-                        prefill.commitLocked(
-                                org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                        List.of(route),
-                                        prepared.value(),
-                                        new long[] {100L},
-                                        null,
-                                        System.currentTimeMillis()));
-            } finally {
-                state.resourceLock().unlock();
-            }
+            var committed =
+                    withStateLock(
+                            org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(state),
+                            () ->
+                                    prefill.commitDelivery(
+                                            org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                                                    List.of(route),
+                                                    prepared.value(),
+                                                    new long[] {100L},
+                                                    null,
+                                                    System.currentTimeMillis())));
             assertNotNull(committed);
             var dispatch =
                     decode.acquireDispatchPermit(
@@ -264,12 +267,12 @@ class DeliverySettlementSignalContractTest {
                     DeliveryDispatcher.commitDelivery(
                             scheduler,
                             new org.flexlb.balance.scheduler.Delivery.Member(
-                                    route, dispatch.handle()),
+                                    route, dispatch.value()),
                             Delivery.SendMode.BATCH_ENQUEUE,
                             BATCH);
             assertNotNull(claim);
             assertTrue(scheduler.tryStartSend(claim));
-            dispatch.handle().release();
+            dispatch.value().release();
             committed.close();
             settled = claim.completion().toCompletableFuture();
             if (side == Side.PREFILL) {
@@ -294,7 +297,8 @@ class DeliverySettlementSignalContractTest {
         private void awaitRelease() throws InterruptedException {
             assertFalse(Thread.holdsLock(context));
             org.junit.jupiter.api.Assertions.assertFalse(
-                    prefill.resourceLock().isHeldByCurrentThread());
+                    org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(prefill)
+                            .isHeldByCurrentThread());
             releaseAttempts.incrementAndGet();
             releaseEntered.countDown();
             if (failRelease.get()) {

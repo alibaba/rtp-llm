@@ -5,7 +5,7 @@ import io.grpc.Server;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.balance.scheduler.RequestLifecycle;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
@@ -34,7 +34,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
     @ValueSource(strings = {"NOT_MASTER", "SHUTDOWN", "DEAD_BEFORE_CONNECT", "UNRESOLVABLE_HOST"})
     @Timeout(value = 20, unit = TimeUnit.SECONDS)
     void followerRecoveryDispatchesExactlyOnceToMockEngine(String failure) throws Exception {
-        RequestLifecycle remoteRoutes = mock(RequestLifecycle.class);
+        AbstractRequestScheduler remoteRoutes = mock(AbstractRequestScheduler.class);
         try (Node oldMaster = new Node("10.0.0.1", remoteRoutes);
                 Node follower = new Node("10.0.0.2", scheduler);
                 var deadAddress = java.nio.channels.SocketChannel.open()) {
@@ -115,7 +115,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
         final FlexlbServiceImpl service;
         final Server server;
 
-        Node(String identity, RequestLifecycle routes) throws Exception {
+        Node(String identity, AbstractRequestScheduler routes) throws Exception {
             when(leadership.isNeedConsistency()).thenReturn(true);
             when(leadership.isMaster()).thenReturn(false);
             when(leadership.getLocalHostIp()).thenReturn(identity);

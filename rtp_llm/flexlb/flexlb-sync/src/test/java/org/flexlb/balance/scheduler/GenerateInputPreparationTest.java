@@ -86,7 +86,7 @@ class GenerateInputPreparationTest {
                 RequestRepository.RegistrationResult.REGISTERED,
                 repository.register(
                         context,
-                        mock(RequestLifecycle.class),
+                        mock(AbstractRequestScheduler.class),
                         new RequestFuture((kind, value, failure) -> true)));
         assertThrows(
                 IllegalStateException.class,
@@ -131,7 +131,7 @@ class GenerateInputPreparationTest {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var reporter = mock(DeliveryMetricsReporter.class);
-        var router = mock(RequestWorkerSelector.class);
+        var router = mock(RequestRouteSelector.class);
         var registry =
                 SchedulerTestSupport.create(
                         service,

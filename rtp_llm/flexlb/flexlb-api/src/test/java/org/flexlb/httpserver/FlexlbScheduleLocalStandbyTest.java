@@ -1,7 +1,7 @@
 package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
-import org.flexlb.balance.scheduler.RequestLifecycle;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.CacheMetadataUpdateOrchestrator;
@@ -79,7 +79,7 @@ class FlexlbScheduleLocalStandbyTest {
                         null,
                         null,
                         new CacheMetadataUpdateOrchestrator(configuration, null, provider));
-        RequestLifecycle router = mock(RequestLifecycle.class);
+        AbstractRequestScheduler router = mock(AbstractRequestScheduler.class);
         CompletableFuture<Response> routed = new CompletableFuture<>();
         when(router.submit(any())).thenReturn(routed);
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
@@ -115,7 +115,7 @@ class FlexlbScheduleLocalStandbyTest {
 
     @Test
     void failedScheduleDoesNotUpdateIndex() {
-        RequestLifecycle router = mock(RequestLifecycle.class);
+        AbstractRequestScheduler router = mock(AbstractRequestScheduler.class);
         when(router.submit(any()))
                 .thenReturn(CompletableFuture.completedFuture(response(RoleType.PREFILL, false)));
         CacheAwareService cache = mock(CacheAwareService.class);
@@ -130,7 +130,7 @@ class FlexlbScheduleLocalStandbyTest {
 
     @Test
     void metadataUpdateFailurePreservesSuccessfulSchedule() {
-        RequestLifecycle router = mock(RequestLifecycle.class);
+        AbstractRequestScheduler router = mock(AbstractRequestScheduler.class);
         when(router.submit(any()))
                 .thenReturn(CompletableFuture.completedFuture(response(RoleType.PREFILL, true)));
         CacheAwareService cache = mock(CacheAwareService.class);
@@ -148,7 +148,7 @@ class FlexlbScheduleLocalStandbyTest {
         verify(observer, never()).onError(any());
     }
 
-    private FlexlbServiceImpl service(RequestLifecycle router, CacheAwareService cache) {
+    private FlexlbServiceImpl service(AbstractRequestScheduler router, CacheAwareService cache) {
         ConfigService config = mock(ConfigService.class);
         FlexlbConfig routingConfig = new FlexlbConfig();
         routingConfig.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());

@@ -5,9 +5,9 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
-import org.flexlb.balance.projection.RequestTimeEstimation.Candidate;
-import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Candidate;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Probe;
 import org.junit.jupiter.api.Test;
 
@@ -66,7 +66,7 @@ class RequestTimeEstimationTest {
     void customPlannerIsUsedForEveryProjectedPrefix() {
         var planner = new org.flexlb.balance.planner.FirstRequestPlanner();
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         31,
                         true,
                         planner,
@@ -92,7 +92,7 @@ class RequestTimeEstimationTest {
     @Test
     void reusedProjectionReadsEveryIncomingSchedulingAndPredictionField() {
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         31L,
                         true,
                         BuiltinGroupPlanner.SINGLE,
@@ -130,7 +130,7 @@ class RequestTimeEstimationTest {
         assertEquals(
                 30L, project(inputs, new Probe(100, 0, 13, 100, 20, 0, 0)).projectedTtftMsValue());
         var laterQueue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         150,
                         true,
                         BuiltinGroupPlanner.SINGLE,
@@ -148,7 +148,7 @@ class RequestTimeEstimationTest {
     @Test
     void recursiveBatchPredictionCannotOverwriteTheOuterQueueCursor() {
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         31L,
                         true,
                         BuiltinGroupPlanner.FIXED_WINDOW,
@@ -190,7 +190,7 @@ class RequestTimeEstimationTest {
                                     evaluator,
                                     org.flexlb.config.DispatcherConfig.Type.BATCH),
                             probe());
-            assertEquals(Candidate.State.MODELED, result.state());
+            assertEquals(RequestTimeEstimation.State.MODELED, result.state());
             assertEquals(30L, result.projectedTtftMsValue());
             assertEquals(1, queue.activeItems().size());
         }
@@ -219,7 +219,7 @@ class RequestTimeEstimationTest {
                     }
                 };
         var result = project(inputs(31L, outerModel), probe());
-        assertEquals(Candidate.State.MODELED, result.state());
+        assertEquals(RequestTimeEstimation.State.MODELED, result.state());
         assertEquals(20L, result.projectedTtftMsValue());
         assertEquals(20L, result.incomingPrefillMs());
         assertEquals(0L, result.cacheHitTokens());
@@ -243,7 +243,7 @@ class RequestTimeEstimationTest {
                     }
                 };
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         31L,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -262,7 +262,7 @@ class RequestTimeEstimationTest {
                                 evaluator,
                                 org.flexlb.config.DispatcherConfig.Type.BATCH),
                         probe());
-        assertEquals(Candidate.State.UNAVAILABLE, result.state());
+        assertEquals(RequestTimeEstimation.State.UNAVAILABLE, result.state());
         assertEquals("BATCH_PREDICTION_FAILED", result.detail());
     }
 
@@ -502,7 +502,7 @@ class RequestTimeEstimationTest {
             var fast =
                     project(
                             new RequestTimeEstimation.Inputs(
-                                    new QueueSnapshot(
+                                    new ProjectionQueueSnapshot(
                                             100L,
                                             true,
                                             org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
@@ -519,7 +519,7 @@ class RequestTimeEstimationTest {
             var generic =
                     project(
                             new RequestTimeEstimation.Inputs(
-                                    new QueueSnapshot(
+                                    new ProjectionQueueSnapshot(
                                             100L,
                                             true,
                                             org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
@@ -546,7 +546,7 @@ class RequestTimeEstimationTest {
             assertEquals(genericEvaluator.invocations(), fastEvaluator.invocations());
         }
         var invalid =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         100L,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.SINGLE,
@@ -568,9 +568,9 @@ class RequestTimeEstimationTest {
                                 100L));
     }
 
-    private static QueueSnapshot fixedWindow(
+    private static ProjectionQueueSnapshot fixedWindow(
             GroupPlanner.Constraints constraints, List<GroupPlanner.Item> active) {
-        return new QueueSnapshot(
+        return new ProjectionQueueSnapshot(
                 100L,
                 true,
                 org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -620,7 +620,7 @@ class RequestTimeEstimationTest {
         }
         Comparator<GroupPlanner.Item> order = Comparator.comparingInt(GroupPlanner.Item::priority);
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         13L,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -652,7 +652,7 @@ class RequestTimeEstimationTest {
                             new GroupPlanner.Item(String.valueOf(99L), 0, 1L, 0L, 13L, 1L, 0L),
                             new GroupPlanner.Item(String.valueOf(99L), 0, 2L, 0L, expiry, 1L, 0L));
             var queue =
-                    new QueueSnapshot(
+                    new ProjectionQueueSnapshot(
                             13L,
                             true,
                             org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -691,7 +691,7 @@ class RequestTimeEstimationTest {
         var items = new java.util.ArrayList<GroupPlanner.Item>();
         items.add(new GroupPlanner.Item(String.valueOf(99L), 0, 1L, 0L, 14L, 1L, 0L));
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         13L,
                         true,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,
@@ -791,36 +791,6 @@ class RequestTimeEstimationTest {
                 "a projection-owned evaluator cannot change mid-call");
     }
 
-    @Test
-    void onlyModeledCandidateCarriesKnownTtft() {
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> candidate(Candidate.State.MODELED, OptionalLong.empty()));
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> candidate(Candidate.State.UNAVAILABLE, OptionalLong.of(1L)));
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> candidate(Candidate.State.MODELED, OptionalLong.of(-2L)));
-
-        Candidate modeled = candidate(Candidate.State.MODELED, OptionalLong.of(10L));
-        Candidate unmodeled =
-                candidate(Candidate.State.UNMODELED_ENGINE_WORK, OptionalLong.empty());
-        assertEquals(10L, modeled.projectedTtftMsValue());
-        assertTrue(unmodeled.engineWorkUnmodeled());
-    }
-
-    private static Candidate candidate(Candidate.State state, OptionalLong projectedTtftMs) {
-        return new Candidate(
-                state,
-                projectedTtftMs.orElse(Candidate.UNKNOWN),
-                0L,
-                Candidate.InitialHeadDisposition.NONE,
-                state.name(),
-                0L,
-                0L);
-    }
-
     private static RequestTimeEstimation.Inputs inputs(
             long capturedAtMs, PrefillTimePredictor.Evaluator evaluator) {
         return new RequestTimeEstimation.Inputs(
@@ -831,8 +801,8 @@ class RequestTimeEstimationTest {
                 routeProjection());
     }
 
-    private static QueueSnapshot emptyQueue(long capturedAtMs) {
-        return new QueueSnapshot(
+    private static ProjectionQueueSnapshot emptyQueue(long capturedAtMs) {
+        return new ProjectionQueueSnapshot(
                 capturedAtMs,
                 true,
                 org.flexlb.balance.planner.BuiltinGroupPlanner.FIXED_WINDOW,

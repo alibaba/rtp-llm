@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 
 import java.util.Comparator;
 import java.util.List;
@@ -8,6 +8,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.runWithStateLock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -23,7 +24,7 @@ public final class PrefillCleanupDeadlockFixture {
     private final PrefillEndpoint state =
             org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                     lock,
-                    PrefillActiveIndex.ordered(
+                    OrderedPrefillRequestQueue.ordered(
                             4,
                             Comparator.comparing(
                                     org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem
@@ -31,20 +32,22 @@ public final class PrefillCleanupDeadlockFixture {
                     clock::get);
     private final EndpointRetirementTestSupport generation =
             new EndpointRetirementTestSupport(() -> {});
-    private final RequestRoute next;
+    private final RouteExecution next;
 
     public PrefillCleanupDeadlockFixture(long requestId, boolean batch) {
-        RequestRoute first = item(requestId);
+        RouteExecution first = item(requestId);
         next = item(requestId + 1);
         if (batch) {
             enqueue(first);
             {
-                var reservation = state.reserveBatch(1L, 2, generation.tryPinGeneration()).value();
+                var reservation = state.reserveBatch(1L, 2).value();
                 try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                     assertNotNull(reservation);
-                    try (var handoff =
-                            EndpointTestSupport.commitBatch(
-                                    state, reservation, List.of(first), 20L)) {
+                    {
+                        var handoff =
+                                EndpointTestSupport.commitBatch(
+                                        state, reservation, List.of(first), 20L);
+
                         assertNotNull(handoff);
                     }
                 }
@@ -54,9 +57,11 @@ public final class PrefillCleanupDeadlockFixture {
                 var reservation = state.reserveUnqueuedRoute(first, 20L, 0L).value();
                 try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                     assertNotNull(reservation);
-                    try (var handoff =
-                            org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                    state, first, reservation)) {
+                    {
+                        var handoff =
+                                org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
+                                        state, first, reservation);
+
                         assertNotNull(handoff);
                     }
                 }
@@ -78,24 +83,25 @@ public final class PrefillCleanupDeadlockFixture {
 
     public void reserveNextBatch() {
         {
-            var reservation = state.reserveBatch(2L, 2, generation.tryPinGeneration()).value();
+            var reservation = state.reserveBatch(2L, 2).value();
             try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                 assertNotNull(reservation);
             }
         }
     }
 
-    private void enqueue(RequestRoute item) {
-        lock.lock();
-        try {
-            assertSame(item, org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, item));
-        } finally {
-            lock.unlock();
-        }
+    private void enqueue(RouteExecution item) {
+        runWithStateLock(
+                lock,
+                () -> {
+                    assertSame(
+                            item,
+                            org.flexlb.balance.endpoint.EndpointTestSupport.enqueue(state, item));
+                });
     }
 
-    private static RequestRoute item(long id) {
-        RequestRoute item = mock(RequestRoute.class);
+    private static RouteExecution item(long id) {
+        RouteExecution item = mock(RouteExecution.class);
         when(item.requestId()).thenReturn(String.valueOf(id));
         when(item.seqLen()).thenReturn(100L);
         return item;

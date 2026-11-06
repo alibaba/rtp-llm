@@ -30,7 +30,7 @@ class DeliveryStopTest {
         for (boolean preempt : new boolean[] {false, true}) {
             var runtime = runtime();
             var claim = sentClaim(runtime);
-            var lifecycle = claim.owner().data().getLifecycle();
+            var lifecycle = claim.owner().data().getRequestScheduler();
             var applied =
                     new java.util.concurrent.CompletableFuture<
                             ContextResult.CleanupAcknowledgement>();
@@ -44,7 +44,8 @@ class DeliveryStopTest {
             doAnswer(
                             call -> {
                                 var event =
-                                        call.getArgument(1, RequestLifecycle.PreemptionEvent.class);
+                                        call.getArgument(
+                                                1, AbstractRequestScheduler.PreemptionEvent.class);
                                 applied.complete(event.cleanup());
                                 return true;
                             })
@@ -157,7 +158,7 @@ class DeliveryStopTest {
                         any(),
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(firstRpc, secondRpc);
-        var scheduler = claim.owner().data().getLifecycle();
+        var scheduler = claim.owner().data().getRequestScheduler();
         when(scheduler.onPreemption(any(), any())).thenReturn(true);
         var dispatcher =
                 new DeliveryDispatcher(
@@ -205,7 +206,7 @@ class DeliveryStopTest {
                         any(),
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(rpc);
-        var scheduler = claim.owner().data().getLifecycle();
+        var scheduler = claim.owner().data().getRequestScheduler();
         var dispatcher =
                 new DeliveryDispatcher(
                         runtime.engineClient,
@@ -243,7 +244,7 @@ class DeliveryStopTest {
                         any(),
                         org.mockito.ArgumentMatchers.anyLong()))
                 .thenReturn(firstRpc);
-        var scheduler = claim.owner().data().getLifecycle();
+        var scheduler = claim.owner().data().getRequestScheduler();
         org.mockito.Mockito.doReturn(false).when(scheduler).onPreemption(any(), any());
         var dispatcher =
                 new DeliveryDispatcher(
@@ -402,7 +403,7 @@ class DeliveryStopTest {
                 new PreemptionRegistration(
                         claim.owner(),
                         1L,
-                        new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
+                        new org.flexlb.balance.endpoint.DecodeResources.RequestReservation(
                                 1L, String.valueOf(41L), 1L),
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         var closed = new java.util.concurrent.CompletableFuture<Void>();
@@ -459,7 +460,7 @@ class DeliveryStopTest {
         var reply = new java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>();
         var sender = new java.util.concurrent.CompletableFuture<Thread>();
         var applied = new java.util.concurrent.CompletableFuture<Thread>();
-        var scheduler = claim.owner().data().getLifecycle();
+        var scheduler = claim.owner().data().getRequestScheduler();
         var channel = runtime.engineClient;
         when(channel.cancelAsync(
                         any(),
@@ -514,7 +515,7 @@ class DeliveryStopTest {
         var lateReply = new java.util.concurrent.CompletableFuture<EngineGrpcClient.CancelReply>();
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         var proofs = new java.util.concurrent.atomic.AtomicInteger();
-        var scheduler = claim.owner().data().getLifecycle();
+        var scheduler = claim.owner().data().getRequestScheduler();
         var channel = runtime.engineClient;
         when(channel.cancelAsync(
                         any(),
@@ -639,7 +640,7 @@ class DeliveryStopTest {
         when(claim.owner().snapshot().cancellation()).thenReturn(null);
         when(claim.owner().snapshot().delivery().abandonment())
                 .thenReturn(CancelReason.CLIENT_CANCELLED);
-        when(claim.route().prefillEp())
+        when(claim.route().prefillEndpoint())
                 .thenReturn(mock(org.flexlb.balance.endpoint.PrefillEndpoint.class));
         return claim;
     }
@@ -648,7 +649,7 @@ class DeliveryStopTest {
         return new PreemptionRegistration(
                 claim.owner(),
                 attemptToken,
-                new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
+                new org.flexlb.balance.endpoint.DecodeResources.RequestReservation(
                         attemptToken, String.valueOf(41L), attemptToken),
                 new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
     }
@@ -712,9 +713,9 @@ class DeliveryStopTest {
         when(claim.owner().snapshot().cancellation()).thenReturn(null);
         when(claim.owner().snapshot().delivery().abandonment())
                 .thenReturn(CancelReason.CLIENT_CANCELLED);
-        when(claim.route().prefillEp())
+        when(claim.route().prefillEndpoint())
                 .thenReturn(mock(org.flexlb.balance.endpoint.PrefillEndpoint.class));
-        var scheduler = claim.owner().data().getLifecycle();
+        var scheduler = claim.owner().data().getRequestScheduler();
         var applications = new java.util.concurrent.atomic.AtomicInteger();
         var firstFailure = new java.util.concurrent.atomic.AtomicReference<IllegalStateException>();
         var first =
@@ -813,7 +814,7 @@ class DeliveryStopTest {
         when(claim.owner().snapshot().cancellation()).thenReturn(null);
         when(claim.owner().snapshot().delivery().abandonment())
                 .thenReturn(CancelReason.CLIENT_CANCELLED);
-        when(claim.route().prefillEp())
+        when(claim.route().prefillEndpoint())
                 .thenReturn(mock(org.flexlb.balance.endpoint.PrefillEndpoint.class));
         var client = runtime.engineClient;
         when(client.cancelAsync(
@@ -840,7 +841,7 @@ class DeliveryStopTest {
                 new PreemptionRegistration(
                         claim.owner(),
                         1L,
-                        new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
+                        new org.flexlb.balance.endpoint.DecodeResources.RequestReservation(
                                 1L, String.valueOf(41L), 1L),
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         try {
@@ -878,7 +879,7 @@ class DeliveryStopTest {
         var runtime = org.mockito.Mockito.spy(runtime());
         var claim = claim(runtime);
         when(claim.owner().snapshot().delivery()).thenReturn(null);
-        var scheduler = claim.owner().data().getLifecycle();
+        var scheduler = claim.owner().data().getRequestScheduler();
         var rejectedFact = new IllegalStateException("transient fact application failure");
         when(scheduler.onPreemption(any(), any())).thenThrow(rejectedFact);
         var taskExecutor = org.mockito.Mockito.spy(runtime.tasks());
@@ -916,7 +917,7 @@ class DeliveryStopTest {
                 new PreemptionRegistration(
                         claim.owner(),
                         1L,
-                        new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
+                        new org.flexlb.balance.endpoint.DecodeResources.RequestReservation(
                                 1L, String.valueOf(41L), 1L),
                         new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
         try {
@@ -977,7 +978,7 @@ class DeliveryStopTest {
                     new PreemptionRegistration(
                             claim.owner(),
                             1L,
-                            new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
+                            new org.flexlb.balance.endpoint.DecodeResources.RequestReservation(
                                     1L, String.valueOf(41L), 1L),
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
             var dispatcher =
@@ -1211,7 +1212,7 @@ class DeliveryStopTest {
                     new PreemptionRegistration(
                             claim.owner(),
                             1L,
-                            new org.flexlb.balance.endpoint.DecodeResources.ReservationHandle(
+                            new org.flexlb.balance.endpoint.DecodeResources.RequestReservation(
                                     1L, String.valueOf(41L), 1L),
                             new org.flexlb.balance.preemption.CancelTarget("127.0.0.1", 9000));
             var answer = cleanup.preempt(registration, null, "priority preemption", 500L);
@@ -1237,10 +1238,10 @@ class DeliveryStopTest {
     private static Delivery.Member claim(SchedulerTestServices runtime) {
         var context = mock(RequestContext.class, RETURNS_DEEP_STUBS);
         when(context.data().getRequestId()).thenReturn("41");
-        var scheduler = context.data().getLifecycle();
+        var scheduler = context.data().getRequestScheduler();
         when(scheduler.onPreemption(any(), any())).thenReturn(true);
         org.flexlb.balance.scheduler.SchedulerTestServices.bind(scheduler, runtime);
-        var route = mock(RequestRoute.class);
+        var route = mock(RouteExecution.class);
         when(route.ctx()).thenReturn(context);
         var claim = DeliveryTestSupport.member(route, Delivery.SendMode.BATCH_ENQUEUE, 17);
         when(context.snapshot().delivery().identity()).thenReturn(claim);

@@ -107,7 +107,9 @@ class PdfusionSchedulingTest {
                         availability,
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(
                                 service.loadBalanceConfig()),
-                        order -> org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(16, order));
+                        order ->
+                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                        16, order));
         WorkerStatus worker =
                 WorkerStatus.createDiscovered(
                         RoleType.PDFUSION, "g1", "127.0.0.1", 8080, 8081, "test");
@@ -135,8 +137,8 @@ class PdfusionSchedulingTest {
         when(cache.findMatchingEngines(any())).thenReturn(localMatches(Map.of()));
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
-        RequestWorkerSelector router =
-                new RequestWorkerSelector(
+        RequestRouteSelector router =
+                new RequestRouteSelector(
                         directory,
                         new CostBasedPrefillStrategy(
                                 cache,
@@ -168,7 +170,7 @@ class PdfusionSchedulingTest {
                                 delivery,
                                 service,
                                 grpc));
-        RequestLifecycle lifecycle =
+        AbstractRequestScheduler lifecycle =
                 SchedulerTestSupport.create(
                         runtime,
                         service,

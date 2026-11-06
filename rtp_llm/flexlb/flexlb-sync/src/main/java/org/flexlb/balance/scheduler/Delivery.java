@@ -7,7 +7,6 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.UnknownFieldSet;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
-import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -23,7 +22,9 @@ import java.util.Objects;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
-/** One delivery owns temporary resources from preparation through the dispatch handoff. */
+/**
+ * One delivery owns temporary resources from preparation through the dispatch handoff.
+ */
 @lombok.Getter
 @lombok.experimental.Accessors(fluent = true)
 public final class Delivery implements AutoCloseable {
@@ -36,17 +37,40 @@ public final class Delivery implements AutoCloseable {
     String reason;
     int remainingQueueDepth;
     private boolean committed;
-    private org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin generationPin;
     private boolean removedFailedMember;
     long selectionTimeMs;
-    RequestRoute bypassedHead;
+    RouteExecution bypassedHead;
     DeliveryExecution.DeliveryPermit executionPermit;
     final PrefillEndpoint endpoint;
     final boolean batch;
     final long[] predictions;
-    PrefillEndpoint.BatchReservation reservation;
+    PrefillEndpoint.BatchRecord reservation;
     CapacityBoundary boundary;
-    RequestRoute blocked;
+    RouteExecution blocked;
+    private boolean preparationReleased;
+    private Throwable preparationFailure;
+    private ArrayList<java.util.function.Consumer<Throwable>> preparationCompletions;
+
+    synchronized boolean preparationReleased() {
+        return preparationReleased;
+    }
+
+    /**
+     * A withdrawn request waits for the preparing task to release its temporary resources.
+     * Completion callbacks run outside both request and Endpoint locks.
+     */
+    void afterPreparationReleased(java.util.function.Consumer<Throwable> completion) {
+        Throwable failure;
+        synchronized (this) {
+            if (!preparationReleased) {
+                if (preparationCompletions == null) preparationCompletions = new ArrayList<>();
+                preparationCompletions.add(completion);
+                return;
+            }
+            failure = preparationFailure;
+        }
+        completion.accept(failure);
+    }
 
     public Delivery(
             PrefillEndpoint endpoint,
@@ -62,56 +86,70 @@ public final class Delivery implements AutoCloseable {
         predictions = batch ? null : new long[size];
     }
 
-    /** Endpoint calls this only after validating every member under its resource lock. */
+    /**
+     * Endpoint calls this only after validating every member in its state lock.
+     */
     public void committed(
-            org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin pin,
-            WorkSnapshot precedingWork,
-            int remainingQueueDepth,
-            boolean removedFailedMember) {
+            WorkSnapshot precedingWork, int remainingQueueDepth, boolean removedFailedMember) {
         checkState(!committed, "delivery already committed");
-        this.generationPin = Objects.requireNonNull(pin);
         this.precedingWork = precedingWork;
         this.remainingQueueDepth = remainingQueueDepth;
         this.removedFailedMember = removedFailedMember;
         committed = true;
     }
 
-    public List<RequestRoute> items() {
+    public List<RouteExecution> items() {
         return members.stream().map(Member::route).toList();
     }
 
-    public RequestRoute failedMember() {
+    public RouteExecution failedMember() {
         return boundary != null && boundary.status() == CapacityBoundary.Status.FAILED
                 ? blocked
                 : null;
     }
 
-    /** End the sender's temporary ownership; committed ledger rows settle through Lifecycle. */
+    /**
+     * End the sender's temporary ownership; committed ledger rows settle through Lifecycle.
+     */
     Throwable releasePreparation() {
         Throwable failure = null;
         for (Member member : members) failure = Failures.run(failure, member::close);
         if (!committed && reservation != null)
             failure = Failures.run(failure, () -> endpoint.rollback(reservation));
-        var pin = generationPin;
-        if (pin != null) {
-            failure = Failures.append(failure, Failures.close(pin));
-            generationPin = null;
+        List<java.util.function.Consumer<Throwable>> completions;
+        synchronized (this) {
+            if (preparationReleased) return failure;
+            preparationReleased = true;
+            preparationFailure = failure;
+            completions = preparationCompletions;
+            preparationCompletions = null;
+        }
+        if (failure == null) {
+            for (var member : members) member.route().clearDeliveryPreparation(this);
+        }
+        if (completions != null) {
+            for (var completion : completions) {
+                try {
+                    completion.accept(failure);
+                } catch (Throwable callbackFailure) {
+                    members.getFirst().recordFailure(callbackFailure);
+                }
+            }
         }
         return failure;
     }
 
     @Override
     public void close() {
-        Throwable failure = releasePreparation();
-        if (executionPermit != null)
-            failure = Failures.append(failure, Failures.close(executionPermit));
+        Throwable failure = executionPermit == null ? null : Failures.close(executionPermit);
+        failure = Failures.append(failure, releasePreparation());
         Failures.rethrow(failure, "temporary delivery resource cleanup failed");
     }
 
     public static final class Member implements AutoCloseable {
         @lombok.Getter
         @lombok.experimental.Accessors(fluent = true)
-        private final RequestRoute route;
+        private final RouteExecution route;
 
         @lombok.Getter
         @lombok.experimental.Accessors(fluent = true)
@@ -125,7 +163,7 @@ public final class Delivery implements AutoCloseable {
         @lombok.experimental.Accessors(fluent = true)
         private long batchId;
 
-        public Member(RequestRoute route, DecodeEndpoint.EngineDispatchPermit decode) {
+        public Member(RouteExecution route, DecodeEndpoint.EngineDispatchPermit decode) {
             this.route = Objects.requireNonNull(route);
             this.decode = decode;
         }
@@ -146,16 +184,16 @@ public final class Delivery implements AutoCloseable {
 
         Delivery.Member claimDelivery(Delivery.SendMode kind, long batchId) {
             return DeliveryDispatcher.commitDelivery(
-                    owner().data().getLifecycle(), this, kind, batchId);
+                    owner().data().getRequestScheduler(), this, kind, batchId);
         }
 
         void recordFailure(Throwable failure) {
-            route.ctx().data().getLifecycle().tasks.recordFailure(failure);
+            route.ctx().data().getRequestScheduler().tasks.recordFailure(failure);
         }
 
         static CapacityBoundary.Attempt<Member> prepare(
-                RequestRoute route, AdmissionCapacity capacity) {
-            var endpoint = route.decodeEp();
+                RouteExecution route, AdmissionCapacity capacity) {
+            var endpoint = route.decodeEndpoint();
             var reservation = route.decodeReservation();
             if (endpoint == null && reservation == null) {
                 return CapacityBoundary.Attempt.accepted(new Member(route, null));
@@ -171,25 +209,21 @@ public final class Delivery implements AutoCloseable {
             try {
                 var acquisition = endpoint.acquireDispatchPermit(reservation, capacity);
                 switch (acquisition.status()) {
-                    case ACQUIRED, ALREADY_ACCEPTED -> permit = acquisition.handle();
+                    case ACQUIRED, ALREADY_ACCEPTED -> permit = acquisition.value();
                     case CAPACITY_FULL -> {
                         return CapacityBoundary.Attempt.rejected(
                                 CapacityBoundary.unavailable(
                                         CapacityBoundary.Resource.DECODE_ENGINE));
                     }
-                    case NOT_OWNED, NOT_QUEUED -> {
+                    case NOT_OWNED, NOT_QUEUED, ENDPOINT_RETIRED -> {
                         return CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST);
                     }
-                    case ENDPOINT_RETIRED, ALREADY_ACQUIRED -> {
-                        String reason =
-                                acquisition.status()
-                                                == DecodeResources.EngineDispatchPermitAcquireStatus
-                                                        .ENDPOINT_RETIRED
-                                        ? "Decode endpoint generation retired: request_id="
-                                        : "Decode dispatch permit already acquired: request_id=";
+                    case ALREADY_ACQUIRED -> {
                         return CapacityBoundary.Attempt.rejected(
                                 CapacityBoundary.failed(
-                                        new IllegalStateException(reason + route.requestId())));
+                                        new IllegalStateException(
+                                                "Decode dispatch permit already acquired: request_id="
+                                                        + route.requestId())));
                     }
                 }
                 return CapacityBoundary.Attempt.accepted(new Member(route, permit));
@@ -235,7 +269,9 @@ public final class Delivery implements AutoCloseable {
         }
     }
 
-    /** Validate input without allocating a decoded token array; Engine sees the same protobuf wire fields. */
+    /**
+     * Validate input without allocating a decoded token array; Engine sees the same protobuf wire fields.
+     */
     static GenerateInputPB parseInput(ByteString bytes) throws InvalidProtocolBufferException {
         try {
             CodedInputStream input = bytes.newCodedInput();
@@ -345,7 +381,9 @@ public final class Delivery implements AutoCloseable {
         }
     }
 
-    /** Transport result for one exact delivery claim. */
+    /**
+     * Transport result for one exact delivery claim.
+     */
     public record Result(Status status, Throwable cause) {
 
         public Result {
@@ -377,29 +415,43 @@ public final class Delivery implements AutoCloseable {
 
         public enum Status {
             DELIVERED,
-            /** Local failure before RPC invocation; no remote work was started by this claim. */
+            /**
+             * Local failure before RPC invocation; no remote work was started by this claim.
+             */
             NOT_SENT,
-            /** Final per-member EnqueueBatch error; Decode may already own resources. */
+            /**
+             * Final per-member EnqueueBatch error; Decode may already own resources.
+             */
             PREFILL_REJECTED,
             UNCERTAIN
         }
     }
 
-    /** Whether unavailable capacity may shorten an already ordered selection. */
+    /**
+     * Whether unavailable capacity may shorten an already ordered selection.
+     */
     public enum PrefixPolicy {
         ALL_SELECTED,
         ORDERED_PREFIX
     }
 
-    /** Delivery mode, also used by request diagnostics before a delivery is claimed. */
+    /**
+     * Delivery mode, also used by request diagnostics before a delivery is claimed.
+     */
     public enum SendMode {
-        /** The request is still wholly owned by the scheduler. */
+        /**
+         * The request is still wholly owned by the scheduler.
+         */
         NONE,
 
-        /** An EnqueueBatch operation may have made the request visible to the engine. */
+        /**
+         * An EnqueueBatch operation may have made the request visible to the engine.
+         */
         BATCH_ENQUEUE,
 
-        /** The route decision may have been returned to the caller. */
+        /**
+         * The route decision may have been returned to the caller.
+         */
         ROUTE_DECISION
     }
 }

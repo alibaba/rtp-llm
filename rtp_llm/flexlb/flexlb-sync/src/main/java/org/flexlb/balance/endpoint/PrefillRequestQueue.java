@@ -1,24 +1,26 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
-/** Exact identities in frozen queue order; all operations use the owning PrefillEndpoint lock. */
-public interface PrefillRequestQueue extends Iterable<RequestRoute> {
+/**
+ * Request identities in frozen queue order; all operations run in the PrefillEndpoint state lock.
+ */
+public interface PrefillRequestQueue extends Iterable<RouteExecution> {
     boolean enabled();
 
     long version();
 
-    boolean add(RequestRoute route);
+    boolean add(RouteExecution route);
 
-    boolean remove(RequestRoute route);
+    boolean remove(RouteExecution route);
 
-    boolean contains(RequestRoute route);
+    boolean contains(RouteExecution route);
 
-    RequestRoute peek();
+    RouteExecution peek();
 
     boolean isEmpty();
 
@@ -30,16 +32,22 @@ public interface PrefillRequestQueue extends Iterable<RequestRoute> {
 
     Snapshot capture();
 
-    /** A prefix after a blocked head, or empty to preserve strict queue order. No mutation. */
-    default List<RequestRoute> candidatesAfterBlockedHead(
-            List<RequestRoute> ordered, boolean priorityOrdering, long nowMs) {
+    /**
+     * A prefix after a blocked head, or empty to preserve strict queue order. No mutation.
+     */
+    default List<RouteExecution> candidatesAfterBlockedHead(
+            List<RouteExecution> ordered, boolean priorityOrdering, long nowMs) {
         return List.of();
     }
 
-    /** Called under the endpoint lock only after a successful dispatch commit. */
-    default void recordDispatch(RequestRoute skippedHead) {}
+    /**
+     * Called in the Endpoint lock only after a successful dispatch commit.
+     */
+    default void recordDispatch(RouteExecution skippedHead) {}
 
-    /** Fields available to both live queue ordering and frozen prediction inputs. */
+    /**
+     * Fields available to both live queue ordering and frozen prediction inputs.
+     */
     interface QueueItem {
         String requestId();
 
@@ -56,8 +64,10 @@ public interface PrefillRequestQueue extends Iterable<RequestRoute> {
         long hitCache();
     }
 
-    /** The comparator must depend only on frozen QueueItem fields and remain stable. */
-    record Snapshot(List<RequestRoute> items, Comparator<QueueItem> order) {
+    /**
+     * The comparator must depend only on frozen QueueItem fields and remain stable.
+     */
+    record Snapshot(List<RouteExecution> items, Comparator<QueueItem> order) {
         public Snapshot {
             items = List.copyOf(items);
             Objects.requireNonNull(order, "order");

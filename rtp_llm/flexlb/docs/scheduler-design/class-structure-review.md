@@ -34,7 +34,7 @@ classDiagram
     RequestScheduler ..> RouteAdmission : 提交候选资源
     BalanceContext --> ScheduledRequest : 当前精确路由
     ScheduledRequest --> BalanceContext : 关联请求并初始化FIFO
-    ScheduledRequest --> RouteReservation : 暂存可转交资源
+    ScheduledRequest --> RequestRecord : 暂存可转交资源
     PrefillEndpoint *-- PrefillState
     PrefillEndpoint *-- WorkerBatcher
     WorkerBatcher --> PrefillState : 直接持有内部锁和索引
@@ -136,7 +136,7 @@ classDiagram
     RequestScheduler --> BalanceContext : 请求事实与阶段
     BalanceContext --> ScheduledRequest : 当前精确路由
     ScheduledRequest --> BalanceContext : 构造时写首次入队身份
-    ScheduledRequest --> PrefillState : 保存可转交的RouteReservation
+    ScheduledRequest --> PrefillState : 保存可转交的RequestRecord
     GlobalQueueCoordinator --> RequestScheduler : 请求仲裁
     GlobalQueueCoordinator ..> RouteAdmission : 提交候选
     RequestScheduler ..> RouteAdmission : 编排候选资源发布
@@ -154,8 +154,8 @@ classDiagram
 
 | 位置与证据                                                                                                                  | 不自然之处                                                                   | 建议收敛的边界                                                                                                             |
 | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `RequestScheduler.enqueueRoute/commitDirectRoute` → admission 内的 `offerQueued/markCommitted`                              | 反向编排已消除；锁外发布仍是独立边界                                         | 已实施，不能再把旧 `RouteAdmission.tryEnqueue` 列为待改问题                                                                |
-| `ScheduledRequest` 构造器写 `firstWorkerEnqueueTime/workerEnqueueSequence`，另有 `publishedRouteReservation` CAS            | 它实际兼任冻结输入、请求身份初始化和资源交接，不能再笼统称为“只读快照”       | 首次入队身份由 Scheduler 的路由创建入口初始化；ScheduledRequest 保留精确路由及暂时拥有的 lease，直到证明能删除整个交接协议 |
+| `RequestScheduler.enqueueRoute/commitDirectRoute` → admission 内的 `tryEnqueueRoute/markCommitted`                              | 反向编排已消除；锁外发布仍是独立边界                                         | 已实施，不能再把旧 `RouteAdmission.tryEnqueue` 列为待改问题                                                                |
+| `ScheduledRequest` 构造器写 `firstWorkerEnqueueTime/workerEnqueueSequence`，另有 `publishedRequestRecord` CAS            | 它实际兼任冻结输入、请求身份初始化和资源交接，不能再笼统称为“只读快照”       | 首次入队身份由 Scheduler 的路由创建入口初始化；ScheduledRequest 保留精确路由及暂时拥有的 lease，直到证明能删除整个交接协议 |
 | `WorkerBatcher.activeIndex/queueLock` 与 `PrefillState` 共用；Batcher 自行捕获版本、检查成员、等待唤醒                      | 账本内部结构被执行循环直接依赖，修改索引容易影响多个类                       | State 提供完整原子动作和决策所需的冻结输入；Batcher 负责预测、窗口和执行。等待条件与同锁检查必须一起设计                   |
 | `DecodePreemptionCoordinator` 对 `PreemptionRegistration` 与 `DecodeState.PreemptionClaim` 分别更新 `PreemptionCancelPhase` | 同一控制事件跨两把锁投影，失败路径须处理部分更新；协议变化波及请求和账本两侧 | 明确请求侧保存协议事实，账本侧保存精确资源隔离与可释放条件；先核对每个 phase 的实际用途，再决定能否删字段或缩小状态        |
 
@@ -197,7 +197,7 @@ Admission 保留准备 Decode、创建路由值、带 pin 发布和 close 的资
 `commitRoute`，DIRECT 的发布动作是资源预留，QUEUE 的发布动作是 ACTIVE 入队。
 只改 QUEUE 就不能声称已经删除整个 publication 协议；不能为了消除函数参数重复一套终结逻辑。
 
-完整时序必须仍是：请求锁内绑定精确 item → 释放请求锁 → 带 generation pin 发布 →
+完整时序必须仍是：请求锁内绑定精确 item → 释放请求锁 → 带 selected Worker 发布 →
 请求锁内推进 READY_TO_DELIVER → 锁外唤醒。发布拒绝或异常只回滚本次绑定；
 资源由当前拥有者经 finally/TWR 关闭，保留主异常和 suppressed 清理异常。
 
@@ -354,7 +354,7 @@ classDiagram
     GlobalQueueCoordinator --> DefaultRouter : 选路
     GlobalQueueCoordinator ..> RouteAdmission : 持有候选资源
     RouteAdmission ..> RequestScheduler : commitRoute回调
-    RouteAdmission ..> PrefillEndpoint : offerPinned
+    RouteAdmission ..> PrefillEndpoint : enqueueRoute
     PrefillEndpoint --> WorkerBatcher : QUEUE模式
     WorkerBatcher --> PrefillEndpoint
     PrefillEndpoint *-- PrefillState
@@ -402,7 +402,7 @@ pin、reservation、provisional。向外移动 tryEnqueue 必须公开这些内�
 
 必须保留：当前 commitRoute 先锁内绑定、锁外入队、锁内推进 READY_TO_DELIVER。
 AdmissionHandle 在此期间阻止提前结算。不能为了消除回调，把 endpoint 入队移到请求锁内。
-候选冻结值、失败回滚和 generation pin 也不能删。
+候选冻结值、失败回滚和 selected Worker 也不能删。
 
 ### B. WorkerBatcher 直接操作 PrefillState 的锁、索引和账本
 
@@ -562,12 +562,12 @@ classDiagram
 
 目标：PrefillState 内完成“加入 ACTIVE + NON_BATCH 资源占位 + 失败撤销”这一完整动作。
 WorkerBatcher 只根据成功与否决定唤醒、尝试本地抢占，解锁后通知请求执行者。
-Endpoint 保留 generation pin 校验与退休边界。收拢时必须核对 reserveRouteOwnership
+Endpoint 保留 selected Worker 校验与退休边界。收拢时必须核对 reserveRouteOwnership
 中实际执行的代际校验，不能直接绕过。
 
 接口约束：优先扩展已有 enqueueActiveUnderLock 语义；如果还需要 WorkerBatcher
 逐步 bind/restore/rollback，说明这一轮并未收拢所有权，不应增加一套转发接口。
-ScheduledRequest 的 publishedRouteReservation 当前跨投递策略使用，不能先删掉；
+ScheduledRequest 的 publishedRequestRecord 当前跨投递策略使用，不能先删掉；
 需一起核对入队、抢占替换、发送认领、终结四条路径，决定唯一存储位置。
 
 ### 次要改动：让请求数据的写入者与类职责一致
@@ -600,7 +600,7 @@ route lease 申请/绑定以及 finally 回滚。WorkerBatcher 删除 rollbackFr
 reserveRouteOwnership 中转接口。底层 reserveRouteUnderLock 校验精确 ACTIVE 身份，
 直接返回 lease，删掉重复加锁和不再需要的 ReservationResult 分配/失败状态分支。
 
-ScheduledRequest.bindPublishedRouteReservation 因跨包调用改为 public；现有 lease 存储与
+ScheduledRequest.bindPublishedRequestRecord 因跨包调用改为 public；现有 lease 存储与
 投递/抢占的精确交接没有改动。退休检查位于 ACTIVE 发布后、占位前，拒绝也经 finally
 撤销本次入队。测试增加确定性交错，防止未来把检查移到发布前而漏掉此边界。
 此轮净减43行：27,301 → 27,258；没有新增状态字段或中间类。后续仍需收拢抢占替换
@@ -647,7 +647,7 @@ RouteTransaction.transferredReservations 保留：第二成员句柄取得失败
 ### 排队撤回的账本入口收拢
 
 WorkerBatcher 的取消、准备失败和到期三个调用点统一进入 PrefillState.removeQueuedUnderLock；
-删除原 removeTerminalActiveUnderLock 和 restoreRouteReservation。State 在同一 ownershipLock
+删除原 removeTerminalActiveUnderLock 和 restoreRequestRecord。State 在同一 ownershipLock
 下取得 item-owned Route lease，执行精确终结，失败时 finally 恢复句柄。Batch 分支仍传 null，
 不释放准备事务拥有的 OPEN lease。生产代码 27,153 → 27,140，净减13行；本轮主要改善职责边界，
 没有声称消除了新的状态机。

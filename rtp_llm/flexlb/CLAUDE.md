@@ -61,7 +61,7 @@ Core load balancing logic, scheduling strategies, and worker status synchronizat
 
 Key concepts:
 
-- **Routing**: `RequestWorkerSelector` composes the Prefill and Decode cost selectors and the VIT random selector for multi-role requests
+- **Routing**: `RequestRouteSelector` composes the Prefill and Decode cost selectors and the VIT random selector for multi-role requests
 - **Queue-based scheduling**: `RequestScheduler` contract + `QueuedRequestScheduler` ordered placement owner + per-generation `PrefillEndpoint` resource handoff
 - **Resource measurement**: Endpoint resource views used by routing strategies
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
@@ -147,10 +147,10 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 ./mvnw test -pl flexlb-sync
 
 # Run specific test class
-./mvnw test -Dtest=RequestWorkerSelectorTest
+./mvnw test -Dtest=RequestRouteSelectorTest
 
 # Run specific test method
-./mvnw test -Dtest=RequestWorkerSelectorTest#testRouteSuccess
+./mvnw test -Dtest=RequestRouteSelectorTest#testRouteSuccess
 ```
 
 ### Code Formatting
@@ -184,11 +184,11 @@ FlexLB routes inference requests through multiple worker stages based on model r
 3. **PDFUSION**: Prefill-Decode fusion workers (combined processing)
 4. **VIT**: Vision-language model processing
 
-The `RequestWorkerSelector` orchestrates routing across these stages. If a later stage fails (e.g., DECODE unavailable), the router closes the generation pins for earlier selections. Resource reservations are acquired and rolled back by the request scheduler after selection.
+The `RequestRouteSelector` orchestrates routing across these stages. If a later stage fails (e.g., DECODE unavailable), the router discards the incomplete selection without closing the selected Workers. Resource reservations are acquired and rolled back by the request scheduler after selection.
 
 ### Load Balancing Strategies
 
-`RequestWorkerSelector` uses explicit role selectors: `CostBasedPrefillStrategy` for
+`RequestRouteSelector` uses explicit role selectors: `CostBasedPrefillStrategy` for
 PREFILL/PDFUSION, `DecodeSelector` for DECODE, and `VitWorkerSelector`
 for VIT. Both selectors evaluate the complete live fleet before
 reducing to one generation-fenced winner. Prefill uses fixed BEST_ONLY with
@@ -209,7 +209,7 @@ non-finite preferred tier fails routing with a formula error.
 
 Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 
-- `scheduler.type=DIRECT`: Routes immediately through `RequestWorkerSelector`.
+- `scheduler.type=DIRECT`: Routes immediately through `RequestRouteSelector`.
 - `scheduler.type=QUEUE`: Uses `QueuedRequestScheduler` for ordered placement; `RequestContext` owns cancellation and request/decision lifetime decisions. Queue ordering is `FIFO` or `PRIORITY`.
 - `scheduler.decision.type=SINGLE`: Forms one-request decision groups.
 - `scheduler.decision.type=FIXED_WINDOW`: Forms groups bounded by request count, collection window, and an optional predicted-execution cap.
@@ -318,15 +318,15 @@ ZooKeeper connection configuration for distributed coordination.
 
 ### Endpoint Selection
 
-`RequestWorkerSelector` calls the explicit selector for each required role. Prefill and
+`RequestRouteSelector` calls the explicit selector for each required role. Prefill and
 Decode selectors consume complete immutable fleet snapshots and return an exact
 generation capability; do not add a second selector pass or endpoint fallback
 after ordered QUEUE commit begins.
 
 ### Rollback Mechanism
 
-When multi-stage routing partially fails, `RequestWorkerSelector` closes the exact
-`WorkerAssignment` capabilities that were already selected. Direct-placement owners
+When multi-stage routing partially fails, `RequestRouteSelector` discards the selection;
+it does not close shared Worker endpoints. Direct-placement owners
 also roll back their exact endpoint reservations before returning the failure.
 
 ### Concurrent Data Access

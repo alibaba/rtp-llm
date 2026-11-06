@@ -167,12 +167,11 @@ public final class DeliveryExecution implements ExecutorStats {
                     failures.accept(failure);
                     return;
                 }
+                release();
                 try {
                     rejected.accept(failure);
                 } catch (Throwable cleanupFailure) {
                     failures.accept(Failures.append(failure, cleanupFailure));
-                } finally {
-                    release();
                 }
             }
         }

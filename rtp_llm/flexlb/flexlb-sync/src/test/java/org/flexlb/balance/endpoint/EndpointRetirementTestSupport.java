@@ -12,7 +12,7 @@ final class EndpointRetirementTestSupport extends WorkerEndpoint {
     }
 
     @Override
-    void continueRetirementAfterHandoff() {
+    protected void closeEndpoint() {
         continuation.run();
     }
 }

@@ -2,7 +2,7 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.scheduler.RequestContext;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -117,24 +117,24 @@ class TwinOverloadAdmissionTest {
     }
 
     @Test
-    void localBatchReservationMustBlockAnotherUntilReleased() {
+    void localBatchRecordMustBlockAnotherUntilReleased() {
         FlexlbConfig config = config(1);
         PrefillEndpoint endpoint = prefill(config);
-        RequestRoute first = item(endpoint, config, 1L);
-        RequestRoute staged = item(endpoint, config, 2L);
+        RouteExecution first = item(endpoint, config, 1L);
+        RouteExecution staged = item(endpoint, config, 2L);
         assertTrue(EndpointTestSupport.offer(endpoint, first));
         assertTrue(EndpointTestSupport.offer(endpoint, staged));
-        CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> acquired =
+        CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> acquired =
                 endpoint.reserveBatch(70L, 1);
         assertTrue(acquired.accepted());
         {
-            PrefillEndpoint.BatchReservation ignored = acquired.value();
+            PrefillEndpoint.BatchRecord ignored = acquired.value();
             try (var preparationIgnored = EndpointTestSupport.preparation(ignored)) {
                 assertEquals(2, endpoint.progress().queueDepth());
-                CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> blocked =
+                CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> blocked =
                         endpoint.reserveBatch(71L, 1);
                 {
-                    PrefillEndpoint.BatchReservation unexpected = blocked.value();
+                    PrefillEndpoint.BatchRecord unexpected = blocked.value();
                     try (var preparationUnexpected = EndpointTestSupport.preparation(unexpected)) {
                         assertEquals(
                                 CapacityBoundary.Resource.PREFILL_BATCH,
@@ -145,10 +145,10 @@ class TwinOverloadAdmissionTest {
             }
         }
         assertEquals(2, endpoint.progress().queueDepth());
-        CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> resumed =
+        CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> resumed =
                 endpoint.reserveBatch(71L, 1);
         {
-            PrefillEndpoint.BatchReservation ignored = resumed.value();
+            PrefillEndpoint.BatchRecord ignored = resumed.value();
             try (var preparationIgnored = EndpointTestSupport.preparation(ignored)) {
                 assertTrue(resumed.accepted());
             }
@@ -183,12 +183,13 @@ class TwinOverloadAdmissionTest {
         endpoints.add(endpoint);
         applyStatus(endpoint, Map.of(), Map.of());
         for (long id = 1; id <= 9; id++) {
-            try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-                assertNotNull(pin);
+            {
+                WorkerEndpoint selectedEndpoint = endpoint;
+
+                assertNotNull(selectedEndpoint);
                 assertNotNull(
-                        endpoint.tryReserveQueuedRequest(
-                                        pin, String.valueOf(id), 128L, 256L, 50, null)
-                                .handle());
+                        endpoint.tryReserveQueuedRequest(String.valueOf(id), 128L, 256L, 50, null)
+                                .value());
             }
         }
         for (long id = 1; id <= 8; id++) {
@@ -205,7 +206,7 @@ class TwinOverloadAdmissionTest {
                     acquisition.status());
             assertEquals(
                     DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                    acquisition.handle().dispatch().status());
+                    acquisition.value().dispatch().status());
         }
         assertEquals(
                 DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
@@ -227,7 +228,7 @@ class TwinOverloadAdmissionTest {
                                 EndpointTestSupport.decodeReservation(endpoint, 9L),
                                 new DecodeResources.AdmissionCapacity(8L, 90L));
         assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
-        assertTrue(resumed.handle().release());
+        assertTrue(resumed.value().release());
     }
 
     private PrefillEndpoint prefill(FlexlbConfig config) {
@@ -257,28 +258,28 @@ class TwinOverloadAdmissionTest {
 
     private static void commitBatch(
             PrefillEndpoint endpoint, FlexlbConfig config, long batchId, long firstRequestId) {
-        List<RequestRoute> items = new ArrayList<>();
+        List<RouteExecution> items = new ArrayList<>();
         for (long id = firstRequestId; id < firstRequestId + 8; id++) {
-            RequestRoute item = item(endpoint, config, id);
+            RouteExecution item = item(endpoint, config, id);
             assertTrue(EndpointTestSupport.offer(endpoint, item));
             items.add(item);
         }
         int limit = config.getDispatcher().getMaxInflightPerPrefillWorker();
-        CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> acquisition =
+        CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> acquisition =
                 endpoint.reserveBatch(batchId, limit);
         assertTrue(acquisition.accepted());
         PrefillEndpoint state = (PrefillEndpoint) endpoint;
         {
-            PrefillEndpoint.BatchReservation reservation = acquisition.value();
+            PrefillEndpoint.BatchRecord reservation = acquisition.value();
             try (var preparationReservation = EndpointTestSupport.preparation(reservation);
                     org.flexlb.balance.scheduler.Delivery ignored =
                             EndpointTestSupport.commitBatch(state, reservation, items, 300_000L)) {
-                // Releasing the handoff closes only the generation pin, not engine work.
+                // Releasing the handoff closes only the selected Worker, not engine work.
             }
         }
     }
 
-    private static RequestRoute item(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
+    private static RouteExecution item(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
         Request request = Request.builder().requestId(String.valueOf(id)).seqLen(128L).build();
         RequestContext context = new RequestContext(config);
         context.data().setRequest(request);

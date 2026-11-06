@@ -1,11 +1,11 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.Delivery;
 import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.RequestExecutionTestSupport;
-import org.flexlb.balance.scheduler.RequestLifecycle;
-import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.RouteExecution;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -18,40 +18,103 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-/** Shared fixtures for exact endpoint and resource ownership contracts. */
+/**
+ * Shared fixtures for exact endpoint and resource ownership contracts.
+ */
 public final class EndpointTestSupport {
 
     private EndpointTestSupport() {}
 
-    /** Tests retain the caller's generation pin explicitly until their assertions finish. */
-    public static Delivery commitDirect(
-            PrefillEndpoint endpoint,
-            RequestRoute route,
-            PrefillEndpoint.RouteReservation reservation) {
-        var pin = endpoint.tryPinGeneration();
-        if (pin == null) return null;
-        Delivery committed = null;
-        try {
-            var work = endpoint.commitDirect(pin, route, reservation);
-            if (work == null) return null;
-            committed = new Delivery(endpoint, false, 0, null, "test");
-            committed.committed(pin, work, 0, false);
-            return committed;
-        } finally {
-            if (committed == null) pin.close();
+    public static java.util.concurrent.locks.ReentrantLock stateLock(WorkerEndpoint endpoint) {
+        var lock =
+                (java.util.concurrent.locks.ReentrantLock)
+                        ReflectionTestUtils.getField(endpoint, "stateLock");
+        if (lock == null) {
+            lock = new java.util.concurrent.locks.ReentrantLock();
+            useStateLock(endpoint, lock);
+        }
+        return lock;
+    }
+
+    public static void useStateLock(
+            WorkerEndpoint endpoint, java.util.concurrent.locks.ReentrantLock lock) {
+        ReflectionTestUtils.setField(endpoint, "stateLock", lock);
+        var details = org.mockito.Mockito.mockingDetails(endpoint);
+        if (details.isMock() && !details.isSpy()) {
+            org.mockito.Mockito.doReturn(lock).when(endpoint).stateLock();
+            if (details.getStubbings().stream()
+                    .noneMatch(
+                            stub ->
+                                    stub.getInvocation()
+                                            .getMethod()
+                                            .getName()
+                                            .equals("acceptsNewRequests"))) {
+                org.mockito.Mockito.lenient()
+                        .when(endpoint.acceptsNewRequests())
+                        .thenAnswer(
+                                call ->
+                                        !endpoint.isRetired()
+                                                && (endpoint.getStatus() == null
+                                                        || endpoint.getStatus()
+                                                                .isAvailableForScheduling()));
+            }
         }
     }
 
-    public static org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork worker(
+    public static <T> T withStateLock(
+            java.util.concurrent.locks.ReentrantLock lock,
+            java.util.function.Supplier<T> operation) {
+        lock.lock();
+        try {
+            return operation.get();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public static void runWithStateLock(
+            java.util.concurrent.locks.ReentrantLock lock, Runnable operation) {
+        lock.lock();
+        try {
+            operation.run();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Tests retain the caller's selected Worker explicitly until their assertions finish.
+     */
+    public static Delivery commitDirect(
+            PrefillEndpoint endpoint,
+            RouteExecution route,
+            PrefillEndpoint.RequestRecord reservation) {
+        var selectedEndpoint = endpoint;
+        if (selectedEndpoint == null) return null;
+        Delivery committed = null;
+        try {
+            var work = endpoint.commitDirect(route, reservation);
+            if (work == null) return null;
+            committed = new Delivery(endpoint, false, 0, null, "test");
+            committed.committed(work, 0, false);
+            return committed;
+        } finally {
+            if (committed == null)
+                ;
+        }
+    }
+
+    public static org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler worker(
             String key,
             PrefillEndpoint endpoint,
             org.flexlb.balance.scheduler.QueueExecutionSettings settings,
             DeliveryDispatcher dispatcher,
             PrefillEndpoint resources,
             org.flexlb.balance.scheduler.DeliveryExecution execution) {
+        ReflectionTestUtils.setField(resources, "queueSettings", settings);
         stubResources(endpoint, resources);
         ReflectionTestUtils.setField(dispatcher, "execution", execution);
-        return new org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork(
+        return new org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler(
                 key, endpoint, settings, dispatcher);
     }
 
@@ -66,39 +129,44 @@ public final class EndpointTestSupport {
         return RESOURCE_FIXTURES.getOrDefault(endpoint, endpoint);
     }
 
-    public static RequestRoute enqueue(PrefillEndpoint endpoint, RequestRoute route) {
+    public static RouteExecution enqueue(PrefillEndpoint endpoint, RouteExecution route) {
         var ledger = resources(endpoint);
-        var lock = ledger.resourceLock();
-        lock.lock();
-        try {
-            return ledger.addQueuedLocked(route);
-        } finally {
-            lock.unlock();
-        }
+        var lock = ledger.stateLock();
+        return withStateLock(
+                lock,
+                () -> {
+                    return ledger.addQueuedLocked(route);
+                });
     }
 
-    public static RequestRoute removeQueued(PrefillEndpoint endpoint, RequestRoute route) {
+    public static RouteExecution removeQueued(PrefillEndpoint endpoint, RouteExecution route) {
         var ledger = resources(endpoint);
-        var lock = ledger.resourceLock();
-        lock.lock();
-        try {
-            return ledger.removeQueuedLocked(route) ? route : null;
-        } finally {
-            lock.unlock();
-        }
+        var lock = ledger.stateLock();
+        return withStateLock(
+                lock,
+                () -> {
+                    return ledger.removeQueuedLocked(route) ? route : null;
+                });
     }
 
-    /** A scheduling test may mock transport while retaining a real resource ledger. */
+    /**
+     * A scheduling test may mock transport while retaining a real resource ledger.
+     */
     public static void stubResources(PrefillEndpoint endpoint, PrefillEndpoint resources) {
         if (endpoint == resources) return;
+        useStateLock(endpoint, stateLock(resources));
         RESOURCE_FIXTURES.put(endpoint, resources);
         org.junit.jupiter.api.Assertions.assertTrue(
                 org.mockito.Mockito.mockingDetails(endpoint).isMock(),
                 "resource delegation is only for a mocked transport endpoint");
         var names =
                 java.util.Set.of(
-                        "resourceLock",
                         "progress",
+                        "isQueueWaitCurrent",
+                        "removeQueuedMember",
+                        "removeFailedQueuedRequest",
+                        "isSelectionCurrent",
+                        "schedulingInputsChanged",
                         "queueCounters",
                         "captureQueue",
                         "schedulingInputsChangedLocked",
@@ -173,8 +241,8 @@ public final class EndpointTestSupport {
                         org.mockito.Mockito.mock(DeliveryMetricsReporter.class),
                         new org.flexlb.balance.scheduler.PlacementAvailability(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                        order -> PrefillActiveIndex.ordered(16, order));
-        ReflectionTestUtils.setField(endpoint, "lock", lock);
+                        order -> OrderedPrefillRequestQueue.ordered(16, order));
+        ReflectionTestUtils.setField(endpoint, "stateLock", lock);
         ReflectionTestUtils.setField(endpoint, "activeIndex", queue);
         ReflectionTestUtils.setField(endpoint, "clock", clock);
         return endpoint;
@@ -188,12 +256,11 @@ public final class EndpointTestSupport {
     }
 
     static java.util.concurrent.locks.ReentrantLock decodeLock(DecodeEndpoint endpoint) {
-        return (java.util.concurrent.locks.ReentrantLock)
-                ReflectionTestUtils.getField(endpoint, "admissionLock");
+        return endpoint.stateLock();
     }
 
     static DecodeResources.Acquisition<
-                    DecodeResources.ReserveStatus, DecodeResources.ReservationHandle>
+                    DecodeResources.ReserveStatus, DecodeResources.RequestReservation>
             reserveQueuedDecode(
                     DecodeEndpoint endpoint,
                     long id,
@@ -201,21 +268,22 @@ public final class EndpointTestSupport {
                     long expected,
                     int priority,
                     DecodeResources.AdmissionCapacity capacity) {
-        try (var pin = endpoint.tryPinGeneration()) {
+        {
+            var selectedEndpoint = endpoint;
+
             return endpoint.tryReserveQueuedRequest(
-                    pin, String.valueOf(id), hard, expected, priority, capacity);
+                    String.valueOf(id), hard, expected, priority, capacity);
         }
     }
 
     public static org.flexlb.balance.scheduler.Delivery commitQueued(
             PrefillEndpoint endpoint, org.flexlb.balance.scheduler.Delivery plan) {
-        var lock = endpoint.resourceLock();
-        lock.lock();
-        try {
-            return endpoint.commitLocked(plan);
-        } finally {
-            lock.unlock();
-        }
+        var lock = endpoint.stateLock();
+        return withStateLock(
+                lock,
+                () -> {
+                    return endpoint.commitLocked(plan);
+                });
     }
 
     public static void completeRetirement(
@@ -271,58 +339,59 @@ public final class EndpointTestSupport {
         return expected;
     }
 
-    /** Build a real local reservation without publishing it to the master queue. */
-    public static DecodeResources.ReservationHandle reserveUnqueuedDecode(
+    /**
+     * Build a real local reservation without publishing it to the master queue.
+     */
+    public static DecodeResources.RequestReservation reserveUnqueuedDecode(
             DecodeEndpoint endpoint,
-            WorkerEndpoint.GenerationPin pin,
+            WorkerEndpoint selectedEndpoint,
             long requestId,
             long hardKv,
             long expectedKv,
             int priority) {
-        endpoint.requirePinnedGeneration(pin);
         var state = endpoint;
-        var lock =
-                (java.util.concurrent.locks.ReentrantLock)
-                        org.springframework.test.util.ReflectionTestUtils.getField(
-                                state, "admissionLock");
-        lock.lock();
-        try {
-            if (!Boolean.TRUE.equals(
-                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                            state, "requestIdAvailable", String.valueOf(requestId)))) {
-                throw new IllegalStateException("Decode request id is already owned: " + requestId);
-            }
-            DecodeResources.Acquisition<
-                            DecodeResources.ReserveStatus, DecodeResources.ReservationHandle>
-                    acquired =
+        var lock = state.stateLock();
+        return withStateLock(
+                lock,
+                () -> {
+                    if (!Boolean.TRUE.equals(
                             org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                                    state,
-                                    "createReservation",
-                                    String.valueOf(requestId),
-                                    hardKv,
-                                    expectedKv,
-                                    priority,
-                                    org.flexlb.enums.DecodeTaskPhase.LOCAL_RESERVED);
-            return acquired.handle();
-        } finally {
-            lock.unlock();
-        }
+                                    state, "requestIdAvailable", String.valueOf(requestId)))) {
+                        throw new IllegalStateException(
+                                "Decode request id is already owned: " + requestId);
+                    }
+                    DecodeResources.Acquisition<
+                                    DecodeResources.ReserveStatus,
+                                    DecodeResources.RequestReservation>
+                            acquired =
+                                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                                            state,
+                                            "createReservation",
+                                            String.valueOf(requestId),
+                                            hardKv,
+                                            expectedKv,
+                                            priority,
+                                            org.flexlb.enums.DecodeTaskPhase.LOCAL_RESERVED);
+                    return acquired.value();
+                });
     }
 
-    /** Read shadow ownership for assertions, without granting a production lookup capability. */
-    public static DecodeResources.ReservationHandle decodeReservation(
+    /**
+     * Read shadow ownership for assertions, without granting a production lookup capability.
+     */
+    public static DecodeResources.RequestReservation decodeReservation(
             DecodeEndpoint endpoint, long requestId) {
         return decodeReservation(endpoint, Long.toString(requestId));
     }
 
-    public static DecodeResources.ReservationHandle decodeReservation(
+    public static DecodeResources.RequestReservation decodeReservation(
             DecodeEndpoint endpoint, String requestId) {
         return endpoint.isRetired()
                 ? null
                 : decodeReservation(endpoint.resourceSnapshot(), requestId);
     }
 
-    private static DecodeResources.ReservationHandle decodeReservation(
+    private static DecodeResources.RequestReservation decodeReservation(
             DecodeResources.ResourceSnapshot snapshot, String requestId) {
         var request = snapshot.requests().get(requestId);
         if (request == null || request.reservationToken() <= 0L) {
@@ -330,7 +399,7 @@ public final class EndpointTestSupport {
         }
         return switch (request.phase()) {
             case LOCAL_RESERVED, MASTER_QUEUED_NOT_DISPATCHED, ENGINE_MAY_HAVE_SEEN ->
-                    new DecodeResources.ReservationHandle(
+                    new DecodeResources.RequestReservation(
                             snapshot.routing().generationId(),
                             String.valueOf(requestId),
                             request.reservationToken());
@@ -340,8 +409,8 @@ public final class EndpointTestSupport {
 
     static int evictPrefill(
             PrefillEndpoint state, long ttlMs, java.util.function.Predicate<String> retained) {
-        var candidates = new java.util.HashSet<RequestRoute>();
-        for (RequestRoute route : state.cleanupCandidates()) {
+        var candidates = new java.util.HashSet<RouteExecution>();
+        for (RouteExecution route : state.cleanupCandidates()) {
             if (!retained.test(route.requestId())) {
                 candidates.add(route);
             }
@@ -369,7 +438,7 @@ public final class EndpointTestSupport {
                                                         token,
                                                         DecodeResources.PreemptionUpdate.handedOff(
                                                                 new DecodeResources
-                                                                        .ReservationHandle(
+                                                                        .RequestReservation(
                                                                         endpoint.getStatus()
                                                                                 .getGenerationId(),
                                                                         victim.requestId(),
@@ -381,54 +450,46 @@ public final class EndpointTestSupport {
     static WorkerEndpoint.StatusChange.Prefill reconcile(
             PrefillEndpoint state,
             WorkerStatus.StatusObservation observation,
-            java.util.function.ToLongFunction<List<RequestRoute>> predictor) {
-        var lock = state.resourceLock();
-        lock.lock();
-        PrefillEndpoint.StatusReduction reduction;
-        try {
-            reduction = state.prepareStatusLocked(observation, true);
-        } finally {
-            lock.unlock();
-        }
+            java.util.function.ToLongFunction<List<RouteExecution>> predictor) {
+        var lock = state.stateLock();
+        var reduction = withStateLock(lock, () -> state.prepareStatusLocked(observation, true));
         var predictions = new java.util.HashMap<Long, Long>();
         reduction
                 .predictionInputs()
                 .forEach(
                         (batchId, members) ->
                                 predictions.put(batchId, predictor.applyAsLong(members)));
-        lock.lock();
-        try {
-            return java.util.Objects.requireNonNull(
-                    state.commitStatusLocked(reduction, predictions));
-        } finally {
-            lock.unlock();
-        }
+        return withStateLock(
+                lock,
+                () -> {
+                    return java.util.Objects.requireNonNull(
+                            state.commitStatusLocked(reduction, predictions));
+                });
     }
 
     static org.flexlb.balance.scheduler.Delivery commitBatch(
             PrefillEndpoint state,
-            PrefillEndpoint.BatchReservation reservation,
-            List<RequestRoute> items,
+            PrefillEndpoint.BatchRecord reservation,
+            List<RouteExecution> items,
             long predictedMs) {
-        state.resourceLock().lock();
-        try {
-            return state.commitLocked(
-                    org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                            items,
-                            reservation,
-                            new long[] {predictedMs},
-                            null,
-                            System.currentTimeMillis()));
-        } finally {
-            state.resourceLock().unlock();
-        }
+        return withStateLock(
+                state.stateLock(),
+                () -> {
+                    return state.commitLocked(
+                            org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                                    items,
+                                    reservation,
+                                    new long[] {predictedMs},
+                                    null,
+                                    System.currentTimeMillis()));
+                });
     }
 
     public static PrefillEndpoint unstartedPrefill(
             org.flexlb.config.FlexlbConfig config,
             WorkerStatus status,
             DeliveryDispatcher delivery,
-            RequestLifecycle scheduler) {
+            AbstractRequestScheduler scheduler) {
         var endpoint =
                 EndpointTestSupport.prefill(
                         status,
@@ -437,16 +498,15 @@ public final class EndpointTestSupport {
                         org.flexlb.balance.scheduler.SchedulerTestSupport.repository(scheduler),
                         org.mockito.Mockito.mock(DeliveryMetricsReporter.class));
         var state = (PrefillEndpoint) endpoint;
-        state.resourceLock().lock();
-        try {
-            state.enableQueueLocked(
-                    PrefillActiveIndex.ordered(
-                            16,
-                            org.flexlb.balance.scheduler.QueueExecutionSettings.queueOrder(
-                                    config.isPriorityOrdering())));
-        } finally {
-            state.resourceLock().unlock();
-        }
+        runWithStateLock(
+                state.stateLock(),
+                () -> {
+                    state.enableQueueLocked(
+                            OrderedPrefillRequestQueue.ordered(
+                                    16,
+                                    org.flexlb.balance.scheduler.QueueExecutionSettings.queueOrder(
+                                            config.isPriorityOrdering())));
+                });
         ReflectionTestUtils.setField(
                 delivery,
                 "execution",
@@ -454,7 +514,8 @@ public final class EndpointTestSupport {
                         scheduler, config));
         var worker =
                 org.mockito.Mockito.mock(
-                        org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork.class,
+                        org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler
+                                .class,
                         org.mockito.Mockito.withSettings()
                                 .useConstructor(
                                         status.getLogicalIpPort(),
@@ -483,25 +544,26 @@ public final class EndpointTestSupport {
 
     private static final java.util.Map<
                     PrefillEndpoint,
-                    org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork>
+                    org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler>
             WORK = java.util.Collections.synchronizedMap(new java.util.IdentityHashMap<>());
 
-    public static org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork requestExecution(
-            PrefillEndpoint endpoint) {
+    public static org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler
+            requestExecution(PrefillEndpoint endpoint) {
         return WORK.get(endpoint);
     }
 
-    public static org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork attach(
-            org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork work) {
+    public static org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler attach(
+            org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler work) {
         attachWork(work.prefillEndpoint(), work);
         return work;
     }
 
     public static void attachWork(
             PrefillEndpoint endpoint,
-            org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork work) {
+            org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler work) {
+        ReflectionTestUtils.setField(resources(endpoint), "queueSettings", work.settings());
         WORK.put(endpoint, work);
-        endpoint.observeQueueWait(work::admissionBlockLocked, work::getLatestQueueWaitSnapshot);
+        endpoint.observeQueueWait(work::admissionBlock, work::getLatestQueueWaitSnapshot);
         org.springframework.test.util.ReflectionTestUtils.setField(endpoint, "queueEnabled", true);
         if (org.mockito.Mockito.mockingDetails(endpoint).isMock()
                 && !org.mockito.Mockito.mockingDetails(endpoint).isSpy()) {
@@ -524,7 +586,7 @@ public final class EndpointTestSupport {
             org.mockito.Mockito.doCallRealMethod().when(endpoint).queueEnabled();
             org.mockito.Mockito.doCallRealMethod()
                     .when(endpoint)
-                    .offerQueued(org.mockito.Mockito.any());
+                    .tryEnqueueRoute(org.mockito.Mockito.any());
             org.mockito.Mockito.doCallRealMethod()
                     .when(endpoint)
                     .removeQueued(org.mockito.Mockito.any());
@@ -558,15 +620,17 @@ public final class EndpointTestSupport {
                                         org.mockito.Mockito.mock(
                                                 org.flexlb.balance.scheduler.ContextResult.Snapshot
                                                         .class);
-                                var route = org.mockito.Mockito.mock(RequestRoute.class);
+                                var route = org.mockito.Mockito.mock(RouteExecution.class);
                                 org.mockito.Mockito.when(context.data()).thenReturn(data);
-                                org.mockito.Mockito.when(data.getLifecycle()).thenReturn(owner);
+                                org.mockito.Mockito.when(data.getRequestScheduler())
+                                        .thenReturn(owner);
                                 org.mockito.Mockito.when(data.getRequestId())
                                         .thenReturn(String.valueOf(id));
                                 org.mockito.Mockito.when(context.snapshot()).thenReturn(snapshot);
                                 org.mockito.Mockito.when(snapshot.route()).thenReturn(route);
                                 org.mockito.Mockito.when(route.ctx()).thenReturn(context);
-                                org.mockito.Mockito.when(route.decodeEp()).thenReturn(endpoint);
+                                org.mockito.Mockito.when(route.decodeEndpoint())
+                                        .thenReturn(endpoint);
                                 return context;
                             });
         }
@@ -587,7 +651,7 @@ public final class EndpointTestSupport {
                         reporter,
                         new org.flexlb.balance.scheduler.PlacementAvailability(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                        order -> PrefillActiveIndex.ordered(16, order));
+                        order -> OrderedPrefillRequestQueue.ordered(16, order));
         org.flexlb.balance.scheduler.SchedulerTestSupport.associateEndpoint(endpoint, repository);
         return endpoint;
     }
@@ -606,19 +670,18 @@ public final class EndpointTestSupport {
                         reporter,
                         new org.flexlb.balance.scheduler.PlacementAvailability(),
                         org.flexlb.balance.planner.BuiltinGroupPlanner.from(config),
-                        order -> PrefillActiveIndex.ordered(16, order)) {
+                        order -> OrderedPrefillRequestQueue.ordered(16, order)) {
                     @Override
-                    public boolean offerPinned(
-                            GenerationPin pin,
-                            RequestRoute route,
+                    public boolean enqueueRoute(
+                            RouteExecution route,
                             org.flexlb.balance.scheduler.QueueExecutionSettings settings) {
                         enableQueueRuntime(
                                 this,
                                 settings,
                                 org.flexlb.balance.scheduler.SchedulerTestSupport.queueDependencies(
-                                        route.ctx().data().getLifecycle(), config),
+                                        route.ctx().data().getRequestScheduler(), config),
                                 delivery);
-                        return super.offerPinned(pin, route, settings);
+                        return super.enqueueRoute(route, settings);
                     }
                 };
         org.flexlb.balance.scheduler.SchedulerTestSupport.associateEndpoint(endpoint, repository);
@@ -631,42 +694,53 @@ public final class EndpointTestSupport {
             org.flexlb.balance.scheduler.DeliveryExecution dependencies,
             DeliveryDispatcher delivery) {
         var state = endpoint;
-        state.resourceLock().lock();
-        try {
-            if (requestExecution(endpoint) != null) {
-                return;
-            }
-            state.enableQueueLocked(
-                    PrefillActiveIndex.ordered(
-                            16,
-                            org.flexlb.balance.scheduler.QueueExecutionSettings.queueOrder(
-                                    settings.priorityOrdering())));
-            ReflectionTestUtils.setField(delivery, "execution", dependencies);
-            var worker =
-                    org.mockito.Mockito.mock(
-                            org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork.class,
-                            org.mockito.Mockito.withSettings()
-                                    .useConstructor(endpoint.ipPort(), endpoint, settings, delivery)
-                                    .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS));
-            org.flexlb.balance.scheduler.DeliveryTestSupport.installQueueFixture(worker, delivery);
-            org.flexlb.balance.endpoint.EndpointTestSupport.attachWork(endpoint, worker);
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    endpoint, "queueSettings", settings);
+        var created =
+                withStateLock(
+                        state.stateLock(),
+                        () -> {
+                            if (endpoint.isRetired() || requestExecution(endpoint) != null) {
+                                return null;
+                            }
+                            state.enableQueueLocked(
+                                    OrderedPrefillRequestQueue.ordered(
+                                            16,
+                                            org.flexlb.balance.scheduler.QueueExecutionSettings
+                                                    .queueOrder(settings.priorityOrdering())));
+                            ReflectionTestUtils.setField(delivery, "execution", dependencies);
+                            var worker =
+                                    org.mockito.Mockito.mock(
+                                            org.flexlb.balance.scheduler.QueuedRequestScheduler
+                                                    .PrefillQueueScheduler.class,
+                                            org.mockito.Mockito.withSettings()
+                                                    .useConstructor(
+                                                            endpoint.ipPort(),
+                                                            endpoint,
+                                                            settings,
+                                                            delivery)
+                                                    .defaultAnswer(
+                                                            org.mockito.Mockito
+                                                                    .CALLS_REAL_METHODS));
+                            org.flexlb.balance.scheduler.DeliveryTestSupport.installQueueFixture(
+                                    worker, delivery);
+                            org.flexlb.balance.endpoint.EndpointTestSupport.attachWork(
+                                    endpoint, worker);
+                            org.springframework.test.util.ReflectionTestUtils.setField(
+                                    endpoint, "queueSettings", settings);
 
-            org.springframework.test.util.ReflectionTestUtils.setField(
-                    endpoint, "projectionSource", null);
-            RequestExecutionTestSupport.attachDriver(
-                    worker,
-                    null,
-                    org.flexlb.balance.scheduler.RequestExecutionTestSupport::schedule);
-            RequestExecutionTestSupport.start(worker);
-        } finally {
-            state.resourceLock().unlock();
-        }
+                            org.springframework.test.util.ReflectionTestUtils.setField(
+                                    endpoint, "projectionSource", null);
+                            RequestExecutionTestSupport.attachDriver(
+                                    worker,
+                                    null,
+                                    org.flexlb.balance.scheduler.RequestExecutionTestSupport
+                                            ::schedule);
+                            return worker;
+                        });
+        if (created != null) RequestExecutionTestSupport.start(created);
     }
 
-    static RequestLifecycle noopEventSink() {
-        return org.mockito.Mockito.mock(RequestLifecycle.class);
+    static AbstractRequestScheduler noopEventSink() {
+        return org.mockito.Mockito.mock(AbstractRequestScheduler.class);
     }
 
     static WorkerStatus workerStatus(RoleType role, String ip, int port, int grpcPort) {
@@ -774,14 +848,15 @@ public final class EndpointTestSupport {
     private static final CapacityBoundary PARKED_BOUNDARY =
             CapacityBoundary.unavailable(CapacityBoundary.Resource.PREFILL_BATCH);
 
-    static boolean offer(PrefillEndpoint endpoint, RequestRoute item) {
+    static boolean offer(PrefillEndpoint endpoint, RouteExecution item) {
         org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(endpoint, item);
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            if (pin == null) {
+        {
+            WorkerEndpoint selectedEndpoint = endpoint;
+
+            if (selectedEndpoint == null) {
                 return false;
             }
-            return endpoint.offerPinned(
-                    pin,
+            return endpoint.enqueueRoute(
                     item,
                     org.flexlb.balance.scheduler.QueueExecutionSettings.capture(
                             item.ctx().data().getConfig(),
@@ -790,28 +865,32 @@ public final class EndpointTestSupport {
         }
     }
 
-    static PrefillEndpoint.RouteReservation reserveUnqueued(
-            PrefillEndpoint endpoint, RequestRoute item, long predictedMs) {
+    static PrefillEndpoint.RequestRecord reserveUnqueued(
+            PrefillEndpoint endpoint, RouteExecution item, long predictedMs) {
         org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(endpoint, item);
-        try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
-            if (pin == null) {
+        {
+            WorkerEndpoint selectedEndpoint = endpoint;
+
+            if (selectedEndpoint == null) {
                 throw new IllegalStateException("endpoint is retired");
             }
-            return endpoint.reserveUnqueuedRoute(pin, item, predictedMs).value();
+            return endpoint.reserveUnqueuedRoute(item, predictedMs).value();
         }
     }
 
     static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
-        RequestRoute item = org.mockito.Mockito.mock(RequestRoute.class);
+        RouteExecution item = org.mockito.Mockito.mock(RouteExecution.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(String.valueOf(requestId));
         org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(endpoint, item);
         {
             var reservation = reserveUnqueued(endpoint, item, predictedMs);
-            try (var preparationReservation = EndpointTestSupport.preparation(reservation);
-                    var handoff =
-                            org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
-                                    endpoint, item, reservation)) {
-                // The endpoint ledger owns this request until authoritative termination.
+            {
+                var handoff =
+                        org.flexlb.balance.endpoint.EndpointTestSupport.commitDirect(
+                                endpoint, item, reservation);
+                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                    // The endpoint ledger owns this request until authoritative termination.
+                }
             }
         }
     }
@@ -820,22 +899,22 @@ public final class EndpointTestSupport {
             PrefillEndpoint endpoint,
             long batchId,
             long predictedMs,
-            List<? extends RequestRoute> exactItems) {
+            List<? extends RouteExecution> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException("batch requires at least one item");
         }
-        List<RequestRoute> items = List.copyOf(exactItems);
+        List<RouteExecution> items = List.copyOf(exactItems);
         items.forEach(
                 item ->
                         org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(
                                 endpoint, item));
-        CapacityBoundary.Attempt<PrefillEndpoint.BatchReservation> result =
+        CapacityBoundary.Attempt<PrefillEndpoint.BatchRecord> result =
                 endpoint.reserveBatch(batchId, Integer.MAX_VALUE);
         if (!result.accepted()) {
             throw new IllegalStateException("batch reservation rejected: " + result.boundary());
         }
         {
-            PrefillEndpoint.BatchReservation reservation = result.value();
+            PrefillEndpoint.BatchRecord reservation = result.value();
             try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
                 PrefillEndpoint state = (PrefillEndpoint) endpoint;
                 return commitBatch(state, reservation, items, predictedMs);
@@ -843,73 +922,81 @@ public final class EndpointTestSupport {
         }
     }
 
-    public static boolean releaseRequest(PrefillEndpoint state, RequestRoute exact) {
+    public static boolean releaseRequest(PrefillEndpoint state, RouteExecution exact) {
         return state.releaseRequest(exact);
     }
 
-    public static PreparationScope preparation(PrefillEndpoint.Reservation reservation) {
-        return new PreparationScope(reservation);
+    public static PreparationScope preparation(PrefillEndpoint.RequestRecord reservation) {
+        return new PreparationScope(() -> rollback(reservation));
     }
 
-    static void rollback(PrefillEndpoint.Reservation reservation) {
-        if (reservation == null) {
-            return;
-        }
-        reservation.owner.rollback(reservation);
+    public static PreparationScope preparation(PrefillEndpoint.BatchRecord reservation) {
+        return new PreparationScope(() -> rollback(reservation));
+    }
+
+    static void rollback(PrefillEndpoint.RequestRecord reservation) {
+        if (reservation != null) reservation.owner.rollback(reservation);
+    }
+
+    static void rollback(PrefillEndpoint.BatchRecord reservation) {
+        if (reservation != null) reservation.owner.rollback(reservation);
     }
 
     public static final class PreparationScope implements AutoCloseable {
-        private final PrefillEndpoint.Reservation reservation;
+        private final Runnable rollback;
 
-        private PreparationScope(PrefillEndpoint.Reservation reservation) {
-            this.reservation = reservation;
+        private PreparationScope(Runnable rollback) {
+            this.rollback = rollback;
         }
 
         @Override
         public void close() {
-            rollback(reservation);
+            rollback.run();
         }
     }
 
     static org.flexlb.balance.scheduler.Delivery commitQueuedRoutes(
-            PrefillEndpoint state, List<RequestRoute> items, long[] predictions) {
-        state.resourceLock().lock();
-        try {
-            return state.commitLocked(
-                    org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                            items, null, predictions, null, System.currentTimeMillis()));
-        } finally {
-            state.resourceLock().unlock();
-        }
+            PrefillEndpoint state, List<RouteExecution> items, long[] predictions) {
+        return withStateLock(
+                state.stateLock(),
+                () -> {
+                    return state.commitLocked(
+                            org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                                    items, null, predictions, null, System.currentTimeMillis()));
+                });
     }
 
     static List<org.flexlb.balance.scheduler.Delivery> commitRoutes(
-            PrefillEndpoint endpoint, long predictedMs, List<? extends RequestRoute> exactItems) {
-        List<RequestRoute> items = List.copyOf(exactItems);
+            PrefillEndpoint endpoint, long predictedMs, List<? extends RouteExecution> exactItems) {
+        List<RouteExecution> items = List.copyOf(exactItems);
         items.forEach(
                 item ->
                         org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(
                                 endpoint, item));
         long[] predictions = new long[items.size()];
         java.util.Arrays.fill(predictions, predictedMs);
-        var lock = endpoint.resourceLock();
-        lock.lock();
-        try {
-            return List.of(
-                    endpoint.commitLocked(
-                            org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
-                                    items, null, predictions, null, System.currentTimeMillis())));
-        } finally {
-            lock.unlock();
-        }
+        var lock = endpoint.stateLock();
+        return withStateLock(
+                lock,
+                () -> {
+                    return List.of(
+                            endpoint.commitLocked(
+                                    org.flexlb.balance.scheduler.DeliveryTestSupport.queued(
+                                            items,
+                                            null,
+                                            predictions,
+                                            null,
+                                            System.currentTimeMillis())));
+                });
     }
 
     static final DeliveryMetricsReporter NOOP_TELEMETRY =
             org.mockito.Mockito.mock(DeliveryMetricsReporter.class);
 
     static class TestRequestRuntime {
-        private final RequestLifecycle requests = org.mockito.Mockito.mock(RequestLifecycle.class);
-        private final RequestLifecycle events = requests;
+        private final AbstractRequestScheduler requests =
+                org.mockito.Mockito.mock(AbstractRequestScheduler.class);
+        private final AbstractRequestScheduler events = requests;
         private final List<PrefillRetirement> prefillRetirements = new CopyOnWriteArrayList<>();
 
         TestRequestRuntime() {
@@ -921,40 +1008,36 @@ public final class EndpointTestSupport {
                                         invocation.getArgument(
                                                 1,
                                                 org.flexlb.balance.scheduler.ContextResult
-                                                        .EngineEvidence.class);
-                                if (evidence.kind()
-                                        == org.flexlb.balance.scheduler.ContextResult.EngineKind
-                                                .RETIRED) {
-                                    prefillRetirements.add(
-                                            new PrefillRetirement(
-                                                    evidence.route().prefillEp(),
-                                                    List.of(evidence.route())));
-                                    onRetired(evidence.route());
-                                }
+                                                        .EndpointRetirement.class);
+                                prefillRetirements.add(
+                                        new PrefillRetirement(
+                                                evidence.route().prefillEndpoint(),
+                                                List.of(evidence.route())));
+                                onRetired(evidence.route());
                                 return null;
                             })
                     .when(events)
-                    .onEngineEvidence(org.mockito.Mockito.any(), org.mockito.Mockito.any());
+                    .onEndpointRetired(org.mockito.Mockito.any(), org.mockito.Mockito.any());
         }
 
-        RequestLifecycle requests() {
+        AbstractRequestScheduler requests() {
             return requests;
         }
 
-        RequestLifecycle events() {
+        AbstractRequestScheduler events() {
             return events;
         }
 
         void onCompleted(Delivery.Member claim, Delivery.Result result) {}
 
-        void onRetired(RequestRoute item) {}
+        void onRetired(RouteExecution item) {}
 
         List<PrefillRetirement> prefillRetirements() {
             return List.copyOf(prefillRetirements);
         }
     }
 
-    record PrefillRetirement(PrefillEndpoint endpoint, List<RequestRoute> ownedItems) {
+    record PrefillRetirement(PrefillEndpoint endpoint, List<RouteExecution> ownedItems) {
         PrefillRetirement {
             ownedItems = List.copyOf(ownedItems);
         }

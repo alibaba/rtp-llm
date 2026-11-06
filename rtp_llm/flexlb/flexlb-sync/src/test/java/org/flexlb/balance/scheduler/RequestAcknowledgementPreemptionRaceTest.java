@@ -50,8 +50,8 @@ class RequestAcknowledgementPreemptionRaceTest {
                 org.flexlb.balance.scheduler.SchedulerTestSupport.runtime(owner),
                 "timer",
                 mock(ExpirationTimer.class));
-        RequestProtocolTestSupport.register(owner, context);
-        var reservation = new DecodeResources.ReservationHandle(1L, String.valueOf(9741L), 3L);
+        RequestProtocolTestSupport.submitForManualPlacement(owner, context);
+        var reservation = new DecodeResources.RequestReservation(1L, String.valueOf(9741L), 3L);
         var decode = RequestProtocolTestSupport.decodeEndpoint();
         var prefill = mock(PrefillEndpoint.class);
         var server = new ServerStatus();
@@ -72,7 +72,7 @@ class RequestAcknowledgementPreemptionRaceTest {
                 org.flexlb.balance.PlacementResult.Status.SUCCESS,
                 RequestProtocolTestSupport.commitRoute(
                         owner, route, RequestProtocolTestSupport.publication(() -> true)));
-        admission.finish();
+        AbstractRequestScheduler.finishPlacement(admission);
         var delivery =
                 DeliveryDispatcher.commitDelivery(
                         owner,

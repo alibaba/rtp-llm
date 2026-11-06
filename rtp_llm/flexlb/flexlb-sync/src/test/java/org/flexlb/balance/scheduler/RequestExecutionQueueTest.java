@@ -4,7 +4,7 @@ import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
@@ -30,6 +30,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.balance.endpoint.EndpointTestSupport.withStateLock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -40,10 +41,12 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Canonical endpoint-queue contract exposed by {@link EndpointWork}. */
+/**
+ * Canonical endpoint-queue contract exposed by {@link PrefillQueueScheduler}.
+ */
 class RequestExecutionQueueTest {
 
-    private final List<EndpointWork> runtimes = new ArrayList<>();
+    private final List<PrefillQueueScheduler> runtimes = new ArrayList<>();
     private FlexlbConfig config;
     private PrefillEndpoint prefillEndpoint;
     private BlockingDispatcher deliveryStrategy;
@@ -59,7 +62,7 @@ class RequestExecutionQueueTest {
 
     @AfterEach
     void stopRuntimes() {
-        for (EndpointWork runtime : runtimes) {
+        for (PrefillQueueScheduler runtime : runtimes) {
             assertNull(runtime.stopAndAwait());
         }
     }
@@ -68,7 +71,7 @@ class RequestExecutionQueueTest {
     @org.junit.jupiter.api.Timeout(15)
     void removedCallbackFailureIsRecordedWithoutStoppingLaterQueueWork() throws Exception {
         var service = DeliveryTestSupport.service(config);
-        RequestLifecycle owner =
+        AbstractRequestScheduler owner =
                 SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
@@ -80,7 +83,7 @@ class RequestExecutionQueueTest {
                 new IllegalStateException("injected preparation failure");
         var callbackReturned = new CountDownLatch(1);
         var laterSelected = new CountDownLatch(1);
-        EndpointWork worker = null;
+        PrefillQueueScheduler worker = null;
         try {
             prefillEndpoint =
                     org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
@@ -100,7 +103,7 @@ class RequestExecutionQueueTest {
                             owner.requests);
             doAnswer(
                             call -> {
-                                List<RequestRoute> selected = call.getArgument(0);
+                                List<RouteExecution> selected = call.getArgument(0);
                                 if (selected.getFirst().requestId().equals("930")) {
                                     return CapacityBoundary.failed(preparationFailure);
                                 }
@@ -132,12 +135,14 @@ class RequestExecutionQueueTest {
             RequestExecutionTestSupport.start(worker);
             for (long id : new long[] {930L, 931L}) {
                 var context = RequestProtocolTestSupport.context(config, id);
-                var future = RequestProtocolTestSupport.register(owner, context);
-                org.flexlb.balance.endpoint.DecodeResources.ReservationHandle reservation;
-                try (var pin = decode.tryPinGeneration()) {
+                var future = RequestProtocolTestSupport.submitForManualPlacement(owner, context);
+                org.flexlb.balance.endpoint.DecodeResources.RequestReservation reservation;
+                {
+                    var selectedEndpoint = decode;
+
                     reservation =
                             org.flexlb.balance.endpoint.EndpointTestSupport.reserveUnqueuedDecode(
-                                    decode, pin, id, 1L, 2L, 50);
+                                    decode, selectedEndpoint, id, 1L, 2L, 50);
                 }
                 var route =
                         SchedulingTestConfig.createRoute(
@@ -149,8 +154,8 @@ class RequestExecutionQueueTest {
                                 decode,
                                 reservation,
                                 System.currentTimeMillis());
-                try (AdmissionHandle admission =
-                                owner.claimAdmissionHandle(String.valueOf(id), future);
+                try (PlacementOperation admission =
+                                SchedulerTestSupport.claim(owner, String.valueOf(id), future);
                         var completed = RequestProtocolTestSupport.finishOnExit(admission)) {
                     assertNotNull(admission);
                     assertEquals(
@@ -205,9 +210,9 @@ class RequestExecutionQueueTest {
     @Test
     void batchModeKeepsPriorityQueueWithoutAnExtraRequestCountLimit() {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
-        EndpointWork runtime = runningRuntime();
-        RequestRoute low = item(901L, 10, Long.MAX_VALUE, 1, 128);
-        RequestRoute high = item(902L, 90, Long.MAX_VALUE, 2, 128);
+        PrefillQueueScheduler runtime = runningRuntime();
+        RouteExecution low = item(901L, 10, Long.MAX_VALUE, 1, 128);
+        RouteExecution high = item(902L, 90, Long.MAX_VALUE, 2, 128);
         assertTrue(RequestExecutionTestSupport.offer(runtime, low));
         assertTrue(RequestExecutionTestSupport.offer(runtime, high));
         assertEquals(List.of(high, low), RequestExecutionTestSupport.capture(runtime).items());
@@ -215,7 +220,7 @@ class RequestExecutionQueueTest {
 
     @Test
     void priorityOrderIsPriorityDescendingThenActualOfferFifo() {
-        EndpointWork runtime = runningRuntime();
+        PrefillQueueScheduler runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
         assertTrue(RequestExecutionTestSupport.offer(runtime, item(1, 50, now + 5_000, now, 128)));
@@ -236,7 +241,7 @@ class RequestExecutionQueueTest {
 
     @Test
     void priorityOrderUsesUniqueOfferSequenceBeforeRequestIdOrCallerTimestamp() {
-        EndpointWork runtime = runningRuntime();
+        PrefillQueueScheduler runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
         assertTrue(RequestExecutionTestSupport.offer(runtime, item(1, 50, now + 9_000, now, 128)));
@@ -252,7 +257,7 @@ class RequestExecutionQueueTest {
     @Test
     void fifoOrderIgnoresPriorityAndCallerTimestamp() {
         SchedulingTestConfig.useFifoQueue(config);
-        EndpointWork runtime = runningRuntime();
+        PrefillQueueScheduler runtime = runningRuntime();
         long now = System.currentTimeMillis();
 
         assertTrue(RequestExecutionTestSupport.offer(runtime, item(1, 30, now + 1_000, now, 128)));
@@ -268,7 +273,7 @@ class RequestExecutionQueueTest {
 
     @Test
     void life002AdmissionBoundaryAndFifoContract() {
-        EndpointWork runtime = runningRuntime();
+        PrefillQueueScheduler runtime = runningRuntime();
         long now = System.currentTimeMillis();
         var requests =
                 List.of(
@@ -296,7 +301,7 @@ class RequestExecutionQueueTest {
 
     @Test
     void sched001PriorityAndSamePriorityFairnessContract() {
-        EndpointWork runtime = runningRuntime();
+        PrefillQueueScheduler runtime = runningRuntime();
         long now = System.currentTimeMillis();
         assertTrue(
                 RequestExecutionTestSupport.offer(
@@ -319,9 +324,9 @@ class RequestExecutionQueueTest {
 
     @Test
     void snapshotsExposeExactCanonicalIdentitiesAndMonotonicMutationVersion() {
-        EndpointWork runtime = runningRuntime();
-        RequestRoute first = item(11, 70, Long.MAX_VALUE, 1, 128);
-        RequestRoute second = item(12, 50, Long.MAX_VALUE, 2, 128);
+        PrefillQueueScheduler runtime = runningRuntime();
+        RouteExecution first = item(11, 70, Long.MAX_VALUE, 1, 128);
+        RouteExecution second = item(12, 50, Long.MAX_VALUE, 2, 128);
 
         var empty = RequestExecutionTestSupport.capture(runtime);
         long emptyVersion =
@@ -353,9 +358,9 @@ class RequestExecutionQueueTest {
 
     @Test
     void removalRequiresTheExactQueuedIdentityEvenForSameRequestId() {
-        EndpointWork runtime = runningRuntime();
-        RequestRoute canonical = item(21, 50, Long.MAX_VALUE, 1, 128);
-        RequestRoute lookalike = item(21, 50, Long.MAX_VALUE, 1, 128);
+        PrefillQueueScheduler runtime = runningRuntime();
+        RouteExecution canonical = item(21, 50, Long.MAX_VALUE, 1, 128);
+        RouteExecution lookalike = item(21, 50, Long.MAX_VALUE, 1, 128);
         assertTrue(RequestExecutionTestSupport.offer(runtime, canonical));
 
         assertFalse(runtime.prefillEndpoint().removeQueued(lookalike));
@@ -370,13 +375,13 @@ class RequestExecutionQueueTest {
                         config,
                         prefillEndpoint.getStatus(),
                         deliveryStrategy,
-                        mock(RequestLifecycle.class));
-        EndpointWork runtime =
+                        mock(AbstractRequestScheduler.class));
+        PrefillQueueScheduler runtime =
                 org.flexlb.balance.endpoint.EndpointTestSupport.requestExecution(prefillEndpoint);
         runtimes.add(runtime);
         RequestExecutionTestSupport.start(runtime);
         var before = prefillEndpoint.captureRouteProjectionInputs();
-        RequestRoute queued = item(905L, 50, Long.MAX_VALUE, 1L, 128L);
+        RouteExecution queued = item(905L, 50, Long.MAX_VALUE, 1L, 128L);
         assertTrue(RequestExecutionTestSupport.offer(runtime, queued));
         var after = prefillEndpoint.captureRouteProjectionInputs();
         assertTrue(after.ownershipVersion() > before.ownershipVersion());
@@ -391,23 +396,23 @@ class RequestExecutionQueueTest {
             throws Exception {
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        RequestLifecycle registry =
+        AbstractRequestScheduler registry =
                 SchedulerTestSupport.create(
                         service,
                         mock(DeliveryMetricsReporter.class),
                         mock(RequestSchedulerReporter.class),
                         mock(TheoryCacheHitReporter.class));
         try {
-            EndpointWork runtime =
+            PrefillQueueScheduler runtime =
                     RequestExecutionTestSupport.create(
                             "test-worker", prefillEndpoint, config, deliveryStrategy, registry);
             runtimes.add(runtime);
             RequestExecutionTestSupport.start(runtime);
             RequestContext context = RequestProtocolTestSupport.context(config, 907L);
             CompletableFuture<Response> future =
-                    RequestProtocolTestSupport.register(registry, context);
+                    RequestProtocolTestSupport.submitForManualPlacement(registry, context);
             context.data().setFuture(future);
-            RequestRoute queued =
+            RouteExecution queued =
                     SchedulingTestConfig.createRoute(
                             context,
                             new Response(),
@@ -434,7 +439,9 @@ class RequestExecutionQueueTest {
                                         Thread.holdsLock(context),
                                         "request cleanup must run outside Context's monitor");
                                 org.junit.jupiter.api.Assertions.assertFalse(
-                                        state.resourceLock().isHeldByCurrentThread(),
+                                        org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(
+                                                        state)
+                                                .isHeldByCurrentThread(),
                                         "request cleanup must enter the resource ledger outside the queue lock");
                                 cleanupThread.set(Thread.currentThread());
                                 boolean released =
@@ -443,14 +450,17 @@ class RequestExecutionQueueTest {
                                 if (released) {
                                     releases.incrementAndGet();
                                     org.junit.jupiter.api.Assertions.assertFalse(
-                                            state.resourceLock().isHeldByCurrentThread(),
+                                            org.flexlb.balance.endpoint.EndpointTestSupport
+                                                    .stateLock(state)
+                                                    .isHeldByCurrentThread(),
                                             "capacity and queue notifications must run after resource release unlocks");
                                     runtime.signal(false);
                                     runtime.capacityAvailableSignal.run();
                                 }
                                 return released;
                             });
-            try (AdmissionHandle admission = registry.claimAdmissionHandle("907", future);
+            try (PlacementOperation admission =
+                            SchedulerTestSupport.claim(registry, "907", future);
                     var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertEquals(
                         PlacementResult.Status.SUCCESS,
@@ -476,15 +486,16 @@ class RequestExecutionQueueTest {
             assertEquals(List.of(queued), RequestExecutionTestSupport.capture(runtime).items());
             RequestProtocolTestSupport.awaitCondition(
                     () -> {
-                        var lock = prefillEndpoint.resourceLock();
-                        lock.lock();
-                        try {
-                            return org.springframework.test.util.ReflectionTestUtils.getField(
-                                            runtime, "waiting")
-                                    != null;
-                        } finally {
-                            lock.unlock();
-                        }
+                        var lock =
+                                org.flexlb.balance.endpoint.EndpointTestSupport.stateLock(
+                                        prefillEndpoint);
+                        return withStateLock(
+                                lock,
+                                () -> {
+                                    return org.springframework.test.util.ReflectionTestUtils
+                                                    .getField(runtime, "waiting")
+                                            != null;
+                                });
                     });
 
             if (futureCancellation) {
@@ -552,8 +563,8 @@ class RequestExecutionQueueTest {
         } else {
             config.getDispatcher().setType(org.flexlb.config.DispatcherConfig.Type.NON_BATCH);
         }
-        RequestLifecycle events = mock(RequestLifecycle.class);
-        EndpointWork runtime =
+        AbstractRequestScheduler events = mock(AbstractRequestScheduler.class);
+        PrefillQueueScheduler runtime =
                 RequestExecutionTestSupport.create(
                         "stop-test", prefillEndpoint, config, deliveryStrategy, events);
         if (!callbackFails) {
@@ -564,7 +575,7 @@ class RequestExecutionQueueTest {
         CountDownLatch callbackEntered = new CountDownLatch(1);
         CountDownLatch releaseCallback = new CountDownLatch(1);
         AtomicInteger callbacks = new AtomicInteger();
-        RequestRoute queued = item(920L, 50, Long.MAX_VALUE, System.currentTimeMillis(), 128L);
+        RouteExecution queued = item(920L, 50, Long.MAX_VALUE, System.currentTimeMillis(), 128L);
         doAnswer(
                         invocation -> {
                             callbacks.incrementAndGet();
@@ -639,7 +650,7 @@ class RequestExecutionQueueTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void explicitStopDrainsRequestsWithoutAnExecutionThread(boolean fails) throws Exception {
-        var owner = mock(RequestLifecycle.class);
+        var owner = mock(AbstractRequestScheduler.class);
         var runtime =
                 RequestExecutionTestSupport.create(
                         "custom-exit", prefillEndpoint, config, deliveryStrategy, owner);
@@ -680,11 +691,11 @@ class RequestExecutionQueueTest {
 
     @Test
     void constructingWorkerStateDoesNotChooseOrDispatchRequests() throws Exception {
-        var owner = mock(RequestLifecycle.class);
+        var owner = mock(AbstractRequestScheduler.class);
         var state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new java.util.concurrent.locks.ReentrantLock(),
-                        org.flexlb.balance.endpoint.PrefillActiveIndex.ordered(
+                        org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
                                 4, QueueExecutionSettings.queueOrder(config.isPriorityOrdering())),
                         System::currentTimeMillis);
         var dispatcher = mock(DeliveryDispatcher.class);
@@ -711,7 +722,7 @@ class RequestExecutionQueueTest {
         try {
             var route = item(9999L, 50, Long.MAX_VALUE, 1L, 128L);
             SchedulerTestSupport.bindOwner(route.ctx(), owner);
-            assertTrue(execution.prefillEndpoint().offerQueued(route));
+            assertTrue(execution.prefillEndpoint().tryEnqueueRoute(route));
             assertFalse(delivered.await(100, TimeUnit.MILLISECONDS));
             assertEquals(List.of(route), execution.captureQueue(10).items());
         } finally {
@@ -719,20 +730,20 @@ class RequestExecutionQueueTest {
         }
     }
 
-    private EndpointWork runningRuntime() {
-        EndpointWork runtime =
+    private PrefillQueueScheduler runningRuntime() {
+        PrefillQueueScheduler runtime =
                 RequestExecutionTestSupport.create(
                         "test-worker",
                         prefillEndpoint,
                         config,
                         deliveryStrategy,
-                        mock(RequestLifecycle.class));
+                        mock(AbstractRequestScheduler.class));
         runtimes.add(runtime);
         RequestExecutionTestSupport.start(runtime);
         return runtime;
     }
 
-    private RequestRoute item(
+    private RouteExecution item(
             long requestId, int priority, long expiresAtMs, long enqueuedAtMs, long seqLen) {
         Request request =
                 Request.builder()
@@ -748,7 +759,7 @@ class RequestExecutionQueueTest {
                 context, null, null, null, prefillEndpoint, null, null, enqueuedAtMs);
     }
 
-    private static List<Long> requestIds(List<RequestRoute> items) {
+    private static List<Long> requestIds(List<RouteExecution> items) {
         return items.stream().map(item -> Long.parseLong(item.requestId())).toList();
     }
 
@@ -766,14 +777,16 @@ class RequestExecutionQueueTest {
         return endpoint;
     }
 
-    /** Holds every exact head ACTIVE so snapshots can exercise live ordering. */
+    /**
+     * Holds every exact head ACTIVE so snapshots can exercise live ordering.
+     */
     private static final class BlockingDispatcher extends DeliveryTestSupport.StubDispatcher {
 
         private final AtomicInteger attempts = new AtomicInteger();
 
         @Override
         public CapacityBoundary selectBoundary(
-                List<RequestRoute> candidates,
+                List<RouteExecution> candidates,
                 PrefillTimePredictor.Evaluator evaluator,
                 OptionalLong plannedPrediction) {
             attempts.incrementAndGet();

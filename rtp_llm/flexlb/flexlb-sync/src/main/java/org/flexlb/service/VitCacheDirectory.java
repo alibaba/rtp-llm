@@ -241,8 +241,9 @@ public class VitCacheDirectory {
         if (worker == null) {
             return false;
         }
-        try (var pin = workers.capture(RoleType.VIT, worker.getLogicalIpPort())) {
-            return pin != null && pin.endpoint().getStatus() == worker;
+        {
+            var selectedEndpoint = workers.selectEndpoint(RoleType.VIT, worker.getLogicalIpPort());
+            return selectedEndpoint != null && selectedEndpoint.getStatus() == worker;
         }
     }
 

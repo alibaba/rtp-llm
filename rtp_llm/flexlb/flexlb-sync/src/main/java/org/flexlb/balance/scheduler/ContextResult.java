@@ -8,7 +8,9 @@ import org.flexlb.dao.route.RoleType;
 
 import static com.google.common.math.LongMath.saturatedAdd;
 
-/** Immutable facts and exact permissions, without execution callbacks or infrastructure handles. */
+/**
+ * Immutable facts and exact permissions, without execution callbacks or infrastructure handles.
+ */
 public final class ContextResult {
     private ContextResult() {}
 
@@ -26,6 +28,40 @@ public final class ContextResult {
         DELIVERED,
         UNKNOWN,
         ROUTE_CLOSED
+    }
+
+    public enum RouteFailureReason {
+        ENDPOINT_UNAVAILABLE,
+        PREPARATION_FAILED
+    }
+
+    /**
+     * Failure of one exact route; cleanup must finish before scheduling another route.
+     */
+    public record RouteFailure(
+            RouteExecution route,
+            RouteFailureReason reason,
+            org.flexlb.balance.endpoint.WorkerEndpoint failedEndpoint,
+            String detail) {
+        public RouteFailure(RouteExecution route, RouteFailureReason reason, String detail) {
+            this(
+                    route,
+                    reason,
+                    reason == RouteFailureReason.ENDPOINT_UNAVAILABLE
+                            ? route.firstUnavailableEndpoint()
+                            : null,
+                    detail);
+        }
+
+        public RoleType failedRole() {
+            return failedEndpoint == null ? null : failedEndpoint.getStatus().getRole();
+        }
+
+        public RouteFailure {
+            java.util.Objects.requireNonNull(route, "route");
+            java.util.Objects.requireNonNull(reason, "reason");
+            detail = detail == null ? "Route admission failed" : detail;
+        }
     }
 
     public enum PublicationResult {
@@ -63,13 +99,15 @@ public final class ContextResult {
         FRONTEND
     }
 
-    public enum EngineKind {
+    /**
+     * Observations about a request on a Worker; not mutually exclusive request states.
+     */
+    public enum WorkerRequestEventType {
         ACTIVE,
         ALLOCATED,
         COMPLETED,
         FAILED,
-        PRIORITY_CANCELLED,
-        RETIRED
+        PRIORITY_CANCELLED
     }
 
     public record Identity(
@@ -88,7 +126,7 @@ public final class ContextResult {
     }
 
     public record EndEvidence(
-            @lombok.With(lombok.AccessLevel.PACKAGE) RequestRoute route,
+            @lombok.With(lombok.AccessLevel.PACKAGE) RouteExecution route,
             EndKind kind,
             RoleType role,
             boolean success,
@@ -98,11 +136,11 @@ public final class ContextResult {
             boolean prefillSettled,
             boolean decodeSettled) {
         public static EndEvidence failure(
-                RequestRoute route, EndKind kind, StrategyErrorType errorType, String detail) {
+                RouteExecution route, EndKind kind, StrategyErrorType errorType, String detail) {
             return new EndEvidence(route, kind, null, false, 0L, errorType, detail, false, false);
         }
 
-        public static EndEvidence publicationFailure(RequestRoute route, Response response) {
+        public static EndEvidence publicationFailure(RouteExecution route, Response response) {
             var error = StrategyErrorType.DISPATCH_FAILED;
             if (response != null) {
                 for (var candidate : StrategyErrorType.values()) {
@@ -135,7 +173,7 @@ public final class ContextResult {
         }
 
         public static EndEvidence externalFailure(
-                RequestRoute route, Response response, Throwable error) {
+                RouteExecution route, Response response, Throwable error) {
             String detail =
                     error != null
                             ? "external future failure: " + error.getMessage()
@@ -145,7 +183,7 @@ public final class ContextResult {
             return failure(route, EndKind.FRONTEND, StrategyErrorType.DISPATCH_FAILED, detail);
         }
 
-        public static EndEvidence deliveryFailure(RequestRoute route, DeliveryEvidence evidence) {
+        public static EndEvidence deliveryFailure(RouteExecution route, DeliveryEvidence evidence) {
             String detail;
             if (evidence instanceof PreparationFailure failed) {
                 detail = failed.detail();
@@ -163,32 +201,28 @@ public final class ContextResult {
         }
     }
 
-    public record EngineEvidence(
-            RequestRoute route,
-            DecodeResources.ReservationHandle reservation,
+    public record WorkerRequestEvent(
+            RouteExecution route,
+            DecodeResources.RequestReservation reservation,
             RoleType role,
-            EngineKind kind,
+            WorkerRequestEventType type,
             long errorCode,
             String detail,
             long nowMs) {
         boolean terminal() {
-            return kind == EngineKind.COMPLETED
-                    || kind == EngineKind.FAILED
-                    || kind == EngineKind.PRIORITY_CANCELLED
-                    || kind == EngineKind.RETIRED;
+            return type == WorkerRequestEventType.COMPLETED
+                    || type == WorkerRequestEventType.FAILED
+                    || type == WorkerRequestEventType.PRIORITY_CANCELLED;
         }
 
         EndEvidence end() {
             boolean decode = role == RoleType.DECODE;
             EndKind end =
-                    kind == EngineKind.RETIRED
-                            ? EndKind.RETIREMENT
-                            : kind == EngineKind.PRIORITY_CANCELLED
-                                    ? EndKind.PRIORITY
-                                    : EndKind.WORKER;
+                    type == WorkerRequestEventType.PRIORITY_CANCELLED
+                            ? EndKind.PRIORITY
+                            : EndKind.WORKER;
             StrategyErrorType error =
                     switch (end) {
-                        case RETIREMENT -> StrategyErrorType.DISPATCH_FAILED;
                         case PRIORITY -> StrategyErrorType.PRIORITY_PREEMPTED;
                         default -> StrategyErrorType.WORKER_EXECUTION_FAILED;
                     };
@@ -196,12 +230,36 @@ public final class ContextResult {
                     route,
                     end,
                     role,
-                    kind == EngineKind.COMPLETED,
+                    type == WorkerRequestEventType.COMPLETED,
                     errorCode,
                     error,
                     detail,
                     !decode,
                     decode);
+        }
+    }
+
+    /**
+     * An exact Endpoint retirement retained while admission finishes or rolls back.
+     */
+    public record EndpointRetirement(
+            RouteExecution route,
+            DecodeResources.RequestReservation reservation,
+            RoleType role,
+            org.flexlb.balance.endpoint.WorkerEndpoint endpoint,
+            String detail,
+            long nowMs) {
+        EndEvidence end() {
+            return new EndEvidence(
+                    route,
+                    EndKind.RETIREMENT,
+                    role,
+                    false,
+                    0L,
+                    StrategyErrorType.DISPATCH_FAILED,
+                    detail,
+                    role != RoleType.DECODE,
+                    role == RoleType.DECODE);
         }
     }
 
@@ -237,7 +295,9 @@ public final class ContextResult {
             boolean releaseAttempt,
             EndEvidence terminal) {}
 
-    /** notificationsDone includes successful removal/update of deadline registrations. */
+    /**
+     * notificationsDone includes successful removal/update of deadline registrations.
+     */
     public record CloseProgress(
             boolean notificationsAttempted,
             boolean prefillSettled,
@@ -275,13 +335,14 @@ public final class ContextResult {
             implements DeliveryEvidence {}
 
     public record PreparationFailure(
-            Delivery.Member delivery, RequestRoute route, String detail, long nowMs)
+            Delivery.Member delivery, RouteExecution route, String detail, long nowMs)
             implements DeliveryEvidence {}
 
     public record PlacementFacts(
-            AdmissionHandle operation,
+            PlacementOperation operation,
+            @lombok.With(lombok.AccessLevel.PACKAGE) boolean completing,
             @lombok.With(lombok.AccessLevel.PACKAGE) boolean published,
-            @lombok.With(lombok.AccessLevel.PACKAGE) EngineEvidence pendingRetirement,
+            @lombok.With(lombok.AccessLevel.PACKAGE) EndpointRetirement pendingRetirement,
             @lombok.With(lombok.AccessLevel.PACKAGE) boolean inactivityExpired) {}
 
     public record EngineFacts(
@@ -310,13 +371,15 @@ public final class ContextResult {
                     delivery);
         }
 
-        EngineFacts observe(EngineEvidence evidence, boolean hasDecode) {
+        EngineFacts observe(WorkerRequestEvent evidence, boolean hasDecode) {
             boolean isDecode = evidence.role() == RoleType.DECODE;
-            boolean accepted = decodeAccepted || isDecode && evidence.kind() != EngineKind.RETIRED;
-            boolean observed = prefillObserved || !isDecode && evidence.kind() == EngineKind.ACTIVE;
+            boolean accepted = decodeAccepted || isDecode;
+            boolean observed =
+                    prefillObserved
+                            || !isDecode && evidence.type() == WorkerRequestEventType.ACTIVE;
             long completed =
                     !isDecode
-                                    && evidence.kind() == EngineKind.COMPLETED
+                                    && evidence.type() == WorkerRequestEventType.COMPLETED
                                     && prefillCompletedAtMs == 0L
                             ? evidence.nowMs()
                             : prefillCompletedAtMs;
@@ -426,7 +489,9 @@ public final class ContextResult {
             };
         }
 
-        /** Exact sender result; cleanup evidence and cancellation remain separate facts. */
+        /**
+         * Exact sender result; cleanup evidence and cancellation remain separate facts.
+         */
         DeliveryFacts recordTransport(Delivery.Result result, CancelReason reason) {
             if (identity.kind() != Delivery.SendMode.BATCH_ENQUEUE) {
                 throw new IllegalArgumentException(
@@ -575,11 +640,13 @@ public final class ContextResult {
         }
     }
 
-    /** Immutable request facts and observation times captured in one transition. */
+    /**
+     * Immutable request facts and observation times captured in one transition.
+     */
     public record Snapshot(
             Identity key,
             long createdAtMs,
-            RequestRoute route,
+            RouteExecution route,
             PlacementFacts placement,
             DeliveryFacts delivery,
             EngineFacts engine,
@@ -587,6 +654,7 @@ public final class ContextResult {
             CancellationFacts cancellation,
             End outcome,
             EndEvidence pendingEnd,
+            RouteFailure routeFailure,
             ResponseCandidate selectedResponse,
             CloseFacts close,
             ExpirationTimer.Plan deadlines,
@@ -598,7 +666,9 @@ public final class ContextResult {
             return DeliveryFacts.releasable(delivery);
         }
 
-        /** State eligibility only; Context still checks inactivity and preemption before confirming. */
+        /**
+         * State eligibility only; Context still checks inactivity and preemption before confirming.
+         */
         public boolean canConfirmDelivery() {
             return key != null
                     && phase() == Phase.OPEN
@@ -617,6 +687,7 @@ public final class ContextResult {
                     || delivery != null
                     || cancellation != null
                     || preemption != null
+                    || routeFailure != null
                     || pendingEnd != null) {
                 return false;
             }

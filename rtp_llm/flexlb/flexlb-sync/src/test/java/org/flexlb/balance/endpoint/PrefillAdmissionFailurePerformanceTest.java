@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.RequestLifecycle;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -44,7 +44,7 @@ class PrefillAdmissionFailurePerformanceTest {
         config.setDispatcher(ConfigTestSupport.nonBatch());
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         var delivery = org.flexlb.balance.scheduler.SchedulerTestSupport.dispatcher();
-        var events = mock(RequestLifecycle.class);
+        var events = mock(AbstractRequestScheduler.class);
         var reporter = mock(DeliveryMetricsReporter.class);
         long singleWorkerAllocation = 0L;
         for (int workerCount : new int[] {1, 64, 512, 1024}) {
@@ -112,7 +112,7 @@ class PrefillAdmissionFailurePerformanceTest {
         var state =
                 org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                         new java.util.concurrent.locks.ReentrantLock(),
-                        PrefillActiveIndex.ordered(
+                        OrderedPrefillRequestQueue.ordered(
                                 4,
                                 java.util.Comparator.comparing(
                                         org.flexlb.balance.endpoint.PrefillRequestQueue.QueueItem

@@ -6,12 +6,12 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.EndpointTestSupport;
-import org.flexlb.balance.endpoint.PrefillActiveIndex;
+import org.flexlb.balance.endpoint.OrderedPrefillRequestQueue;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
-import org.flexlb.balance.scheduler.QueuedRequestScheduler.EndpointWork;
+import org.flexlb.balance.scheduler.QueuedRequestScheduler.PrefillQueueScheduler;
 import org.flexlb.balance.scheduler.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -43,7 +43,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
@@ -85,7 +84,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** The production Worker -> Dispatcher -> Runtime path; only protocol owners and transport are simulated. */
+/**
+ * The production Worker -> Dispatcher -> Runtime path; only protocol owners and transport are simulated.
+ */
 @Timeout(15)
 class BatchDeliveryTest {
     @Test
@@ -103,9 +104,9 @@ class BatchDeliveryTest {
                                                 SchedulingTestConfig.batchConfig())),
                         org.mockito.Mockito.mock(
                                 org.flexlb.balance.scheduler.DeliveryExecution.class));
-        var item = mock(RequestRoute.class);
+        var item = mock(RouteExecution.class);
         var endpoint = mock(PrefillEndpoint.class);
-        when(item.prefillEp()).thenReturn(endpoint);
+        when(item.prefillEndpoint()).thenReturn(endpoint);
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(item.enqueuedAtMs()).thenReturn(Long.MAX_VALUE);
         when(item.hitCache()).thenReturn(Long.MAX_VALUE);
@@ -176,7 +177,7 @@ class BatchDeliveryTest {
                                                                 new byte[20 * 1024 * 1024]))));
             }
             ByteString body = template.build().toByteString();
-            List<RequestRoute> remaining = new ArrayList<>();
+            List<RouteExecution> remaining = new ArrayList<>();
             for (long id = 1; id <= 64; id++) {
                 remaining.add(
                         f.item(
@@ -196,7 +197,7 @@ class BatchDeliveryTest {
                             / (20 * 1024 * 1024 + 1024);
             List<Integer> expectedCounts = new ArrayList<>();
             while (!remaining.isEmpty()) {
-                f.handoffClosed.set(false);
+
                 assertNull(
                         f.process(remaining, OptionalLong.of(9999L)),
                         "size boundary must leave suffix queued");
@@ -273,7 +274,6 @@ class BatchDeliveryTest {
             f.drain();
             assertEquals(Delivery.Result.Status.NOT_SENT, f.result(1).status());
             verifyNoInteractions(f.grpc);
-            verify(f.handoff).close();
         }
     }
 
@@ -291,7 +291,7 @@ class BatchDeliveryTest {
             assertEquals(List.of(1L), f.sentIds());
             assertEquals(List.of(1L), f.claimIds());
             verify(f.decode, never()).acquireDispatchPermit(eq(third.decodeReservation()), any());
-            verify(f.prefill, never()).rollback(any(PrefillEndpoint.Reservation.class));
+            verify(f.prefill, never()).rollback(any(PrefillEndpoint.BatchRecord.class));
             assertEquals(Delivery.Result.Status.DELIVERED, f.result(1).status());
         }
     }
@@ -375,7 +375,7 @@ class BatchDeliveryTest {
             assertEquals(
                     expected.stream().map(route -> Long.parseLong(route.requestId())).toList(),
                     f.sentIds());
-            long prediction = expected.stream().mapToLong(RequestRoute::seqLen).sum();
+            long prediction = expected.stream().mapToLong(RouteExecution::seqLen).sum();
             expected.forEach(
                     item ->
                             assertEquals(
@@ -390,13 +390,13 @@ class BatchDeliveryTest {
     }
 
     @Test
-    void completedRpcPublishesAfterHandoffCloseAndNeverUnderOwnerLocks() {
+    void completedRpcPublishesOutsideEndpointEventsAndContextMonitor() {
         try (var f = new LinearDeliveryFixture(true)) {
             var first = f.item(1, 10);
             var second = f.item(2, 20);
             f.beforeCompletion =
                     claim -> {
-                        assertTrue(f.handoffClosed.get());
+                        assertFalse(f.prefill.isRetired());
                         assertFalse(Thread.holdsLock(claim.route().ctx()));
                         assertFalse(f.queueLock.isHeldByCurrentThread());
                     };
@@ -404,8 +404,6 @@ class BatchDeliveryTest {
             f.drain();
             assertEquals(List.of(1L, 2L), f.sentIds());
             assertEquals(2, f.results.size());
-            verify(f.handoff, times(1)).close();
-            assertTrue(f.events.indexOf("handoff-close") < f.events.indexOf("complete-1"));
         }
     }
 
@@ -417,7 +415,7 @@ class BatchDeliveryTest {
             f.drain();
             assertEquals(Delivery.Result.Status.NOT_SENT, f.result(1).status());
             verifyNoInteractions(f.grpc);
-            assertTrue(f.handoffClosed.get());
+            assertFalse(f.prefill.isRetired());
         }
     }
 
@@ -547,23 +545,13 @@ class BatchDeliveryTest {
             var first = f.item(1, 10);
             var second = f.item(2, 20);
             var permitFailure = new IllegalStateException("permit cleanup failed");
-            var handoffFailure = new IllegalStateException("handoff close failed");
             f.expectedShutdownFailure = permitFailure;
             doThrow(permitFailure).when(f.permits.get(1L)).release();
-            doAnswer(
-                            call -> {
-                                f.handoffClosed.set(true);
-                                throw handoffFailure;
-                            })
-                    .when(f.handoff)
-                    .close();
             f.process(List.of(first, second), OptionalLong.of(30));
             f.drain();
             assertEquals(Delivery.Result.Status.DELIVERED, f.result(1).status());
             assertEquals(Delivery.Result.Status.DELIVERED, f.result(2).status());
             verify(f.permits.get(2L)).release();
-            verify(f.handoff).close();
-            assertTrue(Arrays.asList(permitFailure.getSuppressed()).contains(handoffFailure));
         }
     }
 
@@ -594,13 +582,15 @@ class BatchDeliveryTest {
                                                     && failure.route() == second));
             verify(f.permits.get(1L), times(1)).release();
             verify(f.permits.get(2L), times(1)).release();
-            verify(f.handoff, times(1)).close();
+
             verifyNoInteractions(f.grpc);
         }
     }
 }
 
-/** No transaction/state-machine fake: calls real preparation, commitment orchestration and asynchronous transport. */
+/**
+ * No transaction/state-machine fake: calls real preparation, commitment orchestration and asynchronous transport.
+ */
 final class LinearDeliveryFixture implements AutoCloseable {
     final FlexlbConfig config;
     final DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
@@ -608,20 +598,16 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final PrefillEndpoint prefill = mock(PrefillEndpoint.class);
     final DecodeEndpoint decode =
             org.flexlb.balance.scheduler.SchedulerTestSupport.mockDecodeEndpoint();
-    final RequestLifecycle owner = mock(RequestLifecycle.class);
-    final PrefillEndpoint.BatchReservation reservation =
-            mock(PrefillEndpoint.BatchReservation.class);
-    final org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin handoff =
-            mock(org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin.class);
+    final AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
+    final PrefillEndpoint.BatchRecord reservation = mock(PrefillEndpoint.BatchRecord.class);
     final WorkSnapshot work = mock(WorkSnapshot.class);
     final ReentrantLock queueLock = new ReentrantLock();
     final PrefillEndpoint queueOwnership =
             org.flexlb.balance.endpoint.EndpointTestSupport.prefillEndpoint(
                     queueLock,
-                    PrefillActiveIndex.ordered(16, QueueExecutionSettings.queueOrder(true)),
+                    OrderedPrefillRequestQueue.ordered(16, QueueExecutionSettings.queueOrder(true)),
                     System::currentTimeMillis);
     boolean removedFailedMember;
-    final AtomicBoolean handoffClosed = new AtomicBoolean();
     final List<String> events = new CopyOnWriteArrayList<>();
     final List<Delivery.Member> claims = new CopyOnWriteArrayList<>();
     final List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
@@ -635,7 +621,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
     final Set<Long> blockedDecode = ConcurrentHashMap.newKeySet();
     final SchedulerTestServices runtime;
     final DeliveryDispatcher dispatcher;
-    final EndpointWork worker;
+    final PrefillQueueScheduler worker;
     final PrefillTimePredictor.Evaluator evaluator =
             spy(
                     new PrefillTimePredictor.Evaluator() {
@@ -651,7 +637,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                     .sum();
                         }
                     });
-    volatile List<RequestRoute> committedItems = List.of();
+    volatile List<RouteExecution> committedItems = List.of();
     volatile long committedPrediction;
     volatile long[] committedRoutePredictions;
     volatile long throwCompletionFor = -1;
@@ -720,10 +706,10 @@ final class LinearDeliveryFixture implements AutoCloseable {
         when(prefill.getGrpcPort()).thenReturn(8090);
         when(prefill.reserveBatch(anyLong(), anyInt()))
                 .thenReturn(CapacityBoundary.Attempt.accepted(reservation));
-        when(prefill.commitLocked(any(org.flexlb.balance.scheduler.Delivery.class)))
+        when(prefill.commitDelivery(any(org.flexlb.balance.scheduler.Delivery.class)))
                 .thenAnswer(
                         call -> {
-                            assertTrue(queueLock.isHeldByCurrentThread());
+                            assertFalse(queueLock.isHeldByCurrentThread());
                             var plan =
                                     call.getArgument(
                                             0, org.flexlb.balance.scheduler.Delivery.class);
@@ -734,7 +720,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                 committedRoutePredictions =
                                         Arrays.copyOf(plan.predictions(), committedItems.size());
                             }
-                            plan.committed(handoff, work, 0, removedFailedMember);
+                            plan.committed(work, 0, removedFailedMember);
                             return plan;
                         });
         when(work.calculate())
@@ -743,19 +729,11 @@ final class LinearDeliveryFixture implements AutoCloseable {
                             assertFalse(queueLock.isHeldByCurrentThread());
                             return new WorkSnapshot(0, List.of(), List.of(), 0);
                         });
-        doAnswer(
-                        call -> {
-                            events.add("handoff-close");
-                            handoffClosed.set(true);
-                            return null;
-                        })
-                .when(handoff)
-                .close();
         when(owner.prepareDelivery(any(Delivery.Member.class), any(), anyLong()))
                 .thenAnswer(
                         call -> {
                             Delivery.Member member = call.getArgument(0);
-                            RequestRoute item = member.route();
+                            RouteExecution item = member.route();
                             events.add("claim-" + Long.parseLong(item.requestId()));
                             if (lostClaims.contains(Long.parseLong(item.requestId()))) {
                                 return null;
@@ -814,7 +792,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
         when(decode.acquireDispatchPermit(any(), any()))
                 .thenAnswer(
                         call -> {
-                            DecodeResources.ReservationHandle handle = call.getArgument(0);
+                            DecodeResources.RequestReservation handle = call.getArgument(0);
                             return blockedDecode.contains(Long.parseLong(handle.requestId()))
                                     ? new org.flexlb.balance.endpoint.DecodeResources.Acquisition<>(
                                             DecodeResources.EngineDispatchPermitAcquireStatus
@@ -835,18 +813,18 @@ final class LinearDeliveryFixture implements AutoCloseable {
                             claims.forEach(
                                     claim -> assertFalse(Thread.holdsLock(claim.route().ctx())));
                             assertFalse(
-                                    handoffClosed.get(),
-                                    "generation handoff must cover RPC invocation");
+                                    prefill.isRetired(),
+                                    "sending does not retire the selected endpoint");
                             sent.add(request);
                             return CompletableFuture.completedFuture(ack(request));
                         });
     }
 
-    RequestRoute item(long id, long seqLen) {
+    RouteExecution item(long id, long seqLen) {
         return item(id, seqLen, (ByteString) null);
     }
 
-    RequestRoute item(long id, long seqLen, ByteString payload) {
+    RouteExecution item(long id, long seqLen, ByteString payload) {
         var permit = mock(DecodeEndpoint.EngineDispatchPermit.class);
         when(permit.dispatch())
                 .thenReturn(
@@ -854,30 +832,30 @@ final class LinearDeliveryFixture implements AutoCloseable {
                                 DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                                 false));
         when(permit.belongsTo(
-                        decode, new DecodeResources.ReservationHandle(1, String.valueOf(id), id)))
+                        decode, new DecodeResources.RequestReservation(1, String.valueOf(id), id)))
                 .thenReturn(true);
         permits.put(id, permit);
         return item(
                 id,
                 seqLen,
                 decode,
-                new DecodeResources.ReservationHandle(1, String.valueOf(id), id),
+                new DecodeResources.RequestReservation(1, String.valueOf(id), id),
                 payload);
     }
 
-    RequestRoute item(
+    RouteExecution item(
             long id,
             long seqLen,
             DecodeEndpoint endpoint,
-            DecodeResources.ReservationHandle handle) {
+            DecodeResources.RequestReservation handle) {
         return item(id, seqLen, endpoint, handle, null);
     }
 
-    RequestRoute item(
+    RouteExecution item(
             long id,
             long seqLen,
             DecodeEndpoint endpoint,
-            DecodeResources.ReservationHandle handle,
+            DecodeResources.RequestReservation handle,
             ByteString payload) {
         var context = new RequestContext(config);
         context.data()
@@ -904,7 +882,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
         var route =
                 SchedulingTestConfig.createRoute(
                         context, null, null, null, prefill, endpoint, handle, now);
-        var placement = (AdmissionHandle) context.beginPlacement(null);
+        var placement = (PlacementOperation) context.beginPlacement(null);
         context.bindPlacement(placement, route, PublicationResult.PREPARED);
         context.bindPlacement(placement, route, PublicationResult.PUBLISHED);
         org.flexlb.balance.scheduler.RequestChangeAssertions.record(
@@ -935,12 +913,14 @@ final class LinearDeliveryFixture implements AutoCloseable {
         return endpoint;
     }
 
-    RequestRoute realItem(DecodeEndpoint endpoint, long id, long seqLen) {
-        DecodeResources.ReservationHandle handle;
-        try (var pin = endpoint.tryPinGeneration()) {
+    RouteExecution realItem(DecodeEndpoint endpoint, long id, long seqLen) {
+        DecodeResources.RequestReservation handle;
+        {
+            var selectedEndpoint = endpoint;
+
             handle =
-                    endpoint.tryReserveQueuedRequest(pin, String.valueOf(id), 100, 200, 50, null)
-                            .handle();
+                    endpoint.tryReserveQueuedRequest(String.valueOf(id), 100, 200, 50, null)
+                            .value();
         }
         assertNotNull(handle);
         return item(id, seqLen, endpoint, handle);
@@ -950,7 +930,7 @@ final class LinearDeliveryFixture implements AutoCloseable {
         blockedDecode.add(id);
     }
 
-    CapacityBoundary process(List<RequestRoute> items, OptionalLong prediction) {
+    CapacityBoundary process(List<RouteExecution> items, OptionalLong prediction) {
         return worker.processSelection(
                 items,
                 "contract",

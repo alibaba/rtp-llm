@@ -5,9 +5,10 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.prediction.PrefillTimePredictor.PrefillBatchFeatures;
 import org.flexlb.balance.projection.RequestTimeEstimation;
-import org.flexlb.balance.projection.RequestTimeEstimation.QueueSnapshot;
+import org.flexlb.balance.projection.RequestTimeEstimation.ProjectionQueueSnapshot;
 import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport;
+import org.flexlb.balance.scheduler.RequestTimeEstimationTestSupport.Candidate;
 import org.flexlb.config.DispatcherConfig;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -74,7 +75,7 @@ class RouteDeliveryProjectionTest {
                     project(model, batch, budget, 1, 100, 200, 50).projectedTtftMsValue());
             assertEquals(0, model.calls(50));
             assertEquals(
-                    RequestTimeEstimation.Candidate.State.UNAVAILABLE,
+                    RequestTimeEstimation.State.UNAVAILABLE,
                     project(model, batch, budget, 1, 50, 200, 100).state());
             model.calls.clear();
         }
@@ -134,7 +135,7 @@ class RouteDeliveryProjectionTest {
         var model = new CountingEvaluator();
         model.failingTokens = 100;
         assertEquals(
-                RequestTimeEstimation.Candidate.State.UNAVAILABLE,
+                RequestTimeEstimation.State.UNAVAILABLE,
                 project(model, batch, 1000, 1, 100, 200).state());
         model.failingTokens = -1;
         assertEquals(
@@ -177,7 +178,7 @@ class RouteDeliveryProjectionTest {
         assertEquals(0, model.calls(50));
     }
 
-    private static RequestTimeEstimation.Candidate project(
+    private static Candidate project(
             CountingEvaluator model, boolean batch, long budget, int probeIndex, long... tokens) {
         var active = new ArrayList<GroupPlanner.Item>();
         for (int i = 0; i < tokens.length; i++) {
@@ -194,7 +195,7 @@ class RouteDeliveryProjectionTest {
             }
         }
         var queue =
-                new QueueSnapshot(
+                new ProjectionQueueSnapshot(
                         1000,
                         true,
                         BuiltinGroupPlanner.FIXED_WINDOW,
