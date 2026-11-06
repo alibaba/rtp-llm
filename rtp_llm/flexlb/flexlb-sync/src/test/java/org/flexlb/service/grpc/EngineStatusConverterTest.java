@@ -23,6 +23,20 @@ class EngineStatusConverterTest {
                     RoleType.PREFILL, "default", "127.0.0.1", 8001, 18002, "test");
 
     @Test
+    void distinguishesMissingVitLoadFromAnExplicitZero() {
+        var legacy =
+                EngineStatusConverter.convertToStatusObservation(owner, statusBuilder().build());
+        assertNull(legacy.engine().mmInflightInputs());
+        var reported =
+                EngineStatusConverter.convertToStatusObservation(
+                        owner,
+                        statusBuilder()
+                                .setMmInflightInputs(com.google.protobuf.Int64Value.of(0))
+                                .build());
+        assertEquals(0L, reported.engine().mmInflightInputs());
+    }
+
+    @Test
     void preservesAllActiveTaskPhasesAndKeepsFinishedTasksSeparate() {
         var status =
                 statusBuilder()

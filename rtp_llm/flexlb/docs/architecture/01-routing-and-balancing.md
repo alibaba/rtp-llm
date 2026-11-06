@@ -57,6 +57,8 @@ ENCODER→`NO_ENCODER_WORKER`(8408)，均可重试。
 | VIT                | `vitLoadBalanceStrategy`    | `RANDOM`                                   | `WAIT_TIME`                                                  |
 | ENCODER            | 独立 `EncoderStrategy`      | 提供命中长度时最少编码工作量，否则最少并发 | 在途预测／实际输入长度、`running + waiting + 本地待观察请求` |
 
+ViT 元数据的两阶段路由由 `VitCacheSelector` 处理：默认从已同步的 `mm_inflight_inputs` 中选择负载最低的节点；缺失、负数或超过 `router.roles.vit.loadMaxAgeMs`（默认 5000ms）的报告不按零负载处理。`router.roles.vit.cacheAffinityEnabled=true` 启用媒体缓存亲和选择。首次结果携带 Worker 代次，第二次路由使用 `ip:port@engineIndex` 和代次共同校验，不能仅凭物理地址认定实例相同。
+
 ### gRPC Schedule 响应
 
 `FlexlbService.Schedule` 的 `FlexlbServerStatusPB` 使用 `optional int32 engine_index = 9`。

@@ -21,6 +21,14 @@ public final class RoutingConfig {
     public static final class RolesConfig {
         private PrefillConfig prefill = new PrefillConfig();
         private DecodeConfig decode = new DecodeConfig();
+        private VitConfig vit = new VitConfig();
+    }
+
+    @Getter
+    @Setter
+    public static final class VitConfig {
+        private boolean cacheAffinityEnabled;
+        private long loadMaxAgeMs = 5000;
     }
 
     @Getter

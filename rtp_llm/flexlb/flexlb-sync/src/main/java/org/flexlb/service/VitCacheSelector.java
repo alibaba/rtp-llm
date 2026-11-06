@@ -60,6 +60,12 @@ public class VitCacheSelector {
     }
 
     public synchronized ServerStatus select(BalanceContext ctx, String group) {
+        var config =
+                ctx.getConfig() == null
+                        ? new org.flexlb.config.RoutingConfig.VitConfig()
+                        : ctx.getConfig().getRouter().getRoles().getVit();
+        if (!config.isCacheAffinityEnabled())
+            return selectLeastInflight(ctx, group, config.getLoadMaxAgeMs());
         var keys = ctx.getRequest().getCacheAffinityKeys();
         if (keys == null
                 || keys.isEmpty()
@@ -71,7 +77,8 @@ public class VitCacheSelector {
         Map<String, Candidate> candidates = directory.candidates(group, keys);
         long now = System.currentTimeMillis();
         if (now - pendingPrunedAt >= 5000) {
-            pending.values().removeIf(p -> !p.matches(candidates.get(p.worker().getIpPort()), now));
+            pending.values()
+                    .removeIf(p -> !p.matches(candidates.get(p.worker().getLogicalIpPort()), now));
             pendingPrunedAt = now;
         }
         List<Candidate> best = new ArrayList<>();
@@ -122,6 +129,35 @@ public class VitCacheSelector {
         return status(selected.worker(), ctx.getRequestId());
     }
 
+    private ServerStatus selectLeastInflight(BalanceContext context, String group, long maxAgeMs) {
+        WorkerStatus selected = null;
+        long minimumLoad = Long.MAX_VALUE;
+        int ties = 0;
+        long nowUs = System.nanoTime() / 1000;
+        for (String address : workers.endpointAddressSnapshot(RoleType.VIT)) {
+            try (var pin = workers.captureEndpoint(RoleType.VIT, address)) {
+                if (pin == null) continue;
+                WorkerStatus worker = pin.endpoint().getStatus();
+                if (group != null && !Objects.equals(group, worker.getGroup())) continue;
+                Long reported = worker.committedEngineObservation().mmInflightInputs();
+                long ageUs = nowUs - worker.pollHealth().lastSuccessfulPollUs();
+                long load =
+                        reported != null && reported >= 0 && ageUs >= 0 && ageUs <= maxAgeMs * 1000
+                                ? reported
+                                : Long.MAX_VALUE;
+                if (load < minimumLoad) {
+                    minimumLoad = load;
+                    ties = 0;
+                }
+                if (load == minimumLoad && ThreadLocalRandom.current().nextInt(++ties) == 0)
+                    selected = worker;
+            }
+        }
+        return selected == null
+                ? errorStatus(StrategyErrorType.NO_VIT_WORKER)
+                : status(selected, context.getRequestId());
+    }
+
     /**
      * Revalidates the first selection against the full route's policy group and
      * current endpoint generation. Address equality alone cannot identify a worker
@@ -132,9 +168,7 @@ public class VitCacheSelector {
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        try (var pin =
-                workers.captureEndpoint(
-                        RoleType.VIT, selected.getServerIp() + ":" + selected.getHttpPort())) {
+        try (var pin = workers.captureEndpoint(RoleType.VIT, selected.getLogicalIpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
             if (selected.getRole() != RoleType.VIT
                     || worker == null
@@ -158,8 +192,7 @@ public class VitCacheSelector {
             return null;
         }
         WorkerEndpoint.GenerationPin pin =
-                workers.captureEndpoint(
-                        RoleType.VIT, result.getServerIp() + ":" + result.getHttpPort());
+                workers.captureEndpoint(RoleType.VIT, result.getLogicalIpPort());
         if (pin == null) {
             return null;
         }
@@ -181,6 +214,7 @@ public class VitCacheSelector {
         ServerStatus status = new ServerStatus();
         status.setRole(RoleType.VIT);
         status.setWorkerGeneration(worker.getGenerationId());
+        status.setSelectedEngineIndex(worker.getEngineIndex(), worker.getMultiEngineNum());
         status.setServerIp(worker.getIp());
         status.setHttpPort(worker.getPort());
         status.setGrpcPort(worker.getGrpcPort());
