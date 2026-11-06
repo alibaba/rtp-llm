@@ -51,7 +51,7 @@ syncSend(TcpKVCacheSender& sender, const SendRequest& req, std::chrono::seconds 
 
 static KeyBlockInfoMap makeBlocks(int64_t cache_key, void* addr, size_t size) {
     auto kbi = std::make_shared<KeyBlockInfo>();
-    kbi->blocks.push_back(BlockInfo{false, 0, 0, addr, size});
+    kbi->blocks.push_back(BlockInfo{true, 0, 0, addr, size});
     KeyBlockInfoMap m;
     m[cache_key] = kbi;
     return m;
@@ -150,6 +150,55 @@ TEST_F(TcpSenderOnlyTest, F1_EmptyBlockInfo_ImmediateBuildFailed) {
 
     auto code = syncSend(*sender_, req);
     EXPECT_EQ(code, TransferErrorCode::BUILD_REQUEST_FAILED);
+}
+
+TEST_F(TcpSenderOnlyTest, OversizedBlockRejectedBeforeAllocationOrCopy) {
+    char placeholder = 0;
+    SendRequest req;
+    req.ip = "127.0.0.1";
+    req.port = unused_port_;
+    req.unique_key = "oversized";
+    req.block_info = makeBlocks(1, &placeholder, size_t{1} << 32);
+    req.deadline_ms = currentTimeMs() + 5000;
+    EXPECT_EQ(syncSend(*sender_, req), TransferErrorCode::BUILD_REQUEST_FAILED);
+}
+
+TEST_F(TcpSenderOnlyTest, UnsupportedDeviceDescriptorIsPreserved) {
+    char source[4] = {'D', 'A', 'T', 'A'};
+    SendRequest req;
+    req.ip = "127.0.0.1";
+    req.port = unused_port_;
+    req.unique_key = "privateuse1";
+    req.block_info = makeBlocks(1, source, sizeof(source));
+    auto& block = req.block_info.at(1)->blocks[0];
+    block.is_cuda = false;
+    block.device_type = static_cast<int32_t>(torch::kPrivateUse1);
+    req.deadline_ms = currentTimeMs() + 5000;
+    EXPECT_EQ(syncSend(*sender_, req), TransferErrorCode::BUILD_REQUEST_FAILED);
+}
+
+TEST_F(TcpSenderReceiverTest, HostTransferPreservesEmptySubBlockPositions) {
+    char source[4] = {'D', 'A', 'T', 'A'};
+    char destination[4]{};
+    auto source_blocks = std::make_shared<KeyBlockInfo>();
+    source_blocks->blocks = {BlockInfo{}, BlockInfo{false, 0, 0, source, sizeof(source)}};
+    auto destination_blocks = std::make_shared<KeyBlockInfo>();
+    destination_blocks->blocks = {BlockInfo{}, BlockInfo{false, 0, 0, destination, sizeof(destination)}};
+    RecvRequest recv_req;
+    recv_req.unique_key = "host_with_empty_slot";
+    recv_req.block_info = {{1, destination_blocks}};
+    recv_req.deadline_ms = currentTimeMs() + 5000;
+    auto task = receiver_->recv(recv_req);
+    ASSERT_NE(task, nullptr);
+    SendRequest send_req;
+    send_req.ip = "127.0.0.1";
+    send_req.port = test_port_;
+    send_req.unique_key = recv_req.unique_key;
+    send_req.block_info = {{1, source_blocks}};
+    send_req.deadline_ms = recv_req.deadline_ms;
+    ASSERT_EQ(syncSend(*sender_, send_req), TransferErrorCode::OK);
+    ASSERT_TRUE(task->success());
+    EXPECT_EQ(std::string(destination, sizeof(destination)), "DATA");
 }
 
 // ===========================================================================
