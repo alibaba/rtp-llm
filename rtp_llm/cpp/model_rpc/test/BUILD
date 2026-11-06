@@ -146,7 +146,7 @@ cc_test(
         "QueryConverterLogprobsTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps + cuda13_torch_link_deps,
+    deps = test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
