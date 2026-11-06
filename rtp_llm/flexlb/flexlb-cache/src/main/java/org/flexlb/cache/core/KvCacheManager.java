@@ -39,6 +39,10 @@ public class KvCacheManager {
     @Autowired
     private CacheMetricsReporter cacheMetricsReporter;
 
+    /** TEMPORARY DIAGNOSTIC (cached-prefill campaign): update-path sample counter. */
+    private static final java.util.concurrent.atomic.LongAdder DIAG_UPDATE_COUNTER =
+            new java.util.concurrent.atomic.LongAdder();
+
     // An interrupted add may have reached only the local view. Retain just that
     // key for replay; the next diff recovers the remaining changes from the views.
     // Callers serialize each address through its generation's cache lock.
@@ -96,6 +100,13 @@ public class KvCacheManager {
 
         // Calculate diff
         DiffResult diffResult = engineLocalView.calculateDiff(engineIPort, newCacheBlocks, role);
+        // TEMPORARY DIAGNOSTIC (cached-prefill campaign): sample every 50th update.
+        if (DIAG_UPDATE_COUNTER.incrementAndGet() % 50 == 1) {
+            log.info("CacheIngestDiag engine={} role={} newKeys={} added={} removed={} globalBlocks={} globalMappings={}",
+                    engineIPort, role, newCacheBlocks.size(),
+                    diffResult.getAddedBlocks().size(), diffResult.getRemovedBlocks().size(),
+                    globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
+        }
         if (!diffResult.hasChanges()) {
             return;
         }

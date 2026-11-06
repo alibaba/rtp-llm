@@ -36,6 +36,9 @@ public class GlobalCacheIndex {
     private final ThreadLocal<String[]> prefixCandidates =
             ThreadLocal.withInitial(() -> new String[0]);
 
+    /** TEMPORARY DIAGNOSTIC (cached-prefill campaign): rate-limited match introspection. */
+    private final java.util.concurrent.atomic.LongAdder matchDiagCounter = new LongAdder();
+
     /**
      * Add cache block to specified engine
      *
@@ -118,6 +121,13 @@ public class GlobalCacheIndex {
 
         if (isEmpty(engineIpPorts) || isEmpty(blockCacheKeys)) {
             return Collections.emptyMap();
+        }
+        // TEMPORARY DIAGNOSTIC (cached-prefill campaign): sample every 200th call.
+        if (matchDiagCounter.incrementAndGet() % 200 == 1) {
+            Set<String> firstOwners = getEnginesForBlock(blockCacheKeys.getFirst());
+            log.info("CacheMatchDiag reqKeys={} firstKey={} firstOwners={} totalMappings={} candidates={}",
+                    blockCacheKeys.size(), blockCacheKeys.getFirst(),
+                    firstOwners, totalMappings.sum(), engineIpPorts);
         }
         return calculatePrefixMatchLength(engineIpPorts, blockCacheKeys);
     }
