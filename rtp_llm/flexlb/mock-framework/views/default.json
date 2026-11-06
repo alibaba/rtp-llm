@@ -23441,7 +23441,7 @@
               ]
             }
           },
-          "description": "P/D Worker 服务端处理 GetWorkerStatus 和 GetCacheStatus 的耗时，单位 µs。最大值为所选 Worker 的采样均值最大值。",
+          "description": "P/D Worker 状态采集耗时，单位 µs。CacheStatus 计到缓存快照返回，WorkerStatus 计到容量和任务状态采集完成；包含取快照时的锁等待，排除 protobuf 构建、响应提交、网络和指标上报，不是完整 RPC 延迟。最大值为所选 Worker 的采样均值最大值。",
           "links": [
             {
               "title": "RTP-LLM 原面板",

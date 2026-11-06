@@ -450,3 +450,12 @@ LLM Mock Engine 的装配类统一命名为 `execution/LLMMockEngine`，缓存�
 | `py_rtp_vit_embedding_cache_tokens` / `bytes` | GPU+CPU 逻辑 embedding 驻留量。Mock 用形状计费，不代表真实 Tensor、GPU 内存或 JVM 物理内存。 |
 
 本地 View 显式筛选上述 source；请求耗时合并成功/失败的原始 sum/count 后求平均，不平均实例均值。没有模拟的 CUDA Graph、GreenNet、预处理进程 IPC、像素 decode/resize/processor、真实 Tensor 数据面和代理转发指标保持无样本，不用估计值伪装真实测量。RPC handler/lifecycle、payload bytes 不由 engine 请求耗时或逻辑缓存 bytes 冒充。
+
+
+### 状态 RPC 的 RT 与 QPS
+
+`rtp_llm_rpc_cache_status_total_rt_us` 从进入查询计到缓存快照返回，包含缓存锁等待、版本检查和必要的 key 复制；不包含 protobuf 构建、响应提交、网络传输或指标上报。边界对照 real `LocalRpcServer::getCacheStatusInfo`。
+
+`rtp_llm_rpc_worker_status_total_rt_us` 计到缓存容量和任务状态采集完成；同样排除后续 protobuf 构建和响应提交，对照 real `GetWorkerStatus` 的 `request_after_ws_time_us`。这两个指标均不是客户端观察的完整 RPC 延迟；计时边界修正不代表消息构建、序列化的实际成本消失。
+
+对应 QPS 保持每次状态查询计一次。对比部署时先区分每实例和集群总量，再核对 Master 数量、轮询周期及重试机制，不通过调整 QPS 补偿不同轮询负载。

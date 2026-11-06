@@ -158,10 +158,12 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
     @Override public void getCacheStatus(CacheVersionPB request, StreamObserver<CacheStatusPB> response) {
         statusReply("cache_status", response, () -> {
             var snapshot = cache.snapshot(request.getLatestCacheVersion(), request.getNeedCacheKeys());
+            // Real measures cache collection only, before protobuf construction.
+            long collected = System.nanoTime();
             var result = CacheStatusPB.newBuilder().setTotalKvCache(tokens(snapshot.totalBlocks()))
                 .setAvailableKvCache(tokens(snapshot.availableBlocks())).setBlockSize(config.blockSize()).setVersion(snapshot.version());
             for (long key : snapshot.keys()) result.putCacheKeys(key, true);
-            return new StatusResult<>(result.build(), System.nanoTime());
+            return new StatusResult<>(result.build(), collected);
         });
     }
 
