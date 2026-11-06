@@ -9,7 +9,6 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RequestPhase;
-import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
 import java.util.Map;
@@ -71,9 +70,6 @@ public class PvLogData {
 
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private List<RequestData.CacheMatchSelection> cacheMatchSelections;
-
-    @JsonInclude(JsonInclude.Include.NON_EMPTY)
-    private Map<RoleType, String> selectionReasons;
 
     public PvLogData(
             RequestData ctx,
@@ -140,19 +136,6 @@ public class PvLogData {
                         .map(Map.Entry::getValue)
                         .filter(selection -> !hasRecordedCacheSelection(selection))
                         .toList();
-        this.selectionReasons =
-                telemetry.selectionReasons().entrySet().stream()
-                        .filter(
-                                entry -> {
-                                    RoutingDecision decision =
-                                            telemetry.routingDecisions().get(entry.getKey());
-                                    return decision == null
-                                            || !java.util.Objects.equals(
-                                                    decision.selectionReason(), entry.getValue());
-                                })
-                        .collect(
-                                java.util.stream.Collectors.toMap(
-                                        Map.Entry::getKey, Map.Entry::getValue));
     }
 
     private boolean hasRecordedCacheSelection(RequestData.CacheMatchSelection selection) {

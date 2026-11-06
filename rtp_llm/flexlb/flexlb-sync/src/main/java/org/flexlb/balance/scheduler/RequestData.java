@@ -76,7 +76,6 @@ public final class RequestData {
     private int cacheQueryCount;
     private final EnumMap<RoleType, CacheMatchSelection> cacheSelections =
             new EnumMap<>(RoleType.class);
-    private final EnumMap<RoleType, String> selectionReasons = new EnumMap<>(RoleType.class);
     private final EnumMap<RoleType, RoutingDecision> routingDecisions =
             new EnumMap<>(RoleType.class);
     private final EnumMap<RoleType, Integer> routingAttempts = new EnumMap<>(RoleType.class);
@@ -279,14 +278,12 @@ public final class RequestData {
     public synchronized void beginRoutingAttempt(RoleType role) {
         routingAttempts.merge(role, 1, Integer::sum);
         cacheSelections.remove(role);
-        selectionReasons.remove(role);
         routingDecisions.remove(role);
     }
 
     public synchronized void recordRoutingDecision(RoutingDecision decision) {
         Objects.requireNonNull(decision.role(), "role");
         Objects.requireNonNull(decision.selectionReason(), "selectionReason");
-        selectionReasons.put(decision.role(), decision.selectionReason());
         routingDecisions.put(
                 decision.role(),
                 new RoutingDecision(
@@ -305,16 +302,13 @@ public final class RequestData {
                         decision.prefillPolicy()));
     }
 
-    public synchronized void recordSelectionReason(RoleType role, String selectionReason) {
-        selectionReasons.put(role, Objects.requireNonNull(selectionReason, "selectionReason"));
-    }
-
     public synchronized int routingAttempt(RoleType role) {
         return routingAttempts.getOrDefault(role, 0);
     }
 
     public synchronized String selectionReason(RoleType role) {
-        return selectionReasons.get(role);
+        var decision = routingDecisions.get(role);
+        return decision == null ? null : decision.selectionReason();
     }
 
     public synchronized RoutingTelemetry getRoutingTelemetry() {
@@ -323,7 +317,6 @@ public final class RequestData {
                 cacheQueryUs,
                 cacheQueryCount,
                 cacheSelections,
-                selectionReasons,
                 routingDecisions,
                 routingAttempts);
     }
@@ -333,12 +326,10 @@ public final class RequestData {
             long cacheQueryUs,
             int cacheQueryCount,
             Map<RoleType, CacheMatchSelection> cacheSelections,
-            Map<RoleType, String> selectionReasons,
             Map<RoleType, RoutingDecision> routingDecisions,
             Map<RoleType, Integer> routingAttempts) {
         public RoutingTelemetry {
             cacheSelections = Map.copyOf(cacheSelections);
-            selectionReasons = Map.copyOf(selectionReasons);
             routingDecisions = Map.copyOf(routingDecisions);
             routingAttempts = Map.copyOf(routingAttempts);
         }

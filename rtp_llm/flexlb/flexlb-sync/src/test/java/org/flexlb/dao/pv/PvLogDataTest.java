@@ -251,14 +251,29 @@ class PvLogDataTest {
     }
 
     @Test
-    void includesSelectionReasonWithoutDecisionSnapshot() {
+    void includesSelectionReasonInDecisionSnapshot() {
         RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
-        context.recordSelectionReason(RoleType.PREFILL, "SHORTEST_TTFT_FALLBACK");
+        context.recordRoutingDecision(
+                new org.flexlb.dao.pv.RoutingDecision(
+                        RoleType.PREFILL,
+                        null,
+                        null,
+                        "SHORTEST_TTFT_FALLBACK",
+                        0L,
+                        0,
+                        null,
+                        0,
+                        0,
+                        false,
+                        java.util.Map.of(),
+                        java.util.List.of(),
+                        null));
 
         String json = JsonUtils.toStringOrEmpty(pv(context));
 
-        assertTrue(json.contains("\"selectionReasons\":{\"PREFILL\":\"SHORTEST_TTFT_FALLBACK\"}"));
-        assertFalse(json.contains("routingDecisions"));
+        assertTrue(json.contains("\"selectionReason\":\"SHORTEST_TTFT_FALLBACK\""));
+        assertTrue(json.contains("routingDecisions"));
+        assertFalse(json.contains("\"selectionReasons\""));
     }
 
     @Test
@@ -275,7 +290,6 @@ class PvLogDataTest {
         context.recordCacheSelection(RoleType.PREFILL, "10.0.0.2", 512);
         context.recordCacheQuery("KVCM", 10);
         context.recordCacheSelection(RoleType.DECODE, "10.0.0.3", 128);
-        context.recordSelectionReason(RoleType.PREFILL, "CACHE_LEADER");
         context.recordRoutingDecision(
                 new RoutingDecision(
                         RoleType.PREFILL,
@@ -316,7 +330,6 @@ class PvLogDataTest {
         assertEquals(144, data.getCacheMatchUs());
         assertEquals(3, data.getCacheMatchCount());
         assertEquals(1, data.getCacheMatchSelections().size());
-        assertTrue(data.getSelectionReasons().isEmpty());
         assertEquals(1, data.getRoutingDecisions().size());
         assertEquals("10.0.0.3", data.getCacheMatchSelections().getFirst().selectedIp());
         assertEquals(128, data.getCacheMatchSelections().getFirst().hitCacheTokens());
@@ -425,9 +438,9 @@ class PvLogDataTest {
                 for (int i = 0; i < 1_000; i++) {
                     PvLogData snapshot = pv(context);
                     assertEquals(snapshot.getCacheMatchCount() * 2L, snapshot.getCacheMatchUs());
-                    for (RoutingDecision decision : snapshot.getRoutingDecisions()) {
-                        assertFalse(snapshot.getSelectionReasons().containsKey(decision.role()));
-                    }
+                    assertEquals(
+                            "attempt-999",
+                            snapshot.getRoutingDecisions().getFirst().selectionReason());
                     assertFalse(JsonUtils.toStringOrEmpty(snapshot).isEmpty());
                 }
                 writer.get(5, java.util.concurrent.TimeUnit.SECONDS);
@@ -460,10 +473,39 @@ class PvLogDataTest {
     @Test
     void rejectedSelectionReasonCannotCorruptLaterPvSnapshot() {
         RequestData context = new RequestData(new org.flexlb.config.FlexlbConfig());
-        context.recordSelectionReason(RoleType.PREFILL, "BEST_ONLY");
+        context.recordRoutingDecision(
+                new org.flexlb.dao.pv.RoutingDecision(
+                        RoleType.PREFILL,
+                        null,
+                        null,
+                        "BEST_ONLY",
+                        0L,
+                        0,
+                        null,
+                        0,
+                        0,
+                        false,
+                        java.util.Map.of(),
+                        java.util.List.of(),
+                        null));
         assertThrows(
                 NullPointerException.class,
-                () -> context.recordSelectionReason(RoleType.PREFILL, null));
-        assertEquals("BEST_ONLY", pv(context).getSelectionReasons().get(RoleType.PREFILL));
+                () ->
+                        context.recordRoutingDecision(
+                                new org.flexlb.dao.pv.RoutingDecision(
+                                        RoleType.PREFILL,
+                                        null,
+                                        null,
+                                        null,
+                                        0L,
+                                        0,
+                                        null,
+                                        0,
+                                        0,
+                                        false,
+                                        java.util.Map.of(),
+                                        java.util.List.of(),
+                                        null)));
+        assertEquals("BEST_ONLY", pv(context).getRoutingDecisions().getFirst().selectionReason());
     }
 }

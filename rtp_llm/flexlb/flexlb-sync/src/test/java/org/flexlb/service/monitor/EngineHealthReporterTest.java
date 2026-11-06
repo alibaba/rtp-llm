@@ -299,7 +299,21 @@ class EngineHealthReporterTest {
         response.setCode(200);
         response.setServerStatus(List.of(serverStatus));
         RequestData context = new RequestData(new FlexlbConfig());
-        context.recordSelectionReason(RoleType.PREFILL, "LEAST_RECENTLY_USED_IN_POOL");
+        context.recordRoutingDecision(
+                new org.flexlb.dao.pv.RoutingDecision(
+                        RoleType.PREFILL,
+                        null,
+                        null,
+                        "LEAST_RECENTLY_USED_IN_POOL",
+                        0L,
+                        0,
+                        null,
+                        0,
+                        0,
+                        false,
+                        java.util.Map.of(),
+                        java.util.List.of(),
+                        null));
         context.setFuture(java.util.concurrent.CompletableFuture.completedFuture(response));
 
         reportBalance(context);
