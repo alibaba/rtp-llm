@@ -1,5 +1,6 @@
 import gc
 import logging
+import os
 import threading
 import time
 from typing import TYPE_CHECKING, Optional
@@ -45,20 +46,44 @@ class BackendManager(object):
     def start(self):
         """Initialize backend server without entering service loop"""
         self._distributed_server.start(self.py_env_configs)
-        # One-shot metadata exchange before model loading/NCCL capture. Reuse the
-        # existing gang topology/Store; cross-gang host representatives use RPC.
+        # Reserve local GPU tables before model loading and KV auto sizing.
         from rtp_llm.models_py.modules.dsv41.engram_startup import prepare_static_engram
+
         pc = self.py_env_configs.parallelism_config
         world_info = self._distributed_server.get_world_info(
             self.py_env_configs.server_config, self.py_env_configs.distribute_config, pc
         )
-        prepare_static_engram(
-            getattr(self._distributed_server, "store", None),
-            rank=pc.world_rank, world_size=pc.world_size,
-            gang_hosts=tuple(w.ip for w in sorted(world_info.members, key=lambda w: w.world_rank)),
-            # Already resolved from an oss:// URI to the local fuse mount.
+        store = getattr(self._distributed_server, "store", None)
+        startup = dict(
+            rank=pc.world_rank,
+            world_size=pc.world_size,
+            gang_hosts=tuple(
+                w.ip for w in sorted(world_info.members, key=lambda w: w.world_rank)
+            ),
             checkpoint=getattr(self.py_env_configs.model_args, "ckpt_path", None),
         )
+        storage_mode = os.environ.get("RTP_ENGRAM_STORAGE", "host")
+        if storage_mode == "cuda_local":
+            from rtp_llm.models_py.modules.dsv41.engram_bootstrap import staged_package
+            from rtp_llm.models_py.modules.dsv41.engram_local_cuda import (
+                prepare_local_cuda_engram,
+            )
+            from rtp_llm.models_py.modules.dsv41.engram_shard_config import (
+                shared_storage_requested,
+            )
+
+            if staged_package() is not None or shared_storage_requested(os.environ):
+                raise ValueError("LOCAL_CUDA_ENGRAM_CONFLICTS_WITH_COHORT")
+            prepare_local_cuda_engram(
+                store,
+                device=pc.local_rank,
+                timeout_s=float(os.environ.get("RTP_ENGRAM_COHORT_TIMEOUT", "1800")),
+                **startup,
+            )
+        elif storage_mode == "host":
+            prepare_static_engram(store, **startup)
+        else:
+            raise ValueError("INVALID_ENGRAM_STORAGE")
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
             self.py_env_configs,

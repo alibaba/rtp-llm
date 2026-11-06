@@ -13,7 +13,6 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-
 EXTERNAL_GRAPH_MODE_ENV = "RTP_ENGRAM_GRAPH_MODE"
 PROCESS_LIFETIME_GRAPH = "process_lifetime"
 
@@ -45,7 +44,12 @@ def _retain_default(storage):
 
 
 def require_engram_runtime(
-    model, *, is_cuda_graph=False, capture_check=None, is_prefill=False, is_target_verify=False
+    model,
+    *,
+    is_cuda_graph=False,
+    capture_check=None,
+    is_prefill=False,
+    is_target_verify=False,
 ):
     """Keep eager default; admit opted-in decode graphs with a permanent pin.
 
@@ -58,14 +62,22 @@ def require_engram_runtime(
         return
     if attachment.phase != "READY":
         raise EngramModelInitializationError("EXTERNAL_ENGRAM_NOT_READY")
-    if (getattr(model, "_engram_storage", None) is not attachment.storage
-            or getattr(model, "_engram_hash_state", None) is not attachment.hash_state
-            or getattr(model, "_engram_layers", None) != tuple((lid, index) for lid, index, _ in attachment.layers)
-            or any(model.v4.layers[lid].engram is not module for lid, _, module in attachment.layers)):
+    if (
+        getattr(model, "_engram_storage", None) is not attachment.storage
+        or getattr(model, "_engram_hash_state", None) is not attachment.hash_state
+        or getattr(model, "_engram_layers", None)
+        != tuple((lid, index) for lid, index, _ in attachment.layers)
+        or any(
+            model.v4.layers[lid].engram is not module
+            for lid, _, module in attachment.layers
+        )
+    ):
         raise EngramModelInitializationError("EXTERNAL_ENGRAM_BINDING_CHANGED")
     if attachment.graph_mode == PROCESS_LIFETIME_GRAPH:
         if not attachment.graph_pin_held or not attachment.process_retained:
-            raise EngramModelInitializationError("EXTERNAL_ENGRAM_GRAPH_LIFETIME_UNPINNED")
+            raise EngramModelInitializationError(
+                "EXTERNAL_ENGRAM_GRAPH_LIFETIME_UNPINNED"
+            )
         # Ordinary prefill remains eager; target verify/speculation is outside
         # this slice. Decode replay never re-enters this Python guard.
         if is_prefill or is_target_verify:
@@ -76,7 +88,9 @@ def require_engram_runtime(
                 # graphs; only a prefill-role capture stays unsupported.
                 if getattr(model, "_is_decode_role", False):
                     return
-                raise EngramModelInitializationError("EXTERNAL_ENGRAM_DECODE_GRAPH_ONLY")
+                raise EngramModelInitializationError(
+                    "EXTERNAL_ENGRAM_DECODE_GRAPH_ONLY"
+                )
         return
     if is_cuda_graph or (capture_check is not None and capture_check()):
         raise EngramModelInitializationError("EXTERNAL_ENGRAM_GRAPH_UNSUPPORTED")
@@ -134,19 +148,41 @@ def initialize_model_engram(
         from rtp_llm.models_py.modules.dsv41.engram_bootstrap import staged_package
 
         package = staged_package()
-        from rtp_llm.models_py.modules.dsv41.engram_shard_config import shared_storage_requested
+        from rtp_llm.models_py.modules.dsv41.engram_shard_config import (
+            shared_storage_requested,
+        )
 
+        storage_mode = env.get("RTP_ENGRAM_STORAGE", "host")
+        if storage_mode not in ("host", "cuda_local"):
+            raise EngramModelInitializationError("INVALID_ENGRAM_STORAGE")
+        if storage_mode == "cuda_local" and (
+            package is not None or shared_storage_requested(env)
+        ):
+            raise EngramModelInitializationError(
+                "LOCAL_CUDA_ENGRAM_CONFLICTS_WITH_COHORT"
+            )
         if package is None and shared_storage_requested(env):
             raise EngramModelInitializationError("DISTRIBUTED_ENGRAM_REQUIRES_EXCHANGE")
-        attachment.external = package is not None
+        attachment.external = package is not None or storage_mode == "cuda_local"
         if attachment.external:
-            attachment.graph_mode = env.get(EXTERNAL_GRAPH_MODE_ENV, "eager")
+            attachment.graph_mode = (
+                PROCESS_LIFETIME_GRAPH
+                if storage_mode == "cuda_local"
+                else env.get(EXTERNAL_GRAPH_MODE_ENV, "eager")
+            )
             if attachment.graph_mode not in ("eager", PROCESS_LIFETIME_GRAPH):
-                raise EngramModelInitializationError("INVALID_EXTERNAL_ENGRAM_GRAPH_MODE")
+                raise EngramModelInitializationError(
+                    "INVALID_EXTERNAL_ENGRAM_GRAPH_MODE"
+                )
             hw = getattr(model, "py_hw_kernel_config", None)
-            if (hw is not None and bool(getattr(hw, "enable_cuda_graph", False))
-                    and attachment.graph_mode != PROCESS_LIFETIME_GRAPH):
-                raise EngramModelInitializationError("EXTERNAL_ENGRAM_GRAPH_UNSUPPORTED")
+            if (
+                hw is not None
+                and bool(getattr(hw, "enable_cuda_graph", False))
+                and attachment.graph_mode != PROCESS_LIFETIME_GRAPH
+            ):
+                raise EngramModelInitializationError(
+                    "EXTERNAL_ENGRAM_GRAPH_UNSUPPORTED"
+                )
 
         if hash_factory is None:
             from .engram import NgramHashState
@@ -159,13 +195,44 @@ def initialize_model_engram(
         device = model.v4.embed.weight.device
         checkpoint_path = config["checkpoint_path"]
         hash_state = hash_factory(layout, checkpoint_path, device=device)
-        if attachment.external:
+        if storage_mode == "cuda_local":
+            from pathlib import Path
+
+            from rtp_llm.models_py.modules.dsv41.engram_bootstrap import (
+                hash_state_digest,
+            )
+            from rtp_llm.models_py.modules.dsv41.engram_local_cuda import (
+                staged_local_cuda_storage,
+            )
+
+            storage = staged_local_cuda_storage()
+            if storage is None:
+                raise EngramModelInitializationError(
+                    "LOCAL_CUDA_ENGRAM_MUST_BE_STAGED_BEFORE_KV_SIZING"
+                )
+            attachment.storage = storage
+            if storage.checkpoint_path != str(
+                Path(checkpoint_path).resolve(strict=True)
+            ) or storage.expected_layout.hash_abi != hash_state_digest(hash_state):
+                raise EngramModelInitializationError(
+                    "LOCAL_CUDA_ENGRAM_CHECKPOINT_OR_HASH_MISMATCH"
+                )
+            storage.require_model_layout(
+                layout.layer_ids, layout.num_embeddings, layout.head_dim
+            )
+        elif attachment.external:
             if attach_factory is None:
-                from rtp_llm.models_py.modules.dsv41.engram_bootstrap import attach_from_package
+                from rtp_llm.models_py.modules.dsv41.engram_bootstrap import (
+                    attach_from_package,
+                )
 
                 attach_factory = attach_from_package
             storage = attach_factory(
-                package, layout=layout, hash_state=hash_state, device=device, environ=env
+                package,
+                layout=layout,
+                hash_state=hash_state,
+                device=device,
+                environ=env,
             )
             attachment.storage = storage
 
@@ -227,7 +294,9 @@ def initialize_model_engram(
                     # Keep the module as well as storage: it may still own views.
                     attachment.failed_resources.append(module)
                     cleanup_errors.append(error)
-            resource = storage if storage is not None else getattr(original, "resource", None)
+            resource = (
+                storage if storage is not None else getattr(original, "resource", None)
+            )
             if resource is not None:
                 try:
                     resource.close()
