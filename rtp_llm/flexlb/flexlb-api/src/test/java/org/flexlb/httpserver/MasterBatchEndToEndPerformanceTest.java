@@ -1650,7 +1650,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private static Path findOnlineLogsDirectory() throws IOException {
         Path current = Path.of("").toAbsolutePath();
         for (int depth = 0; depth < 6 && current != null; depth++) {
-            Path candidate = current.resolve("tools/online_eval/data/online_logs");
+            Path candidate = current.resolve("flexlb-api/src/test/resources/performance");
             if (Files.isRegularFile(candidate.resolve("sample_access.json"))
                     && Files.isRegularFile(candidate.resolve("trace_30min.jsonl"))) {
                 return candidate;
@@ -1658,7 +1658,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             current = current.getParent();
         }
         throw new IOException(
-                "Cannot locate tools/online_eval/data/online_logs from "
+                "Cannot locate flexlb-api/src/test/resources/performance from "
                         + Path.of("").toAbsolutePath());
     }
 
