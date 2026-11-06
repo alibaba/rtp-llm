@@ -82,6 +82,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private long nextSheddingNanos;
     private final java.util.function.LongSupplier protectionClock;
     private final Map<String, PrefillQueueShedding.Controller> sheddingControllers = new LinkedHashMap<>();
+    private final Map<String, PrefillDeadlineBudget> deadlineBudgets = new LinkedHashMap<>();
     private long nextRescueRetryNanos;
     private Set<PlacementKey> idleRescueDomains = Set.of();
     private long lastLocalMigrationNanos = Long.MIN_VALUE;
@@ -1017,7 +1018,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private void shedOverloadedQueue() {
         long nowNanos = System.nanoTime();
         if (shedding == null || nowNanos < nextSheddingNanos) { return; }
-        nextSheddingNanos = nowNanos + TimeUnit.MILLISECONDS.toNanos(100L);
+        nextSheddingNanos = nowNanos + TimeUnit.MILLISECONDS.toNanos(
+                shedding.getDeadlineBudget() == null ? 100L : PrefillQueueShedding.SOFT_INTERVAL_MS);
         QueueHardTimeout hard;
         while ((hard = hardTimeouts.poll()) != null) {
             sheddingControllers.computeIfAbsent(hard.pool(), ignored -> new PrefillQueueShedding.Controller()).hardTimeout(hard.atMs());
@@ -1079,8 +1081,26 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             var snapshot = (PrefillTrafficTrend.Snapshot) trends.get(
                     poolEntry.getKey() == null ? "<default>" : "group:" + poolEntry.getKey());
             var controller = sheddingControllers.computeIfAbsent(poolEntry.getKey(), ignored -> new PrefillQueueShedding.Controller());
-            victims.addAll(PrefillQueueShedding.adaptiveVictims(pool, shedding, snapshot, controller,
-                    protectionClock.getAsLong(), router.isPrefillClusterOverloaded(poolEntry.getKey())));
+            if (shedding.getDeadlineBudget() == null) {
+                victims.addAll(PrefillQueueShedding.adaptiveVictims(pool, shedding, snapshot, controller,
+                        protectionClock.getAsLong(), router.isPrefillClusterOverloaded(poolEntry.getKey())));
+            } else {
+                var budgetCandidates = new ArrayList<PrefillDeadlineBudget.Candidate<GlobalQueueEntry>>();
+                for (var candidate : pool) {
+                    var entry = candidate.value();
+                    // Cache may have warmed or expired since this request last attempted placement.
+                    var estimate = router.estimateQueuedWork(entry.context, entry.routingGroup);
+                    if (estimate == null) { budgetCandidates.clear(); break; }
+                    entry.sheddingEstimate = estimate;
+                    long deadline = Math.min(entry.context.data().getRequestExpiresAtMs(),
+                            entry.context.snapshot().inactivityExpiresAtMs());
+                    budgetCandidates.add(new PrefillDeadlineBudget.Candidate<>(entry, entry.priority(), entry.sequence,
+                            estimate.inputTokens() - estimate.hitTokens(), estimate.hitTokens() == 0L, Math.max(0L, deadline - nowMs)));
+                }
+                victims.addAll(deadlineBudgets.computeIfAbsent(poolEntry.getKey(), ignored -> new PrefillDeadlineBudget())
+                        .victims(budgetCandidates, router.deadlineBudgetFleet(poolEntry.getKey()),
+                                shedding.getDeadlineBudget(), queueSettings.priorityOrdering(), protectionClock.getAsLong()));
+            }
         }
         // Keep attribution alive until the real cancellation/publication wins Context arbitration.
         for (var entry : expired) {
@@ -1092,7 +1112,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         for (var victim : victims) {
             String pool = trafficPool(victim);
             selected.merge(pool, 1, Integer::sum);
-            if (!router.isPrefillClusterOverloaded(pool)
+            var fleet = shedding.getDeadlineBudget() == null ? null : router.deadlineBudgetFleet(pool);
+            boolean overloaded = shedding.getDeadlineBudget() == null ? router.isPrefillClusterOverloaded(pool)
+                    : fleet != null && fleet.saturated(shedding.getDeadlineBudget());
+            if (!overloaded
                     || router.hotPrefillQueueAllowsAdmission(victim.context, victim.routingGroup)) { continue; }
             if (victim.sheddingEstimate.hitTokens() == 0L) {
                 var domain = new PlacementKey(victim.lastBlocker.role(), pool, null);
@@ -1114,7 +1137,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 }
             }
             boolean published = completeDecisionResponse(victim, buildErrorResponse(StrategyErrorType.RESOURCE_EXHAUSTED,
-                    victim.sheddingEstimate.hitTokens() == 0L
+                    shedding.getDeadlineBudget() != null ? "Prefill queue overload: cold work exceeds remaining dispatch deadline budget"
+                            : victim.sheddingEstimate.hitTokens() == 0L
                             && TimeUnit.NANOSECONDS.toMillis(nowNanos - victim.queuedAtNanos) <= shedding.getExpectedWaitThresholdMs()
                             ? "Prefill queue overload: sustained actual hard timeouts exhausted cold-request grace"
                             : "Prefill queue overload: actual queue wait exceeded expectedWaitThresholdMs"));

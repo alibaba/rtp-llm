@@ -97,6 +97,60 @@ class PlacementCapacityWaitQueueTest {
     }
 
     @Test
+    void coldFailureDoesNotConsumeTheHotRetryFromTheSameCapacityEdge() {
+        var cold = entry(50);
+        cold.knownColdRequest = true;
+        var hot = entry(50);
+        queue.park(cold, A, 0);
+        queue.park(hot, A, 0);
+        queue.capacityChanged(A);
+        assertEquals(List.of(cold), drain(1));
+        queue.park(cold, A, 0);
+        assertEquals(List.of(hot), drain(1));
+        assertTrue(queue.isWaiting(cold));
+        queue.park(hot, A, 0);
+        assertTrue(drain(10).isEmpty(), "both failed classes wait for new capacity");
+    }
+
+    @Test
+    void changingCacheClassificationMovesTheWaiterWithoutLosingAnAvailablePeer() {
+        var cold = entry(50);
+        cold.knownColdRequest = true;
+        var hot = entry(50);
+        queue.park(cold, A, 0);
+        queue.park(hot, A, 0);
+        queue.capacityChanged(A);
+        assertEquals(List.of(cold), drain(1));
+        cold.knownColdRequest = false;
+        queue.park(cold, A, 0);
+        assertEquals(List.of(cold), drain(1), "the hot class still has its independent opportunity");
+        queue.remove(cold);
+        assertEquals(List.of(hot), drain(1));
+        queue.remove(hot);
+        assertTrue(drain(10).isEmpty());
+    }
+
+    @Test
+    void coldAndHotRetriesKeepPriorityOrderAndRemainBoundedWithLargeBacklogs() {
+        var cold = entry(10);
+        cold.knownColdRequest = true;
+        var hot = entry(90);
+        queue.park(cold, A, 0);
+        queue.park(hot, A, 0);
+        for (int i = 0; i < 10_000; i++) {
+            var next = entry(50);
+            next.knownColdRequest = i % 2 == 0;
+            queue.park(next, A, 0);
+        }
+        queue.capacityChanged(A);
+        var resumed = drain(16);
+        assertEquals(2, resumed.size(), "one retry per admission class, not per request");
+        assertEquals(hot, resumed.getFirst());
+        assertTrue(resumed.getLast().knownColdRequest);
+        assertTrue(drain(16).isEmpty());
+    }
+
+    @Test
     void retriesAreOrderedAcrossDomainsAndThenWithinEachDomain() {
         var first = entry(50);
         var second = entry(50);

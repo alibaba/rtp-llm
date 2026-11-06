@@ -50,6 +50,11 @@ public class RequestWorkerSelector {
 
     public int currentPrefillWorkerCount(String group) { return prefillSelector.currentPrefillWorkerCount(group); }
 
+    PrefillDeadlineBudget.Fleet deadlineBudgetFleet(String group) {
+        return requiredRoles.stream().filter(RoleType::supportsPrefill).findFirst()
+                .map(role -> prefillSelector.deadlineBudgetFleet(role, group)).orElse(null);
+    }
+
     public List<RequestRoute> hotspotMigrationCandidates(int limit) {
         return prefillSelector.hotspotMigrationCandidates(limit);
     }

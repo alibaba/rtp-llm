@@ -166,6 +166,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         status.prepareNewStatus(observation);
                 projection = endpoint.applyPreparedStatus(status, prepared);
             }
+            status.recordAppliedObservation(observation, System.nanoTime() / 1000L);
         } finally {
             status.lock.unlock();
         }
@@ -207,6 +208,22 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 RequestContext context, String policyGroup) {
             return requireBound().select(context, policyGroup);
         }
+
+        @Override PrefillQueueShedding.Estimate estimateQueuedWork(RequestContext context, String group) {
+            return requireBound().estimateQueuedWork(context, group);
+        }
+        @Override PrefillDeadlineBudget.Fleet deadlineBudgetFleet(String group) {
+            return requireBound().deadlineBudgetFleet(group);
+        }
+        @Override boolean isPrefillClusterOverloaded(String group) { return requireBound().isPrefillClusterOverloaded(group); }
+        @Override boolean hasEngineQueueAdmission(String group) { return requireBound().hasEngineQueueAdmission(group); }
+        @Override boolean hotPrefillQueueAllowsAdmission(RequestContext context, String group) {
+            return requireBound().hotPrefillQueueAllowsAdmission(context, group);
+        }
+        @Override CostBasedPrefillStrategy.ColdAdmission coldPrefillAdmission(RequestContext context, String group) {
+            return requireBound().coldPrefillAdmission(context, group);
+        }
+        @Override public int currentPrefillWorkerCount(String group) { return requireBound().currentPrefillWorkerCount(group); }
 
         private synchronized RequestWorkerSelector requireBound() {
             if (delegate == null) {

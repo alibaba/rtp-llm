@@ -77,4 +77,22 @@ class PrefillQueueSheddingConfigTest {
         assertNull(config.queueScheduler().getPrefillQueueShedding());
         assertEquals(3_601_000L, config.resolveExpiresAtMs(1_000L));
     }
+
+    @Test void deadlineBudgetRequiresExplicitCalibrationAndTokenAccounting() {
+        assertNull(parse("{}").queueScheduler().getPrefillQueueShedding().getDeadlineBudget());
+        assertThrows(RuntimeException.class, () -> parse("{\"deadlineBudget\":{\"tokensPerSecond\":70000}}"));
+        String prefix = "{\"router\":{\"roles\":{\"prefill\":{\"tokenBalance\":{}}}},"
+                + "\"scheduler\":{\"type\":\"QUEUE\",\"prefillQueueShedding\":{\"deadlineBudget\":";
+        var parsed = ConfigTestFixtures.parse(prefix + "{\"tokensPerSecond\":70000}}}}");
+        var budget = parsed.queueScheduler().getPrefillQueueShedding().getDeadlineBudget();
+        assertEquals(70_000, budget.getTokensPerSecond());
+        assertEquals(0.9, budget.getCapacityFactor());
+        for (String invalid : new String[]{"{}", "{\"tokensPerSecond\":0}", "{\"tokensPerSecond\":-1}",
+                "{\"tokensPerSecond\":70000,\"capacityFactor\":1.1}",
+                "{\"tokensPerSecond\":70000,\"saturationHoldMs\":0}",
+                "{\"tokensPerSecond\":70000,\"saturatedWorkerPercent\":0}",
+                "{\"tokensPerSecond\":70000,\"dispatchSlackMs\":60000}"}) {
+            assertThrows(RuntimeException.class, () -> ConfigTestFixtures.parse(prefix + invalid + "}}}"));
+        }
+    }
 }

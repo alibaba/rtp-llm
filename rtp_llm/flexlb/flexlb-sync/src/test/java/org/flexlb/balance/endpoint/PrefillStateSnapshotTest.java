@@ -281,6 +281,39 @@ class PrefillStateSnapshotTest {
         assertEquals(0, state.tokenWorkload().score());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deadlineBudgetRetainsColdTokenCapDespiteDelayedLowWaitingStatus(boolean batch) {
+        state.enableTokenWorkload(90L, () -> true);
+        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
+        state.enforceColdTokenLimit(true);
+        var first = item(4101);
+        var second = item(4102);
+        when(first.coldTokenBalance()).thenReturn(true);
+        when(second.coldTokenBalance()).thenReturn(true);
+        if (batch) {
+            var permit = generation.tryAcquireHandoff();
+            var lease = state.reserveUnqueuedBatch(first, 4101, 256, permit).reservation();
+            assertNotNull(lease, "one oversized cold request must still start on an idle worker");
+            var next = generation.tryAcquireHandoff();
+            try { assertNull(state.reserveUnqueuedBatch(second, 4102, 256, next).reservation()); }
+            finally { next.close(); }
+            state.release(lease, null).generationHandoff().close();
+        } else {
+            var lease = state.reserveUnqueuedRoute(first, 1, 256).reservation();
+            assertNotNull(lease);
+            assertNull(state.reserveUnqueuedRoute(second, 1, 256).reservation());
+            var hot = state.reserveUnqueuedRoute(item(4103), 1, 256).reservation();
+            assertNotNull(hot, "hot admission retains existing Engine queue policy");
+            state.release(hot, null);
+            state.release(lease, null);
+        }
+        assertEquals(0L, state.tokenWorkload().pendingTokens());
+        var resumed = state.reserveUnqueuedRoute(second, 1, 256).reservation();
+        assertNotNull(resumed, "real completion restores cold admission");
+        state.release(resumed, null);
+    }
+
     @Test
     void engineQueuePolicyBypassesTokensButNeverTheRequestLimit() {
         var pressure = new java.util.concurrent.atomic.AtomicReference<>(EngineQueueAdmission.State.AVAILABLE);
@@ -1954,6 +1987,53 @@ class PrefillStateSnapshotTest {
         when(item.requestId()).thenReturn(id);
         when(item.seqLen()).thenReturn(100L);
         return item;
+    }
+
+    @Test
+    void coldAdmissionAndDeadlineBudgetRequireAccurateEnginePrefixFeedback() {
+        var pressure = new EngineQueueAdmission(30L, 5_000L);
+        pressure.observe(2L, 0L);
+        state.configureEngineQueueAdmission(pressure::state);
+        state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
+        state.enableTokenWorkload(200_000L, () -> true);
+        state.enforceColdTokenLimit(true);
+        var running = new java.util.HashMap<String, TaskInfo>();
+        for (long id = 91; id <= 93; id++) {
+            var hot = item(id);
+            when(hot.seqLen()).thenReturn(100_000L);
+            when(hot.hitCache()).thenReturn(95_000L);
+            assertNotNull(state.reserveUnqueuedRoute(hot, 1, 256).reservation());
+            var report = task(id, TaskPhase.RUNNING, 0L, 0L);
+            report.setBatchId(0L);
+            report.setInputLength(100_000L);
+            report.setPrefixLength(0L);
+            running.put(Long.toString(id), report);
+        }
+        assertEquals(15_000L, state.tokenWorkload().pendingTokens());
+        reconcile(Map.of(), running, unused -> 0L);
+        assertEquals(300_000L, state.tokenWorkload().pendingTokens(),
+                "an enqueue-time zero prefix inflates 95%-cached work by 20x");
+        var cold = item(94);
+        when(cold.seqLen()).thenReturn(100_000L);
+        when(cold.coldTokenBalance()).thenReturn(true);
+        assertNull(state.reserveUnqueuedRoute(cold, 1, 256).reservation());
+        var budget = new org.flexlb.config.PrefillQueueSheddingConfig.DeadlineBudgetConfig();
+        budget.setTokensPerSecond(70_000);
+        var controller = new org.flexlb.balance.scheduler.PrefillDeadlineBudget();
+        var queue = List.of(new org.flexlb.balance.scheduler.PrefillDeadlineBudget.Candidate<>(
+                "cold", 50, 1L, 100_000L, true, 4_000L));
+        var inflated = new org.flexlb.balance.scheduler.PrefillDeadlineBudget.Fleet(
+                1, 1, state.tokenWorkload().pendingTokens(), true);
+        controller.victims(queue, inflated, budget, false, 0L);
+        assertEquals(List.of("cold"), controller.victims(queue, inflated, budget, false, 2_000L));
+
+        running.values().forEach(report -> report.setPrefixLength(95_000L));
+        reconcile(Map.of(), running, unused -> 0L);
+        assertEquals(15_000L, state.tokenWorkload().pendingTokens());
+        var accurate = new org.flexlb.balance.scheduler.PrefillDeadlineBudget.Fleet(
+                1, 0, state.tokenWorkload().pendingTokens(), true);
+        assertTrue(controller.victims(queue, accurate, budget, false, 3_000L).isEmpty());
+        assertNotNull(state.reserveUnqueuedRoute(cold, 1, 256).reservation());
     }
 
     private PrefillState.Snapshot capture() {

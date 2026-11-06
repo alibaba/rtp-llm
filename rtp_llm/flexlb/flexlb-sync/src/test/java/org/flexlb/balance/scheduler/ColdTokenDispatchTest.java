@@ -826,6 +826,86 @@ class ColdTokenDispatchTest {
         }
     }
 
+    @Test
+    void coldCapacityHeadDoesNotStrandAdmissibleParkedHotRequests() throws Exception {
+        try (var f = new Fixture(false, false, false, true, config -> {
+            config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+            config.queueScheduler().setQueueTimeoutMs(120_000L);
+            config.getRequestLifecycle().getRequest().setTimeoutMs(100_000L);
+            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+            balance.setMinPrefixHitPercent(5);
+            balance.setMaxPendingComputeTokens(200_000L);
+            balance.setEngineQueueAdmissionThreshold(30L);
+            var rescue = new RoutingConfig.HotspotRescueConfig();
+            rescue.setMaxInputTokens(32768L);
+            rescue.setMaxIdlePendingTokens(64768L);
+            rescue.setMigrationIntervalMs(1000L);
+            balance.setHotspotRescue(rescue);
+            var shedding = new org.flexlb.config.PrefillQueueSheddingConfig();
+            var budget = new org.flexlb.config.PrefillQueueSheddingConfig.DeadlineBudgetConfig();
+            budget.setTokensPerSecond(70_000L);
+            shedding.setDeadlineBudget(budget);
+            config.queueScheduler().setPrefillQueueShedding(shedding);
+        })) {
+            when(f.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
+                List<Long> keys = call.getArgument(0);
+                return keys.getFirst() == 111L ? Map.of(f.a.ipPort(), 19, f.b.ipPort(), 19) : Map.of();
+            });
+            var running = new java.util.ArrayList<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>();
+            for (int i = 0; i < 3; i++) {
+                running.add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                        .setBatchId(-1).setRequestId(7_000_000 + i).setInputLength(100_000)
+                        .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build());
+            }
+            var congested = new java.util.ArrayList<>(running);
+            for (int i = 0; i < 31; i++) {
+                congested.add(org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                        .setBatchId(-1).setRequestId(7_010_000 + i).setInputLength(1000).setIsWaiting(true)
+                        .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED).build());
+            }
+            f.observeTaskSnapshot(f.a, congested, List.of());
+            f.observeTaskSnapshot(f.b, congested, List.of());
+            var cold = f.context(7_100_000);
+            cold.data().setRequest(cold.data().getRequest().toBuilder().seqLen(100_000L).build());
+            var coldResponse = f.scheduler.submit(cold);
+            verify(f.router, timeout(1000)).select(same(cold), nullable(String.class));
+            var hot = f.context(7_100_001);
+            hot.data().setRequest(hot.data().getRequest().toBuilder()
+                    .seqLen(100_000L).cacheKeyBlockSize(5000L)
+                    .blockCacheKeys(java.util.stream.LongStream.range(111, 131).boxed().toList()).build());
+            var hotResponse = f.scheduler.submit(hot);
+            verify(f.router, timeout(1000)).select(same(hot), nullable(String.class));
+            var lock = (java.util.concurrent.locks.ReentrantLock) ReflectionTestUtils.getField(f.scheduler, "lock");
+            awaitCondition(() -> {
+                lock.lock();
+                try {
+                    var entries = (Map<RequestContext, GlobalQueueEntry>) ReflectionTestUtils.getField(f.scheduler, "queuedEntries");
+                    var waiters = (PlacementCapacityWaitQueue) ReflectionTestUtils.getField(f.scheduler, "waitingRequests");
+                    return entries.get(cold) != null && entries.get(hot) != null
+                            && waiters.isWaiting(entries.get(cold)) && waiters.isWaiting(entries.get(hot));
+                } finally { lock.unlock(); }
+            });
+            f.observeTaskSnapshot(f.a, running, List.of());
+            f.observeTaskSnapshot(f.b, running, List.of());
+            assertTrue(f.router.hotPrefillQueueAllowsAdmission(hot, null));
+            assertEquals(CostBasedPrefillStrategy.ColdAdmission.INSUFFICIENT_CAPACITY,
+                    f.router.coldPrefillAdmission(cold, null));
+            assertTrue(hotResponse.get(2, TimeUnit.SECONDS).isSuccess(),
+                    "hot work must retry while the cold token gate remains closed");
+            assertFalse(coldResponse.isDone());
+            var fresh = f.context(7_100_002);
+            fresh.data().setRequest(fresh.data().getRequest().toBuilder().seqLen(100_000L).cacheKeyBlockSize(5000L)
+                    .blockCacheKeys(java.util.stream.LongStream.range(111, 131).boxed().toList()).build());
+            assertTrue(f.scheduler.submit(fresh).get(2, TimeUnit.SECONDS).isSuccess(),
+                    "both parked and new hot requests retain admission while cold work waits");
+            // Cold work still waits for a real reduction below its own token gate.
+            f.observeTaskSnapshot(f.a, running.subList(2, 3), running.subList(0, 2));
+            f.observeTaskSnapshot(f.b, running.subList(2, 3), running.subList(0, 2));
+            assertTrue(coldResponse.get(2, TimeUnit.SECONDS).isSuccess());
+            assertTrue(hotResponse.get(2, TimeUnit.SECONDS).isSuccess());
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.newConfig();
         final EndpointRegistry endpoints;

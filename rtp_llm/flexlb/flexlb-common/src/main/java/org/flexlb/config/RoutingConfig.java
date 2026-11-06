@@ -38,7 +38,9 @@ public final class RoutingConfig {
     public static final class TokenBalanceConfig {
         /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
         private double minPrefixHitPercent = 50.0;
-        /** Legacy token backpressure when Engine queue admission is disabled or telemetry is unknown. */
+        /** Legacy token backpressure when Engine queue admission is disabled or telemetry is unknown.
+         * Also bounds cold work when deadlineBudget shedding is enabled; hot affinity is unchanged.
+         */
         private long maxPendingComputeTokens = 2_000_000L;
         /** Include recently completed uncached tokens in ranking only; disabled by default. */
         private boolean enableWindow = false;

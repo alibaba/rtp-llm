@@ -117,6 +117,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
         if (balance != null) { ownership.enableTokenWorkload(balance.getMaxPendingComputeTokens(), this::engineQueueAllowsAdmission,
                 balance.isEnableWindow() ? balance.getWindowMs() : 0L); }
+        var shedding = config.isQueue() ? config.queueScheduler().getPrefillQueueShedding() : null;
+        ownership.enforceColdTokenLimit(shedding != null && shedding.getDeadlineBudget() != null);
 
     }
 

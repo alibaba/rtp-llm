@@ -93,6 +93,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private final java.util.concurrent.atomic.AtomicReference<Throwable> pumpFailure =
             new java.util.concurrent.atomic.AtomicReference<>();
     final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
+    final CacheAwareService cache = mock(CacheAwareService.class);
     final EngineGrpcClient grpcClient = mock(EngineGrpcClient.class);
     final DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
     final RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
@@ -126,6 +127,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     private final Object pumpLock = new Object();
     private ScheduledExecutorService pumpExecutor;
     private final Path tempDir;
+    private final long transportDelayMs;
+    private final Map<String, Object> performanceOverrides;
+    private record DelayedStatus(long dueNanos, WorkerStatus worker, WorkerStatusResponse response) { }
+    private final java.util.ArrayDeque<DelayedStatus> delayedStatuses = new java.util.ArrayDeque<>();
 
     AutoTpmE2EHarness(int basePort, int nPrefill, int nDecode,
                       String prefillFormulaMs, double decodeStepMs,
@@ -168,6 +173,17 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                       boolean preemptionSupported, boolean autoTpm,
                       DecisionPolicyConfig decisionPolicy, boolean productionRouting,
                       FlexlbConfig initialConfig) {
+        this(basePort, nPrefill, nDecode, prefillFormulaMs, decodeStepMs, preemptionSupported,
+                autoTpm, decisionPolicy, productionRouting, initialConfig, 0L, Map.of());
+    }
+
+    AutoTpmE2EHarness(int basePort, int nPrefill, int nDecode,
+                      String prefillFormulaMs, double decodeStepMs,
+                      boolean preemptionSupported, boolean autoTpm,
+                      DecisionPolicyConfig decisionPolicy, boolean productionRouting,
+                      FlexlbConfig initialConfig, long transportDelayMs, Map<String, Object> performanceOverrides) {
+        this.transportDelayMs = transportDelayMs;
+        this.performanceOverrides = performanceOverrides;
         this.config = initialConfig == null ? new FlexlbConfig() : initialConfig;
         try {
             tempDir = Files.createTempDirectory("auto-tpm-e2e");
@@ -181,7 +197,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         // 100-block pool rejects past ~95 concurrent requests on the 5%
         // reserve watermark. These behavioral E2E tests treat KV capacity as
         // a non-constraint (the KV-rejection surface has dedicated tests).
-        final int poolBlocks = 6144;
+        final int poolBlocks = ((Number) performanceOverrides.getOrDefault("test_pool_blocks", 6144)).intValue();
         for (int i = 0; i < nPrefill; i++) {
             int port = basePort + i;
             JavaMockEngineCluster.FastRpcService svc = new JavaMockEngineCluster.FastRpcService(
@@ -213,7 +229,9 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         }
         // the default fixed_window algorithm reads fixedWaitMs (not windowMs):
         // hold dispatch by default so scenarios can assert stable queue state
-        config.getRequestLifecycle().getRequest().setTimeoutMs(3_600_000L);
+        if (config.getRequestLifecycle().getRequest().getTimeoutMs() == null) {
+            config.getRequestLifecycle().getRequest().setTimeoutMs(3_600_000L);
+        }
         config.getRequestLifecycle().getDecision().setLifetime(2.0);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
@@ -224,7 +242,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 any(EngineRpcService.EnqueueBatchRequestPB.class)))
                 .thenAnswer(inv -> {
                     int port = inv.getArgument(1);
-                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    EngineRpcService.EnqueueBatchRequestPB encoded = inv.getArgument(2);
+                    // Production retains packed token_ids as an unknown field until Engine decoding.
+                    // In-process transport must reproduce that wire boundary, or input length is zero.
+                    EngineRpcService.EnqueueBatchRequestPB request = EngineRpcService.EnqueueBatchRequestPB.parseFrom(encoded.toByteArray());
                     JavaMockEngineCluster.FastRpcService svc = services.get(port);
                     if (svc == null) {
                         return CompletableFuture.failedFuture(
@@ -239,7 +260,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                             });
                     CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> future =
                             new CompletableFuture<>();
-                    svc.enqueueBatch(request, new StreamObserver<>() {
+                    Runnable send = () -> svc.enqueueBatch(request, new StreamObserver<>() {
                         private EngineRpcService.EnqueueBatchResponsePB response;
 
                         @Override
@@ -270,6 +291,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                                     });
                         }
                     });
+                    if (transportDelayMs == 0L) { send.run(); }
+                    else { engineScheduler.schedule(send, transportDelayMs, TimeUnit.MILLISECONDS); }
                     return future;
                 });
 
@@ -345,6 +368,12 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         response.setTotalKvCacheTokens(snapshot.getTotalKvCache());
         response.setMaxBatchTokensSize(snapshot.getMaxBatchTokensSize());
         response.setMaxSeqLen(snapshot.getMaxSeqLen());
+        response.setWaitingQueryLen(snapshot.getWaitingQueryLen());
+        response.setRunningQueryLen(snapshot.getRunningQueryLen());
+        response.setAvailableConcurrency(snapshot.getAvailableConcurrency());
+        response.setDpSize(snapshot.getDpSize());
+        response.setTpSize(snapshot.getTpSize());
+        response.setDpRank(snapshot.getDpRank());
         response.setStatusVersion(snapshot.getStatusVersion());
         response.setLatestFinishedVersion(snapshot.getLatestFinishedVersion());
         Map<String, TaskInfo> running = new HashMap<>();
@@ -444,7 +473,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     private RequestWorkerSelector productionRouter() {
         EndpointRegistry workers = endpointRegistry;
-        CacheAwareService cache = mock(CacheAwareService.class);
         when(cache.findMatchingEngines(any(), any(), any()))
                 .thenReturn(Map.of());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
@@ -520,6 +548,10 @@ final class AutoTpmE2EHarness implements AutoCloseable {
      */
     void pumpOnce() {
         synchronized (pumpLock) {
+            while (!delayedStatuses.isEmpty() && delayedStatuses.getFirst().dueNanos() <= System.nanoTime()) {
+                var delayed = delayedStatuses.removeFirst();
+                schedulerRuntime.applyStatus(delayed.worker(), delayed.response());
+            }
             for (JavaMockEngineCluster.FastRpcService svc : services.values()) {
                 pumpEngine(svc);
             }
@@ -545,13 +577,16 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         EngineRpcService.WorkerStatusPB snapshot = workerStatus(
                 svc, status.appliedStatusCursor().latestFinishedTaskVersion());
         RoleType role = decodeEngines.contains(svc) ? RoleType.DECODE : RoleType.PREFILL;
-        schedulerRuntime.applyStatus(status, statusResponse(role, snapshot));
+        if (transportDelayMs == 0L) { schedulerRuntime.applyStatus(status, statusResponse(role, snapshot)); }
+        else { delayedStatuses.addLast(new DelayedStatus(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(transportDelayMs),
+                status, statusResponse(role, snapshot))); }
     }
 
     static TaskInfo toTaskInfo(EngineRpcService.TaskInfoPB task) {
         TaskInfo info = new TaskInfo();
         info.setRequestId(task.getRequestId());
         info.setInputLength(task.getInputLength());
+        info.setPrefixLength(task.getPrefixLength());
         info.setBatchId(task.getBatchId());
         info.setErrorCode(task.getErrorInfo().getErrorCode());
         info.setErrorMessage(task.getErrorInfo().getErrorMessage());
@@ -628,6 +663,19 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     private MockPerformanceModel model(String prefillFormulaMs, double decodeStepMs) {
         try {
+            if (!performanceOverrides.isEmpty()) {
+                var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                Path performance = tempDir.resolve("calibrated-performance.json");
+                Path master = tempDir.resolve("calibrated-master.json");
+                var values = new HashMap<String, Object>();
+                values.put("block_size", 512);
+                values.put("prefill", Map.of("scale", 1.0));
+                values.put("decode", Map.of("step_ms_by_batch", List.of(List.of(1, decodeStepMs))));
+                values.putAll(performanceOverrides);
+                mapper.writeValue(performance.toFile(), values);
+                MockMasterConfig.writeWithPrefillExpression(master, prefillFormulaMs);
+                return MockPerformanceModel.load(performance.toString(), master.toString());
+            }
             return MockEngineTestSupport.performanceModel(
                     tempDir, prefillFormulaMs, 1.0, decodeStepMs);
         } catch (IOException e) {

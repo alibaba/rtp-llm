@@ -10,6 +10,7 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.RouteTimelineProjector;
 import org.flexlb.balance.scheduler.PrefillQueueShedding;
+import org.flexlb.balance.scheduler.PrefillDeadlineBudget;
 import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
@@ -61,6 +62,7 @@ public class CostBasedPrefillStrategy {
     private final int maxInflightBatches;
     private final RoutingConfig.TokenBalanceConfig tokenBalance;
     private final double minAcceptingWorkerPercent;
+    private final boolean deadlineBudgetEnabled;
     private final Object tokenSelectionLock = new Object();
 
     public CostBasedPrefillStrategy(EndpointRegistry endpointRegistry,
@@ -79,6 +81,7 @@ public class CostBasedPrefillStrategy {
         maxInflightBatches = config.getDispatcher().requiresGenerateInput() ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0;
         tokenBalance = config.getRouter().getRoles().getPrefill().getTokenBalance();
         var shedding = config.isQueue() ? config.queueScheduler().getPrefillQueueShedding() : null;
+        deadlineBudgetEnabled = shedding != null && shedding.getDeadlineBudget() != null;
         minAcceptingWorkerPercent = shedding == null
                 ? PrefillQueueSheddingConfig.DEFAULT_MIN_ACCEPTING_WORKER_PERCENT : shedding.getMinAcceptingWorkerPercent();
         var affinity = config.getRouter().getRoles().getPrefill().getCacheAffinity();
@@ -436,6 +439,30 @@ public class CostBasedPrefillStrategy {
                 .count();
     }
 
+    /** Uses outstanding work once (Engine coverage is reconciled by the ownership ledger). */
+    public PrefillDeadlineBudget.Fleet deadlineBudgetFleet(RoleType role, String group) {
+        int workers = 0;
+        int saturated = 0;
+        double tokens = 0;
+        boolean known = tokenBalance != null;
+        for (var entry : endpointRegistry.prefillRoutingSnapshot(role)) {
+            var endpoint = entry.endpoint();
+            if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) { continue; }
+            workers++;
+            var work = endpoint.ownership.tokenWorkload();
+            tokens += (double) work.pendingTokens() + work.plannedTokens();
+            known &= endpoint.engineQueueAdmissionState() != org.flexlb.balance.endpoint.EngineQueueAdmission.State.UNKNOWN;
+            long observedAtUs = endpoint.getStatus().appliedObservation().observedAtUs();
+            known &= observedAtUs > 0L && System.nanoTime() / 1000L - observedAtUs <= 5_000_000L;
+            long waiting = endpoint.getStatus().committedWorkerStatus().fields().waitingQueryLen();
+            boolean nearlyFull = tokenBalance != null && tokenBalance.getEngineQueueAdmissionThreshold() != null
+                    && waiting >= Math.max(1.0, tokenBalance.getEngineQueueAdmissionThreshold() * 0.9);
+            if (nearlyFull || endpoint.engineQueueDispatchBlocked() || !hasInflightCapacity(endpoint)
+                    || tokenBalance != null && work.pendingTokens() >= tokenBalance.getMaxPendingComputeTokens()) { saturated++; }
+        }
+        return new PrefillDeadlineBudget.Fleet(workers, saturated, tokens, known);
+    }
+
     private int migrationSourceCursor;
 
     public java.util.Set<org.flexlb.balance.scheduler.PlacementKey> hotspotRescueDomains() {
@@ -560,7 +587,7 @@ public class CostBasedPrefillStrategy {
             // Preserve a busy cache leader by parking globally, where existing HIT_RATE shedding applies.
             if (candidates.endpoint(i).engineQueueDispatchBlocked()
                     || !PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
-                    && !candidates.endpoint(i).engineQueueAllowsAdmission()) { continue; }
+                    && (deadlineBudgetEnabled && !cacheFirst || !candidates.endpoint(i).engineQueueAllowsAdmission())) { continue; }
             scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen);
             minimum = Math.min(minimum, scores[i]);
         }
@@ -647,7 +674,7 @@ public class CostBasedPrefillStrategy {
                 var endpoint = candidates.endpoint(i);
                 var work = endpoint.ownership.tokenWorkload();
                 if (PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
-                        || endpoint.engineQueueAllowsAdmission()) {
+                        || !deadlineBudgetEnabled && endpoint.engineQueueAllowsAdmission()) {
                     accepting++;
                     // Count the whole matching pool, including request-count and token-full workers.
                     if (enoughAcceptingWorkers(accepting, discovery.registeredCount())) {

@@ -12,8 +12,9 @@ import java.util.function.Consumer;
 /**
  * Queues requests waiting for placement capacity. All methods run under the QueuedRequestScheduler lock.
  *
- * <p>A capacity edge opens one retry per domain. Successful admission (or cancellation
- * before admission) preserves the opportunity for the next waiter; a failed attempt
+ * <p>A capacity edge opens one retry per domain and Prefill admission class.
+ * Successful admission (or cancellation before admission) preserves the opportunity
+ * for the next waiter; a failed attempt
  * consumes it. No endpoint probing or request-specific successor state is needed.
  * Ready domains are globally ordered, and each scan transfers a bounded number of
  * requests. A wakeup grants a fresh route decision, never an endpoint reservation.</p>
@@ -21,7 +22,10 @@ import java.util.function.Consumer;
 final class PlacementCapacityWaitQueue {
     private final PlacementAvailability availability;
     private final Comparator<GlobalQueueEntry> order;
-    private final Map<PlacementKey, Domain> domains = new HashMap<>();
+    // Cold token admission and hot Engine-queue admission are different predicates.
+    // A failed cold retry is not evidence that a hot waiter cannot proceed.
+    private record WaitKey(PlacementKey capacity, boolean cold) { }
+    private final Map<WaitKey, Domain> domains = new HashMap<>();
     private final Map<GlobalQueueEntry, Domain> membership = new IdentityHashMap<>();
     private final NavigableSet<Domain> ready;
     private final Map<GlobalQueueEntry, Rescue> rescueMembership = new IdentityHashMap<>();
@@ -84,7 +88,8 @@ final class PlacementCapacityWaitQueue {
             return false;
         }
         remove(entry, false);
-        PlacementKey key = blocker.capacityDomain();
+        WaitKey key = new WaitKey(blocker.capacityDomain(),
+                blocker.role().supportsPrefill() && entry.knownColdRequest);
         Domain domain = domains.computeIfAbsent(key, Domain::new);
         unindex(domain);
         domain.entries.add(entry);
@@ -149,6 +154,11 @@ final class PlacementCapacityWaitQueue {
     }
 
     private void release(PlacementKey key) {
+        release(new WaitKey(key, false));
+        if (key.role().supportsPrefill()) { release(new WaitKey(key, true)); }
+    }
+
+    private void release(WaitKey key) {
         Domain domain = domains.get(key);
         if (domain != null) {
             domain.available = true;
@@ -173,12 +183,12 @@ final class PlacementCapacityWaitQueue {
     }
 
     private final class Domain {
-        private final PlacementKey key;
+        private final WaitKey key;
         private final NavigableSet<GlobalQueueEntry> entries = new TreeSet<>(order);
         private boolean available;
         private GlobalQueueEntry retry;
 
-        private Domain(PlacementKey key) {
+        private Domain(WaitKey key) {
             this.key = key;
         }
     }
