@@ -1,10 +1,14 @@
 """fmha_inputs; validation/layout planning does not own mutation state."""
 
+from dataclasses import replace
 from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import host_input_mirror
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    host_input_mirror,
+    prefill_step_plan_hit,
+)
 from rtp_llm.ops.compute_ops import LayerKVCache
 
 from .fmha_plans import (
@@ -261,7 +265,15 @@ def _prepare_incremental_prefill_inputs(
         host_input_mirror(self.attn_inputs, "prefix_lengths"),
     )
     if plan is not None:
-        return plan
+        step = prefill_step_plan_hit(
+            self.attn_inputs, int(qkv.shape[0]), device=qkv.device, batch_size=batch
+        )
+        if step is not None and (
+            tuple(step.lengths) != plan.lengths_host
+            or tuple(step.prefix_values) != plan.prefixes_host
+        ):
+            step = None
+        return replace(plan, step_plan=step) if step is not None else plan
 
     from .fmha_validation import main_geometry_checks
     from .validation import DeviceChecks

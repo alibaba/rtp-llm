@@ -3,7 +3,7 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import Optional, overload
+from typing import Any, Optional, overload
 
 import torch
 
@@ -76,6 +76,7 @@ class IncrementalPrefillInputs:
     selected_indices: torch.Tensor
     prefixes_device: torch.Tensor
     cu_seqlens: Optional[torch.Tensor] = None
+    step_plan: Any = None
 
     @property
     def lengths_host(self) -> tuple[int, ...]:

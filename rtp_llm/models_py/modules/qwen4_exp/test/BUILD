@@ -5,6 +5,18 @@ load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 package(default_visibility = ["//visibility:public"])
 
 models_py_test(
+    name = "hc_gdn_moe_prepare_once_test",
+    src = "hc_gdn_moe_prepare_once_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
+    name = "qsa_prepare_once_validation_test",
+    src = "qsa_prepare_once_validation_test.py",
+    gpu = "H20_CU13",
+)
+
+models_py_test(
     name = "sparse_paged_slim_test",
     src = "sparse_paged_slim_test.py",
     gpu = "H20_CU13",

@@ -8,6 +8,7 @@ single FP32 GEMV changes the gate. Keep the native path outside this contract.
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 _TORCH_GIT = "70d99e998b4955e0049d13a98d77ae1b14db1f45"
 
@@ -57,14 +58,16 @@ def _inject_reduce_down_epilogue(
 
 def try_splitk_down_inject(normed, weight, down):
     """Return the complete down/gate epilogue, or leave both consumers native."""
+    # The capability check leads the conjunction: it is process-constant and
+    # False on every SM90 device, so the remaining conditions never run there.
     if not (
-        normed.is_cuda
+        cached_device_capability(normed.device) == (12, 0)
+        and normed.is_cuda
         and torch.version.hip is None
         and str(torch.__version__).startswith("2.11.0")
         and torch.version.git_version == _TORCH_GIT
         and torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
         and not torch.are_deterministic_algorithms_enabled()
-        and torch.cuda.get_device_capability(normed.device) == (12, 0)
         and normed.dtype == weight.dtype == down.dtype == torch.bfloat16
         and normed.ndim == 2
         and (4 <= normed.shape[0] <= 32 or 4093 <= normed.shape[0] <= 4096)

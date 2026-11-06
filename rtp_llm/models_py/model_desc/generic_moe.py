@@ -138,6 +138,11 @@ class GenericMoeLayer(nn.Module):
         )
         self.correction_bias = weights.get(W.e_score_correction_b)
         self.group_topk = GroupTopK() if self.correction_bias is not None else None
+        if self.group_topk is not None:
+            self.renormalize = self.config.has_moe_norm
+            self.num_expert_group = self.config.moe_n_group
+            self.topk_group = self.config.moe_topk_group
+            self.routed_scaling_factor = self.config.routed_scaling_factor
 
     def _create_fused_moe(
         self,
@@ -215,11 +220,11 @@ class GenericMoeLayer(nn.Module):
                 topk_ids=topk_ids,
                 scores=router_logits,
                 correction_bias=self.correction_bias,
-                n_group=self.config.moe_n_group,
-                topk_group=self.config.moe_topk_group,
+                n_group=self.num_expert_group,
+                topk_group=self.topk_group,
                 topk=self.top_k,
-                renormalize=self.config.has_moe_norm,
-                routed_scaling_factor=self.config.routed_scaling_factor,
+                renormalize=self.renormalize,
+                routed_scaling_factor=self.routed_scaling_factor,
             )
         else:
             self.select_topk(router_logits, topk_ids, topk_weights)

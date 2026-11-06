@@ -7,6 +7,7 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.gated_residual.norm import _norm_fp8_scale
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 @triton.jit
@@ -55,7 +56,7 @@ def _inject_grouped_norm(x, sublayer, gates, gamma, eps=1e-6):
     rows = x.numel() // 10240
     residual = torch.empty_like(x)
     norm = torch.empty_like(x)
-    sm90 = torch.cuda.get_device_capability(x.device) == (9, 0)
+    sm90 = cached_device_capability(x.device) == (9, 0)
     collect = (
         7 <= rows <= 32
         or 4093 <= rows <= 4096
@@ -109,7 +110,7 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps):
             or 4093 <= x.numel() // 10240 <= 16384
             or (
                 x.numel() // 10240 <= 4096
-                and torch.cuda.get_device_capability(x.device) == (9, 0)
+                and cached_device_capability(x.device) == (9, 0)
             )
         )
         and all(
@@ -122,7 +123,7 @@ def try_inject_grouped_norm(x, sublayer, gates, gamma, eps):
         and isinstance(eps, (float, int))
         and math.isfinite(eps)
         and eps >= 0
-        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
+        and cached_device_capability(x.device) in ((9, 0), (12, 0))
     ):
         return None
     return _inject_grouped_norm(x, sublayer, gates, gamma, eps)

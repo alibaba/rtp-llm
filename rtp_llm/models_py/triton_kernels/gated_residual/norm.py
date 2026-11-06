@@ -5,6 +5,7 @@ import math
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 
 @triton.jit
@@ -108,7 +109,7 @@ def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
         and eps >= 0
     ):
         return None
-    capability = torch.cuda.get_device_capability(x.device)
+    capability = cached_device_capability(x.device)
     rows = x.numel() // 10240
     min_rows = 1 if capability == (9, 0) else 256
     if capability not in ((9, 0), (12, 0)) or not min_rows <= rows <= 12288:

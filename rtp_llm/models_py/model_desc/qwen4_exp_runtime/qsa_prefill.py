@@ -584,6 +584,7 @@ def _incremental_prefill_selection(
         and not draft
         and not draft_prefix_reuse
         and step is not None
+        and step.prefix_reuse_fused_supported
         and step.selection_valid_rows is not None
         and step.padded_score_weights is not None
         and plan.batch_size * max(plan.lengths) * int(plan.max_ctx_len) * 4
@@ -619,6 +620,7 @@ def _incremental_prefill_selection(
             kv_tokens_per_block=int(plan.kv_tokens_per_block),
             state_tokens_per_block=int(plan.state_tokens_per_block),
             norm_eps=float(indexer.norm_eps),
+            trusted_geometry=True,
         )
     if fused is None and raw_query:
         # The fused writer declined this geometry: apply the model-level norm
