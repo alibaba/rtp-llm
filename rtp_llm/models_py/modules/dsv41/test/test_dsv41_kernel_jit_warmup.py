@@ -504,28 +504,29 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         model = nn.Module()
         shared = shaped_module(
             "W13SharedExpert",
-            w13=shaped_module("V41MXFP8Linear", N=24, K=8),
-            w2=shaped_module("V41MXFP8Linear", N=8, K=12),
+            w13=shaped_module("Mxfp8Linear", in_features=8, out_features=24),
+            w2=shaped_module("Mxfp8Linear", in_features=12, out_features=8),
             swiglu_limit=7.0,
         )
         model.moe = shaped_module(
-            "MoE",
+            "ChunkedFp8Fp4MoeLayer",
             shared_experts=shared,
             _shared_executor=types.SimpleNamespace(name="mxfp8", _out=object()),
-            _routed_includes_shared=False,
-            _strategy=types.SimpleNamespace(
-                name="mega",
-                _mega_y=torch.full((8, 16), 3.0, dtype=torch.bfloat16)[:, ::2],
+            fused_moe=types.SimpleNamespace(
+                includes_shared_expert=False,
+                fused_experts=types.SimpleNamespace(
+                    _mega_y=torch.full((8, 16), 3.0, dtype=torch.bfloat16)[:, ::2],
+                ),
             ),
+            strategy_name="mega_moe",
         )
         silu, combine = mock.Mock(), mock.Mock()
-        base = "rtp_llm.models_py.modules.dsv41"
         modules = {
-            f"{base}.moe._silu_mul_bf16_triton": fake_module(
-                "silu", silu_mul_fp8_g32_quant=silu
+            "rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant": fake_module(
+                "silu_mul_fp8_quant", silu_mul_fp8_quant_packed_g32=silu
             ),
-            f"{base}.moe._shared_expert_triton": fake_module(
-                "combine", fused_moe_epilogue=combine
+            "rtp_llm.models_py.triton_kernels.moe.shared_expert": fake_module(
+                "shared_expert", fused_moe_epilogue=combine
             ),
         }
         self.stack.enter_context(mock.patch.dict(sys.modules, modules))
@@ -695,7 +696,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         # Another layer with the same kernel contract must not duplicate JIT.
         model.other = copy.deepcopy(model.moe)
         original_output = model.moe._shared_executor._out
-        original_routed = model.moe._strategy._mega_y.clone()
+        original_routed = model.moe.fused_moe.fused_experts._mega_y.clone()
         warmup.warmup_v41_shared_expert_jit(model, max_m=8192, device="cuda:0")
         self.assertEqual(
             [tuple(c.args[0].shape) for c in silu.call_args_list],
@@ -714,16 +715,21 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(shared.stride(), (8, 1))
         self.assertEqual(shared.dtype, torch.bfloat16)
         self.assertEqual(out_dtype, torch.bfloat16)
-        self.assertNotEqual(routed.data_ptr(), model.moe._strategy._mega_y.data_ptr())
+        self.assertNotEqual(
+            routed.data_ptr(), model.moe.fused_moe.fused_experts._mega_y.data_ptr()
+        )
         self.assertIs(model.moe._shared_executor._out, original_output)
-        torch.testing.assert_close(model.moe._strategy._mega_y, original_routed)
+        torch.testing.assert_close(
+            model.moe.fused_moe.fused_experts._mega_y, original_routed
+        )
         warmup.warmup_v41_shared_expert_jit(model, max_m=8192, device="cuda:0")
         self.assertEqual(silu.call_count, 1)
         combine.assert_called_once()
 
     def test_shared_minimum_capacity_and_fp32_routed(self):
         model, silu, combine = self.shared_fixture()
-        model.moe._strategy = types.SimpleNamespace(name="grouped_fp4")
+        model.moe.strategy_name = "grouped_fp4"
+        model.moe.fused_moe.fused_experts = types.SimpleNamespace()
         model.moe.shared_experts.swiglu_limit = 0.0
         warmup.warmup_v41_shared_expert_jit(model, max_m=1, device="cuda:0")
         self.assertEqual(silu.call_count, 1)
@@ -749,13 +755,13 @@ class V41KernelJitWarmupTest(unittest.TestCase):
 
     def test_shared_fused_strategy_skip_and_eager_add_switch(self):
         model, silu, combine = self.shared_fixture()
-        model.moe._routed_includes_shared = True
+        model.moe.fused_moe.includes_shared_expert = True
         warmup.warmup_v41_shared_expert_jit(model, max_m=16, device="cuda:0")
         silu.assert_not_called()
         combine.assert_not_called()
         self.assertFalse(warmup._SHARED_WARMED)
-        model.moe._routed_includes_shared = False
-        with mock.patch.dict(os.environ, {"DSV4_SHARED_EXPERT_BF16_ADD": "1"}):
+        model.moe.fused_moe.includes_shared_expert = False
+        with mock.patch.dict(os.environ, {"MOE_SHARED_EXPERT_BF16_ADD": "1"}):
             warmup.warmup_v41_shared_expert_jit(model, max_m=16, device="cuda:0")
         self.assertEqual(silu.call_count, 1)
         combine.assert_not_called()
@@ -776,15 +782,15 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         model, silu, combine = self.shared_fixture()
         warmup.warmup_v41_shared_expert_jit(model, max_m=4, device="cuda:0")
         self.assertEqual(silu.call_count, 1)
-        model.moe.shared_experts.w13.N = 32
-        model.moe.shared_experts.w2.K = 16
+        model.moe.shared_experts.w13.out_features = 32
+        model.moe.shared_experts.w2.in_features = 16
         model.moe.shared_experts.swiglu_limit = 0.0
         warmup.warmup_v41_shared_expert_jit(model, max_m=32, device="cuda:0")
         self.assertEqual(silu.call_count, 2)
         self.assertEqual(silu.call_args.args[0].shape, (1, 32))
         self.assertEqual(silu.call_args.kwargs["clamp_limit"], 0.0)
         self.assertEqual(len(warmup._SHARED_WARMED), 2)
-        model.moe.shared_experts.w13.N = 31
+        model.moe.shared_experts.w13.out_features = 31
         with self.assertRaisesRegex(ValueError, "geometry"):
             warmup.warmup_v41_shared_expert_jit(model, max_m=32, device="cuda:0")
         self.assertEqual(silu.call_count, 2)

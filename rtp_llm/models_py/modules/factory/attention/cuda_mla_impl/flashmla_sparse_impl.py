@@ -553,6 +553,9 @@ class SparseMlaImpl(MlaImplBase):
         self.rope_impl.forward(q_pe, k_pe, self.rope_params)
         if plan is not None:
             data = offload_writer.pack(compressed_kv, k_pe, self.rope_params)
+            # Query transformation does not read KV. Enqueue it before write's
+            # fetch wait so it can overlap Host reads on the transfer stream.
+            q_transformed = self._apply_input_bmm(q, layer_id)
             plan.runtime.write(plan.storage_index, data)
         else:
             self.kv_cache_write_op.forward(
@@ -561,9 +564,7 @@ class SparseMlaImpl(MlaImplBase):
             common.apply_write_cache_store(
                 self.write_cache_store_impl, self.attn_inputs, kv_cache
             )
-
-        # Apply input BMM to transform query
-        q_transformed = self._apply_input_bmm(q, layer_id)
+            q_transformed = self._apply_input_bmm(q, layer_id)
 
         # Get full KV cache: [num_blocks * page_size, kv_lora_rank + rope_head_dim]
         # Reshape from [num_blocks, page_size, kv_dim] to [num_blocks * page_size, h_kv, kv_dim]

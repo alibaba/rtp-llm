@@ -23,6 +23,7 @@ from rtp_llm.models_py.modules.offload.plan import LayerOffloadPlan, build_offlo
 from rtp_llm.models_py.modules.offload.runtime import KVWrite, SparseOffloadRuntime
 from rtp_llm.ops import KvCacheDataType, compute_ops
 from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.utils.model_weight import W
 
 
 def offload_descs(groups, tag="default"):
@@ -892,16 +893,33 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
         topk[..., 1] = topk[..., 0]
         topk[..., 2:6] = torch.tensor([127, 128, 255, 256], device="cuda")
         topk[..., -1] = -1
-        q = torch.randn(tokens, 128, 576, dtype=torch.bfloat16, device="cuda")
+        q = torch.randn(tokens, 128, 192, dtype=torch.bfloat16, device="cuda")
         ckv = torch.randn(tokens, 512, dtype=torch.bfloat16, device="cuda")
         rope = torch.randn(tokens, 64, dtype=torch.bfloat16, device="cuda")
+        impl = SparseMlaImpl.__new__(SparseMlaImpl)
+        impl.num_heads, impl.nope_head_dim = 128, 128
+        impl.kv_lora_rank, impl.rope_head_dim = 512, 64
+        impl.weights = [
+            {W.mla_kc: torch.randn(128, 128, 512, dtype=q.dtype, device="cuda") * 0.02}
+        ]
+        impl.rope_impl = SimpleNamespace(forward=lambda *args: None)
+        impl.rope_params = params
+        impl.fmha_impl = op
+        impl._apply_output_bmm = lambda output, layer_id: output
+        transformed_q = impl._apply_input_bmm(q, 0)
 
         def run():
             plan.runtime.begin(op.translate_selection(topk))
-            plan.runtime.write(0, writer.pack(ckv, rope, params))
-            output = op.forward_resident(q, plan.runtime.acquire(0))
-            plan.runtime.drain()
-            return output
+            return impl.forward(
+                q,
+                ckv,
+                rope,
+                None,
+                0,
+                topk,
+                offload_plan=plan,
+                offload_writer=writer,
+            )
 
         actual = run()
         captured = None
@@ -918,7 +936,7 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
                 ckv, rope, full, params.slot_mapping, codec, scale
             )
             # SparseMlaImpl passes this flat native view to the original path.
-            expected = reference.forward(q, full.view(-1, 1, width), topk)
+            expected = reference.forward(transformed_q, full.view(-1, 1, width), topk)
             if captured is None:
                 actual = run()
             else:

@@ -142,33 +142,34 @@ def _shared_expert_signatures(model):
     for name, moe in model.named_modules():
         executor = getattr(moe, "_shared_executor", None)
         if getattr(executor, "name", None) != "mxfp8" or getattr(
-            moe, "_routed_includes_shared", False
+            getattr(moe, "fused_moe", None), "includes_shared_expert", False
         ):
             continue
         shared = moe.shared_experts
-        dim, inter = int(shared.w13.K), int(shared.w13.N) // 2
+        dim, inter = int(shared.w13.in_features), int(shared.w13.out_features) // 2
         if (
             dim <= 0
             or inter <= 0
-            or int(shared.w13.N) != 2 * inter
-            or (int(shared.w2.N), int(shared.w2.K)) != (dim, inter)
+            or int(shared.w13.out_features) != 2 * inter
+            or (int(shared.w2.out_features), int(shared.w2.in_features)) != (dim, inter)
         ):
             raise ValueError(f"invalid V41 shared-expert geometry: {name}")
-        strategy = moe._strategy
         # Mega returns its BF16 buffer; the other standalone strategies return
         # contiguous FP32 accumulators. Do not call forward/setup_runtime here:
         # those mutate shared runtime buffers and can enter EP collectives.
-        routed = getattr(strategy, "_mega_y", None)
+        routed_executor = moe.fused_moe.fused_experts
+        routed = getattr(routed_executor, "_mega_y", None)
+        strategy_name = moe.strategy_name
         if isinstance(routed, torch.Tensor):
             if routed.ndim != 2 or routed.shape[1] != dim:
                 raise ValueError(f"invalid V41 routed output geometry: {name}")
             routed_dtype, routed_stride = routed.dtype, tuple(routed.stride())
-        elif strategy.name == "mega":
+        elif strategy_name in ("mega_moe", "mega_moe_se"):
             routed_dtype, routed_stride = torch.bfloat16, (dim, 1)
-        elif strategy.name in ("local_loop", "grouped_fp4", "deepep"):
+        elif strategy_name in ("local_loop", "grouped_fp4"):
             routed_dtype, routed_stride = torch.float32, (dim, 1)
         else:
-            raise ValueError(f"unknown V41 routed output contract: {strategy.name}")
+            raise ValueError(f"unknown V41 routed output contract: {strategy_name}")
         clamp = max(float(shared.swiglu_limit), 0.0)
         signatures.setdefault((dim, inter, clamp, routed_dtype, routed_stride), name)
     return signatures
@@ -183,17 +184,15 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
     signatures = _shared_expert_signatures(model)
     if not signatures:
         return
-    from rtp_llm.models_py.modules.dsv41.moe._shared_expert_triton import (
-        fused_moe_epilogue,
-    )
-    from rtp_llm.models_py.modules.dsv41.moe._silu_mul_bf16_triton import (
-        silu_mul_fp8_g32_quant,
+    from rtp_llm.models_py.triton_kernels.moe.shared_expert import fused_moe_epilogue
+    from rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant import (
+        silu_mul_fp8_quant_packed_g32,
     )
 
     # Rows, scale stride and quantization policy do not specialize the kernel.
     # One row warms both policies for the actual projection width and clamp.
     rows_grid = (1,)
-    fused_add = os.environ.get("DSV4_SHARED_EXPERT_BF16_ADD", "0") != "1"
+    fused_add = os.environ.get("MOE_SHARED_EXPERT_BF16_ADD", "0") != "1"
     key = (str(device), frozenset(signatures), rows_grid, fused_add)
     if key in _SHARED_WARMED:
         return
@@ -205,7 +204,7 @@ def warmup_v41_shared_expert_jit(model, *, max_m, device):
             common._run_triton_warmup_launch_with_retry(
                 "DSV41 SharedExpert",
                 f"{name} silu M={rows} D={inter} clamp={clamp}",
-                partial(silu_mul_fp8_g32_quant, gate_up, clamp_limit=clamp),
+                partial(silu_mul_fp8_quant_packed_g32, gate_up, clamp_limit=clamp),
                 device=device,
             )
         if fused_add:

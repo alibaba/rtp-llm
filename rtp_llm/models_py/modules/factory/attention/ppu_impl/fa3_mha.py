@@ -33,6 +33,8 @@ import os
 import sys
 from typing import Any, Optional
 
+from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
+
 # ---------------------------------------------------------------------------
 # FA3 availability check (cached)
 # ---------------------------------------------------------------------------
@@ -404,6 +406,7 @@ class FA3PrefillPagedAttnOp:
             page_size=self.seq_size_per_block,
             causal=True,
             num_splits=0,
+            pack_gqa=False,
         )
 
     def _get_max_seqlens(self, attn_inputs):
@@ -594,6 +597,9 @@ class FA3PrefillPagedAttnOp:
             max_seqlen_k=params.max_seqlen_k,
             scheduler_metadata=params.scheduler_metadata,
             num_splits=0,
+            # RTP uses strided HND cache views. The vendor's automatic GQA
+            # choice changes BF16 prefill results between identical calls.
+            pack_gqa=False,
         )
 
 
@@ -664,12 +670,11 @@ class FA3DecodeImpl:
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
             FusedRopeKVCacheDecodeOp,
         )
-        from rtp_llm.ops import RopeStyle
-        from rtp_llm.ops.compute_ops import rtp_llm_ops
-
         from rtp_llm.models_py.modules.factory.attention.ppu_impl.ppu_mrope import (
             PpuMRopeOp,
         )
+        from rtp_llm.ops import RopeStyle
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
 
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.fmha_impl = FA3DecodeAttnOp(attn_configs, attn_inputs)
@@ -745,7 +750,10 @@ class FA3DecodeImpl:
         else:
             from rtp_llm.models_py.modules.factory.attention import common
 
-            new_rope_params = self.rope_impl.prepare(attn_inputs)
+            new_rope_params = self.rope_impl.prepare(
+                attn_inputs, forbid_reallocation=True
+            )
+            self.rope_params.sequence_lengths = new_rope_params.sequence_lengths
             common.copy_kv_cache_offset(
                 self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
             )
@@ -781,23 +789,29 @@ class FA3DecodeImpl:
 class FA3PrefillPagedImpl:
     """FMHAImplBase-compatible FA3 paged prefill implementation for PPU."""
 
+    # copy_params also exists in generation-prefill capture. Filter that role
+    # before support/construction so its dedicated backend handles the bucket.
+    cuda_graph_selection_modes = {
+        CudaGraphSelectionMode.EAGER,
+        CudaGraphSelectionMode.DECODE_GRAPH,
+    }
+
     # The shared factory probes this capability before calling the constructor.
     accepts_fmha_config = False
 
     def __init__(self, attn_configs, attn_inputs, parallelism_config=None):
         from rtp_llm.models_py.modules.factory.attention import common
-        from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
-            KVCacheWriteOp,
-        )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
             MhaRotaryEmbeddingOp,
         )
-        from rtp_llm.ops import RopeStyle
-        from rtp_llm.ops.compute_ops import rtp_llm_ops
-
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
+            KVCacheWriteOp,
+        )
         from rtp_llm.models_py.modules.factory.attention.ppu_impl.ppu_mrope import (
             PpuMRopeOp,
         )
+        from rtp_llm.ops import RopeStyle
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
 
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.attn_configs = attn_configs

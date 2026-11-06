@@ -616,6 +616,7 @@ class HWKernelConfig:
     generation_prefill_cuda_graph_max_requests_limit: typing.ClassVar[int]
     arm_gemm_use_kai: bool
     decode_capture_batch_sizes: list[int]
+    enable_decode_cascade_attention: bool
     deep_gemm_num_sm: int
     deterministic_attn: bool
     deterministic_gemm: bool

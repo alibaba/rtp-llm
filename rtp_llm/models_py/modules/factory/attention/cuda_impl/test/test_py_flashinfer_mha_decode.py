@@ -74,6 +74,24 @@ class TestPyFlashinferWorkspacePlanning(unittest.TestCase):
             py_flashinfer_mha._planned_flashinfer_workspace_size(wrapper, 12, 256)
         )
 
+    def test_cuda_core_decode_plan_sizes_split_scratch(self) -> None:
+        wrapper = object.__new__(py_flashinfer_mha.BatchDecodeWithPagedKVCacheWrapper)
+        wrapper._backend = "auto"
+        wrapper._use_tensor_cores = False
+        wrapper._plan_info = [32, 0, 32 * 16 * 128 * 4, 0, 0, 0, 0, 0, 1, 1]
+        self.assertEqual(
+            py_flashinfer_mha._planned_flashinfer_workspace_size(wrapper, 16, 128),
+            32 * 16 * (128 + 1) * 4,
+        )
+        wrapper._plan_info[-1] = 0
+        self.assertEqual(
+            py_flashinfer_mha._planned_flashinfer_workspace_size(wrapper, 16, 128), 256
+        )
+        wrapper._plan_info.append(0)
+        self.assertIsNone(
+            py_flashinfer_mha._planned_flashinfer_workspace_size(wrapper, 16, 128)
+        )
+
     def test_workspace_pool_is_size_aware(self) -> None:
         first = py_flashinfer_mha.get_py_flashinfer_workspace_buffer("cpu", 513)
         self.assertEqual(first.numel(), 768)
@@ -81,6 +99,20 @@ class TestPyFlashinferWorkspacePlanning(unittest.TestCase):
         reused = py_flashinfer_mha.get_py_flashinfer_workspace_buffer("cpu", 513)
         self.assertIs(reused, first)
         py_flashinfer_mha.release_py_flashinfer_workspace_buffer(reused)
+
+    def test_decode_wrapper_without_tensor_core_property_keeps_default(self) -> None:
+        class LegacyDecodeWrapper:
+            _backend = "auto"
+            _plan_info = [32, 0, 32 * 16 * 128 * 4, 0, 0, 0, 0, 0, 1, 1]
+
+        with mock.patch.object(
+            py_flashinfer_mha, "BatchDecodeWithPagedKVCacheWrapper", LegacyDecodeWrapper
+        ):
+            self.assertIsNone(
+                py_flashinfer_mha._planned_flashinfer_workspace_size(
+                    LegacyDecodeWrapper(), 16, 128
+                )
+            )
 
 
 class PageMetadata(NamedTuple):

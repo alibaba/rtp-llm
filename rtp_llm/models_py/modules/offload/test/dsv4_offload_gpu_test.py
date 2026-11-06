@@ -14,7 +14,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_flash_mla_decode_kernel_layout
     _make_q,
     _pack_model1_fp8_cache,
 )
-from rtp_llm.models_py.modules.offload.layout import PagedRowLayout
+from rtp_llm.models_py.modules.offload.layout import FetchRows, PagedRowLayout
 from rtp_llm.models_py.modules.offload.plan import LayerOffloadPlan
 from rtp_llm.models_py.modules.offload.runtime import KVWrite, SparseOffloadRuntime
 
@@ -62,6 +62,87 @@ class Dsv4OffloadGpuTest(unittest.TestCase):
     def tearDown(self):
         self.stream.synchronize()
         self.context.__exit__(None, None, None)
+
+    def test_fp8_fetch_preserves_all_other_bytes_eager_and_graph(self):
+        # Different page/row strides and nonzero plane offsets must be respected.
+        # Unaligned pointers and strided bytes exercise the generic fallback.
+        for page, offset, step, row_padding in (
+            (32, 4, 1, 0),
+            (64, 12, 1, 0),
+            (32, 5, 1, 0),
+            (32, 4, 2, 0),
+            (32, 4, 1, 4),
+        ):
+            with self.subTest(page=page, offset=offset, step=step, padding=row_padding):
+                hbm, n = 128, 37
+
+                def planes(raw, base, padding):
+                    pages, stride = raw.shape
+                    return tuple(
+                        raw.as_strided(
+                            (pages, page, width),
+                            (stride, (width + padding) * step, step),
+                            base + start,
+                        )
+                        for width, start in (
+                            (576, 0), (8, page * (576 + padding) * step)
+                        )
+                    )
+
+                stride = offset + page * (584 + 2 * row_padding) * step + 320
+                stride = (stride + 3) // 4 * 4
+                host_raw = torch.randint(
+                    0, 256, (8, stride), dtype=torch.uint8, pin_memory=True
+                )
+                original_host = host_raw.clone()
+                resident_raw = torch.empty(
+                    (8, stride + 64 + page * 2 * row_padding * step),
+                    dtype=torch.uint8,
+                    device="cuda",
+                )
+                hosts = planes(host_raw, offset, row_padding)
+                residents = planes(resident_raw, offset + 8, 2 * row_padding)
+                source = torch.randperm(8 * page)[:n]
+                target = torch.randperm(8 * page - hbm)[:n] + hbm
+                positions_cpu = torch.randperm(n).to(torch.int32)
+                ids = (source + hbm).to(device="cuda", dtype=torch.int32)
+                slots = target.to(device="cuda", dtype=torch.int32)
+                count = torch.zeros((), dtype=torch.int32, device="cuda")
+                misses = FetchRows(ids, slots, positions_cpu.cuda(), count)
+                storage = SimpleNamespace(
+                    host_planes=hosts,
+                    resident_planes=residents,
+                    rows_per_page=page,
+                    hbm_blocks=2,
+                    rows_per_block=64,
+                )
+                layout = PagedRowLayout()
+                layout.fetch(storage, misses)
+                self.stream.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=self.stream):
+                    layout.fetch(storage, misses)
+                for captured in (False, True):
+                    for miss_count in (0, 1, 7, n):
+                        resident_raw.fill_(0xA5)
+                        count.fill_(miss_count)
+                        if captured:
+                            graph.replay()
+                        else:
+                            layout.fetch(storage, misses)
+                        expected = torch.full_like(resident_raw, 0xA5, device="cpu")
+                        selected = positions_cpu[:miss_count].long()
+                        src, dst = source[selected], target[selected]
+                        for host, reference in zip(
+                            hosts, planes(expected, offset + 8, 2 * row_padding)
+                        ):
+                            reference[dst // page, dst % page] = host[
+                                src // page, src % page
+                            ]
+                        self.stream.synchronize()
+                        # Includes HBM prefix, unselected rows, plane gaps and padding.
+                        self.assertTrue(torch.equal(resident_raw.cpu(), expected))
+                        self.assertTrue(torch.equal(host_raw, original_host))
 
     def test_warmup_cache_release_and_production_rebind(self):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
@@ -229,18 +310,50 @@ class Dsv4OffloadGpuTest(unittest.TestCase):
         stride = ((tokens * 584 + 575) // 576) * 576
         raw = torch.zeros((1, stride), device="cuda", dtype=torch.uint8)
         compressor.offload_staging = raw.as_strided((1, tokens, 584), (stride, 584, 1))
-        compressor._launch(kv, score, meta)
         valid = meta.kv_slots >= 0
         ids = meta.kv_slots[valid].to(torch.int32).contiguous()
-        runtime.begin(ids)
-        view = runtime.acquire(0)
-        for resident, width, start in zip(view.planes, (576, 8), (0, 32 * 576)):
-            expected_plane = reference_raw.as_strided(
-                (pages, 32, width), (19008, width, 1), start
+
+        class DelayedLayout(PagedRowLayout):
+            def fetch(self, storage, misses):
+                torch.cuda._sleep(20_000_000)
+                super().fetch(storage, misses)
+
+        runtime.layout = DelayedLayout()
+
+        def run():
+            state.copy_(saved_state)
+            runtime.begin(ids)
+            compressor._launch(kv, score, meta)
+            view = runtime.acquire(0)
+            return tuple(
+                plane[view.indices.long() // 32, view.indices.long() % 32].clone()
+                for plane in view.planes
             )
-            actual = resident[view.indices.long() // 32, view.indices.long() % 32]
-            expected = expected_plane[ids.long() // 32, ids.long() % 32]
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+        # Old Host bytes may be fetched while the new boundary KV is computed.
+        # The writer must join the fetch before publishing the new bytes.
+        run()
+        self.stream.synchronize()
+        runtime.reset()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=self.stream):
+            captured = run()
+        for replay in (False, True, True):
+            self.stream.synchronize()
+            for host in runtime.storages[0].host_planes:
+                host.zero_()
+            runtime.storages[0].generations.add_(1)
+            if replay:
+                graph.replay()
+                actual = captured
+            else:
+                actual = run()
+            for observed, width, start in zip(actual, (576, 8), (0, 32 * 576)):
+                expected_plane = reference_raw.as_strided(
+                    (pages, 32, width), (19008, width, 1), start
+                )
+                expected = expected_plane[ids.long() // 32, ids.long() % 32]
+                torch.testing.assert_close(observed, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

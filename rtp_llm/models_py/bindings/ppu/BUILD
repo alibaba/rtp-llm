@@ -76,3 +76,15 @@ cc_library(
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )
+
+py_test(
+    name = "test_fused_rope_kvcache_decode_graph",
+    srcs = ["test_fused_rope_kvcache_decode_graph.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["manual", "PPU-ZW810E"],
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)

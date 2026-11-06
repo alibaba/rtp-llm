@@ -1277,6 +1277,7 @@ class W:
     moe_b2 = "partial_moe_weights.intermediate_weight2.bias"
     moe_gate = "partial_moe_weights.gate.kernel"
     moe_gate_bias = "partial_moe_weights.gate.bias"
+    moe_gate_bias_vl = "partial_moe_weights.gate.bias_vl"
     moe_gate_tid2eid = "partial_moe_weights.gate.token_id_to_expert_id"
 
     # eplb

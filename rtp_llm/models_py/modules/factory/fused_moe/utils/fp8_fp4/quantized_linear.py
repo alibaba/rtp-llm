@@ -8,6 +8,7 @@ fallback. Native checkpoint storage avoids an eager load-time memory blowup.
 Memory footprint:
   FP4 weight:  [out, in//2] int8 + [out, in//32] UE8M0  ≈ original + 1/32 scale
   FP8 weight:  [out, in] e4m3fn + [out//128, in//128] UE8M0  ≈ original + tiny scale
+  MXFP8 weight: [out, in] e4m3fn + [out//32, in//32] UE8M0  ≈ original + 1/32 scale
   BF16 weight: [out, in] bf16  — no scale
 
 FP4 forward goes through ``deep_gemm.fp8_fp4_gemm_nt`` and requires a
@@ -35,10 +36,28 @@ from rtp_llm.models_py.kernels.cuda.quant_layouts import (
 
 _FP8_BLOCK_CONFIG = Fp8BlockWiseQuantConfig()
 
+MXFP8_BLOCK = 32
+
+
+def is_mxfp8_scale(weight: torch.Tensor, scale: torch.Tensor) -> bool:
+    return (
+        scale.dim() == 2
+        and scale.dtype == torch.float8_e8m0fnu
+        and weight.dim() == 2
+        and tuple(scale.shape)
+        == (
+            (weight.shape[0] + MXFP8_BLOCK - 1) // MXFP8_BLOCK,
+            (weight.shape[1] + MXFP8_BLOCK - 1) // MXFP8_BLOCK,
+        )
+    )
+
 
 def create_fp8_linear(weight: torch.Tensor, scale: torch.Tensor):
     """Build the CUDA FP8 linear used by FP8 shared experts."""
     from rtp_llm.models_py.modules.factory.linear import LinearFactory
+
+    if is_mxfp8_scale(weight, scale):
+        return Mxfp8Linear(weight, scale)
 
     if scale.dtype == torch.float8_e8m0fnu:
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
@@ -183,3 +202,93 @@ class QuantizedLinear(nn.Module):
         # FP8: dequant to x's dtype on the fly.
         w = self.dequant_weight(out_dtype=x.dtype)
         return F.linear(x, w)
+
+
+class Mxfp8Linear(nn.Module):
+    """Linear with native 32x32 checkpoint quantization blocks.
+
+    Checkpoints store one UE8M0 scale per 32x32 weight tile. DeepGEMM needs one
+    scale per 32-element group along K, so the leading dimension is expanded by
+    a pure row broadcast (``row // 32``) and packed into the same TMA-aligned
+    int32 form used by the block-128 path.
+
+    The activation contract is group-32 FP8 as well: ``forward`` quantizes the
+    input with ``sgl_per_token_group_quant_fp8(group_size=32)`` and runs
+    ``fp8_fp4_gemm_nt`` with ``recipe=(1, 1, 32)``.
+    """
+
+    def __init__(self, weight: torch.Tensor, scale: torch.Tensor):
+        super().__init__()
+        self.out_features, self.in_features = weight.shape
+        self.weight = weight
+        self.weight_scales = self.pack_scales(scale)
+
+    def pack_scales(self, scale: torch.Tensor) -> torch.Tensor:
+        if not is_mxfp8_scale(self.weight, scale):
+            raise ValueError(
+                f"invalid MXFP8 scale {tuple(scale.shape)} for weight "
+                f"{tuple(self.weight.shape)}"
+            )
+        from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
+        rows = torch.arange(self.out_features, device=scale.device) // MXFP8_BLOCK
+        return get_mn_major_tma_aligned_packed_ue8m0_tensor(
+            scale.float().index_select(0, rows)
+        )
+
+    def _quantize_input(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            sgl_per_token_group_quant_fp8,
+        )
+
+        flat = x.reshape(-1, self.in_features).contiguous()
+        quantized, scales = sgl_per_token_group_quant_fp8(
+            flat,
+            group_size=MXFP8_BLOCK,
+            eps=torch.finfo(torch.float32).tiny,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        return quantized.view(x.shape), scales
+
+    def forward_quantized(
+        self,
+        x_q: torch.Tensor,
+        x_s: torch.Tensor,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Consume group-32 E4M3/packed UE8M0 without another quantization.
+
+        Used by the fused shared-expert activation kernel, which hands over the
+        quantized SwiGLU output directly. Input layout and disjoint BF16 output
+        storage are caller preconditions.
+        """
+        m = x_q.numel() // self.in_features
+        shape = (*x_q.shape[:-1], self.out_features)
+        output = (
+            out
+            if out is not None
+            else torch.empty(shape, device=x_q.device, dtype=torch.bfloat16)
+        )
+        if m:
+            from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import fp8_fp4_gemm_nt
+
+            fp8_fp4_gemm_nt(
+                (x_q.reshape(m, self.in_features), x_s),
+                (self.weight, self.weight_scales),
+                output.reshape(m, self.out_features),
+                recipe=(1, 1, MXFP8_BLOCK),
+            )
+        return output
+
+    def forward(
+        self, x: torch.Tensor, out: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        if x.numel() == 0:
+            return (
+                out
+                if out is not None
+                else x.new_empty((*x.shape[:-1], self.out_features))
+            )
+        return self.forward_quantized(*self._quantize_input(x), out=out)

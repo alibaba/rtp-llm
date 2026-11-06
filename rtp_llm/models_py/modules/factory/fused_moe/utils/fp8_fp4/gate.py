@@ -132,7 +132,8 @@ class Gate(nn.Module):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W``. Reads
         ``W.moe_gate`` and either ``W.moe_gate_tid2eid`` (hash layers) or
-        ``W.moe_gate_bias`` (non-hash)."""
+        ``W.moe_gate_bias`` (non-hash); optional ``W.moe_gate_bias_vl`` skews
+        image-token routing."""
         super().__init__()
         self.dim = dim
         self.topk = n_activated_experts
@@ -140,6 +141,7 @@ class Gate(nn.Module):
         self.route_scale = route_scale
         self.hash = layer_id < n_hash_layers
         self.fuse_hash_gate = False
+        self.vocab_size = int(vocab_size)
         from rtp_llm.utils.model_weight import W
 
         assert (
@@ -152,6 +154,9 @@ class Gate(nn.Module):
             self.bias = None
         else:
             self.bias = layer_weights[W.moe_gate_bias]
+        # Checkpoints with vision tokens carry a second bias row applied to
+        # image tokens (``input_ids >= vocab_size``).
+        self.bias_vl = layer_weights.get(W.moe_gate_bias_vl)
 
     def _weight_bf16(self) -> torch.Tensor:
         """Lazy-cached BF16 view of ``self.weight``.
@@ -173,9 +178,45 @@ class Gate(nn.Module):
             self._w_bf16 = cached
         return cached
 
+    def _project_scores(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Project router rows, honouring CED and prefill row-chunk policies.
+
+        ``_ced_row_projection`` lets CED map compact rows back to their
+        original positions; ``_prefill_gate_chunk_rows`` bounds the GEMM rows
+        independently of the MoE token budget.
+        """
+        projection = getattr(self, "_ced_row_projection", None)
+        if projection is not None:
+            return projection(x, weight)
+        rows = getattr(self, "_prefill_gate_chunk_rows", 0)
+        if (
+            rows <= 0
+            or torch.is_grad_enabled()
+            or x.ndim != 2
+            or weight.ndim != 2
+            or x.dtype != torch.bfloat16
+            or weight.dtype != torch.bfloat16
+            or not x.is_cuda
+            or not weight.is_cuda
+            or x.shape[0] <= rows
+        ):
+            return F.linear(x, weight)
+        scores = torch.empty(
+            (x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device
+        )
+        wt = weight.T
+        for start in range(0, x.shape[0], rows):
+            torch.mm(x[start : start + rows], wt, out=scores[start : start + rows])
+        return scores
+
     def _bf16_scores(self, x: torch.Tensor) -> torch.Tensor:
         x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
-        return F.linear(x_bf16, self._weight_bf16())
+        return self._project_scores(x_bf16, self._weight_bf16())
+
+    def _visual_routing_active(self) -> bool:
+        return self.bias_vl is not None and bool(
+            getattr(self, "_has_visual_tokens", False)
+        )
 
     def can_prepare_gate_payload(
         self,
@@ -187,6 +228,7 @@ class Gate(nn.Module):
         if (
             x.size(0) == 0
             or os.environ.get("MOE_GATE_FP32", "0") == "1"
+            or self._visual_routing_active()
             or not _use_fused_gate(self.score_func, x.size(0), self.topk)
         ):
             return False
@@ -240,12 +282,13 @@ class Gate(nn.Module):
         # (127× × 1.15 ms = 145 ms in the 64k+CP=4 trace).  Score numerics
         # then run in FP32 through softplus/sqrt/topk, same as before.
         if os.environ.get("MOE_GATE_FP32", "0") == "1":
-            scores = F.linear(x.float(), self.weight.float())
+            scores = self._project_scores(x.float(), self.weight.float())
         else:
             scores = self._bf16_scores(x)
             if (
                 self.hash
                 and self.fuse_hash_gate
+                and not self._visual_routing_active()
                 and _use_fused_gate(self.score_func, x.size(0), self.topk)
             ):
                 assert input_ids is not None
@@ -263,6 +306,7 @@ class Gate(nn.Module):
         if (
             not self.hash
             and self.bias is not None
+            and not self._visual_routing_active()
             and _use_fused_gate(self.score_func, x.size(0), self.topk)
         ):
             return fused_sqrtsoftplus_gate(
@@ -281,12 +325,32 @@ class Gate(nn.Module):
             scores = F.softplus(scores).sqrt()
 
         original_scores = scores
+        image_mask = (
+            input_ids.reshape(-1) >= self.vocab_size
+            if self._visual_routing_active() and input_ids is not None
+            else None
+        )
         if self.bias is not None:
-            scores = scores + self.bias
+            if image_mask is None:
+                scores = scores + self.bias
+            else:
+                scores = scores + torch.where(
+                    image_mask.unsqueeze(-1), self.bias_vl, self.bias
+                )
 
         if self.hash:
             assert input_ids is not None
-            indices = self.tid2eid[input_ids].long()  # [N, topk]
+            flat_ids = input_ids.reshape(-1)
+            if image_mask is None:
+                indices = self.tid2eid[flat_ids].long()  # [N, topk]
+            else:
+                indices = self.tid2eid[torch.where(image_mask, 0, flat_ids)].long()
+                vision_indices = (original_scores + self.bias_vl).topk(
+                    self.topk, dim=-1
+                )[1]
+                indices = torch.where(
+                    image_mask.unsqueeze(-1), vision_indices.long(), indices
+                )
         else:
             indices = None
 

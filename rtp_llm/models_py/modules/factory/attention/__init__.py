@@ -127,6 +127,11 @@ elif device_type == DeviceType.Cuda:
     PREFILL_MHA_IMPS.append(CPFlashInferImpl)
 elif device_type == DeviceType.Ppu:
     # PPU uses the CUDA-flavored attention implementations.
+    from rtp_llm.models_py.modules.factory.attention.ppu_impl.full_prefill import (
+        PpuFlashinferFullPrefillGraphImpl,
+    )
+
+    PREFILL_MHA_IMPS.append(PpuFlashinferFullPrefillGraphImpl)
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
         PyFlashinferDecodeImpl,
         PyFlashinferHybridPrefillImpl,

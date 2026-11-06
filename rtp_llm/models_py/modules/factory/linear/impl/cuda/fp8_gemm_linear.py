@@ -18,6 +18,7 @@ class CudaFp8GEMMLinear(LinearBase):
     """CUDA FP8 GEMM wrapper."""
 
     FLASHINFER_M_THRESHOLD = CudaFp8FlashinferLinear.FLASHINFER_M_THRESHOLD
+    supports_fused_silu_quant = True
 
     @classmethod
     def can_handle(
@@ -140,3 +141,14 @@ class CudaFp8GEMMLinear(LinearBase):
         if not self._should_use_flashinfer(input):
             return self._deepgemm_linear(input)
         return self._flashinfer_linear(input)
+
+    def forward_silu_and_mul_quantized(
+        self, gate_up: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        if gate_up.dim() != 2 or gate_up.shape[1] != 2 * self.K:
+            return None
+        # Dispatch sees the activation's [M, K] shape, not the producer's
+        # [M, 2K] shape. Preserve the existing small-M FlashInfer route.
+        if self._should_use_flashinfer(gate_up[:, : self.K]):
+            return None
+        return self._deepgemm_linear.forward_silu_and_mul_quantized(gate_up)

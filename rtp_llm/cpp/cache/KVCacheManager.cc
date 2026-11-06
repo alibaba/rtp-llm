@@ -580,8 +580,9 @@ void KVCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>&
 }
 
 void KVCacheManager::blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
-                                              const std::vector<std::string>& group_tags) {
-    coordinator_manager_->blockBatchCopyForForward(copy_mapping, group_tags);
+                                              const std::vector<std::string>& group_tags,
+                                              const torch::Tensor&            valid_token_lengths) {
+    coordinator_manager_->blockBatchCopyForForward(copy_mapping, group_tags, valid_token_lengths);
 }
 
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,

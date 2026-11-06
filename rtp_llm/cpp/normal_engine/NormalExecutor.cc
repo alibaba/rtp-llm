@@ -307,7 +307,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
             RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
             cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
-                                                     model_input.kv_cache_group_tags);
+                                                     model_input.kv_cache_group_tags,
+                                                     model_input.kv_cache_copy_token_lengths);
         }
         if (model_input.kv_cache_generation_updates.defined()) {
             RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "offload versions require a cache manager");
@@ -394,11 +395,17 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     // the next iteration can overlap forward prep with worker D2H/update work.
     // Prefill gets no overlap benefit and would only add worker startup cost.
     const bool is_decode_only = stream_groups.totalContextBatchSize() == 0 && stream_groups.totalDecodeBatchSize() > 0;
+    // Beam fanout changes host batch sizes and KV ownership. The scheduler and
+    // StreamGroups must observe that bookkeeping before starting another step;
+    // NormalAsyncDeviceState only mirrors single-sequence decode today.
+    const bool single_sequence_streams = std::none_of(streams.begin(), streams.end(), [](const auto& stream) {
+        return stream->hasNumBeams() || stream->numReturnSequences() > 1;
+    });
     StreamGroups::TokenCountsByPriority token_counts_by_priority;
     if (metrics_reporter_ && tp_rank_ == 0) {
         token_counts_by_priority = stream_groups.tokenCountsByPriority();
     }
-    if (useStreamAsync() && is_decode_only && !zero_token_batch) {
+    if (useStreamAsync() && is_decode_only && single_sequence_streams && !zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 

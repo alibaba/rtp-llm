@@ -380,8 +380,8 @@ def wait_sever_done(
                 return True
             else:
                 logging.debug(f"health check is not ready")
-        except BaseException as e:
-            # 如果健康检查失败，记录调试信息
+        except Exception as e:
+            # Except Exception, not BaseException: KeyboardInterrupt must interrupt the wait.
             logging.debug("health check is not ready, %s", str(e))
 
         # 等待一段时间后重试

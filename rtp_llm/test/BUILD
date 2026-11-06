@@ -3,8 +3,10 @@ py_test(
     srcs = ["glm5_mtp_test.py"],
     deps = ["//rtp_llm:testlib"],
     data = ["//rtp_llm:sdk"],
-    exec_properties = {"gpu": "L20_CU13"},
-    tags = ["L20_CU13"],
+    # The IndexerOp regression calls fast_topk, which needs 128 KiB shared memory.
+    # Match indexer_op_test's Hopper pool; L20 cannot launch this kernel.
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
 )
 
 py_test(

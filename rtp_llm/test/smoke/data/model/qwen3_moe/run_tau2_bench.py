@@ -113,7 +113,11 @@ def resolve_local_dataset() -> str | None:
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 36000
 DEFAULT_MODEL = "your-model-name"   # 必须和服务 /v1/models 返回的 id 一致
-DEFAULT_CONCURRENCY = 8             # --eval-batch-size,按本地服务承载力调
+DEFAULT_CONCURRENCY = 8             # --eval-batch-size 下限;未显式指定时按任务数自动放大
+# 自动并发的上限:smoke server 以 --concurrency_limit 64 启动,每个在飞任务同一时刻
+# 只有一条在途请求(agent 轮或 user-sim 轮,会话内串行),峰值并发=在飞任务数,
+# 22 任务全飞也远低于 64;cap 只防任务清单未来膨胀。
+DEFAULT_CONCURRENCY_CAP = 32
 DEFAULT_REPEATS = 1                 # pass@k 的 k。贪心的话设 1,采样的话 4 或 8
 DEFAULT_TEMPERATURE = 0.0           # smoke 稳定性:贪心采样,消除单次运行方差
 DEFAULT_TOP_P = 1.0                 # temp=0 时 top_p 无意义,设 1 避免边界坑
@@ -131,7 +135,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--host",        default=os.environ.get("SERVER_HOST", DEFAULT_HOST))
     p.add_argument("--port",  type=int, default=int(os.environ.get("SERVER_PORT", DEFAULT_PORT)))
     p.add_argument("--model",       default=os.environ.get("MODEL_NAME", DEFAULT_MODEL))
-    p.add_argument("--concurrency", type=int, default=int(os.environ.get("EVAL_BATCH_SIZE", DEFAULT_CONCURRENCY)))
+    p.add_argument("--concurrency", type=int, default=None,
+                   help="并发任务数。缺省时取 EVAL_BATCH_SIZE,再缺省按任务清单自动取满(每任务单在途请求)")
     p.add_argument("--repeats",     type=int, default=DEFAULT_REPEATS)
     p.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE,
                    help="采样温度。REPEATS>1 必须 >0 才能让 pass@k 有意义。")
@@ -279,6 +284,25 @@ def _install_task_filter(task_ids_map: dict) -> None:
     Tau2BenchAdapter._task_filter_installed = True
 
 
+def _load_task_ids_map(path):
+    with open(path) as f:
+        return json.load(f)   # {domain: [task_id, ...]}
+
+
+def _resolve_concurrency(explicit, total_tasks):
+    if explicit is not None:
+        return explicit
+    env_val = os.environ.get("EVAL_BATCH_SIZE")
+    if env_val:
+        try:
+            return int(env_val)
+        except ValueError:
+            pass
+    if total_tasks:
+        return max(DEFAULT_CONCURRENCY, min(DEFAULT_CONCURRENCY_CAP, total_tasks))
+    return DEFAULT_CONCURRENCY
+
+
 def main() -> None:
     args = parse_args()
     api_base = f"http://{args.host}:{args.port}/v1"
@@ -287,6 +311,12 @@ def main() -> None:
     # TAU2_DATA_DIR at import time, so resolving after the import would leave it
     # pinned to the default and silently ignore the staged data.
     local_dataset = resolve_local_dataset()
+
+    # task 清单提前加载:并发数要从任务总数推导;_install_task_filter 的
+    # monkey-patch 保持在下方原位(仍在任何 evalscope import 之前即可)。
+    task_ids_map = _load_task_ids_map(args.task_ids_file) if args.task_ids_file else None
+    total_tasks = sum(len(v) for v in task_ids_map.values()) if task_ids_map else None
+    args.concurrency = _resolve_concurrency(args.concurrency, total_tasks)
 
     if not args.skip_preflight:
         preflight(api_base, args.model)
@@ -333,16 +363,13 @@ def main() -> None:
     # 用 evalscope Python API 跑(不需要拼 CLI 字符串,JSON 类型安全)
     from evalscope import TaskConfig, run_task
 
-    # --- 可选:仅跑指定 task_id(从 passing_tasks.json 读取) ---
-    if args.task_ids_file:
-        with open(args.task_ids_file) as f:
-            task_ids_map = json.load(f)   # {domain: [task_id, ...]}
+    # --- 可选:仅跑指定 task_id(map 已在上方提前加载) ---
+    if task_ids_map:
         # 自动把 subsets 限制到有 task 的 domain
         args.subsets = [d for d in args.subsets if d in task_ids_map and task_ids_map[d]]
         dataset_args["tau2_bench"]["subset_list"] = args.subsets
         _install_task_filter(task_ids_map)
-        total = sum(len(v) for v in task_ids_map.values())
-        print(f"[INFO] 仅跑 {args.task_ids_file} 指定的 {total} 个 task")
+        print(f"[INFO] 仅跑 {args.task_ids_file} 指定的 {total_tasks} 个 task")
 
     os.makedirs(args.work_dir, exist_ok=True)
 

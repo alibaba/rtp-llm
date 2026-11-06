@@ -85,6 +85,57 @@ def _fetch_tiled(
 
 
 @triton.jit
+def _fetch_fp8_tiled(
+    HostPayload,
+    HostScales,
+    ResidentPayload,
+    ResidentScales,
+    Ids,
+    ResidentIds,
+    Positions,
+    Count,
+    PAGE_ROWS: tl.constexpr,
+    HBM_ROWS: tl.constexpr,
+    HOST_PAYLOAD: tl.constexpr,
+    HOST_SCALES: tl.constexpr,
+    GPU_PAYLOAD: tl.constexpr,
+    GPU_SCALES: tl.constexpr,
+    ROWS: tl.constexpr,
+):
+    # Native FP8 pages keep payloads and scales in separate planes. Copy both
+    # as raw 32-bit words, sharing the miss traversal without assuming that
+    # either plane starts at the page base or that Host/GPU strides match.
+    pointer: tl.constexpr = tl.pointer_type(tl.int32)
+    host_payload = HostPayload.to(pointer)
+    host_scales = HostScales.to(pointer)
+    gpu_payload = ResidentPayload.to(pointer)
+    gpu_scales = ResidentScales.to(pointer)
+    count = tl.load(Count)
+    for start in range(tl.program_id(0) * ROWS, count, tl.num_programs(0) * ROWS):
+        entry = start + tl.arange(0, ROWS)
+        valid = entry < count
+        position = tl.load(Positions + entry, valid, other=0)
+        token = tl.load(Ids + position, valid, other=HBM_ROWS).to(tl.int64)
+        slot = tl.load(ResidentIds + position, valid, other=0).to(tl.int64)
+        source = token - HBM_ROWS
+        x = tl.arange(0, 256)
+        y = tl.arange(0, 2)
+        payload_mask = valid[:, None] & (x[None, :] < 144)
+        hp = _row_offset(source, PAGE_ROWS, HOST_PAYLOAD[0], HOST_PAYLOAD[1])
+        hs = _row_offset(source, PAGE_ROWS, HOST_SCALES[0], HOST_SCALES[1])
+        gp = _row_offset(slot, PAGE_ROWS, GPU_PAYLOAD[0], GPU_PAYLOAD[1])
+        gs = _row_offset(slot, PAGE_ROWS, GPU_SCALES[0], GPU_SCALES[1])
+        payload = tl.load(
+            host_payload + hp[:, None] + x[None, :], payload_mask, other=0
+        )
+        scales = tl.load(
+            host_scales + hs[:, None] + y[None, :], valid[:, None], other=0
+        )
+        tl.store(gpu_payload + gp[:, None] + x[None, :], payload, payload_mask)
+        tl.store(gpu_scales + gs[:, None] + y[None, :], scales, valid[:, None])
+
+
+@triton.jit
 def _write(
     Host,
     Resident,
@@ -152,7 +203,32 @@ class PagedRowLayout:
     """Copy group-provided entry views, preserving head strides and page padding."""
 
     def fetch(self, storage: OffloadStorage, misses: FetchRows) -> None:
-        for host, resident in zip(storage.host_planes, storage.resident_planes):
+        hosts, residents = storage.host_planes, storage.resident_planes
+        if (
+            len(hosts) == len(residents) == 2
+            and all(
+                plane.dtype == torch.uint8
+                and plane.ndim == 3
+                and plane.shape[1:] == (storage.rows_per_page, width)
+                for planes in (hosts, residents)
+                for plane, width in zip(planes, (576, 8))
+            )
+            and _copy_unit(*hosts, *residents) == 4
+        ):
+            _fetch_fp8_tiled[(min(triton.cdiv(misses.backing_ids.numel(), 4), 128),)](
+                *hosts,
+                *residents,
+                misses.backing_ids,
+                misses.resident_ids,
+                misses.positions,
+                misses.count,
+                storage.rows_per_page,
+                storage.hbm_blocks * storage.rows_per_block,
+                *(_copy_view(plane, 4)[1] for plane in (*hosts, *residents)),
+                4,
+            )
+            return
+        for host, resident in zip(hosts, residents):
             unit = _copy_unit(host, resident)
             shape, host_strides = _copy_view(host, unit)
             _, gpu_strides = _copy_view(resident, unit)

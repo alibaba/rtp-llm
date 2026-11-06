@@ -1,6 +1,7 @@
 #pragma once
 #include "rtp_llm/cpp/multimodal_processor/V41Input.h"
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -183,10 +184,22 @@ public:
     std::optional<torch::Tensor> custom_output;
 };
 
+// Immutable, self-contained terminal result for the tokens/scores-only path.
+// Owns compact CPU storage, never a stream, KV resource, or mutable token history.
+// Published through the stream queue after all device copies have completed.
+struct BatchedGenerateOutput {
+    torch::Tensor output_ids;     // [beam, 1, output_length], contiguous CPU int32
+    torch::Tensor cum_log_probs;  // optional, CPU float32, original per-beam shape
+    AuxInfo       aux_info;       // common metadata captured at publication
+};
+
 class GenerateOutputs {
 public:
     std::vector<GenerateOutput> generate_outputs;
-    int64_t                     request_id;
+    int64_t                     request_id{0};
+    // Only nextOutputForRpc() may return the compact representation. nextOutput()
+    // continues to return the existing per-beam representation to other consumers.
+    std::shared_ptr<const BatchedGenerateOutput> batched_output;
 };
 
 enum class StreamState {

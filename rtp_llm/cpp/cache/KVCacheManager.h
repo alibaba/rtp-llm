@@ -87,7 +87,9 @@ public:
     void blockBatchCopy(const torch::Tensor& copy_mapping);
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     void blockBatchCopyByGroup(const std::vector<TaggedBlockIdPair>& copy_mapping);
-    void blockBatchCopyForForward(const torch::Tensor& copy_mapping, const std::vector<std::string>& group_tags);
+    void blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
+                                  const std::vector<std::string>& group_tags,
+                                  const torch::Tensor&            valid_token_lengths = torch::Tensor());
 
     bool hasSparseKvOffload() const {
         return !config_.tiered_cache_configs.empty();

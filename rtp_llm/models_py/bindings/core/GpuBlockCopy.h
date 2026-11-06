@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <vector>
 #include <torch/torch.h>
@@ -10,21 +11,27 @@ namespace rtp_llm {
 struct GpuBlockCopyPlane {
     torch::Tensor blocks;
     size_t        copy_bytes;
+    // Optional HND layout: repeated [tokens_per_block, token_bytes] head planes.
+    // Both zero means opaque bytes; optional valid lengths must then be ignored.
+    uint32_t tokens_per_block = 0;
+    uint32_t token_bytes      = 0;
 };
 
 // GPU copy for a single cache group. Owns the backing tensors, layout descriptors,
 // and two event-protected staging slots. No per-layer CPU expansion per step.
 class GpuBlockCopy {
 public:
-    // Non-CUDA builds return nullptr; callers retain their existing copy path.
+    // Builds without CUDA/ROCm return nullptr; callers retain the existing path.
     static std::unique_ptr<GpuBlockCopy> create(std::vector<GpuBlockCopyPlane> planes);
     ~GpuBlockCopy();
 
-    // Enqueue before forward on the current CUDA stream, outside graph capture.
+    // Enqueue before forward on the current GPU stream, outside graph capture.
     // The caller can release/mutate cpu_mappings on return. KV storage must not
     // be reused until dependent GPU work completes. Destinations must be unique
     // and disjoint from other mappings' sources (beam tail copy-on-write).
-    void copy(const torch::Tensor& cpu_mappings);
+    // Optional per-mapping valid-token counts; zero means a full copy. They are
+    // packed with mappings into a single H2D transfer owned by the staging slot.
+    void copy(const torch::Tensor& cpu_mappings, const torch::Tensor& valid_token_lengths = torch::Tensor());
 
 private:
     struct Impl;

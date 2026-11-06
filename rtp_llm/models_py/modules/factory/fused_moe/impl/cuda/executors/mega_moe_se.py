@@ -14,9 +14,16 @@ import torch
 
 from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     FP4_BLOCK,
+    FP8_BLOCK,
     prepare_fp4_weight_scale_for_deepgemm,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import ExpertGatePayload
+from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
+    mega_shared_expert_block32_enabled,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
+    resolve_mega_num_sms,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_buffer import (
     _get_or_create_mega_se_buf,
     _get_or_create_mega_se_output,
@@ -35,19 +42,23 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_jit_warmup im
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
+from rtp_llm.utils.model_weight import W
 
-from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
+from .fp8_fp4_base import Fp8Fp4ExecutorBase
 from .mega_moe import (
     MegaMoeExecutor,
     _activate_mega_moe_rank_nvcc_tmpdir,
     _get_validated_world_ep_group,
+    _mega_intermediate_size,
     _mega_output_capacity,
     _restore_tmpdir,
 )
 
 _MEGA_MOE_SE_JIT_WARMED_KEYS: set[tuple] = set()
 _ROUTED_RECIPE = (1, 1, FP4_BLOCK)
-_SHARED_RECIPE = (1, 128, 128)
+# Routed experts are FP4 (K block 32); the shared expert stays FP8 and picks
+# the recipe that matches its checkpoint quantization.
+_SHARED_RECIPES = {32: (1, 1, 32), 128: (1, 128, 128)}
 _MMA_TYPE = "fp8xfp4"
 
 
@@ -55,6 +66,10 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
     """Run routed FP4 experts and the replicated FP8 shared expert together."""
 
     includes_shared_expert = True
+
+    @property
+    def _shared_recipe(self) -> tuple[int, int, int]:
+        return _SHARED_RECIPES[self.cfg.shared_fp8_block_size]
 
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:
@@ -64,50 +79,33 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         checker.check(config.world_rank == config.ep_rank)
         checker.check(config.n_shared_experts > 0)
         checker.check(not config.has_shared_expert_gate)
+        checker.check(config.shared_fp8_block_size in _SHARED_RECIPES)
+        # The fused activation/combine rounds differently from the standalone
+        # BF16 shared expert, so group-32 needs an explicit decode-only opt-in.
+        checker.check(
+            config.shared_fp8_block_size != 32
+            or (config.is_decode_role and mega_shared_expert_block32_enabled())
+        )
         checker.check(_mega_moe_se_available())
 
     def setup_weights(self, layer_weights: Dict) -> None:
         import deep_gemm
         import torch.distributed as dist
 
-        from rtp_llm.utils.model_weight import W
-
         cfg = self.cfg
-        E = cfg.n_local_experts
         D = cfg.dim
-        inter = cfg.moe_inter_dim
+        inter = _mega_intermediate_size(cfg)
+        if inter != cfg.moe_inter_dim:
+            raise RuntimeError(
+                "MegaMoE-SE requires DeepGEMM support for the checkpoint "
+                f"intermediate size {cfg.moe_inter_dim}; the routed padding "
+                f"path ({inter}) has no shared-expert weights. Use "
+                "MOE_STRATEGY=mega_moe to run the routed padding fallback "
+                "with a standalone shared expert."
+            )
+        device = self._transform_routed_weights(layer_weights, deep_gemm, inter)
 
-        w13 = layer_weights.pop(W.moe_w1)
-        s13_raw = layer_weights.pop(W.moe_s1)
-        w13, s13_raw = normalize_moe_w13_gate_up(
-            w13,
-            s13_raw,
-            inter,
-            cfg.moe_w1_layout,
-        )
-        device = w13.device
-        s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
-        del s13_raw
-        torch.cuda.empty_cache()
-
-        w2 = layer_weights.pop(W.moe_w2)
-        s2_raw = layer_weights.pop(W.moe_s2)
-        s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
-        del s2_raw
-        torch.cuda.empty_cache()
-
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
-            (w13, s13_int),
-            (w2, s2_int),
-        )
-        del w13, s13_int, w2, s2_int
-        torch.cuda.empty_cache()
-        self._mega_l1_w = l1_w
-        self._mega_l1_sf = l1_sf
-        self._mega_l2_w = l2_w
-        self._mega_l2_sf = l2_sf
-
-        self._setup_shared_expert_weights(layer_weights, deep_gemm, W, D, inter)
+        self._setup_shared_expert_weights(layer_weights, deep_gemm, D, inter)
 
         group = _get_validated_world_ep_group(cfg, dist)
         self._mega_group = group
@@ -130,7 +128,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         self._input_packer = get_mega_moe_se_input_packer()
         self._maybe_warmup_jit_once()
 
-    def _setup_shared_expert_weights(self, layer_weights, deep_gemm, W, D, inter):
+    def _setup_shared_expert_weights(self, layer_weights, deep_gemm, D, inter):
         w13_fp8 = layer_weights.pop(W.ffn_w13)
         w13_scale = layer_weights.pop(W.ffn_s13)
         w2_fp8 = layer_weights.pop(W.ffn_w2)
@@ -156,9 +154,11 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             )
 
         w13_sf_int = self._shared_expert_sf_to_int(
-            deep_gemm, w13_scale, 2 * shared_inter, D
+            deep_gemm, w13_scale, 2 * shared_inter, D, self.cfg.shared_fp8_block_size
         )
-        w2_sf_int = self._shared_expert_sf_to_int(deep_gemm, w2_scale, D, shared_inter)
+        w2_sf_int = self._shared_expert_sf_to_int(
+            deep_gemm, w2_scale, D, shared_inter, self.cfg.shared_fp8_block_size
+        )
         del w13_scale, w2_scale
         (se_l1_w, se_l1_sf), (se_l2_w, se_l2_sf) = (
             deep_gemm.transform_weights_for_mega_moe(
@@ -174,15 +174,39 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         self._se_l2_sf = se_l2_sf
 
     @staticmethod
-    def _shared_expert_sf_to_int(deep_gemm, scale, mn, k):
+    def _shared_expert_sf_to_int(deep_gemm, scale, mn, k, block_size):
+        if block_size not in _SHARED_RECIPES:
+            raise ValueError(f"MegaMoESE unsupported shared block size {block_size}")
         if scale.dtype == torch.int32:
+            if block_size == 32 and (
+                tuple(scale.shape) != (mn, (k + 127) // 128) or scale.stride(0) != 1
+            ):
+                raise ValueError("MegaMoESE K32 packed scales must use MN-major layout")
             return scale
         if scale.dtype != torch.float8_e8m0fnu:
             raise TypeError(
                 "MegaMoESE expected shared UE8M0 scale, " f"got {scale.dtype}"
             )
+        expected_shape = (
+            (mn + block_size - 1) // block_size,
+            (k + block_size - 1) // block_size,
+        )
+        if tuple(scale.shape) != expected_shape:
+            raise ValueError(
+                f"MegaMoESE shared scale shape {tuple(scale.shape)} does not "
+                f"match {expected_shape} for block size {block_size}"
+            )
+        if block_size == 32:
+            if k % 32:
+                raise ValueError(
+                    "MegaMoESE K32 shared weights require K divisible by 32"
+                )
+            scale_1x32 = scale.float().repeat_interleave(32, dim=0)[:mn].contiguous()
+            return deep_gemm.transform_sf_into_required_layout(
+                scale_1x32.unsqueeze(0), mn, k, (1, 32), 1
+            ).squeeze(0)
         return deep_gemm.transform_sf_into_required_layout(
-            scale.float(), mn, k, _SHARED_RECIPE[1:], num_groups=None
+            scale.float(), mn, k, _SHARED_RECIPES[block_size][1:], num_groups=None
         )
 
     def _block_m(self, tokens: int) -> int:
@@ -199,21 +223,35 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             )
         )
 
-    def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
+    def _resolve_jit_warmup_token_counts(
+        self, num_sms: int, deep_gemm=None
+    ) -> list[int]:
         cfg = self.cfg
         max_tokens_per_rank = int(cfg.max_tokens_per_rank)
         override = parse_mega_moe_se_jit_warmup_tokens_override()
         if override is not None:
             return clamp_token_counts(override, max_tokens_per_rank)
+        get_block_m = getattr(deep_gemm, "get_block_m_for_mega_moe", None)
+        block_m_resolver = None
+        if callable(get_block_m):
+            block_m_resolver = lambda tokens: get_block_m(
+                cfg.ep_size,
+                cfg.n_routed_experts,
+                max_tokens_per_rank,
+                tokens,
+                cfg.n_activated_experts,
+                _MMA_TYPE,
+            )
         return generate_mega_moe_se_jit_token_counts(
             num_ranks=cfg.ep_size,
             num_experts=cfg.n_routed_experts,
             num_experts_per_rank=cfg.n_local_experts,
             num_topk=cfg.n_activated_experts,
-            intermediate_hidden=cfg.moe_inter_dim,
+            intermediate_hidden=_mega_intermediate_size(cfg),
             num_sms=num_sms,
             max_tokens_per_rank=max_tokens_per_rank,
             include_cap=cfg.warmup_include_capacity,
+            block_m_resolver=block_m_resolver,
         )
 
     def _maybe_warmup_jit_once(self) -> None:
@@ -228,8 +266,8 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         import torch.distributed as dist
 
         cfg = self.cfg
-        num_sms = int(deep_gemm.get_num_sms())
-        token_counts = self._resolve_jit_warmup_token_counts(num_sms)
+        num_sms = resolve_mega_num_sms(deep_gemm, self._mega_l1_w.device)
+        token_counts = self._resolve_jit_warmup_token_counts(num_sms, deep_gemm)
         if not token_counts:
             return
         warmup_key = (
@@ -245,8 +283,9 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             cfg.swiglu_limit,
             cfg.route_scale,
             num_sms,
-            _SHARED_RECIPE,
+            self._shared_recipe,
             tuple(token_counts),
+            self.supports_gate_pack,
         )
         if warmup_key in _MEGA_MOE_SE_JIT_WARMED_KEYS:
             return
@@ -269,7 +308,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
                 cfg.n_shared_experts,
                 cfg.route_scale,
                 num_sms,
-                _SHARED_RECIPE,
+                self._shared_recipe,
             )
         tmpdir, previous_tmpdir = _activate_mega_moe_rank_nvcc_tmpdir(rank)
         try:
@@ -303,7 +342,6 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
     def _launch(self, y: torch.Tensor, tokens: int, device: torch.device) -> None:
         import deep_gemm
 
-        self._maybe_pre_kernel_barrier(tokens)
         sync_cuda_graph_warmup_ranks(
             f"moe.mega_moe_se.layer{self.cfg.layer_id}.before_deepgemm",
             device,
@@ -321,7 +359,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
-            shared_recipe=_SHARED_RECIPE,
+            shared_recipe=self._shared_recipe,
         )
 
     def forward(self, x, weights, indices):

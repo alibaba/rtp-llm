@@ -42,7 +42,7 @@ class StartServerFailureTest(unittest.TestCase):
         py_env_configs = PyEnvConfigs()
         py_env_configs.role_config.role_type = RoleType.VIT
 
-        def health_check_after_shutdown(manager):
+        def health_check_after_shutdown(manager, timeout=None):
             manager.shutdown_requested = True
             return False
 

@@ -10,6 +10,7 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
@@ -1679,7 +1680,7 @@ bool CoordinatorCacheManager::doInit() {
         ++group_id;
     }
 
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     if (allocation_type_ == AllocationType::DEVICE && group_nums == 1 && !group_block_pools_.front()->isOffload()
         && topology_groups.front().policy.group_type == CacheGroupType::FULL) {
         const auto&                    group         = topology_groups.front();
@@ -1693,7 +1694,27 @@ bool CoordinatorCacheManager::doInit() {
                                     "missing KV storage for layer %d, cache group %s",
                                     layer_id,
                                     group.tag.c_str());
-            planes.push_back({kv_it->second, physical_group.kvBlockStrideBytes()});
+            GpuBlockCopyPlane plane{kv_it->second, physical_group.kvBlockStrideBytes()};
+#if USING_CUDA
+            const auto spec = std::dynamic_pointer_cast<const MHAKVCacheSpec>(group.spec);
+            // Only dense, unquantized HND pages have a known per-head token layout.
+            if (spec && spec->headDim() > 0 && spec->localKvHeads() > 0 && !config_.use_mla && !config_.is_sparse
+                && !config_.use_opaque_kv_cache_store && physical_group.kvScaleStrideBytes() == 0
+                && spec->scale_block_size_bytes() == 0 && spec->kernel_seq_size_per_block == spec->seq_size_per_block
+                && (spec->memoryLayoutDType() == DataType::TYPE_BF16
+                    || spec->memoryLayoutDType() == DataType::TYPE_FP16)
+                && plane.blocks.scalar_type()
+                       == (spec->memoryLayoutDType() == DataType::TYPE_BF16 ? torch::kBFloat16 : torch::kFloat16)
+                && plane.copy_bytes == spec->block_size_bytes()
+                && plane.copy_bytes <= std::numeric_limits<uint32_t>::max()
+                && plane.blocks.stride(0) * plane.blocks.element_size() == plane.copy_bytes
+                && spec->k_block_size_bytes()
+                       == size_t(spec->localKvHeads()) * spec->headDim() * spec->seq_size_per_block * 2) {
+                plane.tokens_per_block = spec->seq_size_per_block;
+                plane.token_bytes      = spec->headDim() * 2;
+            }
+#endif
+            planes.push_back(std::move(plane));
             if (physical_group.kvScaleStrideBytes() > 0) {
                 const auto scale_it = scale_tensors.find(layer_id);
                 RTP_LLM_CHECK_WITH_INFO(scale_it != scale_tensors.end(),
@@ -1850,7 +1871,8 @@ void CoordinatorCacheManager::blockBatchCopy(const BlockIdPair* begin_ptr, const
 }
 
 void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
-                                                       const std::vector<std::string>& group_tags) {
+                                                       const std::vector<std::string>& group_tags,
+                                                       const torch::Tensor&            valid_token_lengths) {
     RTP_LLM_CHECK_WITH_INFO(copy_mapping.defined() && copy_mapping.device().is_cpu()
                                 && copy_mapping.scalar_type() == torch::kInt32 && copy_mapping.is_contiguous()
                                 && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3,
@@ -1862,7 +1884,8 @@ void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&     
                                 tag.c_str());
     }
     if (gpu_block_copy_ && group_tags.size() == 1 && group_tags.front() == config_.groupTags().front()) {
-        gpu_block_copy_->copy(copy_mapping);
+        gpu_block_copy_->copy(copy_mapping,
+                              cp_slot_mapper_ && cp_slot_mapper_->isSharded() ? torch::Tensor() : valid_token_lengths);
         return;
     }
     std::vector<TaggedBlockIdPair> mappings;
