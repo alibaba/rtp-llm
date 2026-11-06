@@ -9,6 +9,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -24,6 +25,22 @@ _INSTALLED=False
 def _is_target(engine):return is_qwen38(engine.model_config.hf_config)
 
 
+def _optimizer_step_after_global_clip(engine,norm,reduce_changed):
+    """Opt-in acceptance gate; leave valid optimizer arithmetic untouched."""
+    required=os.environ.get('RLLM_REQUIRE_REAL_UPDATE')=='1'
+    engine._q38_last_real_update_gate=dict(enabled=required,global_gradient_norm=float(norm),
+                                          global_changed_weight_elements=None)
+    if required and (not math.isfinite(float(norm)) or norm<=0):
+        raise RuntimeError('RLLM_REQUIRE_REAL_UPDATE refuses nonpositive/nonfinite global gradients before Adam allocation/scan')
+    engine.optimizer.step()
+    if required:
+        changed=int(reduce_changed(int(engine.optimizer.changed_weight_elements)))
+        engine._q38_last_real_update_gate['global_changed_weight_elements']=changed
+        if changed<=0:
+            raise RuntimeError('RLLM_REQUIRE_REAL_UPDATE refuses a successful step with no globally changed BF16 weights')
+        engine._q38_last_real_update_gate['changed_count_world_size']=WORLD_SIZE
+
+
 def _audit(engine, boundary):
     import torch.distributed as dist
     directory=Path(os.environ['Q38_TRAINING_AUDIT_DIR']);directory.mkdir(parents=True,exist_ok=True)
@@ -31,6 +48,7 @@ def _audit(engine, boundary):
             'world_size':dist.get_world_size(),'time_ns':time.time_ns(),'pid':os.getpid(),
             'phase':engine._q38_phases.phase,'optimizer':engine.optimizer.audit(),
             'phase_transition_records':engine._q38_phases.transition_records,
+            'real_update_gate':getattr(engine,'_q38_last_real_update_gate',None),
             'native_contexts_released':getattr(engine,'_q38_native_contexts_released',False),
             'last_native_cleanup_proof':getattr(engine,'_q38_last_native_cleanup_proof',None),
             'last_refit_source_release':getattr(engine,'_q38_last_refit_source_release',None)}
@@ -203,7 +221,14 @@ def install():
         norm=self._q38_gradient_store.clip_grad_norm(self.optimizer_config.clip_grad,
             expected_local_numel=self._q38_owned_numel,expected_global_numel=POLICY_NUMEL,
             collective_device=torch.device('cuda',torch.cuda.current_device()))
-        self.optimizer.step();_audit(self,'optimizer-step')
+        def reduce_changed(count):
+            if not dist.is_initialized() or dist.get_world_size()!=WORLD_SIZE:
+                raise RuntimeError('The real-update changed-weight count must cover all72 actor ranks')
+            changed=torch.tensor(count,device=torch.device('cuda',torch.cuda.current_device()),dtype=torch.int64)
+            dist.all_reduce(changed,op=dist.ReduceOp.SUM)
+            return changed.item()
+        _optimizer_step_after_global_clip(self,norm,reduce_changed)
+        _audit(self,'optimizer-step')
         # This is the committed optimizer boundary; the fixed initial profile
         # has one global minibatch per update. Retain the audit, then release
         # every CPU/GPU reduced gradient before native inference can start.
