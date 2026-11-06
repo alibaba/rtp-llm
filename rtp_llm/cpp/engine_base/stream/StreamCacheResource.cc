@@ -182,6 +182,8 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                 .epoch                 = 0,
                 .last_sample_token_gpu = new_tokens.reshape({1}).to(cuda_i32),
                 .next_seq_len_gpu      = torch::full({1}, static_cast<int64_t>(stream->seqLength()), cuda_i32),
+                .last_real_seq_len     = stream->seqLength(),
+                .next_real_seq_len     = stream->seqLength(),
             });
         }
         RTP_LLM_LOG_DEBUG("applyP2PSideChannel: appended first_token_id=%ld, stream_id=%ld",
