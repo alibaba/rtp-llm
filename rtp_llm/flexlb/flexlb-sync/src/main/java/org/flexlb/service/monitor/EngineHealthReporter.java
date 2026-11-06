@@ -61,7 +61,6 @@ import static org.flexlb.constant.MetricConstant.ENGINE_RUNNING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_AVAILABLE_CONCURRENCY;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
-import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL_TOTAL;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_RT;
@@ -125,8 +124,6 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT, FlexMetricType.GAUGE);
         this.monitor.register(
                 ENGINE_STATUS_CHECK_FAIL_TOTAL, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
-        this.monitor.register(
-                ENGINE_STATUS_CHECK_FAIL_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(
                 ENCODER_PENDING_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(
@@ -398,14 +395,6 @@ public class EngineHealthReporter {
         FlexMetricTags metricTags = statusCheckFailureTags(errorEnum, engineIp, role);
         monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
         monitor.report(ENGINE_STATUS_CHECK_FAIL_TOTAL, metricTags, 1.0);
-    }
-
-    public void reportStatusCheckFailureLatency(
-            BalanceStatusEnum errorEnum, String engineIp, RoleType role, long latencyUs) {
-        monitor.report(
-                ENGINE_STATUS_CHECK_FAIL_RT,
-                statusCheckFailureTags(errorEnum, engineIp, role),
-                latencyUs);
     }
 
     private static FlexMetricTags statusCheckFailureTags(

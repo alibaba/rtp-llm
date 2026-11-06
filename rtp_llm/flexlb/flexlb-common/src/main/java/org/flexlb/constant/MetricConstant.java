@@ -92,9 +92,6 @@ public class MetricConstant {
     public static final String ENGINE_STATUS_CHECK_FAIL_TOTAL =
             "app.engine.health.check.fail.total";
 
-    /** Failed WorkerStatus gRPC check latency in microseconds. */
-    public static final String ENGINE_STATUS_CHECK_FAIL_RT = "app.engine.health.check.fail.rt";
-
     public static final String STATUS_FAILURE_DETAIL = "app.status.failure.detail";
 
     /**
