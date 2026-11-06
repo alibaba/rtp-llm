@@ -139,11 +139,13 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     // Override per-stream uniform samples with seeded generator when random_seed is set,
     // ensuring deterministic acceptance for reproducible iter_count.
+    // Guard against generator/target device mismatch (NPU wires a CPU
+    // generator): torch::rand would throw; such rows keep the default samples.
     {
         int idx = 0;
         for (const auto& stream : streams) {
             auto gen = stream->getGenerator();
-            if (gen.defined()) {
+            if (gen.defined() && gen.device().type() == target_device.type()) {
                 uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
             }
             idx++;
