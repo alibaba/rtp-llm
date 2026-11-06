@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
+#include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
@@ -416,6 +417,104 @@ TEST_F(NormalEngineTest, testAllowsUnsupportedCombosWithoutOutputVocab) {
     config.speculative_enabled = true;
     config.warm_up_with_loss   = true;
     EXPECT_NO_THROW(createMockEngine(config));
+}
+
+TEST_F(NormalEngineTest, testDispatchScoringOomFailsOnlyScoringStream) {
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+
+    // A prompt-scoring request and a normal request enter the engine together. The
+    // dispatcher-side test hook throws an out-of-memory error inside the scoring stream's
+    // own output computation; only that stream is failed while the batch completes.
+    std::shared_ptr<GenerateInput> scoring_query         = make_shared<GenerateInput>();
+    scoring_query->input_ids                             = torch::tensor({1, 2, 3, 4}, torch::kInt32);
+    scoring_query->generate_config                       = make_shared<GenerateConfig>();
+    scoring_query->generate_config->max_new_tokens       = 1;
+    scoring_query->generate_config->return_prompt_logits = true;
+
+    std::shared_ptr<GenerateInput> normal_query   = make_shared<GenerateInput>();
+    normal_query->input_ids                       = torch::tensor({5, 6, 7}, torch::kInt32);
+    normal_query->generate_config                 = make_shared<GenerateConfig>();
+    normal_query->generate_config->max_new_tokens = 2;
+
+    shared_ptr<GenerateStream> scoring_stream = engine->enqueue(scoring_query);
+    shared_ptr<GenerateStream> normal_stream  = engine->enqueue(normal_query);
+    ASSERT_TRUE(scoring_stream != nullptr);
+    ASSERT_TRUE(normal_stream != nullptr);
+
+    std::vector<const GenerateStream*> hooked;
+    NormalOutputDispatcher::test_scoring_failure_hook = [&](const GenerateStreamPtr& s) {
+        hooked.push_back(s.get());
+        if (s.get() == scoring_stream.get()) {
+            throw c10::OutOfMemoryError("CUDA out of memory");
+        }
+    };
+    struct HookResetGuard {
+        ~HookResetGuard() {
+            NormalOutputDispatcher::test_scoring_failure_hook = nullptr;
+        }
+    } hook_guard;
+
+    // The scoring request fails request-locally with the non-retryable execution error
+    // instead of taking the engine loop down with the uncaught exception.
+    auto scoring_err = scoring_stream->nextOutput(30000);
+    ASSERT_FALSE(scoring_err.ok());
+    EXPECT_EQ(scoring_err.status().code(), ErrorCode::EXECUTION_EXCEPTION);
+
+    // The co-scheduled normal request completes and commits its output.
+    auto normal_out = normal_stream->nextOutput(30000);
+    ASSERT_TRUE(normal_out.ok());
+    EXPECT_EQ(normal_out.value().generate_outputs[0].aux_info.output_len, 2);
+    ASSERT_TRUE(normal_stream->hasEvent(StreamEvents::GenerateDone));
+
+    // A following normal request still works: the engine survived the aborted stream.
+    std::shared_ptr<GenerateInput> follow_query   = make_shared<GenerateInput>();
+    follow_query->input_ids                       = torch::tensor({1, 2}, torch::kInt32);
+    follow_query->generate_config                 = make_shared<GenerateConfig>();
+    follow_query->generate_config->max_new_tokens = 2;
+    shared_ptr<GenerateStream> follow_stream      = engine->enqueue(follow_query);
+    ASSERT_TRUE(follow_stream != nullptr);
+    auto follow_out = follow_stream->nextOutput(30000);
+    ASSERT_TRUE(follow_out.ok());
+    EXPECT_EQ(follow_out.value().generate_outputs[0].aux_info.output_len, 2);
+
+    // The hook is only invoked for streams that consume scoring rows, i.e. never for the
+    // normal stream and (after its failure) never again for the failed stream.
+    EXPECT_EQ(hooked, std::vector<const GenerateStream*>{scoring_stream.get()});
+}
+
+// Executor that marks every processed stream failed so preRun's stream-error surface can be
+// exercised deterministically through NormalEngine::test_executor_factory.
+class ErrorMarkingExecutor: public Executor {
+public:
+    absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t) override {
+        for (const auto& stream : streams) {
+            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "injected preRun stream failure");
+        }
+        return absl::OkStatus();
+    }
+};
+
+TEST_F(NormalEngineTest, testPreRunFailsWhenStreamReportsError) {
+    NormalEngine::test_executor_factory = [](const EngineInitParams&) {
+        return std::make_unique<ErrorMarkingExecutor>();
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() {
+            NormalEngine::test_executor_factory = nullptr;
+        }
+    } factory_guard;
+
+    CustomConfig config;
+    auto         engine = createMockEngine(config);
+
+    std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+    query->input_ids                     = torch::tensor({1, 2, 3}, torch::kInt32);
+    query->generate_config               = make_shared<GenerateConfig>();
+
+    auto stream_or = engine->preRun(query, preRunMode::prefill_warm_up);
+    ASSERT_FALSE(stream_or.ok());
+    EXPECT_NE(stream_or.status().ToString().find("injected preRun stream failure"), std::string::npos);
 }
 
 }  // namespace rtp_llm

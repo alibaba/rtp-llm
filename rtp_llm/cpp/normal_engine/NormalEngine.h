@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -44,6 +45,12 @@ public:
     }
     bool updateEplbConfig(const EPLBConfig& config) override;
     void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
+
+    // Test seam (nullptr in production): when set, initExecutor builds the executor through
+    // this factory instead of a NormalExecutor, so tests can drive preRun error paths
+    // deterministically. Modeled on NormalExecutor::test_model_factory.
+    using ExecutorFactory = std::function<std::unique_ptr<Executor>(const EngineInitParams&)>;
+    static ExecutorFactory test_executor_factory;
 
 private:
     void                            initScheduler();

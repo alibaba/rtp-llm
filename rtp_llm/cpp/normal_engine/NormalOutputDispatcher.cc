@@ -4,6 +4,9 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <c10/util/Exception.h>
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <string>
 #include "rtp_llm/cpp/utils/TensorDebugUtils.h"
@@ -42,7 +45,40 @@ void syncPinnedCpuCopies(bool need_sync) {
     cuda_graph::graphGetCurrentStream().synchronize();
 }
 
+// Out-of-memory diagnostics that arrive wrapped as a generic c10::Error or
+// std::runtime_error instead of c10::OutOfMemoryError. Only used inside the
+// narrow prompt-scoring block, so a false positive cannot shield unrelated code.
+bool isOutOfMemoryMessage(const char* what) {
+    if (what == nullptr) {
+        return false;
+    }
+    std::string lowered(what);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return lowered.find("out of memory") != std::string::npos;
+}
+
 }  // namespace
+
+std::function<void(const GenerateStreamPtr&)> NormalOutputDispatcher::test_scoring_failure_hook = nullptr;
+
+bool NormalOutputDispatcher::failStreamOnScoringOom(const GenerateStreamPtr& stream, const char* what) const {
+    if (warm_up_) {
+        // Warm-up must surface allocation failures: a swallowed OOM would let startup size
+        // the KV cache from an underestimate.
+        return false;
+    }
+    std::string detail = what == nullptr ? std::string() : std::string(what);
+    if (detail.size() > 512) {
+        detail.resize(512);
+        detail += "...";
+    }
+    RTP_LLM_LOG_ERROR(
+        "stream [%ld] prompt-scoring output aborted by out-of-memory: %s", stream->streamId(), detail.c_str());
+    stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "prompt-scoring request aborted by out-of-memory: " + detail);
+    return true;
+}
 
 std::optional<ErrorInfo> collectStreamSamplerError(const SamplerOutput& sampler_output,
                                                    const torch::Tensor& success_cpu,
@@ -290,70 +326,93 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         batch_cum_log_probs = sampler_output.cum_log_probs.narrow(0, batch_idx_out, next_batch_size);
     }
 
-    torch::Tensor loss;
-    if (stream->calculateLoss()) {
-        auto all_logits_tensor = model_output.all_logits.narrow(0, all_logits_origin, token_size - 1);
-        auto tokens            = stream->currentExecuteTokens(0);
-        auto label_tensor =
-            torch::from_blob(const_cast<int*>(tokens.data() + 1), {(int64_t)(tokens.size() - 1)}, torch::kInt32)
-                .to(torch::kCUDA);
-        auto labels_int64 = label_tensor.toType(torch::kInt64);
-        loss = torch::cross_entropy_loss(all_logits_tensor, labels_int64, torch::nullopt, at::Reduction::None)
-                   .to(torch::kFloat32);
-    }
-
-    // Prompt scoring: guarded by all_logits.defined(), which the model produces whenever
-    // need_all_logits is set — prefill prompt-logits/loss requests and decode-phase
-    // calculate_loss both reach this path.
+    // Scoring-side temporaries (fp32 logits slice, logsumexp, cross-entropy) still allocate
+    // [rows, vocab]-scale buffers per stream and can exhaust device memory on very long
+    // prompts. Guard ONLY this stream's own scoring computation: on an out-of-memory throw,
+    // fail this stream request-locally and let every other stream in the batch finish.
+    // Anything that is not an out-of-memory rethrows unchanged, and warm-up never swallows.
+    torch::Tensor                     loss;
     std::optional<PromptLogitsOutput> prompt_logits_output;
-    if (stream->returnPromptLogits() && !model_output.all_logits.defined()) {
-        RTP_LLM_LOG_WARNING("stream [%ld] prompt_logits requested but all_logits not produced", stream->streamId());
-    }
-    if (stream->returnPromptLogits() && model_output.all_logits.defined()) {
-        auto config    = stream->generateConfig();
-        int  ts        = (int)token_size;
-        int  start_pos = std::clamp(config->prompt_logits_start >= 0 ? config->prompt_logits_start : 0, 0, ts);
-        int  end_pos   = std::clamp(config->prompt_logits_end >= 0 ? config->prompt_logits_end : ts, start_pos, ts);
-        int  slice_len = end_pos - start_pos;
-        if (slice_len > 0) {
-            int top_k = std::min(config->prompt_logits_top_k, (int)model_output.all_logits.size(1));
-
-            auto sliced_logits =
-                model_output.all_logits.narrow(0, all_logits_origin + start_pos, slice_len).to(torch::kFloat32);
-
-            // topk on raw logits (monotonicity of softmax preserves ranking)
-            auto [topk_values_raw, topk_indices] = sliced_logits.topk(top_k, -1);
-
-            // single reduce for log-normalizer, avoids materializing [slice_len, vocab_size]
-            auto log_sum_exp   = sliced_logits.logsumexp(-1, /*keepdim=*/true);
-            auto topk_logprobs = topk_values_raw - log_sum_exp;
-
-            // target_logprobs[i] = logprob of token[start_pos+i+1] at position start_pos+i.
-            // Length = min(slice_len, tokens.size() - start_pos - 1): equals slice_len when
-            // end_pos < tokens.size(), or slice_len-1 when end_pos == tokens.size() (last
-            // position has no next token as label).
-            torch::Tensor target_logprobs;
-            if (config->return_target_logprob) {
-                auto tokens      = stream->currentExecuteTokens(0);
-                int  label_start = start_pos + 1;
-                int  label_end   = std::min(end_pos + 1, (int)tokens.size());
-                int  logprob_len = label_end - label_start;
-                if (logprob_len > 0) {
-                    // from_blob + to(kCUDA) is a synchronous copy; token buffer is stable during prefill.
-                    auto label_tensor = torch::from_blob(const_cast<int*>(tokens.data() + label_start),
-                                                         {(int64_t)logprob_len},
-                                                         torch::kInt32)
-                                            .to(torch::kCUDA)
-                                            .toType(torch::kInt64)
-                                            .unsqueeze(1);
-                    auto target_raw = sliced_logits.narrow(0, 0, logprob_len).gather(1, label_tensor).squeeze(1);
-                    target_logprobs = (target_raw - log_sum_exp.narrow(0, 0, logprob_len).squeeze(1)).cpu();
-                }
-            }
-
-            prompt_logits_output = PromptLogitsOutput{
-                topk_logprobs.cpu(), topk_indices.to(torch::kInt32).cpu(), target_logprobs, start_pos, end_pos};
+    try {
+        const bool consumes_scoring =
+            stream->calculateLoss() || (stream->returnPromptLogits() && model_output.all_logits.defined());
+        if (consumes_scoring && test_scoring_failure_hook) {
+            test_scoring_failure_hook(stream);
         }
+
+        if (stream->calculateLoss()) {
+            auto all_logits_tensor = model_output.all_logits.narrow(0, all_logits_origin, token_size - 1);
+            auto tokens            = stream->currentExecuteTokens(0);
+            auto label_tensor =
+                torch::from_blob(const_cast<int*>(tokens.data() + 1), {(int64_t)(tokens.size() - 1)}, torch::kInt32)
+                    .to(torch::kCUDA);
+            auto labels_int64 = label_tensor.toType(torch::kInt64);
+            loss = torch::cross_entropy_loss(all_logits_tensor, labels_int64, torch::nullopt, at::Reduction::None)
+                       .to(torch::kFloat32);
+        }
+
+        // Prompt scoring: guarded by all_logits.defined(), which the model produces whenever
+        // need_all_logits is set — prefill prompt-logits/loss requests and decode-phase
+        // calculate_loss both reach this path.
+        if (stream->returnPromptLogits() && !model_output.all_logits.defined()) {
+            RTP_LLM_LOG_WARNING("stream [%ld] prompt_logits requested but all_logits not produced", stream->streamId());
+        }
+        if (stream->returnPromptLogits() && model_output.all_logits.defined()) {
+            auto config    = stream->generateConfig();
+            int  ts        = (int)token_size;
+            int  start_pos = std::clamp(config->prompt_logits_start >= 0 ? config->prompt_logits_start : 0, 0, ts);
+            int  end_pos   = std::clamp(config->prompt_logits_end >= 0 ? config->prompt_logits_end : ts, start_pos, ts);
+            int  slice_len = end_pos - start_pos;
+            if (slice_len > 0) {
+                int top_k = std::min(config->prompt_logits_top_k, (int)model_output.all_logits.size(1));
+
+                auto sliced_logits =
+                    model_output.all_logits.narrow(0, all_logits_origin + start_pos, slice_len).to(torch::kFloat32);
+
+                // topk on raw logits (monotonicity of softmax preserves ranking)
+                auto [topk_values_raw, topk_indices] = sliced_logits.topk(top_k, -1);
+
+                // single reduce for log-normalizer, avoids materializing [slice_len, vocab_size]
+                auto log_sum_exp   = sliced_logits.logsumexp(-1, /*keepdim=*/true);
+                auto topk_logprobs = topk_values_raw - log_sum_exp;
+
+                // target_logprobs[i] = logprob of token[start_pos+i+1] at position start_pos+i.
+                // Length = min(slice_len, tokens.size() - start_pos - 1): equals slice_len when
+                // end_pos < tokens.size(), or slice_len-1 when end_pos == tokens.size() (last
+                // position has no next token as label).
+                torch::Tensor target_logprobs;
+                if (config->return_target_logprob) {
+                    auto tokens      = stream->currentExecuteTokens(0);
+                    int  label_start = start_pos + 1;
+                    int  label_end   = std::min(end_pos + 1, (int)tokens.size());
+                    int  logprob_len = label_end - label_start;
+                    if (logprob_len > 0) {
+                        // from_blob + to(kCUDA) is a synchronous copy; token buffer is stable during prefill.
+                        auto label_tensor = torch::from_blob(const_cast<int*>(tokens.data() + label_start),
+                                                             {(int64_t)logprob_len},
+                                                             torch::kInt32)
+                                                .to(torch::kCUDA)
+                                                .toType(torch::kInt64)
+                                                .unsqueeze(1);
+                        auto target_raw = sliced_logits.narrow(0, 0, logprob_len).gather(1, label_tensor).squeeze(1);
+                        target_logprobs = (target_raw - log_sum_exp.narrow(0, 0, logprob_len).squeeze(1)).cpu();
+                    }
+                }
+
+                prompt_logits_output = PromptLogitsOutput{
+                    topk_logprobs.cpu(), topk_indices.to(torch::kInt32).cpu(), target_logprobs, start_pos, end_pos};
+            }
+        }
+    } catch (const c10::OutOfMemoryError& e) {
+        if (!failStreamOnScoringOom(stream, e.what())) {
+            throw;
+        }
+        return;
+    } catch (const std::exception& e) {
+        if (!isOutOfMemoryMessage(e.what()) || !failStreamOnScoringOom(stream, e.what())) {
+            throw;
+        }
+        return;
     }
 
     torch::Tensor all_hidden_states;
