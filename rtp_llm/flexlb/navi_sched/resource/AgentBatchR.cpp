@@ -124,7 +124,6 @@ AgentBatchR::AgentBatchR(int64_t batchTimeoutMs, int64_t closedBatchKeepMs)
     : navi::ExternalResource(RESOURCE_ID, navi::RS_EXTERNAL)
     , _batchTimeoutMs(std::max<int64_t>(1, batchTimeoutMs))
     , _closedBatchKeepMs(std::max<int64_t>(_batchTimeoutMs, closedBatchKeepMs))
-    , _executionUtilizationEstimator(autil::TimeUtility::monotonicTimeUs())
 {
 }
 
@@ -1474,12 +1473,11 @@ bool AgentBatchR::beginBackendExecution(int64_t eventTimeUs, int32_t requestCoun
             std::memory_order_relaxed);
     }
     _backendExecutionObserved = true;
-    _executionUtilizationEstimator.begin(eventTimeUs);
-    NAVI_LOG(INFO, "[navi-execution-utilization] phase=step_begin mono_us=%ld active=%lu",
-             eventTimeUs, _executionUtilizationEstimator.active());
     if (0 == _activeBackendExecutionCount++) {
         _backendExecutionBusyStartTimeUs = eventTimeUs;
     }
+    NAVI_LOG(INFO, "[navi-execution-utilization] phase=step_begin mono_us=%ld active=%lu",
+             eventTimeUs, _activeBackendExecutionCount);
     return true;
 }
 
@@ -1492,23 +1490,13 @@ bool AgentBatchR::endBackendExecution(int64_t eventTimeUs)
     if (0 == _activeBackendExecutionCount) {
         return false;
     }
-    _executionUtilizationEstimator.end(eventTimeUs);
-    NAVI_LOG(INFO,
-             "[navi-execution-utilization] phase=step_end mono_us=%ld "
-             "sample_busy_us=%ld sample_elapsed_us=%ld active=%lu busy_ema=%.9f "
-             "capacity_ema=%.6f gpu_ready_queued=%d effective=%.9f",
-             eventTimeUs, _executionUtilizationEstimator.sampleBusyUs(),
-             _executionUtilizationEstimator.sampleElapsedUs(),
-             _executionUtilizationEstimator.active(),
-             _executionUtilizationEstimator.value(),
-             _backendExecutionCapacity.load(std::memory_order_relaxed),
-             _backendWaitingRequests.load(std::memory_order_relaxed),
-             _executionUtilization->load(std::memory_order_relaxed));
     if (0 == --_activeBackendExecutionCount) {
         _backendExecutionBusyTimeUs +=
             std::max<int64_t>(0, eventTimeUs - _backendExecutionBusyStartTimeUs);
         _backendExecutionBusyStartTimeUs = 0;
     }
+    NAVI_LOG(INFO, "[navi-execution-utilization] phase=step_end mono_us=%ld active=%lu",
+             eventTimeUs, _activeBackendExecutionCount);
     return true;
 }
 
@@ -1574,8 +1562,6 @@ navi::SummaryErrorCode AgentBatchR::getSummary(const std::string &query,
     auto overview = builder.newTable("NaviSchedAgentBatchOverview");
     {
         autil::ScopedLock backendLock(_backendExecutionLock);
-        TABLE_ADD_COLUMN_VALUE(overview, "execution_busy_ema",
-                               _executionUtilizationEstimator.value());
         TABLE_ADD_COLUMN_VALUE(overview, "execution_busy_window",
                                _executionUtilizationWindow.value());
         TABLE_ADD_COLUMN_VALUE(overview, "execution_window_busy_us",
@@ -1585,11 +1571,7 @@ navi::SummaryErrorCode AgentBatchR::getSummary(const std::string &query,
         TABLE_ADD_COLUMN_VALUE(overview, "execution_window_sample_mono_us",
                                _executionUtilizationWindow.sampleMonoUs());
         TABLE_ADD_COLUMN_VALUE(overview, "execution_active_count",
-                               _executionUtilizationEstimator.active());
-        TABLE_ADD_COLUMN_VALUE(overview, "execution_sample_busy_us",
-                               _executionUtilizationEstimator.sampleBusyUs());
-        TABLE_ADD_COLUMN_VALUE(overview, "execution_sample_elapsed_us",
-                               _executionUtilizationEstimator.sampleElapsedUs());
+                               _activeBackendExecutionCount);
     }
     TABLE_ADD_COLUMN_VALUE(overview, "execution_capacity_ema",
                            _backendExecutionCapacity.load(std::memory_order_relaxed));
@@ -1937,14 +1919,11 @@ AgentBatchR::ExecutionUtilizationSnapshot AgentBatchR::getExecutionUtilizationSn
     autil::ScopedLock lock(_lock);
     autil::ScopedLock backendLock(_backendExecutionLock);
     ExecutionUtilizationSnapshot snapshot;
-    snapshot.busyEma = _executionUtilizationEstimator.value();
     snapshot.busyWindow = _executionUtilizationWindow.value();
     snapshot.windowBusyUs = _executionUtilizationWindow.busyUs();
     snapshot.windowElapsedUs = _executionUtilizationWindow.elapsedUs();
     snapshot.windowSampleMonoUs = _executionUtilizationWindow.sampleMonoUs();
-    snapshot.activeCount = _executionUtilizationEstimator.active();
-    snapshot.sampleBusyUs = _executionUtilizationEstimator.sampleBusyUs();
-    snapshot.sampleElapsedUs = _executionUtilizationEstimator.sampleElapsedUs();
+    snapshot.activeCount = _activeBackendExecutionCount;
     snapshot.runningRequests = _utilizationRunningRequests;
     const auto total =
         _batchWaitingRequestCount + _queuedBatchRequestCount + _runningRequestCount;

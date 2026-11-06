@@ -1610,14 +1610,11 @@ std::string NaviSchedAgentImpl::makeSnapshot() const
     summary.executionCapacity = execution.executionCapacity;
     summary.executionCapacityDenominator = execution.executionCapacityDenominator;
     summary.gpuReadyQueuedRequests = execution.gpuReadyQueuedRequests;
-    summary.executionBusyEma = execution.busyEma;
     summary.executionBusyWindow = execution.busyWindow;
     summary.executionWindowBusyUs = execution.windowBusyUs;
     summary.executionWindowElapsedUs = execution.windowElapsedUs;
     summary.executionWindowSampleMonoUs = execution.windowSampleMonoUs;
     summary.executionActiveCount = execution.activeCount;
-    summary.executionSampleBusyUs = execution.sampleBusyUs;
-    summary.executionSampleElapsedUs = execution.sampleElapsedUs;
     summary.executionRunningRequests = execution.runningRequests;
     summary.executionQueuedRequests = execution.queuedRequests;
     summary.executionUtilization = execution.utilization;
@@ -1771,8 +1768,6 @@ void NaviSchedAgentImpl::reportMetrics() const
     if (executionUtilization.utilization >= 0.0) {
         reportMetric("agent.prefill_effective_execution_utilization_pct",
                      executionUtilization.utilization * 100.0);
-        reportMetric("agent.execution_busy_ema_pct",
-                     executionUtilization.busyEma * 100.0);
         reportMetric("agent.execution_busy_window_pct",
                      executionUtilization.busyWindow * 100.0);
         reportMetric("agent.execution_capacity_ema",

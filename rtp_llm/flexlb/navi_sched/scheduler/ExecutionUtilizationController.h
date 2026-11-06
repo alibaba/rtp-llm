@@ -63,68 +63,6 @@ private:
     double _value = 0.0;
 };
 
-class ExecutionUtilizationEstimator {
-public:
-    explicit ExecutionUtilizationEstimator(int64_t nowMonoUs = 0)
-        : _lastSampleMonoUs(nowMonoUs)
-    {
-    }
-
-    void begin(int64_t nowMonoUs)
-    {
-        if (_active++ == 0) _busyStartMonoUs = nowMonoUs;
-    }
-    bool end(int64_t nowMonoUs)
-    {
-        if (_active == 0) return false;
-        if (--_active == 0) {
-            _busyUs += std::max<int64_t>(0, nowMonoUs - _busyStartMonoUs);
-        }
-        const auto totalBusyUs =
-            _busyUs +
-            (_active > 0 ? std::max<int64_t>(0, nowMonoUs - _busyStartMonoUs) : 0);
-        if (!_hasSampleBaseline) {
-            _lastSampleMonoUs = nowMonoUs;
-            _lastSampleBusyUs = totalBusyUs;
-            _hasSampleBaseline = true;
-            return true;
-        }
-        const auto elapsedUs = nowMonoUs - _lastSampleMonoUs;
-        _sampleElapsedUs = elapsedUs;
-        _sampleBusyUs = totalBusyUs - _lastSampleBusyUs;
-        if (elapsedUs > 0) {
-            const auto busyUs =
-                std::clamp<int64_t>(totalBusyUs - _lastSampleBusyUs, 0, elapsedUs);
-            _busyEmaUs = _sampled ? _busyEmaUs + 0.1 * (busyUs - _busyEmaUs) : busyUs;
-            _elapsedEmaUs =
-                _sampled ? _elapsedEmaUs + 0.1 * (elapsedUs - _elapsedEmaUs) : elapsedUs;
-            _ema = _busyEmaUs / _elapsedEmaUs;
-            _sampled = true;
-            _lastSampleMonoUs = nowMonoUs;
-            _lastSampleBusyUs = totalBusyUs;
-        }
-        return true;
-    }
-    double value() const { return _ema; }
-    size_t active() const { return _active; }
-    int64_t sampleElapsedUs() const { return _sampleElapsedUs; }
-    int64_t sampleBusyUs() const { return _sampleBusyUs; }
-
-private:
-    int64_t _lastSampleMonoUs = 0;
-    int64_t _lastSampleBusyUs = 0;
-    int64_t _busyStartMonoUs = 0;
-    int64_t _busyUs = 0;
-    int64_t _sampleElapsedUs = 0;
-    int64_t _sampleBusyUs = 0;
-    size_t _active = 0;
-    double _ema = 0.0;
-    double _busyEmaUs = 0.0;
-    double _elapsedEmaUs = 0.0;
-    bool _sampled = false;
-    bool _hasSampleBaseline = false;
-};
-
 class ExecutionUtilizationController {
 public:
     static constexpr double MIN_EXECUTION_CAPACITY = 5.0;

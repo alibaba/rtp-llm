@@ -53,22 +53,6 @@ TEST_F(ExecutionUtilizationControllerTest, testPeriodicWindowIncludesUnfinishedE
 }
 
 TEST_F(ExecutionUtilizationControllerTest,
-       testFirstCompletionOnlyEstablishesSampleBaseline)
-{
-    ExecutionUtilizationEstimator estimator(100);
-    estimator.begin(721655793);
-    ASSERT_TRUE(estimator.end(722949093));
-    EXPECT_DOUBLE_EQ(0.0, estimator.value());
-    EXPECT_EQ(0, estimator.sampleBusyUs());
-    EXPECT_EQ(0, estimator.sampleElapsedUs());
-    estimator.begin(723037000);
-    ASSERT_TRUE(estimator.end(726373911));
-    EXPECT_NEAR(3336911.0 / 3424818.0, estimator.value(), 1e-12);
-    EXPECT_EQ(3336911, estimator.sampleBusyUs());
-    EXPECT_EQ(3424818, estimator.sampleElapsedUs());
-}
-
-TEST_F(ExecutionUtilizationControllerTest,
        testUnknownExecutionCapacityDoesNotAmplifyQueue)
 {
     EXPECT_DOUBLE_EQ(0.5,
@@ -81,88 +65,6 @@ TEST_F(ExecutionUtilizationControllerTest,
                      ExecutionUtilizationController::effectiveUtilization(0.5, 4, 9));
     EXPECT_DOUBLE_EQ(1.4,
                      ExecutionUtilizationController::effectiveUtilization(0.5, 5, 9));
-}
-
-TEST_F(ExecutionUtilizationControllerTest, testCompletionSamplesIdleAndBusyWithEma)
-{
-    ExecutionUtilizationEstimator estimator(100);
-    estimator.begin(100);
-    ASSERT_TRUE(estimator.end(100));
-    estimator.begin(200);
-    EXPECT_DOUBLE_EQ(0.0, estimator.value());
-    ASSERT_TRUE(estimator.end(300));
-    EXPECT_DOUBLE_EQ(0.5, estimator.value());
-    EXPECT_EQ(100, estimator.sampleBusyUs());
-    EXPECT_EQ(200, estimator.sampleElapsedUs());
-    estimator.begin(300);
-    ASSERT_TRUE(estimator.end(400));
-    EXPECT_DOUBLE_EQ(100.0 / 190.0, estimator.value());
-    EXPECT_EQ(100, estimator.sampleBusyUs());
-    EXPECT_EQ(100, estimator.sampleElapsedUs());
-    estimator.begin(500);
-    ASSERT_TRUE(estimator.end(600));
-    EXPECT_DOUBLE_EQ(100.0 / 191.0, estimator.value());
-    EXPECT_EQ(0u, estimator.active());
-    EXPECT_FALSE(estimator.end(700));
-    EXPECT_DOUBLE_EQ(100.0 / 191.0, estimator.value());
-}
-
-TEST_F(ExecutionUtilizationControllerTest, testShortStepsDoNotOutweighLongIdleInterval)
-{
-    ExecutionUtilizationEstimator estimator(100);
-    estimator.begin(100);
-    ASSERT_TRUE(estimator.end(100));
-    estimator.begin(5000100);
-    ASSERT_TRUE(estimator.end(10000100));
-    EXPECT_DOUBLE_EQ(0.5, estimator.value());
-    int64_t now = 10000100;
-    double busyEma = 5000000.0;
-    double elapsedEma = 10000000.0;
-    for (int i = 0; i < 10; ++i) {
-        estimator.begin(now);
-        now += 100;
-        ASSERT_TRUE(estimator.end(now));
-        busyEma += 0.1 * (100.0 - busyEma);
-        elapsedEma += 0.1 * (100.0 - elapsedEma);
-    }
-    EXPECT_NEAR(busyEma / elapsedEma, estimator.value(), 1e-12);
-    EXPECT_LT(estimator.value(), 0.501);
-}
-
-TEST_F(ExecutionUtilizationControllerTest, testOverlappingExecutionCountsUnionOnce)
-{
-    ExecutionUtilizationEstimator estimator(100);
-    estimator.begin(100);
-    estimator.begin(150);
-    ASSERT_TRUE(estimator.end(200));
-    EXPECT_EQ(1u, estimator.active());
-    EXPECT_DOUBLE_EQ(0.0, estimator.value());
-    ASSERT_TRUE(estimator.end(300));
-    EXPECT_EQ(0u, estimator.active());
-    EXPECT_DOUBLE_EQ(1.0, estimator.value());
-    estimator.begin(400);
-    ASSERT_TRUE(estimator.end(500));
-    EXPECT_DOUBLE_EQ(100.0 / 110.0, estimator.value());
-}
-
-TEST_F(ExecutionUtilizationControllerTest, testSameTimestampAndImmediateQueueScaling)
-{
-    ExecutionUtilizationEstimator estimator(100);
-    estimator.begin(100);
-    ASSERT_TRUE(estimator.end(100));
-    EXPECT_DOUBLE_EQ(0.0, estimator.value());
-    EXPECT_EQ(0, estimator.sampleBusyUs());
-    EXPECT_EQ(0, estimator.sampleElapsedUs());
-    estimator.begin(100);
-    ASSERT_TRUE(estimator.end(200));
-    EXPECT_DOUBLE_EQ(1.0, estimator.value());
-    EXPECT_DOUBLE_EQ(1.0, ExecutionUtilizationController::effectiveUtilization(
-                              estimator.value(), 10, 0));
-    EXPECT_DOUBLE_EQ(2.0, ExecutionUtilizationController::effectiveUtilization(
-                              estimator.value(), 10, 10));
-    EXPECT_DOUBLE_EQ(3.0, ExecutionUtilizationController::effectiveUtilization(
-                              estimator.value(), 10, 20));
-    EXPECT_DOUBLE_EQ(1.0, estimator.value());
 }
 
 TEST_F(ExecutionUtilizationControllerTest, testOrdinaryPiAtExactTarget)

@@ -9,7 +9,6 @@ void NaviSchedAgentSummary::Jsonize(JsonWrapper &json)
     json.Jsonize("server_ip", serverIp);
     json.Jsonize("server_port", serverPort);
     json.Jsonize("pd_separated", pdSeparated);
-    json.Jsonize("execution_busy_ema", executionBusyEma);
     json.Jsonize("execution_busy_window", executionBusyWindow);
     json.Jsonize("execution_window_busy_us", executionWindowBusyUs);
     json.Jsonize("execution_window_elapsed_us", executionWindowElapsedUs);
@@ -18,8 +17,6 @@ void NaviSchedAgentSummary::Jsonize(JsonWrapper &json)
     json.Jsonize("execution_capacity_denominator", executionCapacityDenominator);
     json.Jsonize("gpu_ready_queued_requests", gpuReadyQueuedRequests);
     json.Jsonize("execution_active_count", executionActiveCount);
-    json.Jsonize("execution_sample_busy_us", executionSampleBusyUs);
-    json.Jsonize("execution_sample_elapsed_us", executionSampleElapsedUs);
     json.Jsonize("execution_running_requests", executionRunningRequests);
     json.Jsonize("execution_queued_requests", executionQueuedRequests);
     json.Jsonize("execution_utilization", executionUtilization);
@@ -158,7 +155,6 @@ std::string NaviSchedAgentSummary::format() const
            std::to_string(executionCapacityDenominator) +
            "\n  execution_capacity_ema: " + std::to_string(executionCapacity) +
            "\n  gpu_ready_queued_requests: " + std::to_string(gpuReadyQueuedRequests) +
-           "\n  execution_busy_ema: " + std::to_string(executionBusyEma) +
            "\n  execution_busy_window: " + std::to_string(executionBusyWindow) +
            "\n  execution_window_busy_us: " + std::to_string(executionWindowBusyUs) +
            "\n  execution_window_elapsed_us: " +
@@ -166,9 +162,6 @@ std::string NaviSchedAgentSummary::format() const
            "\n  execution_window_sample_mono_us: " +
            std::to_string(executionWindowSampleMonoUs) +
            "\n  execution_active_count: " + std::to_string(executionActiveCount) +
-           "\n  execution_sample_busy_us: " + std::to_string(executionSampleBusyUs) +
-           "\n  execution_sample_elapsed_us: " +
-           std::to_string(executionSampleElapsedUs) +
            "\n  execution_running_requests: " + std::to_string(executionRunningRequests) +
            "\n  execution_queued_requests: " + std::to_string(executionQueuedRequests) +
            "\n  execution_utilization: " + std::to_string(executionUtilization) +
