@@ -48,19 +48,32 @@ std::optional<ErrorInfo> TreeLogitsProcessor::updateStatus(const torch::Tensor& 
     RTP_LLM_CHECK(2 == new_tokens.dim());
     RTP_LLM_CHECK(size() == (size_t)new_tokens.size(0));
 
+    const int64_t token_stride = new_tokens.size(1);
+    RTP_LLM_CHECK_WITH_INFO(token_stride >= num_new_tokens,
+                            "TreeLogitsProcessor token shape mismatch: num_new_tokens=%d, new_tokens.size(1)=%ld",
+                            num_new_tokens,
+                            token_stride);
+
+    // Normal updates contain only the newly generated tokens. Beam updates
+    // contain full token histories so parent beams can be reordered. The
+    // layout can change between steps when variable_num_beams is used.
+    const bool use_token_offset = token_stride > num_new_tokens;
+
     for (size_t i = 0; i < size(); i++) {
         auto& info = tree_infos_[i];
         if (!info.in_tree_mode)
             continue;
 
-        auto offset = info.is_beam_search ? (info.current_output_length + info.input_length) : 0;
+        const int64_t offset = use_token_offset ? (info.current_output_length + info.input_length) : 0;
+        RTP_LLM_CHECK_WITH_INFO(offset + num_new_tokens <= token_stride,
+                                "TreeLogitsProcessor token offset out of range: offset=%ld, num_new_tokens=%d, "
+                                "new_tokens.size(1)=%ld",
+                                offset,
+                                num_new_tokens,
+                                token_stride);
 
-        if (!info.is_beam_search) {
-            RTP_LLM_CHECK(num_new_tokens == new_tokens.size(1));
-        }
-
-        for (size_t j = 0; j < num_new_tokens; ++j) {
-            auto current_token_id = new_tokens.data_ptr<int>()[i * new_tokens.size(1) + j + offset];
+        for (int32_t j = 0; j < num_new_tokens; ++j) {
+            auto current_token_id = new_tokens.data_ptr<int>()[i * token_stride + j + offset];
             info.dfa_ptr->next(current_token_id);
             if (info.dfa_ptr->hasError()) {
                 break;
@@ -80,11 +93,9 @@ TreeLogitsProcessorPtr TreeLogitsProcessor::fromGenerateInput(std::shared_ptr<Ge
 
     auto processor_ptr = std::make_shared<TreeLogitsProcessor>();
     for (size_t i = 0; i < num; i++) {
-        StreamTreeInfo              tree_info(PrefixToCandidateTokens::instance()->initSuccess(),
+        StreamTreeInfo tree_info(PrefixToCandidateTokens::instance()->initSuccess(),
                                  generate_input->inputLength(),
                                  0,
-                                 generate_input->generate_config->hasNumBeams()
-                                     || generate_input->generate_config->num_return_sequences > 1,
                                  std::make_shared<TreeDFA<std::string, int>>(PrefixToCandidateTokens::instance()));
         std::vector<StreamTreeInfo> tree_infos       = {tree_info};
         auto                        single_processor = std::make_shared<TreeLogitsProcessor>(tree_infos);

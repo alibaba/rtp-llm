@@ -11,6 +11,7 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 from torch.distributed import TCPStore
 
+from rtp_llm.config.layer_partition import validate_pp_partition_snapshots
 from rtp_llm.config.py_config_modules import (
     COORDINATOR_INFO_PORT_NUM,
     DistributeConfig,
@@ -18,6 +19,7 @@ from rtp_llm.config.py_config_modules import (
     ServerConfig,
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.models_py.distributed.rank_layout import Coord, RankLayout
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
 
@@ -88,12 +90,10 @@ def get_world_info(
 def get_dp_addrs_from_world_info(
     world_info: WorldInfo, parallelism_config: ParallelismConfig
 ) -> list[str]:
-    """RPC addresses for DP fan-out: one per DP group (tp_rank==0 per group), or a
-    single serving rank when FFN disaggregate is enabled.
+    """Select TP=0, PP=0 serving RPC addresses from the supplied members only.
 
-    Pure function over WorldInfo / ParallelismConfig — shared by FrontendWorker and
-    any other caller that needs to address the backend model_rpc servers (e.g.
-    DashScApp building its own BackendRPCServerVisitor).
+    Preserve the existing attention-rank selection for FFN disaggregation.
+    Missing serving ranks are not discovered or replaced with remote ranks.
     """
     ffn_disaggregate_config = parallelism_config.ffn_disaggregate_config
     logging.info(
@@ -109,10 +109,13 @@ def get_dp_addrs_from_world_info(
             f"FFN disaggregate enabled, limiting addresses to {serving_ranks} serving ranks: {members}"
         )
     else:
+        # Only the leading stage admits requests; the PP filter is a no-op
+        # at pp_size=1.
+        layout = RankLayout.from_parallelism_config(parallelism_config)
         members = [
             member
             for member in world_info.members
-            if (member.world_rank % parallelism_config.tp_size) == 0
+            if (coord := layout.coord_of(member.world_rank)).tp == 0 and coord.pp == 0
         ]
 
     addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
@@ -121,6 +124,52 @@ def get_dp_addrs_from_world_info(
         f"using addresses from world_info: {addresses}"
     )
     return addresses
+
+
+def get_dp_rpc_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
+    """Select serving backends from the frontend's local world info."""
+    pc = py_env_configs.parallelism_config
+    world_info = get_world_info(
+        py_env_configs.server_config, py_env_configs.distribute_config, pc
+    )
+    return get_dp_addrs_from_world_info(world_info, pc)
+
+
+def get_eplb_stage_root_addresses(py_env_configs: PyEnvConfigs) -> list[str]:
+    """Resolve DP=0, TP=0 roots for PP EPLB control, in stage order."""
+    pc = py_env_configs.parallelism_config
+    layout = RankLayout.from_parallelism_config(pc)
+    root_ranks = [
+        layout.world_rank_of(Coord(pp=stage)) for stage in range(layout.pp_size)
+    ]
+    world_info = get_world_info(
+        py_env_configs.server_config, py_env_configs.distribute_config, pc
+    )
+    addresses = {
+        member.world_rank: f"{member.ip}:{member.rpc_server_port}"
+        for member in world_info.members
+        if member.world_rank in root_ranks
+    }
+    missing = [rank for rank in root_ranks if rank not in addresses]
+    if missing:
+        master_ip, master_port = get_master(py_env_configs.distribute_config, pc)
+        master_port = int(master_port or py_env_configs.server_config.start_port)
+        store = TCPStore(
+            host_name=master_ip,
+            port=master_port - 1,
+            is_master=False,
+            wait_for_workers=False,
+            timeout=timedelta(seconds=3),
+        )
+        for rank in missing:
+            address = store.get(
+                DistributedServer.REGISTRY_RANK_ADDRESS_KEY + str(rank)
+            ).decode()
+            ip, server_port = split_ip_port(address)
+            # The registered server port already includes the local-rank offset;
+            # its RPC port is the next port in WorkerInfo's layout.
+            addresses[rank] = f"{ip}:{server_port + 1}"
+    return [addresses[rank] for rank in root_ranks]
 
 
 def get_local_world_info(
@@ -179,6 +228,7 @@ class DistributedServer(object):
     """Registry key prefix for rank address in TCPStore."""
 
     REGISTRY_RANK_ADDRESS_KEY = "registry_rank_address_"
+    PP_PARTITION_SNAPSHOT_KEY = "pp_partition_snapshot_"
 
     def __init__(
         self,
@@ -287,6 +337,36 @@ class DistributedServer(object):
     def get_nccl_init_port(self) -> int:
         """Return the port used for torch.distributed init (base_port - 11)."""
         return self.master_server_port - 11
+
+    def validate_pp_partition_consistency(
+        self, parallelism_config: ParallelismConfig
+    ) -> None:
+        """Validate every rank's finalized PP partition through TCPStore."""
+        pp_size = int(parallelism_config.pp_size)
+        if pp_size <= 1:
+            return
+
+        world_rank = int(parallelism_config.world_rank)
+        world_size = int(parallelism_config.world_size)
+        snapshot = [
+            int(count) for count in parallelism_config.pp_stage_layer_counts
+        ]
+        self.safe_store_set(
+            self.PP_PARTITION_SNAPSHOT_KEY + str(world_rank), json.dumps(snapshot)
+        )
+
+        snapshots = []
+        for rank in range(world_size):
+            payload = self.safe_store_get(
+                self.PP_PARTITION_SNAPSHOT_KEY + str(rank)
+            )
+            if not payload:
+                raise RuntimeError(
+                    "timed out waiting for PP partition snapshot from "
+                    f"world_rank={rank}"
+                )
+            snapshots.append(json.loads(payload))
+        validate_pp_partition_snapshots(snapshots)
 
     def safe_store_set(self, key: str, value: str) -> None:
         if not isinstance(value, str):

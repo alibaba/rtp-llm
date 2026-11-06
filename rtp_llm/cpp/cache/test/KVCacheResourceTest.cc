@@ -175,7 +175,7 @@ TEST(BlockIdsTest, SharedKernelBlocksReuseStateWithoutChangingOwningRows) {
 TEST(BlockIdsTest, CyclicKernelBlocksKeepHistoryDistinctAndPreserveCanonicalTail) {
     BlockIds state;
     state.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 7, 8, 9, 10});
-    const auto&     kernel = state.kernelBlocks();
+    const auto&      kernel = state.kernelBlocks();
     BlockIndicesType execution(kernel.size());
     state.copyCyclicKernelBlocks(5, 3, execution.data());
     EXPECT_EQ(execution, (BlockIndicesType{7, 8, 9, 7, 8, 9, 10}));
@@ -219,7 +219,7 @@ TEST(BlockIdsTest, ChunkCacheCapacityPreservesCheckpointsAndBoundsSparseBanks) {
     EXPECT_EQ(linear.chunkCacheBlockCount(5, 16, false), 1u);
     linear.policy.active_tail_blocks = 4;
     EXPECT_EQ(linear.chunkCacheBlockCount(80, 8, false), 4u);
-    auto swa                       = makeResourceGroup("swa", CacheGroupType::SWA);
+    auto swa = makeResourceGroup("swa", CacheGroupType::SWA);
     EXPECT_EQ(swa.chunkCacheBlockCount(80, 8, true), 3u);  // No configured window: retain conservative history.
     swa.policy.sliding_window_size = 8;
     EXPECT_EQ(swa.chunkCacheBlockCount(80, 8, true), 2u);

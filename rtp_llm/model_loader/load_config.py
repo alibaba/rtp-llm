@@ -49,6 +49,9 @@ class LoadConfig(BaseModel):
     bit: int = 16
     merge_lora: bool = False
 
+    # Resolved global layer IDs for this model on the current rank.
+    layer_range: range
+
     compute_dtype: Any = torch.float16
 
     quant_algo: Any = None
@@ -130,6 +133,7 @@ class LoadConfig(BaseModel):
         num_nodes: int,
         phy2log_path: Optional[str] = None,
     ):
+        """Build the initial expert mapping for an EP group."""
         expert_num = expert_num
         redundant_expert = phy_exp_num - expert_num
         expert_num_per_ep = expert_num // ep_size
@@ -161,6 +165,11 @@ class LoadConfig(BaseModel):
         elif redundant_expert == 0:
             phy2log = [list(range(expert_num)) for _ in range(layer_num)]
         elif redundant_expert % ep_size == 0:
+            check_with_info(
+                num_nodes > 0 and ep_size % num_nodes == 0,
+                f"ep_size {ep_size} must be divisible by num_nodes {num_nodes} "
+                "for node-local redundant expert placement",
+            )
             rank_per_node = ep_size // num_nodes
             redundant_expert_per_ep = redundant_expert // ep_size
             for _ in range(layer_num):

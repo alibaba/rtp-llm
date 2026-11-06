@@ -49,9 +49,7 @@ class Qwen3DSparkWeight(QWenV3Weight):
         )
         if self._d2t_path is not None:
             transform = (
-                dspark_offset_d2t_to_absolute
-                if self._d2t_path == "d2t"
-                else identity
+                dspark_offset_d2t_to_absolute if self._d2t_path == "d2t" else identity
             )
             info.weights.append(
                 AtomicWeight(
@@ -65,6 +63,9 @@ class Qwen3DSparkWeight(QWenV3Weight):
 
 
 class Qwen3DSpark(QwenV3):
+    def support_pp(self) -> bool:
+        return False
+
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         dspark = get_config_from_path(ckpt_path)
@@ -88,9 +89,7 @@ class Qwen3DSpark(QwenV3):
         config.dspark_markov_rank = int(dspark.get("markov_rank", 0) or 0)
         if config.dspark_markov_rank <= 0:
             raise ValueError("Qwen3 DSpark requires markov_rank > 0")
-        config.dspark_sample_from_anchor = bool(
-            dspark.get("sample_from_anchor", False)
-        )
+        config.dspark_sample_from_anchor = bool(dspark.get("sample_from_anchor", False))
         return config
 
     @staticmethod
@@ -98,9 +97,7 @@ class Qwen3DSpark(QwenV3):
         return Qwen3DSparkWeight
 
     def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.qwen3_dspark_model import (
-            Qwen3DSparkModel,
-        )
+        from rtp_llm.models_py.model_desc.qwen3_dspark_model import Qwen3DSparkModel
 
         self.py_model = Qwen3DSparkModel(
             self.model_config,

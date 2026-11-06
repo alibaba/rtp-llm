@@ -439,6 +439,8 @@ def _register_no_collectives(allreduce=None) -> None:
         unexpected_collective,
         unexpected_collective if allreduce is None else allreduce,
         unexpected_collective,
+        unexpected_collective,
+        unexpected_collective,
     )
 
 
@@ -881,7 +883,11 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                         frames.extend(tensor.clone() for tensor in tensors)
 
                     register_comm_ops(
-                        record_broadcast, unexpected_collective, unexpected_collective
+                        record_broadcast,
+                        unexpected_collective,
+                        unexpected_collective,
+                        unexpected_collective,
+                        unexpected_collective,
                     )
                     results = run_tp_sync_model_inputs_scenario(
                         0,
@@ -916,6 +922,8 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                             # Replay actual root broadcasts, not independently encoded hints.
                             register_comm_ops(
                                 replay_broadcast,
+                                unexpected_collective,
+                                unexpected_collective,
                                 unexpected_collective,
                                 unexpected_collective,
                             )
@@ -1111,6 +1119,80 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(model.prefill_forward_calls, 4)
         self.assertEqual(result["available_after"], result["available_before"])
         self.assertFalse(result["manager_retained"])
+
+    def test_pp_boundary_preserves_activations_and_auxiliary_features(self) -> None:
+        class BoundaryModel(CacheStoreForwardModel):
+            def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+                super()._forward_one(inputs)
+                self.boundaries = inputs.pp_intermediates
+                self.engram_windows = inputs.engram_token_windows
+                self.output_flags = (
+                    inputs.need_all_logits,
+                    inputs.need_all_hidden_states,
+                )
+                # A non-tail stage can supply only boundary tensors. The wrapper
+                # must return before reading or validating a final hidden output.
+                output = PyModelOutputs()
+                output.pp_intermediates = self.boundaries
+                return output
+
+        model = BoundaryModel()
+        result = run_scenario(model, "pp_boundary")
+
+        self.assertEqual(model.capture_flags, [False])
+        self.assertEqual(model.output_flags, (False, False))
+        self.assertFalse(result["logits_defined"])
+        self.assertEqual(result["forward_hidden_states"], [None])
+        self.assertIsNone(result["mtp_target_hidden_states"])
+        self.assertEqual(result["deferred_capture_errors"], [])
+        self.assertEqual(result["capture_failure_count"], 0)
+        rows = sum(model.seen_input_lengths[0])
+        hidden = torch.arange(rows, dtype=torch.float16, device="cuda").reshape(rows, 1)
+        expected = {
+            "hidden_states": hidden,
+            "residual": hidden + 10,
+            "mtp_aux_hidden_states": torch.cat((hidden + 20, hidden + 30), dim=-1),
+        }
+        self.assertEqual(set(result["pp_intermediates"]), set(expected))
+        for name, tensor in expected.items():
+            actual = result["pp_intermediates"][name]
+            torch.testing.assert_close(actual, tensor)
+            self.assertEqual(actual.data_ptr(), model.boundaries[name].data_ptr())
+        self.assertTrue(model.engram_windows.is_cuda)
+        torch.testing.assert_close(
+            model.engram_windows.cpu(),
+            torch.arange(rows * 2, dtype=torch.int32).reshape(rows, 2),
+        )
+        self.assertTrue(result["records"])
+
+    def test_capture_layout_failure_preserves_mtp_features(self) -> None:
+        class MtpFeatureModel(MalformedCaptureLayoutModel):
+            def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:
+                output = super()._forward_one(inputs)
+                self.features = torch.full(
+                    (inputs.input_ids.numel(), 2),
+                    37.0,
+                    dtype=torch.float16,
+                    device=inputs.input_ids.device,
+                )
+                output.mtp_target_hidden_states = self.features
+                return output
+
+        model = MtpFeatureModel()
+        result = run_scenario(model, "capture_bf16", ignore_deferred_errors=True)
+
+        self.assertEqual(model.capture_flags, [True])
+        self.assertEqual(len(result["deferred_capture_errors"]), 1)
+        self.assertIn("expected packed width 3", result["deferred_capture_errors"][0])
+        self.assertEqual(result["capture_failure_count"], 1)
+        self.assertEqual(result["pp_intermediates"], {})
+        torch.testing.assert_close(
+            result["mtp_target_hidden_states"], torch.full_like(model.features, 37.0)
+        )
+        self.assertEqual(
+            result["mtp_target_hidden_states"].data_ptr(), model.features.data_ptr()
+        )
+        self.assertEqual(_FakeEagleMooncakeStore.instances[-1].puts, [])
 
     def test_mtp_placeholders_preserve_model_tag_set_with_extra_payload_rows(self):
         for scenario in ("mtp_placeholders", "mtp_placeholders_extra_payload"):
@@ -1315,9 +1397,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             ["301", "301", "302"],
         )
         middle = _record_for_request(result, 302)
-        self.assertTrue(
-            all("_tag_full" in block["key"] for block in middle["blocks"])
-        )
+        self.assertTrue(all("_tag_full" in block["key"] for block in middle["blocks"]))
         blocks = _blocks_by_key(result)
         for tag, stride, expected in (
             ("swa", 24, {3103: 3, 3104: 4}),
@@ -1673,7 +1753,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             scenarios += ["capture_fp8", "capture_cp"]
         for scenario in scenarios:
             namespace = (
-                "ProfileActor" + "A" * 256 if scenario == "capture_bf16" else "TestActor"
+                "ProfileActor" + "A" * 256
+                if scenario == "capture_bf16"
+                else "TestActor"
             )
             with self.subTest(scenario=scenario), patch.dict(
                 os.environ, {_MOONCAKE_STORE_KEY_NAMESPACE_ENV: namespace}
@@ -1699,7 +1781,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(result["hidden_width"], baseline["hidden_width"])
                 for name in _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS:
                     self.assertEqual(
-                        result["capture_metrics"][name], baseline["capture_metrics"][name]
+                        result["capture_metrics"][name],
+                        baseline["capture_metrics"][name],
                     )
                 self.assertEqual(
                     len(result["forward_hidden_states"]),
@@ -1760,7 +1843,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 children = {e.name: e for e in events if e.cpu_parent is publish[0]}
                 if scenario == "capture_non_owner":
                     self.assertNotIn("hidden_state_capture.gil_acquire", children)
-                    self.assertNotIn("hidden_state_capture.observe_async_errors", children)
+                    self.assertNotIn(
+                        "hidden_state_capture.observe_async_errors", children
+                    )
                     self.assertNotIn("hidden_state_capture.prepare_payload", children)
                     self.assertNotIn("hidden_state_capture.put_batch_admit", children)
                     self.assertNotIn("hidden_state_capture.flush", children)
@@ -1776,7 +1861,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     if scenario == "capture_bf16":
                         self.assertGreater(len(marker.name), 256)
                     self.assertIs(marker.cpu_parent, publish[0])
-                    self.assertLessEqual(prepare.time_range.end, marker.time_range.start)
+                    self.assertLessEqual(
+                        prepare.time_range.end, marker.time_range.start
+                    )
                     self.assertLessEqual(marker.time_range.start, marker.time_range.end)
                     self.assertLessEqual(marker.time_range.end, admit.time_range.start)
                     self.assertLessEqual(prepare.time_range.end, admit.time_range.start)
@@ -1862,8 +1949,12 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 self.assertEqual(
                     metrics[f"{_CAPTURE_METRIC_PREFIX}publish_success_qps"], 0
                 )
-                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1)
-                self.assertEqual(metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0)
+                self.assertEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}store_failure_qps"], 1
+                )
+                self.assertEqual(
+                    metrics[f"{_CAPTURE_METRIC_PREFIX}prepare_failure_qps"], 0
+                )
                 self.assertCaptureStatus(metrics, enabled=1, broken=0)
                 events = prof.events()
                 self.assertCaptureProfileStoreCalls(events, store_calls)

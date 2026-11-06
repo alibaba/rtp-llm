@@ -163,6 +163,12 @@ py_test(
 )
 
 py_test(
+    name = "start_frontend_rank_test",
+    srcs = ["start_frontend_rank_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "prompt_scoring_test",
     srcs = [
         "prompt_scoring_test.py",
@@ -478,4 +484,15 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "draft_model_loading_test",
+    srcs = ["draft_model_loading_test.py"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
