@@ -237,6 +237,26 @@ class TestRunDecode(unittest.TestCase):
         )
         MockGridRunner.assert_not_called()
 
+    @patch("rtp_llm.test.perf_test.grid_runner.create_metrics_table")
+    @patch("rtp_llm.test.perf_test.grid_runner.BatchPerfImpl")
+    def test_decode_grid_forwards_server_log(self, mock_perf, mock_table):
+        _run_decode(
+            8000,
+            1,
+            _make_args(target_tpot=0),
+            self._grid_config(),
+            {128: "q128", 256: "q256"},
+            {"max_kv_tokens": 2048},
+            log_path="/tmp/engine-process.log",
+        )
+        self.assertGreater(mock_perf.call_count, 2)
+        self.assertTrue(
+            all(
+                call.kwargs["log_path"] == "/tmp/engine-process.log"
+                for call in mock_perf.call_args_list
+            )
+        )
+
     # --- Mode 2: decode × distribution ---
     @patch("rtp_llm.test.perf_test.batch_decode_test.DistributionRunner")
     def test_decode_distribution(self, MockDistRunner):
@@ -255,6 +275,28 @@ class TestRunDecode(unittest.TestCase):
         self.assertEqual(call_args[0][2], config.test_config)
         self.assertEqual(call_args[0][3], query_dict)
         mock_runner.run.assert_called_once()
+
+    @patch(
+        "rtp_llm.test.perf_test.distribution_runner.create_distribution_metrics_table"
+    )
+    @patch("rtp_llm.test.perf_test.distribution_runner.BatchPerfImpl")
+    def test_decode_distribution_forwards_server_log(self, mock_perf, mock_table):
+        _run_decode(
+            8000,
+            1,
+            _make_args(target_tpot=0),
+            self._dist_config(),
+            {128: "q128", 256: "q256", 512: "q512"},
+            None,
+            log_path="/tmp/engine-process.log",
+        )
+        self.assertGreater(mock_perf.call_count, 1)
+        self.assertTrue(
+            all(
+                call.kwargs["log_path"] == "/tmp/engine-process.log"
+                for call in mock_perf.call_args_list
+            )
+        )
 
     # --- Mode 3: tps × grid ---
     @patch("rtp_llm.test.perf_test.batch_decode_test.TpsBinarySearchRunner")
@@ -413,9 +455,7 @@ class TestOfflineBenchConfig(unittest.TestCase):
     def test_validate_num_return_sequences(self):
         from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig
 
-        with self.assertRaisesRegex(
-            ValueError, "num_return_sequences must be >= 1"
-        ):
+        with self.assertRaisesRegex(ValueError, "num_return_sequences must be >= 1"):
             OfflineBenchConfig(num_return_sequences=0).validate()
 
 
@@ -429,9 +469,7 @@ class TestOfflineFailurePolicy(unittest.TestCase):
     def test_rejects_zero_successful_requests(self):
         from rtp_llm.test.perf_test.offline_runner import OfflineMetrics
 
-        metrics = OfflineMetrics(
-            total_submitted=2, success_requests=0, fail_requests=2
-        )
+        metrics = OfflineMetrics(total_submitted=2, success_requests=0, fail_requests=2)
         with self.assertRaisesRegex(RuntimeError, "no requests succeeded"):
             metrics.raise_if_all_requests_failed()
 
@@ -1506,10 +1544,7 @@ class TestOfflineBenchMain(unittest.TestCase):
     def test_all_failed_requests_raise_from_entry_point_and_stop_server(self):
         import rtp_llm.test.perf_test.offline_bench_test as offline_bench
         import rtp_llm.test.perf_test.offline_runner as offline_runner_module
-        from rtp_llm.test.perf_test.offline_runner import (
-            OfflineMetrics,
-            OfflineRunner,
-        )
+        from rtp_llm.test.perf_test.offline_runner import OfflineMetrics, OfflineRunner
 
         server = MagicMock(port=12345)
         failed_metrics = OfflineMetrics(
