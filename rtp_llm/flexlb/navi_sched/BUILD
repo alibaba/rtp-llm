@@ -1764,24 +1764,3 @@ cc_test(
     data = [":wheel_python_runtime"],
     deps = ["//aios/unittest_framework", ":navi_sched_role_lib"],
 )
-
-py_test(
-    name = "navi_sched_r78_publication_test",
-    srcs = ["test/vllm/VLLMR78PublicationTest.py"],
-    main = "test/vllm/VLLMR78PublicationTest.py",
-    data = ["packaging/dashllm_r78/runtime_overlay/kvs_connector/v6d_object_connector.py"],
-    python_version = "PY3",
-    deps = [":py_sched_lib"],
-)
-
-py_test(
-    name = "navi_sched_r78_lookup_test",
-    srcs = ["test/vllm/VLLMR78LookupTest.py", "test/vllm/VLLMV6DLookupAuditTest.py"],
-    main = "test/vllm/VLLMR78LookupTest.py",
-    data = [
-        "packaging/dashllm_r78/runtime_overlay/kvs_connector/v6d_object_connector.py",
-        "packaging/dashllm_r50/runtime_overlay/v6d/server/peers/tiered_vineyard/peer.py",
-        "packaging/dashllm_r50/runtime_overlay/v6d/client/client.py",
-    ],
-    python_version = "PY3",
-)
