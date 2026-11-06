@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/normal_engine/PromptScoringRows.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
@@ -1013,6 +1014,11 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
     EXPECT_TRUE(merge_input_status.ok());
     EXPECT_TRUE(merge_input_status.value().need_all_logits);
+    // Concrete gatherer output (not just the downstream remap): stream1 (ts=1) contributes
+    // no loss rows, stream3 (ts=2, offset 1) -> row 1, stream4 (ts=3, offset 3) -> rows 3,4.
+    const auto& row_indexes = merge_input_status.value().all_logits_row_indexes;
+    ASSERT_TRUE(row_indexes.defined());
+    EXPECT_EQ(toVec<int32_t>(row_indexes), (std::vector<int32_t>{1, 3, 4}));
 
     SamplerInputs sampler_inputs;
     MergedOutput  merge_outputs;
@@ -1039,6 +1045,171 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     auto loss4 = stream4->getLoss();
     EXPECT_EQ(2, loss4.numel());
     EXPECT_NEAR(2.25525, *(torch::mean(loss4).exp().data_ptr<float>()), 0.0001);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testAllLogitsRowSelectedLayout) {
+    // Row-selected all_logits layout (all_logits_lm_rows >= 0): the first all_logits_lm_rows rows
+    // are the lm_output_indexes rows, then each stream's promptScoringRowRange slice in
+    // allStreams() order (decode streams first). The dispatcher remap must hand every consumer
+    // the same rows the legacy token-aligned layout would have served, so this test dispatches an
+    // identical mixed batch under both layouts and requires identical losses and prompt logits.
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 16;
+    model_config.num_layers  = 2;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    const int64_t vocab = model_config.vocab_size;
+
+    struct StreamSpec {
+        std::vector<int32_t> ids;
+        bool                 decode;
+        int                  loss;
+        bool                 prompt_logits;
+        int                  prompt_start;
+        int                  prompt_end;
+    };
+    // Cover the flag matrix plus boundary cases a wrong offset/remap would corrupt:
+    //   - a decode stream whose prompt window clamps to its single executed token
+    //   - decode/context streams with no scoring consumers (must contribute zero rows)
+    //   - loss-only, prompt-only, and loss+prompt (contiguous union) ranges
+    //   - an empty prompt window that selects no rows but keeps the flag set
+    const std::vector<StreamSpec> specs = {
+        {{5, 6}, true, 0, true, -1, -1},             // decode prompt rows: [0, 1)
+        {{7, 8}, true, 0, false, -1, -1},            // decode, no consumers: no rows
+        {{1, 2, 3, 4}, false, 2, false, -1, -1},     // loss only: [0, ts-1) = 3 rows
+        {{1, 2, 3, 4, 5, 6}, false, 0, true, 2, 5},  // prompt window: [2, 5) = 3 rows
+        {{2, 3, 4, 5, 6}, false, 2, true, 1, 4},     // loss + window: union [0, 4) = 4 rows
+        {{9, 9, 9}, false, 0, false, -1, -1},        // context, no consumers: no rows
+        {{3, 4, 5, 6}, false, 0, true, 4, 4},        // boundary: empty window, no rows
+    };
+    const int64_t lm_rows = static_cast<int64_t>(specs.size());
+
+    int  next_block  = 1;
+    auto make_stream = [&](const StreamSpec& spec) {
+        auto query                                   = make_shared<GenerateInput>();
+        query->input_ids                             = hostIntBuffer(spec.ids);
+        query->generate_config                       = make_shared<GenerateConfig>();
+        query->generate_config->calculate_loss       = spec.loss;
+        query->generate_config->return_prompt_logits = spec.prompt_logits;
+        query->generate_config->prompt_logits_start  = spec.prompt_start;
+        query->generate_config->prompt_logits_end    = spec.prompt_end;
+        query->generate_config->prompt_logits_top_k  = 4;
+        // updateOutput only enqueues outputs for streaming or finished streams; prompt logits
+        // ride on the emitted output, so these test streams must stream.
+        query->generate_config->is_streaming = true;
+        GenerateStreamPtr stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        BatchKVCacheResource addr;
+        addr.resetBatchSize(1);
+        addr.initGroups(cache_config.topologyPtr());
+        addr.setBatchBlocks(0, 0, {next_block, next_block + 1, next_block + 2});
+        next_block += 3;
+        stream->setKVCache(addr);
+        stream->setIsContextStream(!spec.decode);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+
+    // Token-aligned reference: every executed token owns one row whose values are unique enough
+    // that any slice offset error is observable.
+    int total_tokens = 0;
+    for (const auto& spec : specs) {
+        total_tokens += spec.decode ? 1 : static_cast<int>(spec.ids.size());
+    }
+    auto aligned = torch::arange(total_tokens * vocab, torch::kFloat32).reshape({total_tokens, vocab});
+    aligned += torch::arange(total_tokens, torch::kFloat32).reshape({total_tokens, 1}) * 100.0f;
+    aligned = aligned.to(torch::kCUDA);
+
+    // Build the row-selected tensor exactly like the gatherer + model would: lm_rows leading
+    // rows (never consumed by the scoring paths; poisoned so an off-by-lm_rows bug is visible),
+    // then each stream's [a, b) slice of its own execute-token range in allStreams() order.
+    std::vector<torch::Tensor> pieces       = {torch::full({lm_rows, vocab}, -1e30f, aligned.options())};
+    int                        token_offset = 0;
+    for (const auto& spec : specs) {
+        const int token_size = spec.decode ? 1 : static_cast<int>(spec.ids.size());
+        const auto [a, b] =
+            promptScoringRowRange(token_size, spec.loss != 0, spec.prompt_logits, spec.prompt_start, spec.prompt_end);
+        if (b > a) {
+            pieces.push_back(aligned.narrow(0, token_offset + a, b - a));
+        }
+        token_offset += token_size;
+    }
+    auto selected = torch::cat(pieces, 0);
+
+    auto run_dispatch =
+        [&](const std::list<GenerateStreamPtr>& streams, const torch::Tensor& all_logits, int64_t all_logits_lm_rows) {
+            StreamGroups stream_groups(streams);
+            MergedOutput merge_outputs;
+            merge_outputs.model_output.hidden_states = torch::zeros({lm_rows, 4}, torch::kFloat32).to(torch::kCUDA);
+            merge_outputs.model_output.logits        = torch::zeros({lm_rows, vocab}, torch::kFloat32).to(torch::kCUDA);
+            merge_outputs.model_output.all_logits    = all_logits;
+            merge_outputs.model_output.all_logits_lm_rows = all_logits_lm_rows;
+            merge_outputs.sampler_output.token_ids        = torch::ones({lm_rows, 4}, torch::kInt32);
+            merge_outputs.sampler_output.cum_log_probs    = torch::zeros({lm_rows}, torch::kFloat32).to(torch::kCUDA);
+            EXPECT_TRUE(processor.dispatch(stream_groups, merge_outputs).ok());
+        };
+
+    std::list<GenerateStreamPtr> streams_selected;
+    std::list<GenerateStreamPtr> streams_aligned;
+    for (const auto& spec : specs) {
+        streams_selected.emplace_back(make_stream(spec));
+        streams_aligned.emplace_back(make_stream(spec));
+    }
+    run_dispatch(streams_selected, selected, lm_rows);
+    run_dispatch(streams_aligned, aligned, -1);
+
+    auto it_sel = streams_selected.begin();
+    auto it_ref = streams_aligned.begin();
+    for (size_t i = 0; i < specs.size(); ++i, ++it_sel, ++it_ref) {
+        SCOPED_TRACE("stream " + std::to_string(i));
+        const auto& sel = *it_sel;
+        const auto& ref = *it_ref;
+
+        auto loss_sel = sel->getLoss();
+        auto loss_ref = ref->getLoss();
+        EXPECT_EQ(loss_sel.defined(), loss_ref.defined());
+        if (loss_sel.defined() && loss_ref.defined()) {
+            EXPECT_TRUE(torch::equal(loss_sel.cpu(), loss_ref.cpu()));
+        }
+
+        const int token_size = specs[i].decode ? 1 : static_cast<int>(specs[i].ids.size());
+        const auto [wa, wb]  = promptScoringRowRange(
+            token_size, false, specs[i].prompt_logits, specs[i].prompt_start, specs[i].prompt_end);
+
+        auto out_sel = sel->nextOutput(5000);
+        auto out_ref = ref->nextOutput(5000);
+        ASSERT_TRUE(out_sel.ok());
+        ASSERT_TRUE(out_ref.ok());
+        auto& go_sel = out_sel.value().generate_outputs;
+        auto& go_ref = out_ref.value().generate_outputs;
+        ASSERT_EQ(go_sel.size(), 1u);
+        ASSERT_EQ(go_ref.size(), 1u);
+        const bool expect_prompt_logits = specs[i].prompt_logits && wb > wa;
+        EXPECT_EQ(go_sel[0].prompt_logits.has_value(), expect_prompt_logits);
+        ASSERT_EQ(go_sel[0].prompt_logits.has_value(), go_ref[0].prompt_logits.has_value());
+        if (expect_prompt_logits) {
+            const auto& pl_sel = *go_sel[0].prompt_logits;
+            const auto& pl_ref = *go_ref[0].prompt_logits;
+            EXPECT_EQ(pl_sel.start_pos, wa);
+            EXPECT_EQ(pl_sel.end_pos, wb);
+            EXPECT_EQ(pl_sel.start_pos, pl_ref.start_pos);
+            EXPECT_EQ(pl_sel.end_pos, pl_ref.end_pos);
+            EXPECT_TRUE(torch::equal(pl_sel.topk_logprobs, pl_ref.topk_logprobs));
+            EXPECT_TRUE(torch::equal(pl_sel.topk_token_ids, pl_ref.topk_token_ids));
+            EXPECT_EQ(pl_sel.target_logprobs.defined(), pl_ref.target_logprobs.defined());
+            if (pl_sel.target_logprobs.defined() && pl_ref.target_logprobs.defined()) {
+                EXPECT_TRUE(torch::equal(pl_sel.target_logprobs, pl_ref.target_logprobs));
+            }
+        }
+    }
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {

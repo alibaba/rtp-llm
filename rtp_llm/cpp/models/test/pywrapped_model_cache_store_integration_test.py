@@ -49,11 +49,9 @@ class CacheStoreForwardModel:
                     tag_inputs.cache_store_inputs, layer_cache
                 )
 
-        hidden_states = torch.zeros(
-            (inputs.input_ids.numel(), 1),
-            dtype=torch.float16,
-            device=inputs.input_ids.device,
-        )
+        # Hidden rows carry the token id so a row-selection bug is visible in the
+        # returned logits values, not only in shapes.
+        hidden_states = inputs.input_ids.reshape(-1, 1).to(torch.float16)
         return PyModelOutputs(hidden_states)
 
     def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
@@ -149,6 +147,34 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                         for block in record["blocks"]
                     )
                 )
+
+    def test_micro_batch_scoring_rows_use_full_batch_reassembly(self) -> None:
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, "micro_batch_scoring")
+
+        # need_all_logits must not disable layer micro-batching: the two sub-batches
+        # run through forward_micro_batch, and post-layers receives the reassembled
+        # full batch with the unsplit row indexes.
+        self.assertEqual(model.forward_calls, 0)
+        self.assertEqual(model.micro_batch_calls, 1)
+        self.assertEqual(model.seen_input_lengths, [[2, 4], [2]])
+
+        # lm_output_indexes = [1, 5, 7] (last token of each request), scoring rows
+        # [0, 2, 3]. With hidden = token id and an all-ones head, each logits row is
+        # filled with its source token id (tokens are iota starting at 1).
+        all_logits = result["all_logits"]
+        self.assertEqual(tuple(all_logits.shape), (6, 16))
+        self.assertEqual(result["all_logits_lm_rows"], 3)
+        torch.testing.assert_close(
+            all_logits[:, 0].cpu(),
+            torch.tensor([2.0, 6.0, 8.0, 1.0, 3.0, 4.0]),
+            rtol=0,
+            atol=0,
+        )
+        # The sampler-facing prefix is the lm_output_indexes rows.
+        torch.testing.assert_close(
+            result["logits"][:, 0].cpu(), torch.tensor([2.0, 6.0, 8.0]), rtol=0, atol=0
+        )
 
     def test_context_parallel_publishes_original_lengths_not_local_chunk(self) -> None:
         model = CacheStoreForwardModel()

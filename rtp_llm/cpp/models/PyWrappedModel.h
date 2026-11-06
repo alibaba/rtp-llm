@@ -100,6 +100,10 @@ private:
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
     torch::Tensor   computeQuantizedLogits(const torch::Tensor& hidden);
+    // LM head matmul only (TP-local logits, no gather). Shared by lmHeadLogits and by the
+    // prompt-scoring row-selection path, which gathers only the consumer-visible rows.
+    torch::Tensor
+    lmHeadLocalLogits(const torch::Tensor& last_hidden, const torch::Tensor& lm_head_kernel, bool* int8_used_out);
     // LM head matmul + TP logits gather. With RTP_LLM_INT8_LM_HEAD=1 and a bf16 head, calls with
     // M <= 8 rows run a weight-only INT8 GEMV (per-row scale) on a copy quantized at first use.
     // RTP_LLM_INT8_LM_HEAD_CHECK=1 additionally runs the bf16 head, serves the bf16 logits and
