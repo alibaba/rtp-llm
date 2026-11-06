@@ -1445,14 +1445,23 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
         } else
 #endif
         {
-            logits = torch::mm(hidden.to(kernel.dtype()), kernel.t()).to(torch::kFloat32);
+            logits = torch::mm(hidden.to(kernel.dtype()), kernel.t());
+#if USING_ROCM
+            // TP all-gather only copies logits. Keep native BF16 values until
+            // after the collective to halve communication for a BF16 LM head.
+            if (device_props_.tp_size == 1 || kernel.scalar_type() != torch::kBFloat16) {
+                logits = logits.to(torch::kFloat32);
+            }
+#else
+            logits = logits.to(torch::kFloat32);
+#endif
         }
     }
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(tp_sync_logits)");
         logits = tpSyncEmbeddingOrLogits(logits);
     }
-    return logits;
+    return logits.to(torch::kFloat32);
 }
 
 torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input) {
