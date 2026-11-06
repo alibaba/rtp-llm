@@ -122,7 +122,7 @@ class MarlinAdmissionTest(unittest.TestCase):
             self.assertFalse(strategy.can_handle(config))
             attributes.assert_not_called()
 
-    def test_direct_kernel_tests_skip_incompatible_runtime_before_jit(self):
+    def test_direct_kernel_tests_skip_incompatible_runtime_before_library_load(self):
         for filename, class_name in (
             ("marlin_nvfp4_test.py", "MarlinNvfp4Test"),
             ("marlin_large_decode_test.py", "MarlinLargeDecodeTest"),

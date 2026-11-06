@@ -1,4 +1,5 @@
 load("@arch_config//:arch_select.bzl", "requirement")
+load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
 
 py_library(
     name = "utils",
@@ -109,9 +110,63 @@ _DSV4_PPU_KERNELS = [
     "kernels/ppu/jit/**/*.py", "kernels/ppu/runtime.py",
 ]
 
-filegroup(
-    name = "marlin_nvfp4_jit_sources",
-    srcs = glob(["kernels/cuda/marlin_nvfp4/marlin_kernels/**"]),
+cc_library(
+    name = "marlin_nvfp4_kernels",
+    srcs = [
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/schema.cpp",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/libtorch_stable/moe/marlin_moe_wna16/ops.cu",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/libtorch_stable/moe/marlin_moe_wna16/sm80_kernel_bfloat16_fe2m1f_bfloat16.cu",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/libtorch_stable/quantization/marlin/gptq_marlin_repack.cu",
+    ],
+    hdrs = glob([
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/**/*.h",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/**/*.hpp",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/**/*.cuh",
+    ]),
+    includes = ["kernels/cuda/marlin_nvfp4/marlin_kernels"],
+    # Keep the JIT's compilation semantics and emit both supported cubins,
+    # independently of the engine's selected GPU architecture.
+    copts = cuda_default_copts_without_arch() + [
+        "-O3",
+        "-std=c++17",
+        "-DUSE_CUDA",
+        # Match the runtime admission's minimum stable Torch ABI (2.10).
+        "-DTORCH_TARGET_VERSION=0x020a000000000000",
+        "-D__CUDA_NO_HALF_OPERATORS__",
+        "-D__CUDA_NO_HALF_CONVERSIONS__",
+        "-D__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-D__CUDA_NO_HALF2_OPERATORS__",
+        "-nvcc_options=expt-relaxed-constexpr",
+        "-nvcc_options=static-global-template-stub=false",
+        "-nvcc_options=ftz=false",
+        "--cuda-gpu-arch=sm_90",
+        "--cuda-gpu-arch=sm_120",
+    ],
+    alwayslink = True,
+    target_compatible_with = select({
+        "//:using_cuda13_x86": [],
+        "//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = select({
+        "//:using_cuda13_x86": ["@torch_2.11_py310_cuda//:torch_stable"],
+        "//:using_cuda13_arm": ["@torch_2.11_py310_cuda-aarch64//:torch_stable"],
+        "//conditions:default": [],
+    }) + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)
+
+cc_binary(
+    name = "marlin_nvfp4",
+    linkopts = [
+        "-Wl,--as-needed",
+        "-Wl,-rpath='$$ORIGIN/../../torch/lib'",
+    ],
+    linkshared = True,
+    deps = [":marlin_nvfp4_kernels"],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -269,7 +324,8 @@ py_library(
         "//conditions:default": [],
     }),
     data = [
-        ":marlin_nvfp4_jit_sources",
+        "//rtp_llm/libs:marlin_nvfp4",
+        "kernels/cuda/marlin_nvfp4/marlin_kernels/LICENSE",
     ],
 )
 

@@ -20,35 +20,19 @@ _MAX_ROUTES_PER_CHUNK = 4096
 
 @functools.lru_cache(maxsize=1)
 def load_library():
-    from torch.utils.cpp_extension import load
-
     major, minor = torch.cuda.get_device_capability()
     arch = major * 10 + minor
     if arch not in (90, 120):
         raise RuntimeError("Qwen NVFP4 Marlin requires SM90 or SM120")
-    root = Path(__file__).resolve().parent / "marlin_kernels"
-    kernels = root / "libtorch_stable/moe/marlin_moe_wna16"
-    sources = [
-        root / "schema.cpp",
-        kernels / "ops.cu",
-        kernels / "sm80_kernel_bfloat16_fe2m1f_bfloat16.cu",
-        root / "libtorch_stable/quantization/marlin/gptq_marlin_repack.cu",
-    ]
-    return load(
-        name=f"rtp_qwen4_nvfp4_marlin_sm{arch}",
-        sources=[str(p) for p in sources],
-        extra_include_paths=[str(root)],
-        extra_cflags=["-O3", "-std=c++17", "-DUSE_CUDA"],
-        extra_cuda_cflags=[
-            "-O3",
-            "-std=c++17",
-            "-DUSE_CUDA",
-            "--expt-relaxed-constexpr",
-            "-static-global-template-stub=false",
-            f"-gencode=arch=compute_{arch},code=sm_{arch}",
-        ],
-        is_python_module=False,
-    )
+    # Preserve Bazel runfiles paths: resolving this source symlink would point
+    # outside the runfiles tree containing the packaged library.
+    library = Path(__file__).parents[4] / "libs/libmarlin_nvfp4.so"
+    if not library.is_file():
+        raise RuntimeError(
+            f"NVFP4 Marlin library missing: {library}; install a CUDA 13 build"
+        )
+    torch.ops.load_library(str(library))
+    return str(library)
 
 
 def prepare_weight(q, sf, global_sf):

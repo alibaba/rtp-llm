@@ -1,4 +1,9 @@
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -100,6 +105,45 @@ class MarlinNvfp4Test(unittest.TestCase):
         for rank in (0, 1):
             args = self.inputs(3, rank, [rank * 4, rank * 4 + 1, rank * 4 + 3])
             self.assert_reference(self.models[rank](*args), self.reference(*args, rank))
+
+    def test_precompiled_library_in_fresh_process_without_toolchain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "unused_extensions"
+            env = {
+                **os.environ,
+                "TORCH_EXTENSIONS_DIR": str(cache),
+                "CUDA_HOME": str(Path(directory) / "no_cuda"),
+                "CXX": str(Path(directory) / "no_cxx"),
+            }
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    """
+from pathlib import Path
+from unittest.mock import patch
+
+import torch
+
+with patch("torch.utils.cpp_extension.load", side_effect=AssertionError("runtime JIT")):
+    from rtp_llm.models_py.kernels.cuda.marlin_nvfp4.marlin_nvfp4 import load_library
+    library = load_library()
+    assert str(Path(library).resolve()) in torch.ops.loaded_libraries
+    q = torch.zeros((16, 64), dtype=torch.int32, device="cuda")
+    packed = torch.ops.rtp_qwen4_marlin.gptq_marlin_repack(q, 128, 64, 4, False)
+    assert packed.numel() == q.numel()
+    assert torch.count_nonzero(packed).item() == 0
+    torch.cuda.synchronize()
+""",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(cache.exists())
 
     def test_ep_global_ids_and_all_nonlocal_routes(self):
         for rank in (0, 1):

@@ -161,6 +161,7 @@ qwen4_test(
     name = "marlin_nvfp4_test",
     src = "moe/marlin_nvfp4_test.py",
     args = [
+        "MarlinNvfp4Test.test_precompiled_library_in_fresh_process_without_toolchain",
         "MarlinNvfp4Test.test_scale_range_zero_expert_and_fp32_weight_reference",
         "MarlinNvfp4Test.test_ep_global_ids_and_all_nonlocal_routes",
         "MarlinNvfp4Test.test_graph_refreshes_values_ids_weights",
@@ -175,7 +176,10 @@ qwen4_test(
 qwen4_test(
     name = "marlin_nvfp4_hopper_test",
     src = "moe/marlin_nvfp4_test.py",
-    args = ["MarlinNvfp4Test.test_explicit_strategy_uses_prepared_weights"],
+    args = [
+        "MarlinNvfp4Test.test_precompiled_library_in_fresh_process_without_toolchain",
+        "MarlinNvfp4Test.test_explicit_strategy_uses_prepared_weights",
+    ],
     gpu = "H20_CU13",
     deps = _REFERENCE_DEPS,
 )
