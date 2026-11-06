@@ -186,10 +186,12 @@
     },
     {
       "path": "example/rl/qwen_moe_rl/validation/qualify_recipe_native_chain_cpu.py",
-      "sha256": "c6fcdd39f3a35b208b8ee6b501ad4d6581051f6dc0bd3a19df98c64b2f977d24",
+      "sha256": "0a7b829f36e1e3542e580800754c469a0f4b76b9a2ee9548d5ae9312aacd2bd9",
       "production_source_sha256": "c6fcdd39f3a35b208b8ee6b501ad4d6581051f6dc0bd3a19df98c64b2f977d24",
       "base_sha256": null,
-      "portable_changes": []
+      "portable_changes": [
+        "Preserve the selected virtual-environment interpreter symlink when executing the CPU chain qualifier."
+      ]
     },
     {
       "path": "example/rl/qwen_moe_rl/WORLD72.md",

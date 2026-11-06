@@ -99,9 +99,9 @@ def main():
     script=Path(__file__).resolve()
     for role in ('training','native'):
         shim_path=root/(role+'-python-shim')
-        shim_path.write_text('#!/usr/bin/env python3\nimport os\n'+f'os.execv({str(args.real_python.resolve())!r},[{str(args.real_python.resolve())!r},{str(script)!r},"--shim",{role!r},*__import__("sys").argv[1:]])\n')
+        shim_path.write_text('#!/usr/bin/env python3\nimport os\n'+f'os.execv({str(args.real_python.absolute())!r},[{str(args.real_python.absolute())!r},{str(script)!r},"--shim",{role!r},*__import__("sys").argv[1:]])\n')
         shim_path.chmod(0o700)
-    env=dict(os.environ,Q38_CHAIN_REAL_PYTHON=str(args.real_python.resolve()),Q38_CHAIN_OUTPUT=str(root),
+    env=dict(os.environ,Q38_CHAIN_REAL_PYTHON=str(args.real_python.absolute()),Q38_CHAIN_OUTPUT=str(root),
         Q38_CHAIN_INPUT=str(args.input.resolve()),Q38_CHAIN_NODE_INDEX=str(args.node_index),
         Q38_CHAIN_CPU_CHECKER=str(args.cpu_checker.resolve()),Q38_CHAIN_NATIVE_SHIM=str(root/'native-python-shim'),
         Q38_TRAIN_PYTHON=str(root/'training-python-shim'),Q38_RUN_ROOT=str(root/'recipe-run'),CUDA_VISIBLE_DEVICES='')
