@@ -1468,8 +1468,8 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     // Without history readers, only the final token column is live. The CUDA
     // sampler writes it directly before rejection sampling and accept-length
-    // capping read it. Penalties, ngram bans, processors and beams still
-    // require the full history.
+    // capping read it. Penalties, ngram bans and beams still require the full
+    // history. Speculative processors use their own state and only mask logits.
     // Proposal columns share those readers and never include the final column.
     bool sampler_token_matrix_dead = false;
 #if USING_CUDA
@@ -1482,8 +1482,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         // the all-default state and counts as "no history reader", exactly like
         // the per-row identity values the arrays used to hold.
         sampler_token_matrix_dead =
-            !spec_logits_result.has_active_processor && sampler_inputs.logits_processor_states_ptr == nullptr
-            && !NormalSamplerInputGatherer::anyPenaltyRowActive(sampler_inputs)
+            !NormalSamplerInputGatherer::anyPenaltyRowActive(sampler_inputs)
             && std::all_of(beams_in_ptr, beams_in_ptr + count, [](int64_t n) { return n == 1; })
             && std::all_of(beams_out_ptr, beams_out_ptr + count, [](int64_t n) { return n == 1; });
     }
