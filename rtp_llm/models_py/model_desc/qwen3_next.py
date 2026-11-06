@@ -416,6 +416,9 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
+        # Per-process reusable [B, Hv, Dv, Dk] initial-state buffer for the
+        # prefill path: reallocated only when the step's shape changes.
+        self._ssm_initial_states_cache: Optional[torch.Tensor] = None
         # params
         self.head_k_dim: int = linear_attn_config.linear_key_head_dim
         self.head_v_dim: int = linear_attn_config.linear_value_head_dim
@@ -520,6 +523,33 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         ).transpose(0, 1)
         return out
 
+    def _initial_states_buffer(
+        self, context_batch_size: int, device: torch.device
+    ) -> torch.Tensor:
+        """One [B, Hv, Dv, Dk] buffer reused across a step's layers.
+
+        The shape is a pure function of the step (batch size, sharded head
+        count, dims); ``load_initial_state_from_block_map`` overwrites every
+        element the chunked recurrence later reads, so the legacy per-layer
+        ``torch.empty`` dispatch only pays on shape changes.
+        """
+        cached = self._ssm_initial_states_cache
+        if (
+            cached is None
+            or cached.shape[0] != context_batch_size
+            or cached.device != device
+        ):
+            cached = torch.empty(
+                context_batch_size,
+                self.local_num_v_heads,
+                self.head_v_dim,
+                self.head_k_dim,
+                device=device,
+                dtype=self.ssm_state_dtype,
+            )
+            self._ssm_initial_states_cache = cached
+        return cached
+
     def _fla(
         self,
         mixed_qkv: torch.Tensor,
@@ -541,13 +571,12 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         cu_seqlens_without_padding = attn_inputs.cu_seqlens_device
         initial_states: Optional[torch.Tensor] = None
         if ssm_states is not None:
-            initial_states = torch.empty(
-                context_batch_size,
-                self.local_num_v_heads,
-                self.head_v_dim,
-                self.head_k_dim,
-                device=mixed_qkv.device,
-                dtype=self.ssm_state_dtype,
+            # Reuse one buffer across the layers of a step: the shape is a
+            # pure step function and load_initial_state_from_block_map fully
+            # overwrites the consumed region, so the per-layer torch.empty
+            # dispatch (and its allocation) only pays on shape changes.
+            initial_states = self._initial_states_buffer(
+                context_batch_size, mixed_qkv.device
             )
 
             load_initial_state_from_block_map(
