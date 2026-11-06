@@ -27,6 +27,8 @@ from rtp_llm.ops import RopeStyle
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class IndexerPrefillTritonTest(unittest.TestCase):
+    page_size = 128
+
     def runtime_inputs(self, lengths):
         args = self.inputs(lengths)
         raw, cu, _, _, _, gamma, kv, table, state, state_table = args
@@ -52,7 +54,7 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             indexer_kv_cache=SimpleNamespace(
                 tag=INDEXER_KV_TAG,
                 kv_cache_base=kv.view(torch.uint8).reshape(kv.shape[0], -1),
-                seq_size_per_block=128,
+                seq_size_per_block=self.page_size,
             ),
             indexer_kv_inputs=SimpleNamespace(
                 **metadata, kv_cache_kernel_block_id_device=table
@@ -60,7 +62,7 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             indexer_state_cache=SimpleNamespace(
                 tag=INDEXER_STATE_TAG,
                 kv_cache_base=state.reshape(state.shape[0], -1),
-                seq_size_per_block=128,
+                seq_size_per_block=self.page_size,
             ),
             indexer_state_inputs=SimpleNamespace(
                 **metadata, kv_cache_block_id_device=state_table
@@ -115,9 +117,7 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             "_check_host_mirrors",
             wraps=indexer_prefill_triton._check_host_mirrors,
         ) as check:
-            context.write_prefill_indexer_cache(
-                raw, indexer=indexer, rope_config=rope
-            )
+            context.write_prefill_indexer_cache(raw, indexer=indexer, rope_config=rope)
         self.assertEqual(check.call_count, 1)
         self.assertIs(check.call_args.args[1], context.main_inputs.cu_seqlens)
 
@@ -181,7 +181,7 @@ class IndexerPrefillTritonTest(unittest.TestCase):
     def inputs(self, lengths):
         torch.manual_seed(412)
         b, maximum = len(lengths), max(lengths)
-        pages = (maximum + 127) // 128
+        pages = (maximum + self.page_size - 1) // self.page_size
         blocks = b * pages + 1
         raw = torch.randn(sum(lengths), 128, device="cuda", dtype=torch.bfloat16)
         cu = torch.tensor(
@@ -210,7 +210,9 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             .contiguous()
         )
         gamma = torch.randn(128, device="cuda", dtype=torch.bfloat16) * 0.1
-        kv = torch.randn(blocks, 32, 128, device="cuda", dtype=torch.bfloat16)
+        kv = torch.randn(
+            blocks, self.page_size // 4, 128, device="cuda", dtype=torch.bfloat16
+        )
         state = torch.randn(blocks, 8, 128, device="cuda")
         return raw, cu, lengths, cos, sin, gamma, kv, table, state, state_table
 
@@ -228,13 +230,13 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             state,
             state_table,
             ratio=4,
-            kv_tokens_per_block=128,
-            state_tokens_per_block=128,
+            kv_tokens_per_block=self.page_size,
+            state_tokens_per_block=self.page_size,
             capture_undo=True,
         )
 
     def fused(self, args):
-        return write_zero_prefix_prefill(*args, page_size=128, norm_eps=1e-6)
+        return write_zero_prefix_prefill(*args, page_size=self.page_size, norm_eps=1e-6)
 
     def test_cpu_metadata_mirrors_avoid_scalar_gpu_readback(self):
         args = self.inputs([129, 7])
@@ -243,19 +245,25 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             host_kv_table=args[7].cpu(),
             host_state_table=args[9].cpu(),
         )
-        with patch.object(torch.Tensor, "item", side_effect=AssertionError("GPU readback")):
+        with patch.object(
+            torch.Tensor, "item", side_effect=AssertionError("GPU readback")
+        ):
             result = write_zero_prefix_prefill(
-                *args, page_size=128, norm_eps=1e-6, **host
+                *args, page_size=self.page_size, norm_eps=1e-6, **host
             )
         self.assertIsNotNone(result)
         restore_indexer_cache(result["undo"])
 
         host["host_state_table"][0, 0] = 0
         with self.assertRaises(ValueError):
-            write_zero_prefix_prefill(*args, page_size=128, norm_eps=1e-6, **host)
+            write_zero_prefix_prefill(
+                *args, page_size=self.page_size, norm_eps=1e-6, **host
+            )
         host["host_state_table"][0, 0] = host["host_state_table"][1, 0]
         self.assertIsNone(
-            write_zero_prefix_prefill(*args, page_size=128, norm_eps=1e-6, **host)
+            write_zero_prefix_prefill(
+                *args, page_size=self.page_size, norm_eps=1e-6, **host
+            )
         )
 
     def test_host_staging_with_cuda_as_default_device(self):
@@ -272,6 +280,24 @@ class IndexerPrefillTritonTest(unittest.TestCase):
         torch.testing.assert_close(args[8], expected_state, rtol=0, atol=0)
         restore_indexer_cache(actual["undo"])
 
+    def test_host_mirrors_validate_every_required_page_before_writing(self):
+        for table_idx in (7, 9):
+            args = self.inputs([2 * self.page_size + 4])
+            before_kv, before_state = args[6].clone(), args[8].clone()
+            host_tables = {7: args[7].cpu(), 9: args[9].cpu()}
+            host_tables[table_idx][0, -1] = 0
+            with self.assertRaises(ValueError):
+                write_zero_prefix_prefill(
+                    *args,
+                    page_size=self.page_size,
+                    norm_eps=1e-6,
+                    host_cu_seqlens=args[1].cpu(),
+                    host_kv_table=host_tables[7],
+                    host_state_table=host_tables[9],
+                )
+            torch.testing.assert_close(args[6], before_kv, atol=0, rtol=0)
+            torch.testing.assert_close(args[8], before_state, atol=0, rtol=0)
+
     def test_emitted_selection_keys_match_old_preparation_and_preserve_cache(self):
         for lengths in ([1, 3], [4, 7, 129, 257], [4096, 131], [12288]):
             args = self.inputs(lengths)
@@ -279,7 +305,7 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             legacy_kv, legacy_state = args[6].clone(), args[8].clone()
             restore_indexer_cache(old["undo"])
             result = write_zero_prefix_prefill(
-                *args, page_size=128, norm_eps=1e-6, emit_dense_keys=True
+                *args, page_size=self.page_size, norm_eps=1e-6, emit_dense_keys=True
             )
             torch.testing.assert_close(args[6], legacy_kv, rtol=0, atol=0)
             torch.testing.assert_close(args[8], legacy_state, rtol=0, atol=0)
@@ -310,7 +336,7 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             restore_indexer_cache(result["undo"])
 
     def test_ragged_long_prefill_cache_metadata_and_rollback(self):
-        for lengths in ([1, 3], [4, 7, 127, 128, 129, 257], [4096, 131]):
+        for lengths in ([1, 3], [4, 7, 63, 64, 65, 127, 128, 129, 257], [4096, 131]):
             with self.subTest(lengths=lengths):
                 args = self.inputs(lengths)
                 before_kv, before_state = args[6].clone(), args[8].clone()
@@ -428,11 +454,15 @@ class IndexerPrefillTritonTest(unittest.TestCase):
                 x[8],
                 x[9],
                 ratio=4,
-                kv_tokens_per_block=128,
-                state_tokens_per_block=128,
+                kv_tokens_per_block=self.page_size,
+                state_tokens_per_block=self.page_size,
             )
         torch.testing.assert_close(args[8], ref_args[8], atol=0, rtol=0)
         torch.testing.assert_close(args[6], ref_args[6], atol=0.015625, rtol=0.008)
+
+
+class IndexerPrefill64TritonTest(IndexerPrefillTritonTest):
+    page_size = 64
 
 
 if __name__ == "__main__":
