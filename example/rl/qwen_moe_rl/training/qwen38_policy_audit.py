@@ -54,7 +54,57 @@ def _observed_tensor(tensor, mask=None, include_values=False):
         result['selected_fp32_bits_hex'] = bits.hex()
     return result
 
-def _observed_batch_context(data):
+def _observed_native_amp_log_probs(model_output, data):
+    """Compare existing loss inputs only; no extra model forward or gate.
+
+    Current PPO log probabilities may belong to a legitimately newer policy.
+    This receipt deliberately makes no same-policy claim when no policy
+    version is present at the real loss boundary.
+    """
+    import torch
+    from verl.workers.utils.padding import no_padding_2_padding
+    observed = dict(available_batch_fields=[str(key) for key in data.keys()],
+                    available_model_output_fields=[str(key) for key in model_output.keys()],
+                    status='unavailable', hard_threshold_applied=False,
+                    extra_model_forward=False, tensors_or_loss_modified=False,
+                    same_policy_version_established=False)
+    needed = ['rollout_log_probs', 'response_mask']
+    missing = [key for key in needed if key not in data]
+    if 'log_probs' not in model_output:
+        missing.append('model_output.log_probs')
+    if missing:
+        observed['missing_fields'] = missing
+        return observed
+    try:
+        with torch.no_grad():
+            source = model_output['log_probs']
+            current = no_padding_2_padding(source.detach(), data)
+            original = data.select(*needed).to_padded_tensor()
+            native = original['rollout_log_probs'].detach()
+            mask = original['response_mask'].detach().to(bool)
+            if current.shape != native.shape or native.shape != mask.shape:
+                raise RuntimeError(f'Actual response layout mismatch: current={tuple(current.shape)} native={tuple(native.shape)} mask={tuple(mask.shape)}')
+            lhs = current[mask].float()
+            rhs = native.to(current.device)[mask].float()
+            finite = bool(torch.isfinite(lhs).all() and torch.isfinite(rhs).all())
+            errors = lhs - rhs
+            count = errors.numel()
+            observed.update(status='recorded', active_response_tokens=count,
+                finite=finite, current_log_probs_dtype=str(source.dtype),
+                native_rollout_log_probs_dtype=str(native.dtype), response_shape=list(current.shape),
+                current_device=str(source.device),
+                autocast_current_device_enabled=torch.is_autocast_enabled(source.device.type),
+                maximum_absolute_error=float(errors.abs().max().cpu()) if count and finite else None,
+                RMS_error=float(errors.double().square().mean().sqrt().cpu()) if count and finite else None,
+                current_selected_fp32_sha256=_observed_tensor(current, mask)['selected_fp32_sha256'],
+                native_selected_fp32_sha256=_observed_tensor(native, mask)['selected_fp32_sha256'],
+                interpretation='Only an externally verified same-policy pair is a numerical-consistency test; PPO policy updates can legitimately differ.')
+    except Exception as exc:
+        # Optional observation cannot replace a valid loss with an audit error.
+        observed['layout_error'] = f'{type(exc).__name__}: {exc}'
+    return observed
+
+def _observed_batch_context(data, model_output=None):
     """Only record fields that are really present at the PPO-loss boundary."""
     import torch
     from verl.utils import tensordict_utils as tu
@@ -72,7 +122,8 @@ def _observed_batch_context(data):
                 observed['group_ids'][key] = value
         except Exception as exc:
             observed['unreadable_fields'][key] = f'{type(exc).__name__}: {exc}'
-    for key in ('global_step', 'global_steps', 'training_step'):
+    for key in ('global_step', 'global_steps', 'training_step', 'rtp_global_step',
+                'weight_version', 'policy_version', 'rollout_policy_version'):
         try:
             value = tu.get_non_tensor_data(data=data, key=key, default=None)
             if value is None:
@@ -83,6 +134,8 @@ def _observed_batch_context(data):
                 observed['step_fields'][key] = value
         except Exception as exc:
             observed['unreadable_fields'][key] = f'{type(exc).__name__}: {exc}'
+    if model_output is not None:
+        observed['native_rollout_vs_actual_training_log_probs'] = _observed_native_amp_log_probs(model_output, data)
     return observed
 
 def install_policy_loss_audit():
@@ -139,7 +192,7 @@ def install_policy_loss_audit():
         def observe_ppo(config, model_output, data, *args, **kwargs):
             if _policy_audit_directory() is None:
                 return original_ppo(config, model_output, data, *args, **kwargs)
-            token = _POLICY_AUDIT_CONTEXT.set(_observed_batch_context(data))
+            token = _POLICY_AUDIT_CONTEXT.set(_observed_batch_context(data, model_output))
             try:
                 return original_ppo(config, model_output, data, *args, **kwargs)
             finally:
