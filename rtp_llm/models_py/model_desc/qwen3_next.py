@@ -1473,7 +1473,19 @@ class Qwen3NextDecoderLayer(nn.Module):
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states)
+        if isinstance(self.mlp, GenericMoeLayer):
+            hidden_states = self.mlp(
+                hidden_states,
+                allow_tp_chunking=(
+                    attention_inputs is not None
+                    and attention_inputs.is_prefill
+                    and not attention_inputs.is_cuda_graph
+                    and not attn_meta.is_cuda_graph
+                    and not attn_meta.is_target_verify
+                ),
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
 
