@@ -1300,6 +1300,21 @@ class DashScGrpcRequestTest(TestCase):
         )
         self.assertTrue(op.enable_estimated_usage)
 
+    def test_parse_support_frontend_estimated_usage(self) -> None:
+        for value, expected in (
+            ("true", True),
+            ("false", False),
+            ("1", True),
+            ("0", False),
+            (None, False),
+        ):
+            with self.subTest(value=value):
+                attrs = {}
+                if value is not None:
+                    attrs["x-dashscope-inner-support-frontend-estimatedusage"] = value
+                op = parse_request_controls(self._tpm_request(attrs))
+                self.assertEqual(op.support_frontend_estimated_usage, expected)
+
     def _tpm_request(self, attrs):
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(attrs)

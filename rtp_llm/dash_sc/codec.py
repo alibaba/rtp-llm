@@ -920,6 +920,8 @@ class DashScRequestControls:
     # Per-request override for the early first packet. ``None`` keeps the
     # process-wide DASHSC_ENABLE_FAKE_FIRST_PACKET default.
     enable_estimated_usage: bool | None = None
+    # Gateway capability gate for the early first packet. Missing is false.
+    support_frontend_estimated_usage: bool = False
 
 
 @dataclass(frozen=True)
@@ -1236,6 +1238,10 @@ _TPM_RECHECK_DEFAULT_INTERVAL_ENV = "DASHSC_TPM_RECHECK_DEFAULT_INTERVAL_MS"
 
 # Per-request switch for the early first packet (estimated usage frame).
 _ESTIMATED_USAGE_HEADER = "x-dashscope-inner-enableestimatedusage"
+# Gateway capability gate for the early first packet. Missing is false.
+_SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER = (
+    "x-dashscope-inner-support-frontend-estimatedusage"
+)
 
 
 def _default_tpm_recheck_interval_ms() -> int | None:
@@ -1363,6 +1369,16 @@ def parse_request_controls(
             ds_attrs, _ESTIMATED_USAGE_HEADER
         )
     enable_estimated_usage = _parse_optional_bool(raw_estimated_usage)
+    raw_support = _request_header_value(
+        ds_attrs, invocation_metadata, _SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER
+    )
+    if raw_support is None:
+        raw_support = _lookup_ds_request_control(
+            ds_attrs, _SUPPORT_FRONTEND_ESTIMATED_USAGE_HEADER
+        )
+    support_frontend_estimated_usage = (
+        _parse_optional_bool(raw_support) is True
+    )
     enable_thinking = _parse_optional_parameter_bool(request, "enable_thinking")
     if enable_thinking is None:
         enable_thinking = _parse_optional_bool(
@@ -1467,6 +1483,7 @@ def parse_request_controls(
         ),
         tpm_recheck=tpm_recheck,
         enable_estimated_usage=enable_estimated_usage,
+        support_frontend_estimated_usage=support_frontend_estimated_usage,
     )
 
 
