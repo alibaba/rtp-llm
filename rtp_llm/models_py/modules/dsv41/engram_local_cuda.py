@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Startup-only, same-host DEVICE VMM shards; online lookup uses existing VA views."""
+"""Startup-only DEVICE VMM shards; online lookup uses existing VA views.
+
+POSIX_FD stays on one host/boot. FABRIC uses the instance Store for opaque
+handles and verifies actual imported GPU rows before publishing either mode.
+"""
 from __future__ import annotations
 
 import array
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -42,7 +48,15 @@ def staged_local_cuda_storage():
 
 
 def prepare_local_cuda_engram(
-    store, *, rank, world_size, device, checkpoint, gang_hosts, timeout_s
+    store,
+    *,
+    rank,
+    world_size,
+    device,
+    checkpoint,
+    gang_hosts,
+    timeout_s,
+    storage_mode="cuda_local",
 ):
     """Reserve real VRAM before the engine computes its KV-cache budget."""
     from .engram import EngramLayout, NgramHashState
@@ -51,7 +65,9 @@ def prepare_local_cuda_engram(
     from .engram_startup import _checkpoint_revision
 
     if device is None or checkpoint is None or staged_local_cuda_storage() is not None:
-        raise RuntimeError("cuda_local requires one explicit pre-model startup")
+        raise RuntimeError("GPU Engram requires one explicit pre-model startup")
+    if storage_mode not in ("cuda_local", "cuda_fabric"):
+        raise ValueError("INVALID_ENGRAM_STORAGE")
     root = Path(checkpoint).resolve(strict=True)
     config = json.loads((root / "config.json").read_text())
     config = {**config, **config.get("text_config", {})}
@@ -73,6 +89,7 @@ def prepare_local_cuda_engram(
         rank=rank,
         world_size=world_size,
         gang_hosts=gang_hosts,
+        storage_mode=storage_mode,
     )
     try:
         stage_local_cuda_storage(storage)
@@ -82,7 +99,8 @@ def prepare_local_cuda_engram(
     import logging
 
     logging.getLogger(__name__).info(
-        "Engram cuda_local staged before KV sizing: rank=%d shards=%d bytes=%d",
+        "Engram %s staged before KV sizing: rank=%d shards=%d bytes=%d",
+        storage_mode,
         rank,
         world_size,
         storage.local_physical_bytes,
@@ -92,6 +110,61 @@ def prepare_local_cuda_engram(
 
 def _json(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _checkpoint_identity(plan, expected_layout):
+    """Portable metadata identity, not a checksum of the full tensor payload.
+
+    Local inode/timestamps still protect each load through snapshot validation;
+    they cannot identify immutable checkpoint copies on different hosts.
+    """
+
+    def snapshot(file):
+        return dict(
+            relative_path=file.relative_path,
+            size=file.stat_token[2],
+            header_sha256=file.header_sha256,
+        )
+
+    return hashlib.sha256(
+        _json(
+            dict(
+                layout=asdict(expected_layout),
+                index=snapshot(plan.index),
+                files=[snapshot(file) for file in plan.files],
+                layers=[asdict(layer) for layer in plan.layers],
+            )
+        )
+    ).hexdigest()
+
+
+def _decode_fabric_handles(document, count, handle_bytes):
+    """Accept only explicitly DEVICE/FABRIC, canonical fixed-size handles."""
+    if (
+        type(count) is not int
+        or count <= 0
+        or type(handle_bytes) is not int
+        or handle_bytes <= 0
+        or type(document) is not dict
+        or set(document) != {"location_type", "handle_type", "handles"}
+        or document["location_type"] != "DEVICE"
+        or document["handle_type"] != "FABRIC"
+        or type(document["handles"]) is not list
+        or len(document["handles"]) != count
+    ):
+        raise ValueError("INVALID_DEVICE_FABRIC_HANDLES")
+    handles = []
+    for encoded in document["handles"]:
+        if type(encoded) is not str or len(encoded) != 4 * ((handle_bytes + 2) // 3):
+            raise ValueError("INVALID_DEVICE_FABRIC_HANDLES")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            raise ValueError("INVALID_DEVICE_FABRIC_HANDLES") from None
+        if len(raw) != handle_bytes or base64.b64encode(raw).decode("ascii") != encoded:
+            raise ValueError("INVALID_DEVICE_FABRIC_HANDLES")
+        handles.append(raw)
+    return handles
 
 
 class _Agreement:
@@ -262,14 +335,32 @@ class _LocalFdOps(CudaDriverOps):
         del self.imports[handle]
 
 
+class _DeviceFabricOps(_LocalFdOps):
+    def import_handle(self, raw):
+        imported = self.native.DeviceFabricImport(
+            raw, next(self.sizes), self.granularity, self.device
+        )
+        try:
+            actual = imported.info()
+            if actual["location_type"] != "DEVICE" or actual["handle_type"] != "FABRIC":
+                raise ValueError("INVALID_DEVICE_FABRIC_BACKING")
+            handle = imported.handle()
+            self.imports[handle] = imported
+            return handle
+        except BaseException:
+            imported.close()
+            raise
+
+
 class LocalCudaEngramStorage(FabricEngramStorage):
-    """Reuse reader/graph-pin/drain contracts, with POSIX_FD instead of Fabric imports."""
+    """DEVICE backing with shared reader, graph-pin and drain contracts."""
 
     direct_device_scales = True
 
     def __init__(self):
         super().__init__()
         self._owners = []
+        self.storage_mode = "cuda_local"
 
     @classmethod
     def from_checkpoint(
@@ -284,6 +375,7 @@ class LocalCudaEngramStorage(FabricEngramStorage):
         rank=None,
         world_size=None,
         gang_hosts=None,
+        storage_mode="cuda_local",
     ):
         import torch
         import torch.distributed as dist
@@ -293,6 +385,9 @@ class LocalCudaEngramStorage(FabricEngramStorage):
         from .engram_checkpoint import _same_snapshot, inspect_checkpoint
         from .engram_publish import load_rows
 
+        if storage_mode not in ("cuda_local", "cuda_fabric"):
+            raise ValueError("INVALID_ENGRAM_STORAGE")
+        fabric = storage_mode == "cuda_fabric"
         if store is None:
             if not dist.is_initialized():
                 raise RuntimeError("LOCAL_CUDA_ENGRAM_REQUIRES_STARTUP_STORE")
@@ -304,11 +399,14 @@ class LocalCudaEngramStorage(FabricEngramStorage):
             or not 2 <= world_size <= 64
             or not 0 <= rank < world_size
         ):
-            raise ValueError("cuda_local requires at least two real local GPU ranks")
-        if gang_hosts is not None and (
-            len(gang_hosts) != world_size or len(set(gang_hosts)) != 1
-        ):
-            raise ValueError("cuda_local does not support cross-host groups")
+            raise ValueError(
+                "GPU Engram requires at least two and at most 64 real GPU ranks"
+            )
+        if gang_hosts is not None:
+            if len(gang_hosts) != world_size:
+                raise ValueError("GPU Engram gang size differs from world size")
+            if not fabric and len(set(gang_hosts)) != 1:
+                raise ValueError("cuda_local does not support cross-host groups")
         target = (
             torch.device("cuda", device)
             if isinstance(device, int)
@@ -316,7 +414,7 @@ class LocalCudaEngramStorage(FabricEngramStorage):
         )
         if target.type != "cuda" or target.index is None or not 0 < timeout_s <= 86400:
             raise ValueError(
-                "cuda_local requires an explicit CUDA ordinal and bounded timeout"
+                "GPU Engram requires an explicit CUDA ordinal and bounded timeout"
             )
         result = cls()
         result.device, result.shard_index, result.shard_count = (
@@ -325,29 +423,37 @@ class LocalCudaEngramStorage(FabricEngramStorage):
             world_size,
         )
         result.expected_layout = expected_layout
+        result.storage_mode = storage_mode
         agreement = _Agreement(store, rank, world_size, time.monotonic() + timeout_s)
         server, directory, all_fds = None, None, []
         try:
             native = _load_native()
-            if any(
-                not hasattr(native, name)
-                for name in ("DeviceOwner", "DeviceImport", "device_granularity")
-            ):
-                raise RuntimeError(
-                    "cuda_local requires the prebuilt DEVICE/POSIX_FD native API"
+            required = (
+                (
+                    "DeviceOwner",
+                    "DeviceFabricImport",
+                    "device_granularity",
+                    "device_fabric_supported",
+                    "fabric_handle_bytes",
                 )
+                if fabric
+                else ("DeviceOwner", "DeviceImport", "device_granularity")
+            )
+            if any(not hasattr(native, name) for name in required):
+                raise RuntimeError(
+                    "GPU Engram requires the prebuilt native API for its storage mode"
+                )
+            if fabric and not native.device_fabric_supported(target.index):
+                raise RuntimeError("CUDA_FABRIC_DEVICE_UNSUPPORTED")
             plan = inspect_checkpoint(checkpoint, expected_layout)
             result.checkpoint_path = plan.root
             properties = torch.cuda.get_device_properties(target)
-            identity = hashlib.sha256(
-                _json(
-                    {
-                        "layout": asdict(expected_layout),
-                        "index": asdict(plan.index),
-                        "files": [asdict(file) for file in plan.files],
-                    }
-                )
-            ).hexdigest()
+            identity = _checkpoint_identity(plan, expected_layout)
+            granularity = (
+                native.device_granularity(target.index, handle_type="fabric")
+                if fabric
+                else native.device_granularity(target.index)
+            )
             peers = agreement.exchange(
                 "metadata",
                 dict(
@@ -356,17 +462,32 @@ class LocalCudaEngramStorage(FabricEngramStorage):
                     uuid=str(properties.uuid),
                     identity=identity,
                     pid=os.getpid(),
-                    granularity=native.device_granularity(target.index),
+                    granularity=granularity,
+                    storage_mode=storage_mode,
+                    location_type="DEVICE",
+                    handle_type="FABRIC" if fabric else "POSIX_FD",
                 ),
             )
             if (
-                len({(peer["hostname"], peer["boot_id"]) for peer in peers}) != 1
+                (
+                    not fabric
+                    and len({(peer["hostname"], peer["boot_id"]) for peer in peers})
+                    != 1
+                )
+                or any(not peer["uuid"] or peer["uuid"] == "None" for peer in peers)
                 or len({peer["uuid"] for peer in peers}) != world_size
                 or len({peer["identity"] for peer in peers}) != 1
                 or len({peer["granularity"] for peer in peers}) != 1
+                or any(
+                    peer["storage_mode"] != storage_mode
+                    or peer["location_type"] != "DEVICE"
+                    or peer["handle_type"] != ("FABRIC" if fabric else "POSIX_FD")
+                    for peer in peers
+                )
             ):
                 raise ValueError(
-                    "cuda_local requires identical checkpoint/layout and distinct same-host GPU ranks"
+                    "GPU Engram requires matching mode/checkpoint/layout/granularity, distinct GPUs, "
+                    "and same host/boot for cuda_local"
                 )
             granularity = peers[0]["granularity"]
             plans = {
@@ -383,7 +504,7 @@ class LocalCudaEngramStorage(FabricEngramStorage):
                     plans[layer.layer_id].scale_bytes,
                 )
             ]
-            if len(sizes) > 128:
+            if not fabric and len(sizes) > 128:
                 raise ValueError(
                     "cuda_local FD bundle exceeds the bounded SCM_RIGHTS contract"
                 )
@@ -395,25 +516,31 @@ class LocalCudaEngramStorage(FabricEngramStorage):
                 )
                 or sum(sizes) > max_total
             ):
-                raise ValueError("cuda_local shard exceeds allocation budget")
+                raise ValueError("GPU Engram shard exceeds allocation budget")
             result.local_physical_bytes = sum(sizes)
             with torch.cuda.device(target):
                 if result.local_physical_bytes > torch.cuda.mem_get_info(target)[0]:
                     raise RuntimeError(
-                        "cuda_local has insufficient free VRAM for this rank's shard"
+                        "GPU Engram has insufficient free VRAM for this rank's shard"
                     )
-            directory = tempfile.mkdtemp(prefix="rtp-engram-") if rank == 0 else None
+            directory = (
+                tempfile.mkdtemp(prefix="rtp-engram-")
+                if rank == 0 and not fabric
+                else None
+            )
             descriptions = agreement.exchange(
                 "directory",
                 dict(path=directory, nonce=uuid4().hex) if rank == 0 else None,
             )
             directory, nonce = descriptions[0]["path"], descriptions[0]["nonce"]
-            stat = os.stat(directory, follow_symlinks=False)
-            if stat.st_uid != os.getuid() or stat.st_mode & 0o777 != 0o700:
-                raise RuntimeError(
-                    "cuda_local Unix directory must be owned by this UID with mode0700"
-                )
+            if not fabric:
+                stat = os.stat(directory, follow_symlinks=False)
+                if stat.st_uid != os.getuid() or stat.st_mode & 0o777 != 0o700:
+                    raise RuntimeError(
+                        "cuda_local Unix directory must be owned by this UID with mode0700"
+                    )
             snapshots = {file.relative_path: file for file in plan.files}
+            own_handles = []
             for layer in plan.layers:
                 shard = plans[layer.layer_id]
                 start, end = shard.row_range(rank)
@@ -421,7 +548,11 @@ class LocalCudaEngramStorage(FabricEngramStorage):
                     layer.tensors, (shard.weight_bytes, shard.scale_bytes)
                 ):
                     agreement.remaining()
-                    owner = native.DeviceOwner(size, target.index)
+                    owner = (
+                        native.DeviceOwner(size, target.index, handle_type="fabric")
+                        if fabric
+                        else native.DeviceOwner(size, target.index)
+                    )
                     result._owners.append(owner)
                     load_rows(
                         owner,
@@ -434,42 +565,69 @@ class LocalCudaEngramStorage(FabricEngramStorage):
                         chunk_bytes=min(64 << 20, native.max_load_chunk_bytes),
                         deadline=agreement.deadline,
                     )
-                    fd = owner.export_fd()
-                    os.set_inheritable(fd, False)
-                    all_fds.append(fd)
+                    if fabric:
+                        actual = owner.info()
+                        if (
+                            actual["location_type"] != "DEVICE"
+                            or actual["handle_type"] != "FABRIC"
+                        ):
+                            raise ValueError("INVALID_DEVICE_FABRIC_BACKING")
+                        own_handles.append(
+                            base64.b64encode(owner.export_handle()).decode("ascii")
+                        )
+                    else:
+                        fd = owner.export_fd()
+                        os.set_inheritable(fd, False)
+                        all_fds.append(fd)
             _same_snapshot(Path(checkpoint), plan.index, index=True)
-            agreement.exchange("loaded", True)
-            own_fds = tuple(all_fds)
-            server = _FdServer(
-                str(Path(directory) / f"{rank}.sock"),
-                nonce,
-                rank,
-                peers,
-                own_fds,
-                agreement,
-            )
-            agreement.exchange("listeners", True)
-            handles = []
-            for owner_rank, peer in enumerate(peers):
-                received = (
-                    list(own_fds)
-                    if owner_rank == rank
-                    else _receive_fds(
-                        str(Path(directory) / f"{owner_rank}.sock"),
-                        nonce,
-                        owner_rank,
-                        rank,
-                        peer["pid"],
-                        len(sizes),
-                        agreement.remaining(),
-                    )
+            if fabric:
+                documents = agreement.exchange(
+                    "loaded",
+                    dict(
+                        location_type="DEVICE",
+                        handle_type="FABRIC",
+                        handles=own_handles,
+                    ),
                 )
-                if owner_rank != rank:
-                    all_fds.extend(received)
-                handles.append(received)
+                handles = [
+                    _decode_fabric_handles(
+                        document, len(sizes), native.fabric_handle_bytes
+                    )
+                    for document in documents
+                ]
+            else:
+                agreement.exchange("loaded", True)
+                own_fds = tuple(all_fds)
+                server = _FdServer(
+                    str(Path(directory) / f"{rank}.sock"),
+                    nonce,
+                    rank,
+                    peers,
+                    own_fds,
+                    agreement,
+                )
+                agreement.exchange("listeners", True)
+                handles = []
+                for owner_rank, peer in enumerate(peers):
+                    received = (
+                        list(own_fds)
+                        if owner_rank == rank
+                        else _receive_fds(
+                            str(Path(directory) / f"{owner_rank}.sock"),
+                            nonce,
+                            owner_rank,
+                            rank,
+                            peer["pid"],
+                            len(sizes),
+                            agreement.remaining(),
+                        )
+                    )
+                    if owner_rank != rank:
+                        all_fds.extend(received)
+                    handles.append([struct.pack("i", fd) for fd in received])
             for index, layer in enumerate(plan.layers):
                 shard = plans[layer.layer_id]
-                ops = _LocalFdOps(
+                ops = (_DeviceFabricOps if fabric else _LocalFdOps)(
                     target.index,
                     native,
                     [
@@ -481,8 +639,8 @@ class LocalCudaEngramStorage(FabricEngramStorage):
                 )
                 mapping = ShardedLayerMapping(
                     shard,
-                    [struct.pack("i", fds[2 * index]) for fds in handles],
-                    [struct.pack("i", fds[2 * index + 1]) for fds in handles],
+                    [bundle[2 * index] for bundle in handles],
+                    [bundle[2 * index + 1] for bundle in handles],
                     target.index,
                     ops=ops,
                 )
@@ -496,12 +654,13 @@ class LocalCudaEngramStorage(FabricEngramStorage):
                 )
             result._state = "VERIFYING"
             result._verify_samples(plan, plans, snapshots, target)
-            if server.error is not None:
+            if server is not None and server.error is not None:
                 raise server.error
             agreement.exchange("verified", True)
-            server.close()
-            server = None
-            result.identity_key = f"cuda_local|{identity}|{nonce}"
+            if server is not None:
+                server.close()
+                server = None
+            result.identity_key = f"{storage_mode}|{identity}|{nonce}"
             result._state = "READY"
             return result
         except BaseException as original:
@@ -512,7 +671,7 @@ class LocalCudaEngramStorage(FabricEngramStorage):
             except BaseException:
                 retain_for_process(result)
                 raise CleanupPendingError(
-                    "cuda_local attach cleanup incomplete", result
+                    "GPU Engram attach cleanup incomplete", result
                 ) from original
             raise
         finally:
@@ -566,7 +725,7 @@ class LocalCudaEngramStorage(FabricEngramStorage):
                 )
                 if actual.contiguous().view(torch.uint8).numpy().tobytes() != expected:
                     raise ValueError(
-                        "cuda_local mapped GPU bytes differ from checkpoint samples"
+                        "GPU Engram mapped bytes differ from checkpoint samples"
                     )
 
     def require_model_layout(self, layer_ids, num_embeddings, head_dim):
@@ -574,12 +733,13 @@ class LocalCudaEngramStorage(FabricEngramStorage):
             tuple(sorted(zip(layer_ids, num_embeddings))) != self.expected_layout.layers
             or head_dim != self.expected_layout.head_dim
         ):
-            raise ValueError("cuda_local Engram layout differs from the model")
+            raise ValueError("GPU Engram layout differs from the model")
 
     def info(self):
         with self._lock:
             return dict(
                 state=self._state,
+                storage_mode=self.storage_mode,
                 device=self.device,
                 shard_count=self.shard_count,
                 shard_index=self.shard_index,

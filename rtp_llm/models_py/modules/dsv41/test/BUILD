@@ -347,3 +347,13 @@ py_test(
     env = {"GPU_COUNT": "0"},
     legacy_create_init = 0,
 )
+
+py_test(
+    name = "test_engram_cuda_fabric_config",
+    size = "small",
+    srcs = ["test_engram_cuda_fabric.py"],
+    main = "test_engram_cuda_fabric.py",
+    deps = ["//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "0"},
+    legacy_create_init = 0,
+)

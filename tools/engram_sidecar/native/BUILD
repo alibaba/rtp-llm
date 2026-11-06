@@ -27,6 +27,23 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+py_binary(
+    name = "device_fabric_probe",
+    srcs = ["test_device_fabric_cuda.py"],
+    main = "test_device_fabric_cuda.py",
+    deps = [
+        ":native_runtime",
+        "//rtp_llm/models_py:modules",
+    ],
+    legacy_create_init = 0,
+    visibility = ["//visibility:public"],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 py_test(
     name = "test_embedding_contract",
     size = "small",
