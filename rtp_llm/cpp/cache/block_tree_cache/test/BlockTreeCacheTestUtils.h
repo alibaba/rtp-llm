@@ -164,6 +164,7 @@ public:
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static void waitForTaskPoolIdleForTest(const BlockTreeCache& cache);
     static void setTransferDrainObserverForTest(BlockTreeCache& cache, std::function<void()> observer);
+    static std::unique_lock<std::mutex> lockForTest(const BlockTreeCache& cache);
 
 private:
     static bool armQueueRejectionForTest(BlockTreeCache& cache);
