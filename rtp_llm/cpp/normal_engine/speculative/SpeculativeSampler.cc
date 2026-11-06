@@ -140,7 +140,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         for (const auto& stream : streams) {
             auto gen = stream->getGenerator();
             if (gen.defined()) {
-                uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, std::nullopt, rand_options);
+                uniform_samples_d[idx] = torch::rand({(long)propose_step_ + 1}, gen, rand_options);
             }
             idx++;
         }
