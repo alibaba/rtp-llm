@@ -129,7 +129,7 @@ class WeightManager:
         self._rl_source_shapes = None
         if os.environ.get("RTP_LLM_RL_MODE") == "1":
             config = self._weights_loader.model_config
-            if config.model_type not in {"qwen_3", "qwen35_moe_text", "qwen36_moe_text"} or config.enable_fp32_lm_head:
+            if config.model_type not in {"qwen_3", "qwen35_moe_text", "qwen36_moe_text", "qwen38_moe_text"} or config.enable_fp32_lm_head:
                 raise ValueError("RL mode requires a supported text model with a BF16 LM head")
             self._rl_required_names = self._weights_loader.get_rl_hf_source_names()
             directory = os.environ.get("RTP_WEIGHT_MANIFEST_DIR")
@@ -142,15 +142,21 @@ class WeightManager:
                 dp_rank = int(getattr(load, "dp_rank", 0))
                 world_rank = dp_rank * int(load.tp_size) + tp_rank
                 record = {
-                    "schema": "qwen36-rtp-required-hf-v1",
+                    "schema": "rtp-required-hf-world-v1" if config.model_type == "qwen38_moe_text" else "qwen36-rtp-required-hf-v1",
                     "model_type": config.model_type,
                     "pid": os.getpid(),
                     "device": str(self._device),
                     "gpu_uuid": str(getattr(torch.cuda.get_device_properties(self._device), "uuid", "")),
                     "world_rank": world_rank,
+                    "world_size": int(load.tp_size) * int(getattr(load, "dp_size", 1)),
                     "tp_rank": tp_rank, "tp_size": int(load.tp_size),
-                    "dp_size": int(getattr(load, "dp_size", 1)),
+                    "dp_rank": dp_rank, "dp_size": int(getattr(load, "dp_size", 1)),
+                    "ep_rank": int(getattr(load, "ep_rank", 0)),
                     "ep_size": int(getattr(load, "ep_size", 1)),
+                    "pp_size": 1,
+                    "num_nodes": int(load.num_nodes),
+                    "local_world_size": int(load.tp_size) * int(getattr(load, "dp_size", 1)) // int(load.num_nodes),
+                    "incarnation_id": os.environ.get("RTP_LLM_RL_RUN_ID", ""),
                     "ffn_tp_size": int(getattr(load, "ffn_tp_size", load.tp_size)),
                     "names": list(self._rl_required_names),
                     "names_sha256": hashlib.sha256("\n".join(self._rl_required_names).encode()).hexdigest(),
@@ -174,7 +180,7 @@ class WeightManager:
         if self._rl_update is not None:
             raise RuntimeError("another RL weight transaction is active")
         config = self._weights_loader.model_config
-        if config.model_type not in {"qwen_3", "qwen35_moe_text", "qwen36_moe_text"} or config.enable_fp32_lm_head:
+        if config.model_type not in {"qwen_3", "qwen35_moe_text", "qwen36_moe_text", "qwen38_moe_text"} or config.enable_fp32_lm_head:
             raise ValueError(
                 "RL updates require a supported text model with a BF16 LM head"
             )
@@ -185,6 +191,12 @@ class WeightManager:
             raise ValueError("RL updates require owned BF16 weights")
         if max_buffer_bytes <= 0:
             raise ValueError("max_buffer_bytes must be positive")
+        bootstrap_shapes = getattr(self._weights_loader, "bootstrap_source_shapes", None)
+        if self._rl_source_shapes is None and bootstrap_shapes is not None:
+            required = set(self._weights_loader.get_rl_hf_source_names())
+            if set(bootstrap_shapes) != required:
+                raise ValueError("Bootstrap shape manifest differs from the native HF source set")
+            self._rl_source_shapes = dict(bootstrap_shapes)
         if self._rl_source_shapes is None:
             checkpoint = Path(config.ckpt_path)
             index = json.loads(
@@ -209,6 +221,13 @@ class WeightManager:
             self._device,
             self._rl_source_shapes,
             max_buffer_bytes,
+            borrow_singleton_sources=os.environ.get("RTP_RL_BORROW_SINGLETON_HF_SOURCES", "0") == "1",
+            fixed_expert_map=(
+                config.model_type == "qwen38_moe_text"
+                and os.environ.get("RTP_LLM_RL_WORLD72", "0") == "1"
+                and os.environ.get("RTP_FIXED_PHYSICAL_EP_LAYOUT", "") == "balanced_v1"
+            ),
+            source_dtypes=getattr(self._weights_loader, "bootstrap_source_dtypes", None),
         )
 
     def rl_push(self, name: str, metadata: bytes, timeout: float) -> None:

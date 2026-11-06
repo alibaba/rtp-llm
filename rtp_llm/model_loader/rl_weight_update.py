@@ -17,21 +17,40 @@ class RlWeightUpdate:
     A successful push acknowledges that its source storage can be reused.
     """
 
-    def __init__(self, loader, weights, device, source_shapes, max_buffer_bytes):
+    def __init__(self, loader, weights, device, source_shapes, max_buffer_bytes, *, borrow_singleton_sources=False, fixed_expert_map=False, source_dtypes=None):
         self.loader = loader
         self.weights = weights
         self.device = torch.device(device)
         self.source_shapes = source_shapes
+        self.source_dtypes = None if source_dtypes is None else dict(source_dtypes)
+        if self.source_dtypes is not None and (
+            set(self.source_dtypes) != set(source_shapes)
+            or any(value not in (torch.bfloat16, torch.float32) for value in self.source_dtypes.values())
+        ):
+            raise ValueError("HF source dtype contract must cover every source exactly")
         self.max_buffer_bytes = max_buffer_bytes
-        self.targets = {(None, k): v for k, v in weights.global_weights.items()}
-        self.targets.update(
-            {
-                (i, k): v
-                for i, group in enumerate(weights.weights)
-                for k, v in group.items()
-            }
-        )
-        self.addresses = {k: v.data_ptr() for k, v in self.targets.items()}
+        self.borrow_singleton_sources = bool(borrow_singleton_sources)
+        all_targets = self._live_targets()
+        # These two maps are generated from the fixed physical placement; they
+        # have no corresponding HF source. Never silently skip another target.
+        static_names = {"moe_eplb.logic_expert_cnt", "moe_eplb.log2phy"}
+        self.static_targets = {
+            key: value for key, value in all_targets.items()
+            if fixed_expert_map and key[0] is not None and key[1] in static_names
+        }
+        if fixed_expert_map:
+            expected_static = {(layer, name) for layer in range(len(weights.weights)) for name in static_names}
+            if set(self.static_targets) != expected_static:
+                raise ValueError("Fixed expert refit requires both generated maps on every layer")
+            for key, value in self.static_targets.items():
+                expected_shape = (512,) if key[1].endswith("logic_expert_cnt") else (512, 65)
+                if value.dtype != torch.int32 or tuple(value.shape) != expected_shape:
+                    raise ValueError("Fixed expert refit requires the Qwen3.8 INT32 map shapes")
+        self.targets = {key: value for key, value in all_targets.items() if key not in self.static_targets}
+        self.addresses = {key: value.data_ptr() for key, value in all_targets.items()}
+        self._static_snapshots = {key: value.detach().clone() for key, value in self.static_targets.items()}
+        if self.device.type == "cuda" and self._static_snapshots:
+            torch.cuda.current_stream(self.device).synchronize()
         self.received = set()
         self.applied = set()
         self._queue = queue.Queue(maxsize=1)
@@ -43,6 +62,11 @@ class RlWeightUpdate:
             target=self._run, name="rl-weight-update", daemon=True
         )
         self._thread.start()
+
+    def _live_targets(self):
+        targets = {(None, key): value for key, value in self.weights.global_weights.items()}
+        targets.update({(layer, key): value for layer, group in enumerate(self.weights.weights) for key, value in group.items()})
+        return targets
 
     def _inputs(self):
         while True:
@@ -59,6 +83,8 @@ class RlWeightUpdate:
                 raise ValueError(f"HF shape mismatch for {name}: {tuple(tensor.shape)}")
             if tensor.dtype not in (torch.bfloat16, torch.float32) or tensor.device != self.device:
                 raise ValueError(f"HF parameter must be BF16 or FP32 on {self.device}: {name}")
+            if self.source_dtypes is not None and tensor.dtype != self.source_dtypes[name]:
+                raise ValueError(f"HF dtype mismatch for {name}: {tensor.dtype} != {self.source_dtypes[name]}")
             yield name, tensor
             # The loader owns pending group tensors. All reads and in-place
             # writes on our stream are complete before the producer gets ACK.
@@ -78,6 +104,7 @@ class RlWeightUpdate:
                     self._inputs(),
                     str(self.device),
                     max_buffer_bytes=self.max_buffer_bytes,
+                    borrow_singleton_sources=self.borrow_singleton_sources,
                 ):
                     key = (layer, name)
                     if key in self.applied or key not in self.targets:
@@ -89,14 +116,21 @@ class RlWeightUpdate:
                     else:
                         self.weights.update_layer_weight(layer, name, value)
                     self.applied.add(key)
+                    # Converted packed slices may alias the producer's IPC
+                    # source. Do not retain them while requesting the next
+                    # input, whose ACK permits that storage to be released.
+                    del value
                 if self.received != set(self.source_shapes) or self.applied != set(
                     self.targets
                 ):
                     raise ValueError("incomplete HF source or internal target coverage")
-                if any(
-                    v.data_ptr() != self.addresses[k] for k, v in self.targets.items()
+                live_targets = self._live_targets()
+                if set(live_targets) != set(self.addresses) or any(
+                    value.data_ptr() != self.addresses[key] for key, value in live_targets.items()
                 ):
                     raise RuntimeError("weight update replaced live tensor storage")
+                if any(not torch.equal(live_targets[key], before) for key, before in self._static_snapshots.items()):
+                    raise RuntimeError("weight update changed the fixed expert placement map")
                 if self.device.type == "cuda":
                     torch.cuda.current_stream(self.device).synchronize()
                 self._done.set_result(

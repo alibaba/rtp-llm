@@ -557,11 +557,13 @@ class ModelLoader:
         device: str,
         *,
         max_buffer_bytes: int,
+        borrow_singleton_sources: bool = False,
     ) -> Iterator[Tuple[Optional[int], str, torch.Tensor]]:
         """Stream HF inputs through the normal loader, including shared sources.
 
-        A single owned clone is shared by all consumers of each HF source, then
-        released when its last descriptor completes. The bound counts unique
+        An owned clone is shared by all consumers by default. An opt-in BF16
+        singleton packed expert source is borrowed until its descriptor completes.
+        Sources are released after their last descriptor; the bound counts unique
         pending input bytes, not temporary conversion/output tensors. Inference
         must remain paused until this iterator and the native transaction finish.
         """
@@ -600,7 +602,18 @@ class ModelLoader:
                         f"HF tensor buffer exceeds {max_buffer_bytes} bytes at {name}; "
                         "send complete weight groups together or increase the limit"
                     )
-                owned_tensor = tensor.detach().clone()
+                # A singleton packed expert descriptor is fully converted,
+                # copied and synchronized before RlWeightUpdate sends its ACK.
+                # Multi-input/shared groups still require an owned clone.
+                singleton = (
+                    borrow_singleton_sources
+                    and name.endswith((".mlp.experts.gate_up_proj", ".mlp.experts.down_proj"))
+                    and len(consumers[name]) == 1
+                    and group_names[consumers[name][0]] == {name}
+                )
+                if singleton and tensor.dtype != torch.bfloat16:
+                    raise ValueError("Borrowed packed expert inputs must be BF16")
+                owned_tensor = tensor.detach() if singleton else tensor.detach().clone()
                 if tensor.is_cuda:
                     torch.cuda.current_stream(tensor.device).synchronize()
                 ready = []
@@ -627,6 +640,10 @@ class ModelLoader:
                     for key, value in converted.items():
                         yield group.layer_id, key, value
                     del converted
+                    # A converted view must not keep the old IPC allocation
+                    # alive while the producer constructs its next parameter.
+                    value = None
+                del tensor
             missing = expected - seen
             if missing:
                 raise ValueError(f"missing HF tensors: {sorted(missing)}")
@@ -922,15 +939,15 @@ class ModelLoader:
             phy2log_path=phy2log_path,
         )
 
-        # dynamic expert balancer
-        from rtp_llm.eplb.ep_balancer import ExpertBalancer
-
-        model_path = self.model_config.ckpt_path
-        ep_lb_database = CkptDatabase(model_path)
-        compute_dtype = self.model_config.compute_dtype
-
+        # Static placement needs no checkpoint database. In metadata-only RL
+        # bootstrap, opening it here would bypass the payload-read guard.
         py_eplb = None
         if weights_info.enable_eplb_:
+            from rtp_llm.eplb.ep_balancer import ExpertBalancer
+
+            model_path = self.model_config.ckpt_path
+            ep_lb_database = CkptDatabase(model_path)
+            compute_dtype = self.model_config.compute_dtype
             py_eplb = ExpertBalancer(
                 weights_info=weights_info,
                 compute_dtype=compute_dtype,
