@@ -11,7 +11,7 @@ public final class RtpFifoScheduler extends AbstractRtpScheduler {
 
     RtpFifoScheduler(Object lock, RtpConfig config, KvCacheManager cache, TaskHistory finished) { super(lock, config, cache, finished); }
 
-    @Override protected void selectPrefill(List<Entry> selected) {
+    @Override protected void selectPrefill(List<GenerateStream> selected) {
         admitPrefill(waiting, selected, config.maxUncachedBatchTokens());
     }
 }
