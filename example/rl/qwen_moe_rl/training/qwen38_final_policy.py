@@ -140,6 +140,12 @@ def _forward_worker_setup():
 
 def worker_setup():
     """Passive hook: no Torch, Ray or CUDA initialization before GPU masking."""
+    # A Raylet may have inherited the deprecated alias even when the current
+    # driver has unset it. Remove it before either bridge or Torch imports.
+    os.environ.pop('PYTORCH_CUDA_ALLOC_CONF',None)
+    if (os.environ.get('RTP_LLM_RL_WORLD72')=='1'
+            and os.environ.get('PYTORCH_ALLOC_CONF')!='backend:native,expandable_segments:False'):
+        raise RuntimeError('World72 CUDA IPC requires explicit PYTORCH_ALLOC_CONF=backend:native,expandable_segments:False')
     import install_rtp_bridge as bridge
     if not getattr(bridge._install_driver,'_q38_final_policy_driver',False):
         original=bridge._install_driver

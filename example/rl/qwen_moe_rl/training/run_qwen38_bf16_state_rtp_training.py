@@ -39,6 +39,8 @@ def forward_worker_environment(runtime,environ):
     for name,value in environ.items():
         if name in names or name in ('EP_SIZE','FFN_SP_SIZE') or name.startswith(('Q38_','RTP_','RLLM_','NCCL_')):
             env[name]=value
+    if 'PYTORCH_ALLOC_CONF' in environ:
+        env.pop('PYTORCH_CUDA_ALLOC_CONF',None)
     return runtime
 
 
