@@ -245,8 +245,6 @@ bool MasterScheduleContextKernel::shouldBuildContext(int64_t currentTimeUs) cons
     return getNextScheduleDelayMs(currentTimeUs) <= 0;
 }
 
-
-
 int64_t MasterScheduleContextKernel::getNextScheduleDelayMs(int64_t currentTimeUs) const
 {
     auto maxWaitUs = _maxWaitScheduleTimeMs * 1000;
@@ -521,8 +519,8 @@ bool MasterScheduleContextKernel::applyQueueOverloadLimit(
             long double sum = 0.0;
             ClusterExecutionUtilization cluster;
             _executionUtilizationReportingNodes = 0;
-            for (size_t i = 0; i < context.nodeCount(); ++i) {
-                const auto &node = context.getNode(i);
+            // Admission observes all ready nodes, including cold-start routes.
+            for (const auto &node : context._scheduleNodes) {
                 if (node.getWorkloadRevision() > 0) {
                     cluster.add(node.getExecutionBusyUtilization(),
                                 node.getExecutionRunningRequests(),

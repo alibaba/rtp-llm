@@ -307,6 +307,8 @@ std::string NaviSchedMasterNodeSummary::format() const
         << "    last_request_latency_ms: " << lastRequestLatencyMs << "\n"
         << "    workload: revision=" << workload.revision
         << ", request_count=" << workload.requestCount
+        << ", running_requests=" << workload.runningRequestCount
+        << ", waiting_requests=" << workload.waitingRequestCount
         << ", remaining_prefill_requests=" << workload.remainingPrefillRequestCount
         << ", running_elapsed_time_ms=" << workload.runningElapsedTimeMs
         << ", running_decode_requests=" << workload.runningDecodeRequestCount
