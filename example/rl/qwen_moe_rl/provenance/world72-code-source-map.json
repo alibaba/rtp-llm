@@ -20,10 +20,12 @@
     },
     {
       "path": "example/rl/qwen_moe_rl/adapter/qwen38_world_server.py",
-      "sha256": "cd5376b963b061e62bf68087f41cebf2506a8170ae4233dddfa8d68aaa9e428d",
+      "sha256": "97c851c23fc5fb02f4889072535b33b395ae29ea581c68ef461168f1b6073c65",
       "production_source_sha256": "cd5376b963b061e62bf68087f41cebf2506a8170ae4233dddfa8d68aaa9e428d",
       "base_sha256": null,
-      "portable_changes": []
+      "portable_changes": [
+        "Use an exclusive SO_REUSEADDR availability probe for owned TCP restart after TIME_WAIT; active listeners remain conflicts."
+      ]
     },
     {
       "path": "example/rl/qwen_moe_rl/adapter/qwen38_verl_backend.py",

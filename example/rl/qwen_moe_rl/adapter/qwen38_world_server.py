@@ -32,6 +32,15 @@ from qwen38_world_contract import (
 from qwen38_refit_contract import validate_policy_probe_sources
 
 
+def _check_native_port_available(host, port):
+    # Match restartable TCP listeners: expired connections may retain a
+    # TIME_WAIT tuple after every owned process has actually exited.
+    # No SO_REUSEPORT: a live listener must remain an exclusive conflict.
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((host, port))
+
+
 def gpu_inventory():
     devices = subprocess.check_output(['nvidia-smi', '--query-gpu=index,uuid,memory.total,memory.used',
                                        '--format=csv,noheader,nounits'], text=True)
@@ -189,8 +198,7 @@ class WorldNodeOwner(RTPServer):
         _write_json(physical_map_path, fixed_layer_source_map())
         os.environ['RLLM_RTP_ACCEPTANCE_DIR'] = str(own_root)
         for port in range(self.topology.start_port - 11, self.topology.start_port + 4 * self.topology.rank_port_stride + 12):
-            with socket.socket() as probe:
-                probe.bind((self.node['host'], port))
+            _check_native_port_available(self.node['host'], port)
         environment = dict(os.environ)
         for key in ('RANK', 'WORLD_RANK', 'LOCAL_RANK', 'WORLD_SIZE', 'LOCAL_WORLD_SIZE',
                     'MASTER_ADDR', 'MASTER_PORT', 'DISTRIBUTE_CONFIG_FILE'):
