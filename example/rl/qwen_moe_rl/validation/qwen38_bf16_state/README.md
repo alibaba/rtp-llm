@@ -29,3 +29,27 @@ The final policy hook requires actual step-2 synchronization and fresh native
 probes before reporting success. The matching world adapter and SM100 native
 build remain separate prerequisites; checkpoints are disabled until a bounded
 state writer is provided.
+
+
+The bounded checkpoint path keeps attention/normalization, router, shared
+expert, and individual expert chunks in separate non-reentrant checkpoints.
+It recreates normalized inputs from the same saved residual storage instead
+of retaining a normalized activation for every chunk. Parameter names and
+mathematical routing and loss are preserved. The exact installed HF decoder
+source is guarded before this adaptation is enabled.
+
+In a real four-GPU, 32-chunk-per-layer test, whole-decoder recomputation kept
+32 expert chunks gathered concurrently. The bounded path kept one active
+chunk; one additional pending backward all-gather remained. An empty explicit
+backward prefetch list in Torch 2.13 falls back to its default lookahead, so
+this profile does not claim that backward prefetch is disabled. Budget both
+weight buffers and a separate FP32 reduce-scatter input.
+
+Tiny HF forward logits were bit exact. FP32 CPU gradients agreed to about
+2e-7 relative L2; BF16 backward accumulation order changed, producing about
+0.5% CPU and 1.1% four-GPU relative L2 gradient differences. All trainable
+parameters retained gradients, and the real four-GPU BF16 optimizer completed
+two updates with source-lease offload/restore. These are limited qualification
+results, not a full 2.4T memory peak, RL completion, or convergence result.
+The two `qualify_*checkpoint*` scripts use the checked-in official config
+fixture and random tiny weights; they never open official weight payloads.

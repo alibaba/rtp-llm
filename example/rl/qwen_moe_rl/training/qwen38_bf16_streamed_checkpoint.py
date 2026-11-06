@@ -63,18 +63,11 @@ def meta_checkpoint_model(auto_class, config, *args, **kwargs):
             raise RuntimeError(f'HF created a non-BF16 persistent policy master: {name} {parameter.dtype}')
     install_meta_chunks(model)
     install_meta_vocab_tiles(model)
-    # Non-reentrant activation checkpoint early-stop can otherwise finish
-    # recomputation at a different expert chunk on different routed ranks.
-    # Torch 2.13 exposes an explicit early_stop keyword, so keep every chunk
-    # recomputation in the same collective order without disabling checkpoints.
-    original_checkpoint_enable=model.gradient_checkpointing_enable
-    def checkpoint_enable(gradient_checkpointing_kwargs=None):
-        options=dict(gradient_checkpointing_kwargs or {})
-        if options.get('use_reentrant',False):
-            raise ValueError('The validated collective path requires non-reentrant activation checkpoints')
-        options.update(use_reentrant=False,early_stop=False)
-        return original_checkpoint_enable(gradient_checkpointing_kwargs=options)
-    model.gradient_checkpointing_enable=checkpoint_enable
+    # Whole-decoder recomputation keeps every FSDP expert chunk unsharded
+    # until backward (48GiB of BF16 experts in one real layer). Bound each
+    # checkpoint to one chunk, with separate attention/router/shared regions.
+    from qwen38_bounded_checkpoint import install_bounded_checkpoints
+    install_bounded_checkpoints(model)
     if sum(p.numel() for p in model.parameters()) != POLICY_NUMEL:
         raise ValueError('HF meta model differs from the pinned main-policy coordinates')
     model._qwen38_checkpoint_path = str(Path(checkpoint).resolve(strict=True))
