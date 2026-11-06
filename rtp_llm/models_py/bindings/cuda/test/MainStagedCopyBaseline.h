@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostCopyStrategy.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
 namespace rtp_llm::crc_copy_benchmark::main_baseline {

@@ -254,8 +254,6 @@ MemoryOperationResponsePB::Code BlockTransferRequestConverter::encodeCode(CacheC
             return MemoryOperationResponsePB::INVALID_REQUEST;
         case CacheCopyError::IO_FAILED:
             return MemoryOperationResponsePB::IO_FAILED;
-        case CacheCopyError::CRC_COMPUTE_FAILED:
-            return MemoryOperationResponsePB::CRC_COMPUTE_FAILED;
         case CacheCopyError::CRC_MISMATCH:
             return MemoryOperationResponsePB::CRC_MISMATCH;
         default:
@@ -273,8 +271,6 @@ CacheCopyError BlockTransferRequestConverter::decodeCode(MemoryOperationResponse
             return CacheCopyError::INVALID_REQUEST;
         case MemoryOperationResponsePB::IO_FAILED:
             return CacheCopyError::IO_FAILED;
-        case MemoryOperationResponsePB::CRC_COMPUTE_FAILED:
-            return CacheCopyError::CRC_COMPUTE_FAILED;
         case MemoryOperationResponsePB::CRC_MISMATCH:
             return CacheCopyError::CRC_MISMATCH;
         default:

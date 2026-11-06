@@ -22,12 +22,30 @@ CrcBlockCopyBatch::CrcBlockCopyBatch(int, size_t, size_t, size_t, std::shared_pt
 
 CrcBlockCopyBatch::~CrcBlockCopyBatch() = default;
 
-CrcCopyStatus CrcBlockCopyBatch::store(const std::vector<CrcCopyItem>&, std::vector<CrcCopyFailure>&) {
-    return CrcCopyStatus::DEVICE_ERROR;
+CrcCopyState CrcBlockCopyBatch::store(const std::vector<CrcCopyItem>&, std::vector<CrcCopyFailure>&) {
+    return CrcCopyState::DEVICE_ERROR;
 }
 
-CrcCopyStatus CrcBlockCopyBatch::load(const std::vector<CrcCopyItem>&, std::vector<CrcCopyFailure>&) {
-    return CrcCopyStatus::DEVICE_ERROR;
+CrcCopyState CrcBlockCopyBatch::load(const std::vector<CrcCopyItem>&, std::vector<CrcCopyFailure>&) {
+    return CrcCopyState::DEVICE_ERROR;
 }
+
+CrcCopyState CrcBlockCopyBatch::trySubmit(const std::vector<CrcCopyItem>&, CrcCopyDirection) {
+    return CrcCopyState::DEVICE_ERROR;
+}
+
+CrcCopyState CrcBlockCopyBatch::poll() {
+    throw std::runtime_error("CRC async copy requires CUDA 13 x86 or ARM");
+}
+
+const std::vector<CrcCopyFailure>& CrcBlockCopyBatch::failures() const {
+    throw std::runtime_error("CRC async copy requires CUDA 13 x86 or ARM");
+}
+
+CrcCopyState CrcBlockCopyBatch::finish() {
+    return CrcCopyState::DEVICE_ERROR;
+}
+
+void CrcBlockCopyBatch::setTestHook(std::function<int(const char*, void*, void*)>) {}
 
 }  // namespace rtp_llm

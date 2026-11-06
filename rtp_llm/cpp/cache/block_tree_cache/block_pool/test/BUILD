@@ -63,6 +63,18 @@ cc_test(
 )
 
 cc_test(
+    name = "disk_io_executor_test",
+    srcs = ["DiskIOExecutorTest.cc"],
+    copts = copts(),
+    env = {"GPU_COUNT": "0"},
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:disk_io_executor",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "disk_block_pool_test",
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["DiskBlockPoolTest.cc"],

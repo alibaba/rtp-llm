@@ -404,7 +404,7 @@ struct Benchmark {
         return ops;
     }
 
-    rtp_llm::CrcCopyStatus invoke(size_t ix, int variant, bool store) {
+    rtp_llm::CrcCopyState invoke(size_t ix, int variant, bool store) {
         const auto& items = w.plans[ix]->items;
         if (variant == 0)
             return store ? production.store(items, failures) : production.load(items, failures);
@@ -429,7 +429,7 @@ struct Benchmark {
         } else {
             throw std::runtime_error("unknown copy variant");
         }
-        return rtp_llm::CrcCopyStatus::OK;
+        return rtp_llm::CrcCopyState::OK;
     }
 
     void poisonDevice(size_t ix) {
@@ -483,12 +483,12 @@ struct Benchmark {
         try {
             if (store) {
                 std::memset(w.host->p, 0xa5, size_t(w.maxBackings) * w.hostStride);
-                requireSync(invoke(ix, variant, true) == rtp_llm::CrcCopyStatus::OK, "D2H call failed");
+                requireSync(invoke(ix, variant, true) == rtp_llm::CrcCopyState::OK, "D2H call failed");
                 verifyHost(ix, variant == 0);
             } else {
                 prepareHost(ix);
                 poisonDevice(ix);
-                requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyStatus::OK, "H2D call failed");
+                requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyState::OK, "H2D call failed");
                 verifyDevice();
                 verifyHost(ix, true, true);
             }
@@ -510,7 +510,7 @@ struct Benchmark {
         const auto& plan = *w.plans[ix];
         prepareHost(ix);
         poisonDevice(ix);
-        requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyStatus::OK, "initial good CRC load failed");
+        requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyState::OK, "initial good CRC load failed");
         verifyDevice();
         const int    indices[]{0, plan.n / 2, plan.n - 1};
         const size_t offsets[]{0, w.p / 2, w.p - 1};
@@ -520,7 +520,7 @@ struct Benchmark {
                     w.host->bytes() + size_t(indices[location]) * w.hostStride + (footer ? w.e - 4 : offsets[location]);
                 *damaged ^= 1;
                 poisonDevice(ix);
-                requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyStatus::CRC_MISMATCH,
+                requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyState::CRC_MISMATCH,
                             "corrupted whole record was accepted");
                 // Ungated scatter: the rejected load still lands the record's
                 // payload. Footer damage lands a clean payload; payload damage
@@ -533,7 +533,7 @@ struct Benchmark {
                 if (flipped != ~size_t(0))
                     flipOracleByte(flipped);
                 *damaged ^= 1;
-                requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyStatus::OK,
+                requireSync(invoke(ix, variant, false) == rtp_llm::CrcCopyState::OK,
                             "good record rejected after failed load");
                 verifyDevice();
             }
@@ -583,22 +583,22 @@ static void mixedCrcSelfTest() {
             cu(cudaStreamSynchronize(setup.s));
         };
         poison();
-        requireSync(backend.load(items, failures) == rtp_llm::CrcCopyStatus::OK, "mixed old-record load failed");
+        requireSync(backend.load(items, failures) == rtp_llm::CrcCopyState::OK, "mixed old-record load failed");
         check();
         auto* corrupt = static_cast<unsigned char*>(items.back().host) + items.back().payload_bytes - 1;
         *corrupt ^= 1;
         // Ungated scatter: the rejected load still lands the corrupted payload byte.
         expected[size_t(n - 1) * slot + 17 + items.back().payload_bytes - 1] ^= 1;
         poison();
-        requireSync(backend.load(items, failures) == rtp_llm::CrcCopyStatus::CRC_MISMATCH, "mixed corruption accepted");
+        requireSync(backend.load(items, failures) == rtp_llm::CrcCopyState::CRC_MISMATCH, "mixed corruption accepted");
         check();
         expected[size_t(n - 1) * slot + 17 + items.back().payload_bytes - 1] ^= 1;
         *corrupt ^= 1;
-        requireSync(backend.load(items, failures) == rtp_llm::CrcCopyStatus::OK, "mixed stale verdict after failure");
+        requireSync(backend.load(items, failures) == rtp_llm::CrcCopyState::OK, "mixed stale verdict after failure");
         check();
         // Poison the entire output so footer/padding must be produced by store.
         std::memset(host.p, 0xa5, 32 * hostSlot);
-        requireSync(backend.store(items, failures) == rtp_llm::CrcCopyStatus::OK, "mixed store failed");
+        requireSync(backend.store(items, failures) == rtp_llm::CrcCopyState::OK, "mixed store failed");
         for (int b = 0; b < n; ++b) {
             const auto&  item    = items[b];
             const auto*  record  = static_cast<const unsigned char*>(item.host);
@@ -617,7 +617,7 @@ static void mixedCrcSelfTest() {
                 requireSync(base[i] == 0xa5, "mixed host suffix overwritten");
         }
         poison();
-        requireSync(backend.load(items, failures) == rtp_llm::CrcCopyStatus::OK, "mixed new-record load failed");
+        requireSync(backend.load(items, failures) == rtp_llm::CrcCopyState::OK, "mixed new-record load failed");
         check();
         ++round;
     }
@@ -791,8 +791,9 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << "\",\"seed\":" << options.seed << ",\"source_commit\":\"" << provenance("CRC_BENCH_SOURCE_COMMIT")
        << "\",\"base_commit\":\"" << provenance("CRC_BENCH_BASE_COMMIT") << "\",\"binary_sha256\":\""
        << provenance("CRC_BENCH_BINARY_SHA256") << "\""
+       << ",\"measurement_layer\":\"copy_primitive\",\"main_staged_implementation\":\"legacy\""
        << ",\"shape_source\":\"CacheConfigCreator+DeviceBlockPoolConfigHelper\""
-       << ",\"staged_no_crc_source\":\"production StagedSmDeviceHostCopyStrategy with shared CopyTileKernel and direct HOST-segment DMA\""
+       << ",\"staged_no_crc_source\":\"legacy StagedSmDeviceHostCopyStrategy with shared CopyTileKernel and direct HOST-segment DMA\""
        << ",\"variants\":[\"integrated_crc\",\"copy1d_batch\",\"copy3d_batch\",\"staged_no_crc\",\"main_staged\"]"
        << ",\"exclude_1d_h2d\":" << (options.exclude1dH2d ? "true" : "false") << ",\"excluded_cases\":"
        << (options.exclude1dH2d ?
@@ -810,7 +811,7 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << ",\"measured_h2d_verified\":true"
        << ",\"correctness_only\":" << (options.correctnessOnly ? "true" : "false")
        << ",\"boundary\":\"prebuilt per-API inputs; complete synchronous calls including internal descriptors, checks, locks, metadata H2D, kernels, CPU pack/unpack for main_staged, data transfers, synchronization and CRC verdict\""
-       << ",\"production_source\":\"directly linked current workspace CrcBlockCopyBatch and DeviceHostCopyStrategy\""
+       << ",\"production_source\":\"directly linked current workspace CrcBlockCopyBatch and legacy DeviceHostCopyStrategy\""
        << ",\"main_staged_source\":\"" << mainStagedSourceCommit() << "\""
        << ",\"model\":\"DeepSeek-V4-Flash-0731\",\"target_layers\":43,\"kv_cache_sharded\":true"
        << ",\"copy3d_stream\":\"independent Torch nondefault pooled stream\""
@@ -1155,7 +1156,7 @@ int run(int argc, char** argv) {
                                 profile.calls == size_t(n) && profile.bytes == size_t(n) * w.p,
                                 "main staged payload memcpy count/bytes mismatch; profile interception is incomplete");
 #endif
-                        requireSync(status == CrcCopyStatus::OK, "measured copy call failed");
+                        requireSync(status == CrcCopyState::OK, "measured copy call failed");
                         // Check the actual measured addresses without including oracle work in the timing.
                         if (!store)
                             benchmark.verifyDevice();

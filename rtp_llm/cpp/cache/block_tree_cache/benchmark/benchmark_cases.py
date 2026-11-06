@@ -42,6 +42,7 @@ class BenchmarkCase:
     # Native process timeout override. The online Tree case needs to cover
     # setup + 15s warmup + 60s measured + drain + profiler teardown.
     expected_process_timeout_seconds: Optional[int] = None
+    transfer_implementation: str = "workloop"
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +63,8 @@ SMOKE_CASES = [
         suite="smoke",
         subcommand="transfer",
         params={
+            "--btc-transfer-engine-async": "true",
+            "--enable-crc": "true",
             "--group-set": "full_context",
             "--transfer-directions": "d2h",
             "--transfer-operation-count": "64",
@@ -104,11 +107,19 @@ def _transfer_case(
         "--transfer-operation-count": "4096",
         "--transfer-concurrency": str(concurrency),
         "--transfer-descriptor-batch-size": str(descriptor_batch_size),
-        "--transfer-worker-count": str(transfer_worker_count),
     }
     if business_concurrency > 0:
         params["--business-concurrency"] = str(business_concurrency)
         params["--descriptors-per-business"] = str(descriptors_per_business)
+    legacy = (
+        copy_strategy not in (None, "auto")
+        or transfer_worker_count != 1
+        or business_concurrency > 0
+    )
+    params["--btc-transfer-engine-async"] = "false" if legacy else "true"
+    params["--enable-crc"] = "false" if legacy else "true"
+    if legacy:
+        params["--transfer-worker-count"] = str(transfer_worker_count)
     if copy_strategy is not None:
         params["--copy-strategy"] = copy_strategy
     if disk_mode is not None:
@@ -123,6 +134,7 @@ def _transfer_case(
 
     return BenchmarkCase(
         name=name,
+        transfer_implementation="legacy" if legacy else "workloop",
         suite="profile",
         subcommand="transfer",
         params=params,

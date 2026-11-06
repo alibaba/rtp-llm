@@ -30,7 +30,7 @@ protected:
                                         const std::vector<const GroupSet*>&    group_sets) = 0;
 
 private:
-    friend class PerRankBlockTransferEngine;
+    friend class LegacyTransferEngine;
 
     std::shared_ptr<TransferAsyncContext>
     execute(TransferTask task, std::vector<HostBufferView> hosts, std::vector<const GroupSet*> group_sets);

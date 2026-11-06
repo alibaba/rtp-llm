@@ -60,10 +60,19 @@ const char* transferCopyActionName(TransferCopyAction action) {
 ControlledPerRankBlockTransferEngine::ControlledPerRankBlockTransferEngine(const std::vector<GroupSetPtr>&  groups,
                                                                            TransferCopyAction               action,
                                                                            std::shared_ptr<CallbackBarrier> barrier):
-    PerRankBlockTransferEngine(groups,
+    PerRankBlockTransferEngine(workLoopTestGroups(groups),
                                std::any_of(groups.begin(),
                                            groups.end(),
-                                           [](const GroupSetPtr& group) { return group->diskPool() != nullptr; })),
+                                           [](const GroupSetPtr& group) { return group->diskPool() != nullptr; }),
+                               {},
+                               128,
+                               8,
+                               4,
+                               10000,
+                               nullptr,
+                               0,
+                               4,
+                               true),
     action_(action),
     barrier_(std::move(barrier)) {}
 
@@ -93,7 +102,13 @@ size_t ControlledPerRankBlockTransferEngine::submittedBatchCount() const {
 }
 
 std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count) {
-    return block_transfer_engine_test::makeHostPool(payload_bytes, usable_count);
+    auto pool = block_transfer_engine_test::makeHostPool(payload_bytes, usable_count, true);
+    for (size_t block = 1; block <= usable_count; ++block) {
+        const auto buffer = pool->blockBuffer(static_cast<BlockIdxType>(block));
+        std::memset(buffer.addr, 0, buffer.stride_bytes);
+        block_transfer_engine_test::encodeTestRecord(buffer.addr, payload_bytes);
+    }
+    return pool;
 }
 
 DiskBlockIOStatus MemoryDiskBlockIO::openAndPreallocate(const std::string&, size_t bytes, bool) {
@@ -146,13 +161,15 @@ std::string MemoryDiskBlockIO::debugString() const {
 std::shared_ptr<BlockTreeDiskBlockPool>
 makeDiskPool(size_t payload_bytes, size_t usable_count, std::unique_ptr<DiskBlockIO> io) {
     return block_transfer_engine_test::makeDiskPool(
-        payload_bytes, usable_count, "/tmp", std::move(io), "block_tree_cache_disk");
+        payload_bytes, usable_count, "/tmp", std::move(io), "block_tree_cache_disk", true, true);
 }
 
 bool cudaAvailable() {
     try {
         return torch::cuda::is_available();
-    } catch (const std::exception&) { return false; }
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 DeviceBlockPoolPtr
@@ -416,6 +433,29 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
 
 }  // namespace
 
+std::vector<GroupSetPtr> workLoopTestGroups(std::vector<GroupSetPtr> groups) {
+    prepareGroupSets(groups);
+    for (const auto& group : groups) {
+        if (group->devicePools().empty() || (!group->hostPool() && !group->diskPool()))
+            continue;
+        bool real_gpu = true;
+        for (const auto& pool : group->devicePools()) {
+            if (pool->deviceIndex() < 0) {
+                real_gpu = false;
+                break;  // Structural fakes deliberately have no backing/layout strategies.
+            }
+            const auto buffers = pool->convertIndexToBuffer(0, 0);
+            real_gpu           = real_gpu && !buffers.empty() && buffers[0].addr;
+        }
+        if (real_gpu) {
+            auto layout = block_transfer_engine_test::makeTestBackingLayout(
+                group->payloadBytes(), true, group->usesPhysicalPayloadGeometry());
+            group->initialize(group->groupSetId(), group->topologyPtr(), group->groupTags(), layout);
+        }
+    }
+    return groups;
+}
+
 void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets) {
     prepareGroupSets(group_sets);
 }
@@ -425,7 +465,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                           std::shared_ptr<StorageBackend>            storage_backend,
                                                           std::shared_ptr<BroadcastManager>          broadcast_manager,
                                                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
-    prepareGroupSets(group_sets);
+    group_sets                       = workLoopTestGroups(std::move(group_sets));
+    config.btc_transfer_engine_async = true;
     if (!config.enable_remote_cache) {
         storage_backend = nullptr;
     }
@@ -457,7 +498,15 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                                         config.max_descriptors_per_transfer_batch,
                                                                         config.transfer_worker_count,
                                                                         config.transfer_queue_max_size,
-                                                                        cache_metrics_reporter);
+                                                                        cache_metrics_reporter,
+                                                                        0,
+                                                                        config.btc_crc_slot_count,
+                                                                        config.btc_transfer_engine_async);
+    if (std::all_of(group_sets.begin(), group_sets.end(), [](const auto& group) {
+            return group->devicePools().empty() || (!group->hostPool() && !group->diskPool()) || group->crcEnabled();
+        })) {
+        EXPECT_TRUE(per_rank_engine->asyncEnabled());
+    }
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
@@ -664,10 +713,14 @@ void BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(const BlockTreeCache& ca
     for (;;) {
         cache.task_pool_->waitForIdle();
         cache.transfer_dispatcher_->drainTransfers();
-        cache.transfer_dispatcher_->per_rank_engine_->transfer_task_pool_->waitForIdle();
+        auto& engine = *cache.transfer_dispatcher_->per_rank_engine_;
+        engine.waitForIdle();
         cache.task_pool_->waitForIdle();
+        engine.waitForIdle();
         std::lock_guard<std::mutex> lock(cache.transfer_dispatcher_->completion_mutex_);
-        if (cache.transfer_dispatcher_->transfer_completions_.empty()) {
+        const auto                  queues = engine.queueSizes();
+        if (cache.transfer_dispatcher_->inflight_transfers_ == 0 && cache.task_pool_->pending_tasks_.load() == 0
+            && queues.load == 0 && queues.background == 0 && queues.completion == 0) {
             return;
         }
     }
@@ -703,7 +756,9 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
         return true;
     } catch (const std::exception& error) {
         ADD_FAILURE() << "queue-rejection guard failed to restore thread pool: " << error.what();
-    } catch (...) { ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception"; }
+    } catch (...) {
+        ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception";
+    }
     cache.task_pool_.reset();
     return false;
 }
@@ -711,7 +766,8 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
 ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
                                                                        bool perform_successful_transfers,
                                                                        bool enable_disk_cache):
-    PerRankBlockTransferEngine(groups, enable_disk_cache),
+    PerRankBlockTransferEngine(
+        workLoopTestGroups(groups), enable_disk_cache, {}, 128, 8, 4, 10000, nullptr, 0, 4, true),
     group_set_results_(groups.size()),
     perform_successful_transfers_(perform_successful_transfers) {}
 
@@ -800,7 +856,7 @@ void fillDeviceBlock(const DeviceBlockPoolPtr& pool, BlockIdxType block, uint8_t
 void expectDeviceBlock(const DeviceBlockPoolPtr& pool, BlockIdxType block, uint8_t pattern) {
     for (const auto& buffer : pool->convertIndexToBuffer(0, block)) {
         auto                view = torch::from_blob(buffer.addr,
-                                     {static_cast<int64_t>(buffer.size_bytes)},
+                                                    {static_cast<int64_t>(buffer.size_bytes)},
                                      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
         const torch::Tensor host = view.cpu();
         const auto*         data = host.data_ptr<uint8_t>();
@@ -880,8 +936,8 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
                                                      options.enable_disk ? environment->disk_pools[0] : nullptr);
     auto swa            = block_transfer_engine_test::makeTestGroupSet(1,
                                                             environment->topology,
-                                                            {"group2"},
-                                                            {environment->device_pools[2]},
+                                                                       {"group2"},
+                                                                       {environment->device_pools[2]},
                                                             environment->host_pools[1],
                                                             options.enable_disk ? environment->disk_pools[1] : nullptr);
     environment->groups = {full, swa};

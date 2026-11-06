@@ -124,7 +124,7 @@ BlockTreeCache::~BlockTreeCache() {
     // Task-body idleness does not imply asynchronous RPC/transfer completion.
     // Keep dispatcher and cache state alive until transfer callbacks return,
     // then drain the settlement tasks those callbacks submitted.
-    transfer_dispatcher_->drainTransfers();
+    transfer_dispatcher_->shutdown();
     task_pool_->waitForIdle();
     transfer_dispatcher_.reset();
     task_pool_.reset();

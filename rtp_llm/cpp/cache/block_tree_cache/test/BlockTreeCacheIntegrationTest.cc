@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <cuda_runtime.h>
 
 #include <algorithm>
 #include <chrono>
@@ -109,7 +110,17 @@ public:
                                        bool                            succeed,
                                        bool                            pause_enabled   = true,
                                        size_t                          throw_on_submit = 0):
-        PerRankBlockTransferEngine(groups, enable_disk_cache),
+        PerRankBlockTransferEngine(block_tree_cache_test::workLoopTestGroups(groups),
+                                   enable_disk_cache,
+                                   {},
+                                   128,
+                                   8,
+                                   4,
+                                   10000,
+                                   nullptr,
+                                   0,
+                                   4,
+                                   true),
         pause_enabled_(pause_enabled),
         throw_on_submit_(throw_on_submit),
         succeed_(succeed) {}
@@ -1953,6 +1964,98 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneCascadesAtLeafWithoutC
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
 }
 
+TEST_F(BlockTreeCacheIntegrationTest, WorkLoopStoreEvictLoadRetainsBusinessReferencesAndInstallsOnlySuccess) {
+    if (!CrcBlockCopyBatch::available() || !cudaAvailable())
+        GTEST_SKIP() << "requires CUDA13 CRC";
+    for (bool corrupt : {false, true}) {
+        SCOPED_TRACE(corrupt);
+        constexpr size_t                         payload = 256;
+        block_transfer_engine_test::TempDirGuard temp("workloop_business");
+        auto                                     device = makeDevicePool({{payload, 0}}, 8, "workloop_business");
+        auto                                     host   = block_transfer_engine_test::makeHostPool(payload, 8, true);
+        auto                                     disk =
+            block_transfer_engine_test::makeDiskPool(payload, 8, temp.path, nullptr, "workloop_business", true, true);
+        auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
+            defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payload)});
+        auto group = block_transfer_engine_test::makeTestGroupSet(0, topology, {"group0"}, {device}, host, disk, true);
+        BlockTreeCacheConfig config;
+        config.enable_host_cache = config.enable_disk_cache = true;
+        config.btc_transfer_engine_async                    = true;
+        config.btc_crc_slot_count                           = 1;
+        config.device_disk_staging_block_count              = 4;
+        auto       cache                                    = makeBlockTreeCacheForTest({group}, config);
+        const auto request_sources                          = allocateDeviceBlocksForTest(*group, 1);
+        ASSERT_EQ(request_sources.size(), 1u);
+        const auto                 source        = request_sources[0][0];
+        const auto                 source_buffer = device->convertIndexToBuffer(0, source).front();
+        const std::vector<uint8_t> expected(payload, 0x37);
+        // This is the real producer boundary for the UT, before Store takes its
+        // existing STORE reference. No implicit stream dependency is assumed.
+        ASSERT_EQ(cudaMemcpy(source_buffer.addr, expected.data(), payload, cudaMemcpyHostToDevice), cudaSuccess);
+        std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+        resources[0][0].device_blocks = {source};
+        cache->insert({100}, resources, Tier::HOST);
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        auto nodes = cache->tree()->findNode({100});
+        ASSERT_EQ(nodes.size(), 1u);
+        const auto host_block = nodes[0]->group_set_resources[0].host_block;
+        ASSERT_NE(host_block, NULL_BLOCK_IDX);
+        EXPECT_EQ(host->treeRefCount(host_block), 1u);
+        EXPECT_EQ(device->treeRefCount(source), 0u);
+        device->decRef(source);
+        EXPECT_FALSE(device->isAllocated(source));
+
+        ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, 0, Tier::HOST));
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        const auto disk_block = nodes[0]->group_set_resources[0].disk_block;
+        ASSERT_NE(disk_block, NULL_BLOCK_IDX);
+        EXPECT_FALSE(host->isAllocated(host_block));
+        EXPECT_EQ(disk->treeRefCount(disk_block), 1u);
+        if (corrupt) {
+            std::vector<uint8_t> bytes(disk->strideBytes());
+            ASSERT_EQ(disk->read(disk_block, bytes.data(), bytes.size()), BlockIOStatus::OK);
+            bytes[0] ^= 1;
+            ASSERT_EQ(disk->write(disk_block, bytes.data(), bytes.size()), BlockIOStatus::OK);
+        }
+        auto match   = cache->match({100});
+        auto context = takeLoadContext(match);
+        ASSERT_NE(context, nullptr);
+        const auto targets = device->malloc(1).value();
+        device->incRef(targets);
+        context->load_descs_[0].target_blocks = targets;
+        ASSERT_TRUE(context->commit());
+        context->waitDone();
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        EXPECT_EQ(context->success(), !corrupt);
+        if (corrupt) {
+            // Existing CRC settlement invalidates the corrupt source. It must
+            // neither install a target nor preserve the bad disk cache entry.
+            const auto after_failure = cache->tree()->findNode({100});
+            if (!after_failure.empty()) {
+                EXPECT_FALSE(after_failure.back()->group_set_resources[0].hasTier(Tier::DEVICE));
+                EXPECT_FALSE(after_failure.back()->group_set_resources[0].hasTier(Tier::DISK));
+            }
+            EXPECT_FALSE(disk->isAllocated(disk_block));
+            EXPECT_EQ(device->treeRefCount(targets[0]), 0u);
+        } else {
+            EXPECT_TRUE(nodes[0]->group_set_resources[0].hasTier(Tier::DEVICE));
+            std::vector<uint8_t> actual(payload);
+            ASSERT_EQ(cudaMemcpy(actual.data(),
+                                 device->convertIndexToBuffer(0, targets[0]).front().addr,
+                                 payload,
+                                 cudaMemcpyDeviceToHost),
+                      cudaSuccess);
+            EXPECT_EQ(actual, expected);
+        }
+        context.reset();
+        cache.reset();
+        device->decRef(targets);
+        EXPECT_EQ(device->freeBlocksNum(), 8u);
+        EXPECT_EQ(host->freeBlocksNum(), 8u);
+        EXPECT_EQ(disk->freeBlocksNum(), 8u);
+    }
+}
+
 TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
@@ -1977,6 +2080,9 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     const size_t       disk_free_before = disk_pool->freeBlocksNum();
     const BlockIdxType source_block     = group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
     ASSERT_FALSE(isNullBlockIdx(source_block));
+    std::vector<uint8_t> record(disk_pool->strideBytes(), 0);
+    block_transfer_engine_test::encodeTestRecord(record.data(), payload_bytes);
+    ASSERT_EQ(disk_pool->write(source_block, record.data(), record.size()), BlockIOStatus::OK);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].disk_block = source_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));

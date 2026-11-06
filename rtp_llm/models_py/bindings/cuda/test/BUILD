@@ -131,6 +131,7 @@ cc_library(
     deps = [
         ":main_staged_copy_kernel",
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/transfer/legacy",
         "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:device_block_pool_config_helper",

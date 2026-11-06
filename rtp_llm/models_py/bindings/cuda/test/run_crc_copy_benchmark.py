@@ -81,6 +81,11 @@ def source_provenance():
                 "the benchmark must identify the tested source and main baseline"
             )
         result[field] = value
+    patch = os.environ.get("CRC_BENCH_WORKTREE_PATCH_SHA256", "")
+    if patch:
+        if re.fullmatch(r"[0-9a-f]{64}", patch) is None:
+            raise ValueError("CRC_BENCH_WORKTREE_PATCH_SHA256 must be a SHA256 digest")
+        result["source_patch_sha256"] = patch
     return result
 
 

@@ -180,18 +180,24 @@ struct KVCacheConfig {
     std::string                             disk_cache_paths                                = "";
     int64_t                                 disk_cache_size_mb                              = 0;
     bool                                    disk_cache_buffered_io                          = true;
+    int64_t                                 disk_cache_read_thread_count                    = 16;
+    int64_t                                 disk_cache_write_thread_count                   = 16;
     int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
     int64_t                                 disk_cache_staging_block_count                  = 128;
     int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
-    int64_t                                 block_tree_transfer_worker_count                = 4;
-    int64_t                                 block_tree_business_queue_max_size              = 10000;
-    int64_t                                 block_tree_transfer_queue_max_size              = 10000;
-    double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
-    double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
-    double block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
-    double block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
-    double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
-    double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    // Prefer WorkLoop for supported final layouts; legal legacy layouts fall back at creation.
+    bool btc_transfer_engine_async = true;
+    // Slots per device in each WorkLoop's private async CRC service.
+    int64_t btc_crc_slot_count                           = 8;
+    int64_t block_tree_transfer_worker_count             = 1;
+    int64_t block_tree_business_queue_max_size           = 10000;
+    int64_t block_tree_transfer_queue_max_size           = 10000;
+    double  block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
+    double  block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
+    double  block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
+    double  block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
+    double  block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
+    double  block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
     // FULL-only per-tier overrides: -1/-1 inherits the shared watermarks.
     double   block_tree_full_device_evict_low_watermark_ratio  = -1.0;
     double   block_tree_full_device_evict_high_watermark_ratio = -1.0;

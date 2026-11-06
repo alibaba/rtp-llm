@@ -223,7 +223,7 @@ TEST(StoreTaskRunnerTest, SplitHostAndDiskBatchesReportOneCrcErrorAfterAllComple
         auto* metric =
             metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>()->host_cache_copy_error_qps_metric;
         engine->contexts[1]->complete(
-            {ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC compute failed"), CacheCopyError::CRC_COMPUTE_FAILED});
+            {ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC mismatch"), CacheCopyError::CRC_MISMATCH});
         engine->contexts[0]->complete(
             {ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "RPC failed"), CacheCopyError::RPC_FAILED});
         EXPECT_EQ(callbacks, 0u);
@@ -232,7 +232,7 @@ TEST(StoreTaskRunnerTest, SplitHostAndDiskBatchesReportOneCrcErrorAfterAllComple
         EXPECT_EQ(callbacks, 1u);
         EXPECT_EQ(metric->metric_data_->Size(), 1u);
         kmonitor::MetricsTags tags("copy_direction", "FROM_GPU");
-        tags.AddTag("error_type", "CRC_COMPUTE_FAILED");
+        tags.AddTag("error_type", "CRC_MISMATCH");
         auto* series = metric->DeclareMetric(&tags);
         ASSERT_NE(series, nullptr);
         kmonitor::MetricsRecord snapshot(nullptr, nullptr, 0);

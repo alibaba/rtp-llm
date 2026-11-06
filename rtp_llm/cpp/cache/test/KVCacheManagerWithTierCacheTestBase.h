@@ -26,6 +26,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
@@ -170,7 +171,8 @@ public:
     explicit PausableRecordingTransferEngine(const std::vector<GroupSetPtr>& groups,
                                              bool                            enable_disk_cache,
                                              size_t                          device_disk_staging_block_count = 4):
-        PerRankBlockTransferEngine(groups, enable_disk_cache, {}, device_disk_staging_block_count) {}
+        PerRankBlockTransferEngine(
+            groups, enable_disk_cache, {}, device_disk_staging_block_count, 8, 4, 10000, nullptr, 0, 4, true) {}
 
     std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         const auto& descriptors      = task.descriptors();
@@ -383,7 +385,9 @@ inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_p
     config.disk_cache_size_mb             = layout == TierLayout::HOST_DISK ? lower_cache_size_mb : 0;
     config.disk_cache_buffered_io         = true;
     config.disk_cache_sync_timeout_ms     = 5000;
-    config.disk_cache_staging_block_count = 2;
+    config.disk_cache_staging_block_count = 8;
+    config.btc_transfer_engine_async      = true;
+    config.enable_crc                     = true;
     config.reuse_cache_tail_blocks        = std::numeric_limits<int>::max();
     return config;
 }
@@ -1394,6 +1398,7 @@ protected:
         ASSERT_TRUE(manager_->init());
         ASSERT_NE(manager_->blockTreeCache(), nullptr);
         auto cache = manager_->blockTreeCache();
+        ASSERT_TRUE(cache->transfer_dispatcher_->per_rank_engine_->asyncEnabled());
         ASSERT_TRUE(cache->isHostCacheEnabled());
         ASSERT_EQ(cache->isDiskCacheEnabled(), GetParam() == TierLayout::HOST_DISK);
         ASSERT_NO_FATAL_FAILURE(expectDsv4TierTopology(manager_, cache_config_, GetParam()));
@@ -1403,6 +1408,7 @@ protected:
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, 0.0);
         transfer_engine_ =
             std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets(), true, cache->isDiskCacheEnabled());
+        ASSERT_TRUE(transfer_engine_->asyncEnabled());
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, transfer_engine_);
     }
 

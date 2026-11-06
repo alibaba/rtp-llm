@@ -1,8 +1,23 @@
 # BlockTreeCache Benchmark
 
-## Device/Host copy API priority
+Tree 和默认 Transfer 使用真实 CRC layout 与 WorkLoop，benchmark 默认
+`--btc-transfer-engine-async=true --enable-crc=true`；服务配置也默认开启 async，按最终布局选择实现。
+默认 case 检查实际选择 WorkLoop，不能把布局回退计作新路径结果。
 
-默认顺序为 `cuda_batch > sm > generic`。
+Transfer 支持 `--btc-crc-slot-count`（每个异步 CRC service 在每 GPU 上的 slot 数 C，默认 8）、
+`--transfer-queue-max-size`（驻留 batch 预算 Q，默认 10000）和现有 descriptor batch/staging 参数。
+`--transfer-worker-count`、`--copy-strategy=batch|staged-sm` 只允许显式 legacy case：
+`--btc-transfer-engine-async=false --enable-crc=false`。registry 中原策略与 worker 比较均显式标为 legacy。
+保留原 2 个 smoke、81 个 profile case；Tree 与默认 auto Transfer 为 WorkLoop。
+
+结果 `resolved_config` 包含 `transfer_implementation`、配置 bool、CRC、owner/worker、C/M/Q、staging
+和 `layout_fallback_reason`；manifest 包含 `expected_transfer_implementation`。
+WorkLoop Device copy 的 `actual_copy_strategy=crc`，不把旧策略计时伪装成 CRC kernel 计时。
+Host/Disk 初始数据由真实 CRC store 预填后再测量；主路径与 legacy 结果按实现分别解释。
+
+## legacy Device/Host copy API priority
+
+仅 legacy 普通 copy 使用 `cuda_batch > sm > generic`；WorkLoop 不读取此策略配置。
 
 `BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY` 可设置为 `cuda_batch`、`sm` 或 `generic`。
 只把指定接口移到首位，其他接口保持相对顺序。例如：
@@ -560,3 +575,7 @@ curl -sI "http://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/$PREFIX/index.html" 
 | tree 结果 `pressure_ready=false` | warmup 后未达到预期压力形态 | 查看 `warmup.*` / `pool.*` 快照解释容量或时长；它是观察项，不会单独使 repetition 无效 |
 | 某张 perf 火焰图样本很少 | 短 case 或大量 off-CPU 等待导致 on-CPU samples 不足 | 在报告标明样本数并避免强热点归因；必要时延长独立 profiling process，不伪装成 suite repetition |
 | suite 全部 case 秒挂、stderr 报 libpython | 见第一行 | 设置 `LD_LIBRARY_PATH` 后重跑 |
+
+manual CRC/profile binary 的 `measurement_layer=copy_primitive`，旧 staged 对比显式标为 legacy；
+它不测量 WorkLoop 调度。driver 在设置 `CRC_BENCH_SOURCE_COMMIT`、`CRC_BENCH_BASE_COMMIT` 后，
+可用 `CRC_BENCH_WORKTREE_PATCH_SHA256` 为未提交工作区补丁记录 SHA256；该值写入 run manifest。

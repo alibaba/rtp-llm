@@ -335,6 +335,22 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="磁盘 KV cache 是否使用 buffered I/O。默认开启。",
     )
     kv_cache_group.add_argument(
+        "--disk_cache_read_thread_count",
+        env_name="DISK_CACHE_READ_THREAD_COUNT",
+        bind_to=(kv_cache_config, "disk_cache_read_thread_count"),
+        type=int,
+        default=16,
+        help="每个磁盘 backing file 的异步读线程数，必须为正数，默认 16。",
+    )
+    kv_cache_group.add_argument(
+        "--disk_cache_write_thread_count",
+        env_name="DISK_CACHE_WRITE_THREAD_COUNT",
+        bind_to=(kv_cache_config, "disk_cache_write_thread_count"),
+        type=int,
+        default=16,
+        help="每个磁盘 backing file 的异步写线程数，必须为正数，默认 16。",
+    )
+    kv_cache_group.add_argument(
         "--disk_cache_sync_timeout_ms",
         env_name="DISK_CACHE_SYNC_TIMEOUT_MS",
         bind_to=(kv_cache_config, "disk_cache_sync_timeout_ms"),
@@ -348,7 +364,11 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "disk_cache_staging_block_count"),
         type=int,
         default=128,
-        help="单个 rank Device<->Disk 的 staging 总预算（按最大块大小计），Full/SWA 各占一半；默认各至少容纳 64 块。",
+        help=(
+            "异步模式每对 Load/Offload loops 的 staging 块数，FULL/SWA 各一半，"
+            "再按方向拆分，各类别使用自己的 stride；缺失类别不分配。"
+            "legacy 保留每 rank 按最大块大小折算字节预算。"
+        ),
     )
     kv_cache_group.add_argument(
         "--memory_cache_max_descriptors_per_transfer_batch",
@@ -359,12 +379,31 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="各传输方向共用的最大 descriptor 批大小；Disk->Device 还受 staging 容量限制，Device->Disk 保留单项提交。",
     )
     kv_cache_group.add_argument(
+        "--btc_transfer_engine_async",
+        env_name="BTC_TRANSFER_ENGINE_ASYNC",
+        bind_to=(kv_cache_config, "btc_transfer_engine_async"),
+        type=str2bool,
+        default=True,
+        help="默认开启，按最终布局选择 WorkLoop，每方向数量由 block_tree_transfer_worker_count 控制；不支持的合法布局回退 legacy；设为 false 使用 legacy。",
+    )
+    kv_cache_group.add_argument(
+        "--btc_crc_slot_count",
+        env_name="BTC_CRC_SLOT_COUNT",
+        bind_to=(kv_cache_config, "btc_crc_slot_count"),
+        type=int,
+        default=8,
+        help=(
+            "每个 WorkLoop 的独立 CRC service 在每个 device 上的 slot 数，默认 8；"
+            "每 device 总数为 2 * block_tree_transfer_worker_count * btc_crc_slot_count。"
+        ),
+    )
+    kv_cache_group.add_argument(
         "--block_tree_transfer_worker_count",
         env_name="BLOCK_TREE_TRANSFER_WORKER_COUNT",
         bind_to=(kv_cache_config, "block_tree_transfer_worker_count"),
         type=int,
-        default=4,
-        help="BlockTreeCache 每 rank 每个方向的 TransferEngine worker 数；入 GPU 和后台传输各建一个线程池。",
+        default=1,
+        help="每 rank 每方向的 TransferEngine 执行线程数；异步模式为 WorkLoop 数，legacy 为 worker 数，默认 1。",
     )
     kv_cache_group.add_argument(
         "--block_tree_business_queue_max_size",
@@ -380,7 +419,10 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "block_tree_transfer_queue_max_size"),
         type=int,
         default=10000,
-        help="BlockTreeCache 下层传输任务队列容量上限。",
+        help=(
+            "每方向传输总容量：旧模式限制排队任务；异步按 worker 数静态分配驻留 batch 额度，"
+            "要求 Q >= worker_count。配额不能跨 loop 借用。"
+        ),
     )
     for tier, low, high in (
         ("device", 0.82, 0.90),

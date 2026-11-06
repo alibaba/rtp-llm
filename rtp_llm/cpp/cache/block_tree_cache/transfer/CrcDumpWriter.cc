@@ -149,10 +149,9 @@ std::string CrcDumpWriter::write(const CrcCopyItem&        item,
         metadata["checked_footer_available"] = failure.checked_footer_available ? "true" : "false";
         metadata["expected_crc32c"] =
             failure.checked_footer_available ? std::to_string(failure.expected) : "unavailable";
-        metadata["actual_crc32c"] =
-            failure.status == CrcCopyStatus::CRC_COMPUTE_ERROR ? "unavailable" : std::to_string(failure.actual);
+        metadata["actual_crc32c"]      = std::to_string(failure.actual);
         metadata["gpu_crc_status"] = std::to_string(failure.nvcomp_status);
-        metadata["failure_stage"]  = failure.status == CrcCopyStatus::CRC_COMPUTE_ERROR ? "crc_compute" : "source_crc";
+        metadata["failure_stage"]      = "source_crc";
         metadata["cpu_address"]    = std::to_string(reinterpret_cast<uintptr_t>(item.host));
         metadata["cpu_capacity_bytes"] = std::to_string(item.capacity_bytes);
         metadata["cpu_captured"]       = cpu_captured ? "true" : "false";

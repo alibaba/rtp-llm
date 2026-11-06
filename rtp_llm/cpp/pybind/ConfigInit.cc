@@ -491,10 +491,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disk_cache_paths", &KVCacheConfig::disk_cache_paths)
         .def_readwrite("disk_cache_size_mb", &KVCacheConfig::disk_cache_size_mb)
         .def_readwrite("disk_cache_buffered_io", &KVCacheConfig::disk_cache_buffered_io)
+        .def_readwrite("disk_cache_read_thread_count", &KVCacheConfig::disk_cache_read_thread_count)
+        .def_readwrite("disk_cache_write_thread_count", &KVCacheConfig::disk_cache_write_thread_count)
         .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
         .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
+        .def_readwrite("btc_transfer_engine_async", &KVCacheConfig::btc_transfer_engine_async)
+        .def_readwrite("btc_crc_slot_count", &KVCacheConfig::btc_crc_slot_count)
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
@@ -597,7 +601,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      14,
+                                      17,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -679,13 +683,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_tree_full_memory_evict_high_watermark_ratio,
                                       self.block_tree_full_disk_evict_low_watermark_ratio,
                                       self.block_tree_full_disk_evict_high_watermark_ratio,
-                                      self.kvcm_task_timeout_ms);
+                                      self.kvcm_task_timeout_ms,
+                                      self.btc_crc_slot_count,
+                                      self.btc_transfer_engine_async,
+                                      self.disk_cache_read_thread_count,
+                                      self.disk_cache_write_thread_count);
             },
             [](py::tuple t) {
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
                     || t[0].cast<std::string>() != "KVCacheConfig"
-                    || !((t.size() == 83 && t[1].cast<int>() == 13)
-                         || (t.size() == 84 && t[1].cast<int>() == 14))) {
+                    || !((t.size() == 83 && t[1].cast<int>() == 13) || (t.size() == 84 && t[1].cast<int>() == 14)
+                         || (t.size() == 85 && t[1].cast<int>() == 15) || (t.size() == 86 && t[1].cast<int>() == 16)
+                         || (t.size() == 88 && t[1].cast<int>() == 17))) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -771,8 +780,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.block_tree_full_memory_evict_high_watermark_ratio = t[80].cast<double>();
                 c.block_tree_full_disk_evict_low_watermark_ratio    = t[81].cast<double>();
                 c.block_tree_full_disk_evict_high_watermark_ratio   = t[82].cast<double>();
-                if (t.size() == 84) {
+                if (t.size() >= 84) {
                     c.kvcm_task_timeout_ms = t[83].cast<int>();
+                }
+                if (t.size() >= 85) {
+                    c.btc_crc_slot_count = t[84].cast<int64_t>();
+                }
+                if (t.size() >= 86) {
+                    c.btc_transfer_engine_async = t[85].cast<bool>();
+                }
+                if (t.size() >= 88) {
+                    c.disk_cache_read_thread_count  = t[86].cast<int64_t>();
+                    c.disk_cache_write_thread_count = t[87].cast<int64_t>();
                 }
                 if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
                     || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())

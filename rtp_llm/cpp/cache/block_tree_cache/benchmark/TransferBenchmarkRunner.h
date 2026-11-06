@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/LegacyCopyBenchmarkSupport.h"
 #include <map>
 #include <memory>
 #include <string>
@@ -12,22 +13,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
 namespace rtp_llm::benchmark {
-
-struct BenchmarkDeviceHostCopyStats {
-    std::atomic<size_t> staged_sm{0};
-    std::atomic<size_t> cuda_batch{0};
-    std::atomic<size_t> generic{0};
-    std::atomic<int64_t> lowest_api_ns{0};
-    std::atomic<size_t> lowest_api_calls{0};
-
-    void reset() {
-        staged_sm.store(0, std::memory_order_relaxed);
-        cuda_batch.store(0, std::memory_order_relaxed);
-        generic.store(0, std::memory_order_relaxed);
-        lowest_api_ns.store(0, std::memory_order_relaxed);
-        lowest_api_calls.store(0, std::memory_order_relaxed);
-    }
-};
 
 class TransferBenchmarkRunner {
 public:

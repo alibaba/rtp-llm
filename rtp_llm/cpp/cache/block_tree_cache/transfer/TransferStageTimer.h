@@ -4,6 +4,7 @@
 #include <chrono>
 #include <memory>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
@@ -84,6 +85,25 @@ class TransferStageTimer {
     };
 
 public:
+    TransferStageTimer() noexcept                            = default;
+    TransferStageTimer(const TransferStageTimer&)            = delete;
+    TransferStageTimer& operator=(const TransferStageTimer&) = delete;
+    // Ownership may move between the submitter and its Entry, never concurrently
+    // with finish(). Disarm the source so its destructor cannot report failure.
+    TransferStageTimer(TransferStageTimer&& other) noexcept {
+        moveFrom(other);
+    }
+    TransferStageTimer& operator=(TransferStageTimer&& other) noexcept {
+        if (this != &other) {
+            finish(false);
+            moveFrom(other);
+        }
+        return *this;
+    }
+    explicit operator bool() const noexcept {
+        return enabled_;
+    }
+
     TransferStageTimer(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
                        const char*                                    stage,
                        int64_t                                        request_id,
@@ -113,7 +133,34 @@ public:
         TransferStageTimer(
             ReporterRef{&reporter}, stage, request_id, begin, end, rank, scope, transfer_id, identity, kind) {}
 
+    // A WorkLoop keeps its reporter alive until every Entry and callback drains.
+    // A nullable borrowed observer also supports profiling without a reporter.
+    TransferStageTimer(const BlockTreeCacheMetricsReporter* reporter,
+                       const char*                          stage,
+                       int64_t                              request_id,
+                       size_t                               begin,
+                       size_t                               end,
+                       int64_t                              rank        = -1,
+                       const char*                          scope       = "worker_batch",
+                       uint64_t                             transfer_id = 0,
+                       CacheStageContext                    identity    = {},
+                       AsyncProfileKind                     kind        = AsyncProfileKind::Execution) noexcept:
+        TransferStageTimer(
+            ReporterRef{reporter}, stage, request_id, begin, end, rank, scope, transfer_id, identity, kind) {}
+
 private:
+    void moveFrom(TransferStageTimer& other) noexcept {
+        reporter_owner_ = std::move(other.reporter_owner_);
+        reporter_       = other.reporter_;
+        stage_          = other.stage_;
+        rank_           = other.rank_;
+        scope_          = other.scope_;
+        identity_       = other.identity_;
+        start_us_       = other.start_us_;
+        span_           = std::move(other.span_);
+        finished_.store(other.finished_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        enabled_ = std::exchange(other.enabled_, false);
+    }
     TransferStageTimer(ReporterRef       reporter,
                        const char*       stage,
                        int64_t           request_id,
@@ -190,10 +237,12 @@ public:
             return {};
         }
     }
-    void finish(bool success) noexcept {
+    // Return the first observation's elapsed time for consumers sharing this
+    // boundary. Disabled/already-finished timers return -1 without a clock read.
+    int64_t finish(bool success) noexcept {
         if (!enabled_ || finished_.load(std::memory_order_relaxed)
             || finished_.exchange(true, std::memory_order_acq_rel))
-            return;
+            return -1;
         const auto end_us = AsyncProfileSession::steadyNowUs();
         span_.finishAtSteady(end_us);
         if (reporter_)
@@ -205,6 +254,7 @@ public:
                                            identity_.operation,
                                            identity_.source,
                                            identity_.target);
+        return end_us - start_us_;
     }
 
 private:
@@ -213,10 +263,10 @@ private:
     inline static thread_local void (*allocation_probe_)(const char*) = nullptr;
     friend class TransferStageTimerTestPeer;
     std::shared_ptr<BlockTreeCacheMetricsReporter> reporter_owner_;
-    const BlockTreeCacheMetricsReporter*           reporter_;
-    const char*                                    stage_;
-    int64_t                                        rank_;
-    const char*                                    scope_;
+    const BlockTreeCacheMetricsReporter*           reporter_{nullptr};
+    const char*                                    stage_{nullptr};
+    int64_t                                        rank_{-1};
+    const char*                                    scope_{"worker_batch"};
     CacheStageContext                              identity_;
     bool                                           enabled_{false};
     int64_t                                        start_us_{0};
