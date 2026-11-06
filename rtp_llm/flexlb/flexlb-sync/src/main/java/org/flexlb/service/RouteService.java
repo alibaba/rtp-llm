@@ -96,12 +96,13 @@ public class RouteService {
                 && balanceContext.getConfig().getDispatcher().requiresGenerateInput()
                 && !hasValidGenerateInput(balanceContext)) {
             Logger.warn(
-                    "{} dispatcher rejected request without serialized generate input: request_id={}",
+                    "{} dispatcher rejected request without serialized generate input:"
+                            + " request_id={}",
                     balanceContext.getConfig().getDispatcher().typeName(),
                     balanceContext.getRequestId());
             return CompletableFuture.completedFuture(
                     Response.buildErrorResponse(
-                            StrategyErrorType.INVALID_REQUEST,
+                            StrategyErrorType.GENERATE_INPUT_REQUIRED,
                             "missing serialized generate_input for batch dispatch"));
         }
         return submitScheduled(balanceContext);

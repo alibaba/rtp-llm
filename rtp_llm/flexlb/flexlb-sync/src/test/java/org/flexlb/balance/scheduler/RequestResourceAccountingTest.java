@@ -11,13 +11,14 @@ import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -330,14 +331,18 @@ class RequestResourceAccountingTest {
                                         .publishPreparedEndpoint(
                                                 worker.getIpPort(),
                                                 worker,
-                                                worker.prepareNewStatus(
-                                                        worker.freezeStatusResponse(
-                                                                status(
-                                                                        RoleType.PREFILL,
-                                                                        1,
-                                                                        Map.of(),
-                                                                        Map.of(),
-                                                                        TOTAL_KV))))
+                                                WorkerStatusTestFixtures.prepare(
+                                                        worker,
+                                                        org.flexlb.testfixture
+                                                                .WorkerStatusTestFixtures
+                                                                .observation(
+                                                                        worker,
+                                                                        status(
+                                                                                RoleType.PREFILL,
+                                                                                1,
+                                                                                Map.of(),
+                                                                                Map.of(),
+                                                                                TOTAL_KV))))
                                         .endpoint();
             } finally {
                 worker.lock.unlock();
@@ -532,7 +537,10 @@ class RequestResourceAccountingTest {
         try {
             projection =
                     endpoint.applyPreparedStatus(
-                            worker, worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+                            worker,
+                            WorkerStatusTestFixtures.prepare(
+                                    worker,
+                                    WorkerStatusTestFixtures.observation(worker, response)));
         } finally {
             worker.lock.unlock();
         }

@@ -1,9 +1,8 @@
 package org.flexlb.sync.schedule;
 
-import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.config.ConfigService;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.WorkerDirectory;
@@ -19,111 +18,98 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * Periodically evicts workers that have stopped sending WorkerStatus reports
- * (crash, network partition, OOM kill, etc.) from the routing tables.
- *
- * <p>Once the last successful status report is older than
- * {@code workerRegistry.health.statusStaleAfterMs}, the cleaner retires the
- * exact WorkerStatus generation and its endpoint together. Removing both
- * owners prevents routing from retaining a worker which service discovery no
- * longer observes.
+ * Completes pending retirement after confirmed discovery removal or three valid not-alive
+ * responses. RPC failures and elapsed time alone never evict workers.
  *
  * <p>Runs at {@code workerRegistry.health.cleanupIntervalMs} (default 3 seconds)
- * via Spring {@link Scheduled}. The configured stale timeout is deliberately longer than
- * one status RPC timeout so a single delayed poll does not evict a live worker.
+ * via Spring {@link Scheduled}.
  */
 @Component
 public class ExpirationCleaner {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private final long workerTimeoutUs;
     private final CacheAwareService cacheAwareService;
     private final WorkerDirectory workerDirectory;
 
     @Autowired
-    public ExpirationCleaner(
-            ConfigService configService,
-            CacheAwareService cacheAwareService,
-            WorkerDirectory workerDirectory) {
+    public ExpirationCleaner(CacheAwareService cacheAwareService, WorkerDirectory workerDirectory) {
         this.cacheAwareService = Objects.requireNonNull(cacheAwareService, "cacheAwareService");
         this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
-        this.workerTimeoutUs = resolveWorkerTimeoutUs(configService);
-    }
-
-    /**
-     * Resolve the worker expiration timeout in microseconds.
-     *
-     * <p>The worker registry owns this timeout. It is configured in milliseconds
-     * and converted to the monotonic microsecond clock used by WorkerStatus.
-     * The default 10 s is twice the default status RPC timeout, avoiding
-     * retirement on one transiently delayed poll.
-     */
-    private static long resolveWorkerTimeoutUs(ConfigService configService) {
-        long configMs =
-                configService
-                        .loadBalanceConfig()
-                        .getWorkerRegistry()
-                        .getHealth()
-                        .getStatusStaleAfterMs();
-        return configMs * 1000L;
     }
 
     @Scheduled(
             fixedRateString =
                     "#{@configService.loadBalanceConfig().workerRegistry.health.cleanupIntervalMs}")
-    public void cleanExpiredWorkers() {
+    public void retireUnavailableWorkers() {
+        if (logger.isInfoEnabled()) {
+            logger.info(
+                    "event=worker_counts phase=CLEANUP_START "
+                            + "prefill_discovered={} prefill_published={} "
+                            + "decode_discovered={} decode_published={} "
+                            + "vit_discovered={} vit_published={} "
+                            + "pdfusion_discovered={} pdfusion_published={}",
+                    workerDirectory.discoveredCount(RoleType.PREFILL),
+                    workerDirectory.routingCapacity(RoleType.PREFILL),
+                    workerDirectory.discoveredCount(RoleType.DECODE),
+                    workerDirectory.routingCapacity(RoleType.DECODE),
+                    workerDirectory.discoveredCount(RoleType.VIT),
+                    workerDirectory.routingCapacity(RoleType.VIT),
+                    workerDirectory.discoveredCount(RoleType.PDFUSION),
+                    workerDirectory.routingCapacity(RoleType.PDFUSION));
+        }
         List<PendingRetirement> retirements = new ArrayList<>();
         for (RoleType role : RoleType.values()) {
-            retirements.addAll(beginExpiredRetirements(workerDirectory.statusSnapshot(role), role));
+            retirements.addAll(beginPendingRetirements(workerDirectory.statusSnapshot(role), role));
         }
         completeRetirements(retirements);
     }
 
-    /** Phase one: close every expired routing gate without waiting on drains. */
-    private List<PendingRetirement> beginExpiredRetirements(
+    /** Phase one: close unhealthy routing gates without waiting on drains. */
+    private List<PendingRetirement> beginPendingRetirements(
             Map<String, WorkerStatus> workerStatusMap, RoleType role) {
-        if (MapUtils.isEmpty(workerStatusMap)) {
+        if (workerStatusMap.isEmpty()) {
             return List.of();
         }
 
         List<PendingRetirement> retirements = new ArrayList<>();
         for (Map.Entry<String, WorkerStatus> item : workerStatusMap.entrySet()) {
             WorkerStatus workerStatus = item.getValue();
+            WorkerStatus.RetirementReason reason = workerStatus.retirementReason();
+            if (reason == null) {
+                continue;
+            }
 
-            EndpointRegistry.DetachedGeneration endpointToRetire = null;
-            boolean retirementStarted = false;
-            workerStatus.lock.lock();
+            EndpointRegistry.DetachedGeneration endpointToRetire;
+            workerStatus.trace().record(Stage.RETIREMENT_CHECK_LOCK_ATTEMPT);
+            if (!workerStatus.lock.tryLock()) {
+                continue;
+            }
             try {
-                if (workerStatusMap.get(item.getKey()) != workerStatus) {
+                workerStatus.trace().record(Stage.RETIREMENT_CHECK_LOCK_ACQUIRED);
+                if (!workerDirectory.isCurrentStatus(role, item.getKey(), workerStatus)) {
                     continue;
                 }
                 if (!workerStatus.isActiveGeneration()) {
                     continue;
                 }
-                WorkerStatus.PollHealth health = workerStatus.pollHealth();
-                long expirationTime = health.lastSuccessfulPollUs() + workerTimeoutUs;
-                long currentTime = System.nanoTime() / 1000;
-                if (currentTime > expirationTime) {
-                    endpointToRetire =
-                            workerDirectory.beginRetirement(role, item.getKey(), workerStatus);
-                    retirementStarted = true;
-                }
+                endpointToRetire =
+                        workerDirectory.beginRetirement(
+                                role, item.getKey(), workerStatus, reason.name());
             } finally {
                 workerStatus.lock.unlock();
+                workerStatus.trace().record(Stage.RETIREMENT_CHECK_LOCK_RELEASED);
             }
-            if (retirementStarted) {
-                retirements.add(
-                        new PendingRetirement(workerStatus, role, item.getKey(), endpointToRetire));
-            }
+            retirements.add(
+                    new PendingRetirement(workerStatus, role, item.getKey(), endpointToRetire));
         }
         return retirements;
     }
 
-    /** Phase two: await already-detached generations and finalize identities. */
+    /** Phase two: hand off drains and exact-generation cleanup without waiting. */
     private void completeRetirements(List<PendingRetirement> retirements) {
         for (PendingRetirement retirement : retirements) {
-            workerDirectory.completeRetirement(
+            workerDirectory.completeRetirementAsync(
                     retirement.role(),
                     retirement.ipPort(),
                     retirement.workerStatus(),
@@ -131,10 +117,11 @@ public class ExpirationCleaner {
                     cacheAwareService,
                     logger);
             logger.warn(
-                    "Retiring expired worker: {}, role: {}, generation={}",
+                    "Retiring unavailable worker: {}, role: {}, generation={}, reason={}",
                     retirement.ipPort(),
                     retirement.role(),
-                    retirement.workerStatus().getGenerationId());
+                    retirement.workerStatus().getGenerationId(),
+                    retirement.workerStatus().retirementReason());
         }
     }
 

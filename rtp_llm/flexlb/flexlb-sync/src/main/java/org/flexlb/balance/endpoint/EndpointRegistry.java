@@ -309,7 +309,7 @@ public class EndpointRegistry {
         endpoints.computeIfPresent(
                 ipPort,
                 (ignored, current) -> {
-                    captured.set(current.tryPinGeneration());
+                    captured.set(current.tryPinSchedulingGeneration());
                     return current;
                 });
         return captured.get();
@@ -413,7 +413,8 @@ public class EndpointRegistry {
                         }
                         if (current != null) {
                             throw new IllegalStateException(
-                                    "Existing endpoint generation must be withdrawn before publication for "
+                                    "Existing endpoint generation must be withdrawn before"
+                                            + " publication for "
                                             + ipPort);
                         }
                         return candidate;
@@ -483,7 +484,8 @@ public class EndpointRegistry {
                                 if (observed != exactCurrent) {
                                     throw new IllegalStateException(
                                             role
-                                                    + " endpoint mapping changed outside its directory transaction: "
+                                                    + " endpoint mapping changed outside its"
+                                                    + " directory transaction: "
                                                     + address);
                                 }
                                 return next;

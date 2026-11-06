@@ -15,7 +15,6 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerIdentity;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
@@ -25,6 +24,8 @@ import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.metric.FlexStatisticsType;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -74,7 +75,8 @@ class EngineHealthReporterTest {
                         cacheMetricsReporter,
                         engineGrpcClient,
                         loopResources,
-                        workerDirectory);
+                        workerDirectory,
+                        mock(org.flexlb.service.monitor.StatusFailureReporter.class));
     }
 
     @Test
@@ -1304,7 +1306,6 @@ class EngineHealthReporterTest {
                 WorkerStatus.createDiscovered(role, null, ip, 8080, 8081, "test-site");
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
-        response.setCacheStatus(cacheStatus);
         response.setAlive(true);
         response.setStatusVersion(1L);
         response.setLatestFinishedVersion(0L);
@@ -1314,16 +1315,24 @@ class EngineHealthReporterTest {
         response.setTotalKvCacheTokens(totalKvCacheTokens);
         response.setRunningQueryLen(runningQueryLen);
         response.setWaitingQueryLen(waitingQueryLen);
+        response.setBlockSize(cacheStatus == null ? 0L : cacheStatus.getBlockSize());
 
         workerStatus.lock.lock();
         try {
             if (cacheStatus != null) {
-                workerStatus.publishCacheStatus(cacheStatus);
+                workerStatus.cacheMutationLock.lock();
+                try {
+                    workerStatus.publishCacheStatus(cacheStatus);
+                } finally {
+                    workerStatus.cacheMutationLock.unlock();
+                }
             }
             WorkerStatus.PreparedStatus prepared =
-                    workerStatus.prepareNewStatus(workerStatus.freezeStatusResponse(response));
+                    WorkerStatusTestFixtures.prepare(
+                            workerStatus,
+                            WorkerStatusTestFixtures.observation(workerStatus, response));
             workerStatus.publishPreparedStatus(prepared);
-            workerStatus.recordSuccessfulPoll(true);
+            WorkerStatusTestFixtures.receive(workerStatus, true, null);
         } finally {
             workerStatus.lock.unlock();
         }

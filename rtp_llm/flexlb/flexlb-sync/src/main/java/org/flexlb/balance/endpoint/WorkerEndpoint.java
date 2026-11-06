@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import lombok.Getter;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Objects;
@@ -127,10 +128,20 @@ public class WorkerEndpoint {
      * the point of the pin: a capture which linearized before registry detach
      * may finish its already accepted handoff. The owner must close the pin on
      * every selected, rejected, and exceptional path.</p>
+     *
+     * <p>New scheduling admissions require an available worker generation.</p>
      */
+    public final GenerationPin tryPinSchedulingGeneration() {
+        return hasAvailableSchedulingStatus() ? tryPinGeneration() : null;
+    }
+
     public final GenerationPin tryPinGeneration() {
         EndpointGenerationLifecycle.HandoffPermit permit = generationLifecycle.tryAcquireHandoff();
         return permit == null ? null : new GenerationPin(this, status.getGenerationId(), permit);
+    }
+
+    protected final boolean hasAvailableSchedulingStatus() {
+        return status.isAvailableForScheduling();
     }
 
     /** Validate an exact, still-open pin before consuming its admission right. */
@@ -168,6 +179,7 @@ public class WorkerEndpoint {
      */
     final void beginRetirement() {
         generationLifecycle.beginRetirement();
+        status.trace().record(Stage.ENDPOINT_GATE_CLOSED);
     }
 
     /**

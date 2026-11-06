@@ -3,9 +3,7 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/**
- * Per-worker concurrency limits for dispatch decisions.
- */
+/** Per-Prefill delivery concurrency: batches for BATCH, requests for NON_BATCH. Waiting queues do not consume it. */
 @Getter
 @Setter
 public final class DispatcherConfig {

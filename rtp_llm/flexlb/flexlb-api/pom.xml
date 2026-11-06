@@ -20,35 +20,42 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
 
-  <dependencies>
-    <dependency>
-      <groupId>org.flexlb</groupId>
-      <artifactId>flexlb-sync</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-webflux</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-test</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.mockito</groupId>
-      <artifactId>mockito-core</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>uk.org.webcompere</groupId>
-      <artifactId>system-stubs-jupiter</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>io.projectreactor</groupId>
-      <artifactId>reactor-test</artifactId>
-      <scope>test</scope>
-    </dependency>
-  </dependencies>
+    <dependencies>
+        <dependency>
+            <groupId>org.flexlb</groupId>
+            <artifactId>flexlb-common</artifactId>
+            <version>${project.version}</version>
+            <type>test-jar</type>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.flexlb</groupId>
+            <artifactId>flexlb-sync</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>uk.org.webcompere</groupId>
+            <artifactId>system-stubs-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.projectreactor</groupId>
+            <artifactId>reactor-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 
   <profiles>
     <!-- Internal profile - automatically activated when internal dependencies exists -->

@@ -51,8 +51,8 @@ class ConfigServiceTest {
                 7000L,
                 ConfigTestFixtures.parse(
                                 """
-                {"grpcServer":{"shutdownQuietPeriodMs":7000}}
-                """)
+                                {"grpcServer":{"shutdownQuietPeriodMs":7000}}
+                                """)
                         .getGrpcServer()
                         .getShutdownQuietPeriodMs());
         for (String value : new String[] {"0", "-1", "null", "1.5", "\"7000\""}) {
@@ -77,8 +77,8 @@ class ConfigServiceTest {
         FlexlbConfig.GrpcServerConfig grpc =
                 ConfigTestFixtures.parse(
                                 """
-                {"grpcServer":{"executorCoreSize":16,"executorMaxSize":32,"executorQueueSize":256}}
-                """)
+                                {"grpcServer":{"executorCoreSize":16,"executorMaxSize":32,"executorQueueSize":256}}
+                                """)
                         .getGrpcServer();
         assertEquals(16, grpc.getExecutorCoreSize());
         assertEquals(32, grpc.getExecutorMaxSize());
@@ -91,6 +91,62 @@ class ConfigServiceTest {
                     "{\"grpcServer\":{\"executorQueueSize\":0}}",
                     "{\"grpcServer\":{\"executorQueueSize\":-1}}",
                     "{\"grpcServer\":{\"executorCoreSize\":\"16\"}}"
+                }) {
+            assertThrows(
+                    ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);
+        }
+    }
+
+    @Test
+    void receivingCountsDefaultIndependentlyOfExecutorAndAcceptExplicitOverrides() {
+        var defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
+        assertEquals(1024, defaults.getMaxReceivingRequests());
+        assertEquals(128, defaults.getMaxReceivingControlRequests());
+        var configured =
+                ConfigTestFixtures.parse(
+                                """
+                {"grpcServer":{"executorCoreSize":64,"executorMaxSize":64,
+                 "maxReceivingRequests":4096,"maxReceivingControlRequests":16}}
+                """)
+                        .getGrpcServer();
+        assertEquals(4096, configured.getMaxReceivingRequests());
+        assertEquals(16, configured.getMaxReceivingControlRequests());
+        for (String field : new String[] {"maxReceivingRequests", "maxReceivingControlRequests"}) {
+            assertThrows(
+                    ConfigValidationException.class,
+                    () -> ConfigTestFixtures.parse("{\"grpcServer\":{\"" + field + "\":-1}}"));
+        }
+    }
+
+    @Test
+    void grpcKeepAlivePermitDefaultsAndOverridesAreValidated() {
+        FlexlbConfig.GrpcServerConfig defaults = ConfigTestFixtures.parse("{}").getGrpcServer();
+        assertEquals(10_000L, defaults.getPermitKeepAliveTimeMs());
+        assertTrue(defaults.isPermitKeepAliveWithoutCalls());
+        FlexlbConfig.GrpcServerConfig grpc =
+                ConfigTestFixtures.parse(
+                                """
+                {"grpcServer":{"permitKeepAliveTimeMs":30000,"permitKeepAliveWithoutCalls":false}}
+                """)
+                        .getGrpcServer();
+        assertEquals(30_000L, grpc.getPermitKeepAliveTimeMs());
+        assertFalse(grpc.isPermitKeepAliveWithoutCalls());
+        assertEquals(
+                0L,
+                ConfigTestFixtures.parse(
+                                """
+                {"grpcServer":{"permitKeepAliveTimeMs":0}}
+                """)
+                        .getGrpcServer()
+                        .getPermitKeepAliveTimeMs());
+        for (String patch :
+                new String[] {
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":-1}}",
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":null}}",
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":\"30000\"}}",
+                    "{\"grpcServer\":{\"permitKeepAliveTimeMs\":1.5}}",
+                    "{\"grpcServer\":{\"permitKeepAliveWithoutCalls\":\"true\"}}",
+                    "{\"grpcServer\":{\"permitKeepAliveWithoutCalls\":null}}"
                 }) {
             assertThrows(
                     ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch), patch);
@@ -142,7 +198,6 @@ class ConfigServiceTest {
         var health = config.getWorkerRegistry().getHealth();
         assertEquals(20L, health.getStatusPollIntervalMs());
         assertEquals(5000L, health.getStatusRpcTimeoutMs());
-        assertEquals(10000L, health.getStatusStaleAfterMs());
         assertEquals(3000L, health.getCleanupIntervalMs());
         var cache = config.getWorkerRegistry().getCacheStatus();
         assertEquals(30, cache.getTargetDiffSize());
@@ -236,23 +291,23 @@ class ConfigServiceTest {
         FlexlbConfig config =
                 ConfigTestFixtures.parse(
                         """
-                {
-                  "scheduler":{"ordering":{"type":"PRIORITY","defaultPriority":60,
-                    "preemption":{"allowedVictimStages":["DECODE_RESERVED","DECODE_ENGINE_OWNED"]}},
-                    "decision":{"maxRequests":12,"maxCollectionWaitMs":40,"maxPredictedExecutionMs":90}},
-                  "dispatcher":{"maxInflightPerPrefillWorker":4},
-                  "router":{
-                    "groupSelector":{"defaultTargets":[{"group":"blue"}],"rules":[{
-                      "name":"long-context","match":{"inputTokens":{"min":4096}},"targets":[{"group":"long"}]}]},
-                    "roles":{"prefill":{"executionTimeEstimator":{"expression":"sum(computeTokens)"},
-                      "cacheAffinity":{"maxExtraTtftMs":25,"minPrefixHitPercent":10}},
-                      "decode":{"availability":{"maxKvUsagePercent":85,"maxEngineRequests":128}}}},
-                  "workerRegistry":{"health":{"statusPollIntervalMs":25},
-                    "cacheStatus":{"minRefreshIntervalMs":100,"maxRefreshIntervalMs":2000}},
-                  "observability":{"cacheHit":{"recentKeyWindow":{"durationMs":60000,"maxKeyOccurrences":100000},
-                    "requestTraceLogEnabled":true,"theoryLog":{}}}
-                }
-                """);
+                        {
+                          "scheduler":{"ordering":{"type":"PRIORITY","defaultPriority":60,
+                            "preemption":{"allowedVictimStages":["DECODE_RESERVED","DECODE_ENGINE_OWNED"]}},
+                            "decision":{"maxRequests":12,"maxCollectionWaitMs":40,"maxPredictedExecutionMs":90}},
+                          "dispatcher":{"maxInflightPerPrefillWorker":4},
+                          "router":{
+                            "groupSelector":{"defaultTargets":[{"group":"blue"}],"rules":[{
+                              "name":"long-context","match":{"inputTokens":{"min":4096}},"targets":[{"group":"long"}]}]},
+                            "roles":{"prefill":{"executionTimeEstimator":{"expression":"sum(computeTokens)"},
+                              "cacheAffinity":{"maxExtraTtftMs":25,"minPrefixHitPercent":10}},
+                              "decode":{"availability":{"maxKvUsagePercent":85,"maxEngineRequests":128}}}},
+                          "workerRegistry":{"health":{"statusPollIntervalMs":25},
+                            "cacheStatus":{"minRefreshIntervalMs":100,"maxRefreshIntervalMs":2000}},
+                          "observability":{"cacheHit":{"recentKeyWindow":{"durationMs":60000,"maxKeyOccurrences":100000},
+                            "requestTraceLogEnabled":true,"theoryLog":{}}}
+                        }
+                        """);
         assertTrue(config.isPriorityOrdering());
         assertEquals(60, config.priorityOrdering().getDefaultPriority());
         assertTrue(
@@ -285,9 +340,9 @@ class ConfigServiceTest {
             FlexlbConfig config =
                     ConfigTestFixtures.parse(
                             """
-                    {"router":{"roles":{"decode":{"costEstimator":{"expression":"%s"},
-                      "availability":{"maxEngineRequests":128}}}}}
-                    """
+                            {"router":{"roles":{"decode":{"costEstimator":{"expression":"%s"},
+                              "availability":{"maxEngineRequests":128}}}}}
+                            """
                                     .formatted(expression));
             assertEquals(
                     expression,
@@ -303,8 +358,8 @@ class ConfigServiceTest {
         FlexlbConfig config =
                 ConfigTestFixtures.parse(
                         """
-                {"router":{"roles":{"decode":{"costEstimator":{"expression":"running_size"}}}}}
-                """);
+                        {"router":{"roles":{"decode":{"costEstimator":{"expression":"running_size"}}}}}
+                        """);
         assertNull(
                 config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests());
     }
@@ -405,18 +460,18 @@ class ConfigServiceTest {
         FlexlbConfig config =
                 ConfigTestFixtures.parse(
                         """
-                {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
-                  "allowedVictimStages":["DECODE_ENGINE_OWNED"]}}}}
-                """);
+                        {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
+                          "allowedVictimStages":["DECODE_ENGINE_OWNED"]}}}}
+                        """);
         assertEquals(1000L, config.priorityOrdering().getPreemption().getTimeoutMs());
         for (long timeoutMs : new long[] {1L, 2500L, Long.MAX_VALUE}) {
             config =
                     ConfigTestFixtures.parse(
                             """
-                    {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
-                      "allowedVictimStages":["DECODE_RESERVED","DECODE_ENGINE_OWNED"],
-                      "timeoutMs":%d}}}}
-                    """
+                            {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
+                              "allowedVictimStages":["DECODE_RESERVED","DECODE_ENGINE_OWNED"],
+                              "timeoutMs":%d}}}}
+                            """
                                     .formatted(timeoutMs));
             assertEquals(timeoutMs, config.priorityOrdering().getPreemption().getTimeoutMs());
         }
@@ -483,9 +538,9 @@ class ConfigServiceTest {
         FlexlbConfig config =
                 ConfigTestFixtures.parse(
                         """
-                {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
-                  "allowedVictimStages":["DECODE_ENGINE_OWNED"]}}}}
-                """);
+                        {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
+                          "allowedVictimStages":["DECODE_ENGINE_OWNED"]}}}}
+                        """);
         config.priorityOrdering().getPreemption().setTimeoutMs(0);
         assertThrows(ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
     }
@@ -495,9 +550,9 @@ class ConfigServiceTest {
         FlexlbConfig config =
                 ConfigTestFixtures.parse(
                         """
-                {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
-                  "allowedVictimStages":["DECODE_RESERVED"]}}}}
-                """);
+                        {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
+                          "allowedVictimStages":["DECODE_RESERVED"]}}}}
+                        """);
         assertTrue(config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_RESERVED));
         assertInvalid(
                 """
@@ -518,16 +573,16 @@ class ConfigServiceTest {
         FlexlbConfig config =
                 ConfigTestFixtures.parse(
                         """
-                {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
-                  "allowedVictimStages":["PREFILL_QUEUED"]}}}}
-                """);
+                        {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
+                          "allowedVictimStages":["PREFILL_QUEUED"]}}}}
+                        """);
         assertTrue(config.allowsPreemption(VictimStage.PREFILL_QUEUED));
         config =
                 ConfigTestFixtures.parse(
                         """
-                {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
-                  "allowedVictimStages":["DECODE_RESERVED","PREFILL_QUEUED"]}}}}
-                """);
+                        {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{
+                          "allowedVictimStages":["DECODE_RESERVED","PREFILL_QUEUED"]}}}}
+                        """);
         assertTrue(config.allowsPreemption(VictimStage.PREFILL_QUEUED));
         assertTrue(config.allowsPreemption(VictimStage.DECODE_RESERVED));
         assertInvalid(
@@ -681,7 +736,6 @@ class ConfigServiceTest {
                     "{\"requestLifecycle\":{\"decision\":{\"lifetime\":0.99}}}",
                     "{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxEngineRequests\":0}}}}}",
                     "{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxKvUsagePercent\":101}}}}}",
-                    "{\"workerRegistry\":{\"health\":{\"statusStaleAfterMs\":9999}}}",
                     "{\"workerRegistry\":{\"health\":{\"cleanupIntervalMs\":0}}}",
                     "{\"workerRegistry\":{\"health\":{\"cleanupIntervalMs\":-1}}}",
                     "{\"workerRegistry\":{\"cacheStatus\":{\"minRefreshIntervalMs\":100,\"maxRefreshIntervalMs\":99}}}"

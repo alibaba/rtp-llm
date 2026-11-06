@@ -13,8 +13,10 @@ import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.GrpcFailure;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.FlexMetricType;
@@ -121,6 +123,8 @@ public class EngineHealthReporter {
 
     private final WorkerDirectory workerDirectory;
 
+    private final StatusFailureReporter statusFailureReporter;
+
     private final Map<String, EventLoopGroup> eventLoopGroupMap;
 
     @Autowired
@@ -129,11 +133,13 @@ public class EngineHealthReporter {
             CacheMetricsReporter cacheMetricsReporter,
             EngineGrpcClient engineGrpcClient,
             LoopResources serverLoopResources,
-            WorkerDirectory workerDirectory) {
+            WorkerDirectory workerDirectory,
+            StatusFailureReporter statusFailureReporter) {
         this.monitor = monitor;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.engineGrpcClient = engineGrpcClient;
         this.workerDirectory = workerDirectory;
+        this.statusFailureReporter = statusFailureReporter;
         this.eventLoopGroupMap =
                 Map.of(
                         "serverWorker", serverLoopResources.onServer(true),
@@ -550,6 +556,37 @@ public class EngineHealthReporter {
         monitor.report(ENGINE_WORKER_STEP_PREFILL_TOKENS, tags, step.prefillTokens());
         monitor.report(ENGINE_WORKER_STEP_TOKEN_BUDGET, tags, step.tokenBudget());
         monitor.report(ENGINE_WORKER_STEP_BUDGET_FILL_RATIO, tags, step.budgetFillRatio());
+    }
+
+    public void reportStatusCheckerFail(
+            String metricIpPort,
+            BalanceStatusEnum errorEnum,
+            RoleType role,
+            EndpointTrace.Stage stage,
+            String reason,
+            GrpcFailure.Analysis failure) {
+        try {
+            reportStatusCheckerFail(errorEnum, metricIpPort, role);
+        } finally {
+            statusFailureReporter.report(role, "worker_status", stage, reason, failure);
+        }
+    }
+
+    public void reportCacheStatusCheckerFail(
+            String metricIpPort,
+            BalanceStatusEnum errorEnum,
+            RoleType role,
+            EndpointTrace.Stage stage,
+            String reason,
+            GrpcFailure.Analysis failure) {
+        try {
+            monitor.report(
+                    CACHE_STATUS_CHECK_FAIL,
+                    statusCheckFailureTags(errorEnum, metricIpPort, role),
+                    1.0);
+        } finally {
+            statusFailureReporter.report(role, "cache_status", stage, reason, failure);
+        }
     }
 
     public void reportStatusCheckerSuccess(

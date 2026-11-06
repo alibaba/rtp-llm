@@ -13,9 +13,6 @@ public final class InternalRuntimeSettings {
 
     private final int nettySelectThreadMultiplier = 1;
     private final int nettyWorkerThreadMultiplier = 2;
-    private final int grpcClientExecutorThreads = 32;
-    private final int grpcClientExecutorQueueCapacity = 10_000;
-    private final int grpcClientEventLoopThreads = 8;
     private final int grpcServerWorkerEventLoopThreads = 4;
     private final int httpNettyEventLoopThreads = 4;
     private final int httpNettyEventExecutorThreads = 16;
