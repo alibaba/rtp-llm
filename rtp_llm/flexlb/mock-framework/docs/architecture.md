@@ -453,3 +453,5 @@ P/D/V 健康检查只读取已安全发布的关闭/致命失败状态与 RPC �
 业务路径记录原始指标样本；安装 SDK 后，MetricsOutput 的单个发送线程按入队顺序调用 Reporter，事件与周期快照共用这个发送方。队列上限 65536 项，不在业务线程调用 SDK，也不把事件求均值后发送。发送失败或队列溢出会锁定“指标流不完整”错误，周期采集明确报错，关闭时排空并检查错误；不能把这种运行当作指标验收通过。此错误不反向暂停计算或把业务 health 标为失败。异步发送可能推迟 SDK 接收样本的时刻，原始值和样本权重不变。未安装 SDK 时，Prometheus 仍直接使用原始 Summary 的 sum/count。
 
 周期采集只在取得 Scheduler/KV 数值时使用各自短锁，指标对象和 exposition 在锁外生成。WorkerStatus RT 截止状态读取完成，不包含 protobuf 构造；CacheStatus RT 包含响应构造。两者均不包含 onNext/onCompleted 或指标上报。模拟 Forward elapsed 在定时完成/取消时固定，不包含后续通知执行器排队；端到端请求时间仍包含实际等待。
+
+输入 token 转换、多模态 span 验证和 prompt cache key 计算在协议准备阶段完成，不持有 Engine 执行锁。进入单请求或组准入前，在执行锁内重新核验 Session 身份、取消状态和 deadline，由 Scheduler 执行最终准入。CacheSequence 保存不可变 prompt keys；成功发布 Decode 缓存时，从最后一个完整 prompt block 的 hash 追加已计算输出，保留 partial block、多模态 span 和 seed 的原始 hash 规则，不重新扫描整个 prompt，也不发布尚未计算 KV 的最后一个采样 token。

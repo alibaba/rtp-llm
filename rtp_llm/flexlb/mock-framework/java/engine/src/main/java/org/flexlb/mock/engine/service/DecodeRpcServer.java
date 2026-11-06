@@ -83,16 +83,23 @@ final class DecodeRpcServer implements AutoCloseable {
     }
 
     private void accept(Call call, GenerateRequestPB frame) {
-        synchronized (executionLock) {
-            if (call.terminal) return;
-            try {
+        try {
+            EngineScheduler.Input prepared = null;
+            if (frame.getStage() == RemoteStage.ALLOCATE) {
+                validate(frame);
+                var input = frame.getInput();
+                prepared = RpcMessages.input(new org.flexlb.mock.protocol.MediaInput.Prepared(input, frame.getMultimodalCacheSpansList()),
+                    frame.getClientId() + "/" + input.getRequestId(), call.started,
+                    RpcMessages.deadline(input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed());
+            }
+            synchronized (executionLock) {
+                if (call.terminal) return;
                 if (closed) throw Status.UNAVAILABLE.withDescription("Decode node is closing").asRuntimeException();
                 if (call.input == null) {
-                    validate(frame);
+                    if (prepared == null) throw RpcErrors.failure(Status.INVALID_ARGUMENT.withDescription("Expected ALLOCATE frame"), 605);
                     call.input = frame.getInput();
                     call.client = frame.getClientId();
-                    call.request = engine.input(RpcMessages.input(new org.flexlb.mock.protocol.MediaInput.Prepared(call.input, frame.getMultimodalCacheSpansList()), call.client + "/" + call.input.getRequestId(),
-                        call.started, RpcMessages.deadline(call.input, call.started, call.rpcDeadline), false, config.blockSize(), config.cacheKeySeed()), call);
+                    call.request = engine.input(prepared, call);
                     return;
                 }
                 if (frame.getRequestId() != call.input.getRequestId()
@@ -121,13 +128,13 @@ final class DecodeRpcServer implements AutoCloseable {
                 } else {
                     throw Status.FAILED_PRECONDITION.withDescription("Expected ALLOCATE, LOAD, then GENERATE or PREFILL_COMPLETE").asRuntimeException();
                 }
-            } catch (RequestFailure failure) {
-                stop(call, failure.reason() == RequestFailure.Reason.INVALID ? Status.INVALID_ARGUMENT.withDescription(failure.getMessage()) : RpcErrors.status(failure),
-                    failure.reason() == RequestFailure.Reason.INVALID ? 605 : RpcErrors.code(failure));
             }
-            catch (StatusRuntimeException error) { stop(call, error.getStatus(), error.getStatus().getCode() == Status.Code.INVALID_ARGUMENT ? 605 : 0); }
-            catch (RuntimeException error) { stop(call, Status.INTERNAL.withDescription("Decode frame failed: " + error.getMessage()), 0); }
+        } catch (RequestFailure failure) {
+            stop(call, failure.reason() == RequestFailure.Reason.INVALID ? Status.INVALID_ARGUMENT.withDescription(failure.getMessage()) : RpcErrors.status(failure),
+                failure.reason() == RequestFailure.Reason.INVALID ? 605 : RpcErrors.code(failure));
         }
+        catch (StatusRuntimeException error) { stop(call, error.getStatus(), error.getStatus().getCode() == Status.Code.INVALID_ARGUMENT ? 605 : 0); }
+            catch (RuntimeException error) { stop(call, Status.INTERNAL.withDescription("Decode frame failed: " + error.getMessage()), 0); }
     }
     private void validate(GenerateRequestPB request) {
         if (request.getStage() != RemoteStage.ALLOCATE || !request.hasInput() || request.getClientId().isBlank()
