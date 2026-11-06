@@ -214,12 +214,12 @@ def _validate_main_paged_geometry_uncached(
             "qwen4_exp QSA paged main cache must be packed 2-D or HND 5-D"
         )
 
-    visible_ends = sequence_bases + query_lengths
-    required_columns = (visible_ends + page_size - 1) // page_size
     if graph_capture:
         return page_size
     if qsa_strict_validation_enabled():
         # Legacy per-check host validation with its exact diagnostics.
+        visible_ends = sequence_bases + query_lengths
+        required_columns = (visible_ends + page_size - 1) // page_size
         if block_table.numel() and int(block_table.max().item()) >= cache_blocks:
             raise RuntimeError(
                 "qwen4_exp QSA paged main block table contains an "
@@ -242,7 +242,31 @@ def _validate_main_paged_geometry_uncached(
         return page_size
     # One async device verdict replaces three host-synchronizing scalar reads.
     # The whole-table out-of-range term keeps the legacy ``block_table.max()``
-    # check's coverage of stale columns beyond the visible KV.
+    # check's coverage of stale columns beyond the visible KV. Supported
+    # geometries fold the whole chain into one Triton reduction: every QSA
+    # layer owns its own main cache (the step memo never matches cross-layer),
+    # so the per-layer cost is two device launches instead of nineteen.
+    if block_table.is_cuda and torch.version.hip is None:
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_validation_triton import (
+            main_geometry_supported,
+            main_geometry_verdict,
+        )
+
+        if main_geometry_supported(block_table, sequence_bases, query_lengths):
+            qsa_assert_valid(
+                main_geometry_verdict(
+                    block_table,
+                    sequence_bases,
+                    query_lengths,
+                    pool_blocks=cache_blocks,
+                    page_size=page_size,
+                ),
+                "qwen4_exp QSA paged main block table does not cover or resolve "
+                "the visible KV",
+            )
+            return page_size
+    visible_ends = sequence_bases + query_lengths
+    required_columns = (visible_ends + page_size - 1) // page_size
     covered = required_columns <= int(block_table.shape[1])
     columns = torch.arange(
         int(block_table.shape[1]), device=block_table.device
