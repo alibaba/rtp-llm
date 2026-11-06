@@ -696,6 +696,12 @@ py_test(
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
 
+models_py_test(
+    name = "sm90_prefill_indexer_test",
+    src = "sm90_prefill_indexer_test.py",
+    gpu = "H20_CU13",
+)
+
 py_test(
     name = "ple_sm90_components_test",
     srcs = ["ple_sm90_components_test.py", "ple_sm90_test_utils.py"],
