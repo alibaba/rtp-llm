@@ -537,12 +537,33 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
             ASSERT_TRUE(after_failure.has_value());
             for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
                 const auto&  group_set   = cache->groupSets()[group_set_id];
+                const size_t reuse_count = group_set->computeReuseBlockCount(/*matched_blocks=*/3);
+                ASSERT_GT(reuse_count, 0u);
+                ASSERT_LE(reuse_count, 3u);
+                const size_t reuse_begin = 3 - reuse_count;
                 // Injected transport failure does not identify a corrupt record.
+                // Successful HOST copies remain cached even when DISK fails; HOST
+                // states outside the SWA reuse window must not be loaded.
                 for (size_t path = 0; path < 3; ++path) {
-                    const auto& source = (*after_failure)[path][group_set_id];
+                    const auto& source      = (*after_failure)[path][group_set_id];
+                    const bool  host_loaded = path == 1 && path >= reuse_begin;
+                    const Tier  expected    = host_loaded ? Tier::DEVICE : (*mixed)[path][group_set_id].getTopTier();
                     EXPECT_TRUE(source.isMatchUsable());
                     EXPECT_EQ(source.transfer_state, GroupSetTransferState::IDLE);
-                    EXPECT_EQ(source.getTopTier(), (*mixed)[path][group_set_id].getTopTier());
+                    EXPECT_EQ(source.getTopTier(), expected) << "path=" << path << " group_set=" << group_set_id;
+                    if (expected == Tier::DEVICE) {
+                        ASSERT_EQ(source.device_blocks.size(), group_set->groupTags().size());
+                        for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
+                            EXPECT_TRUE(groupBlockPayloadMatches(manager_,
+                                                                 cache_config_,
+                                                                 group_set->groupTags()[member],
+                                                                 source.device_blocks[member],
+                                                                 path));
+                        }
+                    }
+                    EXPECT_EQ(source.host_block,
+                              host_loaded ? NULL_BLOCK_IDX : (*mixed)[path][group_set_id].host_block);
+                    EXPECT_EQ(source.disk_block, (*mixed)[path][group_set_id].disk_block);
                 }
                 for (size_t member = 0; member < group_set->groupTags().size(); ++member) {
                     const auto& blocks =

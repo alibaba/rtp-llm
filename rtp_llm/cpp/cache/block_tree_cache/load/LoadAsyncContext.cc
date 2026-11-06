@@ -35,8 +35,15 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
         return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
     })) {
-    workflow_span_ = AsyncProfileSpan("workflow_total", request_id_.value_or(-1), 0, load_descs_.size(), 0, -1,
-                                       workflowId(), "load", AsyncProfileKind::Lifecycle);
+    workflow_span_ = AsyncProfileSpan("workflow_total",
+                                      request_id_.value_or(-1),
+                                      0,
+                                      load_descs_.size(),
+                                      0,
+                                      -1,
+                                      workflowId(),
+                                      "load",
+                                      AsyncProfileKind::Lifecycle);
     if (need_backend_match_) {
         storage_request_.transfer_task = backend_task_.subtask({});
     }
@@ -51,17 +58,17 @@ LoadAsyncContext::~LoadAsyncContext() {
 
 void LoadAsyncContext::rebuildMatchedBlocksByTier() {
     matched_blocks_by_tier_.fill(0);
-    std::unordered_map<size_t, Tier> reuse_tier_by_path;
+    reuse_tier_by_path_.clear();
     for (const TransferDescriptor& desc : load_descs_) {
         if (desc.source_tier < Tier::DEVICE || desc.source_tier > Tier::DISK) {
             continue;
         }
-        auto [it, inserted] = reuse_tier_by_path.emplace(desc.path_index, desc.source_tier);
+        auto [it, inserted] = reuse_tier_by_path_.emplace(desc.path_index, desc.source_tier);
         if (!inserted && desc.source_tier > it->second) {
             it->second = desc.source_tier;
         }
     }
-    for (const auto& [_, tier] : reuse_tier_by_path) {
+    for (const auto& [_, tier] : reuse_tier_by_path_) {
         ++matched_blocks_by_tier_[static_cast<size_t>(tier)];
     }
 }
@@ -85,6 +92,31 @@ size_t LoadAsyncContext::matchedBlocks() const {
 
 size_t LoadAsyncContext::matchedBlocks(Tier tier) const {
     return tier >= Tier::DEVICE && tier <= Tier::DISK ? matched_blocks_by_tier_[static_cast<size_t>(tier)] : 0;
+}
+
+size_t LoadAsyncContext::matchedBlocks(Tier tier, size_t prefix) const {
+    if (prefix == local_matched_blocks_) {
+        return matchedBlocks(tier);
+    }
+    return std::count_if(reuse_tier_by_path_.begin(), reuse_tier_by_path_.end(), [=](const auto& item) {
+        return item.first < prefix && item.second == tier;
+    });
+}
+
+void LoadAsyncContext::setLocalMatchLengths(size_t device_blocks, size_t device_host_blocks) {
+    RTP_LLM_CHECK(device_blocks <= device_host_blocks && device_host_blocks <= local_matched_blocks_);
+    device_ready_blocks_        = device_blocks;
+    matched_device_host_blocks_ = device_host_blocks;
+}
+
+size_t LoadAsyncContext::deviceReadyBlocks() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return device_ready_blocks_;
+}
+
+bool LoadAsyncContext::hostTransfersSucceeded() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return settlement_ready_ && !has_host_failure_;
 }
 
 bool LoadAsyncContext::needBackendMatch() const {
@@ -223,7 +255,7 @@ void LoadAsyncContext::onBackendRead(ErrorInfo error) {
             matched_blocks_ = backend_matched_blocks_;
         } else {
             backend_error_ = error;
-            error_info_  = std::move(error);
+            error_info_    = std::move(error);
         }
         backend_pending_ = false;
         finishIfReadyLocked(notify, settlement_ready_callback);
@@ -303,10 +335,13 @@ void LoadAsyncContext::startJoinWait(int64_t start_time_us) {
         "join_wait", request_id_.value_or(-1), 0, 0, start_time_us, -1, workflowId(), "load", AsyncProfileKind::Wait);
 }
 
-bool LoadAsyncContext::completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us) {
+bool LoadAsyncContext::completeJoinedOne(bool     success,
+                                         bool&    join_completed,
+                                         int64_t& join_wait_latency_us,
+                                         Tier     source_tier) {
     join_completed       = false;
     join_wait_latency_us = 0;
-    if (!completeTransfers(1, success)) {
+    if (!completeTransfers(1, success, source_tier)) {
         return false;
     }
     const size_t previous_count = remaining_join_count_.fetch_sub(1, std::memory_order_acq_rel);
@@ -321,7 +356,7 @@ bool LoadAsyncContext::completeJoinedOne(bool success, bool& join_completed, int
     return true;
 }
 
-bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
+bool LoadAsyncContext::completeTransfers(size_t count, bool success, Tier source_tier) {
     bool                    notify = false;
     SettlementReadyCallback settlement_ready_callback;
     {
@@ -331,6 +366,7 @@ bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
             return false;
         }
         has_local_failure_ = has_local_failure_ || !success;
+        has_host_failure_  = has_host_failure_ || (!success && source_tier != Tier::DISK);
         if (!success && error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load transfer failed");
         }
@@ -347,6 +383,7 @@ void LoadAsyncContext::cancelUnsubmittedTransfers() {
     std::lock_guard<std::mutex> lock(mutex_);
     assert(!committed_);
     has_local_failure_        = true;
+    has_host_failure_         = true;
     remaining_transfer_count_ = 0;
 }
 
@@ -370,13 +407,18 @@ bool LoadAsyncContext::backendTimedOut() const {
     return backend_error_.code() == ErrorCode::DEADLINE_EXCEEDED;
 }
 
-bool LoadAsyncContext::settle(bool success) {
+bool LoadAsyncContext::settle(bool success, bool host_success) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_.load() != State::PENDING || !settlement_ready_) {
             return false;
         }
-        local_load_succeeded_             = success && !has_local_failure_;
+        local_load_succeeded_ = success && !has_local_failure_;
+        if (local_load_succeeded_) {
+            device_ready_blocks_ = local_matched_blocks_;
+        } else if (host_success && !has_host_failure_) {
+            device_ready_blocks_ = matched_device_host_blocks_;
+        }
         const bool completed_successfully = local_load_succeeded_ && backend_error_.ok();
         if (!completed_successfully && error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed");
@@ -421,6 +463,11 @@ void LoadAsyncContext::finishIfReadyLocked(bool& notify, SettlementReadyCallback
         return;
     }
     local_load_succeeded_ = !has_local_failure_;
+    if (local_load_succeeded_) {
+        device_ready_blocks_ = local_matched_blocks_;
+    } else if (!has_host_failure_) {
+        device_ready_blocks_ = matched_device_host_blocks_;
+    }
     state_.store(local_load_succeeded_ && backend_error_.ok() ? State::SUCCEEDED : State::FAILED);
     notify = true;
 }
