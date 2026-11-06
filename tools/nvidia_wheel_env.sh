@@ -38,13 +38,14 @@ for _stub in /usr/local/cuda/lib64/stubs /usr/local/cuda-13.2/lib64/stubs; do
     [ -d "$_stub" ] && base_paths+=("$_stub")
 done
 # Final fallback for driver-less workers (CPU-only test execution with
-# GPU_COUNT=0): device-linked test binaries DT_NEED the exact SONAME
-# libcuda.so.1. Note the toolkit stubs dir only ships libcuda.so (no .1),
-# which satisfies neither the loader nor a libcuda.so.1 existence check:
-# link the SONAME to the toolkit stub when present, else synthesize an
-# EMPTY stub - lazy binding resolves symbols only at first call, and
-# CPU-only tests never call driver APIs, so the load succeeds and the
-# CPU assertions run.
+# GPU_COUNT=0): device-linked test binaries DT_NEED driver SONAMEs such as
+# libcuda.so.1 and libnvidia-ml.so.1. The toolkit stubs dir ships only the
+# dev names (libcuda.so, libnvidia-ml.so, ...), which satisfy neither the
+# loader nor a SONAME existence check: link EVERY toolkit stub to its
+# .so.1 SONAME in a temp dir appended to LD_LIBRARY_PATH; if a stub file is
+# missing entirely, synthesize an empty one - lazy binding resolves symbols
+# only at first call, and CPU-only tests never call driver APIs, so the
+# load succeeds and the CPU assertions run.
 _have_driver=no
 for _d in "${base_paths[@]}"; do
     [ -e "$_d/libcuda.so.1" ] && _have_driver=yes
@@ -52,33 +53,40 @@ done
 ldconfig -p 2>/dev/null | grep -q 'libcuda\.so\.1' && _have_driver=yes
 if [ "$_have_driver" = no ]; then
     _stub=""
-    _src=""
     for _cand in /usr/local/cuda/compat /usr/local/cuda*/lib64/stubs; do
         if [ -e "$_cand/libcuda.so.1" ]; then
             _stub="$_cand"
             break
         fi
-        if [ -z "$_src" ] && [ -e "$_cand/libcuda.so" ]; then
-            _src="$_cand/libcuda.so"
-        fi
     done
     if [ -z "$_stub" ]; then
         _gen=/tmp/rtp-libcuda-stub.$$
         mkdir -p "$_gen" 2>/dev/null || true
-        if [ -n "$_src" ]; then
-            ln -sn "$_src" "$_gen/libcuda.so.1" 2>/dev/null || true
-            if [ -e "$_gen/libcuda.so.1" ]; then
-                _stub="$_gen"
-                echo "nvidia_wheel_env: no driver; linking SONAME to toolkit stub $_src" >&2
+        _linked=0
+        for _pair in \
+            'libcuda.so.1 libcuda.so' \
+            'libnvidia-ml.so.1 libnvidia-ml.so'
+        do
+            set -- $_pair
+            _soname=$1
+            _dev=$2
+            _src=""
+            for _cand in /usr/local/cuda*/lib64/stubs /usr/local/cuda/lib64/stubs; do
+                [ -e "$_cand/$_dev" ] && _src="$_cand/$_dev" && break
+            done
+            if [ -z "$_src" ] && command -v gcc >/dev/null 2>&1; then
+                printf '' | gcc -shared -x c -o "$_gen/$_dev" - 2>/dev/null || true
+                _src="$_gen/$_dev"
             fi
-        fi
-        if [ -z "$_stub" ] && command -v gcc >/dev/null 2>&1; then
-            if printf '' | gcc -shared -x c -o "$_gen/libcuda.so.1" - 2>/dev/null && [ -e "$_gen/libcuda.so.1" ]; then
-                _stub="$_gen"
-                echo "nvidia_wheel_env: no driver libcuda found; using empty stub $_stub" >&2
+            if [ -n "$_src" ] && [ ! -e "$_gen/$_soname" ]; then
+                ln -sn "$_src" "$_gen/$_soname" 2>/dev/null || true
+                [ -e "$_gen/$_soname" ] && _linked=$((_linked+1))
             fi
-        fi
-        if [ -z "$_stub" ]; then
+        done
+        if [ "$_linked" -gt 0 ]; then
+            _stub="$_gen"
+            echo "nvidia_wheel_env: no driver; linked $_linked stub SONAME(s) in $_stub" >&2
+        else
             rm -rf "$_gen" 2>/dev/null || true
         fi
     fi
