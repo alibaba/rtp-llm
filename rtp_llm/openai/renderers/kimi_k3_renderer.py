@@ -401,9 +401,9 @@ class KimiK3Renderer(CustomChatRenderer):
 
     @staticmethod
     def _stream_includes_usage(request: ChatCompletionRequest) -> bool:
-        return bool(
-            request.stream_options is not None and request.stream_options.include_usage
-        )
+        if request.stream_options is None:
+            return True
+        return bool(request.stream_options.include_usage)
 
     @override
     async def _generate_final(
