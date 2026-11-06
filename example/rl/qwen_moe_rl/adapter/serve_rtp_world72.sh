@@ -9,12 +9,14 @@ export RTP_MODEL_PATH="${RTP_MODEL_PATH:?The owner must bind the mounted BF16 mo
 export CHECKPOINT_PATH="$RTP_MODEL_PATH" TOKENIZER_PATH="$RTP_MODEL_PATH"
 export PTUNING_PATH= EXTRA_DATA_PATH= LOCAL_EXTRA_DATA_PATH= SP_CHECKPOINT_PATH= SP_TYPE= SP_MODEL_TYPE=
 export LORA_INFO='{}' JSON_MODEL_OVERRIDE_ARGS='{}'
+export MERGE_LORA=false
 unset QUANTIZATION SP_QUANTIZATION SP_ACT_TYPE TREE_DECODE_CONFIG
 export RTP_ARM_BF16_ROPE_BACKEND=torch_bf16_v1
 export FLASHINFER_CUDA_ARCH_LIST=10.0 FLASHINFER_NO_DOWNLOAD=1
 export FLASHINFER_CUBIN_DIR="$Q38_DEPLOY_ROOT/rtp-runtime-kernels/flashinfer-runtime/cubins"
 export FLASHINFER_WORKSPACE_BASE="$Q38_DEPLOY_ROOT/rtp-runtime-kernels/flashinfer-jit"
 export MAX_JOBS=4
+export USE_DEEPEP_MOE=false USE_DEEPEP_LOW_LATENCY=false USE_DEEPEP_INTERNODE=false USE_MORI_EP=false
 unset FLASHINFER_DISABLE_JIT
 export RTP_WEIGHT_MANIFEST_DIR="${RTP_WEIGHT_MANIFEST_DIR:?The owner must bind the current native incarnation manifest directory}"
 export RTP_RL_NATIVE_LIBRARY_SHA256="${RTP_RL_NATIVE_LIBRARY_SHA256:?Pin the fresh SM100 native library artifact}"
@@ -63,10 +65,11 @@ PY
 args=("$RTP_PYTHON" -m qwen38_world72_entrypoint
   --model_type qwen38_moe_text --checkpoint_path "$RTP_MODEL_PATH" --tokenizer_path "$RTP_MODEL_PATH" --act_type BF16
   --ptuning_path "" --extra_data_path "" --local_extra_data_path ""
-  --sp_checkpoint_path "" --sp_type "" --sp_model_type "" --lora_info '{}' --json_model_override_args '{}'
+  --sp_checkpoint_path "" --sp_type "" --sp_model_type "" --lora_info '{}' --merge_lora false --json_model_override_args '{}'
   --start_port "$RTP_START_PORT" --world_size 72 --local_world_size 4 --world_rank "$RTP_WORLD_RANK"
   --tp_size 8 --dp_size 9 --ep_size 72 --ffn_sp_size 8
   --moe_strategy nccl_bf16_reference --moe_pure_tp_preshard false
+  --use_deepep_moe false --use_deepep_low_latency false --use_deepep_internode false --use_mori_ep false
   --redundant_expert 64 --phy2log_path "$RTP_PHY2LOG_PATH" --eplb_mode NONE
   --frontend_server_count 0 --frontend_pre_stop_drain_seconds 0
   --dash_sc_grpc_pre_stop_drain_seconds 0 --backend_post_frontend_drain_seconds 0
