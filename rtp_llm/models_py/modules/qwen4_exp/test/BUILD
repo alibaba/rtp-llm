@@ -780,6 +780,16 @@ py_test(
 )
 
 py_test(
+    name = "sm90_prefill_indexer_test",
+    srcs = ["sm90_prefill_indexer_test.py"],
+    main = "sm90_prefill_indexer_test.py",
+    deps = ["//rtp_llm/models_py:qsa_prefill_score_testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "ple_sm90_components_test",
     srcs = ["ple_sm90_components_test.py", "ple_sm90_test_utils.py"],
     main = "ple_sm90_components_test.py",

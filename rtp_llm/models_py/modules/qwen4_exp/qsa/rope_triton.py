@@ -1,4 +1,8 @@
-"""SM120 text indexer RoPE with the existing BF16 rounding boundaries."""
+"""Text indexer RoPE with the existing BF16 rounding boundaries.
+
+Partial rotation is validated on SM90 and SM120; text-cache construction
+retains its SM120-only dispatch.
+"""
 
 import math
 
@@ -122,7 +126,7 @@ def try_apply_partial_rope(x, cos, sin):
     if not (
         x.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
+        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
         and x.ndim in (3, 4)
         and x.shape[-1] == 128
         and x.numel() > 0

@@ -37,7 +37,7 @@ def try_indexer_rmsnorm(x, gamma, eps):
     if not (
         x.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
+        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
         and x.dtype == torch.bfloat16
         and x.ndim in (2, 3, 4)
         and x.shape[-1] == 128

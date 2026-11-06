@@ -64,8 +64,8 @@ def try_prefill_score(q, block_keys):
         and block_keys.shape[2] == d
         and h == 4
         and d == 128
-        and 128 <= s <= 20480
-        and 32 <= n <= 5120
+        and 128 <= s <= 32768
+        and 32 <= n <= 8192
         and q.stride(-1) == block_keys.stride(-1) == 1
         and torch.version.hip is None
     ):

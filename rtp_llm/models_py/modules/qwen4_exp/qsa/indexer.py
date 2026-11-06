@@ -343,6 +343,10 @@ def validate_mrope_decode_tail(positions: torch.Tensor, compress_ratio: int) -> 
     Page-aligned prefix reuse calls this on its new suffix (pages are divisible
     by the compression ratio), so the entire unfinished group is present.
     """
+    # Complete compression groups have no unfinished tail to validate. Avoid
+    # materializing a device-side True and synchronizing the stream to read it.
+    if int(positions.shape[0]) % compress_ratio == 0:
+        return
     if not bool(mrope_decode_tail_verdict(positions, compress_ratio)):
         raise ValueError(
             "qwen4 QSA unfinished MRoPE compression group requires a "

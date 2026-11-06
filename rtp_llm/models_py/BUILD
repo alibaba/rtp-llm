@@ -241,26 +241,33 @@ py_library(
 
 exports_files(["utils/cutlass.py"])
 
-# Kernel-only test closure for the qwen4_exp qsa prefill-score scorer: the
-# real production module plus its package init chain (models_py and qwen4_exp
-# are namespace packages at this revision), carrying only the torch and triton
-# wheels the module imports. Not //rtp_llm:testlib: its runfiles drag in the
-# th_transformer/rtp_compute_ops engine closure these kernel tests never load.
+# QSA indexer leaf modules and their package init chain (models_py and
+# qwen4_exp are namespace packages), with only Torch/Triton dependencies.
+# Avoid //rtp_llm:testlib: its runfiles include the th_transformer/
+# rtp_compute_ops engine closure these kernel tests never load.
 py_library(
     name = "qsa_prefill_score_testlib",
     testonly = True,
     srcs = [
         "modules/__init__.py",
+        "modules/base/__init__.py",
+        "modules/base/common/__init__.py",
+        "modules/base/common/zero_centered_rms_norm.py",
         "modules/qwen4_exp/qsa/__init__.py",
+        "modules/qwen4_exp/qsa/indexer.py",
         "modules/qwen4_exp/qsa/indexer_prefill_score.py",
+        "modules/qwen4_exp/qsa/rope_triton.py",
     ],
     data = [
         "//rtp_llm:__init__.py",
+        "//rtp_llm:device/__init__.py",
+        "//rtp_llm:device/device_type.py",
     ],
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm:torch",
         "//rtp_llm:triton",
+        "//rtp_llm/models_py/triton_kernels:common",
     ],
 )
 

@@ -87,6 +87,7 @@ def captured_dispatch(module, q, k):
 
 
 def full_gate(test, a, b, q, k):
+    torch.testing.assert_close(b, a, atol=5e-6, rtol=5e-6)
     reference = reference_fp64_chunked(q, k)
     errors = {}
     for name, scores in (("prechange", a), ("new_dispatch", b)):
@@ -140,6 +141,9 @@ def fixtures():
         ("zeros", 4096, 60203, 1, False),
         ("identical_keys_ties", 4096, 60204, 1, False),
         ("negative_relu_zero", 4096, 60205, 1, False),
+        ("long_boundary", 20481, 20261106, 1, False),
+        ("long_strided", 32767, 20261107, 1, True),
+        ("long_upper", 32768, 20261108, 1, False),
     ):
         rows.append(dict(kind=kind, S=s, N=s // 4, seed=seed, B=batch, strided=stride))
     for i, (kind, s, n) in enumerate(
@@ -149,8 +153,12 @@ def fixtures():
             ("ragged_highS", 20479, 5119),
             ("ragged_highN", 20480, 5119),
             ("upper_corner", 20480, 5120),
-            ("reject_S", 20481, 32),
-            ("reject_N", 128, 5121),
+            ("former_limit_S", 20481, 32),
+            ("former_limit_N", 128, 5121),
+            ("reject_S", 32769, 32),
+            ("reject_N", 128, 8193),
+            ("new_corner_lowS_highN", 128, 8192),
+            ("new_corner_highS_lowN", 32768, 32),
         )
     ):
         rows.append(dict(kind=kind, S=s, N=n, seed=82001 + i, B=1, strided=False))
@@ -351,6 +359,9 @@ class IntegrationTest(unittest.TestCase):
                 (20480, 5120),
                 (20481, 32),
                 (128, 5121),
+                (32768, 8192),
+                (32769, 32),
+                (128, 8193),
                 (127, 32),
                 (128, 31),
             ):
@@ -359,8 +370,8 @@ class IntegrationTest(unittest.TestCase):
                 sentinel = object()
                 expected = (
                     major >= 8
-                    and 128 <= s <= (20480 if major == 9 else 8192)
-                    and 32 <= n <= (5120 if major == 9 else 2048)
+                    and 128 <= s <= (32768 if major == 9 else 8192)
+                    and 32 <= n <= (8192 if major == 9 else 2048)
                 )
                 with patch.object(
                     torch.cuda, "get_device_capability", return_value=(major, 0)
@@ -445,7 +456,7 @@ class IntegrationTest(unittest.TestCase):
                     a, old_fused, old_calls = captured_dispatch(frozen, q, k)
                     b, new_fused, new_calls = captured_dispatch(live, q, k)
                     self.assertEqual(
-                        new_fused, 128 <= spec["S"] <= 20480 and 32 <= spec["N"] <= 5120
+                        new_fused, 128 <= spec["S"] <= 32768 and 32 <= spec["N"] <= 8192
                     )
                     self.assertEqual(
                         old_fused, 128 <= spec["S"] <= 8192 and 32 <= spec["N"] <= 2048
@@ -477,7 +488,7 @@ class IntegrationTest(unittest.TestCase):
         record["gpu"] = self.gpu_metadata()
         record["replays"] = []
         try:
-            for length in (10240, 20480):
+            for length in (10240, 20480, 32768):
                 q, k = make_inputs(length, seed=95000 + length, batch=1)
                 for _ in range(3):
                     self.assertIsNotNone(live.try_prefill_score(q, k))
