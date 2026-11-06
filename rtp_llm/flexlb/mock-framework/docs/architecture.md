@@ -457,3 +457,5 @@ P/D/V 健康检查只读取已安全发布的关闭/致命失败状态与 RPC �
 输入 token 转换、多模态 span 验证和 prompt cache key 计算在协议准备阶段完成，不持有 Engine 执行锁。进入单请求或组准入前，在执行锁内重新核验 Session 身份、取消状态和 deadline，由 Scheduler 执行最终准入。CacheSequence 保存不可变 prompt keys；成功发布 Decode 缓存时，从最后一个完整 prompt block 的 hash 追加已计算输出，保留 partial block、多模态 span 和 seed 的原始 hash 规则，不重新扫描整个 prompt，也不发布尚未计算 KV 的最后一个采样 token。
 
 Prefill 初始化 KV 配额每轮准入只扫描一次活动集合，随后按本轮申请、Loading、超时和释放更新局部计数。LRU 一次回收多个块时临时跳过被引用叶子并在结束时恢复，避免为每个回收块重复扫描同一批被引用节点；新出现的父叶子仍按原 LRU 顺序参与，选择策略不变。finished-history gap 只在状态快照中登记，RPC 释放业务锁后打印，最多每秒一次。
+
+本地 Runner 在启动 Engine 前把已选定的 Master HTTP/gRPC 端口加入 Engine 端口避让集合。Master 在 Engine 发现就绪后启动，不能因尚未绑定而让动态 Engine 分配复用这些端口；这不改变 Case 端口配置或 Master 重启地址。

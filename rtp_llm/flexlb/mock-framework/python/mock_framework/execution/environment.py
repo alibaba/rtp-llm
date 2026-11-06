@@ -75,6 +75,9 @@ class RunEnvironment:
         connect = await self.zookeeper.start()
         if connect is not None:
             self.masters.configure_election(connect)
+            # Masters start after Engines: exclude their selected but not yet bound service ports.
+            port = int(self.masters.environment['MOCK_MASTER_PORT'])
+            self.engines.used_ports.update((port, port + 2))
         await self.engines.start()
         await self.masters.start()
         await self.clients.start_nodes()
