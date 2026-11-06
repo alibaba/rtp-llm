@@ -26,6 +26,7 @@ using ::testing::DoAll;
 using ::testing::Invoke;
 using ::testing::Return;
 using ::testing::ReturnRef;
+
 using ::testing::SetArgReferee;
 
 TEST(ClientFactoryGdrTest, SsdAutomaticallyRequiresGpuRegistrations) {
@@ -77,19 +78,25 @@ initializeClient(bool                                                  enable_vi
                  kv_cache_manager::MockMetaClient**                    initial_meta_client      = nullptr,
                  std::shared_ptr<std::atomic<int>>                     reinit_attempts          = nullptr,
                  kv_cache_manager::MockTransferClient**                transfer_client          = nullptr,
-                 std::unique_ptr<kv_cache_manager::MockTransferClient> supplied_transfer_client = nullptr) {
+                 std::unique_ptr<kv_cache_manager::MockTransferClient> supplied_transfer_client = nullptr,
+                 std::chrono::milliseconds                            reinit_interval = std::chrono::seconds(10),
+                 MockClientFactory**                                  observed_factory = nullptr,
+                 const std::vector<std::string>&                       endpoints = {}) {
     auto  factory        = std::make_unique<MockClientFactory>();
     auto* factory_ptr    = factory.get();
+    if (observed_factory) *observed_factory = factory_ptr;
+    EXPECT_CALL(*factory_ptr, getLeaderAddress(_, _, _)).WillRepeatedly(Return(std::string{}));
     auto  subscriber     = std::make_unique<MockSubscriber>();
     auto* subscriber_ptr = subscriber.get();
 
     EXPECT_CALL(*factory_ptr, createSubscriber(enable_vipserver)).WillOnce(Invoke([&subscriber](bool) {
         return std::move(subscriber);
     }));
-    EXPECT_CALL(*subscriber_ptr, init(std::vector<std::string>{endpoint})).WillOnce(Return(true));
+    EXPECT_CALL(*subscriber_ptr, init(endpoints.empty() ? std::vector<std::string>{endpoint} : endpoints))
+        .WillOnce(Return(true));
     if (enable_vipserver) {
         EXPECT_CALL(*subscriber_ptr, getAddresses(_))
-            .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{endpoint + "_resolved"}), Return(true)));
+            .WillRepeatedly(DoAll(SetArgReferee<0>(std::vector<std::string>{endpoint + "_resolved"}), Return(true)));
     } else if (reinit_attempts) {
         EXPECT_CALL(*subscriber_ptr, getAddresses(_))
             .WillRepeatedly(DoAll(SetArgReferee<0>(std::vector<std::string>{endpoint}), Return(true)));
@@ -141,13 +148,142 @@ initializeClient(bool                                                  enable_vi
             return client;
         }));
 
-    auto                         wrapper = std::make_shared<ClientWrapper>(std::move(factory));
+    auto                         wrapper = std::make_shared<ClientWrapper>(std::move(factory), reinit_interval);
     ClientWrapper::ConfigMap     config_map{{"", makeConfig(enable_vipserver, endpoint)}};
+    if (!endpoints.empty()) config_map.begin()->second->set_addresses(endpoints);
     kv_cache_manager::InitParams params{kv_cache_manager::RoleType::HYBRID, &registration_span, "tp0_Fgroup"};
     if (!wrapper->init(config_map, params, "default")) {
         return nullptr;
     }
     return wrapper;
+}
+
+class MetadataRecoveryTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        wrapper = initializeClient(false, "old", span, observation, std::make_shared<int>(0), &meta, nullptr,
+                                   nullptr, nullptr, interval, &factory, {"old", "standby"});
+        ASSERT_NE(wrapper, nullptr);
+        EXPECT_CALL(*factory, getLeaderAddress(_, _, _)).Times(0);
+    }
+
+    void TearDown() override {
+        if (wrapper) wrapper->shutdown();
+    }
+
+    bool awaitFinish(const std::string& trace) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (wrapper->finishWrite("", trace, "session", {}, {})) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    }
+
+    const std::chrono::milliseconds interval{80};
+    std::array<char, 32> data{};
+    kv_cache_manager::RegistSpan span{data.data(), data.size()};
+    InitObservation observation;
+    kv_cache_manager::MockMetaClient* meta = nullptr;
+    MockClientFactory* factory = nullptr;
+    std::shared_ptr<ClientWrapper> wrapper;
+};
+
+TEST_F(MetadataRecoveryTest, OnlyRegistrationErrorsRecoverAndEveryAttemptIsRateLimited) {
+    using Clock = std::chrono::steady_clock;
+    auto first = std::make_unique<kv_cache_manager::MockMetaClient>();
+    auto second = std::make_unique<kv_cache_manager::MockMetaClient>();
+    std::vector<Clock::time_point> attempts;
+    std::promise<void> started;
+    auto ready = started.get_future();
+    EXPECT_CALL(*meta, FinishWrite(_, _, _, _)).WillRepeatedly(Return(kv_cache_manager::ER_INVALID_GRPCSTATUS));
+    EXPECT_CALL(*meta, FinishWrite("business", _, _, _)).WillOnce(Return(kv_cache_manager::ER_SERVICE_INTERNAL_ERROR));
+    EXPECT_CALL(*meta, FinishWrite("missing", _, _, _)).WillOnce(Return(kv_cache_manager::ER_SERVICE_INSTANCE_NOT_EXIST));
+    EXPECT_CALL(*first, FinishWrite("ready", _, _, _)).WillOnce(Return(kv_cache_manager::ER_OK));
+    EXPECT_CALL(*first, FinishWrite("leader", _, _, _)).WillRepeatedly(Return(kv_cache_manager::ER_SERVICE_NOT_LEADER));
+    EXPECT_CALL(*second, FinishWrite("leader", _, _, _)).WillOnce(Return(kv_cache_manager::ER_OK));
+    EXPECT_CALL(*factory, createMetaClient(_, _)).Times(3).WillRepeatedly(
+        Invoke([&](const auto&, const auto&) -> std::unique_ptr<kv_cache_manager::MetaClient> {
+            attempts.push_back(Clock::now());
+            if (attempts.size() == 1) {
+                started.set_value();
+                return {};
+            }
+            if (attempts.size() == 2) return std::move(first);
+            return std::move(second);
+        }));
+    for (int i = 0; i < 8; ++i) EXPECT_FALSE(wrapper->finishWrite("", "grpc", "session", {}, {}));
+    EXPECT_FALSE(wrapper->finishWrite("", "business", "session", {}, {}));
+    EXPECT_EQ(ready.wait_for(interval * 2), std::future_status::timeout);
+    EXPECT_FALSE(wrapper->finishWrite("", "missing", "session", {}, {}));
+    EXPECT_TRUE(awaitFinish("ready"));
+    EXPECT_CALL(*factory, getLeaderAddress(_, _, _)).Times(2).WillRepeatedly(Return(std::string{}));
+    EXPECT_TRUE(awaitFinish("leader"));
+    wrapper->shutdown();
+    ASSERT_EQ(attempts.size(), 3u);
+    EXPECT_GE(attempts[1] - attempts[0], interval);
+    EXPECT_GE(attempts[2] - attempts[1], interval);
+}
+
+TEST_F(MetadataRecoveryTest, RecoveryCoalescesSignalsKeepsServingAndStopsOnShutdown) {
+    using block_tree_cache_test::BoundedThread;
+    auto candidate = std::make_unique<kv_cache_manager::MockMetaClient>();
+    std::promise<void> entered, release;
+    auto ready = entered.get_future();
+    auto released = release.get_future().share();
+    EXPECT_CALL(*meta, FinishWrite(_, _, _, _)).WillRepeatedly(Return(kv_cache_manager::ER_OK));
+    EXPECT_CALL(*meta, FinishWrite("missing", _, _, _))
+        .WillRepeatedly(Return(kv_cache_manager::ER_SERVICE_INSTANCE_NOT_EXIST));
+    EXPECT_CALL(*factory, createMetaClient(_, _)).WillOnce(Invoke([&](const auto&, const auto&) {
+        entered.set_value();
+        released.wait();
+        return std::move(candidate);
+    }));
+    EXPECT_FALSE(wrapper->finishWrite("", "missing", "session", {}, {}));
+    if (ready.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        release.set_value();
+        wrapper->shutdown();
+        FAIL() << "recovery did not start";
+    }
+    BoundedThread<bool> calls([wrapper = wrapper] {
+        for (int i = 0; i < 4; ++i) {
+            if (wrapper->finishWrite("", "missing", "session", {}, {})
+                || !wrapper->finishWrite("", "healthy", "session", {}, {})) return false;
+        }
+        return true;
+    });
+    const auto status = calls.waitFor(std::chrono::seconds(2));
+    BoundedThread<void> stopped([wrapper = wrapper] { wrapper->shutdown(); });
+    EXPECT_EQ(stopped.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
+    release.set_value();
+    EXPECT_EQ(status, std::future_status::ready);
+    ASSERT_EQ(calls.waitFor(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(calls.get());
+    ASSERT_EQ(stopped.waitFor(std::chrono::seconds(2)), std::future_status::ready);
+    stopped.get();
+    EXPECT_FALSE(wrapper->finishWrite("", "stopped", "session", {}, {}));
+}
+
+TEST_F(MetadataRecoveryTest, NotLeaderDiscoversOnDemandAndFallsBackWhenAdvertisedAddressIsUnreachable) {
+    auto next = std::make_unique<kv_cache_manager::MockMetaClient>();
+    EXPECT_CALL(*factory, getLeaderAddress("old", _, _))
+        .Times(2).WillRepeatedly(Return(std::string("unreachable-leader")));
+    EXPECT_CALL(*meta, FinishWrite(_, _, _, _)).Times(0);
+    EXPECT_CALL(*meta, FinishWrite("redirect", _, _, _)).WillOnce(Return(kv_cache_manager::ER_SERVICE_NOT_LEADER));
+    EXPECT_CALL(*next, FinishWrite(_, _, _, _)).WillRepeatedly(Return(kv_cache_manager::ER_OK));
+    EXPECT_CALL(*factory, createMetaClient(_, _))
+        .WillOnce(Invoke([](const std::string& config, const auto&) {
+            EXPECT_NE(config.find("\"unreachable-leader\""), std::string::npos);
+            return std::unique_ptr<kv_cache_manager::MetaClient>{};
+        }))
+        .WillOnce(Invoke([&](const std::string& config, const auto&) {
+            EXPECT_NE(config.find("\"old\""), std::string::npos);
+            EXPECT_EQ(config.find("\"unreachable-leader\""), std::string::npos);
+            return std::move(next);
+        }));
+    EXPECT_FALSE(wrapper->finishWrite("", "redirect", "session", {}, {}));
+    EXPECT_TRUE(awaitFinish("read"));
+    std::this_thread::sleep_for(interval * 3);
 }
 
 template<typename Match>
@@ -741,7 +877,7 @@ TEST(ClientWrapperTest, ReusesMetadataClientWhenVipAddressSnapshotIsUnchanged) {
     }));
     EXPECT_CALL(*subscriber_ptr, init(std::vector<std::string>{"vip"})).WillOnce(Return(true));
     EXPECT_CALL(*subscriber_ptr, getAddresses(_))
-        .Times(2)
+        .Times(1)
         .WillRepeatedly(DoAll(SetArgReferee<0>(std::vector<std::string>{"address"}), Return(true)));
     EXPECT_CALL(*factory_ptr, createMetaClient(_, _))
         .Times(1)
@@ -789,31 +925,33 @@ TEST(ClientWrapperTest, RecreatesMetadataClientWhenVipAddressChanges) {
     EXPECT_CALL(*subscriber_ptr, init(std::vector<std::string>{"vip"})).WillOnce(Return(true));
     EXPECT_CALL(*subscriber_ptr, getAddresses(_))
         .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"old_address"}), Return(true)))
-        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"new_address"}), Return(true)));
+        .WillRepeatedly(DoAll(SetArgReferee<0>(std::vector<std::string>{"new_address"}), Return(true)));
     EXPECT_CALL(*factory_ptr, createMetaClient(_, _))
         .WillOnce(Invoke([&old_meta_client](const auto&, const auto&) { return std::move(old_meta_client); }))
         .WillOnce(Invoke([&new_meta_client](const auto&, const auto&) { return std::move(new_meta_client); }));
     static const std::string storage_config = R"({"sdk_backend_configs":[]})";
     EXPECT_CALL(*old_meta_ptr, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
+    EXPECT_CALL(*old_meta_ptr, MatchLocation(_, _, _, _, _, _, _))
+        .WillRepeatedly(Return(std::make_pair(kv_cache_manager::ER_INVALID_GRPCSTATUS, kv_cache_manager::Locations{})));
     EXPECT_CALL(*new_meta_ptr, MatchLocation("match", _, _, _, _, _, _))
         .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::Locations{})));
     EXPECT_CALL(*factory_ptr, createTransferClient(_, _)).WillOnce(Invoke([&transfer_client](const auto&, const auto&) {
         return std::move(transfer_client);
     }));
 
-    ClientWrapper                wrapper(std::move(factory));
+    ClientWrapper                wrapper(std::move(factory), std::chrono::milliseconds(20));
     std::array<char, 32>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
     ASSERT_TRUE(wrapper.init(
         {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
-    EXPECT_TRUE(wrapper
-                    .match("",
-                           "match",
-                           kv_cache_manager::QueryType::QT_PREFIX_MATCH,
-                           {1},
-                           kv_cache_manager::BlockMaskOffset{0},
-                           {})
-                    .first);
+    bool routed = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!routed && std::chrono::steady_clock::now() < deadline) {
+        routed = wrapper.match("", "match", kv_cache_manager::QueryType::QT_PREFIX_MATCH,
+                                {1}, kv_cache_manager::BlockMaskOffset{0}, {}).first;
+        if (!routed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(routed);
     wrapper.shutdown();
     EXPECT_EQ(*destruction_count, 1);
 }
@@ -852,18 +990,22 @@ TEST_P(MetadataClientLifetimeTest, VipRefreshRetainsInFlightClient) {
     if (GetParam() == "match") {
         EXPECT_CALL(*old_client, MatchLocation(_, _, _, _, _, _, _)).WillOnce(Invoke([hold](const auto&...) {
             hold();
-            return std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::Locations{});
+            return std::make_pair(kv_cache_manager::ER_SERVICE_NOT_LEADER, kv_cache_manager::Locations{});
         }));
     } else if (GetParam() == "start_write") {
         EXPECT_CALL(*old_client, StartWrite(_, _, _, _, _, 0)).WillOnce(Invoke([hold](const auto&...) {
             hold();
-            return std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::WriteLocation{});
+            return std::make_pair(kv_cache_manager::ER_SERVICE_NOT_LEADER, kv_cache_manager::WriteLocation{});
         }));
     } else {
         EXPECT_CALL(*old_client, FinishWrite(_, _, _, _)).WillOnce(Invoke([hold](const auto&...) {
             hold();
-            return kv_cache_manager::ClientErrorCode::ER_OK;
-        }));
+            return kv_cache_manager::ER_SERVICE_NOT_LEADER;
+        })).WillRepeatedly(Return(kv_cache_manager::ER_INVALID_GRPCSTATUS));
+    }
+    if (GetParam() != "finish_write") {
+        EXPECT_CALL(*old_client, FinishWrite(_, _, _, _))
+            .WillRepeatedly(Return(kv_cache_manager::ER_INVALID_GRPCSTATUS));
     }
     EXPECT_CALL(*new_client, FinishWrite(_, _, _, _)).WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
     EXPECT_CALL(*subscriber, init(std::vector<std::string>{"vip"})).WillOnce(Return(true));
@@ -880,7 +1022,7 @@ TEST_P(MetadataClientLifetimeTest, VipRefreshRetainsInFlightClient) {
     EXPECT_CALL(*factory, createTransferClient(_, _)).WillOnce(Invoke([](const auto&, const auto&) {
         return std::make_unique<kv_cache_manager::MockTransferClient>(std::make_shared<int>(0));
     }));
-    auto wrapper = std::make_shared<ClientWrapper>(std::move(factory));
+    auto wrapper = std::make_shared<ClientWrapper>(std::move(factory), std::chrono::milliseconds(20));
     ASSERT_TRUE(wrapper->init(
         {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, nullptr, "tp0_Ffull"}, "default"));
     BoundedThread<bool> call([wrapper, operation = GetParam()] {
@@ -905,7 +1047,14 @@ TEST_P(MetadataClientLifetimeTest, VipRefreshRetainsInFlightClient) {
         FAIL() << "metadata RPC did not enter the old client";
     }
     refresh->store(true);
-    BoundedThread<bool> refreshed([wrapper] { return wrapper->finishWrite("", "refresh", "session", {}, {}); });
+    BoundedThread<bool> refreshed([wrapper] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (wrapper->finishWrite("", "refresh", "session", {}, {})) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    });
     const auto          refreshed_status = refreshed.waitFor(std::chrono::seconds(5));
     EXPECT_EQ(refreshed_status, std::future_status::ready);
     EXPECT_EQ(destroyed->load(), 0) << "old client destroyed while the RPC was still executing";
@@ -913,8 +1062,9 @@ TEST_P(MetadataClientLifetimeTest, VipRefreshRetainsInFlightClient) {
     ASSERT_EQ(refreshed.waitFor(std::chrono::seconds(5)), std::future_status::ready);
     EXPECT_TRUE(refreshed.get());
     ASSERT_EQ(call.waitFor(std::chrono::seconds(5)), std::future_status::ready);
-    EXPECT_TRUE(call.get());
+    EXPECT_FALSE(call.get());
     EXPECT_EQ(destroyed->load(), 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
     wrapper->shutdown();
     EXPECT_FALSE(wrapper->finishWrite("", "stopped", "session", {}, {}));
 }
@@ -924,7 +1074,7 @@ INSTANTIATE_TEST_SUITE_P(MetadataCalls,
                          ::testing::Values("match", "start_write", "finish_write"),
                          [](const ::testing::TestParamInfo<std::string>& info) { return info.param; });
 
-TEST(ClientWrapperTest, VipRefreshFailureDoesNotCallStaleMetadataClient) {
+TEST(ClientWrapperTest, VipFailureAndMembershipChangesKeepCallingCurrentMetadataClient) {
     auto  factory           = std::make_unique<MockClientFactory>();
     auto* factory_ptr       = factory.get();
     auto  subscriber        = std::make_unique<MockSubscriber>();
@@ -933,6 +1083,9 @@ TEST(ClientWrapperTest, VipRefreshFailureDoesNotCallStaleMetadataClient) {
     auto* meta_ptr          = meta_client.get();
     auto  destruction_count = std::make_shared<int>(0);
     auto  transfer_client   = std::make_unique<kv_cache_manager::MockTransferClient>(destruction_count);
+    std::promise<void> polled;
+    auto ready = polled.get_future();
+    int polls = 0;
 
     EXPECT_CALL(*factory_ptr, createSubscriber(true)).WillOnce(Invoke([&subscriber](bool) {
         return std::move(subscriber);
@@ -940,23 +1093,30 @@ TEST(ClientWrapperTest, VipRefreshFailureDoesNotCallStaleMetadataClient) {
     EXPECT_CALL(*subscriber_ptr, init(std::vector<std::string>{"vip"})).WillOnce(Return(true));
     EXPECT_CALL(*subscriber_ptr, getAddresses(_))
         .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"old_address"}), Return(true)))
-        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{}), Return(false)));
+        .WillRepeatedly(Invoke([&](auto& addresses) {
+            ++polls;
+            addresses = polls % 2 ? std::vector<std::string>{"old_address", "standby"}
+                                 : std::vector<std::string>{"standby", "old_address"};
+            if (polls == 3) polled.set_value();
+            return polls != 1;
+        }));
     EXPECT_CALL(*factory_ptr, createMetaClient(_, _)).WillOnce(Invoke([&meta_client](const auto&, const auto&) {
         return std::move(meta_client);
     }));
     static const std::string storage_config = R"({"sdk_backend_configs":[]})";
     EXPECT_CALL(*meta_ptr, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
-    EXPECT_CALL(*meta_ptr, FinishWrite(_, _, _, _)).Times(0);
+    EXPECT_CALL(*meta_ptr, FinishWrite(_, _, _, _)).WillRepeatedly(Return(kv_cache_manager::ER_OK));
     EXPECT_CALL(*factory_ptr, createTransferClient(_, _)).WillOnce(Invoke([&transfer_client](const auto&, const auto&) {
         return std::move(transfer_client);
     }));
 
-    ClientWrapper                wrapper(std::move(factory));
+    ClientWrapper                wrapper(std::move(factory), std::chrono::milliseconds(20));
     std::array<char, 32>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
     ASSERT_TRUE(wrapper.init(
         {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
-    EXPECT_FALSE(wrapper.finishWrite("", "finish", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
+    EXPECT_EQ(ready.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    EXPECT_TRUE(wrapper.finishWrite("", "finish", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
     wrapper.shutdown();
     EXPECT_EQ(*destruction_count, 1);
 }
@@ -979,28 +1139,35 @@ TEST(ClientWrapperTest, RetriesVipAddressChangeAfterClientCreationFailure) {
     EXPECT_CALL(*subscriber_ptr, init(std::vector<std::string>{"vip"})).WillOnce(Return(true));
     EXPECT_CALL(*subscriber_ptr, getAddresses(_))
         .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"old_address"}), Return(true)))
-        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"new_address"}), Return(true)))
-        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"new_address"}), Return(true)));
+        .WillRepeatedly(DoAll(SetArgReferee<0>(std::vector<std::string>{"new_address"}), Return(true)));
     EXPECT_CALL(*factory_ptr, createMetaClient(_, _))
         .WillOnce(Invoke([&old_meta_client](const auto&, const auto&) { return std::move(old_meta_client); }))
         .WillOnce(Invoke([](const auto&, const auto&) { return std::unique_ptr<kv_cache_manager::MetaClient>{}; }))
         .WillOnce(Invoke([&new_meta_client](const auto&, const auto&) { return std::move(new_meta_client); }));
     static const std::string storage_config = R"({"sdk_backend_configs":[]})";
     EXPECT_CALL(*old_meta_ptr, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
-    EXPECT_CALL(*old_meta_ptr, FinishWrite(_, _, _, _)).Times(0);
+    EXPECT_CALL(*old_meta_ptr, FinishWrite("finish_1", _, _, _)).WillOnce(Return(kv_cache_manager::ER_OK));
+    EXPECT_CALL(*old_meta_ptr, FinishWrite("finish_2", _, _, _))
+        .WillRepeatedly(Return(kv_cache_manager::ER_INVALID_GRPCSTATUS));
     EXPECT_CALL(*new_meta_ptr, FinishWrite("finish_2", "session", _, _))
         .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
     EXPECT_CALL(*factory_ptr, createTransferClient(_, _)).WillOnce(Invoke([&transfer_client](const auto&, const auto&) {
         return std::move(transfer_client);
     }));
 
-    ClientWrapper                wrapper(std::move(factory));
+    ClientWrapper                wrapper(std::move(factory), std::chrono::milliseconds(20));
     std::array<char, 32>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
     ASSERT_TRUE(wrapper.init(
         {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
-    EXPECT_FALSE(wrapper.finishWrite("", "finish_1", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
-    EXPECT_TRUE(wrapper.finishWrite("", "finish_2", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
+    EXPECT_TRUE(wrapper.finishWrite("", "finish_1", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
+    bool routed = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!routed && std::chrono::steady_clock::now() < deadline) {
+        routed = wrapper.finishWrite("", "finish_2", "session", kv_cache_manager::BlockMaskOffset{0}, {});
+        if (!routed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(routed);
     wrapper.shutdown();
     EXPECT_EQ(*destruction_count, 1);
 }
@@ -1023,8 +1190,7 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
         return std::move(subscriber);
     }));
     EXPECT_CALL(*subscriber_ptr, init(std::vector<std::string>{"direct"})).WillOnce(Return(true));
-    EXPECT_CALL(*subscriber_ptr, getAddresses(_))
-        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"direct"}), Return(true)));
+    EXPECT_CALL(*subscriber_ptr, getAddresses(_)).Times(0);
     EXPECT_CALL(*factory_ptr, createMetaClient(_, _))
         .WillOnce(Invoke([&old_meta_client](const auto&, const auto&) { return std::move(old_meta_client); }))
         .WillOnce(Invoke([&new_meta_client, reinit_started](const auto&, const auto&) {
@@ -1036,6 +1202,8 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
     EXPECT_CALL(*old_meta_ptr, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
     EXPECT_CALL(*old_meta_ptr, FinishWrite("finish_1", "session", _, _))
         .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_SERVICE_INSTANCE_NOT_EXIST));
+    EXPECT_CALL(*old_meta_ptr, FinishWrite("finish_2", "session", _, _))
+        .WillRepeatedly(Return(kv_cache_manager::ER_INVALID_GRPCSTATUS));
     EXPECT_CALL(*new_meta_ptr, FinishWrite("finish_2", "session", _, _))
         .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
     EXPECT_CALL(*factory_ptr, createTransferClient(_, _)).WillOnce(Invoke([&transfer_client](const auto&, const auto&) {

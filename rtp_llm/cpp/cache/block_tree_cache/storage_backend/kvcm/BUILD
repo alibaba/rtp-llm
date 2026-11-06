@@ -104,6 +104,7 @@ cc_library(
         ":config",
         ":subscriber",
         ":sdk_buffer_safety",
+        "//rtp_llm/cpp/cache/events:kvcm_discovery_proto",
         "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:json",
         "@local_config_cuda//cuda:cuda_headers",
