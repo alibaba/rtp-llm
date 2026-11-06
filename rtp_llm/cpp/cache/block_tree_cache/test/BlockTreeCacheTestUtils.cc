@@ -677,6 +677,10 @@ void BlockTreeCacheTestPeer::setTransferDrainObserverForTest(BlockTreeCache& cac
     cache.transfer_dispatcher_->drain_observer_for_test_ = std::move(observer);
 }
 
+std::unique_lock<std::mutex> BlockTreeCacheTestPeer::lockForTest(const BlockTreeCache& cache) {
+    return std::unique_lock<std::mutex>(cache.mutex_);
+}
+
 bool BlockTreeCacheTestPeer::armQueueRejectionForTest(BlockTreeCache& cache) {
     waitForTaskPoolIdleForTest(cache);
     if (cache.task_pool_->pending_tasks_.load() != 0) {
