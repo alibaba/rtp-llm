@@ -799,6 +799,21 @@ py_test(
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
 
+py_test(
+    name = "qsa_triton_recompile_regression_test",
+    srcs = [
+        "qsa_triton_recompile_regression_test.py",
+        "indexer_prefix_reuse_triton_test.py",
+        "scalar_cache_reference.py",
+        "topk_reference.py",
+        "ple_sm90_test_utils.py",
+    ],
+    deps = ["//rtp_llm:testlib", ":math_references"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 
 cc_binary(
     name = "ple_native_quant_test_ops.so",

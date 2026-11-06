@@ -10,8 +10,8 @@ def _mask_scores(
     scores,
     lengths,
     masked,
-    N: tl.constexpr,
-    ROW_STRIDE: tl.constexpr,
+    N,
+    ROW_STRIDE,
     COL_STRIDE: tl.constexpr,
     LENGTH_STRIDE: tl.constexpr,
     BN: tl.constexpr,
@@ -36,7 +36,7 @@ def _expand_tokens(
     blocks,
     lengths,
     output,
-    K: tl.constexpr,
+    K,
     LENGTH_STRIDE: tl.constexpr,
     FINITE_ONLY: tl.constexpr,
 ):
@@ -133,7 +133,6 @@ def _packed_qsa_tokens(
         tl.store(O + row * 2052 + 2048 + tail, -1, (tail < 3) & (2048 + tail >= count))
     else:
         tl.store(O + row * 2051 + 2048 + tail, tail_token.to(tl.int32), tail < 3)
-
 
 
 def try_select_qsa_tokens(
