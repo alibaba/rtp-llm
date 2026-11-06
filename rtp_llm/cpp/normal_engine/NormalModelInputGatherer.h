@@ -63,6 +63,9 @@ private:
                                          TensorHolder&       host_holder) const;
 
     NormalModelInputGathererConfig config_;
+    // Freeze startup options before engine workers run. getenv must not race
+    // with environment updates from Python or runtime initialization.
+    const bool device_input_enabled_;
 };
 
 }  // namespace rtp_llm
