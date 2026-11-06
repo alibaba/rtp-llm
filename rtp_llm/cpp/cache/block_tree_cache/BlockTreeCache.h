@@ -67,9 +67,12 @@ struct BlockTreeCacheConfig {
     bool   btc_transfer_engine_async{true};
     size_t transfer_queue_max_size{10000};
 
-    // ---- Cross-rank transfer timeout ----
+    // ---- Transfer deadlines, including queue wait and cross-rank work ----
     int host_cache_sync_timeout_ms{10000};
+    // Preserve the existing name for disk loads.
     int disk_cache_sync_timeout_ms{30000};
+    // Outbound disk transfers from both eviction and store.
+    int disk_cache_evict_timeout_ms{30000};
 
     // Async: blocks per Load/Offload pair, split by direction and shared by groups.
     // Legacy: rank-wide byte budget measured in maximum-stride blocks.
