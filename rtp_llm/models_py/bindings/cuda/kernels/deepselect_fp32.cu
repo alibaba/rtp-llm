@@ -1,9 +1,10 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 
+#include <cuda_runtime.h>
 #include <cstdint>
 #include <limits>
 
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
 #include <ATen/MemoryOverlap.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -25,7 +26,7 @@
 
 namespace torch_ext {
 
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
 namespace {
 template<typename BiasT, bool InvalidOnly = false>
 __global__ void markovScaledLogitsKernel(const float* __restrict__ logits,
@@ -67,7 +68,7 @@ markov_scaled_logits(const torch::Tensor& logits, const torch::Tensor& markov_bi
                     && logits.device() == markov_bias.device() && logits.device() == temperature.device(),
                 "DSpARK scaled logits require same-device FP32 logits [B,V], contiguous bias [B,V]"
                 " in FP32/BF16/FP16, and contiguous FP32 temperature [B]");
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     auto output = torch::empty(logits.sizes(), logits.options());
     if (logits.numel() == 0) {
         return output;
@@ -111,7 +112,7 @@ markov_scaled_logits(const torch::Tensor& logits, const torch::Tensor& markov_bi
 }
 
 bool deepselect_fp32_available() {
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     return true;
 #else
     return false;
@@ -126,7 +127,7 @@ static void deepselect_fp32_impl(const torch::Tensor& logits,
                                  const torch::Tensor* candidate_counts,
                                  bool                 skip_valid_candidates,
                                  const torch::Tensor* index_map) {
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     TORCH_CHECK(logits.is_cuda() && ends.is_cuda() && output.is_cuda(), "DeepSelect requires CUDA tensors");
     TORCH_CHECK(logits.device() == ends.device() && logits.device() == output.device(),
                 "DeepSelect tensors must share a device");
@@ -156,9 +157,8 @@ static void deepselect_fp32_impl(const torch::Tensor& logits,
     TORCH_CHECK(ends.dim() == 1 && ends.size(0) == rows && ends.is_contiguous(),
                 "DeepSelect ends must be contiguous [M]");
     const int64_t topk = output.dim() == 2 ? output.size(1) : 0;
-    TORCH_CHECK(output.dim() == 2 && output.size(0) == rows
-                    && (topk == 512 || topk == 1024 || topk == 4096) && output.stride(1) == 1
-                    && output.stride(0) >= topk && output.stride(0) % 8 == 0
+    TORCH_CHECK(output.dim() == 2 && output.size(0) == rows && (topk == 512 || topk == 1024 || topk == 4096)
+                    && output.stride(1) == 1 && output.stride(0) >= topk && output.stride(0) % 8 == 0
                     && reinterpret_cast<uintptr_t>(output.data_ptr()) % 32 == 0,
                 "DeepSelect output must be [M,512|1024|4096] with unit inner stride and 32B row/base alignment");
     // Strided views can make the overlap analyzer return TooHard. Reject
@@ -171,10 +171,10 @@ static void deepselect_fp32_impl(const torch::Tensor& logits,
         // K1024 shares the K4096 fused-value epilogue; the K512 bucket keeps the
         // legacy gather fallback (no value output) so its instantiations stay put.
         TORCH_CHECK((topk == 1024 || topk == 4096) && output_values->is_cuda()
-                        && output_values->device() == logits.device()
-                        && output_values->scalar_type() == torch::kFloat32 && output_values->sizes() == output.sizes()
-                        && output_values->is_contiguous() && !output_values->is_alias_of(logits)
-                        && !output_values->is_alias_of(ends) && !output_values->is_alias_of(output),
+                        && output_values->device() == logits.device() && output_values->scalar_type() == torch::kFloat32
+                        && output_values->sizes() == output.sizes() && output_values->is_contiguous()
+                        && !output_values->is_alias_of(logits) && !output_values->is_alias_of(ends)
+                        && !output_values->is_alias_of(output),
                     "DeepSelect value output requires separate contiguous CUDA FP32 [M,1024|4096] storage");
     }
     if (candidate_counts) {
@@ -286,7 +286,7 @@ void deepselect_fp32(const torch::Tensor& logits,
 }
 
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tensor& logits, int64_t k) {
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     // Fast-path gate, not a shape contract: whatever fails here falls back to
     // ATen topk below. It mirrors the checks deepselect_fp32_impl applies, so a
     // tensor that passes can never be rejected there (a rejection would be a
@@ -310,9 +310,8 @@ std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tenso
     // K1024 and K4096 read the selected values straight out of the selector,
     // which removes the post-selection gather over the full row.
     const bool fused_values = k == 1024 || k == 4096;
-    if ((k == 4096 || k == 1024 || (k > 0 && k <= 512)) && logits.is_cuda()
-        && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2 && logits.size(1) >= width
-        && logits.size(1) < MAX_VOCAB_SIZE && logits_row_major_view
+    if ((k == 4096 || k == 1024 || (k > 0 && k <= 512)) && logits.is_cuda() && logits.scalar_type() == torch::kFloat32
+        && logits.dim() == 2 && logits.size(1) >= width && logits.size(1) < MAX_VOCAB_SIZE && logits_row_major_view
         && at::cuda::getDeviceProperties(logits.get_device())->major == 10
         && (at::cuda::getDeviceProperties(logits.get_device())->minor == 0
             || at::cuda::getDeviceProperties(logits.get_device())->minor == 3)) {
@@ -335,7 +334,7 @@ std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk(const torch::Tenso
     return {std::get<0>(selected), std::get<1>(selected)};
 }
 
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
 static std::tuple<torch::Tensor, torch::Tensor> prefilter_topk(const torch::Tensor& logits,
                                                                const torch::Tensor* markov_bias,
                                                                const torch::Tensor* temperature,
@@ -362,7 +361,7 @@ static std::tuple<torch::Tensor, torch::Tensor> prefilter_topk(const torch::Tens
 #endif
 
 std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_topk_prefilter(const torch::Tensor& logits, int64_t k) {
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     return prefilter_topk(logits, nullptr, nullptr, k);
 #else
     return deepselect_fp32_topk(logits, k);
@@ -373,7 +372,7 @@ std::tuple<torch::Tensor, torch::Tensor> deepselect_fp32_markov_topk_prefilter(c
                                                                                const torch::Tensor& markov_bias,
                                                                                const torch::Tensor& temperature,
                                                                                int64_t              k) {
-#if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     return prefilter_topk(logits, &markov_bias, &temperature, k);
 #else
     return deepselect_fp32_topk(markov_scaled_logits(logits, markov_bias, temperature), k);

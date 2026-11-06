@@ -1,10 +1,11 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
 
+#include <cuda_runtime.h>
 #include <cstdint>
 #include <limits>
 #include <type_traits>
 
-#if defined(RTP_DEEPSELECT_BF16_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
 #include <ATen/MemoryOverlap.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -25,7 +26,7 @@
 namespace torch_ext {
 
 bool deepselect_bf16_available() {
-#if defined(RTP_DEEPSELECT_BF16_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     return true;
 #else
     return false;
@@ -39,7 +40,7 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
                           const torch::Tensor& ends,
                           torch::Tensor&       output,
                           bool                 filter_finite) {
-#if defined(RTP_DEEPSELECT_BF16_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     TORCH_CHECK(logits.is_cuda() && ends.is_cuda() && output.is_cuda(), "DeepSelect requires CUDA tensors");
     TORCH_CHECK(logits.device() == ends.device() && logits.device() == output.device(),
                 "DeepSelect tensors must share a device");
@@ -170,7 +171,7 @@ void deepselect_bf16_impl(const torch::Tensor& logits,
 #endif
 }
 
-#if defined(RTP_DEEPSELECT_BF16_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
 // scores[b, pitch] = bf16_rn(logits[b, V] + float(bias[b, V])), tail padded -inf.
 __global__ void correctedBf16Kernel(const float* __restrict__ logits,
                                     int64_t logits_row_stride,
@@ -246,7 +247,7 @@ void deepselect_bf16_dense_sorted(const torch::Tensor& logits, const torch::Tens
 }
 
 bool draft_markov_topk_bf16_supported(const torch::Tensor& logits, int64_t k) {
-#if defined(RTP_DEEPSELECT_BF16_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     if (!logits.defined() || !logits.is_cuda() || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2
         || logits.stride(1) != 1 || logits.size(0) > 65535) {
         return false;
@@ -271,7 +272,7 @@ std::tuple<torch::Tensor, torch::Tensor> draft_markov_topk_bf16(const torch::Ten
                                                                 const torch::Tensor& markov_bias,
                                                                 const torch::Tensor& temperature,
                                                                 int64_t              k) {
-#if defined(RTP_DEEPSELECT_BF16_ENABLED) && !defined(USE_ROCM)
+#if !defined(USE_ROCM) && CUDART_VERSION >= 12090
     TORCH_CHECK(draft_markov_topk_bf16_supported(logits, k),
                 "draft BF16 topk requires SM100/SM103, FP32 [B,V] logits with unit inner stride, B <= 65535, "
                 "K in {512,1024,4096}, K <= V and padded V < 2^23");
