@@ -255,6 +255,10 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         self.pool: Optional[multiprocessing.pool.Pool] = None
         self._consecutive_timeouts = 0
         self._max_consecutive_timeouts = vit_config.mm_preprocess_max_workers
+        # Counts completed tasks so a timeout can tell a stuck pool (no
+        # progress) from an overloaded one (slow but draining).
+        self._completed_tasks = 0
+        self._last_timeout_completed = 0
         # Accepted, unfinished work; includes both running and waiting tasks (M3).
         self._preprocess_queue_lock = threading.Lock()
         self._pending_preprocess_tasks: Set[int] = set()
@@ -293,6 +297,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             if task_id not in self._pending_preprocess_tasks:
                 return
             self._pending_preprocess_tasks.remove(task_id)
+            self._completed_tasks = getattr(self, "_completed_tasks", 0) + 1
             queue_size = len(self._pending_preprocess_tasks)
         _report_preprocess_queue_size(queue_size)
 
@@ -395,14 +400,27 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
             raise e.error from e
         except multiprocessing.pool.TimeoutError:
             with self._pool_lock:
-                self._consecutive_timeouts += 1
-                if self._consecutive_timeouts >= self._max_consecutive_timeouts:
-                    logging.warning(
-                        f"Hit {self._consecutive_timeouts} consecutive timeouts, "
-                        f"rebuilding pool (workers may be stuck)"
-                    )
-                    self._rebuild_pool()
+                # Distinguish a stuck pool (no task completed since the last
+                # timeout) from an overloaded one (tasks are still draining).
+                # Rebuilding an overloaded pool would discard queued work and
+                # make the backlog worse.
+                completed = getattr(self, "_completed_tasks", 0)
+                if completed != getattr(self, "_last_timeout_completed", 0):
                     self._consecutive_timeouts = 0
+                    self._last_timeout_completed = completed
+                else:
+                    self._consecutive_timeouts += 1
+                    if self._consecutive_timeouts >= self._max_consecutive_timeouts:
+                        logging.warning(
+                            f"Hit {self._consecutive_timeouts} consecutive timeouts "
+                            f"with no completed tasks, rebuilding pool "
+                            f"(workers may be stuck)"
+                        )
+                        self._rebuild_pool()
+                        self._consecutive_timeouts = 0
+                        self._last_timeout_completed = getattr(
+                            self, "_completed_tasks", 0
+                        )
             raise TimeoutError(
                 f"Preprocessing timeout after {work_item.mm_timeout_ms}ms"
             )
