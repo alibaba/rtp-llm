@@ -7,7 +7,7 @@ import triton.language as tl
 
 @triton.jit
 def _suffix_and_head_padding(Q, O, QS0: tl.constexpr, QS1: tl.constexpr,
-                             QS2: tl.constexpr, N: tl.constexpr,
+                             QS2: tl.constexpr,
                              HEADS: tl.constexpr, KHEADS: tl.constexpr,
                              NOPE: tl.constexpr, LATENT: tl.constexpr,
                              SUFFIX: tl.constexpr, HEAD_BLOCK: tl.constexpr,
@@ -47,6 +47,6 @@ def absorbed_query(q, weight, latent_dim, kernel_heads):
         torch.bmm(q[..., :nope].transpose(0, 1), weight,
                   out=output[:, :heads, :latent_dim].transpose(0, 1))
         _suffix_and_head_padding[(rows, triton.cdiv(kernel_heads, 8))](
-            q, output, *q.stride(), rows, heads, kernel_heads, nope, latent_dim,
+            q, output, *q.stride(), heads, kernel_heads, nope, latent_dim,
             suffix, 8, triton.next_power_of_2(latent_dim + suffix), num_warps=4)
     return output
