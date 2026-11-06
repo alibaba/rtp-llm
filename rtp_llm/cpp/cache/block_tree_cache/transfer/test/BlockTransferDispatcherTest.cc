@@ -507,10 +507,11 @@ TEST(BlockTransferDispatcherTest, AllDirectionsUseTheConfiguredBatchLimit) {
 }
 
 TEST(BlockTransferDispatcherTest, DefaultBatchLimitIsSharedByDirections) {
-    auto                            device_host_engine = std::make_shared<ScriptedPerRankEngine>();
+    auto device_host_engine =
+        std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<TransferAsyncContext>>{}, 64);
     BlockTransferDispatcher         device_host_dispatcher(device_host_engine);
     std::vector<TransferDescriptor> device_host_descriptors;
-    for (size_t index = 0; index < 9; ++index) {
+    for (size_t index = 0; index < 33; ++index) {
         device_host_descriptors.push_back(deviceHostDescriptor(0));
     }
     size_t device_host_callback_count = 0;
@@ -520,14 +521,15 @@ TEST(BlockTransferDispatcherTest, DefaultBatchLimitIsSharedByDirections) {
                                            ++device_host_callback_count;
                                        });
     ASSERT_EQ(device_host_engine->submittedBatches().size(), 2u);
-    EXPECT_EQ(device_host_engine->submittedBatches()[0].size(), 8u);
+    EXPECT_EQ(device_host_engine->submittedBatches()[0].size(), 32u);
     EXPECT_EQ(device_host_engine->submittedBatches()[1].size(), 1u);
     EXPECT_EQ(device_host_callback_count, 1u);
 
-    auto                            host_disk_engine = std::make_shared<ScriptedPerRankEngine>();
+    auto host_disk_engine =
+        std::make_shared<ScriptedPerRankEngine>(std::deque<std::shared_ptr<TransferAsyncContext>>{}, 64);
     BlockTransferDispatcher         host_disk_dispatcher(host_disk_engine);
     std::vector<TransferDescriptor> host_disk_descriptors;
-    for (size_t index = 0; index < 9; ++index) {
+    for (size_t index = 0; index < 33; ++index) {
         host_disk_descriptors.push_back(hostDiskDescriptor(0));
     }
     size_t host_disk_callback_count = 0;
@@ -537,7 +539,7 @@ TEST(BlockTransferDispatcherTest, DefaultBatchLimitIsSharedByDirections) {
                                          ++host_disk_callback_count;
                                      });
     ASSERT_EQ(host_disk_engine->submittedBatches().size(), 2u);
-    EXPECT_EQ(host_disk_engine->submittedBatches()[0].size(), 8u);
+    EXPECT_EQ(host_disk_engine->submittedBatches()[0].size(), 32u);
     EXPECT_EQ(host_disk_engine->submittedBatches()[1].size(), 1u);
     EXPECT_EQ(host_disk_callback_count, 1u);
 }

@@ -231,13 +231,19 @@ public:
         close();
     }
     DiskBlockIOStatus write(uint64_t, const void*, size_t) override {
-        started.set_value();
-        return release_.wait_for(std::chrono::seconds(5)) == std::future_status::ready ? DiskBlockIOStatus::OK :
-                                                                                         DiskBlockIOStatus::IO_ERROR;
+        return waitForWriteRelease();
+    }
+    DiskBlockIOStatus write(const std::vector<DiskWrite>&) override {
+        return waitForWriteRelease();
     }
     std::promise<void> started;
 
 private:
+    DiskBlockIOStatus waitForWriteRelease() {
+        started.set_value();
+        return release_.wait_for(std::chrono::seconds(5)) == std::future_status::ready ? DiskBlockIOStatus::OK :
+                                                                                         DiskBlockIOStatus::IO_ERROR;
+    }
     std::shared_future<void> release_;
 };
 
