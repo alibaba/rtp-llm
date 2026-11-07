@@ -45,6 +45,9 @@ def forward_worker_environment(runtime,environ):
     # its CUDA_* forwarding prefix; never serialize a CPU driver's empty mask.
     env.pop('CUDA_VISIBLE_DEVICES',None)
     env.pop('RLLM_EXCLUDE',None)
+    if environ.get('Q38_ENABLE_BF16_STATE_RUNTIME')=='1' and environ.get('RTP_LLM_RL_WORLD72')=='1':
+        if environ.get('NCCL_CUMEM_ENABLE')!='1' or env.get('NCCL_CUMEM_ENABLE')!='1':
+            raise RuntimeError('This dedicated 72-GPU RTP allocation requires the actual-role qualified NCCL CUMEM1/MNNVL profile')
     return runtime
 
 

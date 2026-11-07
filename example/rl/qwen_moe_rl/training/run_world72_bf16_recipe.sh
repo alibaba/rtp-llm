@@ -51,6 +51,8 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1
 export PYTORCH_ALLOC_CONF=backend:native,expandable_segments:False
 unset PYTORCH_CUDA_ALLOC_CONF
 export OMP_NUM_THREADS=4 TOKENIZERS_PARALLELISM=false RAY_DEDUP_LOGS=0 CUDA_DEVICE_MAX_CONNECTIONS=1
+# This allocation qualified MNNVL; override the generic historical vLLM CUMEM0 workaround only here.
+export NCCL_CUMEM_ENABLE=1 NCCL_DEBUG=INFO NCCL_DEBUG_SUBSYS=INIT,NET,ENV TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export PYTHONPATH="$PROJECT/training:$PROJECT/adapter:$PROJECT/agent:$PROJECT/rtp:$RTP_SOURCE:$RTP_SOURCE/rtp_llm/libs${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p "$RUN/training" "$RUN/policy-loss" "$RUN/rtp" "$RUN/episodes" "$RUN/tool-episodes" "$RUN/trace-linkage"
 "$PYTHON" - "$RLLM_PYTHON_TOOL_TRAIN_JSONL" <<'PY'
