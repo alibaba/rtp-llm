@@ -163,15 +163,20 @@ class MMRemoteEmbeddingCache:
 
     def normalize_cpp_url_input(self, item):
         # QueryConverter's GenerateInput URL path passes torch::empty(1), not
-        # image data. The verified Qwen3/VL2 IMAGE preprocessors ignore this
+        # image data. The verified Qwen3/VL2/V4.1 IMAGE preprocessors ignore this
         # field and consume url. Never inspect the uninitialized scalar value.
         from rtp_llm.utils.base_model_datatypes import MMUrlType
 
         tensor = item.tensor
+        model_type = self._model_identity.get("model_type")
+        is_v41 = model_type in ("deepseek_v41", "deepseek_v41_dspark")
+        inline_url = item.url.startswith("data:image/") or (
+            is_v41 and item.url.startswith("data:application/octet-stream;base64,")
+        )
         if (
-            self._model_identity.get("model_type") in ("qwen3_vl", "deepseek_vl_v2")
+            (model_type in ("qwen3_vl", "deepseek_vl_v2") or is_v41)
             and item.mm_type == MMUrlType.IMAGE
-            and item.url.startswith("data:image/")
+            and inline_url
             and tensor is not None
             and tensor.device.type == "cpu"
             and tensor.dtype == torch.float32

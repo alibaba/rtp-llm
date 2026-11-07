@@ -1564,3 +1564,51 @@ class GdrStartupLifetimeTest(unittest.TestCase):
             constructor.assert_called_once()
             cache.close()
             client.close.assert_called_once()
+
+
+class V41CppPlaceholderTest(unittest.TestCase):
+    def cache(self, model_type="deepseek_v41"):
+        cache = MMRemoteEmbeddingCache(
+            Store(), model_identity={"model_type": model_type},
+            namespace="immutable-v41-revision", max_object_bytes=65536,
+            max_inflight_bytes=1048576, max_pending=8, read_timeout_ms=500,
+        )
+        self.addCleanup(cache.close)
+        return cache
+
+    def item(self, url="data:application/octet-stream;base64,AQID", tensor=None, mm_type=1):
+        return MultimodalInput(
+            url=url, mm_type=mm_type,
+            tensor=torch.empty(1) if tensor is None else tensor,
+            mm_preprocess_config=MMPreprocessConfig(),
+        )
+
+    def test_v41_cpp_url_placeholder_matches_empty_wire_key(self):
+        for model in ("deepseek_v41", "deepseek_v41_dspark"):
+            cache = self.cache(model)
+            for mime in ("image/png", "application/octet-stream"):
+                item = self.item(url="data:" + mime + ";base64,AQID")
+                empty = self.item(url=item.url, tensor=torch.empty(0))
+                expected = cache.key([empty])
+                self.assertIsNotNone(expected)
+                cache.normalize_cpp_url_input(item)
+                self.assertEqual(item.tensor.numel(), 0)
+                self.assertEqual(cache.key([item]), expected)
+
+    def test_placeholder_normalization_keeps_other_tensor_contracts(self):
+        cache = self.cache()
+        for item in (
+            self.item(tensor=torch.empty(2)),
+            self.item(tensor=torch.empty(1, dtype=torch.int64)),
+            self.item(mm_type=2),
+            self.item(url="https://example.invalid/image.png"),
+            self.item(url="data:application/pdf;base64,AQID"),
+        ):
+            original = item.tensor
+            cache.normalize_cpp_url_input(item)
+            self.assertIs(item.tensor, original)
+        unknown = self.cache("unknown")
+        item = self.item()
+        unknown.normalize_cpp_url_input(item)
+        self.assertEqual(item.tensor.numel(), 1)
+        self.assertIsNone(unknown.key([item]))
