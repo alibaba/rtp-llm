@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -1795,6 +1796,75 @@ TEST_F(GenerateStreamTest, testChunkedPrefillWindowAndUpdate) {
     updateOneToken(stream, 101);
     ASSERT_FALSE(stream->isContextStream());
     ASSERT_EQ(stream->seqLength(), original_seq_len + 1);
+}
+
+TEST_F(GenerateStreamTest, testChunkedPrefillTokenCountsIncludeCacheOnce) {
+    struct TestCase {
+        int              reuse_length;
+        int              initial_reuse_length;
+        std::vector<int> compute_tokens;
+        std::vector<int> tokens_with_cache;
+    };
+    const std::vector<TestCase> cases{{0, 0, {8, 8, 4}, {8, 8, 4}},
+                                      {4, 4, {8, 8}, {12, 8}},
+                                      {4, 8, {8, 8}, {12, 8}},
+                                      {19, 19, {1}, {20}},
+                                      {20, 20, {0}, {20}}};
+    for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+        for (const auto& test_case : cases) {
+            SCOPED_TRACE(testing::Message()
+                         << "role=" << static_cast<int>(role) << ", reuse=" << test_case.reuse_length);
+            GenerateStreamBuilder builder;
+            auto                  stream = builder.createChunkedContextStream(
+                makeInputIds(20), role, 8, [](GenerateInput& input, GenerateConfig&) { input.priority = 7; });
+            ASSERT_FALSE(stream->hasError());
+            stream->setReuseLength(test_case.reuse_length);
+            // Initial cache-hit metrics may use canonical CP tokens while reuseLength is rank-local.
+            stream->setInitialReuseLength(test_case.initial_reuse_length);
+            markRunning(stream);
+
+            size_t total_tokens_with_cache = 0;
+            size_t total_compute_tokens    = 0;
+            for (size_t chunk = 0; chunk < test_case.compute_tokens.size(); ++chunk) {
+                SCOPED_TRACE(chunk);
+                StreamGroups groups({stream});
+                const auto   counts = groups.tokenCountsByPriority().at(7);
+                EXPECT_EQ(groups.contextExecuteTokenSize(), test_case.compute_tokens[chunk]);
+                EXPECT_EQ(groups.contextExecuteTokenSizeWithCache(), test_case.tokens_with_cache[chunk]);
+                EXPECT_EQ(counts.context, test_case.compute_tokens[chunk]);
+                EXPECT_EQ(counts.context_with_cache, test_case.tokens_with_cache[chunk]);
+                EXPECT_EQ(counts.total, test_case.compute_tokens[chunk]);
+                EXPECT_EQ(groups.tokenCountsByPriority().at(7).context_with_cache, counts.context_with_cache);
+                total_compute_tokens += groups.contextExecuteTokenSize();
+                total_tokens_with_cache += groups.contextExecuteTokenSizeWithCache();
+                if (chunk + 1 < test_case.compute_tokens.size()) {
+                    ASSERT_TRUE(stream->isMiddleChunk());
+                    stream->advanceChunk();
+                }
+            }
+            EXPECT_TRUE(stream->isLastChunk());
+            EXPECT_EQ(total_compute_tokens, 20 - test_case.reuse_length);
+            EXPECT_EQ(total_tokens_with_cache, 20);
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, testUnchunkedPrefillTokenCountsIncludeCache) {
+    for (const int reuse_length : {0, 4, 19, 20}) {
+        SCOPED_TRACE(reuse_length);
+        GenerateStreamBuilder builder;
+        auto                  stream = builder.createChunkedContextStream(makeInputIds(20), RoleType::PREFILL, 0);
+        stream->setReuseLength(reuse_length);
+        stream->setInitialReuseLength(reuse_length);
+        markRunning(stream);
+        ASSERT_FALSE(stream->chunkedPrefillEnabled());
+        StreamGroups groups({stream});
+        const auto   counts = groups.tokenCountsByPriority().at(stream->priority());
+        EXPECT_EQ(groups.contextExecuteTokenSize(), 20 - reuse_length);
+        EXPECT_EQ(groups.contextExecuteTokenSizeWithCache(), 20);
+        EXPECT_EQ(counts.context, 20 - reuse_length);
+        EXPECT_EQ(counts.context_with_cache, 20);
+    }
 }
 
 TEST_F(GenerateStreamTest, testChunkedPrefillMiddleChunkPropagatesWorkerError) {
