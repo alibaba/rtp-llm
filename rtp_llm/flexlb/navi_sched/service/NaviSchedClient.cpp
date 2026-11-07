@@ -179,7 +179,8 @@ NaviSchedScheduleResult NaviSchedClient::makeScheduleResult(
 
 NaviSchedScheduleResult NaviSchedClient::scheduleRequest(
     const ClientRequestToMasterDataConstPtr &request, const std::string &masterBizName,
-    int64_t timeoutMs, bool expectResponseStream, const std::string &masterAddress)
+    int64_t timeoutMs, bool expectResponseStream, const std::string &masterAddress,
+    bool waitForDecision)
 {
     if (!_runner) {
         _stoppedRequestCount.fetch_add(1, std::memory_order_relaxed);
@@ -193,12 +194,69 @@ NaviSchedScheduleResult NaviSchedClient::scheduleRequest(
     }
     _scheduleCount.fetch_add(1, std::memory_order_relaxed);
     const auto beginTimeUs = autil::TimeUtility::monotonicTimeUs();
-    auto result =
-        _runner->schedule(request, masterBizName, timeoutMs, expectResponseStream,
-                          masterAddress);
+    if (!waitForDecision) {
+        std::lock_guard<std::mutex> lock(_pendingSchedulesMutex);
+        if (!_pendingSchedules
+                 .emplace(request->requestId,
+                          PendingSchedule{request, masterBizName, beginTimeUs})
+                 .second) {
+            NaviSchedScheduleResult result;
+            result.errorCode = navi::EC_ABORT;
+            result.errorMessage = "duplicate pending NaviSched schedule";
+            return result;
+        }
+    }
+    auto result = _runner->schedule(request, masterBizName, timeoutMs,
+                                    expectResponseStream, masterAddress, waitForDecision);
+    if (!waitForDecision && result.errorCode == navi::EC_NONE) {
+        return makeScheduleResult(result);
+    }
+    if (!waitForDecision) {
+        std::lock_guard<std::mutex> lock(_pendingSchedulesMutex);
+        _pendingSchedules.erase(request->requestId);
+    }
     const auto masterRequestLatencyUs =
         autil::TimeUtility::monotonicTimeUs() - beginTimeUs;
     recordScheduleResult(request, masterBizName, result, masterRequestLatencyUs);
+    return makeScheduleResult(result);
+}
+
+int NaviSchedClient::notificationFd()
+{
+    if (!_responseR) {
+        throw std::runtime_error("NaviSched client response resource is not initialized");
+    }
+    return _responseR->notificationFd();
+}
+
+std::optional<NaviSchedScheduleResult> NaviSchedClient::takeScheduleResult(
+    uint64_t requestId)
+{
+    std::lock_guard<std::mutex> lock(_pendingSchedulesMutex);
+    auto it = _pendingSchedules.find(requestId);
+    if (it == _pendingSchedules.end()) {
+        throw std::invalid_argument("NaviSched schedule is not pending");
+    }
+    auto decision = _responseR->takeDecision(requestId);
+    if (!decision) {
+        return std::nullopt;
+    }
+    ClientGraphRunResult result;
+    result.errorCode = decision->errorCode;
+    result.errorMessage = std::move(decision->errorMessage);
+    result.decision = std::move(decision->decision);
+    result.replay = std::move(decision->replay);
+    const auto &pending = it->second;
+    const auto latencyUs = autil::TimeUtility::monotonicTimeUs() - pending.beginTimeUs;
+    if (result.decision) {
+        if (!result.decision->requestTiming) {
+            result.decision->requestTiming = std::make_shared<NaviSchedRequestTiming>();
+        }
+        result.decision->requestTiming->clientTotalLatencyMs =
+            std::max(int64_t(0), latencyUs) / 1000.0;
+    }
+    recordScheduleResult(pending.request, pending.masterBizName, result, latencyUs);
+    _pendingSchedules.erase(it);
     return makeScheduleResult(result);
 }
 
@@ -429,9 +487,10 @@ bool NaviSchedClient::abortForwardRequest(uint64_t requestId)
     }
     const bool abortedFlexlb = flexlb && flexlb->abort(requestId);
     const bool didAbort =
-        (_enableAgentForward && _responseR && _responseR->abort(requestId)) || abortedFlexlb;
-    AUTIL_LOG(INFO, "abort forward graph, request_id [%lu], aborted [%d]",
-              requestId, didAbort);
+        (_enableAgentForward && _responseR && _responseR->abort(requestId)) ||
+        abortedFlexlb;
+    AUTIL_LOG(INFO, "abort forward graph, request_id [%lu], aborted [%d]", requestId,
+              didAbort);
     return didAbort;
 }
 
@@ -496,6 +555,22 @@ NaviSchedScheduleResult NaviSchedClient::schedule(const NaviSchedScheduleRequest
                                                   bool collectReplay,
                                                   const std::string &masterAddress)
 {
+    return scheduleImpl(input, masterBizName, collectReplay, masterAddress, true);
+}
+
+NaviSchedScheduleResult NaviSchedClient::submitSchedule(
+    const NaviSchedScheduleRequest &input, const std::string &masterBizName)
+{
+    if (!_enableAgentForward) {
+        throw std::invalid_argument("async scheduling requires Agent forwarding");
+    }
+    return scheduleImpl(input, masterBizName, false, "", false);
+}
+
+NaviSchedScheduleResult NaviSchedClient::scheduleImpl(
+    const NaviSchedScheduleRequest &input, const std::string &masterBizName,
+    bool collectReplay, const std::string &masterAddress, bool waitForDecision)
+{
     _requestReceivedCount.fetch_add(1, std::memory_order_relaxed);
     const auto &effectiveMasterBizName =
         masterBizName.empty() ? _defaultMasterBizName : masterBizName;
@@ -524,7 +599,7 @@ NaviSchedScheduleResult NaviSchedClient::schedule(const NaviSchedScheduleRequest
             request, autil::TimeUtility::currentTimeInMicroSeconds());
     }
     return scheduleRequest(request, effectiveMasterBizName, input.timeoutMs, true,
-                           masterAddress);
+                           masterAddress, waitForDecision);
 }
 
 void NaviSchedClient::stop()
@@ -557,6 +632,10 @@ void NaviSchedClient::stop()
     }
     NaviSchedRole::stop();
     _runner.reset();
+    {
+        std::lock_guard<std::mutex> lock(_pendingSchedulesMutex);
+        _pendingSchedules.clear();
+    }
     _replayClientR.reset();
 }
 

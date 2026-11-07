@@ -65,6 +65,37 @@ class NaviSchedClient(RoleFacade):
         route_only: bool = False,
         explicit_cache_checkpoint_position: int = 0,
     ) -> NaviSchedDecision:
+        native_request, effective_master_biz_name = self._make_native_request(
+            request,
+            target_biz_name,
+            master_biz_name,
+            block_hashes,
+            timeout_ms,
+            request_id,
+            block_size,
+            forward_payload,
+            route_only,
+            explicit_cache_checkpoint_position,
+        )
+        arguments = (native_request, effective_master_biz_name, bool(collect_replay))
+        if master_address:
+            arguments += (str(master_address),)
+        result = self._service.schedule(*arguments)
+        return decisionFromNative(result)
+
+    def _make_native_request(
+        self,
+        request,
+        target_biz_name,
+        master_biz_name="",
+        block_hashes=None,
+        timeout_ms=1000,
+        request_id=None,
+        block_size=256,
+        forward_payload=b"",
+        route_only=False,
+        explicit_cache_checkpoint_position=0,
+    ):
         effective_master_biz_name = str(master_biz_name) or self._master_biz_name
         if not target_biz_name:
             raise ValueError("target_biz_name is required")
@@ -109,11 +140,22 @@ class NaviSchedClient(RoleFacade):
         native_request.timeout_ms = int(timeout_ms)
         native_request.forward_payload = request.forward_payload
         native_request.route_only = bool(route_only)
-        arguments = (native_request, effective_master_biz_name, bool(collect_replay))
-        if master_address:
-            arguments += (str(master_address),)
-        result = self._service.schedule(*arguments)
-        return decisionFromNative(result)
+        return native_request, effective_master_biz_name
+
+    def submit_schedule(self, request, target_biz_name, timeout_ms=1000):
+        native_request, master_biz = self._make_native_request(
+            request, target_biz_name, timeout_ms=timeout_ms
+        )
+        result = self._service.submit_schedule(native_request, master_biz)
+        if result.error_code:
+            raise RuntimeError(result.error_message or "NaviSched submission failed")
+
+    def take_schedule_result(self, request_id):
+        result = self._service.take_schedule_result(int(request_id))
+        return None if result is None else decisionFromNative(result)
+
+    def notification_fd(self):
+        return int(self._service.notification_fd())
 
     def schedule_flexlb(self, request_id: int, address: str, payload: bytes, timeout_ms: int,
                         metadata=()):

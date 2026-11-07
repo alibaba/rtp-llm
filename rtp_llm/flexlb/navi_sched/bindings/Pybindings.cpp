@@ -10,6 +10,7 @@
 #include "aios/navi_sched/debug/NaviSchedScheduleReplayJson.h"
 #include "aios/navi_sched/service/NaviSchedAgent.h"
 #include "aios/navi_sched/service/NaviSchedClient.h"
+#include "aios/navi_sched/resource/AsyncNotification.h"
 #include "aios/navi_sched/service/NaviSchedMaster.h"
 #include "aios/navi_sched/resource/MasterStateR.h"
 #include "aios/navi_sched/common/TPUPrefillExecutionPolicy.h"
@@ -120,6 +121,7 @@ public:
             }
             state->cancelledRequests.emplace_back(requestId);
             state->condition.notify_one();
+            state->notification.notify();
         });
         const auto enabled = _agent->setForwardBatchHandler(
             [state](const std::vector<NaviSchedForwardedRequest> &requests,
@@ -175,6 +177,7 @@ public:
                 }
                 state->forwardQueue.emplace_back(batch);
                 state->condition.notify_one();
+                state->notification.notify();
                 return true;
             },
             true,
@@ -277,10 +280,13 @@ public:
         lock.unlock();
         if (!batch->reporter || !batch->reporter->beginExecution()) {
             releaseForwardBatch(batch);
+            state->notification.notify();
             return nullptr;
         }
         return batch;
     }
+
+    int notificationFd() { return _forwardState->notification.fd(); }
 
     std::vector<std::shared_ptr<ForwardRequestTouch>> takeForwardRequestTouches(
         size_t maxCount)
@@ -944,6 +950,7 @@ private:
     struct ForwardState {
         std::mutex mutex;
         std::condition_variable condition;
+        AsyncNotification notification;
         std::deque<std::shared_ptr<ForwardBatch>> forwardQueue;
         std::deque<std::shared_ptr<ForwardRequestTouch>> touchQueue;
         std::deque<uint64_t> cancelledRequests;
@@ -1057,6 +1064,7 @@ void bindNaviSchedData(py::module_ &m)
              py::call_guard<py::gil_scoped_release>())
         .def("take_next_forward_batch", &VLLMAgentBridge::takeNextForwardBatch,
              py::arg("timeout_ms") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("notification_fd", &VLLMAgentBridge::notificationFd)
         .def("take_forward_request_touches", &VLLMAgentBridge::takeForwardRequestTouches,
              py::arg("max_count") = 0, py::call_guard<py::gil_scoped_release>())
         .def("take_cancelled_requests", &VLLMAgentBridge::takeCancelledRequests,
@@ -1591,6 +1599,11 @@ void bindNaviSchedData(py::module_ &m)
              &NaviSchedClient::takeNextForwardResponse,
              py::arg("timeout_ms") = 0,
              py::call_guard<py::gil_scoped_release>())
+        .def("notification_fd", &NaviSchedClient::notificationFd)
+        .def("submit_schedule", &NaviSchedClient::submitSchedule, py::arg("request"),
+             py::arg("master_biz_name") = "", py::call_guard<py::gil_scoped_release>())
+        .def("take_schedule_result", &NaviSchedClient::takeScheduleResult,
+             py::arg("request_id"), py::call_guard<py::gil_scoped_release>())
         .def("abort_forward_request", &NaviSchedClient::abortForwardRequest,
              py::arg("request_id"), py::call_guard<py::gil_scoped_release>())
         .def("allocate_request_id", &NaviSchedClient::allocateRequestId)

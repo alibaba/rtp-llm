@@ -502,6 +502,14 @@ py_library(
         "navi_sched/adapters/rtp_llm/FlexlbPrefillMaster.py",
         "navi_sched/adapters/rtp_llm/RtpLLMUnifiedConfig.py",
         "navi_sched/adapters/rtp_llm/ServiceDiscovery.py",
+        "navi_sched/adapters/sglang/__init__.py",
+        "navi_sched/adapters/sglang/NaviSchedSGLangPlugin.py",
+        "navi_sched/adapters/sglang/SGLangCache.py",
+        "navi_sched/adapters/sglang/SGLangConfig.py",
+        "navi_sched/adapters/sglang/SGLangForwardProtocol.py",
+        "navi_sched/adapters/sglang/SGLangObserver.py",
+        "navi_sched/adapters/sglang/SGLangRuntime.py",
+        "navi_sched/adapters/sglang/SGLangTransport.py",
         "navi_sched/adapters/vllm/__init__.py",
         "navi_sched/adapters/vllm/NaviSchedAdapterConfig.py",
         "navi_sched/adapters/vllm/NaviSchedClient.py",
@@ -521,6 +529,7 @@ py_library(
         "navi_sched/adapters/vllm/VLLMWorkerObserver.py",
         "navi_sched/adapters/vllm/VLLMAdapterUtils.py",
         "navi_sched/client.py",
+        "navi_sched/asyncio.py",
         "navi_sched/master.py",
         "navi_sched/master_process.py",
         "navi_sched/spectrum_prefill_master.py",
@@ -866,6 +875,14 @@ pybind_extension(
         ":navi_sched_role_lib",
         ":navi_sched_simulator_lib",
     ],
+)
+
+py_test(
+    name = "navi_sched_asyncio_test",
+    srcs = ["test/AsyncioTest.py"],
+    main = "test/AsyncioTest.py",
+    python_version = "PY3",
+    deps = [":py_sched_lib"],
 )
 
 py_test(

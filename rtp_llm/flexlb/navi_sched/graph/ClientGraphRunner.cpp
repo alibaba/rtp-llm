@@ -84,9 +84,8 @@ private:
 
 std::unique_ptr<navi::GraphDef> ClientGraphRunner::buildScheduleGraph(
     const std::string &clientBizName, const std::string &masterBizName,
-    bool collectReplay, int64_t entryTimeoutMs,
-    navi::GraphId &clientGraphId, navi::GraphId &masterGraphId,
-    const std::string &masterAddress)
+    bool collectReplay, int64_t entryTimeoutMs, navi::GraphId &clientGraphId,
+    navi::GraphId &masterGraphId, const std::string &masterAddress)
 {
     const auto rpcTimeoutMs = getNaviSchedRpcTimeoutMs(entryTimeoutMs);
     auto graphDef = std::make_unique<navi::GraphDef>();
@@ -104,8 +103,8 @@ std::unique_ptr<navi::GraphDef> ClientGraphRunner::buildScheduleGraph(
             port <= 0 || port > 65535) {
             return nullptr;
         }
-        builder.subGraph(masterGraphId).directLocation(
-            masterBizName, masterAddress.substr(0, separator), port);
+        builder.subGraph(masterGraphId)
+            .directLocation(masterBizName, masterAddress.substr(0, separator), port);
     }
     builder.subGraph(masterGraphId).gigProbe(false);
     auto scheduleNode =
@@ -202,7 +201,8 @@ void ClientGraphRunner::setClientBizName(const std::string &clientBizName)
 
 ClientGraphRunResult ClientGraphRunner::schedule(
     const ClientRequestToMasterDataConstPtr &request, const std::string &masterBizName,
-    int64_t timeoutMs, bool expectResponseStream, const std::string &masterAddress)
+    int64_t timeoutMs, bool expectResponseStream, const std::string &masterAddress,
+    bool waitForDecision)
 {
     ClientGraphRunResult result;
     if (!_navi || !request || 0 == request->requestId || request->bizName.empty() ||
@@ -212,7 +212,7 @@ ClientGraphRunResult ClientGraphRunner::schedule(
         return result;
     }
     return runRequest(request, masterBizName, timeoutMs, expectResponseStream, {},
-                      masterAddress);
+                      masterAddress, waitForDecision);
 }
 
 ClientGraphRunResult ClientGraphRunner::scheduleDetached(
@@ -233,8 +233,8 @@ ClientGraphRunResult ClientGraphRunner::scheduleDetached(
 
 ClientGraphRunResult ClientGraphRunner::runRequest(
     const ClientRequestToMasterDataConstPtr &request, const std::string &masterBizName,
-    int64_t timeoutMs, bool expectResponseStream,
-    DecisionCallback decisionCallback, const std::string &masterAddress) const
+    int64_t timeoutMs, bool expectResponseStream, DecisionCallback decisionCallback,
+    const std::string &masterAddress, bool waitForDecision) const
 {
     ClientGraphRunResult result;
     auto beginTimeUs = autil::TimeUtility::currentTime();
@@ -305,7 +305,7 @@ ClientGraphRunResult ClientGraphRunner::runRequest(
                 return result;
             }
         }
-        if (detached) {
+        if (detached || !waitForDecision) {
             result.errorCode = navi::EC_NONE;
         } else {
             auto decision = _responseR->waitDecision(request->requestId,

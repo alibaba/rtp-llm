@@ -3,11 +3,12 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <poll.h>
+#include <unistd.h>
 
 using namespace navi_sched;
 
-class ClientResponseRTest : public TESTBASE {
-};
+class ClientResponseRTest : public TESTBASE {};
 
 namespace {
 
@@ -19,8 +20,7 @@ MasterResponseToClientDataPtr makeDecision(uint64_t requestId)
     return decision;
 }
 
-AgentResponseToClientDataPtr makeOutput(uint64_t requestId,
-                                        const std::string &frame,
+AgentResponseToClientDataPtr makeOutput(uint64_t requestId, const std::string &frame,
                                         bool terminal)
 {
     auto output = std::make_shared<AgentResponseToClientData>();
@@ -31,6 +31,64 @@ AgentResponseToClientDataPtr makeOutput(uint64_t requestId,
     return output;
 }
 
+}
+
+TEST_F(ClientResponseRTest, testAsyncDecisionDoesNotConsumePendingState)
+{
+    ClientResponseR resource;
+    ASSERT_TRUE(resource.begin(41, false));
+    EXPECT_FALSE(resource.takeDecision(41));
+    ASSERT_TRUE(resource.publishDecision(41, makeDecision(41)));
+    auto result = resource.takeDecision(41);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(navi::EC_NONE, result->errorCode);
+    EXPECT_EQ(41, result->decision->requestId);
+    resource.finishGraph(41, navi::EC_NONE, "");
+    EXPECT_EQ(0, resource.requestCount());
+}
+
+TEST_F(ClientResponseRTest, testAsyncNotificationIncludesAlreadyQueuedDataAndLaterWrites)
+{
+    ClientResponseR resource;
+    ASSERT_TRUE(resource.begin(42, false));
+    ASSERT_TRUE(resource.publishDecision(42, makeDecision(42)));
+    const auto fd = resource.notificationFd();
+    struct pollfd ready = {fd, POLLIN, 0};
+    ASSERT_EQ(1, poll(&ready, 1, 0));
+    uint64_t count = 0;
+    ASSERT_EQ(sizeof(count), read(fd, &count, sizeof(count)));
+    EXPECT_GE(count, 1);
+    ASSERT_TRUE(resource.takeDecision(42).has_value());
+    EXPECT_EQ(0, poll(&ready, 1, 0));
+    ASSERT_TRUE(resource.publishResponse(42, makeOutput(42, "first", false)));
+    ASSERT_TRUE(resource.publishResponse(42, makeOutput(42, "last", true)));
+    ASSERT_EQ(1, poll(&ready, 1, 0));
+    ASSERT_EQ(sizeof(count), read(fd, &count, sizeof(count)));
+    EXPECT_EQ(2, count);
+    EXPECT_EQ("first", resource.takeNextResponse(0)->frames[0]);
+    EXPECT_EQ("last", resource.takeNextResponse(0)->frames[0]);
+    EXPECT_FALSE(resource.takeNextResponse(0));
+    EXPECT_EQ(0, poll(&ready, 1, 0));
+    resource.finishGraph(42, navi::EC_NONE, "");
+    EXPECT_EQ(0, resource.requestCount());
+}
+
+TEST_F(ClientResponseRTest, testAsyncGraphFailureWakesWithoutDecision)
+{
+    ClientResponseR resource;
+    const auto fd = resource.notificationFd();
+    uint64_t count;
+    ASSERT_EQ(sizeof(count), read(fd, &count, sizeof(count)));
+    ASSERT_TRUE(resource.begin(43, false));
+    EXPECT_FALSE(resource.takeDecision(43));
+    resource.finishGraph(43, navi::EC_ABORT, "failed before decision");
+    struct pollfd ready = {fd, POLLIN, 0};
+    EXPECT_EQ(1, poll(&ready, 1, 0));
+    auto result = resource.takeDecision(43);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(navi::EC_ABORT, result->errorCode);
+    EXPECT_EQ("failed before decision", result->errorMessage);
+    EXPECT_EQ(0, resource.requestCount());
 }
 
 TEST_F(ClientResponseRTest, testStreamsResponsesUntilGraphFinishes)
@@ -63,10 +121,8 @@ TEST_F(ClientResponseRTest, testConcurrentRequestsKeepTheirIds)
     ClientResponseR resource;
     for (uint64_t requestId : {1, 2}) {
         ASSERT_TRUE(resource.begin(requestId, false));
-        ASSERT_TRUE(resource.publishDecision(requestId,
-                                             makeDecision(100 + requestId)));
-        ASSERT_EQ(navi::EC_NONE,
-                  resource.waitDecision(requestId, 100).errorCode);
+        ASSERT_TRUE(resource.publishDecision(requestId, makeDecision(100 + requestId)));
+        ASSERT_EQ(navi::EC_NONE, resource.waitDecision(requestId, 100).errorCode);
     }
 
     ASSERT_TRUE(resource.publishResponse(2, makeOutput(102, "two", true)));
@@ -155,8 +211,8 @@ TEST_F(ClientResponseRTest, testDetachedGraphCompletionReturnsFailureWithoutDeci
     ClientResponseR resource;
     ASSERT_TRUE(resource.begin(34, false, false, true));
 
-    auto result = resource.finishGraph(
-        34, navi::EC_STREAM_RECEIVE, "master stream failed", true);
+    auto result =
+        resource.finishGraph(34, navi::EC_STREAM_RECEIVE, "master stream failed", true);
 
     EXPECT_EQ(navi::EC_STREAM_RECEIVE, result.errorCode);
     EXPECT_EQ("master stream failed", result.errorMessage);
@@ -218,8 +274,7 @@ TEST_F(ClientResponseRTest, testStopWaitsForDetachedClosureCompletion)
     ClientResponseR resource;
     ASSERT_TRUE(resource.begin(35, false, false, true));
     ASSERT_TRUE(resource.publishDecision(35, makeDecision(135)));
-    ASSERT_EQ(navi::EC_NONE,
-              resource.finishGraph(35, navi::EC_NONE, "", true).errorCode);
+    ASSERT_EQ(navi::EC_NONE, resource.finishGraph(35, navi::EC_NONE, "", true).errorCode);
 
     std::atomic<bool> stopped{false};
     std::thread stopper([&]() {
@@ -269,10 +324,8 @@ TEST_F(ClientResponseRTest, testConcurrentFinishAllWaitsForEveryGraph)
     ASSERT_TRUE(resource.begin(6, false));
     ClientResponseR::DecisionResult firstResult;
     ClientResponseR::DecisionResult secondResult;
-    std::thread firstWaiter(
-        [&]() { firstResult = resource.waitDecision(5, 5000); });
-    std::thread secondWaiter(
-        [&]() { secondResult = resource.waitDecision(6, 5000); });
+    std::thread firstWaiter([&]() { firstResult = resource.waitDecision(5, 5000); });
+    std::thread secondWaiter([&]() { secondResult = resource.waitDecision(6, 5000); });
 
     std::atomic<size_t> stopCount(0);
     std::thread firstStopper([&]() {
