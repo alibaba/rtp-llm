@@ -1,6 +1,7 @@
 """PPU HC uses the bound prenorm kernel and an explicit PDL policy."""
 
 import importlib
+from functools import partial
 
 import torch
 
@@ -25,6 +26,9 @@ class PpuHCUnit(TileLangHCUnit):
         self.tp_size, self.tp_rank = tp_size, tp_rank
         self._allow_graph = allow_graph
         self._fuse_norm = fuse_norm
+        self._rowwise_prenorm = (
+            allow_graph and options.get("DSV4_PPU_DECODE_HC_ROWWISE") == "1"
+        )
         self._fuse_moe_sum = fuse_moe_sum
         self._fuse_pre_quant = fuse_pre_quant
         # Prefill-only defaults; explicit zero retains the original operators.
@@ -40,7 +44,7 @@ class PpuHCUnit(TileLangHCUnit):
         self._backend = options.get(
             "DSV4_MHC_PRE_GEMM_BACKEND", "deepgemm_deterministic"
         )
-        if self._backend not in ("deepgemm", "deepgemm_deterministic"):
+        if self._backend not in ("deepgemm", "deepgemm_deterministic", "fp32"):
             raise ValueError(
                 "PPU module HC requires an explicitly supported prenorm backend"
             )
@@ -51,9 +55,14 @@ class PpuHCUnit(TileLangHCUnit):
         # per rank. Every rank therefore computes bit-identical HC outputs
         # from identical inputs, so TP>1 needs no extra collective here.
         # pre_norm still fails closed on non-replicated activations/weights.
-        if allow_graph and self._backend != "deepgemm_deterministic":
+        if allow_graph and self._backend not in ("deepgemm_deterministic", "fp32"):
             raise ValueError("PPU HC Graph requires deterministic prenorm")
-        if fuse_prenorm:
+        if self._backend == "fp32":
+            from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_fp32 import fp32_hc_prenorm_partials
+
+            self._prenorm_partials = fp32_hc_prenorm_partials
+            self._fuse_moe_sum = self._fuse_pre_quant = False
+        elif fuse_prenorm:
             if not allow_graph or self._backend != "deepgemm_deterministic":
                 raise ValueError("Fused HC reduction requires deterministic Decode")
             from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_prenorm import tf32_hc_prenorm_partials
@@ -74,7 +83,12 @@ class PpuHCUnit(TileLangHCUnit):
         self._post_kernel = importlib.import_module(
             prefix + ".post_kernel"
         ).mhc_post_fwd
-        if self._backend == "deepgemm_deterministic":
+        if self._backend == "fp32":
+            from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_fp32 import fp32_hc_prenorm_gemm
+
+            self._prenorm_gemm = fp32_hc_prenorm_gemm
+            self._post_kernel = partial(self._post_kernel, reference_order=True)
+        elif self._backend == "deepgemm_deterministic":
             from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_prenorm import tf32_hc_prenorm_gemm
 
             self._prenorm_gemm = tf32_hc_prenorm_gemm
@@ -128,6 +142,16 @@ class PpuHCUnit(TileLangHCUnit):
         with torch.inference_mode(), record_function_range(
             f"dsv4.hc.L{self.layer_id:02d}.{self.name}.pre_norm"
         ):
+            prenorm_partials = self._prenorm_partials
+            if self._backend == "fp32":
+                if self._rowwise_prenorm or (x.ndim == 4 and x.shape[1] == 6):
+                    prenorm_partials = partial(prenorm_partials, rowwise=True)
+                else:
+                    from rtp_llm.models_py.modules.dsv4.ppu.prefill.request_rows import request_row_lengths
+
+                    lengths = request_row_lengths(x.numel() // (self.hc_mult * self.dim))
+                    if lengths:
+                        prenorm_partials = partial(self._request_prenorm_partials, lengths=lengths)
             post, comb, y = self._pre_kernel(
                 x,
                 self.fn,
@@ -142,15 +166,27 @@ class PpuHCUnit(TileLangHCUnit):
                 prenorm_gemm=self._prenorm_gemm,
                 prenorm_output="reduced",
                 stabilize_atomic=self._backend == "deepgemm",
-                prenorm_partials=self._prenorm_partials,
-                norm_weight=weight,
+                prenorm_partials=prenorm_partials,
+                norm_weight=None if self._backend == "fp32" else weight,
                 norm_eps=norm.variance_epsilon,
             )
+            if self._backend == "fp32":
+                from rtp_llm.models_py.kernels.ppu.hc.ppu_hc_fp32 import fp32_hc_rms_norm
+
+                y = fp32_hc_rms_norm(
+                    y, weight, norm.variance_epsilon,
+                    rowwise=self._rowwise_prenorm or (x.ndim == 4 and x.shape[1] == 6),
+                )
         self._check_pre_output(leading, y, post, comb)
         if dbg_tag is not None:
             for name, tensor in (("y", y), ("post", post), ("comb", comb)):
                 _rt.record_if_level(2, f"{dbg_tag}_fused_norm_{name}", tensor)
         return y, post, comb
+
+    def _request_prenorm_partials(self, x, weight, *, lengths):
+        chunks = [self._prenorm_partials(part, weight) for part in x.split(lengths)]
+        dots, squares = zip(*chunks)
+        return torch.cat(dots, dim=1), torch.cat(squares, dim=1)
 
     def prefill_fast_pre_norm(self, x, norm, *, tp_size, tp_rank):
         """Use the fused HC/RMSNorm boundary from Block's prefill fast path.

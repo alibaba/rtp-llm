@@ -10,10 +10,17 @@ from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.indexer import IndexerFP8
 from rtp_llm.utils.model_weight import W
 
 from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import compress4, compress4_decode, norm_rope_store, paged_score, quantize_q, topk_bf16, topk_decode
-from rtp_llm.models_py.kernels.ppu.attention.ppu_fp4_indexer_cache import build_decode_plan, build_plans, gather_k
+from rtp_llm.models_py.kernels.ppu.attention.ppu_bf16_radix_topk import restore_short_native_order
+from rtp_llm.models_py.kernels.ppu.attention.ppu_fp4_indexer_cache import (
+    build_decode_plan,
+    build_plans,
+    gather_k,
+    gather_k_prefix,
+)
 from rtp_llm.models_py.modules.dsv4.ppu.attention.decode_query import slice_compressor_query
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import AttentionFP8
 from rtp_llm.models_py.kernels.ppu.attention.ppu_inverse_rope import inverse_rope_inplace
+from rtp_llm.models_py.kernels.ppu.attention.ppu_fp4_mqa_logits import fp8_fp4_mqa_logits, native_topk
 
 
 class PpuFP4Compressor(CompressorFP8):
@@ -47,6 +54,13 @@ class PpuFP4Compressor(CompressorFP8):
         super().__init__(*args, compressor_weights=compressor_weights, **kwargs)
         if (self.head_dim, self.rope_head_dim, self.compress_ratio) != (128, 64, 4):
             raise ValueError("FP4 Indexer compressor requires head128/rope64/C4")
+        # Match native Prefill rounding; retain the fused BF16 weights for Decode.
+        self.wkv.weight = torch.nn.Parameter(
+            self.wkv.weight.float(), requires_grad=False
+        )
+        self.wgate.weight = torch.nn.Parameter(
+            self.wgate.weight.float(), requires_grad=False
+        )
         self._pool_entry_bytes = 68
         self.norm.weight = torch.nn.Parameter(
             compressor_weights["norm"].float().contiguous(), requires_grad=False
@@ -56,6 +70,12 @@ class PpuFP4Compressor(CompressorFP8):
             torch.cat(self.ape.chunk(2, dim=-1), dim=0).contiguous(),
             requires_grad=False,
         )
+
+    _project_prefill = CompressorFP8._project_separate_prefill
+
+    def _project_raw(self, x):
+        x = x.float()
+        return torch.cat((self.wkv(x), self.wgate(x)), dim=-1)
 
     def _launch(self, kv_flat, score_flat, meta, seq_start=None):
         if self._state_pool_3d is None or self._kv_pool_view is None:
@@ -104,9 +124,16 @@ class PpuFP4Compressor(CompressorFP8):
             raise RuntimeError("FP4 Decode compressor pools were not bound")
         if not x.shape[0]:
             return
-        fused = _linear_bf16_bf16_fp32(
-            x, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
-        ).reshape(x.shape[0], 512)
+        def project(rows):
+            return _linear_bf16_bf16_fp32(
+                rows, self._wkv_wgate_fused, linear_op=self._bf16_fp32_linear
+            )
+
+        # Persist the same FP32 projection regardless of the Decode batch shape.
+        fused = project(x) if x.shape[0] == 1 else torch.cat(
+            [project(row) for row in x.split(1)], dim=0
+        )
+        fused = fused.reshape(x.shape[0], 512)
         plan, slots = build_decode_plan(
             meta, self._state_block_table, self._state_eb, self._state_tokens_per_block
         )
@@ -157,6 +184,12 @@ class PpuFP4Indexer(IndexerFP8):
         if not callable(getattr(deep_gemm, "fp8_fp4_mqa_logits", None)):
             raise RuntimeError("PPU DeepGEMM FP4 MQA is required")
         self._score = deep_gemm.fp8_fp4_mqa_logits
+        # Native A8 attention reduces compressed entries in score order.
+        self._native_score_order = self._platform_provider.execution_options.get(
+            "DSV4_PPU_EXPERT_PRECISION"
+        ) == "a8"
+        if self._native_score_order:
+            self._score = fp8_fp4_mqa_logits
         self.weights_proj = (
             layer_weights[W.v4_indexer_weights_proj_w].to(torch.bfloat16).contiguous()
         )
@@ -265,7 +298,11 @@ class PpuFP4Indexer(IndexerFP8):
                                 tensor,
                             )
                     with record_function_range("dsv4.ppu.fp4.indexer.topk"):
-                        topk_bf16(logits, local_ks, local_ke, out[start:end])
+                        if self._native_score_order:
+                            native_topk(logits, local_ks, local_ke, out[start:end],
+                                        topk=self.index_topk)
+                        else:
+                            topk_bf16(logits, local_ks, local_ke, out[start:end])
                     del logits
             return out.view(*x.shape[:-1], self.index_topk)
         finally:
@@ -283,9 +320,9 @@ class PpuFP4Indexer(IndexerFP8):
         q_producer_stream=None,
         decode_streams=None,
     ):
-        if x.ndim != 3 or x.shape[1] not in (1, 2, 3, 4):
+        if x.ndim != 3 or x.shape[1] not in (1, 2, 3, 4, 6):
             raise ValueError(
-                "FP4 Indexer requires Decode or MTP1/MTP2/MTP3 verify queries"
+                "FP4 Indexer requires Decode, MTP1/2/3 or DSpARK5 verify queries"
             )
         if x.shape[1] == 1:
             return self._forward_decode_step(
@@ -407,23 +444,7 @@ class PpuFP4Indexer(IndexerFP8):
             lengths = lengths.reshape(tokens, 1).to(torch.int32).contiguous()
             table = self._kv_block_table[:batch].to(torch.int32)
             table = table.repeat_interleave(width, dim=0).contiguous()
-            capacity = table.shape[1] * self._kv_eb
-            score_width = max(32, min(capacity, self._kv_cache_t or capacity))
-            logits = paged_score(
-                q.reshape(tokens, 1, self.n_heads, 64),
-                qs.reshape(tokens, 1, self.n_heads),
-                weights,
-                self._kv_pool_view,
-                table,
-                lengths,
-                score_width,
-            )
-            topk_decode(
-                logits.reshape(tokens, score_width),
-                lengths.reshape(tokens),
-                out_topk_buffer.reshape(tokens, self.index_topk),
-                canonical_in_kernel=getattr(self, "_fuse_topk_order", False),
-            )
+            self._select_decode_topk(q, qs, weights, table, lengths, out_topk_buffer)
             return out_topk_buffer
         finally:
             self._clear_nested_pool()
@@ -495,11 +516,20 @@ class PpuFP4Indexer(IndexerFP8):
                 lengths = (compressor_meta.positions + 1) // self.compress_ratio
             lengths = lengths.reshape(bsz, 1).to(torch.int32).contiguous()
             table = self._kv_block_table[:bsz].to(torch.int32).contiguous()
-            capacity = table.shape[1] * self._kv_eb
-            width = max(32, min(capacity, self._kv_cache_t or capacity))
+            self._select_decode_topk(q, qs, weights, table, lengths, out_topk_buffer)
+            return out_topk_buffer
+        finally:
+            self._clear_nested_pool()
+
+    def _select_decode_topk(self, q, scales, weights, table, lengths, out):
+        rows = table.shape[0]
+        capacity = table.shape[1] * self._kv_eb
+        width = max(32, min(capacity, self._kv_cache_t or capacity))
+        out = out.reshape(rows, self.index_topk)
+        if not self._native_score_order:
             logits = paged_score(
-                q.reshape(bsz, 1, self.n_heads, 64),
-                qs.reshape(bsz, 1, self.n_heads),
+                q.reshape(rows, 1, self.n_heads, 64),
+                scales.reshape(rows, 1, self.n_heads),
                 weights,
                 self._kv_pool_view,
                 table,
@@ -507,18 +537,34 @@ class PpuFP4Indexer(IndexerFP8):
                 width,
             )
             topk_decode(
-                logits.reshape(bsz, width),
-                lengths.reshape(bsz),
-                out_topk_buffer.reshape(bsz, self.index_topk),
+                logits.reshape(rows, width),
+                lengths.reshape(rows),
+                out,
                 canonical_in_kernel=getattr(self, "_fuse_topk_order", False),
+                score_order=False,
             )
-            return out_topk_buffer
-        finally:
-            self._clear_nested_pool()
+            return
+
+        # Native a8 rounds the dot and weighted product before the head sum.
+        q = q.reshape(rows, self.n_heads, 64)
+        scales = scales.reshape(rows, self.n_heads, 1)
+        lengths = lengths.reshape(rows)
+        starts = torch.zeros_like(lengths)
+        scores = torch.empty((rows, width), dtype=torch.bfloat16, device=q.device)
+        # Each request owns its page table; keep dot scratch bounded per row.
+        for row in range(rows):
+            sl = slice(row, row + 1)
+            kv = gather_k_prefix(self._kv_pool_view, table[sl], lengths[sl], width)
+            scores[sl].copy_(fp8_fp4_mqa_logits(
+                (q[sl], scales[sl]), kv, weights[sl], starts[sl], lengths[sl],
+                logits_dtype=torch.bfloat16,
+            ))
+            native_topk(scores[sl], starts[sl], lengths[sl], out=out[sl], topk=self.index_topk)
+        restore_short_native_order(scores, lengths, out)
 
 
 class PpuFP4Attention(AttentionFP8):
-    def _wo_a_from_bf16(self, o, freqs_cis, B, S):
+    def _wo_a_from_bf16(self, o, freqs_cis, B, S, *, prefill=False):
         if self.wo_a is None:
             raise RuntimeError("PPU grouped output projection was not bound")
         output = o.view(B, S, self.n_heads, self.head_dim)
@@ -547,7 +593,8 @@ class PpuFP4Attention(AttentionFP8):
                 projected = self.wo_a.forward_permuted(payload, scale)
                 return projected.view(B, S, self.n_groups, self.wo_a.rank)
         inverse_rope_inplace(output, freqs_cis, self.rope_head_dim)
-        return self.wo_a(output.reshape(B, S, self.n_groups, -1))
+        grouped = output.reshape(B, S, self.n_groups, -1)
+        return self.wo_a(grouped, prefill=True) if prefill else self.wo_a(grouped)
 
 
     def __init__(

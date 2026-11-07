@@ -49,3 +49,17 @@ def maybe_warmup_ppu_tp_communication(parallelism_config, *, options=None) -> bo
         device,
     )
     return True
+
+
+def reduce_tp_sum(tensor: torch.Tensor, *, tp_size: int, inplace: bool = True):
+    if tp_size <= 1:
+        return tensor if inplace else tensor.clone()
+    # BF16 accumulation can round differently on different PPU ranks. These
+    # outputs feed replicated KV projections, so that drift changes P/D caches.
+    if tensor.dtype == torch.bfloat16:
+        reduced = all_reduce(tensor.float(), Group.TP, inplace=True).to(tensor.dtype)
+        if inplace:
+            tensor.copy_(reduced)
+            return tensor
+        return reduced
+    return all_reduce(tensor, Group.TP, inplace=inplace)

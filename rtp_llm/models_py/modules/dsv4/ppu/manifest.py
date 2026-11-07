@@ -11,6 +11,8 @@ class SupportResult(NamedTuple):
 
 def _check_execution_options(options, required):
     for key, expected in required.items():
+        if key == "DSV4_MHC_PRE_GEMM_BACKEND" and options.get(key) == "fp32":
+            continue
         if options.get(key) != expected:
             return SupportResult(False, f"requires {key}={expected}")
     return SupportResult(True)
@@ -27,13 +29,15 @@ def build_provider(model_config, parallelism, moe_config, max_generate_batch_siz
 
     role = parallelism.role_type.name
     draft = model_config.model_type == "deepseek_v4_mtp"
+    dspark = model_config.model_type == "deepseek_v4_dspark"
     if (
         model_config.hidden_size != 4096
-        or model_config.num_layers != (1 if draft else 43)
-        or model_config.model_type not in ("deepseek_v4", "deepseek_v4_mtp")
+        or model_config.num_layers != (3 if dspark else 1 if draft else 43)
+        or model_config.model_type not in ("deepseek_v4", "deepseek_v4_mtp", "deepseek_v4_dspark")
         or (draft and list(model_config.attn_config.layer_compress_ratios) != [0])
+        or (dspark and list(model_config.attn_config.layer_compress_ratios) != [0, 0, 0])
     ):
-        raise ValueError("PPU supports DeepSeek V4 Flash and its single SWA MTP layer")
+        raise ValueError("PPU supports DeepSeek V4 Flash, single SWA MTP or three SWA DSpARK layers")
     if role not in ("PREFILL", "DECODE"):
         raise ValueError(f"PPU DSV4 requires separate Prefill and Decode roles, got {role}")
     if parallelism.pp_size != 1 or parallelism.prefill_cp_config.is_enabled():
@@ -51,7 +55,14 @@ def build_provider(model_config, parallelism, moe_config, max_generate_batch_siz
     if (model_config.attn_config.kernel_tokens_per_block != 256
             or model_config.attn_config.tokens_per_block != 256):
         raise ValueError("PPU DSV4 requires matching 256-token physical and kernel blocks")
-    if model_config.gen_num_per_cycle not in (0, 1, 2, 3):
+    dspark_target = (
+        model_config.model_type == "deepseek_v4"
+        and list(getattr(model_config, "capture_aux_hidden_layer_ids", None) or []) == [40, 41, 42]
+    )
+    if dspark or dspark_target:
+        if model_config.gen_num_per_cycle != 5:
+            raise ValueError("PPU DSpARK requires block_size=5")
+    elif model_config.gen_num_per_cycle not in (0, 1, 2, 3):
         raise ValueError("PPU DSV4 supports MTP depths 1 through 3")
     if getattr(model_config, "lora_infos", None) or model_config.eplb_config.enable_eplb():
         raise ValueError("PPU DSV4 LoRA and EPLB are not qualified")
@@ -74,7 +85,11 @@ def build_provider(model_config, parallelism, moe_config, max_generate_batch_siz
     if role == "DECODE":
         from rtp_llm.models_py.modules.dsv4.ppu.ppu_decode_provider import PpuDecodeProvider
 
-        return PpuDecodeProvider(options)
+        provider = PpuDecodeProvider(options)
+        provider._gate_rowwise = (
+            dspark_target or options.get("DSV4_PPU_DECODE_GATE_ROWWISE") == "1"
+        )
+        return provider
     from rtp_llm.models_py.modules.dsv4.ppu.ppu_module_provider import PpuModuleProvider
 
     return PpuModuleProvider(options)

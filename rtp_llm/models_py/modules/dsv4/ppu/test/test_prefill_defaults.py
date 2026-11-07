@@ -150,7 +150,8 @@ class PrefillDefaultsTest(unittest.TestCase):
             is_decode_role=False,
             tp_rank=0,
             platform_provider=SimpleNamespace(
-                _bool=lambda k, default: options.get(k, default)
+                execution_options=options,
+                _bool=lambda k, default: options.get(k, default),
             ),
         )
         args.update(overrides)

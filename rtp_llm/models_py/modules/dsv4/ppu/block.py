@@ -193,7 +193,10 @@ class Block(_BaseBlock):
             tp_size=tp_size,
             tp_rank=tp_rank,
         )
-        self.attn = platform_provider.build_attention(attn_cls, **attn_kwargs)
+        self.attn = (
+            attn_cls(platform_provider=platform_provider, **attn_kwargs)
+            if commit_only else platform_provider.build_attention(attn_cls, **attn_kwargs)
+        )
         self._cp_sync_after_attn_done = False
         if commit_only:
             self.ffn = None
@@ -496,6 +499,7 @@ class Block(_BaseBlock):
         if (
             callable(quant_pre)
             and type(self.attn.wq_a) is PpuFp8Linear
+            and not self.attn.wq_a.pow2_scales
             and type(self.attn.wkv) is PpuFp8Linear
             and self.attn.wq_a.quantization in ("auto", "v2_row")
             and self.attn.wkv.quantization == self.attn.wq_a.quantization

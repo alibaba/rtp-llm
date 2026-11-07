@@ -14,8 +14,8 @@ def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None
     Streams are prepared at construction and shared across this model's layers.
     """
     bsz, q_len, _ = x.shape
-    if q_len not in (1, 2, 3, 4):
-        raise ValueError("PPU Decode overlap requires 1/2/3/4 tokens per request")
+    if q_len not in (1, 2, 3, 4, 6):
+        raise ValueError("PPU Decode overlap requires 1/2/3/4/6 tokens per request")
     start_pos = metadata.start_pos[:bsz]
     position_ids = metadata.position_ids[: bsz * q_len]
     attn._ensure_freqs_cis_bound()
@@ -122,7 +122,7 @@ def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None
         if q_quantized is None:
             q = decode_compute_q_b(attn, qr, freqs)
         else:
-            from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
+            from rtp_llm.models_py.kernels.ppu.attention.ppu_rmsnorm_rope import (
                 fused_rmsnorm_rope,
             )
 

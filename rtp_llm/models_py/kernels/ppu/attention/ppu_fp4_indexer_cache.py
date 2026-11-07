@@ -59,11 +59,11 @@ def build_plans(meta, state_bt, state_entries, state_tokens, seq_start):
     n = meta.positions.numel()
     if (
         n > (1 << 28)
-        or state_entries not in (8, 12)
+        or state_entries not in (8, 12, 16)
         or state_tokens <= 0
         or state_tokens % 4
     ):
-        raise ValueError("SG C4 plans require <=2^28 rows and an 8/12-row native ring")
+        raise ValueError("SG C4 plans require <=2^28 rows and an 8/12/16-row native ring")
     if state_bt.ndim != 2 or state_bt.shape[1] == 0:
         raise ValueError("SG C4 plans require a nonempty state block table")
     varlen = meta.is_batched and meta.seq_start_per_req is not None
@@ -134,8 +134,8 @@ def _decode_plans(
 def build_decode_plan(meta, state_bt, state_entries, state_tokens):
     """Map one token per request onto native Decode/MTP3 C4 state pages."""
     n = meta.positions.numel()
-    if state_entries not in (8, 12) or state_tokens <= 0 or state_tokens % 4:
-        raise ValueError("FP4 Decode requires an 8/12-row native state ring")
+    if state_entries not in (8, 12, 16) or state_tokens <= 0 or state_tokens % 4:
+        raise ValueError("FP4 Decode requires an 8/12/16-row native state ring")
     if state_bt.ndim != 2 or state_bt.shape[1] == 0:
         raise ValueError("FP4 Decode requires a nonempty state block table")
     if (
@@ -224,3 +224,61 @@ def gather_k(cache, block_table, cu_kv_seqlens, total, entries):
             16,
         )
     return k, sf
+
+
+@triton.jit
+def _gather_prefix(cache, table, length, packed, scales,
+                   WIDTH: tl.constexpr, COLUMNS: tl.constexpr,
+                   PAGES: tl.constexpr, ENTRIES: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    column = row // ENTRIES
+    in_width = row < WIDTH
+    in_prefix = in_width & (row < tl.load(length)) & (column < COLUMNS)
+    physical = tl.load(table + column, mask=in_prefix, other=0)
+    readable = in_prefix & (physical > 0) & (physical < PAGES)
+    # Safe pointer arithmetic even for invalid table values.
+    page_start = tl.where(readable, physical, 0).to(tl.int64) * (ENTRIES * 68)
+    slot = row % ENTRIES
+    lane = tl.arange(0, 64)
+    payload = tl.load(
+        cache + page_start[:, None] + slot[:, None] * 64 + lane[None, :],
+        mask=readable[:, None], other=0,
+    )
+    tl.store(packed + row[:, None] * 64 + lane[None, :],
+             payload.to(tl.int8, bitcast=True), mask=in_width[:, None])
+    scale_start = cache + page_start + ENTRIES * 64 + slot * 4
+    scale_word = tl.full((BLOCK,), 0, tl.uint32)
+    for byte in tl.static_range(4):
+        ue8m0 = tl.load(scale_start + byte, mask=readable, other=127).to(tl.uint32)
+        scale_word |= ue8m0 << (byte * 8)
+    tl.store(scales + row, scale_word.to(tl.int32, bitcast=True), mask=in_width)
+
+
+def gather_k_prefix(cache, table_row, length_1d, width):
+    """Return packed int8[width,64] and UE8M0 words int32[width,1].
+
+    The single request's device table maps logical pages to physical pages.
+    Block 0 is reserved. The scorer must mask columns outside the valid prefix.
+    A missing page inside the prefix is a caller metadata error.
+    """
+    if (cache.ndim != 3 or cache.shape[1] <= 0 or cache.shape[2] != 68
+            or cache.dtype != torch.uint8 or not cache.is_cuda
+            or not cache.is_contiguous()):
+        raise ValueError('expected device FP4 SoA uint8[blocks,entries,68]')
+    if not (table_row.ndim == 1 or (table_row.ndim == 2 and table_row.shape[0] == 1)):
+        raise ValueError('expected one request block table [columns] or [1,columns]')
+    if length_1d.shape != (1,):
+        raise ValueError('expected one device length [1]')
+    if any(x.device != cache.device or x.dtype != torch.int32 or not x.is_contiguous()
+           for x in (table_row, length_1d)):
+        raise ValueError('expected contiguous int32 table and length on cache device')
+    if type(width) is not int or width < 0:
+        raise ValueError('expected static nonnegative width')
+    packed = torch.empty((width, 64), dtype=torch.int8, device=cache.device)
+    scales = torch.empty((width, 1), dtype=torch.int32, device=cache.device)
+    if width:
+        _gather_prefix[(triton.cdiv(width, 16),)](
+            cache, table_row, length_1d, packed, scales,
+            width, table_row.shape[-1], cache.shape[0], cache.shape[1], 16,
+        )
+    return packed, scales

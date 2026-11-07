@@ -146,14 +146,17 @@ def _require_n_shared_experts(config_json: dict) -> int:
 
 
 def _is_ppu_flash(config):
-    if config.model_type not in ("deepseek_v4", "deepseek_v4_mtp"):
+    if config.model_type not in ("deepseek_v4", "deepseek_v4_mtp", "deepseek_v4_dspark"):
         return False
     from rtp_llm.device.device_type import is_ppu
 
     return (
         is_ppu()
         and config.hidden_size == 4096
-        and config.num_layers == (1 if config.model_type == "deepseek_v4_mtp" else 43)
+        and config.num_layers == (
+            3 if config.model_type == "deepseek_v4_dspark"
+            else 1 if config.model_type == "deepseek_v4_mtp" else 43
+        )
     )
 
 
@@ -1187,7 +1190,7 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
                     )
                 ],
                 identity,
-                data_type=torch.bfloat16,
+                data_type=torch.float32 if _is_ppu_flash(self.model_config) else torch.bfloat16,
             ),
             AtomicWeight(
                 W.dspark_markov_w2,
@@ -1197,7 +1200,7 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
                     )
                 ],
                 identity,
-                data_type=torch.bfloat16,
+                data_type=torch.float32 if _is_ppu_flash(self.model_config) else torch.bfloat16,
             ),
         ]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
@@ -1269,6 +1272,11 @@ class DeepSeekV4DSpark(DeepSeekV4):
         from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
             DeepSeekV4DSparkModel,
         )
+
+        if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.model_desc.deepseek_v4_ppu.dspark_model import (
+                PpuDeepSeekV4DSparkModel as DeepSeekV4DSparkModel,
+            )
 
         self.py_model = DeepSeekV4DSparkModel(
             self.model_config,

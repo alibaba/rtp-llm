@@ -118,6 +118,15 @@ def validate_swa_pool(*, q, swa_pool_3d, swa_topk_3d, attn_sink, topk_length):
     _validate_lengths(topk_length, q=q, name="swa.topk_length")
 
 
+def validate_dspark_pool(*, q, swa_pool_3d, swa_topk_3d, attn_sink, topk_length):
+    _validate_rich_pool(
+        q=q, pool=swa_pool_3d, indices=swa_topk_3d, sink=attn_sink,
+        page=RICH_SWA_PAGE, index_width=256, name="dspark.swa",
+        allowed_widths=(192, 256), allow_ring_extension=True,
+    )
+    _validate_lengths(topk_length, q=q, name="dspark.topk_length")
+
+
 def validate_dual_pool(*, q, swa_pool_3d, swa_topk_3d, cmp_pool_3d, cmp_topk_3d, attn_sink, topk_length, extra_topk_length, compress_ratio, cmp_tokens_per_block):
     _validate_rich_pool(
         q=q,

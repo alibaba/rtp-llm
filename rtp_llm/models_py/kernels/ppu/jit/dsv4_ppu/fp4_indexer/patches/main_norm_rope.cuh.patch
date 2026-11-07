@@ -1,0 +1,20 @@
+--- csrc/deepseek_v4/main_norm_rope.cuh
++++ compat/main_norm_rope.cuh
+@@ -23,13 +23,14 @@
+ 
+ SGL_DEVICE uint8_t quant_fp4_e2m1(float x) {
+   const float ax = fminf(fabsf(x), 6.0f);
++  // FP4 conversion rounds midpoint ties to an even encoded magnitude.
+   uint8_t idx = 0;
+   idx += ax > 0.25f;
+-  idx += ax > 0.75f;
++  idx += ax >= 0.75f;
+   idx += ax > 1.25f;
+-  idx += ax > 1.75f;
++  idx += ax >= 1.75f;
+   idx += ax > 2.5f;
+-  idx += ax > 3.5f;
++  idx += ax >= 3.5f;
+   idx += ax > 5.0f;
+   if (x < 0.0f && idx != 0) idx |= 0x8;
+   return idx;

@@ -3,9 +3,13 @@
 import os
 from typing import Optional
 
+# Bounded score+probability scratch; diagnostics may set64 before Graph capture.
+TILE_ROWS = 1024
+
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra.ppu import libdevice as ppu_libdevice
 
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     _trap_invalid_kv_access, _FUSED_CONSTEXPR_BY_HEAD_DIM,
@@ -14,6 +18,185 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     trap_invalid_kv_access_enabled, validate_slot_mapping,
 )
+
+
+@triton.jit(
+    do_not_specialize=[
+        "block_table_stride",
+        "seq_start",
+        "n_raw",
+        "kv_cache_block_size",
+        "KV_BLOCK_STRIDE",
+        "NUM_STATE_BLOCKS",
+        "NUM_KV_BLOCKS",
+    ]
+)
+def _main_score_gather(
+    state_cache_ptr,
+    state_cache_stride0,
+    state_cache_stride1,
+    token_to_req_indices_ptr,
+    positions_ptr,
+    slot_mapping_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    # Raw kv/score for the tokens supplied to this launch + ape table.
+    # ``seq_start`` = absolute position of ``kv_raw[0]`` (prefill: the
+    # current chunk's start = sp_int). ``n_raw`` = ``kv_raw.shape[0]``,
+    # i.e. how many leading positions ``kv_raw`` covers (NOT a batch
+    # size — DSV4 prefill runs bsz=1, so this is the chunk length).
+    # See module docstring for the source-dispatch rules.
+    kv_raw_ptr,
+    kv_raw_stride,
+    score_raw_ptr,
+    score_raw_stride,
+    ape_ptr,
+    ape_stride,
+    seq_start,
+    n_raw,
+    # Phase-3a part 4c — varlen raw path. When ``BATCHED=True`` these
+    # arrays carry per-request data so the kernel can compute the flat
+    # ``kv_raw`` offset for each request independently:
+    #   seq_start_per_req[b]  = absolute position of req b's first new token
+    #   cu_seq_per_req[b+1]   = end offset of req b in the flat kv_raw axis
+    # ``BATCHED=False`` falls back to scalar ``seq_start`` + global
+    # ``[0, n_raw)`` check, byte-equal to the legacy single-request path.
+    seq_start_per_req_ptr,
+    cu_seq_per_req_ptr,
+    rms_norm_weight_ptr,
+    rms_norm_eps,
+    cos_sin_cache_ptr,
+    cos_sin_stride,
+    k_cache_ptr,
+    kv_slot_mapping_ptr,
+    kv_cache_block_size,
+    native_probabilities_ptr,
+    HEAD_SIZE: tl.constexpr,
+    TRITON_BLOCK_SIZE: tl.constexpr,
+    STATE_WIDTH: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    OVERLAP: tl.constexpr,
+    ROPE_HEAD_DIM: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    QUANT_BLOCK: tl.constexpr,
+    TOKEN_STRIDE: tl.constexpr,
+    SCALE_DIM: tl.constexpr,
+    KV_BLOCK_STRIDE,
+    NUM_STATE_BLOCKS,
+    NUM_KV_BLOCKS,
+    BATCHED: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    STATE_RING_ENTRIES: tl.constexpr,
+    PPU_RMS_COMPAT: tl.constexpr = False,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+
+    position = tl.load(positions_ptr + token_idx).to(tl.int64)
+    if (position + 1) % COMPRESS_RATIO != 0:
+        # Every scratch row is initialized, including non-boundary rows.
+        rows0 = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
+        dims0 = tl.arange(0, TRITON_BLOCK_SIZE)
+        offsets0 = token_idx * ((1 + OVERLAP) * COMPRESS_RATIO * HEAD_SIZE) + rows0[:, None] * HEAD_SIZE + dims0[None, :]
+        tl.store(native_probabilities_ptr + offsets0, 0.0, mask=dims0[None, :] < HEAD_SIZE)
+        return
+
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx).to(tl.int64)
+
+    start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
+    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
+    pos = start + tokens
+    mask_pos = pos >= 0
+    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
+
+    block = tl.arange(0, TRITON_BLOCK_SIZE)
+    mask = block < HEAD_SIZE
+
+    # ── Source dispatch (see module docstring) ──
+    #   flat_idx in [0, n_raw)  → raw   (covered by this launch's kv_raw)
+    #   flat_idx <  0           → cache (prefix-cache hit; resolve via
+    #                                    block_table[req_idx])
+    # Decode: disable_raw_path → n_raw == 0, every position → cache.
+    # BATCHED: per-request raw window — req b's tokens live in
+    #   kv_raw[cu_seq_per_req[b] : cu_seq_per_req[b+1]] and cover abs
+    #   positions [seq_start_per_req[b], seq_start_per_req[b]+req_n_raw).
+    if BATCHED:
+        req_seq_start = tl.load(seq_start_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_lo = tl.load(cu_seq_per_req_ptr + req_idx).to(tl.int64)
+        req_cu_hi = tl.load(cu_seq_per_req_ptr + req_idx + 1).to(tl.int64)
+        req_n_raw = req_cu_hi - req_cu_lo
+        flat_idx_in_req = pos - req_seq_start
+        use_raw = mask_pos & (flat_idx_in_req >= 0) & (flat_idx_in_req < req_n_raw)
+        flat_idx = req_cu_lo + flat_idx_in_req
+    else:
+        flat_idx = pos - seq_start
+        use_raw = mask_pos & (flat_idx >= 0) & (flat_idx < n_raw)
+    flat_idx_safe = tl.where(use_raw, flat_idx, 0)
+
+    raw_mask = use_raw[:, None] & mask[None, :]
+    score_from_raw = tl.load(
+        score_raw_ptr
+        + flat_idx_safe[:, None] * score_raw_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    ape_rows = pos % COMPRESS_RATIO
+    ape_rows_safe = tl.where(use_raw, ape_rows, 0)
+    ape_vals = tl.load(
+        ape_ptr
+        + ape_rows_safe[:, None] * ape_stride
+        + head_offset[:, None]
+        + block[None, :],
+        mask=raw_mask,
+        other=0.0,
+    )
+    score_from_raw = score_from_raw + ape_vals
+
+    # State-cache path: prefix-cache hit region. The framework supplies sparse
+    # absolute logical-block tables. Any non-negative physical block id is
+    # readable; negative entries are invalid. Do not clamp here: a
+    # block index beyond the table width means the framework failed to grow the
+    # table before this launch.
+    use_cache = mask_pos & ~use_raw
+    block_indices = (pos // block_size) % block_table_stride
+    block_indices_safe = tl.where(use_cache, block_indices, 0)
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + block_indices_safe,
+        mask=use_cache,
+        other=0,
+    )
+    invalid_state_block = use_cache & (block_numbers >= NUM_STATE_BLOCKS)
+    if tl.max(invalid_state_block.to(tl.int32), axis=0) != 0:
+        _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+    valid_block = use_cache & (block_numbers > 0)
+    block_numbers_i64 = tl.where(valid_block, block_numbers, 0).to(tl.int64)
+    ring_mod = STATE_RING_ENTRIES
+    block_offsets_raw = pos % ring_mod
+    block_offsets = tl.where(mask_pos, block_offsets_raw, 0)
+
+    row_base = (
+        state_cache_ptr
+        + block_numbers_i64 * state_cache_stride0.to(tl.int64)
+        + block_offsets.to(tl.int64) * state_cache_stride1.to(tl.int64)
+        + head_offset
+    )
+    cache_mask = valid_block[:, None] & mask[None, :]
+    score_from_cache = tl.load(
+        row_base[:, None] + STATE_WIDTH + block[None, :],
+        mask=cache_mask,
+        other=0.0,
+    )
+
+    score = tl.where(use_raw[:, None], score_from_raw, score_from_cache)
+
+    final_valid = use_raw | (use_cache & valid_block)
+    combined_mask = final_valid[:, None] & mask[None, :]
+
+    score = tl.where(combined_mask, score, float("-inf"))
+    offsets = token_idx * ((1 + OVERLAP) * COMPRESS_RATIO * HEAD_SIZE) + tokens[:, None] * HEAD_SIZE + block[None, :]
+    tl.store(native_probabilities_ptr + offsets, score, mask=mask[None, :])
 
 
 @triton.jit(
@@ -67,6 +250,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     k_cache_ptr,
     kv_slot_mapping_ptr,
     kv_cache_block_size,
+    native_probabilities_ptr,
     HEAD_SIZE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
     STATE_WIDTH: tl.constexpr,
@@ -84,6 +268,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     STATE_RING_ENTRIES: tl.constexpr,
     PPU_RMS_COMPAT: tl.constexpr = False,
+    USE_NATIVE_PROBABILITIES: tl.constexpr = False,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
 
@@ -197,17 +382,39 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     combined_mask = final_valid[:, None] & mask[None, :]
 
     score = tl.where(combined_mask, score, float("-inf"))
-    score = tl.softmax(score, dim=0)
+    if USE_NATIVE_PROBABILITIES:
+        probability_offsets = token_idx * ((1 + OVERLAP) * COMPRESS_RATIO * HEAD_SIZE) + tokens[:, None] * HEAD_SIZE + block[None, :]
+        score = tl.load(native_probabilities_ptr + probability_offsets, mask=mask[None, :], other=0.0)
+    else:
+        score = tl.softmax(score, dim=0)
     kv = tl.where(combined_mask, kv, 0.0)
-    compressed_kv = tl.sum(kv * score, axis=0)
+    if USE_NATIVE_PROBABILITIES:
+        product = ppu_libdevice.mul_rn(kv, score)
+        p0=tl.gather(product,tl.full((1,TRITON_BLOCK_SIZE),0,tl.int32),axis=0).reshape((TRITON_BLOCK_SIZE,))
+        p1=tl.gather(product,tl.full((1,TRITON_BLOCK_SIZE),1,tl.int32),axis=0).reshape((TRITON_BLOCK_SIZE,))
+        p2=tl.gather(product,tl.full((1,TRITON_BLOCK_SIZE),2,tl.int32),axis=0).reshape((TRITON_BLOCK_SIZE,))
+        p3=tl.gather(product,tl.full((1,TRITON_BLOCK_SIZE),3,tl.int32),axis=0).reshape((TRITON_BLOCK_SIZE,))
+        p4=tl.gather(product,tl.full((1,TRITON_BLOCK_SIZE),4,tl.int32),axis=0).reshape((TRITON_BLOCK_SIZE,))
+        p5=tl.gather(product,tl.full((1,TRITON_BLOCK_SIZE),5,tl.int32),axis=0).reshape((TRITON_BLOCK_SIZE,))
+        p6=tl.gather(product,tl.full((1,TRITON_BLOCK_SIZE),6,tl.int32),axis=0).reshape((TRITON_BLOCK_SIZE,))
+        p7=tl.gather(product,tl.full((1,TRITON_BLOCK_SIZE),7,tl.int32),axis=0).reshape((TRITON_BLOCK_SIZE,))
+        a0=ppu_libdevice.add_rn(p0,p4);a1=ppu_libdevice.add_rn(p1,p5)
+        a2=ppu_libdevice.add_rn(p2,p6);a3=ppu_libdevice.add_rn(p3,p7)
+        compressed_kv=ppu_libdevice.add_rn(ppu_libdevice.add_rn(ppu_libdevice.add_rn(a0,a1),a2),a3)
+    else:
+        compressed_kv = tl.sum(kv * score, axis=0)
+    # The model casts pooled KV to the activation dtype before RMSNorm.
+    compressed_kv = compressed_kv.to(tl.bfloat16).to(tl.float32)
 
     rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
     variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_SIZE
     if PPU_RMS_COMPAT:
-        rrms = 1.0 / tl.sqrt(variance + rms_norm_eps)
+        rrms = tl.rsqrt(variance + rms_norm_eps)
     else:
         rrms = tl.rsqrt(variance + rms_norm_eps)
     normed = compressed_kv * rrms * rms_w
+    # RMSNorm returns BF16; both RoPE and quantization consume that value.
+    normed = normed.to(tl.bfloat16).to(tl.float32)
 
     kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
     if kv_slot_idx < 0:
@@ -690,52 +897,126 @@ def run_fused_compress_kv_write(
     else:
         kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
 
-    kernel[(N,)](
-        state_cache,
-        state_cache.stride(0),
-        state_cache.stride(1),
-        token_to_req_indices,
-        positions,
-        slot_mapping,
-        block_table,
-        block_table.stride(0),
-        state_block_size,
-        # raw path
-        kv_raw,
-        kv_raw.stride(0),
-        score_raw,
-        score_raw.stride(0),
-        ape,
-        ape.stride(0),
-        seq_start,
-        n_raw,
-        seq_start_per_req,
-        cu_seq_per_req,
-        rms_norm_weight,
-        rms_norm_eps,
-        cos_sin_cache,
-        cos_sin_cache.stride(0),
-        kv_cache,
-        kv_slot_mapping,
-        kv_block_size,
-        HEAD_SIZE=head_dim,
-        TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),
-        STATE_WIDTH=state_width,
-        COMPRESS_RATIO=compress_ratio,
-        OVERLAP=overlap,
-        ROPE_HEAD_DIM=rope_head_dim,
-        FP8_MAX=448.0,
-        QUANT_BLOCK=cfg["quant_block"],
-        TOKEN_STRIDE=cfg["token_stride"],
-        SCALE_DIM=cfg["scale_dim"],
-        KV_BLOCK_STRIDE=kv_block_stride,
-        NUM_STATE_BLOCKS=int(state_cache.shape[0]),
-        NUM_KV_BLOCKS=int(kv_cache.shape[0]),
-        BATCHED=batched,
-        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
-        STATE_RING_ENTRIES=state_ring_entries,
-        # Preserve upstream CUDA rounding before the compressed KV quantizer.
-        # Keep the previously validated reciprocal-sqrt path on PPU only.
-        PPU_RMS_COMPAT=True,
-        num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
-    )
+    # Shape-only dispatch: original N0/other ratio/indexer routes remain intact.
+    use_native_probabilities = head_dim == 512 and compress_ratio == 4 and overlap
+    if use_native_probabilities:
+        if not isinstance(TILE_ROWS, int) or isinstance(TILE_ROWS, bool) or not 1 <= TILE_ROWS <= 1024:
+            raise ValueError("TILE_ROWS must be an integer in [1,1024]")
+        step = TILE_ROWS
+    else:
+        step = N
+    for lo in range(0, N, step):
+        hi = min(lo + step, N)
+        tile_count = hi - lo
+        native_options = {}
+        if head_dim == 512:
+            # A stand-in pointer is never read by original constexpr-false path.
+            native_options = dict(native_probabilities_ptr=positions, USE_NATIVE_PROBABILITIES=False)
+        if use_native_probabilities:
+            scores = torch.empty((tile_count,8,512),device=score_raw.device,dtype=torch.float32)
+            _main_score_gather[(tile_count,)](
+                state_cache,
+                state_cache.stride(0),
+                state_cache.stride(1),
+                token_to_req_indices[lo:hi],
+                positions[lo:hi],
+                slot_mapping[lo:hi],
+                block_table,
+                block_table.stride(0),
+                state_block_size,
+                # raw path
+                kv_raw,
+                kv_raw.stride(0),
+                score_raw,
+                score_raw.stride(0),
+                ape,
+                ape.stride(0),
+                seq_start,
+                n_raw,
+                seq_start_per_req,
+                cu_seq_per_req,
+                rms_norm_weight,
+                rms_norm_eps,
+                cos_sin_cache,
+                cos_sin_cache.stride(0),
+                kv_cache,
+                kv_slot_mapping[lo:hi],
+                kv_block_size,
+                HEAD_SIZE=head_dim,
+                TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),
+                STATE_WIDTH=state_width,
+                COMPRESS_RATIO=compress_ratio,
+                OVERLAP=overlap,
+                ROPE_HEAD_DIM=rope_head_dim,
+                FP8_MAX=448.0,
+                QUANT_BLOCK=cfg["quant_block"],
+                TOKEN_STRIDE=cfg["token_stride"],
+                SCALE_DIM=cfg["scale_dim"],
+                KV_BLOCK_STRIDE=kv_block_stride,
+                NUM_STATE_BLOCKS=int(state_cache.shape[0]),
+                NUM_KV_BLOCKS=int(kv_cache.shape[0]),
+                BATCHED=batched,
+                TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+                STATE_RING_ENTRIES=state_ring_entries,
+                # Preserve upstream CUDA rounding before the compressed KV quantizer.
+                # Keep the previously validated reciprocal-sqrt path on PPU only.
+                PPU_RMS_COMPAT=True,
+                num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
+                native_probabilities_ptr=scores,
+            )
+            probabilities = torch.softmax(scores, dim=1)
+            native_options = dict(native_probabilities_ptr=probabilities, USE_NATIVE_PROBABILITIES=True)
+        kernel[(tile_count,)](
+            state_cache,
+            state_cache.stride(0),
+            state_cache.stride(1),
+            token_to_req_indices[lo:hi],
+            positions[lo:hi],
+            slot_mapping[lo:hi],
+            block_table,
+            block_table.stride(0),
+            state_block_size,
+            # raw path
+            kv_raw,
+            kv_raw.stride(0),
+            score_raw,
+            score_raw.stride(0),
+            ape,
+            ape.stride(0),
+            seq_start,
+            n_raw,
+            seq_start_per_req,
+            cu_seq_per_req,
+            rms_norm_weight,
+            rms_norm_eps,
+            cos_sin_cache,
+            cos_sin_cache.stride(0),
+            kv_cache,
+            kv_slot_mapping[lo:hi],
+            kv_block_size,
+            HEAD_SIZE=head_dim,
+            TRITON_BLOCK_SIZE=triton.next_power_of_2(head_dim),
+            STATE_WIDTH=state_width,
+            COMPRESS_RATIO=compress_ratio,
+            OVERLAP=overlap,
+            ROPE_HEAD_DIM=rope_head_dim,
+            FP8_MAX=448.0,
+            QUANT_BLOCK=cfg["quant_block"],
+            TOKEN_STRIDE=cfg["token_stride"],
+            SCALE_DIM=cfg["scale_dim"],
+            KV_BLOCK_STRIDE=kv_block_stride,
+            NUM_STATE_BLOCKS=int(state_cache.shape[0]),
+            NUM_KV_BLOCKS=int(kv_cache.shape[0]),
+            BATCHED=batched,
+            TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+            STATE_RING_ENTRIES=state_ring_entries,
+            # Preserve upstream CUDA rounding before the compressed KV quantizer.
+            # Keep the previously validated reciprocal-sqrt path on PPU only.
+            PPU_RMS_COMPAT=True,
+            num_warps=_fused_num_warps(head_dim, compress_ratio, cfg),
+            **native_options,
+        )
+        if use_native_probabilities:
+            # Stream-ordered lifetime; no third tile buffer remains live.
+            del scores, probabilities
+    return None

@@ -27,6 +27,7 @@ def _mhc_pre_big_fuse(
     fuse_norm: bool = False,
     norm_eps: float = 1e-6,
     parallel_reduction: bool = False,
+    reference_order: bool = False,
 ):
     num_tokens = T.dynamic("num_tokens")
     mhc_mult3 = mhc_mult * (2 + mhc_mult)
@@ -176,7 +177,10 @@ def _mhc_pre_big_fuse(
                     for i_mhc in T.serial(mhc_mult):
                         pre = pre_mix_shared[i_mhc]
                         for i1_h in T.Parallel(hidden_block):
-                            ol[i1_h] += pre * xl[i_mhc, i1_h]
+                            if reference_order:
+                                ol[i1_h] += T.call_pure_extern(T.float32, "__fmul_rn", pre, xl[i_mhc, i1_h])
+                            else:
+                                ol[i1_h] += pre * xl[i_mhc, i1_h]
 
                     if fuse_norm:
                         # Match the SGLang fused boundary: the RMS denominator

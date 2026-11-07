@@ -134,6 +134,7 @@ def forward_layers(
     attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
     capture_context: Optional[Any] = None,
+    workspace: Optional[PrefillWorkspace] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -166,8 +167,8 @@ def forward_layers(
     # other forward-local CUDA tensor. If embedding lands in the cached block
     # first, it can split the only contiguous region large enough for this
     # allocation and force the expandable allocator to map another region.
-    ws: Optional[PrefillWorkspace] = None
-    if v4.fp8_kv_cache:
+    ws: Optional[PrefillWorkspace] = workspace
+    if v4.fp8_kv_cache and ws is None:
         reserve_cp = (
             getattr(v4, "_cp_info", None) is not None
             and int(getattr(v4, "_cp_size", 1)) > 1
@@ -728,6 +729,19 @@ def forward_prefill(
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn_inputs)
 
+    from rtp_llm.models_py.modules.dsv4.ppu.prefill.warmup import (
+        forward_warmup_groups, reserved_page_warmup_groups,
+    )
+    groups = None if is_capturing or _rt.ENABLED or _fwd_dbg.enabled() else reserved_page_warmup_groups(
+        v4, parallelism_config, attn_inputs, cu_seqlens, input_ids.numel(),
+        prepare_hidden_fn, capture_context,
+    )
+    if groups is not None:
+        return forward_warmup_groups(
+            v4, kv_cache, input_ids, positions, cu_seqlens,
+            block_tables_by_type, attn_inputs, groups, forward_layers,
+        )
+
     fixed_mtp_buffer = v4._mtp_hidden_buffer
     temporary_mtp_buffer = None
     if fixed_mtp_buffer is not None and input_ids.numel() > fixed_mtp_buffer.size(0):
@@ -740,19 +754,25 @@ def forward_prefill(
         )
         fixed_valid_tokens = v4._mtp_hidden_valid_tokens
         v4._mtp_hidden_buffer = temporary_mtp_buffer
+    from rtp_llm.models_py.modules.dsv4.ppu.prefill.request_rows import prefill_request_rows
+
     try:
-        hidden = forward_layers(
-            v4,
-            kv_cache,
-            input_ids,
-            positions,
-            cu_seqlens,
-            block_tables_by_type,
-            attn_inputs=attn,
-            attention_inputs=attn_inputs,
-            prepare_hidden_fn=prepare_hidden_fn,
-            capture_context=capture_context,
-        )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
+        with prefill_request_rows(
+            cu_seqlens, input_ids.numel(),
+            enabled=not is_capturing and getattr(v4, "_cp_size", 1) == 1,
+        ):
+            hidden = forward_layers(
+                v4,
+                kv_cache,
+                input_ids,
+                positions,
+                cu_seqlens,
+                block_tables_by_type,
+                attn_inputs=attn,
+                attention_inputs=attn_inputs,
+                prepare_hidden_fn=prepare_hidden_fn,
+                capture_context=capture_context,
+            )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
     finally:
         if temporary_mtp_buffer is not None:
             v4._mtp_hidden_buffer = fixed_mtp_buffer

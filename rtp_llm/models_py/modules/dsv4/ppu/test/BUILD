@@ -34,7 +34,8 @@ _PPU_CONTRACT_TESTS = [
     deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"] + select({"@//:using_ppu": [":ppu_test_runtime"], "//conditions:default": []}),
 ) for name in [
     "isolated_metadata", "rich_contract", "chunk_options", "platform_provider",
-    "prefill_communication", "tp_prefill_workspace_dims",
+    "prefill_communication", "tp_prefill_workspace_dims", "prefill_warmup",
+    "dspark_contract",
 ]]
 
 
@@ -65,7 +66,7 @@ py_test(
         "@//:using_ppu": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-) for name in ["mega_moe_contract", "mtp_input", "decode_metadata_graph", "decode_state_slots"]]
+) for name in ["mega_moe_contract", "mtp_input", "decode_metadata_graph", "decode_state_slots", "a8_moe", "gate_precision", "fp4_mqa_logits"]]
 
 py_test(
     name = "decode_fusions_test",

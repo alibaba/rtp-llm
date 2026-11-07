@@ -20,14 +20,16 @@ class PpuDeepGemmLayoutCompatTest(unittest.TestCase):
             "_forward_prefill_swa_only", "_forward_prefill_hca",
             "_forward_prefill_hca_overlapped", "_cp_full_req_ids_and_positions",
             "_cp_local_full_row_indices", "_attn_via_workspace_cp_raw_q_merge",
-            "_build_shared_prefill_meta", "_prefill_common_setup", "_prefill_compute_qkv",
-            "_materialize_prefill_q", "_ensure_prefill_kv_full",
+            "_build_shared_prefill_meta", "_prefill_common_setup", "_ensure_prefill_kv_full",
             "_prefill_write_swa_fp8_paged", "_attn_fp8_swa_via_kv_full",
             "_attn_fp8_swa_via_concat",
         )
         for name in methods:
             with self.subTest(method=name):
                 self.assertIs(getattr(Ppu, name), getattr(Shared, name))
+        # PPU overrides the two projection boundaries to preserve native rounding.
+        self.assertIsNot(Ppu._prefill_compute_qkv, Shared._prefill_compute_qkv)
+        self.assertIsNot(Ppu._materialize_prefill_q, Shared._materialize_prefill_q)
         common = types.SimpleNamespace(
             device=torch.device("cpu"),
             cp_ctx=types.SimpleNamespace(

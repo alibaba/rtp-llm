@@ -45,6 +45,12 @@ class Dsv4ConfigTest(unittest.TestCase):
         self.assertEqual(self.build().execution_options,
                          self.module.PREFILL_EXECUTION_OPTIONS)
 
+    def test_fp32_reference_hc_is_explicit(self):
+        self.assertEqual(self.build().execution_options["DSV4_MHC_PRE_GEMM_BACKEND"],
+                         "deepgemm_deterministic")
+        with patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "fp32"}):
+            self.assertEqual(self.build().execution_options["DSV4_MHC_PRE_GEMM_BACKEND"], "fp32")
+
     def test_fused_role_is_rejected_before_forward(self):
         self.parallel.role_type.name = "PDFUSION"
         with self.assertRaisesRegex(ValueError, "separate Prefill and Decode"):
@@ -63,6 +69,17 @@ class Dsv4ConfigTest(unittest.TestCase):
         self.config.num_layers = 1
         self.config.attn_config.layer_compress_ratios = [0]
         self.build()
+
+    def test_decode_rowwise_gate_is_opt_in(self):
+        option = "DSV4_PPU_DECODE_GATE_ROWWISE"
+        with patch.dict(os.environ, {option: "1"}):
+            self.assertFalse(getattr(self.build(), "_gate_rowwise", False))
+        self.parallel.role_type.name = "DECODE"
+        self.parallel.ep_size = 4
+        self.moe.use_deepep_low_latency = True
+        self.assertFalse(self.build()._gate_rowwise)
+        with patch.dict(os.environ, {option: "1"}):
+            self.assertTrue(self.build()._gate_rowwise)
 
     def test_decode_ep1_rejected_for_single_and_multiple_tp_ranks(self):
         self.parallel.role_type.name = "DECODE"
