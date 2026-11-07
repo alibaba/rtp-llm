@@ -146,7 +146,8 @@ def _symlink_genrule_for_dir(repository_ctx, src_dir, dest_dir, genrule_name,
 def _get_python_bin(repository_ctx):
   """Gets the python bin path."""
   python_bin = repository_ctx.os.environ.get(_PYTHON_BIN_PATH)
-  if python_bin != None:
+  # An empty value (as --config=xpu sets) means: use `python` from PATH.
+  if python_bin:
     return python_bin
   python_bin_path = repository_ctx.which("python")
   if python_bin_path != None:
@@ -291,6 +292,7 @@ def _create_local_python_repository(repository_ctx):
       repository_ctx, None, '', 'python_import_lib',
       [python_import_lib_src], [python_import_lib_name])
   _tpl(repository_ctx, "BUILD", {
+      "%{PYTHON_BIN_PATH}": python_bin,
       "%{PYTHON_INCLUDE_GENRULE}": python_include_rule,
       "%{PYTHON_IMPORT_LIB_GENRULE}": python_import_lib_genrule,
       "%{PYTHON_LIB_PATH}": python_lib_dir + "/" + python_lib_name,

@@ -288,6 +288,24 @@ build:cpu --copt="-D_GLIBCXX_USE_CXX11_ABI=0"
 # icx version is for 1-3 gen intel xeon cpu, non-icl version is for 4th gen and later.
 build:cpu_latest --define=xft_use_icx=false
 
+# --- Intel XPU (--config=xpu) -----------------------------------------------
+# The XPU Python environment (deps/requirements_xpu.txt). The C++ flags for XPU
+# are added with the XPU C++ build.
+build:xpu --define=using_cuda=false --define=using_cuda_nvcc=false --define=using_xpu=true
+build:xpu --action_env TF_NEED_CUDA="0"
+build:xpu --host_action_env TF_NEED_CUDA="0"
+build:xpu --crosstool_top=@bazel_tools//tools/cpp:toolchain
+build:xpu --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+# Lines 5 and 8 pin the CI image's interpreter (/opt/conda310). For XPU, use the
+# active environment's: PYTHON_BIN_PATH is cleared, so local_config_python and
+# pip_parse take `python` / `python3` from the forwarded PATH, and --python_top
+# points Bazel's Python targets at that same interpreter. To pick another one,
+# pass --repo_env=PYTHON_BIN_PATH=<python> on the command line.
+build:xpu --action_env=PYTHON_BIN_PATH=
+build:xpu --repo_env=PYTHON_BIN_PATH=
+build:xpu --repo_env=PATH
+build:xpu --python_top=@local_config_python//:python_runtime
+
 build:rocm --copt="-DENABLE_BF16=1"
 build:rocm --action_env TF_NEED_CUDA="0"
 build:rocm --host_action_env TF_NEED_CUDA="0"

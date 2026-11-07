@@ -9,6 +9,7 @@ load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12 = "requi
 load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13 = "requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 load("@pip_ppu_torch//:requirements.bzl", requirement_ppu = "requirement")
+load("@pip_xpu_torch//:requirements.bzl", requirement_xpu = "requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
 # Endpoint and mirror seams, shared by open- and closed-source builds:
@@ -105,6 +106,7 @@ def requirement(names):
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm("amd-aiter" if name == "aiter" else name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
                 "@rtp_llm//:using_ppu": ppu_deps,
+                "@rtp_llm//:using_xpu": [requirement_xpu(name)],
                 "//conditions:default": [requirement_cpu(name)],
             }),
             visibility = ["//visibility:public"],
@@ -261,6 +263,8 @@ def whl_deps():
             "fast-safetensors==0.7.3+torch2.1.2.rocm",
             "fastsafetensors==0.1.19rc5+ali",
         ],
+        # torch+xpu from the PyTorch XPU index (deps/requirements_xpu.txt).
+        "@rtp_llm//:using_xpu": ["torch==2.13.0+xpu", "torchvision==0.28.0+xpu"],
         "//conditions:default": ["torch==2.1.2"],
     })
 
