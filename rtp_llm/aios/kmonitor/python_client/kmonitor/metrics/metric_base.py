@@ -1,9 +1,13 @@
 from abc import abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 class MetricDataPoint(object):
-    def __init__(self, value: float, tags: Dict[str, str]):
+    def __init__(
+        self, value: float, tags: Dict[str, str], metric_name: Optional[str] = None
+    ):
+        # Composite metrics can emit named components through the same transport.
+        self.metric_name = metric_name
         self.value = value
         self.tags = tags
 
