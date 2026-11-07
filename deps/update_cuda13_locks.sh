@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <x86|arm> [--check|--print-command]" >&2
+    echo "Usage: $0 <x86|arm|internal-x86> [--check|--print-command]" >&2
     exit 2
 }
 
@@ -11,14 +11,20 @@ platform=$1
 mode=${2:-update}
 [[ "$mode" == update || "$mode" == --check || "$mode" == --print-command ]] || usage
 workspace=${BUILD_WORKSPACE_DIRECTORY:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}
-overrides="$workspace/deps/requirements_cuda13_overrides.txt"
+cd "$workspace"
+overrides=deps/requirements_cuda13_overrides.txt
 
 case "$platform" in
-    x86)
-        input="$workspace/deps/requirements_torch_gpu_cuda13.txt"
-        output="$workspace/deps/requirements_lock_torch_gpu_cuda13.txt"
+    x86|internal-x86)
+        input=deps/requirements_torch_gpu_cuda13.txt
+        output=deps/requirements_lock_torch_gpu_cuda13.txt
         python_platform=x86_64-manylinux_2_28
-        target=requirements_torch_gpu_cuda13.update
+        target=@rtp_public_deps//:requirements_torch_gpu_cuda13.update
+        if [[ "$platform" == internal-x86 ]]; then
+            input=internal_source/deps/requirements_torch_gpu_cuda13.txt
+            output=internal_source/deps/requirements_lock_torch_gpu_cuda13.txt
+            target=@rtp_deps//:requirements_torch_gpu_cuda13.update
+        fi
         # The x86 lock resolves by-name packages from public PyPI (with the
         # aliyun mirror fallback) while the arm lock uses the internal artlab
         # index set, which carries the aarch64+cu13 artifacts; keep each lock
@@ -29,10 +35,10 @@ case "$platform" in
         )
         ;;
     arm)
-        input="$workspace/deps/requirements_cuda13_arm.txt"
-        output="$workspace/deps/requirements_lock_cuda13_arm.txt"
+        input=deps/requirements_cuda13_arm.txt
+        output=deps/requirements_lock_cuda13_arm.txt
         python_platform=aarch64-manylinux_2_28
-        target=requirements_cuda13_arm.update
+        target=@rtp_public_deps//:requirements_cuda13_arm.update
         # The arm lock is resolved against the artlab index set (its emitted
         # --index-url lines); keep regeneration on the same lineage.
         indexes=(
@@ -54,7 +60,7 @@ command=(
     "${indexes[@]}"
     --index-strategy unsafe-best-match
     --emit-index-url
-    --custom-compile-command "bazelisk run //deps:$target"
+    --custom-compile-command "bazelisk run $target"
 )
 
 if [[ "$mode" == --print-command ]]; then

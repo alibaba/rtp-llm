@@ -35,6 +35,12 @@ local_repository(
     path = "deps",
 )
 
+# Keep public lock tooling addressable when rtp_deps uses the internal overlay.
+local_repository(
+    name = "rtp_public_deps",
+    path = "deps",
+)
+
 local_repository(
     name = "arch_config",
     path = "arch_config",
