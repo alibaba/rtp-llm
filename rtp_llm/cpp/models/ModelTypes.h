@@ -98,12 +98,22 @@ enum GptModelInputIndex : size_t {
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
     comboTokenTypeIds,
-    // Number of rows in all_logits_row_indexes (int32 host tensor selecting which token rows get
-    // full-vocab TP-gathered logits; see GptModelInputs::all_logits_row_indexes).
+    // Number of rows in all_logits_row_indexes (int32 host tensor listing the token rows whose
+    // scoring outputs consumers read; see GptModelInputs::all_logits_row_indexes).
     allLogitsRowIndexes,
     // Max prompt_logits_top_k over the batch's scoring streams; every rank must compute the
     // same per-shard top-k width so the partial all-gather shapes agree.
     allLogitsTopK,
+    // Validity bitmap for the scoring-row metadata: bit0 (1) = all_logits_row_labels defined,
+    // bit1 (2) = all_logits_row_indexes defined, bit2 (4) = both defined with equal row counts.
+    // Every rank checks the identical predicate against this broadcast value so a malformed producer
+    // aborts the whole group uniformly instead of root dying alone and leaving the other ranks
+    // inside the packed broadcast.
+    allLogitsRowMeta,
+    // Broadcast row budget for the tp>1 scoring partial all-gather/merge. Root fills it from
+    // GptModelInputs::scoring_partial_chunk_rows or RTP_LLM_SCORING_PARTIAL_CHUNK_ROWS; every
+    // rank chunks the collectives by this identical value.
+    scoringChunkRows,
     gptModelInputLength,
 };
 
@@ -127,6 +137,16 @@ enum GptModelInputDeviceBit : uint32_t {
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
 torch::Tensor           makeModelInputShapeHintsTensor(const GptModelInputs& inputs);
 std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
+
+// Default row budget for the tp>1 scoring partial all-gather/merge when neither the producer
+// nor RTP_LLM_SCORING_PARTIAL_CHUNK_ROWS overrides it (see GptModelInputIndex::scoringChunkRows).
+inline constexpr int64_t kDefaultScoringPartialChunkRows = 512;
+
+// Validates the allLogitsRowMeta shape hint against need_all_logits: the row set must be
+// attached iff need_all_logits, labels must accompany it, and index/label row counts must
+// agree. Runs identically on every rank from broadcast data, so a violation aborts the whole
+// TP group at the same point.
+void checkScoringRowMetaConsistent(bool need_all_logits, int64_t row_meta);
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 

@@ -274,10 +274,12 @@ torch::Tensor buildLmOutputIndexesOnHost(const GptModelInputs& model_input, cons
 
 // Token rows (combo_tokens coordinates, allStreams() order) whose full-vocab logits any output
 // consumer can read this step: per stream, the clamped prompt-logits window and/or the loss range
-// [0, token_size-1). PyWrappedModel TP-gathers only these rows (plus the lm_output_indexes rows)
-// instead of every executed token, so prompt scoring a long prompt no longer allocates
-// [tokens, vocab] fp32 per rank. The dispatcher recomputes the same ranges (promptScoringRowRange)
-// to locate each stream's slice, so the two must stay in lockstep.
+// [0, token_size-1). Under tp>1 PyWrappedModel gathers the lm_output_indexes rows whole and
+// reduces these scoring rows to compact partials instead of TP-gathering every executed token's logits, so
+// prompt scoring a long prompt no longer allocates [tokens, vocab] fp32 per rank; at tp==1 the
+// legacy full-window all_logits is returned and this metadata is ignored. The dispatcher
+// recomputes the same ranges (promptScoringRowRange) to locate each stream's slice, so the two
+// must stay in lockstep.
 // Alongside the rows this emits the per-row next-token labels the sharded reduction needs to read
 // raw target logits out of each rank's vocab shard (token[r+1] in the stream's own execute
 // tokens, -1 when the row has no label), and the max prompt_logits_top_k any stream requests so

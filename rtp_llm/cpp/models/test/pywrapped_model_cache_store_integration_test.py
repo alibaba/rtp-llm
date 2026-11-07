@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import torch
@@ -5,6 +6,8 @@ import torch
 from rtp_llm.cpp.models.test.libth_pywrapped_model_cache_store_integration_test import (
     PyModelInputs,
     PyModelOutputs,
+    clear_comm_ops,
+    register_comm_ops,
     run_scenario,
 )
 
@@ -159,22 +162,122 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(model.micro_batch_calls, 1)
         self.assertEqual(model.seen_input_lengths, [[2, 4], [2]])
 
-        # lm_output_indexes = [1, 5, 7] (last token of each request), scoring rows
-        # [0, 2, 3]. With hidden = token id and an all-ones head, each logits row is
-        # filled with its source token id (tokens are iota starting at 1).
+        # tp==1 keeps the legacy contract: row metadata is ignored and the full
+        # [tokens, vocab] window comes back with token-offset dispatch
+        # (all_logits_lm_rows == -1). lm_output_indexes = [1, 5, 7] (last token of each
+        # request), scoring rows [0, 2, 3] — both are inert here. With hidden = token
+        # id and an all-ones head, each logits row is filled with its source token id
+        # (tokens are iota starting at 1).
         all_logits = result["all_logits"]
-        self.assertEqual(tuple(all_logits.shape), (6, 16))
-        self.assertEqual(result["all_logits_lm_rows"], 3)
+        self.assertEqual(tuple(all_logits.shape), (8, 16))
+        self.assertEqual(result["all_logits_lm_rows"], -1)
         torch.testing.assert_close(
             all_logits[:, 0].cpu(),
-            torch.tensor([2.0, 6.0, 8.0, 1.0, 3.0, 4.0]),
+            torch.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
             rtol=0,
             atol=0,
         )
-        # The sampler-facing prefix is the lm_output_indexes rows.
+        # The sampler-facing rows are the lm_output_indexes rows.
         torch.testing.assert_close(
             result["logits"][:, 0].cpu(), torch.tensor([2.0, 6.0, 8.0]), rtol=0, atol=0
         )
+
+    def test_micro_batch_scoring_tp2_emits_sharded_partials(self) -> None:
+        # tp>1 over mocked communication: the same scoring input must NOT produce a
+        # [rows, vocab] all_logits at all — only the gathered lm rows and the merged
+        # scoring partials (lse / target / top-k) in the [lm rows ++ scoring rows]
+        # layout. The peer shard is emulated as local + 16 over a padded vocab of 32.
+        gathered_shapes = []
+
+        def gather(receivers, mode, senders, inplace):
+            buffer = receivers[0]
+            gathered_shapes.append(tuple(buffer.shape))
+            local = buffer.view(2, buffer.size(0), -1)[0].clone()
+            if buffer.size(0) > 1:
+                # lm-row gather [3, 2*16]: peer = local + 16.
+                buffer.view(2, buffer.size(0), -1).copy_(
+                    torch.stack((local, local + 16))
+                )
+            else:
+                # Scoring payload [1, 2P], P = rows*(2+2*kl): peer values +16; the
+                # scenario's labels all live on rank0's shard so peer target = -inf.
+                kl = 3
+                rows = (buffer.size(1) // 2) // (2 + 2 * kl)
+                p = local.reshape(-1)
+                l0, t0, v0, i0 = p.split([rows, rows, rows * kl, rows * kl])
+                r1 = torch.cat(
+                    (
+                        l0 + 16,
+                        torch.full_like(t0, float("-inf")),
+                        v0 + 16,
+                        (i0.view(torch.int32).remainder(13) + 16).view(torch.float32),
+                    )
+                )
+                buffer.view(2, -1).copy_(torch.stack((p, r1)))
+
+        register_comm_ops(lambda *args: None, lambda *args: None, gather)
+        try:
+            model = CacheStoreForwardModel()
+            result = run_scenario(model, "micro_batch_scoring_tp2")
+        finally:
+            clear_comm_ops()
+
+        # Micro-batching still ran, and the reduction moved only compact payloads:
+        # one [3, 32] lm-row gather and one payload all-gather covering the 3
+        # scoring rows (shard_k = 3 -> P = 3*(2+2*3) = 24 -> buffer [1, 48]).
+        self.assertEqual(model.micro_batch_calls, 1)
+        self.assertEqual(gathered_shapes, [(3, 32), (1, 48)])
+
+        self.assertIsNone(result["all_logits"])
+        self.assertEqual(result["all_logits_lm_rows"], 3)
+
+        # hidden = token id, all-ones head -> every local logit row is filled with the
+        # row's source token id; the peer shard adds 16. lm rows = [2, 6, 8]: rank0's
+        # half of the gathered row is v, rank1's half v+16.
+        torch.testing.assert_close(
+            result["logits"][:, 0].cpu(), torch.tensor([2.0, 6.0, 8.0]), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            result["logits"][:, 16].cpu(),
+            torch.tensor([18.0, 22.0, 24.0]),
+            rtol=0,
+            atol=0,
+        )
+        lse = result["all_logits_lse"].cpu()
+        # Row layout [lm(2,6,8) placeholder zeros; scoring(1,3,4) merged]. A scoring
+        # row's local logits are constant v over 16 valid columns -> local lse =
+        # v + ln16; the mock peer reports lse+16 -> merged = v + ln16 + ln(1+e^16).
+        torch.testing.assert_close(lse[:3], torch.zeros(3), rtol=0, atol=0)
+        for idx, v in enumerate([1.0, 3.0, 4.0]):
+            self.assertAlmostEqual(
+                float(lse[3 + idx]),
+                v + math.log(16.0) + math.log1p(math.exp(16.0)),
+                places=4,
+            )
+        # Labels {7,-1,4} are next-token ids < 16 -> all on rank0's shard.
+        target = result["all_logits_target_logits"].cpu()
+        torch.testing.assert_close(target[:3], torch.zeros(3), rtol=0, atol=0)
+        torch.testing.assert_close(
+            target[3:],
+            torch.tensor([1.0, float("-inf"), 4.0]),
+            rtol=0,
+            atol=0,
+        )
+        # Merged top-k: peer values dominate; every scoring row's top-3 values equal
+        # v+16 and the ids are rank1-valid (< 29) positions of equal-valued columns.
+        topk_values = result["all_logits_topk_values"].cpu()
+        topk_ids = result["all_logits_topk_ids"].cpu()
+        self.assertEqual(tuple(topk_values.shape), (6, 3))
+        torch.testing.assert_close(topk_values[:3], torch.zeros(3, 3), rtol=0, atol=0)
+        for idx, v in enumerate([1.0, 3.0, 4.0]):
+            torch.testing.assert_close(
+                topk_values[3 + idx],
+                torch.tensor([v + 16.0, v + 16.0, v + 16.0]),
+                rtol=0,
+                atol=0,
+            )
+            for k in range(3):
+                self.assertTrue(16 <= int(topk_ids[3 + idx][k]) < 29)
 
     def test_context_parallel_publishes_original_lengths_not_local_chunk(self) -> None:
         model = CacheStoreForwardModel()

@@ -12,6 +12,8 @@
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"
+#include <atomic>
+#include <functional>
 #include <memory>
 
 using namespace std;
@@ -437,23 +439,30 @@ TEST_F(NormalEngineTest, testDispatchScoringOomFailsOnlyScoringStream) {
     normal_query->generate_config                 = make_shared<GenerateConfig>();
     normal_query->generate_config->max_new_tokens = 2;
 
+    // Publish the hook BEFORE enqueueing: the engine thread reads it via atomic_load
+    // concurrently with test setup, so a plain std::function store could be torn. The
+    // predicate keys on an immutable request property rather than a captured stream
+    // pointer whose test-side initialization could race the dispatch thread.
+    std::atomic<int> calls{0};
+    std::atomic_store(
+        &NormalOutputDispatcher::test_scoring_failure_hook,
+        std::make_shared<std::function<void(const GenerateStreamPtr&)>>([&calls](const GenerateStreamPtr& s) {
+            calls.fetch_add(1);
+            if (s->generateConfig()->return_prompt_logits) {
+                throw c10::OutOfMemoryError("CUDA out of memory");
+            }
+        }));
+    struct HookResetGuard {
+        ~HookResetGuard() {
+            std::atomic_store(&NormalOutputDispatcher::test_scoring_failure_hook,
+                              std::shared_ptr<std::function<void(const GenerateStreamPtr&)>>(nullptr));
+        }
+    } hook_guard;
+
     shared_ptr<GenerateStream> scoring_stream = engine->enqueue(scoring_query);
     shared_ptr<GenerateStream> normal_stream  = engine->enqueue(normal_query);
     ASSERT_TRUE(scoring_stream != nullptr);
     ASSERT_TRUE(normal_stream != nullptr);
-
-    std::vector<const GenerateStream*> hooked;
-    NormalOutputDispatcher::test_scoring_failure_hook = [&](const GenerateStreamPtr& s) {
-        hooked.push_back(s.get());
-        if (s.get() == scoring_stream.get()) {
-            throw c10::OutOfMemoryError("CUDA out of memory");
-        }
-    };
-    struct HookResetGuard {
-        ~HookResetGuard() {
-            NormalOutputDispatcher::test_scoring_failure_hook = nullptr;
-        }
-    } hook_guard;
 
     // The scoring request fails request-locally with the non-retryable execution error
     // instead of taking the engine loop down with the uncaught exception.
@@ -480,7 +489,7 @@ TEST_F(NormalEngineTest, testDispatchScoringOomFailsOnlyScoringStream) {
 
     // The hook is only invoked for streams that consume scoring rows, i.e. never for the
     // normal stream and (after its failure) never again for the failed stream.
-    EXPECT_EQ(hooked, std::vector<const GenerateStream*>{scoring_stream.get()});
+    EXPECT_EQ(calls.load(), 1);
 }
 
 // Executor that marks every processed stream failed so preRun's stream-error surface can be

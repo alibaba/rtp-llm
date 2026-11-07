@@ -76,22 +76,32 @@ struct GptModelInputs {
 
     // int32 host tensor populated by NormalModelInputGatherer iff need_all_logits: the token rows
     // (in combo_tokens coordinates, allStreams() order) whose full-vocab logits any consumer can
-    // read — prompt-logits window rows and loss rows. PyWrappedModel gathers only
-    // cat(lm_output_indexes, all_logits_row_indexes) across TP instead of all token rows, so a long
-    // prompt-scoring request no longer materializes [tokens, vocab] fp32 on every rank.
+    // read — prompt-logits window rows and loss rows. Under tp>1 the model still runs the full
+    // local lm-head GEMM over every executed token, then TP-gathers only the lm_output_indexes
+    // rows and reduces the scoring rows to compact partials, so a long prompt-scoring request no
+    // longer materializes [tokens, vocab] fp32 on every rank. At tp==1 the metadata is ignored
+    // and the legacy full-window all_logits is returned.
     // Undefined when need_all_logits is false; when true it is defined but may still be empty —
-    // definedness (not emptiness) selects the row-gather path, and undefined keeps the legacy
-    // full-row gather.
+    // definedness (not emptiness) selects the row-reduction path, and undefined keeps the legacy
+    // full-row behavior.
     torch::Tensor all_logits_row_indexes;
     // int32 host tensor aligned with all_logits_row_indexes: the next-token label each scoring
     // row needs (token[r+1] in the stream's own execute tokens), or -1 when the row has no
     // label (last executed position). TP ranks use it to read the raw target logit out of their
-    // local vocab shard; defined iff all_logits_row_indexes is defined.
+    // local vocab shard; defined iff all_logits_row_indexes is defined, and the broadcast
+    // allLogitsRowMeta hint asserts both definedness and length agreement on every rank.
     torch::Tensor all_logits_row_labels;
     // Max prompt_logits_top_k requested by any scoring stream this step (0 when none ask for
     // top-k). Synchronized via the allLogitsTopK shape hint so every rank computes the same
-    // per-shard top-k width.
+    // per-shard top-k width. Larger requested k stays accepted: the merged top-k emits
+    // min(k, vocab) entries.
     int64_t all_logits_top_k = 0;
+    // Row budget for the tp>1 scoring partial all-gather/merge. Producers leave this 0 and the
+    // shape-hint broadcast fills it from RTP_LLM_SCORING_PARTIAL_CHUNK_ROWS (or the default), so
+    // every rank issues identical all-gather calls; the model additionally clamps it by a fixed
+    // scratch byte budget derived from synchronized tp_size/shard-width metadata before entering
+    // the collective loop.
+    int64_t scoring_partial_chunk_rows = 0;
     // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
     size_t kv_block_stride_bytes;
     size_t kv_scale_stride_bytes;
@@ -149,7 +159,10 @@ struct GptModelOutputs {
     // scoring. All four tensors share the row-selected all_logits layout described above
     // ([lm rows ++ per-stream scoring ranges]); lm rows are computed but never consumed.
     //   all_logits_lse           [rows]      fp32 global logsumexp over the full vocab
-    //   all_logits_topk_values   [rows, K]   fp32 global top-k raw logit values (desc, gid asc)
+    //   all_logits_topk_values   [rows, K]   fp32 global top-k raw logit values, ordered by the
+    //                                        merge's deterministic value-desc/id-asc key (see
+    //                                        mergeScoringPartials; local top-k cutoff ties are
+    //                                        unspecified, like the legacy torch.topk path)
     //   all_logits_topk_ids      [rows, K]   int32 global top-k token ids
     //   all_logits_target_logits [rows]      fp32 raw logit at the row's label (-inf if none)
     torch::Tensor all_logits_lse;

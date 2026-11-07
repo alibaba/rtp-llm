@@ -269,6 +269,13 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     };
     std::list<GenerateStreamPtr> streams{stream};
     THROW_IF_STATUS_ERROR(executor_->process(streams));
+#if USING_CUDA
+    if (mode == preRunMode::build_system_prompt) {
+        // Keep the stream and its execution buffers alive until the resident KV writes
+        // finish — even on the error return below, an in-flight write must not outlive them.
+        cudaDeviceSynchronize();
+    }
+#endif
     // A pre-run stream that was marked failed during process (e.g. an output-stage error
     // reported instead of thrown) must not count as a successful warm-up/sizing step.
     if (stream->hasError()) {
@@ -276,12 +283,6 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         return absl::InternalError("preRun stream failed with error code "
                                    + std::to_string(static_cast<int>(error.code())) + ": " + error.ToString());
     }
-#if USING_CUDA
-    if (mode == preRunMode::build_system_prompt) {
-        // Keep the stream and its execution buffers alive until the resident KV writes finish.
-        cudaDeviceSynchronize();
-    }
-#endif
     return stream;
 }
 

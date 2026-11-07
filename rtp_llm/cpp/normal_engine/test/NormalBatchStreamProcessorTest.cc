@@ -1,3 +1,5 @@
+#include <atomic>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -1459,9 +1461,15 @@ struct ScoringOomFixture {
 
 struct ScoringHookResetGuard {
     ~ScoringHookResetGuard() {
-        NormalOutputDispatcher::test_scoring_failure_hook = nullptr;
+        std::atomic_store(&NormalOutputDispatcher::test_scoring_failure_hook,
+                          std::shared_ptr<std::function<void(const GenerateStreamPtr&)>>(nullptr));
     }
 };
+
+void installScoringHook(std::function<void(const GenerateStreamPtr&)> hook) {
+    std::atomic_store(&NormalOutputDispatcher::test_scoring_failure_hook,
+                      std::make_shared<std::function<void(const GenerateStreamPtr&)>>(std::move(hook)));
+}
 
 }  // namespace
 
@@ -1475,10 +1483,10 @@ TEST_F(NormalBatchStreamProcessorTest, testDispatchScoringOomFailsOnlyThatStream
 
     // Inject a dispatch-stage OOM inside each scoring stream's own output computation.
     std::vector<const GenerateStream*> hooked;
-    NormalOutputDispatcher::test_scoring_failure_hook = [&](const GenerateStreamPtr& s) {
+    installScoringHook([&hooked](const GenerateStreamPtr& s) {
         hooked.push_back(s.get());
         throw c10::OutOfMemoryError("CUDA out of memory");
-    };
+    });
     ScoringHookResetGuard hook_guard;
 
     StreamGroups stream_groups(fixture.streams);
@@ -1507,9 +1515,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDispatchScoringNonOomRethrows) {
                                          fixture.cache_config,
                                          /*warm_up=*/false);
 
-    NormalOutputDispatcher::test_scoring_failure_hook = [](const GenerateStreamPtr&) {
-        throw std::runtime_error("some non-OOM dispatch failure");
-    };
+    installScoringHook([](const GenerateStreamPtr&) { throw std::runtime_error("some non-OOM dispatch failure"); });
     ScoringHookResetGuard hook_guard;
 
     StreamGroups stream_groups(fixture.streams);
@@ -1526,13 +1532,110 @@ TEST_F(NormalBatchStreamProcessorTest, testDispatchScoringOomRethrowsOnWarmUp) {
                                          fixture.cache_config,
                                          /*warm_up=*/true);
 
-    NormalOutputDispatcher::test_scoring_failure_hook = [](const GenerateStreamPtr&) {
-        throw c10::OutOfMemoryError("CUDA out of memory");
-    };
+    installScoringHook([](const GenerateStreamPtr&) { throw c10::OutOfMemoryError("CUDA out of memory"); });
     ScoringHookResetGuard hook_guard;
 
     StreamGroups stream_groups(fixture.streams);
     EXPECT_THROW(processor.dispatch(stream_groups, fixture.merge_outputs), c10::OutOfMemoryError);
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDispatchScoringWrappedOomMessageFailsStream) {
+    ScoringOomFixture          fixture;
+    NormalBatchStreamProcessor processor(fixture.model_config,
+                                         fixture.pd_sep_config,
+                                         fixture.profiling_debug_logging_config,
+                                         fixture.cache_config,
+                                         /*warm_up=*/false);
+
+    // Allocator retry paths surface OOM as a wrapped message, not c10::OutOfMemoryError;
+    // the substring catch must still fail only the scoring streams.
+    installScoringHook([](const GenerateStreamPtr&) {
+        throw std::runtime_error("allocator retry failed during scoring reduction: CUDA out of memory");
+    });
+    ScoringHookResetGuard hook_guard;
+
+    StreamGroups stream_groups(fixture.streams);
+    EXPECT_TRUE(processor.dispatch(stream_groups, fixture.merge_outputs).ok());
+    for (const auto& stream : {fixture.loss_stream, fixture.prompt_stream}) {
+        EXPECT_TRUE(stream->hasError());
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    }
+    EXPECT_FALSE(fixture.normal_stream->hasError());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDispatchShardedScoringOomFailsOnlyThatStream) {
+    ScoringOomFixture          fixture;
+    NormalBatchStreamProcessor processor(fixture.model_config,
+                                         fixture.pd_sep_config,
+                                         fixture.profiling_debug_logging_config,
+                                         fixture.cache_config,
+                                         /*warm_up=*/false);
+
+    // tp>1 sharded layout: the model emits merged per-row partials (lse / target /
+    // top-k) and all_logits_lm_rows >= 0 instead of all_logits. Build the REAL merged
+    // fields the model would produce for this batch: row layout is
+    // [lm(3); loss_stream rows [0,2); prompt_stream window [0,4)] = 9 rows. The hook
+    // fails ONLY the loss stream; the neighboring prompt stream must still succeed and
+    // slice its own rows at the right offset (lm_rows + cumulative scoring rows).
+    const int64_t vocab    = fixture.model_config.vocab_size;
+    const int64_t top_k    = fixture.prompt_stream->generateConfig()->prompt_logits_top_k;
+    auto          selected = torch::arange(9 * vocab, torch::kFloat32).reshape({9, vocab}).to(torch::kCUDA);
+    selected += torch::arange(9, torch::kFloat32).reshape({9, 1}).to(torch::kCUDA) * 100.0f;
+
+    std::vector<int32_t> label_vec = {-1, -1, -1, 2, 3, 5, 6, 7, -1};
+    auto                 lbl       = torch::tensor(label_vec, torch::kInt32).to(torch::kCUDA).to(torch::kLong);
+    auto                 tcol      = lbl.clamp(0, vocab - 1).unsqueeze(1);
+    auto                 tvals     = selected.gather(1, tcol).squeeze(1);
+    auto                 tmask     = lbl < 0;
+    auto                 target    = tvals.masked_fill(tmask, -std::numeric_limits<float>::infinity());
+    auto                 topk      = selected.topk(top_k, -1);
+
+    fixture.merge_outputs.model_output.all_logits               = torch::Tensor();
+    fixture.merge_outputs.model_output.all_logits_lm_rows       = 3;
+    fixture.merge_outputs.model_output.all_logits_lse           = selected.logsumexp(-1);
+    fixture.merge_outputs.model_output.all_logits_target_logits = target;
+    fixture.merge_outputs.model_output.all_logits_topk_values   = std::get<0>(topk);
+    fixture.merge_outputs.model_output.all_logits_topk_ids      = std::get<1>(topk).to(torch::kInt32);
+
+    std::vector<const GenerateStream*> hooked;
+    installScoringHook([&hooked](const GenerateStreamPtr& s) {
+        hooked.push_back(s.get());
+        if (s->generateConfig()->calculate_loss) {
+            throw c10::OutOfMemoryError("CUDA out of memory");
+        }
+    });
+    ScoringHookResetGuard hook_guard;
+
+    StreamGroups stream_groups(fixture.streams);
+    EXPECT_TRUE(processor.dispatch(stream_groups, fixture.merge_outputs).ok());
+
+    // The hook fires once per scoring consumer stream; only the loss stream threw.
+    EXPECT_EQ(hooked, (std::vector<const GenerateStream*>{fixture.loss_stream.get(), fixture.prompt_stream.get()}));
+    EXPECT_TRUE(fixture.loss_stream->hasError());
+    EXPECT_EQ(fixture.loss_stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+
+    // The prompt stream after the failed one still reads its own slice — proving the
+    // successor stream's row offset does not shift when a neighbor fails mid-batch.
+    EXPECT_FALSE(fixture.prompt_stream->hasError());
+    auto prompt_out = fixture.prompt_stream->nextOutput(5000);
+    ASSERT_TRUE(prompt_out.ok());
+    const auto& go = prompt_out.value().generate_outputs;
+    ASSERT_GE(go.size(), 1u);
+    ASSERT_TRUE(go[0].prompt_logits.has_value());
+    const auto& pl = *go[0].prompt_logits;
+    EXPECT_EQ(pl.start_pos, 0);
+    EXPECT_EQ(pl.end_pos, 4);
+    // Rows 5..8 of the merged fields are this stream's window [0,4): topk ids/values
+    // bitwise, logprobs equal (same lse is subtracted downstream).
+    auto expect_topk_v = std::get<0>(topk).narrow(0, 5, 4);
+    auto expect_topk_i = std::get<1>(topk).narrow(0, 5, 4);
+    auto expect_lse    = selected.logsumexp(-1).narrow(0, 5, 4);
+    EXPECT_TRUE(torch::equal(pl.topk_token_ids.cpu(), expect_topk_i.cpu().to(torch::kInt32)));
+    EXPECT_TRUE(torch::equal(pl.topk_logprobs.cpu(), (expect_topk_v - expect_lse.unsqueeze(1)).cpu()));
+
+    EXPECT_FALSE(fixture.normal_stream->hasError());
+    auto normal_out = fixture.normal_stream->nextOutput(5000);
+    ASSERT_TRUE(normal_out.ok());
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
