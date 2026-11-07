@@ -8,9 +8,11 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 #include <unordered_set>
 
@@ -41,12 +43,16 @@ public:
                                      const std::string &masterBizName,
                                      bool collectReplay = false,
                                      const std::string &masterAddress = "");
-    std::shared_ptr<AgentResponseToClientData> takeNextForwardResponse(
-        int64_t timeoutMs);
+    NaviSchedScheduleResult submitSchedule(const NaviSchedScheduleRequest &request,
+                                           const std::string &masterBizName);
+    std::optional<NaviSchedScheduleResult> takeScheduleResult(uint64_t requestId);
+    int notificationFd();
+    std::shared_ptr<AgentResponseToClientData> takeNextForwardResponse(int64_t timeoutMs);
     bool abortForwardRequest(uint64_t requestId);
     std::tuple<int32_t, std::string, std::string> scheduleFlexlb(
         uint64_t requestId, const std::string &address, const std::string &payload,
-        int64_t timeoutMs, const std::vector<std::pair<std::string, std::string>> &metadata);
+        int64_t timeoutMs,
+        const std::vector<std::pair<std::string, std::string>> &metadata);
     uint64_t allocateRequestId();
     bool hasMasterBiz(const std::string &masterBizName = "") const;
     void reportLocalFallback();
@@ -75,14 +81,19 @@ private:
     NaviSchedScheduleResult scheduleRequest(
         const std::shared_ptr<const ClientRequestToMasterData> &request,
         const std::string &masterBizName, int64_t timeoutMs,
-        bool expectResponseStream = true, const std::string &masterAddress = "");
+        bool expectResponseStream = true, const std::string &masterAddress = "",
+        bool waitForDecision = true);
+    NaviSchedScheduleResult scheduleImpl(const NaviSchedScheduleRequest &input,
+                                         const std::string &masterBizName,
+                                         bool collectReplay,
+                                         const std::string &masterAddress,
+                                         bool waitForDecision);
     void scheduleReplayRequest(
         const std::shared_ptr<const ClientRequestToMasterData> &request,
         const std::string &masterBizName, int64_t timeoutMs);
     void abortReplayRequests();
     bool replayAbortOccurredSince(uint64_t generation) const;
-    void abortReplayRequestLaunchedAcrossStop(uint64_t requestId,
-                                              uint64_t generation);
+    void abortReplayRequestLaunchedAcrossStop(uint64_t requestId, uint64_t generation);
     void recordScheduleResult(
         const std::shared_ptr<const ClientRequestToMasterData> &request,
         const std::string &masterBizName, ClientGraphRunResult &result,
@@ -110,6 +121,13 @@ private:
     std::shared_ptr<ClientResponseR> _responseR;
     std::shared_ptr<ReplayClientR> _replayClientR;
     std::shared_ptr<ClientGraphRunner> _runner;
+    struct PendingSchedule {
+        std::shared_ptr<const ClientRequestToMasterData> request;
+        std::string masterBizName;
+        int64_t beginTimeUs = 0;
+    };
+    std::mutex _pendingSchedulesMutex;
+    std::unordered_map<uint64_t, PendingSchedule> _pendingSchedules;
     std::mutex _flexlbGraphMutex;
     std::shared_ptr<FlexlbScheduleGraph> _flexlbGraph;
     std::shared_ptr<ReplayControlGraph> _replayControlGraph;

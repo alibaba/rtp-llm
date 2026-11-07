@@ -13,8 +13,7 @@ ClientResponseR::ClientResponseR()
 }
 
 bool ClientResponseR::begin(uint64_t requestId, bool expectReplay,
-                            bool expectResponseStream,
-                            bool hasClosureCompletion)
+                            bool expectResponseStream, bool hasClosureCompletion)
 {
     if (requestId == 0) {
         return false;
@@ -59,8 +58,8 @@ bool ClientResponseR::attach(uint64_t requestId,
     return true;
 }
 
-bool ClientResponseR::publishDecision(
-    uint64_t requestId, const MasterResponseToClientDataPtr &decision)
+bool ClientResponseR::publishDecision(uint64_t requestId,
+                                      const MasterResponseToClientDataPtr &decision)
 {
     auto state = find(requestId);
     if (!state || !decision || decision->version != NAVI_SCHED_DATA_VERSION ||
@@ -77,11 +76,12 @@ bool ClientResponseR::publishDecision(
         state->decisionTimeUs = autil::TimeUtility::currentTime();
     }
     state->condition.notify_all();
+    _notification.notify();
     return true;
 }
 
-bool ClientResponseR::publishReplay(
-    uint64_t requestId, const MasterResponseToClientDataPtr &replay)
+bool ClientResponseR::publishReplay(uint64_t requestId,
+                                    const MasterResponseToClientDataPtr &replay)
 {
     auto state = find(requestId);
     if (!state || !replay || replay->version != NAVI_SCHED_DATA_VERSION ||
@@ -96,14 +96,14 @@ bool ClientResponseR::publishReplay(
         state->replay = replay->replay;
     }
     state->condition.notify_all();
+    _notification.notify();
     return true;
 }
 
-bool ClientResponseR::publishResponse(
-    uint64_t requestId, const AgentResponseToClientDataPtr &response)
+bool ClientResponseR::publishResponse(uint64_t requestId,
+                                      const AgentResponseToClientDataPtr &response)
 {
-    if (!response || !response->valid() ||
-        AgentResponseKind::ACK == response->kind) {
+    if (!response || !response->valid() || AgentResponseKind::ACK == response->kind) {
         return false;
     }
     auto state = find(requestId);
@@ -134,11 +134,27 @@ bool ClientResponseR::publishResponse(
         _responses.emplace_back(std::move(output));
     }
     _responseCondition.notify_one();
+    _notification.notify();
     return true;
 }
 
-ClientResponseR::DecisionResult ClientResponseR::waitDecision(
-    uint64_t requestId, int64_t timeoutMs)
+std::optional<ClientResponseR::DecisionResult> ClientResponseR::takeDecision(
+    uint64_t requestId)
+{
+    auto state = find(requestId);
+    if (state) {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (!(state->decision && (!state->expectReplay || state->replay)) &&
+            !state->graphFinished && !state->stopRequested) {
+            return std::nullopt;
+        }
+    }
+    // Readiness is monotonic. This call consumes a ready result without waiting.
+    return waitDecision(requestId, 1);
+}
+
+ClientResponseR::DecisionResult ClientResponseR::waitDecision(uint64_t requestId,
+                                                              int64_t timeoutMs)
 {
     DecisionResult result;
     auto state = find(requestId);
@@ -167,8 +183,8 @@ ClientResponseR::DecisionResult ClientResponseR::waitDecision(
         result.decision = state->decision;
         result.replay = state->replay;
     } else {
-        result.errorCode = state->errorCode == navi::EC_NONE ? navi::EC_NO_DATA
-                                                             : state->errorCode;
+        result.errorCode =
+            state->errorCode == navi::EC_NONE ? navi::EC_NO_DATA : state->errorCode;
         result.errorMessage = state->errorMessage.empty()
                                   ? "schedule graph returned no decision"
                                   : state->errorMessage;
@@ -190,9 +206,8 @@ AgentResponseToClientDataPtr ClientResponseR::takeNextResponse(int64_t timeoutMs
 {
     std::unique_lock<std::mutex> lock(_mutex);
     if (_responses.empty() && !_stopped && timeoutMs > 0) {
-        _responseCondition.wait_for(
-            lock, std::chrono::milliseconds(timeoutMs),
-            [this] { return _stopped || !_responses.empty(); });
+        _responseCondition.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+                                    [this] { return _stopped || !_responses.empty(); });
     }
     if (_responses.empty()) {
         return nullptr;
@@ -227,8 +242,8 @@ bool ClientResponseR::abort(uint64_t requestId)
 }
 
 ClientResponseR::DecisionResult ClientResponseR::finishGraph(
-    uint64_t requestId, navi::ErrorCode errorCode,
-    const std::string &errorMessage, bool consumeDecision)
+    uint64_t requestId, navi::ErrorCode errorCode, const std::string &errorMessage,
+    bool consumeDecision)
 {
     DecisionResult result;
     auto state = find(requestId);
@@ -259,8 +274,7 @@ ClientResponseR::DecisionResult ClientResponseR::finishGraph(
             result.replay = state->replay;
             result.decisionTimeUs = state->decisionTimeUs;
         } else {
-            result.errorCode = errorCode == navi::EC_NONE ? navi::EC_NO_DATA
-                                                           : errorCode;
+            result.errorCode = errorCode == navi::EC_NONE ? navi::EC_NO_DATA : errorCode;
             result.errorMessage = errorMessage.empty()
                                       ? "schedule graph returned no decision"
                                       : errorMessage;
@@ -283,9 +297,9 @@ ClientResponseR::DecisionResult ClientResponseR::finishGraph(
         response->requestId = requestId;
         response->kind = AgentResponseKind::ERROR;
         response->terminal = true;
-        response->errorMessage = errorMessage.empty()
-                                     ? "NaviSched response graph ended before terminal output"
-                                     : errorMessage;
+        response->errorMessage =
+            errorMessage.empty() ? "NaviSched response graph ended before terminal output"
+                                 : errorMessage;
         {
             std::lock_guard<std::mutex> lock(_mutex);
             if (!_stopped) {
@@ -294,6 +308,7 @@ ClientResponseR::DecisionResult ClientResponseR::finishGraph(
         }
         _responseCondition.notify_one();
     }
+    _notification.notify();
     return result;
 }
 
@@ -355,16 +370,15 @@ void ClientResponseR::finishAll()
         state->condition.notify_all();
     }
     _responseCondition.notify_all();
+    _notification.notify();
     for (const auto &result : results) {
         result->abort(navi::EC_ABORT);
     }
     for (const auto &state : states) {
         std::unique_lock<std::mutex> stateLock(state->mutex);
-        state->condition.wait(stateLock,
-                              [state] {
-                                  return state->graphFinished &&
-                                         state->closureCompletionFinished;
-                              });
+        state->condition.wait(stateLock, [state] {
+            return state->graphFinished && state->closureCompletionFinished;
+        });
     }
     {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -380,8 +394,8 @@ size_t ClientResponseR::requestCount() const
     return _states.size();
 }
 
-navi::SummaryErrorCode ClientResponseR::getSummary(
-    const std::string &, navi::SummaryBuilder &builder) const
+navi::SummaryErrorCode ClientResponseR::getSummary(const std::string &,
+                                                   navi::SummaryBuilder &builder) const
 {
     std::lock_guard<std::mutex> lock(_mutex);
     auto table = builder.newTable("NaviSchedClientResponseOverview");

@@ -2,6 +2,7 @@
 
 #include "aios/navi_sched/data/AgentResponseToClientData.h"
 #include "aios/navi_sched/data/MasterResponseToClientData.h"
+#include "aios/navi_sched/resource/AsyncNotification.h"
 #include "navi/engine/NaviUserResult.h"
 #include "navi/engine/Resource.h"
 #include <condition_variable>
@@ -9,6 +10,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -27,17 +29,17 @@ public:
     ClientResponseR();
 
 public:
-    bool begin(uint64_t requestId, bool expectReplay,
-               bool expectResponseStream = true,
+    bool begin(uint64_t requestId, bool expectReplay, bool expectResponseStream = true,
                bool hasClosureCompletion = false);
     bool attach(uint64_t requestId, const navi::NaviUserResultPtr &userResult);
     bool publishDecision(uint64_t requestId,
                          const MasterResponseToClientDataPtr &decision);
-    bool publishReplay(uint64_t requestId,
-                       const MasterResponseToClientDataPtr &replay);
+    bool publishReplay(uint64_t requestId, const MasterResponseToClientDataPtr &replay);
     bool publishResponse(uint64_t requestId,
                          const AgentResponseToClientDataPtr &response);
     DecisionResult waitDecision(uint64_t requestId, int64_t timeoutMs);
+    std::optional<DecisionResult> takeDecision(uint64_t requestId);
+    int notificationFd() { return _notification.fd(); }
     AgentResponseToClientDataPtr takeNextResponse(int64_t timeoutMs);
     bool abort(uint64_t requestId);
     DecisionResult finishGraph(uint64_t requestId, navi::ErrorCode errorCode,
@@ -85,6 +87,7 @@ private:
     std::deque<AgentResponseToClientDataPtr> _responses;
     bool _stopped = false;
     bool _finishCompleted = false;
+    AsyncNotification _notification;
 };
 
 NAVI_TYPEDEF_PTR(ClientResponseR);

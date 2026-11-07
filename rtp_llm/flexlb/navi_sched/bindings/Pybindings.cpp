@@ -8,6 +8,7 @@
 #include "aios/navi_sched/debug/NaviSchedScheduleReplayJson.h"
 #include "aios/navi_sched/service/NaviSchedAgent.h"
 #include "aios/navi_sched/service/NaviSchedClient.h"
+#include "aios/navi_sched/resource/AsyncNotification.h"
 #include "aios/navi_sched/service/NaviSchedMaster.h"
 #include "aios/network/gig/multi_call/subscribe/VIPSubscribeService.h"
 #include "autil/Log.h"
@@ -76,8 +77,7 @@ public:
     };
 
     explicit VLLMAgentBridge(const std::shared_ptr<NaviSchedAgent> &agent)
-        : _agent(agent)
-        , _forwardState(std::make_shared<ForwardState>())
+        : _agent(agent), _forwardState(std::make_shared<ForwardState>())
     {
     }
 
@@ -110,10 +110,11 @@ public:
             }
             state->cancelledRequests.emplace_back(requestId);
             state->condition.notify_one();
+            state->notification.notify();
         });
         const auto enabled = _agent->setForwardBatchHandler(
             [state](const std::vector<NaviSchedForwardedRequest> &requests,
-                   int64_t batchId, const NaviSchedBatchFinishReporterPtr &reporter) {
+                    int64_t batchId, const NaviSchedBatchFinishReporterPtr &reporter) {
                 if (batchId <= 0 || requests.empty() || !reporter) {
                     return false;
                 }
@@ -122,8 +123,10 @@ public:
                 batch->localBatchId = requests.front().localBatchId;
                 batch->scheduleBatchSize = requests.front().scheduleBatchSize;
                 batch->pendingCacheTracked = requests.front().pendingCacheTracked;
-                batch->readyTimeNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                batch->readyTimeNs =
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
                 batch->reporter = reporter;
                 batch->requestIds.reserve(requests.size());
                 batch->payloads.reserve(requests.size());
@@ -136,15 +139,14 @@ public:
                             static_cast<int64_t>(requests.size()) ||
                         request.localBatchId != batch->localBatchId ||
                         request.scheduleBatchSize != batch->scheduleBatchSize ||
-                        request.localBatchSize !=
-                            static_cast<int64_t>(requests.size()) ||
-                        request.pendingCacheTracked !=
-                            batch->pendingCacheTracked ||
+                        request.localBatchSize != static_cast<int64_t>(requests.size()) ||
+                        request.pendingCacheTracked != batch->pendingCacheTracked ||
                         !uniqueRequestIds.emplace(request.requestId).second) {
                         return false;
                     }
                     batch->requestIds.emplace_back(request.requestId);
-                    batch->requestBlockHashes.emplace(request.requestId, request.blockHashes);
+                    batch->requestBlockHashes.emplace(request.requestId,
+                                                      request.blockHashes);
                     batch->payloads.emplace_back(request.payload);
                     batch->predictedCacheHitTokenCounts.emplace_back(
                         request.predictedCacheHitTokenCount);
@@ -163,6 +165,7 @@ public:
                 }
                 state->forwardQueue.emplace_back(batch);
                 state->condition.notify_one();
+                state->notification.notify();
                 return true;
             },
             true,
@@ -174,7 +177,8 @@ public:
                 touch->requestId = requestId;
                 touch->acceptedTimeNs =
                     std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
                 touch->payload = payload;
                 std::lock_guard<std::mutex> lock(state->mutex);
                 if (!state->enabled ||
@@ -231,8 +235,7 @@ public:
         std::unique_lock<std::mutex> lock(state->mutex);
         if (state->forwardQueue.empty() && state->enabled && timeoutMs > 0) {
             state->condition.wait_for(
-                lock, std::chrono::milliseconds(timeoutMs),
-                [state] {
+                lock, std::chrono::milliseconds(timeoutMs), [state] {
                     return !state->enabled || !state->forwardQueue.empty() ||
                            !state->cancelledRequests.empty();
                 });
@@ -246,12 +249,11 @@ public:
         for (auto requestId : batch->requestIds) {
             state->queuedForwardRequestIds.erase(requestId);
             removeQueuedTouches =
-                state->queuedTouchRequestIds.erase(requestId) > 0 ||
-                removeQueuedTouches;
+                state->queuedTouchRequestIds.erase(requestId) > 0 || removeQueuedTouches;
         }
         if (removeQueuedTouches) {
-            const std::unordered_set<uint64_t> requestIds(
-                batch->requestIds.begin(), batch->requestIds.end());
+            const std::unordered_set<uint64_t> requestIds(batch->requestIds.begin(),
+                                                          batch->requestIds.end());
             state->touchQueue.erase(
                 std::remove_if(
                     state->touchQueue.begin(), state->touchQueue.end(),
@@ -263,26 +265,28 @@ public:
         lock.unlock();
         if (!batch->reporter || !batch->reporter->beginExecution()) {
             releaseForwardBatch(batch);
+            // A skipped batch must not hide later batches after the fd was drained.
+            state->notification.notify();
             return nullptr;
         }
         return batch;
     }
 
-    std::vector<std::shared_ptr<ForwardRequestTouch>>
-    takeForwardRequestTouches(size_t maxCount)
+    int notificationFd() { return _forwardState->notification.fd(); }
+
+    std::vector<std::shared_ptr<ForwardRequestTouch>> takeForwardRequestTouches(
+        size_t maxCount)
     {
         const auto state = _forwardState;
         std::lock_guard<std::mutex> lock(state->mutex);
         std::vector<std::shared_ptr<ForwardRequestTouch>> touches;
-        const auto count = maxCount == 0
-                               ? state->touchQueue.size()
-                               : std::min(maxCount, state->touchQueue.size());
+        const auto count = maxCount == 0 ? state->touchQueue.size()
+                                         : std::min(maxCount, state->touchQueue.size());
         touches.reserve(count);
         while (!state->touchQueue.empty() && touches.size() < count) {
             auto touch = std::move(state->touchQueue.front());
             state->touchQueue.pop_front();
-            if (!touch ||
-                state->queuedTouchRequestIds.erase(touch->requestId) == 0) {
+            if (!touch || state->queuedTouchRequestIds.erase(touch->requestId) == 0) {
                 continue;
             }
             touches.emplace_back(std::move(touch));
@@ -303,16 +307,14 @@ public:
         return requests;
     }
 
-    bool publishForwardResponse(uint64_t requestId,
-                                std::vector<std::string> frames,
+    bool publishForwardResponse(uint64_t requestId, std::vector<std::string> frames,
                                 bool terminal) const
     {
         return _agent &&
                _agent->publishForwardResponse(requestId, std::move(frames), terminal);
     }
 
-    bool failForwardResponse(uint64_t requestId,
-                             const std::string &errorMessage) const
+    bool failForwardResponse(uint64_t requestId, const std::string &errorMessage) const
     {
         return _agent && _agent->failForwardResponse(requestId, errorMessage);
     }
@@ -334,9 +336,8 @@ public:
         return batch->reporter->startBatch(requestIds) ? batch->reporter : nullptr;
     }
 
-    static bool abortForwardBatchRequests(
-        const std::shared_ptr<ForwardBatch> &batch,
-        const std::vector<uint64_t> &requestIds)
+    static bool abortForwardBatchRequests(const std::shared_ptr<ForwardBatch> &batch,
+                                          const std::vector<uint64_t> &requestIds)
     {
         if (!batch || requestIds.empty()) {
             return false;
@@ -344,8 +345,7 @@ public:
         std::lock_guard<std::mutex> lock(batch->reporterMutex);
         if (!batch->reporter || requestIds.size() >= batch->requestIds.size() ||
             batch->requestIds.size() != batch->payloads.size() ||
-            batch->requestIds.size() !=
-                batch->predictedCacheHitTokenCounts.size()) {
+            batch->requestIds.size() != batch->predictedCacheHitTokenCounts.size()) {
             return false;
         }
         std::unordered_set<uint64_t> abortedIds;
@@ -378,8 +378,7 @@ public:
         }
         batch->requestIds.swap(remainingRequestIds);
         batch->payloads.swap(remainingPayloads);
-        batch->predictedCacheHitTokenCounts.swap(
-            remainingPredictedCacheHits);
+        batch->predictedCacheHitTokenCounts.swap(remainingPredictedCacheHits);
         return true;
     }
 
@@ -464,32 +463,21 @@ public:
         return reporter->finishBatch(requests);
     }
 
-    static bool finishBatchWithExecution(const NaviSchedBatchFinishReporterPtr &reporter,
-                                         const std::vector<RequestStats> &values,
-                                         double wallTimeMs, double executeModelTimeMs,
-                                         int64_t executionStepCount,
-                                         int64_t prefillTokenCount,
-                                         int64_t decodeRequestStepCount,
-                                         int64_t decodeTokenCount,
-                                         double unifiedLatencyMs,
-                                         int64_t precedingRequestCount,
-                                         int64_t sampleBatchCount,
-                                         int64_t runningRequestCount,
-                                         int64_t runningCacheHitTokenCount,
-                                         int64_t runningCacheMissTokenCount,
-                                         double runningCacheMissTokenSquareSum,
-                                         double runningCacheHitMissTokenProductSum,
-                                         int64_t waitingRequestCount,
-                                         int64_t waitingCacheHitTokenCount,
-                                         int64_t waitingCacheMissTokenCount,
-                                         double waitingCacheMissTokenSquareSum,
-                                         double waitingCacheHitMissTokenProductSum,
-                                         double runningElapsedTimeMs,
-                                         int64_t runningDecodeRequestCount,
-                                         int64_t runningDecodeGeneratedTokenCount,
-                                         int64_t runningDecodeRemainingTokenBudget,
-                                         double admissionToFirstExecutionMs,
-                                         double nativePreparationMs)
+    static bool finishBatchWithExecution(
+        const NaviSchedBatchFinishReporterPtr &reporter,
+        const std::vector<RequestStats> &values, double wallTimeMs,
+        double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
+        int64_t decodeRequestStepCount, int64_t decodeTokenCount, double unifiedLatencyMs,
+        int64_t precedingRequestCount, int64_t sampleBatchCount,
+        int64_t runningRequestCount, int64_t runningCacheHitTokenCount,
+        int64_t runningCacheMissTokenCount, double runningCacheMissTokenSquareSum,
+        double runningCacheHitMissTokenProductSum, int64_t waitingRequestCount,
+        int64_t waitingCacheHitTokenCount, int64_t waitingCacheMissTokenCount,
+        double waitingCacheMissTokenSquareSum, double waitingCacheHitMissTokenProductSum,
+        double runningElapsedTimeMs, int64_t runningDecodeRequestCount,
+        int64_t runningDecodeGeneratedTokenCount,
+        int64_t runningDecodeRemainingTokenBudget, double admissionToFirstExecutionMs,
+        double nativePreparationMs)
     {
         if (!reporter || values.empty()) {
             return false;
@@ -511,28 +499,22 @@ public:
         }
         NaviSchedLatencyFeatures sampleFeatures;
         if (!sampleFeatures.appendCapacitySplitAggregate(
-                sampleBatchCount, runningRequestCount,
-                runningCacheHitTokenCount, runningCacheMissTokenCount,
-                runningCacheMissTokenSquareSum,
+                sampleBatchCount, runningRequestCount, runningCacheHitTokenCount,
+                runningCacheMissTokenCount, runningCacheMissTokenSquareSum,
                 runningCacheHitMissTokenProductSum, waitingRequestCount,
                 waitingCacheHitTokenCount, waitingCacheMissTokenCount,
-                waitingCacheMissTokenSquareSum,
-                waitingCacheHitMissTokenProductSum) ||
-            !sampleFeatures.appendPrecedingRequestCount(
-                precedingRequestCount) ||
-            !sampleFeatures.appendRunningElapsedTimeMs(
-                runningElapsedTimeMs) ||
+                waitingCacheMissTokenSquareSum, waitingCacheHitMissTokenProductSum) ||
+            !sampleFeatures.appendPrecedingRequestCount(precedingRequestCount) ||
+            !sampleFeatures.appendRunningElapsedTimeMs(runningElapsedTimeMs) ||
             !sampleFeatures.appendRunningDecodeProgress(
-                runningDecodeRequestCount,
-                runningDecodeGeneratedTokenCount,
+                runningDecodeRequestCount, runningDecodeGeneratedTokenCount,
                 runningDecodeRemainingTokenBudget)) {
             return false;
         }
         return reporter->finishBatchWithUnifiedLatency(
             requests, wallTimeMs, executeModelTimeMs, executionStepCount,
-            prefillTokenCount, decodeRequestStepCount, decodeTokenCount,
-            sampleFeatures, unifiedLatencyMs, admissionToFirstExecutionMs,
-            nativePreparationMs);
+            prefillTokenCount, decodeRequestStepCount, decodeTokenCount, sampleFeatures,
+            unifiedLatencyMs, admissionToFirstExecutionMs, nativePreparationMs);
     }
 
     bool beginBackendExecution(int32_t requestCount) const
@@ -548,8 +530,8 @@ public:
     bool reportExecutionStep(double elapsedMs, int64_t prefillTokens,
                              int64_t decodeTokens) const
     {
-        return _agent && _agent->reportObservedExecutionStep(
-                             elapsedMs, prefillTokens, decodeTokens);
+        return _agent && _agent->reportObservedExecutionStep(elapsedMs, prefillTokens,
+                                                             decodeTokens);
     }
 
     bool reportCoreStep(double elapsedMs, bool futureWait) const
@@ -557,43 +539,31 @@ public:
         return _agent && _agent->reportObservedCoreStep(elapsedMs, futureWait);
     }
 
-    bool reportWorkload(int64_t eventTimeUs, int32_t batchCount,
-                        int32_t requestCount,
-                        int32_t remainingPrefillRequestCount,
-                        int32_t runningRequestCount,
-                        int32_t waitingRequestCount,
-                        int64_t remainingPrefillContextTokenCount,
-                        int64_t remainingPrefillTokenCount,
-                        double remainingPrefillTokenSquareSum,
-                        double contextRemainingPrefillTokenProductSum,
-                        int32_t maxRunningRequestCount,
-                        int32_t runningCapacitySlotCount,
-                        int32_t runningCapacityPrefillRequestCount,
-                        int64_t runningCapacityPrefillContextTokenCount,
-                        int64_t runningCapacityPrefillTokenCount,
-                        double runningCapacityPrefillTokenSquareSum,
-                        double runningCapacityContextRemainingPrefillTokenProductSum,
-                        int32_t waitingCapacityPrefillRequestCount,
-                        int64_t waitingCapacityPrefillContextTokenCount,
-                        int64_t waitingCapacityPrefillTokenCount,
-                        double waitingCapacityPrefillTokenSquareSum,
-                        double waitingCapacityContextRemainingPrefillTokenProductSum,
-                        int64_t remainingTotalContextTokenCount,
-                        int64_t remainingTotalTokenCount,
-                        double remainingTotalTokenSquareSum,
-                        double contextRemainingTotalTokenProductSum,
-                        int64_t totalPromptTokenCount,
-                        int64_t inFlightScheduledTokenCount,
-                        int64_t admittedScheduleBatchId,
-                        int64_t admittedLocalBatchId,
-                        int32_t admittedRequestCount,
-                        bool admittedPendingCacheTracked,
-                        const std::vector<uint64_t> &admittedRequestIds,
-                        double runningElapsedTimeMs,
-                        int32_t runningDecodeRequestCount,
-                        int64_t runningDecodeGeneratedTokenCount,
-                        int64_t runningDecodeRemainingTokenBudget,
-                        const std::vector<int64_t> &coveredNativeBatchIds) const
+    bool reportWorkload(
+        int64_t eventTimeUs, int32_t batchCount, int32_t requestCount,
+        int32_t remainingPrefillRequestCount, int32_t runningRequestCount,
+        int32_t waitingRequestCount, int64_t remainingPrefillContextTokenCount,
+        int64_t remainingPrefillTokenCount, double remainingPrefillTokenSquareSum,
+        double contextRemainingPrefillTokenProductSum, int32_t maxRunningRequestCount,
+        int32_t runningCapacitySlotCount, int32_t runningCapacityPrefillRequestCount,
+        int64_t runningCapacityPrefillContextTokenCount,
+        int64_t runningCapacityPrefillTokenCount,
+        double runningCapacityPrefillTokenSquareSum,
+        double runningCapacityContextRemainingPrefillTokenProductSum,
+        int32_t waitingCapacityPrefillRequestCount,
+        int64_t waitingCapacityPrefillContextTokenCount,
+        int64_t waitingCapacityPrefillTokenCount,
+        double waitingCapacityPrefillTokenSquareSum,
+        double waitingCapacityContextRemainingPrefillTokenProductSum,
+        int64_t remainingTotalContextTokenCount, int64_t remainingTotalTokenCount,
+        double remainingTotalTokenSquareSum, double contextRemainingTotalTokenProductSum,
+        int64_t totalPromptTokenCount, int64_t inFlightScheduledTokenCount,
+        int64_t admittedScheduleBatchId, int64_t admittedLocalBatchId,
+        int32_t admittedRequestCount, bool admittedPendingCacheTracked,
+        const std::vector<uint64_t> &admittedRequestIds, double runningElapsedTimeMs,
+        int32_t runningDecodeRequestCount, int64_t runningDecodeGeneratedTokenCount,
+        int64_t runningDecodeRemainingTokenBudget,
+        const std::vector<int64_t> &coveredNativeBatchIds) const
     {
         if (!_agent) {
             return false;
@@ -606,43 +576,34 @@ public:
         snapshot.runningRequestCount = runningRequestCount;
         snapshot.runningElapsedTimeMs = runningElapsedTimeMs;
         snapshot.runningDecodeRequestCount = runningDecodeRequestCount;
-        snapshot.runningDecodeGeneratedTokenCount =
-            runningDecodeGeneratedTokenCount;
-        snapshot.runningDecodeRemainingTokenBudget =
-            runningDecodeRemainingTokenBudget;
+        snapshot.runningDecodeGeneratedTokenCount = runningDecodeGeneratedTokenCount;
+        snapshot.runningDecodeRemainingTokenBudget = runningDecodeRemainingTokenBudget;
         snapshot.waitingRequestCount = waitingRequestCount;
-        snapshot.remainingPrefillContextTokenCount =
-            remainingPrefillContextTokenCount;
+        snapshot.remainingPrefillContextTokenCount = remainingPrefillContextTokenCount;
         snapshot.remainingPrefillTokenCount = remainingPrefillTokenCount;
-        snapshot.remainingPrefillTokenSquareSum =
-            remainingPrefillTokenSquareSum;
+        snapshot.remainingPrefillTokenSquareSum = remainingPrefillTokenSquareSum;
         snapshot.contextRemainingPrefillTokenProductSum =
             contextRemainingPrefillTokenProductSum;
         snapshot.prefillCapacitySplit = true;
         snapshot.maxRunningRequestCount = maxRunningRequestCount;
         snapshot.runningCapacitySlotCount = runningCapacitySlotCount;
-        snapshot.runningCapacityPrefillRequestCount =
-            runningCapacityPrefillRequestCount;
+        snapshot.runningCapacityPrefillRequestCount = runningCapacityPrefillRequestCount;
         snapshot.runningCapacityPrefillContextTokenCount =
             runningCapacityPrefillContextTokenCount;
-        snapshot.runningCapacityPrefillTokenCount =
-            runningCapacityPrefillTokenCount;
+        snapshot.runningCapacityPrefillTokenCount = runningCapacityPrefillTokenCount;
         snapshot.runningCapacityPrefillTokenSquareSum =
             runningCapacityPrefillTokenSquareSum;
         snapshot.runningCapacityContextRemainingPrefillTokenProductSum =
             runningCapacityContextRemainingPrefillTokenProductSum;
-        snapshot.waitingCapacityPrefillRequestCount =
-            waitingCapacityPrefillRequestCount;
+        snapshot.waitingCapacityPrefillRequestCount = waitingCapacityPrefillRequestCount;
         snapshot.waitingCapacityPrefillContextTokenCount =
             waitingCapacityPrefillContextTokenCount;
-        snapshot.waitingCapacityPrefillTokenCount =
-            waitingCapacityPrefillTokenCount;
+        snapshot.waitingCapacityPrefillTokenCount = waitingCapacityPrefillTokenCount;
         snapshot.waitingCapacityPrefillTokenSquareSum =
             waitingCapacityPrefillTokenSquareSum;
         snapshot.waitingCapacityContextRemainingPrefillTokenProductSum =
             waitingCapacityContextRemainingPrefillTokenProductSum;
-        snapshot.remainingTotalContextTokenCount =
-            remainingTotalContextTokenCount;
+        snapshot.remainingTotalContextTokenCount = remainingTotalContextTokenCount;
         snapshot.remainingTotalTokenCount = remainingTotalTokenCount;
         snapshot.remainingTotalTokenSquareSum = remainingTotalTokenSquareSum;
         snapshot.contextRemainingTotalTokenProductSum =
@@ -652,8 +613,7 @@ public:
         snapshot.admittedBatch.scheduleBatchId = admittedScheduleBatchId;
         snapshot.admittedBatch.localBatchId = admittedLocalBatchId;
         snapshot.admittedBatch.requestCount = admittedRequestCount;
-        snapshot.admittedBatch.pendingCacheTracked =
-            admittedPendingCacheTracked;
+        snapshot.admittedBatch.pendingCacheTracked = admittedPendingCacheTracked;
         snapshot.admittedBatch.requestIds = admittedRequestIds;
         return _agent->reportObservedWorkload(snapshot, coveredNativeBatchIds);
     }
@@ -674,21 +634,19 @@ public:
         }
     }
 
-    void reportCacheUpdated(
-        const std::vector<uint64_t> &added,
-        const std::vector<uint64_t> &removed,
-        const std::vector<uint64_t> &addedFullReady,
-        const std::vector<uint64_t> &removedFullReady,
-        const std::vector<uint64_t> &addedTailReady,
-        const std::vector<uint64_t> &removedTailReady) const
+    void reportCacheUpdated(const std::vector<uint64_t> &added,
+                            const std::vector<uint64_t> &removed,
+                            const std::vector<uint64_t> &addedFullReady,
+                            const std::vector<uint64_t> &removedFullReady,
+                            const std::vector<uint64_t> &addedTailReady,
+                            const std::vector<uint64_t> &removedTailReady) const
     {
         if (!_agent) {
             return;
         }
         const auto makeHashes = [](const std::vector<uint64_t> &values) {
-            return values.empty()
-                       ? NaviSchedBlockHashesConstPtr()
-                       : std::make_shared<const NaviSchedBlockHashes>(values);
+            return values.empty() ? NaviSchedBlockHashesConstPtr()
+                                  : std::make_shared<const NaviSchedBlockHashes>(values);
         };
         _agent->reportCacheUpdated(
             -1, -1, -1, makeHashes(added), makeHashes(removed),
@@ -707,8 +665,7 @@ public:
     }
 
     void logCacheTouchAudit(uint64_t requestCount, uint64_t promotedBlockCount,
-                            uint64_t lastDrainRequestCount,
-                            double lastDrainMaxLagMs,
+                            uint64_t lastDrainRequestCount, double lastDrainMaxLagMs,
                             double lastDrainProcessingMs) const
     {
         AUTIL_LOG(INFO,
@@ -729,6 +686,7 @@ private:
         std::unordered_set<uint64_t> queuedForwardRequestIds;
         std::unordered_set<uint64_t> queuedTouchRequestIds;
         bool enabled = false;
+        AsyncNotification notification;
     };
 
     struct BatchReadyState {
@@ -765,14 +723,15 @@ void bindNaviSchedData(py::module_ &m)
         .def_readonly("request_ids", &VLLMAgentBridge::ForwardBatch::requestIds)
         .def_readonly("predicted_cache_hit_token_counts",
                       &VLLMAgentBridge::ForwardBatch::predictedCacheHitTokenCounts)
-        .def("get_request_block_hashes", [](const VLLMAgentBridge::ForwardBatch &self,
-                                            uint64_t requestId) -> const NaviSchedBlockHashes & {
-            const auto it = self.requestBlockHashes.find(requestId);
-            if (it == self.requestBlockHashes.end()) {
-                throw py::key_error("unknown forwarded request id");
-            }
-            return BlockHashUtil::get(it->second);
-        })
+        .def("get_request_block_hashes",
+             [](const VLLMAgentBridge::ForwardBatch &self,
+                uint64_t requestId) -> const NaviSchedBlockHashes & {
+                 const auto it = self.requestBlockHashes.find(requestId);
+                 if (it == self.requestBlockHashes.end()) {
+                     throw py::key_error("unknown forwarded request id");
+                 }
+                 return BlockHashUtil::get(it->second);
+             })
         .def_property_readonly("payloads", [](const VLLMAgentBridge::ForwardBatch &self) {
             py::list result;
             for (const auto &payload : self.payloads) {
@@ -783,14 +742,13 @@ void bindNaviSchedData(py::module_ &m)
     py::class_<VLLMAgentBridge::ForwardRequestTouch,
                std::shared_ptr<VLLMAgentBridge::ForwardRequestTouch>>(
         m, "_VLLMForwardRequestTouch")
-        .def_readonly("request_id",
-                      &VLLMAgentBridge::ForwardRequestTouch::requestId)
+        .def_readonly("request_id", &VLLMAgentBridge::ForwardRequestTouch::requestId)
         .def_readonly("accepted_time_ns",
                       &VLLMAgentBridge::ForwardRequestTouch::acceptedTimeNs)
-        .def_property_readonly(
-            "payload", [](const VLLMAgentBridge::ForwardRequestTouch &self) {
-                return py::bytes(self.payload);
-            });
+        .def_property_readonly("payload",
+                               [](const VLLMAgentBridge::ForwardRequestTouch &self) {
+                                   return py::bytes(self.payload);
+                               });
     py::class_<NaviSchedBatchFinishReporter, NaviSchedBatchFinishReporterPtr>(
         m, "_VLLMBatchHandle");
     py::class_<VLLMAgentBridge>(m, "_VLLMAgentBridge")
@@ -803,10 +761,9 @@ void bindNaviSchedData(py::module_ &m)
              py::call_guard<py::gil_scoped_release>())
         .def("take_next_forward_batch", &VLLMAgentBridge::takeNextForwardBatch,
              py::arg("timeout_ms") = 0, py::call_guard<py::gil_scoped_release>())
-        .def("take_forward_request_touches",
-             &VLLMAgentBridge::takeForwardRequestTouches,
-             py::arg("max_count") = 0,
-             py::call_guard<py::gil_scoped_release>())
+        .def("notification_fd", &VLLMAgentBridge::notificationFd)
+        .def("take_forward_request_touches", &VLLMAgentBridge::takeForwardRequestTouches,
+             py::arg("max_count") = 0, py::call_guard<py::gil_scoped_release>())
         .def("take_cancelled_requests", &VLLMAgentBridge::takeCancelledRequests,
              py::call_guard<py::gil_scoped_release>())
         .def("publish_forward_response", &VLLMAgentBridge::publishForwardResponse,
@@ -824,76 +781,59 @@ void bindNaviSchedData(py::module_ &m)
                     py::call_guard<py::gil_scoped_release>())
         .def_static("finish_batch", &VLLMAgentBridge::finishBatch,
                     py::call_guard<py::gil_scoped_release>())
-        .def_static("finish_batch_with_execution",
-                    &VLLMAgentBridge::finishBatchWithExecution,
-                    py::arg("reporter"), py::arg("values"),
-                    py::arg("wall_time_ms"),
-                    py::arg("execute_model_time_ms"),
-                    py::arg("execution_step_count"),
-                    py::arg("prefill_token_count"),
-                    py::arg("decode_request_step_count"),
-                    py::arg("decode_token_count"),
-                    py::arg("unified_latency_ms"),
-                    py::arg("preceding_request_count"),
-                    py::arg("sample_batch_count"),
-                    py::arg("running_request_count"),
-                    py::arg("running_cache_hit_token_count"),
-                    py::arg("running_cache_miss_token_count"),
-                    py::arg("running_cache_miss_token_square_sum"),
-                    py::arg("running_cache_hit_miss_token_product_sum"),
-                    py::arg("waiting_request_count"),
-                    py::arg("waiting_cache_hit_token_count"),
-                    py::arg("waiting_cache_miss_token_count"),
-                    py::arg("waiting_cache_miss_token_square_sum"),
-                    py::arg("waiting_cache_hit_miss_token_product_sum"),
-                    py::arg("running_elapsed_time_ms"),
-                    py::arg("running_decode_request_count"),
-                    py::arg("running_decode_generated_token_count"),
-                    py::arg("running_decode_remaining_token_budget"),
-                    py::arg("admission_to_first_execution_ms") = -1.0,
-                    py::arg("native_preparation_ms") = 0.0,
-                    py::call_guard<py::gil_scoped_release>())
+        .def_static(
+            "finish_batch_with_execution", &VLLMAgentBridge::finishBatchWithExecution,
+            py::arg("reporter"), py::arg("values"), py::arg("wall_time_ms"),
+            py::arg("execute_model_time_ms"), py::arg("execution_step_count"),
+            py::arg("prefill_token_count"), py::arg("decode_request_step_count"),
+            py::arg("decode_token_count"), py::arg("unified_latency_ms"),
+            py::arg("preceding_request_count"), py::arg("sample_batch_count"),
+            py::arg("running_request_count"), py::arg("running_cache_hit_token_count"),
+            py::arg("running_cache_miss_token_count"),
+            py::arg("running_cache_miss_token_square_sum"),
+            py::arg("running_cache_hit_miss_token_product_sum"),
+            py::arg("waiting_request_count"), py::arg("waiting_cache_hit_token_count"),
+            py::arg("waiting_cache_miss_token_count"),
+            py::arg("waiting_cache_miss_token_square_sum"),
+            py::arg("waiting_cache_hit_miss_token_product_sum"),
+            py::arg("running_elapsed_time_ms"), py::arg("running_decode_request_count"),
+            py::arg("running_decode_generated_token_count"),
+            py::arg("running_decode_remaining_token_budget"),
+            py::arg("admission_to_first_execution_ms") = -1.0,
+            py::arg("native_preparation_ms") = 0.0,
+            py::call_guard<py::gil_scoped_release>())
         .def("begin_backend_execution", &VLLMAgentBridge::beginBackendExecution,
-             py::arg("request_count") = 0,
-             py::call_guard<py::gil_scoped_release>())
+             py::arg("request_count") = 0, py::call_guard<py::gil_scoped_release>())
         .def("end_backend_execution", &VLLMAgentBridge::endBackendExecution,
              py::call_guard<py::gil_scoped_release>())
         .def("report_workload", &VLLMAgentBridge::reportWorkload,
-             py::arg("event_time_us"), py::arg("batch_count"),
-             py::arg("request_count"),
-             py::arg("remaining_prefill_request_count"),
-             py::arg("running_request_count"),
+             py::arg("event_time_us"), py::arg("batch_count"), py::arg("request_count"),
+             py::arg("remaining_prefill_request_count"), py::arg("running_request_count"),
              py::arg("waiting_request_count"),
              py::arg("remaining_prefill_context_token_count"),
              py::arg("remaining_prefill_token_count"),
              py::arg("remaining_prefill_token_square_sum"),
              py::arg("context_remaining_prefill_token_product_sum"),
-             py::arg("max_running_request_count"),
-             py::arg("running_capacity_slot_count"),
+             py::arg("max_running_request_count"), py::arg("running_capacity_slot_count"),
              py::arg("running_capacity_prefill_request_count"),
              py::arg("running_capacity_prefill_context_token_count"),
              py::arg("running_capacity_prefill_token_count"),
              py::arg("running_capacity_prefill_token_square_sum"),
-             py::arg(
-                 "running_capacity_context_remaining_prefill_token_product_sum"),
+             py::arg("running_capacity_context_remaining_prefill_token_product_sum"),
              py::arg("waiting_capacity_prefill_request_count"),
              py::arg("waiting_capacity_prefill_context_token_count"),
              py::arg("waiting_capacity_prefill_token_count"),
              py::arg("waiting_capacity_prefill_token_square_sum"),
-             py::arg(
-                 "waiting_capacity_context_remaining_prefill_token_product_sum"),
+             py::arg("waiting_capacity_context_remaining_prefill_token_product_sum"),
              py::arg("remaining_total_context_token_count"),
              py::arg("remaining_total_token_count"),
              py::arg("remaining_total_token_square_sum"),
              py::arg("context_remaining_total_token_product_sum"),
              py::arg("total_prompt_token_count"),
              py::arg("in_flight_scheduled_token_count"),
-             py::arg("admitted_schedule_batch_id"),
-             py::arg("admitted_local_batch_id"),
-             py::arg("admitted_request_count"),
-             py::arg("admitted_pending_cache_tracked"),
-             py::arg("admitted_request_ids"),
-             py::arg("running_elapsed_time_ms"),
+             py::arg("admitted_schedule_batch_id"), py::arg("admitted_local_batch_id"),
+             py::arg("admitted_request_count"), py::arg("admitted_pending_cache_tracked"),
+             py::arg("admitted_request_ids"), py::arg("running_elapsed_time_ms"),
              py::arg("running_decode_request_count"),
              py::arg("running_decode_generated_token_count"),
              py::arg("running_decode_remaining_token_budget"),
@@ -905,18 +845,15 @@ void bindNaviSchedData(py::module_ &m)
              py::call_guard<py::gil_scoped_release>())
         .def("report_cache_updated", &VLLMAgentBridge::reportCacheUpdated,
              py::call_guard<py::gil_scoped_release>())
-        .def("log_cache_lifecycle_audit",
-             &VLLMAgentBridge::logCacheLifecycleAudit,
+        .def("log_cache_lifecycle_audit", &VLLMAgentBridge::logCacheLifecycleAudit,
              py::call_guard<py::gil_scoped_release>())
-        .def("log_request_lifecycle_audit",
-             &VLLMAgentBridge::logRequestLifecycleAudit,
+        .def("log_request_lifecycle_audit", &VLLMAgentBridge::logRequestLifecycleAudit,
              py::call_guard<py::gil_scoped_release>())
         .def("report_execution_step", &VLLMAgentBridge::reportExecutionStep,
-             py::arg("elapsed_ms"), py::arg("prefill_tokens"),
-             py::arg("decode_tokens"), py::call_guard<py::gil_scoped_release>())
-        .def("report_core_step", &VLLMAgentBridge::reportCoreStep,
-             py::arg("elapsed_ms"), py::arg("future_wait"),
+             py::arg("elapsed_ms"), py::arg("prefill_tokens"), py::arg("decode_tokens"),
              py::call_guard<py::gil_scoped_release>())
+        .def("report_core_step", &VLLMAgentBridge::reportCoreStep, py::arg("elapsed_ms"),
+             py::arg("future_wait"), py::call_guard<py::gil_scoped_release>())
         .def("log_cache_touch_audit", &VLLMAgentBridge::logCacheTouchAudit,
              py::call_guard<py::gil_scoped_release>());
     py::class_<NaviSchedTarget>(m, "NaviSchedTarget")
@@ -1006,13 +943,14 @@ void bindNaviSchedData(py::module_ &m)
         m, "AgentResponseToClientData")
         .def_readonly("request_id", &AgentResponseToClientData::requestId)
         .def_readonly("kind", &AgentResponseToClientData::kind)
-        .def_property_readonly("frames", [](const AgentResponseToClientData &self) {
-            py::list result;
-            for (const auto &frame : self.frames) {
-                result.append(py::bytes(frame));
-            }
-            return result;
-        })
+        .def_property_readonly("frames",
+                               [](const AgentResponseToClientData &self) {
+                                   py::list result;
+                                   for (const auto &frame : self.frames) {
+                                       result.append(py::bytes(frame));
+                                   }
+                                   return result;
+                               })
         .def_readonly("terminal", &AgentResponseToClientData::terminal)
         .def_readonly("error_message", &AgentResponseToClientData::errorMessage);
 
@@ -1071,8 +1009,7 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("kmon_tags", &NaviSchedConfig::kmonTags)
         .def_readwrite("kmon_monitor_name_prefix",
                        &NaviSchedConfig::kmonMonitorNamePrefix)
-        .def_readwrite("kmon_report_interval_ms",
-                       &NaviSchedConfig::kmonReportIntervalMs)
+        .def_readwrite("kmon_report_interval_ms", &NaviSchedConfig::kmonReportIntervalMs)
         .def_readwrite("gig", &NaviSchedConfig::gig)
         .def_readwrite("wait_no_query", &NaviSchedConfig::waitNoQuery)
         .def_readwrite("batch_timeout_ms", &NaviSchedConfig::batchTimeoutMs)
@@ -1086,8 +1023,7 @@ void bindNaviSchedData(py::module_ &m)
                        &NaviSchedConfig::latencyCurrentSampleWeight)
         .def_readwrite("latency_parameter_learning_rate_scales",
                        &NaviSchedConfig::latencyParameterLearningRateScales)
-        .def_readwrite("latency_nonlinear_scale",
-                       &NaviSchedConfig::latencyNonlinearScale)
+        .def_readwrite("latency_nonlinear_scale", &NaviSchedConfig::latencyNonlinearScale)
         .def_readwrite("queue_learning_rate", &NaviSchedConfig::queueLearningRate)
         .def_readwrite("latency_check_gradient", &NaviSchedConfig::latencyCheckGradient)
         .def_readwrite("latency_cold_start_fit_epochs",
@@ -1109,8 +1045,7 @@ void bindNaviSchedData(py::module_ &m)
                        &NaviSchedConfig::latencyZeroAnchorMinSamples)
         .def_readwrite("latency_validation_enabled",
                        &NaviSchedConfig::latencyValidationEnabled)
-        .def_readwrite("residual_learning_rate",
-                       &NaviSchedConfig::residualLearningRate)
+        .def_readwrite("residual_learning_rate", &NaviSchedConfig::residualLearningRate)
         .def_readwrite("residual_update_error_floor_ms",
                        &NaviSchedConfig::residualUpdateErrorFloorMs)
         .def_readwrite("residual_update_error_ratio",
@@ -1159,8 +1094,7 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("master_biz_name", &NaviSchedClientConfig::masterBizName)
         .def_readwrite("enable_sample_collection",
                        &NaviSchedClientConfig::enableSampleCollection)
-        .def_readwrite("enable_agent_forward",
-                       &NaviSchedClientConfig::enableAgentForward)
+        .def_readwrite("enable_agent_forward", &NaviSchedClientConfig::enableAgentForward)
         .def_readwrite("expect_agent_response_stream",
                        &NaviSchedClientConfig::expectAgentResponseStream);
     py::class_<NaviSchedMasterConfig>(m, "NaviSchedMasterConfig")
@@ -1168,7 +1102,8 @@ void bindNaviSchedData(py::module_ &m)
         .def_readwrite("service", &NaviSchedMasterConfig::service)
         .def_readwrite("runtime", &NaviSchedMasterConfig::runtime)
         .def_readwrite("collector_thread_num", &NaviSchedMasterConfig::collectorThreadNum)
-        .def_readwrite("collector_queue_count", &NaviSchedMasterConfig::collectorQueueCount)
+        .def_readwrite("collector_queue_count",
+                       &NaviSchedMasterConfig::collectorQueueCount)
         .def_readwrite("max_wait_schedule_count",
                        &NaviSchedMasterConfig::maxWaitScheduleCount)
         .def_readwrite("max_wait_schedule_time_ms",
@@ -1200,7 +1135,8 @@ void bindNaviSchedData(py::module_ &m)
                const std::string &masterBizName, bool collectReplay,
                const std::string &masterAddress) {
                 py::gil_scoped_release release;
-                return self.schedule(request, masterBizName, collectReplay, masterAddress);
+                return self.schedule(request, masterBizName, collectReplay,
+                                     masterAddress);
             },
             py::arg("request"), py::arg("master_biz_name") = "",
             py::arg("collect_replay") = false, py::arg("master_address") = "")
@@ -1213,7 +1149,8 @@ void bindNaviSchedData(py::module_ &m)
                 std::tuple<int32_t, std::string, std::string> output;
                 {
                     py::gil_scoped_release release;
-                    output = self.scheduleFlexlb(requestId, address, input, timeoutMs, metadata);
+                    output = self.scheduleFlexlb(requestId, address, input, timeoutMs,
+                                                 metadata);
                 }
                 return py::make_tuple(std::get<0>(output), py::bytes(std::get<1>(output)),
                                       std::get<2>(output));
@@ -1221,20 +1158,21 @@ void bindNaviSchedData(py::module_ &m)
             py::arg("request_id"), py::arg("address"), py::arg("payload"),
             py::arg("timeout_ms"),
             py::arg("metadata") = std::vector<std::pair<std::string, std::string>>{})
-        .def("take_next_forward_response",
-             &NaviSchedClient::takeNextForwardResponse,
-             py::arg("timeout_ms") = 0,
-             py::call_guard<py::gil_scoped_release>())
+        .def("take_next_forward_response", &NaviSchedClient::takeNextForwardResponse,
+             py::arg("timeout_ms") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("notification_fd", &NaviSchedClient::notificationFd)
+        .def("submit_schedule", &NaviSchedClient::submitSchedule, py::arg("request"),
+             py::arg("master_biz_name") = "", py::call_guard<py::gil_scoped_release>())
+        .def("take_schedule_result", &NaviSchedClient::takeScheduleResult,
+             py::arg("request_id"), py::call_guard<py::gil_scoped_release>())
         .def("abort_forward_request", &NaviSchedClient::abortForwardRequest,
              py::arg("request_id"), py::call_guard<py::gil_scoped_release>())
         .def("allocate_request_id", &NaviSchedClient::allocateRequestId)
         .def("has_master_biz", &NaviSchedClient::hasMasterBiz,
-             py::arg("master_biz_name") = "",
-             py::call_guard<py::gil_scoped_release>())
+             py::arg("master_biz_name") = "", py::call_guard<py::gil_scoped_release>())
         .def("report_local_fallback", &NaviSchedClient::reportLocalFallback,
              py::call_guard<py::gil_scoped_release>())
-        .def("get_request_received_count",
-             &NaviSchedClient::getRequestReceivedCount);
+        .def("get_request_received_count", &NaviSchedClient::getRequestReceivedCount);
 
     py::class_<NaviSchedMaster, std::shared_ptr<NaviSchedMaster>>(m, "NaviSchedMaster")
         .def(py::init<const NaviSchedMasterConfig &>(), py::arg("config"))
@@ -1250,18 +1188,16 @@ void bindNaviSchedData(py::module_ &m)
              py::arg("server_ip") = "", py::arg("total_blocks") = 0)
         .def("init", &NaviSchedAgent::init, py::call_guard<py::gil_scoped_release>())
         .def("stop", &NaviSchedAgent::stop, py::call_guard<py::gil_scoped_release>())
-        .def("report_cache_status",
-             [](const NaviSchedAgent &self, int64_t totalBlocks,
-                int64_t blockSize, int64_t linearStep,
-                bool hybridTailRequired) {
-                 self.reportCacheUpdated(totalBlocks, blockSize, linearStep,
-                                         nullptr, nullptr, nullptr, nullptr,
-                                         nullptr, nullptr,
-                                         hybridTailRequired ? 1 : 0, 0);
-             },
-             py::arg("total_blocks"), py::arg("block_size"),
-             py::arg("linear_step"), py::arg("hybrid_tail_required"),
-             py::call_guard<py::gil_scoped_release>())
+        .def(
+            "report_cache_status",
+            [](const NaviSchedAgent &self, int64_t totalBlocks, int64_t blockSize,
+               int64_t linearStep, bool hybridTailRequired) {
+                self.reportCacheUpdated(totalBlocks, blockSize, linearStep, nullptr,
+                                        nullptr, nullptr, nullptr, nullptr, nullptr,
+                                        hybridTailRequired ? 1 : 0, 0);
+            },
+            py::arg("total_blocks"), py::arg("block_size"), py::arg("linear_step"),
+            py::arg("hybrid_tail_required"), py::call_guard<py::gil_scoped_release>())
         .def("get_grpc_port", &NaviSchedAgent::getGrpcPort);
 }
 

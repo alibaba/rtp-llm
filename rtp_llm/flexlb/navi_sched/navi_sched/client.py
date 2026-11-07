@@ -63,9 +63,34 @@ class NaviSchedClient(RoleFacade):
         forward_payload: bytes = b"",
         master_address: str = "",
     ) -> NaviSchedDecision:
-        effective_master_biz_name = (
-            str(master_biz_name) or self._master_biz_name
+        native_request, effective_master_biz_name = self._make_native_request(
+            request,
+            target_biz_name,
+            master_biz_name,
+            block_hashes,
+            timeout_ms,
+            request_id,
+            block_size,
+            forward_payload,
         )
+        arguments = (native_request, effective_master_biz_name, bool(collect_replay))
+        if master_address:
+            arguments += (str(master_address),)
+        result = self._service.schedule(*arguments)
+        return decisionFromNative(result)
+
+    def _make_native_request(
+        self,
+        request,
+        target_biz_name,
+        master_biz_name="",
+        block_hashes=None,
+        timeout_ms=1000,
+        request_id=None,
+        block_size=256,
+        forward_payload=b"",
+    ):
+        effective_master_biz_name = str(master_biz_name) or self._master_biz_name
         if not target_biz_name:
             raise ValueError("target_biz_name is required")
         if not effective_master_biz_name:
@@ -96,16 +121,37 @@ class NaviSchedClient(RoleFacade):
         native_request.block_hashes = request.block_hashes
         native_request.timeout_ms = int(timeout_ms)
         native_request.forward_payload = request.forward_payload
-        arguments = (native_request, effective_master_biz_name, bool(collect_replay))
-        if master_address:
-            arguments += (str(master_address),)
-        result = self._service.schedule(*arguments)
-        return decisionFromNative(result)
+        return native_request, effective_master_biz_name
 
-    def schedule_flexlb(self, request_id: int, address: str, payload: bytes, timeout_ms: int,
-                        metadata=()):
+    def submit_schedule(self, request, target_biz_name, timeout_ms=1000):
+        native_request, master_biz = self._make_native_request(
+            request, target_biz_name, timeout_ms=timeout_ms
+        )
+        result = self._service.submit_schedule(native_request, master_biz)
+        if result.error_code:
+            raise RuntimeError(result.error_message or "NaviSched submission failed")
+
+    def take_schedule_result(self, request_id):
+        result = self._service.take_schedule_result(int(request_id))
+        return None if result is None else decisionFromNative(result)
+
+    def notification_fd(self):
+        return int(self._service.notification_fd())
+
+    def schedule_flexlb(
+        self,
+        request_id: int,
+        address: str,
+        payload: bytes,
+        timeout_ms: int,
+        metadata=(),
+    ):
         status, response, details = self._service.schedule_flexlb(
-            int(request_id), str(address), bytes(payload), int(timeout_ms), list(metadata)
+            int(request_id),
+            str(address),
+            bytes(payload),
+            int(timeout_ms),
+            list(metadata),
         )
         if status:
             raise FlexlbScheduleRpcError(status, details)
@@ -121,9 +167,7 @@ class NaviSchedClient(RoleFacade):
         return int(self._service.allocate_request_id())
 
     def has_master_biz(self, master_biz_name: str = "") -> bool:
-        effective_master_biz_name = (
-            str(master_biz_name) or self._master_biz_name
-        )
+        effective_master_biz_name = str(master_biz_name) or self._master_biz_name
         return bool(self._service.has_master_biz(effective_master_biz_name))
 
     def report_local_fallback(self) -> None:
@@ -132,6 +176,7 @@ class NaviSchedClient(RoleFacade):
     @property
     def request_received_count(self) -> int:
         return int(self._service.get_request_received_count())
+
 
 __all__ = [
     "NaviSchedClient",
