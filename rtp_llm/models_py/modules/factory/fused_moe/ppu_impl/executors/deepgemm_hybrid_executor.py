@@ -1207,7 +1207,8 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
 
         if self._fuse_silu_quant:
             down_q, down_scale = silu_mul_fp8_quantize_128(
-                gateup_output, gate_first=False,
+                gateup_output,
+                gate_first=False,
             )
             dispose_tensor(gateup_output)
         else:

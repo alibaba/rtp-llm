@@ -54,9 +54,7 @@ def _register_impls(
 
             prefill_mla_imps.append(SparseMlaImpl)
             decode_mla_imps.append(SparseMlaImpl)
-            logging.info(
-                "[ppu attn register] SparseMlaImpl registered for sparse MLA"
-            )
+            logging.info("[ppu attn register] SparseMlaImpl registered for sparse MLA")
         except ImportError as e:
             logging.warning(
                 "[ppu attn register] flash_mla unavailable, sparse MLA not "

@@ -43,17 +43,16 @@ from rtp_llm.ops import AttentionConfigs, FMHAConfig, FMHAType, ParallelismConfi
 from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 
 from .flashmla_sparse_impl import (
+    _IS_PPU,
     SparseMlaFp8DecodeParams,
     SparseMlaFp8Op,
     SparseMlaImpl,
     _allocate_prefill_fused_kv,
     _as_uint8,
     _GatherWorkspace,
-    _IS_PPU,
     _topk_2d,
 )
 from .glm53_prefill_workspace import Glm53PrefillWorkspace
-
 
 # The PPU FP8 paged kernel corrupts results for large prefill Q batches.
 # Keep its launch shape within the range verified against single-query output.
@@ -460,7 +459,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                     num_heads_k=1,
                     is_fp8_kvcache=True,
                 )
-                metadata_by_size[rows] = SparseMlaFp8DecodeParams(tile_sched, num_splits)
+                metadata_by_size[rows] = SparseMlaFp8DecodeParams(
+                    tile_sched, num_splits
+                )
             self._fp8_kernel_metadata_chunks.append(metadata_by_size[rows])
         self._fp8_kernel_metadata_q0 = self._fp8_kernel_metadata_chunks[0]
         self._fp8_kernel_metadata_q0_key = key
@@ -990,7 +991,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         global_topk = self._convert_topk_indices_to_global(topk).squeeze(1).unsqueeze(0)
         if _IS_PPU and q0.size(0) > _PPU_FP8_MAX_QUERY_TOKENS:
             output = q0.new_empty((q0.size(0), q0.size(1), self.kv_lora_rank))
-            for index, begin in enumerate(range(0, q0.size(0), _PPU_FP8_MAX_QUERY_TOKENS)):
+            for index, begin in enumerate(
+                range(0, q0.size(0), _PPU_FP8_MAX_QUERY_TOKENS)
+            ):
                 end = min(begin + _PPU_FP8_MAX_QUERY_TOKENS, q0.size(0))
                 meta = self._fp8_kernel_metadata_chunks[index]
                 chunk_out, _ = flash_mla_with_kvcache(

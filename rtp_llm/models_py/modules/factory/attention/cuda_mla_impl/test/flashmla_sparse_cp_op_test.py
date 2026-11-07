@@ -649,42 +649,69 @@ class SparseMlaFp8CPOpTest(TestCase):
         kpe = torch.randn((tokens, rope), dtype=torch.bfloat16)
         dummy_q = torch.zeros((tokens, 1, 256), dtype=torch.bfloat16)
         cos_sin = torch.zeros((tokens, rope), dtype=torch.float32)
-        cos_sin[:, :rope // 2] = 1
+        cos_sin[:, : rope // 2] = 1
         fused_qk_rope_cat_cache_mla(
-            dummy_q, ckv, kpe, cache,
+            dummy_q,
+            ckv,
+            kpe,
+            cache,
             torch.arange(tokens, dtype=torch.int64) + page,
             torch.arange(tokens, dtype=torch.int32),
-            cos_sin, latent, rope, False, "fp8_ds_mla",
+            cos_sin,
+            latent,
+            rope,
+            False,
+            "fp8_ds_mla",
         )
         table = torch.arange(1, tokens // page + 1, dtype=torch.int32)[None]
         for count in (1025, 4082):
             with self.subTest(queries=count):
-                q = (torch.randn((count, heads, latent + rope), dtype=torch.float32) * 0.1).bfloat16()
+                q = (
+                    torch.randn((count, heads, latent + rope), dtype=torch.float32)
+                    * 0.1
+                ).bfloat16()
                 indices = torch.randint(0, tokens, (count, 1, topk), dtype=torch.int32)
-                indices[::2, :, topk // 2:] = -1
-                op = cp_impl.SparseMlaFp8CPOp(heads, latent, rope, latent, page, 1.0, topk)
+                indices[::2, :, topk // 2 :] = -1
+                op = cp_impl.SparseMlaFp8CPOp(
+                    heads, latent, rope, latent, page, 1.0, topk
+                )
                 op.block_table, op.mla_params = table, SimpleNamespace()
                 op.precomputed_req_ids = torch.zeros(count, dtype=torch.int32)
                 op._refresh_fp8_kernel_metadata(count)
-                output = op._attend_with_kvcache(q, SimpleNamespace(kv_cache_base=cache), indices, 0)
+                output = op._attend_with_kvcache(
+                    q, SimpleNamespace(kv_cache_base=cache), indices, 0
+                )
                 actual = output.float().cpu().numpy()
                 self.assertTrue(np.isfinite(actual).all())
                 for row in (0, 1023, 1024, count - 1):
                     meta, splits = cp_impl.get_mla_metadata(
-                        cache_seqlens=None, num_q_tokens_per_head_k=heads,
-                        topk=topk, num_heads_q=heads, num_heads_k=1, is_fp8_kvcache=True,
+                        cache_seqlens=None,
+                        num_q_tokens_per_head_k=heads,
+                        topk=topk,
+                        num_heads_q=heads,
+                        num_heads_k=1,
+                        is_fp8_kvcache=True,
                     )
                     reference, _ = cp_impl.flash_mla_with_kvcache(
-                        q=q[row:row+1].unsqueeze(0), k_cache=cache.unsqueeze(2),
-                        block_table=table, head_dim_v=latent, cache_seqlens=None,
-                        tile_scheduler_metadata=meta, num_splits=splits,
+                        q=q[row : row + 1].unsqueeze(0),
+                        k_cache=cache.unsqueeze(2),
+                        block_table=table,
+                        head_dim_v=latent,
+                        cache_seqlens=None,
+                        tile_scheduler_metadata=meta,
+                        num_splits=splits,
                         is_fp8_kvcache=True,
-                        indices=torch.where(indices[row:row+1, 0] >= 0, indices[row:row+1, 0] + page, -1).unsqueeze(0),
+                        indices=torch.where(
+                            indices[row : row + 1, 0] >= 0,
+                            indices[row : row + 1, 0] + page,
+                            -1,
+                        ).unsqueeze(0),
                         softmax_scale=op.scale,
                     )
-                    error = np.abs(actual[row] - reference[0, 0].float().cpu().numpy()).max()
+                    error = np.abs(
+                        actual[row] - reference[0, 0].float().cpu().numpy()
+                    ).max()
                     self.assertLess(float(error), 0.002)
-
 
     def test_ppu_fresh_bf16_chunks_preserve_request_boundaries(self):
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
@@ -697,16 +724,20 @@ class SparseMlaFp8CPOpTest(TestCase):
         lengths = (256, 384)
         ckv = torch.randn(sum(lengths), 512)
         kpe = torch.randn(sum(lengths), 64)
-        ckv[:lengths[0]].add_(1)
-        ckv[lengths[0]:].sub_(1)
+        ckv[: lengths[0]].add_(1)
+        ckv[lengths[0] :].sub_(1)
         kv = torch.cat((ckv, kpe), dim=-1).unsqueeze(1)
         for count in (1025, 4082):
             with self.subTest(queries=count):
                 op = cp_impl.SparseMlaFp8CPOp(64, 512, 64, 512, 64, 1.0, 128)
-                op.cu_kv_seqlens_global = torch.tensor([0, lengths[0], sum(lengths)], dtype=torch.int32)
+                op.cu_kv_seqlens_global = torch.tensor(
+                    [0, lengths[0], sum(lengths)], dtype=torch.int32
+                )
                 op.precomputed_req_ids = torch.arange(count, dtype=torch.int32) % 2
                 q = (torch.randn(count, 64, 576, dtype=torch.float32) * 0.1).bfloat16()
-                topk = torch.randint(0, min(lengths), (count, 1, 128), dtype=torch.int32)
+                topk = torch.randint(
+                    0, min(lengths), (count, 1, 128), dtype=torch.int32
+                )
                 topk[::2, :, 64:] = -1
                 sizes = []
                 native = cp_impl.flash_mla_sparse_fwd
@@ -723,9 +754,15 @@ class SparseMlaFp8CPOpTest(TestCase):
                 self.assertLessEqual(max(sizes), 1024)
                 for row in (0, 1023, 1024, count - 1):
                     offset = lengths[0] if row % 2 else 0
-                    index = torch.where(topk[row:row + 1] >= 0, topk[row:row + 1] + offset, -1)
-                    reference, _, _ = native(q[row:row + 1], kv, index, op.scale, d_v=512)
-                    error = np.abs(actual[row] - reference[0].float().cpu().numpy()).max()
+                    index = torch.where(
+                        topk[row : row + 1] >= 0, topk[row : row + 1] + offset, -1
+                    )
+                    reference, _, _ = native(
+                        q[row : row + 1], kv, index, op.scale, d_v=512
+                    )
+                    error = np.abs(
+                        actual[row] - reference[0].float().cpu().numpy()
+                    ).max()
                     self.assertLess(float(error), 0.002)
 
     def test_chunk_tail_positions_and_empty_rank_collectives(self):
@@ -782,7 +819,9 @@ class SparseMlaFp8CPOpTest(TestCase):
                     ) as metadata:
                         op.plan(mla, block_table, ai)
                         self.assertEqual(metadata.call_count, int(bool(valid)))
-                    self.assertEqual(op._ppu_fresh_bf16_prefill, cp_impl._IS_PPU and prefix == 0)
+                    self.assertEqual(
+                        op._ppu_fresh_bf16_prefill, cp_impl._IS_PPU and prefix == 0
+                    )
                     self.assertEqual(op.total_local_ids.tolist(), valid)
                     self.assertEqual(
                         op.full_rope_pos_ids.tolist(),

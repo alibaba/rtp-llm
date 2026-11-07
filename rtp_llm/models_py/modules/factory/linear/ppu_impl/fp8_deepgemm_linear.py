@@ -5,9 +5,7 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.kernels.ppu.block_scaled_fp8_gemm import (
-    fp8_block_scaled_matmul,
-)
+from rtp_llm.models_py.kernels.ppu.block_scaled_fp8_gemm import fp8_block_scaled_matmul
 from rtp_llm.models_py.kernels.ppu.deepgemm_warmup import (
     get_deep_gemm_warmup_mode,
     resolve_deep_gemm_warmup_max_tokens,
@@ -109,8 +107,11 @@ class PpuFp8DeepGemmLinear(LinearBase):
             )
 
     def forward(
-        self, input: torch.Tensor, input_scales: Optional[torch.Tensor] = None,
-        *, block_scaled: bool = False,
+        self,
+        input: torch.Tensor,
+        input_scales: Optional[torch.Tensor] = None,
+        *,
+        block_scaled: bool = False,
     ) -> torch.Tensor:
         """Use explicit K128 scale/add arithmetic when ``block_scaled`` is set."""
         if input.shape[-1] != self.k:
@@ -121,16 +122,24 @@ class PpuFp8DeepGemmLinear(LinearBase):
         input_2d = input.reshape(-1, self.k)
         if input_scales is None:
             if input.dtype != torch.bfloat16:
-                raise ValueError(f"FP8 Linear expects BF16 input without scales, got {input.dtype}")
+                raise ValueError(
+                    f"FP8 Linear expects BF16 input without scales, got {input.dtype}"
+                )
             input_q, input_scale = fp8_quantize_128(input_2d)
         else:
             if input.dtype != torch.float8_e4m3fn or not input_2d.is_contiguous():
-                raise ValueError("prequantized FP8 Linear input must be contiguous E4M3")
-            if (input_scales.dtype != torch.float32
+                raise ValueError(
+                    "prequantized FP8 Linear input must be contiguous E4M3"
+                )
+            if (
+                input_scales.dtype != torch.float32
                 or input_scales.shape != (input_2d.shape[0], self.k // 128)
                 or input_scales.device != input.device
-                or not input_scales.is_contiguous()):
-                raise ValueError("prequantized FP8 Linear scales must be contiguous FP32 [M, K/128]")
+                or not input_scales.is_contiguous()
+            ):
+                raise ValueError(
+                    "prequantized FP8 Linear scales must be contiguous FP32 [M, K/128]"
+                )
             input_q, input_scale = input_2d, input_scales
         if input_2d.shape[0] == 0:
             return torch.empty(output_shape, device=input.device, dtype=torch.bfloat16)
@@ -142,7 +151,11 @@ class PpuFp8DeepGemmLinear(LinearBase):
         )
         if block_scaled:
             fp8_block_scaled_matmul(
-                input_q, self.weight, input_scale, self.weight_scales, out=output,
+                input_q,
+                self.weight,
+                input_scale,
+                self.weight_scales,
+                out=output,
             )
         else:
             with configure_deep_gemm_num_sms(self.num_gemm_sms):

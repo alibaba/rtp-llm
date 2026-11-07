@@ -6,7 +6,16 @@ import triton.language as tl
 
 
 @triton.jit
-def _encode_keys(SCORES, STARTS, ENDS, KEYS, N: tl.constexpr, S0: tl.constexpr, S1: tl.constexpr, BLOCK: tl.constexpr):
+def _encode_keys(
+    SCORES,
+    STARTS,
+    ENDS,
+    KEYS,
+    N: tl.constexpr,
+    S0: tl.constexpr,
+    S1: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     start, end = tl.load(STARTS + row), tl.load(ENDS + row)
@@ -22,7 +31,15 @@ def _encode_keys(SCORES, STARTS, ENDS, KEYS, N: tl.constexpr, S0: tl.constexpr, 
 
 
 @triton.jit
-def _finish(INDICES, VALUES, STARTS, OUTPUT, K: tl.constexpr, COUNT: tl.constexpr, BLOCK: tl.constexpr):
+def _finish(
+    INDICES,
+    VALUES,
+    STARTS,
+    OUTPUT,
+    K: tl.constexpr,
+    COUNT: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
     row = tl.program_id(0)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     selected = col < COUNT
@@ -46,9 +63,22 @@ def stable_topk(logits, row_starts, row_ends, output):
         return
     keys = torch.empty((rows, columns), dtype=torch.int64, device=logits.device)
     _encode_keys[(rows, triton.cdiv(columns, 256))](
-        logits, row_starts, row_ends, keys, columns, logits.stride(0), logits.stride(1), 256,
+        logits,
+        row_starts,
+        row_ends,
+        keys,
+        columns,
+        logits.stride(0),
+        logits.stride(1),
+        256,
     )
     values, indices = torch.topk(keys, count, dim=-1, sorted=False)
     _finish[(rows, triton.cdiv(output.shape[1], 256))](
-        indices, values, row_starts, output, output.shape[1], count, 256,
+        indices,
+        values,
+        row_starts,
+        output,
+        output.shape[1],
+        count,
+        256,
     )

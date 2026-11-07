@@ -8,9 +8,9 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.device.device_type import is_ppu
 from rtp_llm.ops import KvCacheDataType, compute_ops
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
-from rtp_llm.device.device_type import is_ppu
 
 
 class MlaKVCacheWriteOp:

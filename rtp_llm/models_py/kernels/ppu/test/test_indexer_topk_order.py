@@ -41,7 +41,9 @@ class IndexerTopkOrderTest(TestCase):
         ks.zero_()
         op._run_prefill_topk(logits, ks, ke, output, 8192)
         reference = output.cpu().clone()
-        self.assertTrue(torch.equal(reference, torch.arange(2048, dtype=torch.int32).repeat(4, 1)))
+        self.assertTrue(
+            torch.equal(reference, torch.arange(2048, dtype=torch.int32).repeat(4, 1))
+        )
         for _ in range(12):
             op._run_prefill_topk(logits, ks, ke, output, 8192)
             self.assertTrue(torch.equal(reference, output.cpu()))
@@ -51,11 +53,20 @@ class IndexerTopkOrderTest(TestCase):
         logits = torch.arange(8192, dtype=torch.float32, device="cuda").repeat(4, 1)
         lengths = torch.full((4,), 8192, dtype=torch.int32, device="cuda")
         params = SimpleNamespace(expanded_seq_lens=lengths, kvlen_d=lengths)
-        inputs = SimpleNamespace(kv_cache_kernel_block_id_device=torch.zeros(4, 128, dtype=torch.int32, device="cuda"))
-        cache = SimpleNamespace(seq_size_per_block=64, kv_cache_base=torch.zeros(1, 64 * 132, dtype=torch.uint8, device="cuda"))
+        inputs = SimpleNamespace(
+            kv_cache_kernel_block_id_device=torch.zeros(
+                4, 128, dtype=torch.int32, device="cuda"
+            )
+        )
+        cache = SimpleNamespace(
+            seq_size_per_block=64,
+            kv_cache_base=torch.zeros(1, 64 * 132, dtype=torch.uint8, device="cuda"),
+        )
         q = torch.zeros(4, 1, 128, device="cuda")
         weights = torch.ones(4, 1, 1, device="cuda")
-        with patch.object(indexer_op, "_fp8_paged_mqa_logits_compat", return_value=logits):
+        with patch.object(
+            indexer_op, "_fp8_paged_mqa_logits_compat", return_value=logits
+        ):
             for _ in range(3):
                 op._get_topk_paged(q, weights, cache, params, inputs)
             torch.cuda.synchronize()
@@ -95,10 +106,16 @@ class IndexerTopkOrderTest(TestCase):
         scores[1] = torch.arange(8192, device="cuda") % 255 - 128
         scores[2].zero_()
         scores[2, ::2] = -0.0
-        scores[3] = torch.arange(8192, dtype=torch.int32).view(torch.float32).to(scores.device)
+        scores[3] = (
+            torch.arange(8192, dtype=torch.int32).view(torch.float32).to(scores.device)
+        )
         starts, ends, output = starts[:4], ends[:4], output[:4]
         op._run_prefill_topk(scores, starts, ends, output, 8192)
-        reference = torch.argsort(scores.cpu(), descending=True, stable=True)[:, :2048].sort(dim=-1).values.int()
+        reference = (
+            torch.argsort(scores.cpu(), descending=True, stable=True)[:, :2048]
+            .sort(dim=-1)
+            .values.int()
+        )
         self.assertTrue(torch.equal(output.cpu(), reference))
 
     def test_short_and_empty_rows_keep_minus_one_padding(self):
@@ -106,7 +123,9 @@ class IndexerTopkOrderTest(TestCase):
         for columns in (0, 17):
             scores = torch.zeros(3, columns, device="cuda")
             starts = torch.zeros(3, dtype=torch.int32, device="cuda")
-            ends = torch.tensor([0, min(1, columns), columns], dtype=torch.int32, device="cuda")
+            ends = torch.tensor(
+                [0, min(1, columns), columns], dtype=torch.int32, device="cuda"
+            )
             output = torch.empty(3, 2048, dtype=torch.int32, device="cuda")
             op._run_prefill_topk(scores, starts, ends, output, columns)
             self.assert_selection(output, [0] * 3, ends.cpu().tolist())

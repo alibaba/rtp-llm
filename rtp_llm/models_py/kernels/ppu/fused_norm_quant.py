@@ -23,18 +23,31 @@ def _sum32_descending(x, ROWS: tl.constexpr):
 
 @triton.jit
 def _rmsnorm_quant(
-    x_ptr, residual_ptr, weight_ptr, out_ptr, q_ptr, scales_ptr,
-    H: tl.constexpr, EPS: tl.constexpr,
-    X_STRIDE: tl.constexpr, R_STRIDE: tl.constexpr,
-    BLOCK: tl.constexpr, ADD_RESIDUAL: tl.constexpr, QUANTIZE: tl.constexpr,
+    x_ptr,
+    residual_ptr,
+    weight_ptr,
+    out_ptr,
+    q_ptr,
+    scales_ptr,
+    H: tl.constexpr,
+    EPS: tl.constexpr,
+    X_STRIDE: tl.constexpr,
+    R_STRIDE: tl.constexpr,
+    BLOCK: tl.constexpr,
+    ADD_RESIDUAL: tl.constexpr,
+    QUANTIZE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     lanes = tl.arange(0, BLOCK // 8)
     vec = tl.arange(0, 8)
     cols_vec = vec[:, None] + lanes[None, :] * 8
-    vectors = tl.load(x_ptr + row * X_STRIDE + cols_vec, cols_vec < H, other=0).to(tl.float32)
+    vectors = tl.load(x_ptr + row * X_STRIDE + cols_vec, cols_vec < H, other=0).to(
+        tl.float32
+    )
     if ADD_RESIDUAL:
-        residual = tl.load(residual_ptr + row * R_STRIDE + cols_vec, cols_vec < H, other=0).to(tl.float32)
+        residual = tl.load(
+            residual_ptr + row * R_STRIDE + cols_vec, cols_vec < H, other=0
+        ).to(tl.float32)
         vectors = vectors + residual
         # The normalization consumes the FP32 sum; only the residual store
         # rounds to BF16, matching fused_add_rmsnorm.
@@ -43,12 +56,17 @@ def _rmsnorm_quant(
     # reduction. Preserve that association instead of reducing x*x directly.
     lane_sum = tl.full((BLOCK // 8,), 0, tl.float32)
     for j in tl.static_range(8):
-        value = tl.gather(vectors, tl.full((1, BLOCK // 8), j, tl.int32), 0).reshape((BLOCK // 8,))
+        value = tl.gather(vectors, tl.full((1, BLOCK // 8), j, tl.int32), 0).reshape(
+            (BLOCK // 8,)
+        )
         lane_sum = tl.fma(value, value, lane_sum)
     warp_sum = _sum32_descending(lane_sum.reshape((BLOCK // 256, 32)), BLOCK // 256)
     warps = tl.arange(0, 32)
-    warp_padded = tl.where(warps < BLOCK // 256,
-                           tl.gather(warp_sum, tl.minimum(warps, BLOCK // 256 - 1), 0), 0)
+    warp_padded = tl.where(
+        warps < BLOCK // 256,
+        tl.gather(warp_sum, tl.minimum(warps, BLOCK // 256 - 1), 0),
+        0,
+    )
     sum_sq = _sum32_descending(warp_padded.reshape((1, 32)), 1).reshape(())
     inv_rms = tl.rsqrt(sum_sq / H + EPS)
     cols = tl.arange(0, BLOCK)
@@ -69,19 +87,27 @@ def _rmsnorm_quant(
         tl.store(scales_ptr + row * (H // 128) + groups, scale, groups < H // 128)
 
 
-def _run(x: torch.Tensor, weight: torch.Tensor, eps: float,
-         residual: Optional[torch.Tensor], quantize: bool):
+def _run(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    residual: Optional[torch.Tensor],
+    quantize: bool,
+):
     if x.ndim != 2:
         raise ValueError("PPU fused RMSNorm expects [M, H]")
     rows, hidden = x.shape
     if hidden <= 0 or weight.shape != (hidden,):
         raise ValueError("PPU fused RMSNorm requires positive H and weight [H]")
-    if residual is not None and (residual.shape != x.shape or residual.dtype != x.dtype):
+    if residual is not None and (
+        residual.shape != x.shape or residual.dtype != x.dtype
+    ):
         raise ValueError("residual must match the input shape and dtype")
     # H=512/2048 pass both exact-output and latency gates. H=6144 retains
     # native normalization: its exact fused reduction is slower on PPU.
     eligible = (
-        x.dtype == weight.dtype == torch.bfloat16 and x.stride(-1) == 1
+        x.dtype == weight.dtype == torch.bfloat16
+        and x.stride(-1) == 1
         and hidden in (512, 2048)
         and (residual is None or residual.stride(-1) == 1)
     )
@@ -101,13 +127,28 @@ def _run(x: torch.Tensor, weight: torch.Tensor, eps: float,
         return out, out, out
     out = torch.empty((rows, hidden), device=x.device, dtype=x.dtype)
     q = torch.empty_like(out, dtype=torch.float8_e4m3fn) if quantize else out
-    scales = torch.empty((rows, hidden // 128), device=x.device, dtype=torch.float32) if quantize else out
+    scales = (
+        torch.empty((rows, hidden // 128), device=x.device, dtype=torch.float32)
+        if quantize
+        else out
+    )
     if rows:
         _rmsnorm_quant[(rows,)](
-            x, residual if residual is not None else x, weight, out, q, scales,
-            hidden, eps, x.stride(0), residual.stride(0) if residual is not None else 0,
-            triton.next_power_of_2(hidden), residual is not None, quantize,
-            num_warps=4 if hidden <= 2048 else 8, enable_fp_fusion=False,
+            x,
+            residual if residual is not None else x,
+            weight,
+            out,
+            q,
+            scales,
+            hidden,
+            eps,
+            x.stride(0),
+            residual.stride(0) if residual is not None else 0,
+            triton.next_power_of_2(hidden),
+            residual is not None,
+            quantize,
+            num_warps=4 if hidden <= 2048 else 8,
+            enable_fp_fusion=False,
         )
     return out, q, scales
 
@@ -117,7 +158,11 @@ def fused_strided_rmsnorm(x, weight, eps=1e-6):
 
 
 def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
-    x, weight, eps=1e-6, group_size=128, scale_ue8m0=False,
+    x,
+    weight,
+    eps=1e-6,
+    group_size=128,
+    scale_ue8m0=False,
 ):
     if group_size != 128 or scale_ue8m0:
         raise ValueError("PPU dense FP8 uses groups of 128 with FP32 scales")
@@ -125,16 +170,27 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
 
 
 def fused_add_rmsnorm_fp8_quant_with_bf16_output(
-    x, residual, weight, eps=1e-6, group_size=128, scale_ue8m0=False,
+    x,
+    residual,
+    weight,
+    eps=1e-6,
+    group_size=128,
+    scale_ue8m0=False,
 ):
     if group_size != 128 or scale_ue8m0:
         raise ValueError("PPU dense FP8 uses groups of 128 with FP32 scales")
     return _run(x, weight, eps, residual, True)
 
 
-def fused_add_rmsnorm_fp8_quant(x, residual, weight, eps=1e-6,
-                              group_size=128, scale_ue8m0=False):
+def fused_add_rmsnorm_fp8_quant(
+    x, residual, weight, eps=1e-6, group_size=128, scale_ue8m0=False
+):
     _, q, scales = fused_add_rmsnorm_fp8_quant_with_bf16_output(
-        x, residual, weight, eps, group_size, scale_ue8m0,
+        x,
+        residual,
+        weight,
+        eps,
+        group_size,
+        scale_ue8m0,
     )
     return q, scales

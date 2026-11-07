@@ -87,8 +87,14 @@ class DeepGemmFp8DispatchTest(unittest.TestCase):
     def test_missing_metadata_and_symbol_preserve_exported_contract(self):
         exported = lambda *args: None
         wheel = types.SimpleNamespace(m_grouped_gemm_fp8_fp8_bf16_nt_nopad=exported)
-        with patch.object(importlib.metadata, "version", side_effect=importlib.metadata.PackageNotFoundError):
-            self.assertIs(deepgemm_wrapper._resolve_fp8_grouped(wheel, "nopad"), exported)
+        with patch.object(
+            importlib.metadata,
+            "version",
+            side_effect=importlib.metadata.PackageNotFoundError,
+        ):
+            self.assertIs(
+                deepgemm_wrapper._resolve_fp8_grouped(wheel, "nopad"), exported
+            )
         self.assertIsNone(deepgemm_wrapper._resolve_fp8_grouped(wheel, "masked"))
 
 

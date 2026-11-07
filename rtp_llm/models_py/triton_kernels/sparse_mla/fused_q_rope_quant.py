@@ -23,7 +23,9 @@ from rtp_llm.device.device_type import is_ppu
 
 @triton.jit
 def _quantize_query(
-    data, SCALE_UE8M0: tl.constexpr, USE_V2_QUANT: tl.constexpr,
+    data,
+    SCALE_UE8M0: tl.constexpr,
+    USE_V2_QUANT: tl.constexpr,
     USE_PPU_QUANT: tl.constexpr,
 ):
     # The unfused Hadamard transform writes BF16 before quantization reads it.

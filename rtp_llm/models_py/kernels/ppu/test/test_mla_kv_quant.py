@@ -9,16 +9,24 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.kernels.ppu.mla_kv_quant import concat_and_cache_mla_fp8
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import MlaKVCacheWriteOp
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
+    MlaKVCacheWriteOp,
+)
 from rtp_llm.ops import KvCacheDataType
 
 
 class MlaKvQuantTest(TestCase):
     @classmethod
     def setUpClass(cls):
-        data = json.loads(Path(__file__).with_name("test_mla_kv_sgl_golden.json").read_text())
-        cls.ckv = torch.tensor(data["input_ckv_u16"], dtype=torch.uint16, device="cuda").view(torch.bfloat16)
-        cls.kpe = torch.tensor(data["input_kpe_u16"], dtype=torch.uint16, device="cuda").view(torch.bfloat16)
+        data = json.loads(
+            Path(__file__).with_name("test_mla_kv_sgl_golden.json").read_text()
+        )
+        cls.ckv = torch.tensor(
+            data["input_ckv_u16"], dtype=torch.uint16, device="cuda"
+        ).view(torch.bfloat16)
+        cls.kpe = torch.tensor(
+            data["input_kpe_u16"], dtype=torch.uint16, device="cuda"
+        ).view(torch.bfloat16)
         cls.golden = torch.tensor(data["expected_u8"], dtype=torch.uint8, device="cuda")
 
     def test_sgl_bytes_scattered_slots_and_noncontiguous_rows(self):
@@ -26,7 +34,9 @@ class MlaKvQuantTest(TestCase):
         kpe = torch.empty(6, 128, device="cuda", dtype=torch.bfloat16)[:, :64]
         ckv.copy_(self.ckv)
         kpe.copy_(self.kpe)
-        slots = torch.tensor([65, 130, -1, 199, 64, 191], device="cuda", dtype=torch.int64)
+        slots = torch.tensor(
+            [65, 130, -1, 199, 64, 191], device="cuda", dtype=torch.int64
+        )
         cache = torch.full((4, 64, 656), 137, device="cuda", dtype=torch.uint8)
         expected = cache.clone()
         for row, slot in enumerate(slots.cpu().tolist()):
@@ -34,7 +44,12 @@ class MlaKvQuantTest(TestCase):
                 expected.view(-1, 656)[slot].copy_(self.golden[row])
         writer = MlaKVCacheWriteOp(KvCacheDataType.FP8)
         self.assertTrue(writer._ppu_fp8)
-        writer.forward(ckv, kpe, SimpleNamespace(kv_cache_base=cache), SimpleNamespace(slot_mapping=slots))
+        writer.forward(
+            ckv,
+            kpe,
+            SimpleNamespace(kv_cache_base=cache),
+            SimpleNamespace(slot_mapping=slots),
+        )
         self.assertTrue(torch.equal(cache, expected))
 
     def test_graph_reads_new_values_and_new_slot_mapping(self):
@@ -44,14 +59,18 @@ class MlaKvQuantTest(TestCase):
         writer = MlaKVCacheWriteOp(KvCacheDataType.FP8)
         kv = SimpleNamespace(kv_cache_base=cache)
         fmha = SimpleNamespace(slot_mapping=slots)
-        for _ in range(3): writer.forward(ckv, kpe, kv, fmha)
+        for _ in range(3):
+            writer.forward(ckv, kpe, kv, fmha)
         torch.cuda.synchronize()
         graph, stream = torch.cuda.CUDAGraph(), torch.cuda.Stream()
-        with torch.cuda.graph(graph, stream=stream): writer.forward(ckv, kpe, kv, fmha)
+        with torch.cuda.graph(graph, stream=stream):
+            writer.forward(ckv, kpe, kv, fmha)
         for multiplier, start in ((2, 128), (4, 192)):
             ckv.copy_(self.ckv * multiplier)
             kpe.copy_(self.kpe * multiplier)
-            slots.copy_(torch.arange(start, start + 6, dtype=torch.int64, device="cuda"))
+            slots.copy_(
+                torch.arange(start, start + 6, dtype=torch.int64, device="cuda")
+            )
             cache.zero_()
             expected = self.golden.clone()
             scales = expected[:, 512:528].contiguous().view(torch.float32) * multiplier
@@ -59,7 +78,9 @@ class MlaKvQuantTest(TestCase):
             expected[:, 528:] = kpe.view(torch.uint8)
             graph.replay()
             torch.cuda.synchronize()
-            self.assertTrue(torch.equal(cache.view(-1, 656)[start:start + 6], expected))
+            self.assertTrue(
+                torch.equal(cache.view(-1, 656)[start : start + 6], expected)
+            )
             self.assertEqual(int(torch.count_nonzero(cache.view(-1, 656)[:start])), 0)
 
     def test_zero_tiles_and_empty_input_remain_finite(self):
@@ -95,8 +116,12 @@ class MlaKvQuantTest(TestCase):
         slots = torch.arange(6, dtype=torch.int64, device="cuda")
         cache = torch.zeros(1, 64, 656, device="cuda", dtype=torch.uint8)
         with patch(module + "compute_ops.concat_and_cache_mla") as native:
-            writer.forward(self.ckv, self.kpe, SimpleNamespace(kv_cache_base=cache),
-                           SimpleNamespace(slot_mapping=slots))
+            writer.forward(
+                self.ckv,
+                self.kpe,
+                SimpleNamespace(kv_cache_base=cache),
+                SimpleNamespace(slot_mapping=slots),
+            )
         native.assert_called_once()
         self.assertEqual(native.call_args.args[4], "fp8_ds_mla")
 
