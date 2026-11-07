@@ -279,7 +279,7 @@ def _worker(rank, port):
         ffn_tp_nccl_port=port + 3,
     )
     init_distributed_environment(
-        parallel, nccl, port, timeout=180, disable_custom_all_reduce=True
+        parallel, nccl, port, timeout=180
     )
     try:
         for op in (PCPAllGatherAttnOp, PCPAllGatherOverlapAttnOp, PCPAll2AllAttnOp):

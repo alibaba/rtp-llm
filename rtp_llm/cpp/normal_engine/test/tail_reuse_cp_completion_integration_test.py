@@ -56,8 +56,8 @@ def _worker(world_rank: int, world_size: int, port: int, results: mp.Queue) -> N
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=tp_group)
         return tensor
 
-    def unexpected_allgather(*_args):
-        raise AssertionError("CP completion fixture unexpectedly issued allgather")
+    def unexpected_communication(*_args):
+        raise AssertionError("CP completion fixture used an unexpected communication path")
 
     def writer_barrier():
         # Called by both C++ model forwards after their local copy check.
@@ -66,8 +66,14 @@ def _worker(world_rank: int, world_size: int, port: int, results: mp.Queue) -> N
         dist.barrier(group=tp_group)
 
     try:
-        extension.init_exec_ctx(world_rank, False, False, 0)
-        extension.register_comm_ops(broadcast, allreduce, unexpected_allgather)
+        extension.init_exec_ctx(world_rank)
+        extension.register_comm_ops(
+            broadcast,
+            allreduce,
+            unexpected_communication,
+            unexpected_communication,
+            unexpected_communication,
+        )
         dist.barrier(group=tp_group)
         result = extension.run_cp_completion(
             tp_rank, world_rank, world_size, writer_barrier
@@ -164,7 +170,7 @@ class TailReuseCpCompletionIntegrationTest(unittest.TestCase):
         )
 
         torch.cuda.set_device(0)
-        extension.init_exec_ctx(0, False, False, 0)
+        extension.init_exec_ctx(0)
         extension.clear_comm_ops()
         with self.assertRaisesRegex(
             RuntimeError,

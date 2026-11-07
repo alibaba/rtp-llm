@@ -80,3 +80,5 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+.omo/
+review.draft.md
