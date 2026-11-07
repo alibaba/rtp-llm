@@ -148,16 +148,6 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types.numel() : 0;
     shape_hints[GptModelInputIndex::kvCacheUpdateCopyNum] =
         inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
-    RTP_LLM_CHECK_WITH_INFO(
-        !inputs.kv_cache_copy_token_lengths.defined()
-            || (inputs.kv_cache_copy_token_lengths.device().is_cpu()
-                && inputs.kv_cache_copy_token_lengths.scalar_type() == torch::kInt32
-                && inputs.kv_cache_copy_token_lengths.dim() == 1 && inputs.kv_cache_copy_token_lengths.is_contiguous()
-                && inputs.kv_cache_update_mapping.defined()
-                && inputs.kv_cache_copy_token_lengths.numel() == inputs.kv_cache_update_mapping.size(0)),
-        "KV copy live lengths must be CPU int32 [copy count]");
-    shape_hints[GptModelInputIndex::kvCacheCopyTokenLengths] =
-        inputs.kv_cache_copy_token_lengths.defined() ? inputs.kv_cache_copy_token_lengths.numel() : 0;
     shape_hints[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
     shape_hints[GptModelInputIndex::comboPositionIds] =
@@ -537,9 +527,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         } else {
             inputs.kv_cache_kernel_block_id = torch::Tensor();
         }
-        const auto live_count = checkedHint(GptModelInputIndex::kvCacheCopyTokenLengths, "kvCacheCopyTokenLengths");
-        inputs.kv_cache_copy_token_lengths =
-            live_count ? allocBuf(rtp_llm::DataType::TYPE_INT32, {live_count}) : torch::Tensor();
         const auto copy_count          = checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum");
         inputs.kv_cache_update_mapping = copy_count ?
                                              allocBuf(rtp_llm::DataType::TYPE_INT32,

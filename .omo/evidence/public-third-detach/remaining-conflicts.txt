@@ -1,2 +1,0 @@
-rtp_llm/config/test/kv_cache_config_pickle_test.py
-rtp_llm/cpp/pybind/ConfigInit.cc

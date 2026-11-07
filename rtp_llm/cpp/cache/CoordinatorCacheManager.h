@@ -130,7 +130,8 @@ public:
     // and ATen graph replay use that stream. Capture runs during model initialization.
     virtual void blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
                                           const std::vector<std::string>& group_tags,
-                                          bool                            require_complete_payload = false);
+                                          bool                            require_complete_payload = false,
+                                          const torch::Tensor&            valid_token_lengths = torch::Tensor());
 
     virtual const std::vector<DeviceBlockPoolPtr>& groupBlockPools() const {
         return group_block_pools_;

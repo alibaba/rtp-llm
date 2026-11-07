@@ -910,6 +910,87 @@ public:
             components.executor->parallelism_config_.dp_size    = 2;
             components.executor->parallelism_config_.world_size = 2;
         }
+        if (enable_tail_reuse) {
+            components.resource_context.cache_manager = components.executor->cache_manager_;
+        }
+
+        auto target_only_stream = createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3}, 0);
+        EXPECT_TRUE(target_only_stream->generateConfig()->isPrefillOnly());
+        EXPECT_TRUE(target_only_stream->generateConfig()->reuse_cache);
+        EXPECT_FALSE(target_only_stream->reuseCache());
+
+        torch::Tensor source_bytes;
+        torch::Tensor destination_bytes;
+        if (enable_tail_reuse) {
+            components.executor->partial_tail_reuse_ = true;
+            target_only_stream->streamCacheResource().setNeedReleaseResource(false);
+            const auto& cache = components.executor->cache_manager_;
+            const auto& tag = cache->cacheConfig().groupTags().front();
+            const int layer = cache->cacheConfig().layerIdsForGroup(tag).front();
+            const auto src = cache->convertIndexToAddr(layer, tag, 1);
+            const auto dst = cache->convertIndexToAddr(layer, tag, 2);
+            const auto bytes = static_cast<int64_t>(cache->cacheConfig().group(tag).kvBlockStrideBytes());
+            auto options = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+            source_bytes = torch::from_blob(src.kv_addr, {bytes}, options);
+            destination_bytes = torch::from_blob(dst.kv_addr, {bytes}, options);
+            source_bytes.fill_(0x5a);
+            destination_bytes.zero_();
+            target_only_stream->streamCacheResource().block_update_mapping_ = {{tag, 1, 2}};
+
+            PrefixCacheRegistration registration;
+            registration.original_input_tokens = 4;
+            registration.prepared = true;
+            PrefixCacheGroupSaveBinding binding;
+            binding.resource.device_blocks = {2};
+            registration.points.push_back({{1, 17, 4}, {binding}});
+            target_only_stream->streamCacheResource().prefix_cache_registration_ = std::move(registration);
+        }
+
+        auto target_input                  = GptModelInputs{};
+        target_input.combo_tokens          = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+        target_input.input_lengths         = torch::tensor({4}, torch::kInt32);
+        target_input.prefix_lengths        = torch::tensor({0}, torch::kInt32);
+        target_input.lm_output_indexes     = torch::tensor({3}, torch::kInt32);
+        target_input.skip_lm_head          = true;
+        target_input.capture_hidden_states = true;
+
+        auto target_output = GptModelOutputs{};
+        target_output.all_hidden_states =
+            torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
+        vector<string> forward_trace;
+        components.fake_target_model->setInputs({target_input});
+        components.fake_target_model->setOutputs({target_output});
+        components.fake_target_model->setForwardTrace(&forward_trace, "target");
+        if (enable_tail_reuse) {
+            components.fake_target_model->setInputObserver([](const GptModelInputs& inputs) {
+                EXPECT_FALSE(inputs.kv_cache_update_mapping.defined());
+            });
+            components.fake_target_model->setForwardObserver([source_bytes, destination_bytes]() {
+                EXPECT_TRUE(destination_bytes.eq(0x5a).all().item<bool>());
+                source_bytes.fill_(0x6b);
+            });
+        }
+        if (existing_stream_error) {
+            components.fake_target_model->setForwardObserver([target_only_stream, &forward_trace]() {
+                target_only_stream->reportError(ErrorCode::INVALID_PARAMS, "existing request error");
+                forward_trace.push_back("target.request_error_reported");
+            });
+        }
+        auto* draft_forward_model =
+            sp_type == SP_TYPE_DSPARK ? components.fake_draft_prefill_model.get() : components.fake_draft_model.get();
+        draft_forward_model->setForwardTrace(&forward_trace, "draft");
+        if (enable_tail_reuse) {
+            draft_forward_model->setInputObserver([](const GptModelInputs& inputs) {
+                EXPECT_FALSE(inputs.kv_cache_update_mapping.defined());
+            });
+            draft_forward_model->setForwardObserver([destination_bytes]() {
+                EXPECT_TRUE(destination_bytes.eq(0x5a).all().item<bool>());
+            });
+        }
+        if (deferred_capture_error.has_value()) {
+            components.fake_target_model->setDeferredHiddenStateCaptureError(*deferred_capture_error);
+        }
         if (dspark_publication_failure) {
             components.fake_target_model->setPublicationResult("injected cache-store failure");
         }
@@ -1262,22 +1343,22 @@ TEST_F(MtpExecutorTest, testTargetOnlyRunsTargetPrefillWithoutDraftOrSampling) {
 
 TEST_F(MtpExecutorTest, testTailReuseTargetOnlyCopiesBeforeForwardAndCompletesRuntimeSave) {
     runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, false,
-                                 false, std::nullopt, SP_TYPE_MTP, false, true);
+                                 std::nullopt, SP_TYPE_MTP, false, true);
 }
 
 TEST_F(MtpExecutorTest, testTailReuseMtpDraftRestoresCpInputWithoutCopyReplay) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, false, true,
-                                 true, std::nullopt, SP_TYPE_MTP, false, true);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, true, true,
+                                 std::nullopt, SP_TYPE_MTP, false, true);
 }
 
 TEST_F(MtpExecutorTest, testTailReuseDSparkCommitDoesNotReplayCopy) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, true,
-                                 false, std::nullopt, SP_TYPE_DSPARK, false, true);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, true, false,
+                                 std::nullopt, SP_TYPE_DSPARK, false, true);
 }
 
 TEST_F(MtpExecutorTest, testTailReuseDSparkPublicationFailureDoesNotCompleteSave) {
-    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, true,
-                                 false, std::nullopt, SP_TYPE_DSPARK, false, true, true);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, true, false,
+                                 std::nullopt, SP_TYPE_DSPARK, false, true, true);
 }
 
 TEST_F(MtpExecutorTest, testTargetOnlyRunsDraftPrefillForFfnAlignmentWithoutSampling) {

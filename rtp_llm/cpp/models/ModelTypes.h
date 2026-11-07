@@ -190,6 +190,21 @@ std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, in
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
+struct MicroBatchInfo {
+    size_t prefill_num;
+    size_t decoder_num;
+};
+
+struct MicroBatchPlan {
+    bool                        enable = false;
+    std::vector<MicroBatchInfo> batch_infos;
+};
+
+struct TokenSliceInfo {
+    size_t offset = 0;
+    size_t count  = 0;
+};
+
 class ModelBase {
 public:
     virtual ~ModelBase()                                                     = default;

@@ -4029,7 +4029,7 @@ TEST_F(FIFOSchedulerTest, prefillTokenLimitsPreserveReserveAndAvoidOverflow) {
     runtime_config.max_generate_batch_size                     = 4;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8;
     FIFOScheduler scheduler(
-        runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+        runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, cache_manager);
     auto prefill    = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 0);
     auto generation = makeStream({1, 2, 3, 4}, model_config, runtime_config, resource_context, 2);
     for (size_t admitted_tokens : {size_t(3), size_t(4), size_t(5)}) {
@@ -4075,7 +4075,7 @@ TEST_F(FIFOSchedulerTest, fullBudgetPrefillOnlyDoesNotMixWithGeneration) {
     for (bool prefill_first : {false, true}) {
         SCOPED_TRACE(prefill_first);
         FIFOScheduler scheduler(
-            runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, ModelSpecificConfig{}, cache_manager);
+            runtime_config, model_config, PDSepConfig{}, ParallelismConfig{}, cache_manager);
         auto prefill    = makeStream(std::vector<int>(8, 1), model_config, runtime_config, resource_context, 0);
         auto generation = makeStream({1, 2}, model_config, runtime_config, resource_context, 2);
         auto first      = prefill_first ? prefill : generation;

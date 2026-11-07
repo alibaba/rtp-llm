@@ -729,7 +729,6 @@ TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsSkipLocalOnlyPlaceholders)
     EXPECT_EQ(computeTierBlockCounts(4 * 4096, {0, 8}, {0, 4096}),
               (std::vector<size_t>{0, 4}));
     // A zero count paired with a non-zero stride is not a valid placeholder.
-    CoreDumpGuard guard;
     EXPECT_ANY_THROW(computeTierBlockCounts(4096, {0, 8}, {4096, 4096}));
 }
 

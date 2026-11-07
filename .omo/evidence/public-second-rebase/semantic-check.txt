@@ -1,1 +1,0 @@
-PASS: static integration assertions: upstream metric fields, optional observation, mutable retry status, post-publication remote effectiveness, one first-key prefill aggregation call, unchanged global request denominator, no obsolete fields or conflict markers.

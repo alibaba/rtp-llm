@@ -1,9 +1,0 @@
-diff a/rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h b/rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h	(rejected hunks)
-@@ -59,6 +59,7 @@ public:
-     size_t   matchedBlocks() const;
-     size_t   matchedBlocks(Tier tier) const;
-     bool     needBackendMatch() const;
-+    PrefixCacheRemoteObservation remoteObservation(size_t reuse_unit_tokens) const;
- 
-     void setValidPrefix(std::function<bool(size_t)> valid_prefix) {
-         valid_prefix_ = std::move(valid_prefix);

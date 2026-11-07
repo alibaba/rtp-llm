@@ -1369,7 +1369,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
         cache_work_guard.markComplete();
     }
-    if (!dspark_cache_store_ok || alignment_only) {
+    if (!dspark_cache_store_ok) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         return absl::OkStatus();

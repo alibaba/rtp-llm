@@ -2815,7 +2815,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ForwardBlockCopyPreservesUnusedTai
         }
     }
     allocator_->blockBatchCopyForForward(
-        torch::tensor({0, 1, 4}, torch::kInt32).reshape({1, 3}), config.groupTags(), torch::tensor({5}, torch::kInt32));
+        torch::tensor({0, 1, 4}, torch::kInt32).reshape({1, 3}), config.groupTags(), false, torch::tensor({5}, torch::kInt32));
     for (const auto& destination : destinations) {
         const auto host = destination.cpu();
         EXPECT_TRUE(host.narrow(1, 0, 5).eq(17).all().item<bool>());
