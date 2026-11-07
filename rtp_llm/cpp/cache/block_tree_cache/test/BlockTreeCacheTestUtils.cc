@@ -635,6 +635,25 @@ int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t n
     return total_evicted;
 }
 
+int BlockTreeCacheTestPeer::reclaimGroupSetBlocksForTest(BlockTreeCache& cache,
+                                                        size_t           group_set_id,
+                                                        size_t           num_blocks,
+                                                        Tier             tier) {
+    std::lock_guard<std::mutex> lock(cache.mutex_);
+    if (!cache.config_.isTierEnabled(tier)) {
+        return 0;
+    }
+
+    int total_evicted = 0;
+    for (size_t attempt = 0; attempt < num_blocks; ++attempt) {
+        if (!cache.evictor_.dropLocked(group_set_id, tier, /*notify_settled=*/true)) {
+            break;
+        }
+        ++total_evicted;
+    }
+    return total_evicted;
+}
+
 BlockTreeCacheTestPeer::ScopedQueueRejectionGuard::ScopedQueueRejectionGuard(BlockTreeCache& cache):
     cache_(&cache), armed_(BlockTreeCacheTestPeer::armQueueRejectionForTest(cache)) {
     if (!armed_) {

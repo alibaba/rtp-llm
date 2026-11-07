@@ -201,6 +201,29 @@ void BlockTreeLoader::collectReuseTimeSnapshots(TreeNode*                       
     evictor_.onMatched(node, group_set_id);
 }
 
+void BlockTreeLoader::refreshPathRecency(const std::vector<TreeNode*>& path,
+                                         size_t                          group_set_id,
+                                         uint64_t                        access_seq,
+                                         int64_t                         access_time_us) {
+    for (TreeNode* node : path) {
+        GroupSetResource& resource = node->group_set_resources[group_set_id];
+        const Tier        tier     = resource.getTopTier();
+        if (tier == Tier::NONE) {
+            continue;
+        }
+        CandidateMeta& meta = resource.candidate_meta;
+        if (meta.last_access_seq == access_seq) {
+            // Already refreshed by the reuse-window pass of this same match.
+            continue;
+        }
+        // Recency-only update: no hit_count increment and no reuse-time metric
+        // snapshot, so window-bounded metric semantics are unchanged.
+        meta.last_access_seq     = access_seq;
+        meta.last_access_time_us = access_time_us;
+        evictor_.onMatched(node, group_set_id);
+    }
+}
+
 BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>&            path,
                                                         const CacheKeysType&               cache_keys,
                                                         const std::function<bool(size_t)>& valid_prefix,
@@ -295,6 +318,17 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         // Outside the normal load window, fallback only pins existing device values.
         append_range(host_prefix - host_reuse_count, std::min(host_prefix, load_begins[group_set_id]));
         append_range(load_begins[group_set_id], path.size());
+    }
+
+    // Recency-only refresh over the whole matched path for every group set.
+    // The per-group loops above only refresh the group's compute reuse window
+    // (for SWA that is the sliding-window tail), so a group's LRU heap would
+    // otherwise rank an active session's early path nodes (insertion-time seq)
+    // below newly inserted garbage and evict them once the tier saturates,
+    // truncating every later match of that session to the window tail.
+    // Reuse-time metrics stay window-bounded; this pass only updates LRU meta.
+    for (const GroupSetPtr& group_set : tree_->groupSets()) {
+        refreshPathRecency(path, group_set->groupSetId(), access_seq, access_time_us);
     }
 
     StorageRequest storage_request;

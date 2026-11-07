@@ -69,6 +69,10 @@ private:
                                                     uint64_t                                             access_seq,
                                                     int64_t                                              access_time_us,
                                                     std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots);
+    void                  refreshPathRecency(const std::vector<TreeNode*>& path,
+                                             size_t                          group_set_id,
+                                             uint64_t                        access_seq,
+                                             int64_t                         access_time_us);
     BlockTreeMatchResult  createMatchResult(std::vector<TreeNode*>&            path,
                                             const CacheKeysType&               cache_keys,
                                             const std::function<bool(size_t)>& valid_prefix,

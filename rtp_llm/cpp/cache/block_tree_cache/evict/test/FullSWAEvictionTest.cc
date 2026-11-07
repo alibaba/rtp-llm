@@ -202,5 +202,50 @@ TEST_F(FullSWAEvictionTest, ForkBothBranchesEvictable) {
     EXPECT_EQ(cache_->getStats().tree_node_count, 0u);
 }
 
+// ---------------------------------------------------------------------------
+// Test: Saturating garbage must not evict a matched active session.
+//
+//   A 16-node active session is inserted first; four 16-node garbage branches
+//   are inserted afterwards (fresh LRU insertion seq, exactly like diverged
+//   branch tails in an append-heavy workload). The active session matches
+//   between insertions, as a live session does on every step.
+//
+//   Eviction from the SWA group heap must pick garbage: the active session's
+//   whole matched path is in LRU terms hotter than any garbage node. Before
+//   the full-path recency refresh, only the sliding-window tail of a match
+//   refreshed SWA recency, so the active session's early nodes kept their
+//   insertion-time seq and were evicted first, truncating every later match
+//   of that session to the window tail (the deployment's warm zero-reuse).
+// ---------------------------------------------------------------------------
+TEST_F(FullSWAEvictionTest, SaturatingGarbageDoesNotEvictMatchedActiveSession) {
+    CacheKeysType active;
+    for (size_t i = 0; i < 16; ++i) {
+        active.push_back(1001 + static_cast<CacheKeyType>(i));
+    }
+    insertPath(active, 10, 20);
+
+    for (size_t g = 0; g < 4; ++g) {
+        CacheKeysType garbage;
+        for (size_t i = 0; i < 16; ++i) {
+            garbage.push_back(2001 + static_cast<CacheKeyType>(g * 1000 + i));
+        }
+        insertPath(garbage, 100 + static_cast<BlockIdxType>(10 * g),
+                   200 + static_cast<BlockIdxType>(10 * g));
+    }
+
+    BlockTreeMatchResult matched = cache_->match(active);
+    EXPECT_EQ(matched.matched_device_blocks, 16u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, matched.matched_device_resources);
+
+    const int evicted =
+        BlockTreeCacheTestPeer::reclaimGroupSetBlocksForTest(*cache_, /*group_set_id=*/1, 16, Tier::DEVICE);
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
+    EXPECT_GT(evicted, 0);
+
+    BlockTreeMatchResult after = cache_->match(active);
+    EXPECT_EQ(after.matched_device_blocks, 16u);
+    block_tree_cache_test::releaseRequestRefsForTest(*cache_, after.matched_device_resources);
+}
+
 }  // namespace
 }  // namespace rtp_llm

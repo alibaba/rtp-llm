@@ -162,6 +162,10 @@ public:
     static bool
     demoteOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier, bool force_drop = false);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
+    static int  reclaimGroupSetBlocksForTest(BlockTreeCache& cache,
+                                             size_t           group_set_id,
+                                             size_t           num_blocks,
+                                             Tier             tier = Tier::DEVICE);
     static void waitForTaskPoolIdleForTest(const BlockTreeCache& cache);
     static void setTransferDrainObserverForTest(BlockTreeCache& cache, std::function<void()> observer);
 
