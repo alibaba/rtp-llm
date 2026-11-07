@@ -19,12 +19,13 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -413,7 +414,9 @@ class CostBasedPrefillSelectionMetricTest {
         status.lock.lock();
         try {
             endpoint.applyPreparedStatus(
-                            status, status.prepareNewStatus(status.freezeStatusResponse(response)))
+                            status,
+                            WorkerStatusTestFixtures.prepare(
+                                    status, WorkerStatusTestFixtures.observation(status, response)))
                     .run();
         } finally {
             status.lock.unlock();

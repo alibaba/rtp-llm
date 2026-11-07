@@ -5,8 +5,9 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -112,7 +113,8 @@ class WorkerBatcherStatusSnapshotTest {
         status.lock.lock();
         try {
             status.publishPreparedStatus(
-                    status.prepareNewStatus(status.freezeStatusResponse(response)));
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, response)));
         } finally {
             status.lock.unlock();
         }

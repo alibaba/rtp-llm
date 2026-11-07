@@ -721,13 +721,15 @@ final class DecodeState {
         return true;
     }
 
-    boolean shouldRetryDispatch(String requestId, AdmissionCapacity capacity) {
+    boolean shouldRetryDispatch(
+            String requestId, AdmissionCapacity capacity, boolean schedulingReady) {
         DecodeRequestState candidate = shadowReservation(requestId);
         if (candidate == null || !candidate.queued() || candidate.dispatchPermit() != null) {
             return true;
         }
         WorkerStatus.CommittedWorkerStatus committed = status.committedWorkerStatus();
-        return !isEngineDispatchCapacityFullSnapshot(candidate, capacity, committed.fields());
+        return schedulingReady
+                && !isEngineDispatchCapacityFullSnapshot(candidate, capacity, committed.fields());
     }
 
     private boolean isEngineDispatchCapacityFullSnapshot(

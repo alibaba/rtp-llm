@@ -401,6 +401,7 @@ class RequestRegistryTest {
         CompletableFuture<Response> encoderFuture = lifecycle.register(context);
         CompletableFuture<Response> generationFuture = lifecycle.register(context(108L));
         WorkerStatus worker = mock(WorkerStatus.class);
+        when(worker.trace()).thenReturn(new org.flexlb.dao.master.EndpointTrace());
         EncoderEndpoint endpoint =
                 new EncoderEndpoint(worker, new EndpointEventProjector(lifecycle));
         Response route = new Response();

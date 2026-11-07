@@ -2,6 +2,9 @@ package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.DiffResult;
+import org.flexlb.cache.primitive.LongKeySet;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.WorkerRegistryConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -34,6 +37,24 @@ public class EngineLocalView {
      */
     private volatile ForkJoinPool customPool;
 
+    private final int diffParallelism;
+
+    public EngineLocalView() {
+        this(new WorkerRegistryConfig.ExecutorsConfig());
+    }
+
+    @Autowired
+    public EngineLocalView(ConfigService configService) {
+        this(configService.loadBalanceConfig().getWorkerRegistry().getExecutors());
+    }
+
+    private EngineLocalView(WorkerRegistryConfig.ExecutorsConfig executors) {
+        diffParallelism =
+                Math.min(
+                        Runtime.getRuntime().availableProcessors(),
+                        executors.getCacheDiffParallelism());
+    }
+
     private volatile boolean closed;
 
     /**
@@ -54,8 +75,7 @@ public class EngineLocalView {
                 throw new IllegalStateException("Engine local view is closed");
             }
             if (customPool == null) {
-                customPool =
-                        new ForkJoinPool(Math.min(Runtime.getRuntime().availableProcessors(), 8));
+                customPool = new ForkJoinPool(diffParallelism);
             }
             return customPool;
         }
@@ -83,44 +103,31 @@ public class EngineLocalView {
 
         Set<Long> oldCacheBlocks = getEngineCacheBlocks(engineIPort);
 
-        // Efficiently calculate differences
-        Set<Long> addedBlocks = ConcurrentHashMap.newKeySet(128);
-        Set<Long> removedBlocks = ConcurrentHashMap.newKeySet(128);
-
-        // Use custom ForkJoin thread pool to parallel compute added and removed cache blocks
         ForkJoinPool pool = diffPool();
-        ForkJoinTask<?> addedTask = null;
+        ForkJoinTask<LongKeySet> addedTask = null;
+        ForkJoinTask<LongKeySet> removedTask = null;
+        Set<Long> addedBlocks;
+        Set<Long> removedBlocks;
         try {
-            addedTask =
-                    pool.submit(
-                            () ->
-                                    newCacheBlocks.parallelStream()
-                                            .filter(
-                                                    blockCacheKey ->
-                                                            !oldCacheBlocks.contains(blockCacheKey))
-                                            .forEach(addedBlocks::add));
-
-            ForkJoinTask<?> removedTask =
-                    pool.submit(
-                            () ->
-                                    oldCacheBlocks.parallelStream()
-                                            .filter(
-                                                    blockCacheKey ->
-                                                            !newCacheBlocks.contains(blockCacheKey))
-                                            .forEach(removedBlocks::add));
-
-            addedTask.join();
-            removedTask.join();
+            addedTask = pool.submit(() -> LongKeySet.difference(newCacheBlocks, oldCacheBlocks));
+            removedTask = pool.submit(() -> LongKeySet.difference(oldCacheBlocks, newCacheBlocks));
+            addedBlocks = addedTask.join();
+            removedBlocks = removedTask.join();
         } catch (RejectedExecutionException error) {
+            addedBlocks =
+                    addedTask == null
+                            ? LongKeySet.difference(newCacheBlocks, oldCacheBlocks)
+                            : addedTask.join();
+            removedBlocks = LongKeySet.difference(oldCacheBlocks, newCacheBlocks);
+        } finally {
+            // Both tasks borrow the mutable local view under the caller's cache lock.
+            // Even if one task fails, the other must finish before that lock is released.
             if (addedTask != null) {
-                addedTask.join();
+                addedTask.quietlyJoin();
             }
-            newCacheBlocks.stream()
-                    .filter(blockCacheKey -> !oldCacheBlocks.contains(blockCacheKey))
-                    .forEach(addedBlocks::add);
-            oldCacheBlocks.stream()
-                    .filter(blockCacheKey -> !newCacheBlocks.contains(blockCacheKey))
-                    .forEach(removedBlocks::add);
+            if (removedTask != null) {
+                removedTask.quietlyJoin();
+            }
         }
 
         // Update statistics in dynamic sync interval manager
@@ -149,8 +156,7 @@ public class EngineLocalView {
                     blockCacheKey);
             return;
         }
-        Set<Long> engineCache =
-                engineViews.computeIfAbsent(engineIPort, k -> ConcurrentHashMap.newKeySet());
+        Set<Long> engineCache = engineViews.computeIfAbsent(engineIPort, k -> new LongKeySet());
 
         engineCache.add(blockCacheKey);
     }
@@ -183,7 +189,7 @@ public class EngineLocalView {
     }
 
     /**
-     * Remove all cache blocks of an engine
+     * Detach all cache blocks of an engine
      *
      * @param engineIPort Engine IP
      */
@@ -192,6 +198,8 @@ public class EngineLocalView {
             return;
         }
 
+        // Production retirement removes this view only after global cleanup
+        // succeeds, while holding this generation's cacheMutationLock.
         Set<Long> removed = engineViews.remove(engineIPort);
         // Warn if removal fails
         if (removed == null) {
@@ -203,6 +211,10 @@ public class EngineLocalView {
      * Get all cache block IDs of an engine
      *
      * @param engineIPort Engine IP
+     * <p>Returns a borrowed mutable set, not a snapshot. Callers iterating it
+     * must hold the owning generation's cacheMutationLock for the entire use.
+     * The global index lock does not protect writes to this local view.
+     *
      * @return Cache block ID set
      */
     public Set<Long> getEngineCacheBlocks(String engineIPort) {
