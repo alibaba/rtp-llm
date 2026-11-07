@@ -55,9 +55,12 @@ public:
                         && !entry.stream->hasPendingAsyncBookkeeping()) {
                         ready_to_dequeue.emplace_back(id, entry.stream);
                     }
-                    auto task_info  = entry.task_info;
-                    task_info.phase = derivePhase(entry.stream);
-                    auto overlay    = priority_preemption_overlays_.find(id);
+                    auto task_info = entry.task_info;
+                    // Cache lookup completes after enqueue. Report the matched
+                    // prefix, not the execution cursor advanced by later work.
+                    task_info.prefix_length = entry.stream->initialReuseLength();
+                    task_info.phase         = derivePhase(entry.stream);
+                    auto overlay            = priority_preemption_overlays_.find(id);
                     if (overlay != priority_preemption_overlays_.end()) {
                         task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
                         emitted_preemption_overlays.insert(id);
@@ -104,7 +107,7 @@ public:
         const auto stream_batch_id = stream->generateInput()->group_id;
         const auto batch_id        = resolveBatchId(identity, stream_batch_id);
         auto       new_task        = makeTaskInfo(TaskIdentity{identity.request_id, batch_id},
-                                     stream->prefixLength(),
+                                     stream->initialReuseLength(),
                                      stream->inputLength(),
                                      time_info.wait_time_us / 1000);
 
@@ -127,7 +130,8 @@ public:
                                       /*waiting_time_ms=*/0);
         auto running   = running_streams_.find(request_id);
         if (running != running_streams_.end()) {
-            task_info = running->second.task_info;
+            task_info               = running->second.task_info;
+            task_info.prefix_length = running->second.stream->initialReuseLength();
         } else {
             for (auto it = finished_streams_.rbegin(); it != finished_streams_.rend(); ++it) {
                 if (it->second.request_id == request_id) {
@@ -223,7 +227,8 @@ public:
                                                /*end_time_ms=*/-1};
         auto                                ptr = running_streams_.find(request_id);
         if (ptr != running_streams_.end()) {
-            task_info = ptr->second.task_info;
+            task_info               = ptr->second.task_info;
+            task_info.prefix_length = ptr->second.stream->initialReuseLength();
             if (input_length > 0) {
                 task_info.input_length = input_length;
             }
@@ -274,7 +279,7 @@ protected:
         snapshot.end_time_ms     = autil::TimeUtility::currentTimeInMilliSeconds();
         snapshot.begin_time_us   = time_info.begin_time_us;
         snapshot.waiting_time_ms = time_info.wait_time_us / 1000;
-        snapshot.prefix_length   = stream->prefixLength();
+        snapshot.prefix_length   = stream->initialReuseLength();
         snapshot.input_length    = stream->inputLength();
         snapshot.iterate_count   = stream->iterCount();
         snapshot.status          = stream->statusInfo();

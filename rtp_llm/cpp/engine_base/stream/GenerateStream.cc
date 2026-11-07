@@ -484,7 +484,7 @@ int GenerateStream::reuseLength() const {
 }
 
 int GenerateStream::initialReuseLength() const {
-    return initial_reuse_length_;
+    return initial_reuse_length_.tokens.load(std::memory_order_relaxed);
 }
 
 void GenerateStream::setReuseLength(int reuse_length) {
@@ -539,7 +539,7 @@ void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     // connector reuse lengths are accounted in canonical block tokens
     // (seq_size_per_block * cp_size), which can legitimately exceed the
     // rank-local sequence length.
-    initial_reuse_length_ = initial_reuse_length;
+    initial_reuse_length_.tokens.store(initial_reuse_length, std::memory_order_relaxed);
 }
 
 void GenerateStream::setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory) {
@@ -1430,10 +1430,10 @@ void GenerateStream::reportStreamMetrics() {
         collector.not_streaming_qps          = !generate_input_->generate_config->is_streaming;
         collector.kv_cache_malloc_failed_qps = malloc_terminal_failed;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length       = initial_reuse_length_;
+            collector.reuse_length       = initialReuseLength();
             collector.input_token_length = inputLength();
             collector.effective_context_length =
-                std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
+                std::max<int64_t>(0, collector.input_token_length - collector.reuse_length);
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = maxBatchSize();
