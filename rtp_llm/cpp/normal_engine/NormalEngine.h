@@ -74,7 +74,7 @@ private:
     size_t                          getWarmUpInputLength() const;
     static size_t                   reserveStepForStream(size_t configured_reserve_step, bool is_prefill_only);
     static size_t warmUpReservedBlockCount(size_t seq_len, size_t reserve_tokens, size_t tokens_per_block);
-    static bool   shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool enable_ffn_disaggregate);
+    static bool   shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size);
     static bool   shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
     void          mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
 
@@ -97,8 +97,7 @@ private:
     ProfilingDebugLoggingConfig                   profiling_debug_logging_config;
     KVCacheConfig                                 kv_cache_config;
     CacheStoreConfig                              cache_store_config;
-    FfnDisAggregateConfig                         ffn_disaggregate_config;
-    ModelSpecificConfig                           model_specific_config;
+
     SpeculativeExecutionConfig                    sp_config;
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;

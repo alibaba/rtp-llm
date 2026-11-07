@@ -9,30 +9,6 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         "Profiling、Debugging、Logging"
     )
     profile_debug_logging_group.add_argument(
-        "--trace_memory",
-        env_name="RTP_LLM_TRACE_MEMORY",
-        bind_to=(profiling_debug_config, "trace_memory"),
-        type=str2bool,
-        default=False,
-        help="控制是否在BufferManager中启用内存追踪功能。可选值: True (启用), False (禁用)。默认为 False",
-    )
-    profile_debug_logging_group.add_argument(
-        "--enable_device_perf",
-        env_name="ENABLE_DEVICE_PERF",
-        bind_to=(profiling_debug_config, "enable_device_perf"),
-        type=str2bool,
-        default=False,
-        help="控制是否启用设备性能指标的收集和报告。可选值: True (启用), False (禁用)。",
-    )
-    profile_debug_logging_group.add_argument(
-        "--ft_core_dump_on_exception",
-        env_name="FT_CORE_DUMP_ON_EXCEPTION",
-        bind_to=(profiling_debug_config, "ft_core_dump_on_exception"),
-        type=str2bool,
-        default=False,
-        help="控制在发生特定异常或断言失败时是否强制执行core dump (程序中止并生成核心转储文件)。可选值: True (启用), False (禁用)。",
-    )
-    profile_debug_logging_group.add_argument(
         "--ft_alog_conf_path",
         env_name="FT_ALOG_CONF_PATH",
         bind_to=(profiling_debug_config, "ft_alog_conf_path"),

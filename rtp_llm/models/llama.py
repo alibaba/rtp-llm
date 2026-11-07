@@ -6,17 +6,16 @@ from typing import Any, Dict, List, Optional
 
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.model_factory_register import register_model
+from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.llama_weight import GemmaWeightInfo, LlamaWeightInfo
 from rtp_llm.ops import (
-    ParallelismConfig,
-    ModelSpecificConfig,
+    FMHAConfig,
     HWKernelConfig,
     KVCacheConfig,
-    FMHAConfig,
     MoeConfig,
-    RuntimeConfig,
-    DeviceResourceConfig,
+    ParallelismConfig,
+    VitConfig,
 )
 
 
@@ -170,15 +169,17 @@ class Gemma(Llama):
         self,
         model_config: PyModelConfig,
         parallelism_config: ParallelismConfig,
-        model_specific_config: ModelSpecificConfig,
         hw_kernel_config: HWKernelConfig,
         kv_cache_config: KVCacheConfig,
         fmha_config: FMHAConfig,
         moe_config: MoeConfig,
-        runtime_config: RuntimeConfig,
-        device_resource_config: DeviceResourceConfig,
-        vit_config: Optional[Any] = None,
-        merge_lora: bool = False,
+        max_generate_batch_size: int,
+        load_method: LoadMethod,
+        vit_config: Optional[VitConfig],
+        merge_lora: bool,
+        force_cpu_load_weights: bool = False,
+        loader_recycle_handles: bool = False,
+        moe_pure_tp_preshard: bool = False,
     ):
         if fmha_config.enable_open_source_fmha:
             logging.warn(
@@ -188,15 +189,17 @@ class Gemma(Llama):
         super().__init__(
             model_config=model_config,
             parallelism_config=parallelism_config,
-            model_specific_config=model_specific_config,
             hw_kernel_config=hw_kernel_config,
             kv_cache_config=kv_cache_config,
             fmha_config=fmha_config,
             moe_config=moe_config,
-            runtime_config=runtime_config,
-            device_resource_config=device_resource_config,
+            max_generate_batch_size=max_generate_batch_size,
+            load_method=load_method,
             vit_config=vit_config,
             merge_lora=merge_lora,
+            force_cpu_load_weights=force_cpu_load_weights,
+            loader_recycle_handles=loader_recycle_handles,
+            moe_pure_tp_preshard=moe_pure_tp_preshard,
         )
 
     @staticmethod

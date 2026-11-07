@@ -2,8 +2,10 @@
 
 namespace rtp_llm {
 
-bool getEnvEnablePDL();
-
+// Programmatic Dependent Launch is unconditionally enabled on SM>=90:
+// the retired disable_pdl switch was never set to enable PDL anywhere,
+// and the launched kernels carry griddepcontrol.wait/launch_dependents.
+// Pre-Hopper devices keep the plain launch.
 #if USING_CUDA
 #define LAUNCH_KERNEL_WITH_PDL(kernel, grid_dim, block_dim, smem_size, stream, ...)                                     \
     do {                                                                                                                \
@@ -16,7 +18,7 @@ bool getEnvEnablePDL();
             config__.stream           = (stream);                                                                       \
             cudaLaunchAttribute attrs__[1];                                                                             \
             attrs__[0].id                                         = cudaLaunchAttributeProgrammaticStreamSerialization; \
-            attrs__[0].val.programmaticStreamSerializationAllowed = rtp_llm::getEnvEnablePDL();                         \
+            attrs__[0].val.programmaticStreamSerializationAllowed = 1;                                                  \
             config__.numAttrs                                     = 1;                                                  \
             config__.attrs                                        = attrs__;                                            \
             cudaLaunchKernelEx(&config__, &(kernel), __VA_ARGS__);                                                      \

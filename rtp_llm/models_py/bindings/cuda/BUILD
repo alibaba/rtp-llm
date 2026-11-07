@@ -19,7 +19,6 @@ cc_library(
     implementation_deps = [
         "//rtp_llm/cpp/utils:stack_trace",
         "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/config:static_config",
         "@local_config_cuda//cuda:cublas_headers",
         "@local_config_cuda//cuda:cuda_driver",
         "@local_config_cuda//cuda:nvml",
@@ -47,16 +46,8 @@ cc_library(
 
 cc_library(
     name = "launch_utils",
-    srcs = [
-        "launch_utils.cc",
-    ],
     hdrs = [
         "launch_utils.h",
-    ],
-    implementation_deps = [
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/cpp/config:static_config",
-        "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),
     alwayslink = 1,
@@ -147,7 +138,6 @@ cc_library(
         "SplitKvCacheCopy.cc",
         "NoBlockCopy.cc",
         "cuda_host_utils.cc",
-        "launch_utils.cc",
     ]),
     hdrs = glob([
         "*.h",

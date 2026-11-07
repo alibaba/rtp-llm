@@ -28,11 +28,6 @@ static auto init_engine_func = torch::RegisterOperators("rtp_llm::init_engine", 
 
 }  // namespace rtp_llm
 
-static torch::Tensor
-rtp_llm_preprocess_gemm_weight_by_key(const std::string& key, torch::Tensor weight, bool use_arm_gemm_use_kai) {
-    return rtp_llm::preprocessGemmWeightByKey(key, weight, use_arm_gemm_use_kai);
-}
-
 static torch::Tensor rtp_llm_preprocess_weight_scale(torch::Tensor weight, torch::Tensor scale) {
     return rtp_llm::preprocessWeightScale(weight, scale);
 }
@@ -45,8 +40,6 @@ static void rtp_llm_sync_and_check() {
     rtp_llm::runtimeSyncAndCheck();
 }
 
-static auto reg_preprocess_gemm_weight =
-    torch::RegisterOperators("rtp_llm::preprocess_gemm_weight_by_key", &rtp_llm_preprocess_gemm_weight_by_key);
 static auto reg_preprocess_weight_scale =
     torch::RegisterOperators("rtp_llm::preprocess_weight_scale", &rtp_llm_preprocess_weight_scale);
 static auto reg_mask_logits    = torch::RegisterOperators("rtp_llm::mask_logits", &rtp_llm_mask_logits);

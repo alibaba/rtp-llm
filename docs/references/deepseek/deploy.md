@@ -41,8 +41,6 @@ ENABLE_MERGE_W13=1 \
 --sp_checkpoint_path XXXXXXX \
 --sp_act_type bf16 \
 --sp_type mtp \
---sp_min_token_match 2 \
---sp_max_token_match 2 \
 --max_seq_len 32768 \
 --max_batch_size 1024 \
 --concurrency_limit 1024 \
@@ -58,7 +56,6 @@ ENABLE_MERGE_W13=1 \
 --use_deepep_internode 1 \
 --use_deepep_low_latency 0 \
 --use_deepep_moe 1 \
---enable_layer_micro_batch 1 \
 --seq_size_per_block 64 \
 --log_level INFO \
 --reserver_runtime_mem_mb 76800 \
@@ -99,8 +96,6 @@ REDUNDANT_EXPERT=32 \
 --sp_checkpoint_path XXXXXXX \
 --sp_act_type bf16 \
 --sp_type mtp \
---sp_min_token_match 2 \
---sp_max_token_match 2 \
 --max_seq_len 32768 \
 --max_batch_size 1024 \
 --concurrency_limit 1024 \
@@ -121,7 +116,6 @@ REDUNDANT_EXPERT=32 \
 --eplb_mode EPLB \
 --eplb_force_repack 1 \
 --redundant_expert 32 \
---enable_layer_micro_batch 2 \
 --seq_size_per_block 64 \
 --log_level INFO \
 --reserver_runtime_mem_mb 6144 \

@@ -13,7 +13,6 @@ This page lists server arguments used to configure the behavior and performance 
 | `--world-size` | Total number of GPUs used in distributed setup (WORLD_SIZE = TP_SIZE * DP_SIZE). | None |
 | `--world-rank` | Global unique ID of the current process/GPU in the distributed system. | None |
 | `--local-world-size` | Number of GPU devices used on the current node. | None |
-| `--enable_ffn_disaggregate` | Enables FFN disaggregation feature to separate attention and feed-forward network computations for performance optimization. | None |
 
 ## Concurrency Control
 
@@ -172,7 +171,6 @@ The following legacy options and environment variables were removed and must no 
 | `--load-balance` | Enables dynamic load balancing | False |
 | `--step-records-time-range` | Performance record retention time window (microseconds) | 60000000 |
 | `--step-records-max-size` | Maximum performance record count | 1000 |
-| `--disable-pdl` | Disables PDL feature | False |
 
 ## 3FS Configuration
 

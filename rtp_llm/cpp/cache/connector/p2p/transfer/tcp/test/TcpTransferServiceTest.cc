@@ -112,10 +112,7 @@ static KeyBlockInfoMap makeTwoSubBlocks(int64_t cache_key, void* addr0, size_t s
 class TcpTransferServiceTest: public ::testing::Test {
 public:
     static void SetUpTestSuite() {
-        initRuntime(/*device_id=*/0,
-                    /*trace_memory=*/false,
-                    /*enable_comm_overlap=*/false,
-                    MlaOpsType::AUTO);
+        initRuntime(/*device_id=*/0);
         device_initialized_ = isRuntimeInitialized();
     }
 

@@ -8,8 +8,6 @@ compute RMSNorm.
 
 from __future__ import annotations
 
-import os
-
 import torch
 import triton
 import triton.language as tl
@@ -127,11 +125,7 @@ def rope_only_inplace(
 
     block_half = triton.next_power_of_2(RD // 2)
     selected_group_heads = (
-        group_heads
-        if group_heads is not None
-        else int(
-            os.environ.get("DSV4_ROPE_ONLY_GROUP_HEADS", str(_DEFAULT_GROUP_HEADS))
-        )
+        group_heads if group_heads is not None else _DEFAULT_GROUP_HEADS
     )
     can_group_heads = (
         selected_group_heads in (2, 4, 8)

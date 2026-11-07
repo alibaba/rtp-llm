@@ -9,7 +9,6 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
 )
 from typing import Any, Dict, Optional, Tuple
 import torch
-from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
@@ -30,6 +29,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     group_tags as _kv_cache_group_tags,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+
 
 def build_metadata_eager(
     v4_args: Any,
@@ -103,7 +103,9 @@ def build_metadata_eager(
             paged_entries_per_block[tag] = int(paged_pool_specs[tag][0])
 
     if fp8_kv_cache:
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.decode_attn_metadata import build_decode_metadata_fp8
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.decode_attn_metadata import (
+            build_decode_metadata_fp8,
+        )
 
         return build_decode_metadata_fp8(
             attention_inputs=attn,
@@ -146,6 +148,7 @@ def build_metadata_eager(
         paged_block_tables=paged_block_tables or None,
         paged_pool_entries_per_block=paged_entries_per_block or None,
     )
+
 
 def forward_layers(
     v4: Any,
@@ -238,6 +241,7 @@ def forward_layers(
         )
         v4._dbg_step = step + 1
     return h
+
 
 def forward_decode(
     v4: Any,
@@ -339,15 +343,6 @@ def forward_decode(
         prepare_hidden_fn=prepare_hidden_fn,
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
-    if _fwd_dbg.enabled():
-        _fwd_dbg.print_decode(
-            hidden=hidden,
-            input_ids_2d=input_ids.view(B, q_len),
-            attn_inputs=attn,
-            meta=meta,
-            head_weight=getattr(v4, "head_weight", None),
-            step=int(getattr(v4, "_dbg_step", 0)),
-        )
     if _rt_on:
         _rt.record("decode_hidden", hidden)
         lm_logits = torch.mm(

@@ -3,7 +3,7 @@ from rtp_llm.server.server_args.util import str2_cp_rotate_method, str2bool
 
 
 def init_parallel_group_args(
-    parser, parallelism_config, ffn_disaggregate_config, prefill_cp_config
+    parser, parallelism_config, prefill_cp_config
 ):
     ##############################################################################################################
     # Parallelism and Distributed Setup Configuration
@@ -59,22 +59,6 @@ def init_parallel_group_args(
         type=int,
         default=1,
         help="在多节点分布式设置中，当前节点（Node）上使用的GPU设备数量。未设置时默认 1，多进程时由配置阶段按 min(cuda 数, world_size) 推导。",
-    )
-    parallel_group.add_argument(
-        "--ffn_sp_size",
-        env_name="FFN_SP_SIZE",
-        bind_to=(parallelism_config, "ffn_sp_size"),
-        type=int,
-        default=1,
-        help="FFN层序列并行大小。",
-    )
-    parallel_group.add_argument(
-        "--enable_ffn_disaggregate",
-        env_name="ENABLE_FFN_DISAGGREGATE",
-        bind_to=(ffn_disaggregate_config, "enable_ffn_disaggregate"),
-        type=str2bool,
-        default=False,
-        help="启用AF分离功能。",
     )
     parallel_group.add_argument(
         "--cp_rotate_method",

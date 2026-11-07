@@ -7,7 +7,6 @@
 #include <cstdio>
 #include <future>
 #include <mutex>
-#include <sys/resource.h>
 #include <thread>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
@@ -20,7 +19,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
@@ -559,38 +557,6 @@ INSTANTIATE_TEST_SUITE_P(NonOkWorkerStatuses,
                                            grpc::StatusCode::INTERNAL,
                                            grpc::StatusCode::UNAVAILABLE,
                                            grpc::StatusCode::RESOURCE_EXHAUSTED));
-
-static void disableCoreDump() {
-    rlimit no_core;
-    no_core.rlim_cur = 0;
-    no_core.rlim_max = 0;
-    setrlimit(RLIMIT_CORE, &no_core);
-}
-
-static void broadcastWithNonOkWorkerStatus() {
-    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
-        {true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::UNAVAILABLE, "worker gone")},
-    };
-    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
-    ASSERT_NE(broadcast_manager, nullptr);
-    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
-
-    disableCoreDump();
-    StaticConfig::user_ft_core_dump_on_exception = true;
-    std::fprintf(stderr, "broadcast setup complete; exercising worker failure\n");
-    (void)executeAndWait(
-        *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500);
-}
-
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferAbortsWithSigabrtWhenCoreDumpEnabled) {
-    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
-    // Require successful setup before accepting the expected worker-failure abort.
-    EXPECT_EXIT(broadcastWithNonOkWorkerStatus(),
-                ::testing::KilledBySignal(SIGABRT),
-                "broadcast setup complete; exercising worker failure");
-}
 
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource) {
     if (!cudaAvailable()) {
@@ -1369,12 +1335,9 @@ TEST_F(MultiRankBlockTransferEngineTest, StandaloneOrdinaryRpcFailureReportsUnkn
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto                                                          manager = makeBroadcastManager({config}, servers);
     ASSERT_NE(manager, nullptr);
-    const bool previous_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), manager);
     auto context = engine.execute(TransferTask({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(5)));
     context->waitDone();
-    StaticConfig::user_ft_core_dump_on_exception = previous_dump;
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 1u);
@@ -1396,8 +1359,6 @@ static void mixedBroadcastLosesCompletion(bool through_dispatcher) {
     auto                                                          manager = makeBroadcastManager({config}, servers);
     ASSERT_NE(manager, nullptr);
     auto engine = std::make_shared<MultiRankBlockTransferEngine>(makeMixedIntegrityBroadcastGroups(), manager);
-    disableCoreDump();
-    StaticConfig::user_ft_core_dump_on_exception = false;
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::hostToDevice(1, 3, {4})},
                       std::chrono::seconds(5));
     if (through_dispatcher) {
@@ -1414,26 +1375,23 @@ static void mixedBroadcastLosesCompletion(bool through_dispatcher) {
     }
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, MixedBatchReportsRpcFailureWithCoreDumpDisabled) {
+TEST_F(MultiRankBlockTransferEngineTest, MixedBatchReportsRpcFailure) {
     mixedBroadcastLosesCompletion(false);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, DispatcherReportsMixedRpcFailureWithCoreDumpDisabled) {
+TEST_F(MultiRankBlockTransferEngineTest, DispatcherReportsMixedRpcFailure) {
     mixedBroadcastLosesCompletion(true);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, CrcBusinessFailureFallsBackWithCoreDumpEnabled) {
+TEST_F(MultiRankBlockTransferEngineTest, CrcBusinessFailureFallsBack) {
     MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::CRC_MISMATCH, grpc::Status::OK};
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto                                                          manager = makeBroadcastManager({config}, servers);
     ASSERT_NE(manager, nullptr);
     MultiRankBlockTransferEngine          engine(makeMixedIntegrityBroadcastGroups(), manager);
     const std::vector<TransferDescriptor> descriptors{TransferDescriptor::hostToDevice(1, 1, {1})};
-    const bool                            previous = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception   = true;
     auto context                                   = engine.execute(TransferTask(descriptors, std::chrono::seconds(5)));
     context->waitDone();
-    StaticConfig::user_ft_core_dump_on_exception = previous;
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::CRC_MISMATCH);
@@ -1490,8 +1448,6 @@ static void protectedBroadcastLosesCompletion() {
     auto                                                          manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
     MultiRankBlockTransferEngine engine(makeMixedIntegrityBroadcastGroups(), manager);
-    disableCoreDump();
-    StaticConfig::user_ft_core_dump_on_exception = false;
     std::fprintf(stderr, "protected broadcast setup complete; losing completion\n");
     auto context =
         engine.execute(TransferTask({TransferDescriptor::hostToDevice(1, 1, {1})}, std::chrono::milliseconds(5000)));
@@ -1500,7 +1456,7 @@ static void protectedBroadcastLosesCompletion() {
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, ProtectedTransferReportsUnknownCompletionWithCoreDumpDisabled) {
+TEST_F(MultiRankBlockTransferEngineTest, ProtectedTransferReportsUnknownCompletion) {
     protectedBroadcastLosesCompletion();
 }
 

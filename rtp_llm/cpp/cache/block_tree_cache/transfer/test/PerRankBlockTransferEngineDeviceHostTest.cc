@@ -21,7 +21,6 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
@@ -411,18 +410,11 @@ protected:
     GroupSetPtr                                 group_set_;
 };
 
-// Restore the process-wide assertion policy even if a test assertion fails.
 class CopyBoundsTest: public PerRankBlockTransferEngineTest {
 protected:
     void SetUp() override {
-        previous_                                    = StaticConfig::user_ft_core_dump_on_exception;
-        StaticConfig::user_ft_core_dump_on_exception = false;
         PerRankBlockTransferEngineTest::SetUp();
     }
-    void TearDown() override {
-        StaticConfig::user_ft_core_dump_on_exception = previous_;
-    }
-    bool previous_;
 };
 
 TEST_F(CopyBoundsTest, RejectsInvalidBatchDimensionsAndHostCapacity) {

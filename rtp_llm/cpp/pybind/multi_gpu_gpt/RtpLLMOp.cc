@@ -84,15 +84,12 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                           base_params.kv_cache_config,
                                                                           base_params.profiling_debug_logging_config,
                                                                           base_params.hw_kernel_config,
-                                                                          base_params.device_resource_config,
                                                                           base_params.moe_config,
-                                                                          base_params.model_specific_config,
                                                                           base_params.sp_config,
                                                                           base_params.cache_store_config,
                                                                           base_params.misc_config,
                                                                           base_params.arpc_config,
                                                                           base_params.grpc_config,
-                                                                          base_params.ffn_disaggregate_config,
                                                                           base_params.vit_config,
                                                                           std::move(*gpt_weight),
                                                                           py::none(),
@@ -132,16 +129,13 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.kv_cache_config,
                                                                            base_params.profiling_debug_logging_config,
                                                                            base_params.hw_kernel_config,
-                                                                           base_params.device_resource_config,
                                                                            base_params.moe_config,
-                                                                           base_params.model_specific_config,
                                                                            base_params.sp_config,
                                                                            base_params.cache_store_config,
                                                                            base_params.misc_config,
                                                                            base_params.arpc_config,
                                                                            base_params.grpc_config,
-                                                                           base_params.ffn_disaggregate_config,
-                                                                           base_params.vit_config,
+                                                                            base_params.vit_config,
                                                                            std::move(*gpt_weight),
                                                                            py::none(),
                                                                            py_eplb)));
@@ -245,9 +239,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto profiling_debug_logging_config =
             engine_config.attr("profiling_debug_logging_config").cast<ProfilingDebugLoggingConfig>();
         auto hw_kernel_config       = engine_config.attr("hw_kernel_config").cast<HWKernelConfig>();
-        auto device_resource_config = engine_config.attr("device_resource_config").cast<DeviceResourceConfig>();
         auto moe_config             = engine_config.attr("moe_config").cast<MoeConfig>();
-        auto model_specific_config  = engine_config.attr("model_specific_config").cast<ModelSpecificConfig>();
         auto sp_config              = engine_config.attr("sp_config").cast<SpeculativeExecutionConfig>();
         auto cache_store_config     = engine_config.attr("cache_store_config").cast<CacheStoreConfig>();
         auto misc_config            = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
@@ -284,15 +276,12 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 kv_cache_config,
                                 profiling_debug_logging_config,
                                 hw_kernel_config,
-                                device_resource_config,
                                 moe_config,
-                                model_specific_config,
                                 sp_config,
                                 cache_store_config,
                                 misc_config,
                                 arpc_config,
                                 grpc_config,
-                                parallelism_config.ffn_disaggregate_config,
                                 vit_config_cpp,
                                 std::move(*gpt_weight),
                                 py_model,

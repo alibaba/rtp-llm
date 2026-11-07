@@ -31,7 +31,9 @@ _KERNEL_PATH = os.path.join(
     "..",
     "_fused_rmsnorm_rope_triton.py",
 )
-_SPEC = importlib.util.spec_from_file_location("_fused_rmsnorm_rope_triton", _KERNEL_PATH)
+_SPEC = importlib.util.spec_from_file_location(
+    "_fused_rmsnorm_rope_triton", _KERNEL_PATH
+)
 _KERNEL = importlib.util.module_from_spec(_SPEC)
 assert _SPEC.loader is not None
 _SPEC.loader.exec_module(_KERNEL)
@@ -47,11 +49,7 @@ FUSED_KERNEL_REGEX = r".*fused_rmsnorm_rope.*"
 
 
 def _group_heads_list() -> List[int]:
-    values = parse_int_list("DSV4_RMSNORM_ROPE_GROUP_HEADS_LIST", (1, 2, 4, 8))
-    invalid = [x for x in values if x not in (1, 2, 4, 8)]
-    if invalid:
-        raise ValueError(f"invalid GROUP_HEADS values: {invalid}")
-    return values
+    return [1, 2, 4, 8]
 
 
 @dataclass
@@ -69,9 +67,13 @@ def _make_freqs(rows: int) -> torch.Tensor:
     return torch.polar(torch.ones_like(angle), angle).to(torch.complex64).contiguous()
 
 
-def _make_case(case: BenchCase) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+def _make_case(
+    case: BenchCase,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     torch.manual_seed(17 + case.M + len(case.name))
-    x = (torch.randn(*case.shape, dtype=torch.bfloat16, device="cuda") * 0.3).contiguous()
+    x = (
+        torch.randn(*case.shape, dtype=torch.bfloat16, device="cuda") * 0.3
+    ).contiguous()
     weight = None
     if case.has_weight:
         weight = torch.rand(case.shape[-1], dtype=torch.bfloat16, device="cuda") + 0.5
@@ -79,7 +81,9 @@ def _make_case(case: BenchCase) -> Tuple[torch.Tensor, Optional[torch.Tensor], t
     return x, weight, freqs
 
 
-def _apply_rope_tail(y: torch.Tensor, freqs: torch.Tensor, rope_dim: int, inverse: bool) -> torch.Tensor:
+def _apply_rope_tail(
+    y: torch.Tensor, freqs: torch.Tensor, rope_dim: int, inverse: bool
+) -> torch.Tensor:
     flat = y.view(-1, y.shape[-1])
     num_rows = flat.shape[0]
     freqs_flat = freqs.view(-1, freqs.shape[-1])
@@ -129,16 +133,29 @@ def _run_fused(
 
 def _build_cases(M: int) -> List[BenchCase]:
     return [
-        BenchCase("q_decode_no_weight", "q", M, (M, 1, N_HEADS, Q_HEAD_DIM), False, False),
-        BenchCase("q_prefill_no_weight", "q", M, (1, M, N_HEADS, Q_HEAD_DIM), False, False),
-        BenchCase("q_prefill_inverse", "q", M, (1, M, N_HEADS, Q_HEAD_DIM), False, True),
+        BenchCase(
+            "q_decode_no_weight", "q", M, (M, 1, N_HEADS, Q_HEAD_DIM), False, False
+        ),
+        BenchCase(
+            "q_prefill_no_weight", "q", M, (1, M, N_HEADS, Q_HEAD_DIM), False, False
+        ),
+        BenchCase(
+            "q_prefill_inverse", "q", M, (1, M, N_HEADS, Q_HEAD_DIM), False, True
+        ),
         BenchCase("kv_decode_weight", "kv", M, (M, 1, KV_HEAD_DIM), True, False),
         BenchCase("kv_prefill_weight", "kv", M, (1, M, KV_HEAD_DIM), True, False),
-        BenchCase("kv_prefill_no_weight_inverse", "kv", M, (1, M, KV_HEAD_DIM), False, True),
+        BenchCase(
+            "kv_prefill_no_weight_inverse", "kv", M, (1, M, KV_HEAD_DIM), False, True
+        ),
     ]
 
 
-def _check_correctness(case: BenchCase, x: torch.Tensor, weight: Optional[torch.Tensor], freqs: torch.Tensor) -> None:
+def _check_correctness(
+    case: BenchCase,
+    x: torch.Tensor,
+    weight: Optional[torch.Tensor],
+    freqs: torch.Tensor,
+) -> None:
     ref = _run_eager(x, weight, freqs, inverse=case.inverse)
     cand = _run_fused(x, weight, freqs, inverse=case.inverse)
     torch.cuda.synchronize()
@@ -191,23 +208,30 @@ def _check_correctness(case: BenchCase, x: torch.Tensor, weight: Optional[torch.
                 inplace=True,
             )
             grouped_inplace_diff = (
-                ref.float() - cand_grouped_inplace.float()
-            ).abs().max().item()
+                (ref.float() - cand_grouped_inplace.float()).abs().max().item()
+            )
             if grouped_inplace_diff > 5e-2:
                 raise AssertionError(
                     f"{case.name} M={case.M} group_heads={group_heads} inplace "
                     f"mismatch: {grouped_inplace_diff:.4e}"
                 )
 
-def _bench_case(case: BenchCase, report_trace_dir: str, profile_enabled: bool) -> List[dict]:
+
+def _bench_case(
+    case: BenchCase, report_trace_dir: str, profile_enabled: bool
+) -> List[dict]:
     x, weight, freqs = _make_case(case)
     if case.M <= 256:
         _check_correctness(case, x, weight, freqs)
 
     warmup = 20 if case.M <= 4096 else 8
     iters = iters_for_m(case.M)
-    eager: Callable[[], torch.Tensor] = lambda: _run_eager(x, weight, freqs, inverse=case.inverse)
-    fused: Callable[[], torch.Tensor] = lambda: _run_fused(x, weight, freqs, inverse=case.inverse)
+    eager: Callable[[], torch.Tensor] = lambda: _run_eager(
+        x, weight, freqs, inverse=case.inverse
+    )
+    fused: Callable[[], torch.Tensor] = lambda: _run_fused(
+        x, weight, freqs, inverse=case.inverse
+    )
     out_buf = torch.empty_like(x)
     inplace_x = x.clone()
     fused_out: Callable[[], torch.Tensor] = lambda: fused_rmsnorm_rope(
@@ -320,7 +344,11 @@ def _bench_case(case: BenchCase, report_trace_dir: str, profile_enabled: bool) -
 
 def _print_summary(rows: List[dict]) -> None:
     print("\n[fused_rmsnorm_rope]")
-    print("  {:>8} {:>28} {:>14} {:>12} {:>9}".format("M", "case", "impl", "span_us", "speedup"))
+    print(
+        "  {:>8} {:>28} {:>14} {:>12} {:>9}".format(
+            "M", "case", "impl", "span_us", "speedup"
+        )
+    )
     for row in rows:
         print(
             "  {:8d} {:>28} {:>14} {:12.2f} {:8.3f}x".format(
@@ -358,7 +386,9 @@ class FusedRmsnormRopePerfTest(unittest.TestCase):
         _print_summary(rows)
         payload = {
             "elapsed_sec": time.time() - started,
-            "git_commit": git_commit(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")),
+            "git_commit": git_commit(
+                os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+            ),
             "device": device_payload(),
             "m_list": m_list,
             "profile_enabled": profile_enabled,

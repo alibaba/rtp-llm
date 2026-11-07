@@ -8,15 +8,6 @@ def init_misc_group_args(parser, misc_config):
     misc_group = parser.add_argument_group("Miscellaneous")
 
     misc_group.add_argument(
-        "--disable_pdl",
-        env_name="DISABLE_PDL",
-        bind_to=(misc_config.misc_config, "disable_pdl"),
-        type=str2bool,
-        default=True,
-        help="是否禁用PDL",
-    )
-
-    misc_group.add_argument(
         "--disable_access_log",
         env_name="DISABLE_ACCESS_LOG",
         bind_to=[

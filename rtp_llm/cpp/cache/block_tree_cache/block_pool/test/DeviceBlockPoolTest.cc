@@ -13,7 +13,6 @@
 // remote_kv_cache_manager dependency that does not link in the CUDA-12 toolchain).
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace {
@@ -330,10 +329,7 @@ TEST(DeviceBlockPoolTest, ExplicitReleaseCannotConsumeTreeUmbrella) {
     ASSERT_TRUE(block.has_value());
     pool.incTreeRef(*block, BlockTreeRefType::LOAD);
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(pool.decRef(*block));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.refCount(*block), 1u);
@@ -350,10 +346,7 @@ TEST(DeviceBlockPoolTest, BatchIncRefRejectsInvalidTailWithoutMutatingPrefix) {
     ASSERT_TRUE(block.has_value());
     const BlockIdxType unallocated_block = *block + 1;
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(pool.incRef(BlockIdList{*block, unallocated_block}));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_EQ(pool.refCount(*block), 0u);
     EXPECT_EQ(pool.referencedBlocksNum(), 0u);
@@ -370,10 +363,7 @@ TEST(DeviceBlockPoolTest, BatchDecRefRejectsUnheldTailWithoutMutatingPrefix) {
     ASSERT_TRUE(blocks.has_value());
     pool.incRef(blocks->front());
 
-    const bool old_core_dump                     = StaticConfig::user_ft_core_dump_on_exception;
-    StaticConfig::user_ft_core_dump_on_exception = false;
     EXPECT_ANY_THROW(pool.decRef(*blocks));
-    StaticConfig::user_ft_core_dump_on_exception = old_core_dump;
 
     EXPECT_EQ(pool.refCount(blocks->front()), 1u);
     EXPECT_EQ(pool.referencedBlocksNum(), 1u);

@@ -15,7 +15,6 @@
 
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace {
@@ -117,19 +116,6 @@ TEST(StorageBackendExecutorTest, ShutdownDrainsQueuedTasksAndWaitsForConcurrentS
     EXPECT_EQ(completed->load(), 3u);
     EXPECT_FALSE(executor->submit([] {}));
 }
-
-class CoreDumpGuard {
-public:
-    CoreDumpGuard(): old_(StaticConfig::user_ft_core_dump_on_exception) {
-        StaticConfig::user_ft_core_dump_on_exception = false;
-    }
-    ~CoreDumpGuard() {
-        StaticConfig::user_ft_core_dump_on_exception = old_;
-    }
-
-private:
-    bool old_;
-};
 
 class TestBlockPool: public DeviceBlockPool {
 public:
@@ -569,7 +555,6 @@ TEST(StorageBackendTest, ReorderedPoolInputsPreserveTagIdentityAndTopologyLifeti
 }
 
 TEST(StorageBackendTest, InvalidPoolBindingsFailBeforeDerivedInitOrIo) {
-    CoreDumpGuard guard;
     auto          pool  = std::make_shared<TestBlockPool>();
     auto          block = pool->malloc().value();
     pool->incRef(block);
@@ -993,7 +978,6 @@ TEST(StorageBackendTest, ShutdownDrainsAcceptedTasksAndRejectsNewOnes) {
 }
 
 TEST(StorageBackendTest, ShutdownFromCompletionIsRejectedWithoutDeadlock) {
-    CoreDumpGuard guard;
     auto          pool     = std::make_shared<TestBlockPool>();
     auto          executor = std::make_shared<HoldingExecutor>();
     TestBackend   backend(/*init_result=*/true, executor);

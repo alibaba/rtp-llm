@@ -1,7 +1,6 @@
 import argparse
 import csv
 import json
-import os
 import statistics
 import time
 from pathlib import Path
@@ -261,9 +260,9 @@ def write_outputs(rows: List[Dict], out_dir: Path) -> None:
         "device": torch.cuda.get_device_name(),
         "capability": torch.cuda.get_device_capability(),
         "torch": torch.__version__,
-        "env": {
-            "DSV4_FP8_QUANT_KERNEL": os.environ.get("DSV4_FP8_QUANT_KERNEL", ""),
-        },
+        # The quant kernel selection is always the auto heuristic now; the
+        # "auto" kernel rows below exercise it unmodified.
+        "quant_kernel_policy": "auto",
         "rows": rows,
     }
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

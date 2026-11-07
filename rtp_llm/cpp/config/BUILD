@@ -3,13 +3,6 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
-cc_library(
-    name = "static_config",
-    hdrs = ["StaticConfig.h"],
-    srcs = ["StaticConfig.cc"],
-    copts = copts(),
-)
-
 py_test(
     name = "model_config_test",
     srcs = ["model_config_test.py"],
