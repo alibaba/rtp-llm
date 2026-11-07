@@ -68,8 +68,8 @@ public class EngineAddressResolver {
                         "Failed to fetch initial engine hosts for endpoint: " + endpoint.getAddress(), e);
             }
             if (hosts == null || hosts.isEmpty()) {
-                throw new IllegalStateException(
-                        "No initial engine hosts discovered for endpoint: " + endpoint.getAddress());
+                log.warn("No initial engine hosts discovered for endpoint: {}", endpoint.getAddress());
+                continue;
             }
             initialHosts.put(endpoint, List.copyOf(hosts));
         }

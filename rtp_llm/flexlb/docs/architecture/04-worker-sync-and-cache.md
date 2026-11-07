@@ -59,8 +59,8 @@ NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需�
 返回空列表。发现线程池使用 AbortPolicy，饱和时不在同步线程执行网络查询。超时查询即使稍后
 完成，也不会更新快照。成功的非空结果替换快照，允许正常的部分缩容与节点更换。
 
-`EngineAddressResolver` 在构造阶段同步查询所有 Endpoint。每个查询必须成功且返回非空机器列表，
-全部检查通过后才发布初始地址并注册地址监听；任一查询失败或返回空/null 时抛出异常，阻止 Master 启动。
+`EngineAddressResolver` 在构造阶段同步查询所有 Endpoint。查询抛出异常时阻止 Master 启动；
+查询成功但返回空列表或 null 时，Master 可以启动并继续监听该 Endpoint，后续发现机器时发布地址。
 定期查询和订阅回调同样忽略空列表，保留该 Endpoint 的地址，
 避免关闭现有 channel 或清除已有 worker cache。无论空列表持续多久，都不把它作为撤销通知；
 真实 worker 失效由健康探测处理。

@@ -48,33 +48,50 @@ class EngineAddressResolverTest {
     }
 
     @Test
-    void anyInitiallyEmptyEndpointPreventsStartupAndListenerRegistration() {
+    void initiallyEmptyEndpointDoesNotHideHostsFromOtherEndpoints() {
         Endpoint first = endpoint("vip-a");
         Endpoint second = endpoint("vip-b");
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
-        when(discovery.getHosts(first)).thenReturn(List.of(workerHost("10.0.0.1", 8080)));
+        WorkerHost host = workerHost("10.0.0.1", 8080);
+        when(discovery.getHosts(first)).thenReturn(List.of(host));
         when(discovery.getHosts(second)).thenReturn(List.of());
 
-        IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> new EngineAddressResolver(discovery, modelConfig(first, second)));
+        EngineAddressResolver resolver = new EngineAddressResolver(discovery, modelConfig(first, second));
 
-        assertTrue(failure.getMessage().contains("vip-b"));
-        verify(discovery).getHosts(first);
-        verify(discovery).getHosts(second);
-        verify(discovery, never()).listen(any(Endpoint.class), any());
+        EngineAddressResolver.Listener listener = mock(EngineAddressResolver.Listener.class);
+        resolver.subscribe(listener);
+        verify(listener).onAddressUpdate(List.of(host));
     }
 
     @Test
-    void initiallyNullHostsPreventStartupAndListenerRegistration() {
-        Endpoint endpoint = endpoint("vip-a");
+    void startsWithoutPrefillOrDecodeHostsAndPublishesThemWhenDiscovered() {
+        Endpoint prefill = endpoint("prefill-vip");
+        Endpoint decode = endpoint("decode-vip");
+        GroupRoleEndPoint group = new GroupRoleEndPoint();
+        group.setGroup("default");
+        group.setPrefillEndpoint(prefill);
+        group.setDecodeEndpoint(decode);
+        ServiceRoute route = new ServiceRoute();
+        route.setRoleEndpoints(List.of(group));
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
-        when(discovery.getHosts(endpoint)).thenReturn(null);
+        WorkerHost prefillHost = workerHost("10.0.0.1", 8080);
+        WorkerHost decodeHost = workerHost("10.0.0.2", 8080);
+        when(discovery.getHosts(prefill)).thenReturn(List.of(), List.of(prefillHost));
+        when(discovery.getHosts(decode)).thenReturn(null);
 
-        IllegalStateException failure = assertThrows(IllegalStateException.class,
-                () -> new EngineAddressResolver(discovery, modelConfig(endpoint)));
+        EngineAddressResolver resolver = new EngineAddressResolver(discovery, new ModelMetaConfig(route));
+        ArgumentCaptor<ServiceHostListener> decodeUpdates = ArgumentCaptor.forClass(ServiceHostListener.class);
+        verify(discovery).listen(eq(prefill), any());
+        verify(discovery).listen(eq(decode), decodeUpdates.capture());
+        EngineAddressResolver.Listener listener = mock(EngineAddressResolver.Listener.class);
+        resolver.subscribe(listener);
+        verify(listener).onAddressUpdate(List.of());
 
-        assertTrue(failure.getMessage().contains("vip-a"));
-        verify(discovery, never()).listen(any(Endpoint.class), any());
+        resolver.periodicHostUpdate();
+        verify(listener).onAddressUpdate(List.of(prefillHost));
+        decodeUpdates.getValue().onHostsChanged(List.of(decodeHost));
+        verify(listener).onAddressUpdate(argThat(
+                hosts -> hosts.size() == 2 && hosts.containsAll(List.of(prefillHost, decodeHost))));
     }
 
     @Test
