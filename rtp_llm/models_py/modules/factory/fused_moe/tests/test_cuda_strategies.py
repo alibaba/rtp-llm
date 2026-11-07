@@ -37,6 +37,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.strategy.ep import (
     RocmEpNormalStrategy,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
+    StrategyRegistry,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import (
     ConditionChecker,
 )
@@ -353,6 +356,49 @@ class TestCudaFp8PerBlockNoDPStrategy(unittest.TestCase):
 
 class TestCudaFp8PerBlockNoDPMaskedStrategy(unittest.TestCase):
     """Test CUDA FP8 PerBlock No DP Masked strategy"""
+
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+        "deepgemm_masked_executor_v2.get_sm"
+    )
+    @patch(
+        "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors."
+        "deepgemm_hybrid_executor.get_sm"
+    )
+    @patch("rtp_llm.models_py.utils.arch.get_sm")
+    @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
+    def test_auto_cuda_graph_selects_supported_executor(
+        self, mock_has_deep_gemm, mock_arch_sm, mock_hybrid_sm, mock_masked_sm
+    ) -> None:
+        mock_has_deep_gemm.return_value = True
+        config = create_moe_config_adapter(
+            model_config=create_model_config_with_fp8_block_quant(),
+            parallelism_config=create_parallelism_config(),
+            moe_config=create_moe_config(use_all_gather=True),
+            enable_cuda_graph=True,
+        )
+        registry = StrategyRegistry()
+        registry.register(CudaFp8PerBlockNoDPStrategy())
+        registry.register(CudaFp8PerBlockNoDPMaskedStrategy())
+
+        for major, expected in (
+            (9, CudaFp8PerBlockNoDPMaskedStrategy),
+            (10, CudaFp8PerBlockNoDPMaskedStrategy),
+            (12, CudaFp8PerBlockNoDPStrategy),
+        ):
+            with self.subTest(sm=major):
+                mock_arch_sm.return_value = (major, 0)
+                mock_hybrid_sm.return_value = (major, 0)
+                mock_masked_sm.return_value = (major, 0)
+                self.assertIsInstance(registry.get_strategy(config), expected)
+
+        config.enable_cuda_graph = False
+        mock_arch_sm.return_value = (9, 0)
+        mock_hybrid_sm.return_value = (9, 0)
+        mock_masked_sm.return_value = (9, 0)
+        self.assertIsInstance(
+            registry.get_strategy(config), CudaFp8PerBlockNoDPStrategy
+        )
 
     @patch(
         "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2.get_sm"

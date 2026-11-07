@@ -24,6 +24,7 @@ _TESTS = [
     "test_ced",
     "test_dsv41_kernel_jit_warmup",
     "test_engram_cuda",
+    "test_block_kwargs",
     "test_v41_cross_layer_mhc",
     "test_v41_decode_rope_metadata",
     "test_v41_delayed_hc_cuda_graph",

@@ -9,7 +9,7 @@ mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -92,6 +92,9 @@ class V4Args:
     dp_rank: int = 0
     world_size: int = 1
     world_rank: int = 0
+    # The real ParallelismConfig: the fused-MoE runtime config must see the
+    # true tp_size or TP-sharded weights skip their Group.TP reduction.
+    parallelism_config: Optional[Any] = None
     is_decode_role: bool = False
     # Dedicated DSpARK prefill workers execute only the commit side: target
     # features are projected into the draft SWA pools and no query/FFN/mHC
@@ -161,6 +164,7 @@ def _block_kwargs(
         tp_rank=args.tp_rank,
         ep_size=args.ep_size,
         ep_rank=args.ep_rank,
+        parallelism_config=args.parallelism_config,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         moe_strategy=args.moe_strategy,

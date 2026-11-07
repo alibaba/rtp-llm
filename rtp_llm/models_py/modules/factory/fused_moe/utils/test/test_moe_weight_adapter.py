@@ -69,6 +69,33 @@ class SplitMoeWeightAdapterTest(unittest.TestCase):
         self.assertIs(adapt_split_moe_weights(weights, 4, 0, {}), weights)
         self.assertIs(weights[W.moe_w1], tensor)
 
+    def test_canonical_weights_accept_partial_name_mapping(self):
+        routed = torch.ones(2, 8, 4)
+        shared = torch.ones(8, 4)
+        router_bias = torch.ones(2)
+        weights = {
+            W.moe_w1: routed,
+            W.ffn_w13: shared,
+            "checkpoint.router_bias": router_bias,
+        }
+        names = {"router_bias": "checkpoint.router_bias"}
+
+        self.assertIs(adapt_split_moe_weights(weights, 4, 1, names), weights)
+        self.assertIs(weights[W.moe_w1], routed)
+        self.assertIs(weights[W.ffn_w13], shared)
+        self.assertIs(weights[W.moe_gate_bias], router_bias)
+
+    def test_canonical_routed_weights_still_map_router(self):
+        routed = torch.ones(2, 8, 4)
+        router = torch.ones(2, 4)
+        weights = {W.moe_w1: routed, "checkpoint.router": router}
+
+        adapt_split_moe_weights(weights, 4, 0, {"router": "checkpoint.router"})
+
+        self.assertIs(weights[W.moe_w1], routed)
+        self.assertIs(weights[W.moe_gate], router)
+        self.assertNotIn("checkpoint.router", weights)
+
 
 if __name__ == "__main__":
     unittest.main()

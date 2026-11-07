@@ -6,8 +6,15 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.distributed.deepep_wrapper import DeepepWrapperConfig
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp4 import (
     _has_fp8_fp4_grouped_kernel,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+    PureTpRouterFp8PerBlock,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp8_fp4 import (
     CudaGroupedFp4Strategy,
@@ -25,10 +32,12 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
 
 def _config(
     ep_size=1,
+    ep_rank=0,
     n_shared_experts=0,
     strategy="auto",
     world_size=None,
     has_shared_expert_gate=False,
+    **kwargs,
 ):
     return Fp8Fp4MoeRuntimeConfig(
         layer_id=0,
@@ -39,12 +48,88 @@ def _config(
         n_shared_experts=n_shared_experts,
         swiglu_limit=10.0,
         ep_size=ep_size,
-        ep_rank=0,
+        ep_rank=ep_rank,
         world_size=world_size,
         max_tokens_per_rank=128,
         moe_strategy=strategy,
         has_shared_expert_gate=has_shared_expert_gate,
+        **kwargs,
     )
+
+
+class Fp8Fp4RuntimeConfigTest(unittest.TestCase):
+    def test_default_config_has_router_and_deepep_fields(self):
+        config = _config(ep_size=2, strategy="fp8_per_block_ep_normal")
+        self.assertFalse(config.parallelism_config.prefill_cp_config.is_enabled())
+        wrapper = DeepepWrapperConfig.from_config_adapter(config)
+        self.assertEqual(wrapper.hidden_size, config.hidden_size)
+        self.assertEqual(wrapper.expert_num, config.expert_num)
+        self.assertEqual(wrapper.moe_k, config.moe_k)
+
+    def test_uses_actual_parallelism_moe_and_cuda_graph_configuration(self):
+        parallelism = SimpleNamespace(
+            tp_size=1,
+            ep_size=2,
+            ep_rank=1,
+            dp_size=2,
+            dp_rank=1,
+            local_rank=1,
+            world_size=2,
+            prefill_cp_config=SimpleNamespace(is_enabled=lambda: False),
+            ffn_disaggregate_config=None,
+        )
+        moe = SimpleNamespace(
+            moe_strategy="fp8_per_block_ep_normal",
+            deep_ep_num_sm=24,
+            use_deepep_low_latency=False,
+            use_deepep_internode=True,
+            use_deepep_moe=True,
+            use_all_gather=False,
+            ll_num_max_token=64,
+            masked_max_token_num=128,
+        )
+        config = _config(
+            ep_size=2,
+            ep_rank=1,
+            strategy="fp8_per_block_ep_normal",
+            parallelism_config=parallelism,
+            moe_config=moe,
+            enable_cuda_graph=True,
+        )
+
+        self.assertIs(config.parallelism_config, parallelism)
+        self.assertIs(config.moe_config, moe)
+        self.assertTrue(config.enable_cuda_graph)
+        self.assertEqual(config.dp_rank, 1)
+        self.assertEqual(config.ll_num_max_token, 64)
+        wrapper = DeepepWrapperConfig.from_config_adapter(config)
+        self.assertEqual(wrapper.deep_ep_num_sm, 24)
+        self.assertTrue(wrapper.use_deepep_internode)
+
+    def test_pure_tp_exposes_weight_sharding_size_to_router(self):
+        parallelism = SimpleNamespace(
+            tp_size=2,
+            tp_rank=1,
+            ep_size=1,
+            ep_rank=0,
+            dp_size=1,
+            dp_rank=0,
+            local_rank=1,
+            world_size=2,
+            get_attn_tp_size=lambda: 2,
+            get_attn_tp_rank=lambda: 1,
+        )
+        config = _config(parallelism_config=parallelism)
+        self.assertEqual(config.tp_size, 2)
+        self.assertEqual(config.tp_rank, 1)
+        router = PureTpRouterFp8PerBlock(config, FusedMoEQuantConfig())
+        with patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers."
+            "pure_tp_router.all_reduce",
+            return_value=torch.ones(1, 512),
+        ) as reduce:
+            router._maybe_all_reduce_tp(torch.zeros(1, 512), None)
+        reduce.assert_called_once()
 
 
 def _registry():

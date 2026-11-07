@@ -228,8 +228,19 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         self.masked_max_token_num = config.masked_max_token_num
         self.enable_cuda_graph = config.enable_cuda_graph
+        # SwiGLU clamp from the model config (DeepSeek-V4 contract). 0.0
+        # disables clamping and keeps the kernels bit-identical to the
+        # unclamped launch.
+        self.clamp_limit = float(getattr(config, "swiglu_limit", 0.0) or 0.0)
+        # Triton's route aligner requires every expert ID to be valid; Top-p uses -1.
+        self.norm_top_p_enabled = bool(getattr(config, "norm_top_p_enabled", False))
         self.is_sm120 = get_sm()[0] == 12
-        if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
+        if (
+            self.is_sm120
+            and self.enable_cuda_graph
+            and self.ep_size == 1
+            and not self.norm_top_p_enabled
+        ):
             self.sm120_triton_max_tokens = _get_sm120_triton_max_tokens()
         else:
             # Do not let an SM120-only rollback knob affect H20/SM100 or an
@@ -250,7 +261,12 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         assert self.w2_weight.size(1) == self.K
         assert self.w2_weight.size(2) == self.N // 2
 
-        if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
+        if (
+            self.is_sm120
+            and self.enable_cuda_graph
+            and self.ep_size == 1
+            and not self.norm_top_p_enabled
+        ):
             gate_shape = (self.E, self.N, self.K, self.top_k)
             down_shape = (self.E, self.K, self.N // 2, self.top_k)
             config_source = (
@@ -293,6 +309,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         if (
             self.is_sm120
             and self.enable_cuda_graph
+            and not self.norm_top_p_enabled
             and self.ep_size == 1
             and _is_cuda_graph_warmup_or_capture()
             and token_num >= _SM120_TRITON_MIN_TOKENS
@@ -410,7 +427,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             device=hidden_states_fp8.device,
             dtype=torch.bfloat16,
         )
-        silu_and_mul(down_input, gate_up_output)
+        silu_and_mul(down_input, gate_up_output, clamp_limit=self.clamp_limit)
         down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
             down_input,
             group_size=self.BLOCK_SIZE,
@@ -578,6 +595,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     down_input_scale,
                     self.DEEPGEMM_BLOCK_SHAPE[0],
                     num_recv_tokens_per_expert,
+                    clamp_limit=self.clamp_limit,
                 )
             else:
                 # Standard path for other SM versions
@@ -600,6 +618,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     expected_m=expected_m,
                     input_layout=MaskedSiluInputLayout.BATCH_TOKEN_ALIGNMENT,
                     scale_ue8m0=is_deep_gemm_e8m0_used(),
+                    clamp_limit=self.clamp_limit,
                 )
 
             # Free upgate_output
@@ -834,7 +853,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             dtype=torch.bfloat16,
         )
         gateup_output = gateup_output.view(-1, N)
-        silu_and_mul(down_input, gateup_output)
+        silu_and_mul(down_input, gateup_output, clamp_limit=self.clamp_limit)
         del gateup_output
         down_output = torch.empty(
             (all_tokens, K),

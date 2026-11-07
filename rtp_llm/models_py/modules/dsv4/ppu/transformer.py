@@ -41,7 +41,15 @@ def _build_block(
         provider = platform_provider
     return provider.build_block(
         Block,
-        **_block_kwargs(layer_id, args, layer_weights, commit_only=commit_only),
+        **_block_kwargs(
+            layer_id,
+            args,
+            layer_weights,
+            commit_only=commit_only,
+            # The PPU Block builds its own packaged MegaMoE; its explicit
+            # signature does not accept the fused-MoE runtime kwargs.
+            include_moe_runtime=False,
+        ),
         platform_provider=provider,
     )
 

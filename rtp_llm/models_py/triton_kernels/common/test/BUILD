@@ -55,3 +55,17 @@ py_test(
     },
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "silu_clamp_test",
+    srcs = ["silu_clamp_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "1",
+    },
+)

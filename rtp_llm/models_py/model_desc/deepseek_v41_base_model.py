@@ -334,6 +334,10 @@ class DeepSeekV4Model(GptModelBase):
             args.dp_rank = int(getattr(parallelism_config, "dp_rank", 0) or 0)
             args.world_size = int(getattr(parallelism_config, "world_size", 1) or 1)
             args.world_rank = int(getattr(parallelism_config, "world_rank", 0) or 0)
+            # The fused-MoE runtime config consumes the real object; without
+            # it the layer falls back to tp_size=1 and TP-sharded weights
+            # silently skip their Group.TP reduction.
+            args.parallelism_config = parallelism_config
         if args.world_size > 1:
             logging.info(
                 "[DeepSeekV4Model] parallelism: world=%d tp=%d/%d ep=%d/%d dp=%d/%d (scaffold only — V4 sharding not yet implemented; see docs/dsv4/parallel_design.md)",

@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4 import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import (
     Fp8Fp4MoeLayer,
 )
+from rtp_llm.utils.model_weight import W
 
 
 class _FakeGate:
@@ -55,6 +56,13 @@ class _FakeFusedMoe:
         return torch.ones_like(hidden_states)
 
 
+class _FakeNormTopP(torch.nn.Module):
+    enabled = False
+
+    def forward(self, x, topk_weights, topk_ids):
+        return topk_weights, topk_ids
+
+
 class _FakeSharedExecutor:
     def __init__(self, events):
         self.events = events
@@ -91,6 +99,7 @@ class Fp8Fp4MoeLayerSchedulingTest(unittest.TestCase):
         torch.nn.Module.__init__(layer)
         layer.dim = 4
         layer.gate = _FakeGate(events, gate_pack_enabled)
+        layer.norm_top_p = _FakeNormTopP()
         layer.fused_moe = _FakeFusedMoe(events)
         layer.shared_experts = object() if with_shared else None
         layer._shared_executor = _FakeSharedExecutor(events) if with_shared else None
@@ -172,6 +181,47 @@ class Fp8Fp4MoeLayerSchedulingTest(unittest.TestCase):
                 "fused_moe.forward_gate_pack",
             ],
         )
+
+    def test_top_p_accepts_fp8_per_block_local_routes(self):
+        for strategy in (
+            "fp8_per_block_no_dp",
+            "fp8_per_block_no_dp_masked",
+            "fp8_per_block_pure_cp",
+        ):
+            with self.subTest(strategy=strategy):
+                with (
+                    patch.object(layer_module, "Gate"),
+                    patch.object(layer_module, "Dsv4NormTopP") as norm_top_p,
+                    patch.object(layer_module, "FusedMoeFactory") as factory,
+                ):
+                    norm_top_p.return_value.enabled = True
+                    factory.return_value.create_fused_moe.return_value.strategy_name = (
+                        strategy
+                    )
+                    layer = Fp8Fp4MoeLayer(
+                        layer_id=3,
+                        dim=4,
+                        moe_inter_dim=8,
+                        n_routed_experts=4,
+                        n_activated_experts=2,
+                        n_shared_experts=0,
+                        score_func="sigmoid",
+                        route_scale=1.0,
+                        swiglu_limit=1.0,
+                        n_hash_layers=3,
+                        vocab_size=8,
+                        layer_weights={
+                            W.moe_w1: torch.empty(
+                                (4, 16, 4), dtype=torch.float8_e4m3fn
+                            )
+                        },
+                        model_type="deepseek_v4",
+                    )
+                    runtime_config = (
+                        factory.return_value.create_fused_moe.call_args.args[0]
+                    )
+                    self.assertTrue(runtime_config.norm_top_p_enabled)
+                self.assertEqual(layer.strategy_name, strategy)
 
 
 class Fp8Fp4ExecutorOutputDtypeTest(unittest.TestCase):
