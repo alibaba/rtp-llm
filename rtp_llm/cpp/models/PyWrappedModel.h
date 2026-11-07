@@ -99,8 +99,8 @@ private:
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
-    torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
-    torch::Tensor   computeQuantizedLogits(const torch::Tensor& hidden);
+    torch::Tensor tpSyncEmbeddingOrLogits(const torch::Tensor& input);
+    torch::Tensor computeQuantizedLogits(const torch::Tensor& hidden);
     // LM head matmul only (TP-local logits, no gather). Shared by lmHeadLogits and by the
     // prompt-scoring row-selection path, which gathers only the consumer-visible rows.
     torch::Tensor
@@ -109,12 +109,22 @@ private:
     // M <= 8 rows run a weight-only INT8 GEMV (per-row scale) on a copy quantized at first use.
     // RTP_LLM_INT8_LM_HEAD_CHECK=1 additionally runs the bf16 head, serves the bf16 logits and
     // logs how often the gathered top-1 token differs.
-    torch::Tensor   lmHeadLogits(const torch::Tensor& last_hidden, const torch::Tensor& lm_head_kernel);
+    torch::Tensor lmHeadLogits(const torch::Tensor& last_hidden, const torch::Tensor& lm_head_kernel);
+#if USING_CUDA
+    // INT8 check-mode helper: gathers the bf16 reference rows, updates the device-side
+    // [rows, top1_mismatch] stats and returns the reference to serve in place of the int8
+    // output. Used by every path that ran the int8 GEMV.
+    torch::Tensor serveInt8CheckedLogits(torch::Tensor ref_local, const torch::Tensor& int8_logits);
+#endif
 
     // All-gathers the compact per-rank scoring payload produced by computeShardScoringPartials
     // (PromptScoringShards.h) and merges it into the global per-row results. Executed
-    // identically on every TP rank (collective shape/order safety).
-    ScoringPartials tpReduceScoringPartials(const ScoringPartials& local, int64_t k_max);
+    // identically on every TP rank (collective shape/order safety). merge_chunk_rows bounds the
+    // merge's sort-temporary rows and comes from the synchronized scoringChunkRows hint (byte
+    // budget already applied), so every rank passes the same value. When check_nan is set the
+    // merged tensors — bit-identical across ranks — are NaN-checked, so the abort is symmetric.
+    ScoringPartials
+    tpReduceScoringPartials(const ScoringPartials& local, int64_t k_max, bool check_nan, int64_t merge_chunk_rows);
 
     GptModelOutputs forwardPostLayers(torch::Tensor         hidden,
                                       const bool            has_context_request,
@@ -275,10 +285,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
-    const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
-                                     dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
-                                                                                      "forward";
-    py_forward_method_             = py_model_.attr(forward_method);
+    const char* forward_method = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
+                                 dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
+                                                                                  "forward";
+    py_forward_method_         = py_model_.attr(forward_method);
     if (weights_.lm_head && weights_.lm_head->kernel.dtype() == torch::kUInt8) {
         RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "compute_quantized_logits"),
                                 "Packed LM head requires Python compute_quantized_logits");

@@ -109,14 +109,14 @@ TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
     EXPECT_EQ(wire_hints.scalar_type(), torch::kInt64);
     EXPECT_EQ(wire_hints.data_ptr<int64_t>()[GptModelInputIndex::mtpHiddenStates], 3221225472LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{262144, 12288}));
 
     inputs.last_hidden_states = backing.expand({1048576, 12288});
     shape_hints               = getModelInputShapeHints(inputs);
     EXPECT_EQ(shape_hints[GptModelInputIndex::mtpHiddenStates], 12884901888LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{1048576, 12288}));
 }
 
@@ -125,6 +125,56 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(1, 0), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(5, 2), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
+}
+
+TEST_F(ModelDataTest, testScoringRowHintsEncodeMetadataAndChunkRows) {
+    GptModelInputs inputs;
+    auto           hints = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::allLogitsRowMeta], 0);
+    // No producer override: the hint carries the env/default value every rank agrees on.
+    EXPECT_EQ(hints[GptModelInputIndex::scoringChunkRows], kDefaultScoringPartialChunkRows);
+
+    inputs.all_logits_row_indexes     = torch::empty({0}, torch::kLong);
+    inputs.all_logits_row_labels      = torch::empty({0}, torch::kInt32);
+    inputs.scoring_partial_chunk_rows = 3;
+    hints                             = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::allLogitsRowMeta], 7);  // defined + defined + equal
+    EXPECT_EQ(hints[GptModelInputIndex::scoringChunkRows], 3);
+
+    // Indexes without labels must encode meta=2 so the consistency check can reject it
+    // identically on every rank.
+    inputs.all_logits_row_labels = torch::Tensor();
+    hints                        = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::allLogitsRowMeta], 2);
+}
+
+TEST_F(ModelDataTest, testScoringRowHintsEncodeLabelLengthMismatch) {
+    // A defined row set whose label count differs from its index count encodes meta=3
+    // (both defined, lengths unequal); the broadcast check then rejects it on every rank
+    // before packing — a rank-local tensor comparison could not give that guarantee.
+    GptModelInputs inputs;
+    inputs.all_logits_row_indexes = torch::empty({3}, torch::kLong);
+    inputs.all_logits_row_labels  = torch::empty({2}, torch::kInt32);
+    auto hints                    = getModelInputShapeHints(inputs);
+    EXPECT_EQ(hints[GptModelInputIndex::allLogitsRowMeta], 3);
+    EXPECT_THROW(checkScoringRowMetaConsistent(/*need_all_logits=*/true, hints[GptModelInputIndex::allLogitsRowMeta]),
+                 RTPException);
+}
+
+TEST_F(ModelDataTest, testScoringRowMetaConsistencyCheck) {
+    // The predicate every tpSyncModelInputs rank evaluates on the broadcast hints — a
+    // rejection is collective-uniform because the checked value is rank-identical.
+    EXPECT_NO_THROW(checkScoringRowMetaConsistent(/*need_all_logits=*/false, 0));
+    EXPECT_NO_THROW(checkScoringRowMetaConsistent(/*need_all_logits=*/true, 7));
+    EXPECT_THROW(checkScoringRowMetaConsistent(true, 0), RTPException);    // flag without rows
+    EXPECT_THROW(checkScoringRowMetaConsistent(false, 7), RTPException);   // rows without flag
+    EXPECT_THROW(checkScoringRowMetaConsistent(false, 2), RTPException);   // rows without flag
+    EXPECT_THROW(checkScoringRowMetaConsistent(true, 2), RTPException);    // indexes w/o labels
+    EXPECT_THROW(checkScoringRowMetaConsistent(true, 1), RTPException);    // labels w/o indexes
+    EXPECT_THROW(checkScoringRowMetaConsistent(true, 3), RTPException);    // unequal lengths
+    EXPECT_THROW(checkScoringRowMetaConsistent(true, 6), RTPException);    // indexes + lengths w/o labels
+    EXPECT_THROW(checkScoringRowMetaConsistent(false, -1), RTPException);  // corrupt hint
+    EXPECT_THROW(checkScoringRowMetaConsistent(false, 8), RTPException);
 }
 
 }  // namespace rtp_llm

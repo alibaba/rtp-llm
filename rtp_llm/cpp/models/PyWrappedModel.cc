@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <mutex>
@@ -960,11 +961,10 @@ torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input
 
 torch::Tensor PyWrappedModel::computeQuantizedLogits(const torch::Tensor& hidden) {
     py::gil_scoped_acquire gil;
-    auto logits = py_lm_head_method_(hidden).cast<torch::Tensor>();
+    auto                   logits = py_lm_head_method_(hidden).cast<torch::Tensor>();
     RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2 && logits.size(0) == hidden.size(0)
                                 && logits.size(1) == weights_.lm_head->kernel.size(0)
-                                && logits.scalar_type() == torch::kBFloat16
-                                && logits.device() == hidden.device(),
+                                && logits.scalar_type() == torch::kBFloat16 && logits.device() == hidden.device(),
                             "Quantized LM head must return BF16 local logits "
                             "[rows, local_vocab] on the hidden device");
     return logits;
@@ -1038,6 +1038,38 @@ PyWrappedModel::lmHeadLocalLogits(const torch::Tensor& last_hidden, const torch:
     return logits;
 }
 
+#if USING_CUDA
+torch::Tensor PyWrappedModel::serveInt8CheckedLogits(torch::Tensor ref_local, const torch::Tensor& int8_logits) {
+    // INT8 check mode: gather the bf16 reference, compare gathered top-1 ids against the
+    // int8 output, accumulate the [rows, top1_mismatch] stats and return the reference to
+    // serve. Shared by every path that ran the int8 GEMV so check mode behaves identically
+    // whether the caller gathered all rows or a row selection. The stats tensor lives on the
+    // reference device — a CPU allocation here crashes the first later add of a CUDA tensor.
+    if (device_props_.tp_size > 1) {
+        ref_local = tpSyncEmbeddingOrLogits(ref_local);
+    }
+    if (!int8_lm_head_check_stats_.defined()) {
+        int8_lm_head_check_stats_ = torch::zeros({2}, ref_local.options().dtype(torch::kLong));
+    }
+    // Compare top-1 only over the served vocabulary; padded tail rows are dropped before sampling.
+    auto          ref_top1 = ref_local;
+    auto          out_top1 = int8_logits;
+    const int64_t vocab    = static_cast<int64_t>(description_.output_vocab_size);
+    if (vocab > 0 && vocab < ref_local.size(1)) {
+        ref_top1 = ref_local.narrow(1, 0, vocab);
+        out_top1 = int8_logits.narrow(1, 0, vocab);
+    }
+    auto mismatch = (ref_top1.argmax(-1) != out_top1.argmax(-1)).sum();
+    int8_lm_head_check_stats_.select(0, 0).add_(ref_local.size(0));
+    int8_lm_head_check_stats_.select(0, 1).add_(mismatch);
+    if (++int8_lm_head_check_calls_ % 256 == 0) {
+        auto s = int8_lm_head_check_stats_.cpu();
+        RTP_LLM_LOG_INFO("INT8 LM head check: rows=%ld top1_mismatch=%ld", s[0].item<int64_t>(), s[1].item<int64_t>());
+    }
+    return ref_local;
+}
+#endif
+
 torch::Tensor PyWrappedModel::lmHeadLogits(const torch::Tensor& last_hidden, const torch::Tensor& kernel) {
     bool          int8_used = false;
     torch::Tensor logits    = lmHeadLocalLogits(last_hidden, kernel, &int8_used);
@@ -1049,48 +1081,26 @@ torch::Tensor PyWrappedModel::lmHeadLogits(const torch::Tensor& last_hidden, con
 #if USING_CUDA
     if (int8_used && int8_lm_head_check_) {
         auto ref = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16).contiguous(), kernel);
-        if (device_props_.tp_size > 1) {
-            ref = tpSyncEmbeddingOrLogits(ref);
-        }
-        if (!int8_lm_head_check_stats_.defined()) {
-            int8_lm_head_check_stats_ = torch::zeros({2}, ref.options().dtype(torch::kLong));
-        }
-        // Compare top-1 only over the served vocabulary; padded tail rows are dropped before sampling.
-        auto          ref_top1 = ref;
-        auto          out_top1 = logits;
-        const int64_t vocab    = static_cast<int64_t>(description_.output_vocab_size);
-        if (vocab > 0 && vocab < ref.size(1)) {
-            ref_top1 = ref.narrow(1, 0, vocab);
-            out_top1 = logits.narrow(1, 0, vocab);
-        }
-        auto mismatch = (ref_top1.argmax(-1) != out_top1.argmax(-1)).sum();
-        int8_lm_head_check_stats_.select(0, 0).add_(ref.size(0));
-        int8_lm_head_check_stats_.select(0, 1).add_(mismatch);
-        if (++int8_lm_head_check_calls_ % 256 == 0) {
-            auto s = int8_lm_head_check_stats_.cpu();
-            RTP_LLM_LOG_INFO(
-                "INT8 LM head check: rows=%ld top1_mismatch=%ld", s[0].item<int64_t>(), s[1].item<int64_t>());
-        }
-        logits = ref;
+        logits   = serveInt8CheckedLogits(std::move(ref), logits);
     }
 #endif
     return logits;
 }
 
 namespace {
-// Upper bound on rows reduced per iteration so scoring chunk temporaries stay small even
-// when nearly every executed row is selected. Env-overridable for tests/chunk-boundary
-// coverage; identical on all ranks because it only sizes local temporaries, not collectives.
-int64_t scoringPartialChunkRows() {
-    static const int64_t rows = [] {
-        const char* e = getenv("RTP_LLM_SCORING_PARTIAL_CHUNK_ROWS");
-        return e ? std::max<int64_t>(1, std::atoll(e)) : 512;
-    }();
-    return rows;
-}
+// Scratch byte budget for the tp>1 scoring merge temporaries (payload unpack staging + the
+// per-chunk sort workspace). The synchronized scoringChunkRows hint value is additionally
+// clamped so a chunk's scratch stays under this cap: unpack/sort temporaries cost ~96B per
+// (row * tp_size * shard_k), so a large accepted k shrinks the chunk rather than letting a
+// fixed row count allocate a multi-GiB sort workspace. Final outputs (rows * k top-k
+// entries) are inherent to the accepted-k contract and not covered by this bound.
+constexpr int64_t kScoringMergeScratchBudgetBytes = 256ll << 20;
 }  // namespace
 
-ScoringPartials PyWrappedModel::tpReduceScoringPartials(const ScoringPartials& local, int64_t k_max) {
+ScoringPartials PyWrappedModel::tpReduceScoringPartials(const ScoringPartials& local,
+                                                        int64_t                k_max,
+                                                        bool                   check_nan,
+                                                        int64_t                merge_chunk_rows) {
     const int64_t rows    = local.lse.numel();
     const int64_t shard_k = local.topk_values.size(1);
     if (rows == 0) {
@@ -1108,7 +1118,16 @@ ScoringPartials PyWrappedModel::tpReduceScoringPartials(const ScoringPartials& l
     const auto payload  = packScoringPartials(local);
     const auto gathered = tpSyncEmbeddingOrLogits(payload.view({1, -1})).view({device_props_.tp_size, payload.numel()});
     const int64_t vocab = description_.output_vocab_size > 0 ? static_cast<int64_t>(description_.output_vocab_size) : 0;
-    return mergeScoringPartials(gathered, rows, shard_k, k_max, vocab);
+    auto          merged = mergeScoringPartials(gathered, rows, shard_k, k_max, vocab, merge_chunk_rows);
+    if (check_nan) {
+        // The merged results are all-gather-identical on every rank, so this aborts
+        // symmetrically. Checking rank-local partials BEFORE the all-gather instead could
+        // let a subset of ranks throw while the rest enter the collective and hang.
+        const bool has_nan = merged.lse.isnan().any().item<bool>() || merged.target.isnan().any().item<bool>()
+                             || (merged.topk_values.numel() > 0 && merged.topk_values.isnan().any().item<bool>());
+        RTP_LLM_CHECK_WITH_INFO(!has_nan, "NAN detected in scoring logits");
+    }
+    return merged;
 }
 
 GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
@@ -1212,154 +1231,154 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         // When the input gatherer marked the exact token rows any consumer can read
         // (all_logits_row_indexes, set iff need_all_logits), run the full local lm head GEMM exactly
-        // as the unselected path would (same shapes -> bitwise-identical local logits), then select
-        // only [lm_output_indexes ++ all_logits_row_indexes] rows before the TP gather. The gather
-        // then moves a handful of rows instead of the whole prompt, so a long prompt-scoring request
-        // no longer materializes [tokens, vocab] fp32 per rank (the 3.46 GiB @3740-token allocation
-        // that OOMed nearly-full GPUs). The first lm_output_indexes.numel() rows of the gathered
-        // tensor remain the sampler-facing logits.
-        const bool row_select = need_all_logits && inputs.all_logits_row_indexes.defined();
+        // as the unselected path would (same shapes -> bitwise-identical local logits), then at
+        // tp>1 gather only the lm_output_indexes rows whole and reduce the
+        // all_logits_row_indexes scoring rows to compact scoring partials. A long
+        // prompt-scoring request then no longer materializes [tokens, vocab] fp32 per rank (the
+        // 3.46 GiB @3740-token allocation that OOMed nearly-full GPUs). The first
+        // lm_output_indexes.numel() rows of every row-selected output remain the sampler-facing
+        // logits.
+        // tp_size == 1 keeps the legacy full-row all_logits: there is no TP gather for the row
+        // selection to shrink, so the row-select machinery is skipped entirely.
+        const bool row_select = need_all_logits && inputs.all_logits_row_indexes.defined() && device_props_.tp_size > 1;
 
         torch::Tensor logits;
         torch::Tensor scoring_lse, scoring_target, scoring_topk_v, scoring_topk_i;
         if (row_select) {
-            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm_row_select)");
+            // TP-sharded scoring reduction: the sampler-facing lm rows are still gathered
+            // whole, but every selected scoring row is reduced to small per-row partials
+            // (logsumexp, raw target logit, per-shard top-k) and only that compact payload
+            // is all-gathered -- no rank materializes [rows, vocab] for scoring.
+            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_shard_selected_logits)");
             buffer_holder_.hold_host(inputs.all_logits_row_indexes);
-            auto scoring_rows_device = inputs.all_logits_row_indexes.to(torch::kCUDA, /*non_blocking=*/true);
-            auto row_indexes_device  = scoring_rows_device.numel() > 0 ?
-                                           torch::cat({lm_output_indexes_device, scoring_rows_device}, 0) :
-                                           lm_output_indexes_device;
+            auto       scoring_rows_device = inputs.all_logits_row_indexes.to(torch::kCUDA, /*non_blocking=*/true);
+            const auto num_scoring_rows    = scoring_rows_device.numel();
             // Local logits cover every executed token (identical GEMM to the unselected path);
-            // only the needed rows leave this rank. The full [tokens, local_vocab] temporary
-            // is released before the collectives so peak memory stays at one local copy.
-            bool int8_used = false;
-            if (device_props_.tp_size > 1) {
-                // TP-sharded scoring reduction: the sampler-facing lm rows are still gathered
-                // whole, but every selected scoring row is reduced to small per-row partials
-                // (logsumexp, raw target logit, per-shard top-k) and only that compact payload
-                // is all-gathered -- no rank materializes [rows, vocab] for scoring.
-                RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_shard_selected_logits)");
-                RTP_LLM_CHECK_WITH_INFO(inputs.all_logits_row_labels.defined()
-                                            && inputs.all_logits_row_labels.numel()
-                                                   == inputs.all_logits_row_indexes.numel(),
-                                        "row-selected TP scoring requires one all_logits_row_labels"
-                                        " entry per all_logits_row_indexes row");
+            // only the needed rows leave this rank.
+            bool          int8_used    = false;
+            torch::Tensor local_logits = lmHeadLocalLogits(last_hidden, lm_head->kernel, &int8_used);
+            RTP_LLM_CHECK_WITH_INFO(num_scoring_rows == 0
+                                        || (inputs.all_logits_row_labels.defined()
+                                            && inputs.all_logits_row_labels.numel() == num_scoring_rows),
+                                    "row-selected TP scoring requires one all_logits_row_labels"
+                                    " entry per all_logits_row_indexes row");
+            torch::Tensor scoring_labels_device;
+            if (num_scoring_rows > 0) {
                 buffer_holder_.hold_host(inputs.all_logits_row_labels);
-                auto scoring_labels_device = inputs.all_logits_row_labels.to(torch::kCUDA, /*non_blocking=*/true);
-                auto labels_full_device =
-                    torch::cat({torch::full({lm_output_indexes_device.size(0)}, -1, scoring_labels_device.options()),
-                                scoring_labels_device},
-                               0);
-                auto    local_logits = lmHeadLocalLogits(last_hidden, lm_head->kernel, &int8_used);
-                int64_t k_max        = inputs.all_logits_top_k;
-#if USING_CUDA
-                if (int8_used && int8_lm_head_check_) {
-                    // The check compares merged top-1 ids, so compute at least one top-k
-                    // entry even when no stream asked for prompt top-k.
-                    k_max = std::max<int64_t>(k_max, 1);
-                }
-#endif
-                const int64_t vocab_l       = local_logits.size(1);
-                const int64_t scoring_vocab = description_.output_vocab_size > 0 ?
-                                                  static_cast<int64_t>(description_.output_vocab_size) :
-                                                  vocab_l * device_props_.tp_size;
-                auto          partial       = computeShardScoringPartials(local_logits,
-                                                           row_indexes_device.to(torch::kLong),
-                                                           labels_full_device,
-                                                           k_max,
-                                                           device_props_.tp_rank * vocab_l,
-                                                           scoring_vocab,
-                                                           scoringPartialChunkRows(),
-                                                           check_nan_);
-                auto          lm_local      = local_logits.index_select(0, lm_output_indexes_device.to(torch::kLong));
-                local_logits                = torch::Tensor();
-#if USING_CUDA
-                if (int8_used && int8_lm_head_check_) {
-                    // Mirror lmHeadLogits' check mode: rebuild the bf16 reference over the same
-                    // token set, merge int8 partials for the stats, serve the reference.
-                    // Collective order (int8 partials, ref lm rows, ref partials) is identical
-                    // on every rank.
-                    auto ref_local = torch_ext::cublas_gemm_bf16_bf16_fp32(
-                        last_hidden.to(torch::kBFloat16).contiguous(), lm_head->kernel);
-                    auto ref_partial  = computeShardScoringPartials(ref_local,
-                                                                   row_indexes_device.to(torch::kLong),
-                                                                   labels_full_device,
-                                                                   k_max,
-                                                                   device_props_.tp_rank * vocab_l,
-                                                                   scoring_vocab,
-                                                                   scoringPartialChunkRows(),
-                                                                   check_nan_);
-                    auto ref_lm_local = ref_local.index_select(0, lm_output_indexes_device.to(torch::kLong));
-                    ref_local         = torch::Tensor();
-                    auto merged_int8  = tpReduceScoringPartials(partial, k_max);
-                    logits            = tpSyncEmbeddingOrLogits(ref_lm_local);
-                    auto merged_ref   = tpReduceScoringPartials(ref_partial, k_max);
-                    if (!int8_lm_head_check_stats_.defined()) {
-                        int8_lm_head_check_stats_ = torch::zeros({2}, torch::TensorOptions().dtype(torch::kLong));
-                    }
-                    int64_t mismatch = 0;
-                    if (merged_int8.topk_ids.defined() && merged_int8.topk_ids.size(1) > 0) {
-                        mismatch = (merged_int8.topk_ids.select(1, 0) != merged_ref.topk_ids.select(1, 0))
-                                       .sum()
-                                       .item<int64_t>();
-                    }
-                    int8_lm_head_check_stats_.select(0, 0).add_(row_indexes_device.numel());
-                    int8_lm_head_check_stats_.select(0, 1).add_(mismatch);
-                    if (++int8_lm_head_check_calls_ % 256 == 0) {
-                        RTP_LLM_LOG_INFO("INT8 LM head check: rows=%ld top1_mismatch=%ld",
-                                         int8_lm_head_check_stats_[0].item<int64_t>(),
-                                         int8_lm_head_check_stats_[1].item<int64_t>());
-                    }
-                    scoring_lse    = merged_ref.lse;
-                    scoring_target = merged_ref.target;
-                    scoring_topk_v = merged_ref.topk_values;
-                    scoring_topk_i = merged_ref.topk_ids;
-                } else
-#endif
-                {
-                    logits         = tpSyncEmbeddingOrLogits(lm_local);
-                    auto merged    = tpReduceScoringPartials(partial, k_max);
-                    scoring_lse    = merged.lse;
-                    scoring_target = merged.target;
-                    scoring_topk_v = merged.topk_values;
-                    scoring_topk_i = merged.topk_ids;
-                }
+                scoring_labels_device = inputs.all_logits_row_labels.to(torch::kCUDA, /*non_blocking=*/true);
             } else {
-                logits = lmHeadLocalLogits(last_hidden, lm_head->kernel, &int8_used)
-                             .index_select(0, row_indexes_device.to(torch::kLong));
+                scoring_labels_device =
+                    torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(scoring_rows_device.device()));
+            }
+            int64_t k_max = inputs.all_logits_top_k;
 #if USING_CUDA
             if (int8_used && int8_lm_head_check_) {
-                // Mirror lmHeadLogits' check mode on the served rows: rebuild the bf16
-                // reference over the same token set, select and gather the same rows,
-                // compare top-1, and serve the reference like the unselected path does.
-                auto ref = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16).contiguous(),
-                                                                 lm_head->kernel)
-                               .index_select(0, row_indexes_device.to(torch::kLong));
-                if (device_props_.tp_size > 1) {
-                    ref = tpSyncEmbeddingOrLogits(ref);
+                // The check compares merged top-1 ids, so compute at least one top-k
+                // entry even when no stream asked for prompt top-k.
+                k_max = std::max<int64_t>(k_max, 1);
+            }
+#endif
+            const int64_t vocab_l       = local_logits.size(1);
+            const int64_t scoring_vocab = description_.output_vocab_size > 0 ?
+                                              static_cast<int64_t>(description_.output_vocab_size) :
+                                              vocab_l * device_props_.tp_size;
+            // Compute partials and reduce them in row chunks: the local partial tensors,
+            // the packed payload, the all-gathered buffer and the merge temporaries all
+            // stay O(chunk_rows * shard_k) even when prompt_logits_top_k is as large as the
+            // vocabulary (k itself is a supported contract, never silently truncated). The
+            // chunk size is a function of synchronized state only — the scoringChunkRows
+            // shape hint broadcast (field or env value, identical on every rank), or the
+            // shared default when a producer bypassed tpSync — never a rank-local getenv,
+            // so every rank issues the same all-gathers in the same order. It is
+            // additionally clamped by the fixed scratch byte budget so a large accepted k
+            // cannot turn a fixed row count into a multi-GiB sort workspace.
+            const int64_t lm_rows          = lm_output_indexes_device.size(0);
+            const int64_t sel_rows         = lm_rows + num_scoring_rows;
+            const int64_t shard_k          = std::min<int64_t>(std::max<int64_t>(k_max, 0), vocab_l);
+            const int64_t configured_chunk = inputs.scoring_partial_chunk_rows > 0 ? inputs.scoring_partial_chunk_rows :
+                                                                                     kDefaultScoringPartialChunkRows;
+            const int64_t budget_chunk     = std::max<int64_t>(
+                1, kScoringMergeScratchBudgetBytes / (96 * device_props_.tp_size * std::max<int64_t>(shard_k, 1)));
+            const int64_t chunk =
+                num_scoring_rows > 0 ? std::min({configured_chunk, budget_chunk, num_scoring_rows}) : 1;
+            const auto scoring_rows_long = scoring_rows_device.to(torch::kLong);
+            // Partials are computed for the scoring rows only — the lm prefix rows of the
+            // outputs layout are sampler-facing (served from `logits`) and their lse/top-k
+            // values are never read, so reducing them would be pure waste.
+            auto reduce_chunk = [&](const torch::Tensor& src_local, int64_t c0, int64_t c) {
+                auto part = computeShardScoringPartials(src_local,
+                                                        scoring_rows_long.narrow(0, c0, c),
+                                                        scoring_labels_device.narrow(0, c0, c),
+                                                        k_max,
+                                                        device_props_.tp_rank * vocab_l,
+                                                        scoring_vocab,
+                                                        c);
+                return tpReduceScoringPartials(part, k_max, check_nan_, chunk);
+            };
+            // Outputs keep the [lm prefix ++ scoring rows] layout the dispatcher expects;
+            // the lm prefix carries placeholder rows (never consumed).
+            ScoringPartials merged;
+            merged.lse         = torch::zeros({sel_rows}, local_logits.options().dtype(torch::kFloat32));
+            merged.target      = torch::zeros({sel_rows}, local_logits.options().dtype(torch::kFloat32));
+            merged.topk_values = torch::zeros({sel_rows, shard_k}, local_logits.options().dtype(torch::kFloat32));
+            merged.topk_ids    = torch::zeros({sel_rows, shard_k},
+                                           torch::TensorOptions().dtype(torch::kInt32).device(local_logits.device()));
+            auto append_chunk  = [&](const ScoringPartials& m, int64_t c0, int64_t c) {
+                merged.lse.narrow(0, lm_rows + c0, c).copy_(m.lse);
+                merged.target.narrow(0, lm_rows + c0, c).copy_(m.target);
+                merged.topk_values.narrow(0, lm_rows + c0, c).copy_(m.topk_values);
+                merged.topk_ids.narrow(0, lm_rows + c0, c).copy_(m.topk_ids);
+            };
+#if USING_CUDA
+            if (int8_used && int8_lm_head_check_) {
+                // Mirror lmHeadLogits' check mode: rebuild the bf16 reference over the same
+                // token set, merge int8 partials per chunk for the stats, keep and serve the
+                // reference merge. Per chunk the collective order (int8 payload, ref payload)
+                // is identical on every rank; the ref lm-row gather follows the loop.
+                auto ref_local = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16).contiguous(),
+                                                                       lm_head->kernel);
+                torch::Tensor mismatch;
+                for (int64_t c0 = 0; c0 < num_scoring_rows; c0 += chunk) {
+                    const int64_t c    = std::min(chunk, num_scoring_rows - c0);
+                    auto          m_i8 = reduce_chunk(local_logits, c0, c);
+                    auto          m_rf = reduce_chunk(ref_local, c0, c);
+                    if (m_i8.topk_ids.defined() && m_i8.topk_ids.size(1) > 0) {
+                        auto diff = (m_i8.topk_ids.select(1, 0) != m_rf.topk_ids.select(1, 0)).sum();
+                        mismatch  = mismatch.defined() ? mismatch + diff : diff;
+                    }
+                    append_chunk(m_rf, c0, c);
                 }
+                auto ref_lm_local = ref_local.index_select(0, lm_output_indexes_device.to(torch::kLong));
+                ref_local         = torch::Tensor();
+                logits            = tpSyncEmbeddingOrLogits(ref_lm_local);
                 if (!int8_lm_head_check_stats_.defined()) {
-                    int8_lm_head_check_stats_ = torch::zeros({2}, ref.options().dtype(torch::kLong));
+                    int8_lm_head_check_stats_ = torch::zeros({2}, logits.options().dtype(torch::kLong));
                 }
-                auto          ref_top1 = ref;
-                auto          out_top1 = logits;
-                const int64_t vocab    = static_cast<int64_t>(description_.output_vocab_size);
-                if (vocab > 0 && vocab < ref.size(1)) {
-                    ref_top1 = ref.narrow(1, 0, vocab);
-                    out_top1 = logits.narrow(1, 0, vocab);
+                int8_lm_head_check_stats_.select(0, 0).add_(num_scoring_rows);
+                if (mismatch.defined()) {
+                    int8_lm_head_check_stats_.select(0, 1).add_(mismatch);
                 }
-                auto mismatch = (ref_top1.argmax(-1) != out_top1.argmax(-1)).sum();
-                int8_lm_head_check_stats_.select(0, 0).add_(ref.size(0));
-                int8_lm_head_check_stats_.select(0, 1).add_(mismatch);
                 if (++int8_lm_head_check_calls_ % 256 == 0) {
                     auto s = int8_lm_head_check_stats_.cpu();
                     RTP_LLM_LOG_INFO(
                         "INT8 LM head check: rows=%ld top1_mismatch=%ld", s[0].item<int64_t>(), s[1].item<int64_t>());
                 }
-                logits = ref;
-            }
+            } else
 #endif
+            {
+                // Gather the sampler lm rows first, then the per-chunk payload all-gathers —
+                // the same collective sequence on every rank.
+                logits =
+                    tpSyncEmbeddingOrLogits(local_logits.index_select(0, lm_output_indexes_device.to(torch::kLong)));
+                for (int64_t c0 = 0; c0 < num_scoring_rows; c0 += chunk) {
+                    const int64_t c = std::min(chunk, num_scoring_rows - c0);
+                    append_chunk(reduce_chunk(local_logits, c0, c), c0, c);
+                }
             }
+            scoring_lse    = merged.lse;
+            scoring_target = merged.target;
+            scoring_topk_v = merged.topk_values;
+            scoring_topk_i = merged.topk_ids;
         } else {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
             logits = lmHeadLogits(last_hidden, lm_head->kernel);
@@ -1390,15 +1409,11 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                 outputs.all_hidden_states  = hidden;
                 outputs.softmax_result     = softmax_result_t;
                 outputs.all_logits_lm_rows = lm_rows;
-                if (device_props_.tp_size > 1) {
-                    // Compact per-row reductions; all_logits itself is never materialized.
-                    outputs.all_logits_lse           = scoring_lse;
-                    outputs.all_logits_target_logits = scoring_target;
-                    outputs.all_logits_topk_values   = scoring_topk_v;
-                    outputs.all_logits_topk_ids      = scoring_topk_i;
-                } else {
-                    outputs.all_logits = logits;
-                }
+                // Compact per-row reductions; all_logits itself is never materialized.
+                outputs.all_logits_lse           = scoring_lse;
+                outputs.all_logits_target_logits = scoring_target;
+                outputs.all_logits_topk_values   = scoring_topk_v;
+                outputs.all_logits_topk_ids      = scoring_topk_i;
                 return outputs;
             }
             auto last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));

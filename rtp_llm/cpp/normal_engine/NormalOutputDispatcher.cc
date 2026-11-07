@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <c10/util/Exception.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdlib>
 #include <string>
@@ -61,7 +62,8 @@ bool isOutOfMemoryMessage(const char* what) {
 
 }  // namespace
 
-std::function<void(const GenerateStreamPtr&)> NormalOutputDispatcher::test_scoring_failure_hook = nullptr;
+std::shared_ptr<std::function<void(const GenerateStreamPtr&)>> NormalOutputDispatcher::test_scoring_failure_hook =
+    nullptr;
 
 bool NormalOutputDispatcher::failStreamOnScoringOom(const GenerateStreamPtr& stream, const char* what) const {
     if (warm_up_) {
@@ -76,7 +78,9 @@ bool NormalOutputDispatcher::failStreamOnScoringOom(const GenerateStreamPtr& str
     }
     RTP_LLM_LOG_ERROR(
         "stream [%ld] prompt-scoring output aborted by out-of-memory: %s", stream->streamId(), detail.c_str());
-    stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "prompt-scoring request aborted by out-of-memory: " + detail);
+    // The client gets a stable minimal message; raw allocator diagnostics (device addresses,
+    // pool internals) stay in the server log above.
+    stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "prompt-scoring request aborted by out-of-memory");
     return true;
 }
 
@@ -326,11 +330,13 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         batch_cum_log_probs = sampler_output.cum_log_probs.narrow(0, batch_idx_out, next_batch_size);
     }
 
-    // Scoring-side temporaries (fp32 logits slice, logsumexp, cross-entropy) still allocate
-    // [rows, vocab]-scale buffers per stream and can exhaust device memory on very long
-    // prompts. Guard ONLY this stream's own scoring computation: on an out-of-memory throw,
-    // fail this stream request-locally and let every other stream in the batch finish.
-    // Anything that is not an out-of-memory rethrows unchanged, and warm-up never swallows.
+    // Scoring-side temporaries can still allocate [rows, vocab]-scale buffers per stream —
+    // the tp_size==1 / non-selected producers keep legacy all_logits and the tp>1 sharded
+    // path allocates the contract-sized merged outputs — and can exhaust device memory on
+    // very long prompts. Guard ONLY this stream's own scoring computation: on an
+    // out-of-memory throw, fail this stream request-locally and let every other stream in
+    // the batch finish. Anything that is not an out-of-memory rethrows unchanged, and
+    // warm-up never swallows.
     torch::Tensor                     loss;
     std::optional<PromptLogitsOutput> prompt_logits_output;
     try {
@@ -340,8 +346,11 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         const bool consumes_scoring =
             stream->calculateLoss()
             || (stream->returnPromptLogits() && (model_output.all_logits.defined() || has_sharded_scoring));
-        if (consumes_scoring && test_scoring_failure_hook) {
-            test_scoring_failure_hook(stream);
+        if (consumes_scoring) {
+            const auto failure_hook = std::atomic_load(&test_scoring_failure_hook);
+            if (failure_hook) {
+                (*failure_hook)(stream);
+            }
         }
 
         if (stream->calculateLoss()) {

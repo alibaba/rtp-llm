@@ -11,9 +11,10 @@ namespace rtp_llm {
 //   calculate_loss       -> [0, token_size - 1)
 //   both                 -> their union (contiguous, because the loss range starts at 0)
 //   neither              -> empty
-// NormalModelInputGatherer uses this to build the TP-gather row set (all_logits_row_indexes) and
-// NormalOutputDispatcher uses the identical rule to locate each stream's slice inside the gathered
-// all_logits. The clamping must stay byte-for-byte identical to the dispatcher's window logic.
+// NormalModelInputGatherer uses this to build the scoring row set (all_logits_row_indexes) and
+// NormalOutputDispatcher uses the identical rule to locate each stream's slice inside the
+// produced scoring outputs (legacy all_logits at tp==1, sharded partial rows at tp>1). The
+// clamping must stay byte-for-byte identical to the dispatcher's window logic.
 inline std::pair<int, int> promptScoringRowRange(
     int token_size, bool calculate_loss, bool return_prompt_logits, int prompt_logits_start, int prompt_logits_end) {
     int a = 0, b = 0;

@@ -455,6 +455,17 @@ Scenario makeScenario(const std::string& name) {
     if (name == "micro_batch_scoring") {
         return makeMicroBatchScoringScenario();
     }
+    if (name == "micro_batch_scoring_tp2") {
+        // Same scoring input under tp=2 (mock communication is supplied by the test):
+        // the row metadata must drive the sharded partials path instead of the legacy
+        // full-window all_logits.
+        auto scenario                         = makeMicroBatchScoringScenario();
+        scenario.parallelism.tp_size          = 2;
+        scenario.parallelism.tp_rank          = 0;
+        scenario.inputs.all_logits_row_labels = pinnedTensor({7, -1, 4}, {3});
+        scenario.inputs.all_logits_top_k      = 3;
+        return scenario;
+    }
     if (name == "cp_actual_lengths") {
         return makeContextParallelScenario();
     }
@@ -562,18 +573,30 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
         }
         outputs = model.forward(scenario.inputs);
     }
-    auto result                  = serializeResult(*cache_store, scenario.base_addresses);
-    result["logits"]             = outputs.logits.defined() ? py::cast(outputs.logits) : py::none();
-    result["all_logits"]         = outputs.all_logits.defined() ? py::cast(outputs.all_logits) : py::none();
-    result["all_logits_lm_rows"] = outputs.all_logits_lm_rows;
+    auto result          = serializeResult(*cache_store, scenario.base_addresses);
+    auto cast_or_none    = [](const torch::Tensor& t) -> py::object { return t.defined() ? py::cast(t) : py::none(); };
+    result["logits"]     = cast_or_none(outputs.logits);
+    result["all_logits"] = cast_or_none(outputs.all_logits);
+    result["all_logits_lm_rows"]       = outputs.all_logits_lm_rows;
+    result["all_logits_lse"]           = cast_or_none(outputs.all_logits_lse);
+    result["all_logits_target_logits"] = cast_or_none(outputs.all_logits_target_logits);
+    result["all_logits_topk_values"]   = cast_or_none(outputs.all_logits_topk_values);
+    result["all_logits_topk_ids"]      = cast_or_none(outputs.all_logits_topk_ids);
     return result;
 }
 
 }  // namespace
 }  // namespace rtp_llm::test
 
+namespace rtp_llm {
+void registerExecCtxOps(pybind11::module& m);
+}
+
 PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
+    // Exposes register_comm_ops/clear_comm_ops so the test can mock TP communication
+    // without importing librtp_compute_ops (which would double-register pybind types).
+    rtp_llm::registerExecCtxOps(m);
     m.def("run_scenario",
           &rtp_llm::test::runPyWrappedModelCacheStoreScenario,
           py::arg("py_model"),

@@ -4,12 +4,43 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
 
 namespace rtp_llm {
+
+namespace {
+
+// RTP_LLM_SCORING_PARTIAL_CHUNK_ROWS sets the row budget for the tp>1 scoring
+// all-gather/merge. It is parsed once, identically on every rank, and the result only
+// ever reaches the forward loop through the broadcast shape hint — so a malformed local
+// value can never make a single rank throw or pick a different chunk size than its peers.
+// Empty/unparseable/non-positive input falls back to kDefaultScoringPartialChunkRows.
+int64_t scoringPartialChunkRowsFromEnv() {
+    static const int64_t parsed = []() {
+        const char* env = std::getenv("RTP_LLM_SCORING_PARTIAL_CHUNK_ROWS");
+        if (env == nullptr || *env == '\0') {
+            return kDefaultScoringPartialChunkRows;
+        }
+        errno                 = 0;
+        char*           end   = nullptr;
+        const long long value = std::strtoll(env, &end, 10);
+        if (errno != 0 || end == env || *end != '\0' || value <= 0 || value > std::numeric_limits<int32_t>::max()) {
+            RTP_LLM_LOG_WARNING("invalid RTP_LLM_SCORING_PARTIAL_CHUNK_ROWS='%s', using default %ld",
+                                env,
+                                kDefaultScoringPartialChunkRows);
+            return kDefaultScoringPartialChunkRows;
+        }
+        return static_cast<int64_t>(value);
+    }();
+    return parsed;
+}
+
+}  // namespace
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
@@ -78,6 +109,14 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::allLogitsRowIndexes] =
         inputs.all_logits_row_indexes.defined() ? inputs.all_logits_row_indexes.numel() : 0;
     shape_hints[GptModelInputIndex::allLogitsTopK] = inputs.all_logits_top_k;
+    const bool row_idx_defined                     = inputs.all_logits_row_indexes.defined();
+    const bool row_lbl_defined                     = inputs.all_logits_row_labels.defined();
+    const bool row_len_equal                       = row_idx_defined && row_lbl_defined
+                               && inputs.all_logits_row_indexes.numel() == inputs.all_logits_row_labels.numel();
+    shape_hints[GptModelInputIndex::allLogitsRowMeta] =
+        (row_idx_defined ? 2 : 0) | (row_lbl_defined ? 1 : 0) | (row_len_equal ? 4 : 0);
+    shape_hints[GptModelInputIndex::scoringChunkRows] =
+        inputs.scoring_partial_chunk_rows > 0 ? inputs.scoring_partial_chunk_rows : scoringPartialChunkRowsFromEnv();
 
     // encode root-side tensor device for fields that may live on GPU on the
     // PDFUSION fast path, so non-root ranks can allocate matching GPU buffers
@@ -136,6 +175,41 @@ std::array<int64_t, 2> decodeMtpHiddenStatesShape(int64_t total_numel, int64_t r
     return {rows, cols};
 }
 
+void checkScoringRowMetaConsistent(bool need_all_logits, int64_t row_meta) {
+    const bool indexes_defined = (row_meta & 2) != 0;
+    const bool labels_defined  = (row_meta & 1) != 0;
+    const bool lengths_equal   = (row_meta & 4) != 0;
+    RTP_LLM_CHECK_WITH_INFO(row_meta >= 0 && row_meta <= 7,
+                            "tpSyncModelInputs: invalid allLogitsRowMeta hint %lld",
+                            static_cast<long long>(row_meta));
+    // bit2 (lengths equal) may only be set when both tensors are defined.
+    RTP_LLM_CHECK_WITH_INFO(!lengths_equal || (indexes_defined && labels_defined),
+                            "tpSyncModelInputs: allLogitsRowMeta hint %lld sets the "
+                            "lengths-equal bit without both tensors defined",
+                            static_cast<long long>(row_meta));
+    // Producer contract: the root attaches the (possibly empty) row set iff need_all_logits.
+    // A producer that diverges — flag without tensor or tensor without flag — would make the
+    // all-gather row counts disagree across ranks and hang NCCL, so fail fast before
+    // broadcasting.
+    RTP_LLM_CHECK_WITH_INFO(need_all_logits == indexes_defined,
+                            "tpSyncModelInputs: need_all_logits=%d but all_logits_row_indexes is %s; "
+                            "attach the (possibly empty) row tensor iff need_all_logits is set",
+                            static_cast<int>(need_all_logits),
+                            indexes_defined ? "defined" : "undefined");
+    // The sharded scoring reduction needs one label per scoring row on every rank; it is
+    // broadcast together with the row indexes, so the producer must attach both or neither.
+    RTP_LLM_CHECK_WITH_INFO(indexes_defined == labels_defined,
+                            "tpSyncModelInputs: all_logits_row_indexes is %s but "
+                            "all_logits_row_labels is %s; attach both or neither",
+                            indexes_defined ? "defined" : "undefined",
+                            labels_defined ? "defined" : "undefined");
+    // A defined row set whose label count differs from its index count would make root and
+    // non-root disagree on the packed broadcast size, so reject it before packing.
+    RTP_LLM_CHECK_WITH_INFO(!indexes_defined || lengths_equal,
+                            "tpSyncModelInputs: all_logits_row_labels row count differs from "
+                            "all_logits_row_indexes; label rows must align 1:1 with index rows");
+}
+
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
         return;
@@ -166,6 +240,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_all_hidden_states          = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
     inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    inputs.scoring_partial_chunk_rows      = shape_hints_ptr[GptModelInputIndex::scoringChunkRows];
     if (inputs.skip_run) {
         return;
     }
@@ -388,24 +463,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
     collect(inputs.lm_output_indexes);
-    if (!is_non_root) {
-        // Producer contract: the root attaches the (possibly empty) row set iff need_all_logits,
-        // and non-root ranks mirror that definedness from the synchronized flag. A root that
-        // diverges — flag without tensor or tensor without flag — would make the all-gather row
-        // counts disagree across ranks and hang NCCL, so fail fast before broadcasting.
-        RTP_LLM_CHECK_WITH_INFO(inputs.need_all_logits == inputs.all_logits_row_indexes.defined(),
-                                "tpSyncModelInputs: need_all_logits=%d but all_logits_row_indexes is %s; "
-                                "attach the (possibly empty) row tensor iff need_all_logits is set",
-                                static_cast<int>(inputs.need_all_logits),
-                                inputs.all_logits_row_indexes.defined() ? "defined" : "undefined");
-        // The sharded scoring reduction needs one label per scoring row on every rank; it is
-        // broadcast together with the row indexes, so the producer must attach both or neither.
-        RTP_LLM_CHECK_WITH_INFO(inputs.all_logits_row_indexes.defined() == inputs.all_logits_row_labels.defined(),
-                                "tpSyncModelInputs: all_logits_row_indexes is %s but "
-                                "all_logits_row_labels is %s; attach both or neither",
-                                inputs.all_logits_row_indexes.defined() ? "defined" : "undefined",
-                                inputs.all_logits_row_labels.defined() ? "defined" : "undefined");
-    }
+    // Producer contract for the scoring-row metadata, evaluated from the broadcast shape
+    // hints so every rank checks the identical value and aborts at the same point — a
+    // root-only check could leave non-root ranks waiting inside the packed broadcast
+    // after root already failed.
+    checkScoringRowMetaConsistent(inputs.need_all_logits, shape_hints_ptr[GptModelInputIndex::allLogitsRowMeta]);
     collect(inputs.all_logits_row_indexes);
     collect(inputs.all_logits_row_labels);
     if (combo_position_ids_size) {

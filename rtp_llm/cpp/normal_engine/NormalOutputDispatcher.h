@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <memory>
 #include <optional>
 
 #include <torch/all.h>
@@ -26,9 +27,11 @@ public:
 
     // Test seam (nullptr in production): invoked inside dispatchSingleStream's guarded
     // prompt-scoring/loss block so tests can inject e.g. a c10::OutOfMemoryError for a
-    // specific stream without exhausting real memory. Modeled on
-    // NormalExecutor::test_model_factory.
-    static std::function<void(const GenerateStreamPtr&)> test_scoring_failure_hook;
+    // specific stream without exhausting real memory. Publication/reset MUST go through
+    // std::atomic_store on this shared_ptr and the read side loads with std::atomic_load —
+    // the engine thread can read it concurrently with test setup/teardown. The pointed-to
+    // std::function stays immutable once published.
+    static std::shared_ptr<std::function<void(const GenerateStreamPtr&)>> test_scoring_failure_hook;
 
 private:
     bool restoreCurrentTokenIds(const GenerateStreamPtr& stream,

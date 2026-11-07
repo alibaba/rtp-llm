@@ -30,14 +30,17 @@ struct ScoringPartials {
 // shard_lo is this rank's first global vocab id; vocab is the real (unpadded) vocab size so
 // padded tail columns are excluded exactly like the gathered path's output_vocab_size narrow.
 // Rows are processed in chunk_rows-sized batches to bound the [c, vocab_l] temporaries.
+// NOTE: no NaN check happens here. The merged results are checked after the all-gather
+// (PyWrappedModel::tpReduceScoringPartials) because a rank-local pre-collective abort could
+// desynchronize the TP group: merged values are identical on every rank, so the abort is
+// symmetric by construction.
 inline ScoringPartials computeShardScoringPartials(const torch::Tensor& local_logits,
                                                    const torch::Tensor& row_indexes,
                                                    const torch::Tensor& labels,
                                                    int64_t              k_max,
                                                    int64_t              shard_lo,
                                                    int64_t              vocab,
-                                                   int64_t              chunk_rows,
-                                                   bool                 check_nan) {
+                                                   int64_t              chunk_rows) {
     const int64_t rows    = row_indexes.numel();
     const int64_t vocab_l = local_logits.size(1);
     const int64_t n_valid = std::clamp(vocab - shard_lo, (int64_t)0, vocab_l);
@@ -57,9 +60,6 @@ inline ScoringPartials computeShardScoringPartials(const torch::Tensor& local_lo
     for (int64_t c0 = 0; c0 < rows; c0 += chunk_rows) {
         const int64_t c   = std::min(chunk_rows, rows - c0);
         auto          sel = local_logits.index_select(0, row_indexes.narrow(0, c0, c)).to(torch::kFloat32);
-        if (check_nan) {
-            RTP_LLM_CHECK_WITH_INFO(!sel.isnan().any().item<bool>(), "NAN detected in scoring logits");
-        }
         const auto valid = n_valid < vocab_l ? sel.narrow(1, 0, n_valid) : sel;
         out.lse.narrow(0, c0, c).copy_(valid.logsumexp(-1));
         if (shard_k > 0) {
@@ -100,45 +100,71 @@ inline torch::Tensor packScoringPartials(const ScoringPartials& partials) {
 
 // Merges one rank-major [tp_size, payload_len] all-gathered payload into the global per-row
 // results: logsumexp over the shard lses (valid shards only contribute real columns, so the
-// global lse is exact up to reduction order), max over the -inf-padded target column, and a
-// deterministic top-k merge ordered by value desc then global token id asc.
-inline ScoringPartials
-mergeScoringPartials(const torch::Tensor& gathered, int64_t rows, int64_t shard_k, int64_t k_max, int64_t vocab) {
-    const int64_t   tp_size = gathered.size(0);
+// global lse is exact up to reduction order) and max over the -inf-padded target column.
+// Top-k ordering contract (documented honestly — same "unspecified ties" class as the legacy
+// gathered path's torch.topk):
+//   * merged topk_values are exact: every shard contributes its local top-min(k_max, n_valid),
+//     which provably contains all global top-k_max candidates, and the merge sorts by the
+//     order-preserving float bit map.
+//   * the merge order is a total deterministic order: value descending under the bit map
+//     (+NaN largest, -NaN smallest, -0.0 below +0.0), then global token id ascending among the
+//     candidates that survive to the merge.
+//   * candidates that tie at a shard's LOCAL top-k cutoff may be dropped by torch.topk before
+//     they ever reach the merge (torch's tie choice is unspecified), so a smaller-id tied
+//     token is not guaranteed to appear. Callers must not rely on a globally stable
+//     smallest-id rule for ties — matching the unspecified tie behavior the legacy
+//     [rows, vocab] torch.topk already had.
+// Rows are merged in chunk_rows-sized batches so the [c, tp_size*shard_k] value/id/key
+// temporaries stay bounded.
+inline ScoringPartials mergeScoringPartials(
+    const torch::Tensor& gathered, int64_t rows, int64_t shard_k, int64_t k_max, int64_t vocab, int64_t chunk_rows) {
+    const int64_t tp_size = gathered.size(0);
+    RTP_LLM_CHECK_WITH_INFO(chunk_rows > 0, "scoring merge chunk_rows must be positive, got %ld", chunk_rows);
     ScoringPartials out;
-    out.lse    = gathered.narrow(1, 0, rows).t().logsumexp(-1);
-    out.target = std::get<0>(gathered.narrow(1, rows, rows).max(0));
+    out.lse       = torch::empty({rows}, gathered.options());
+    out.target    = torch::empty({rows}, gathered.options());
+    int64_t k_out = 0;
     if (shard_k > 0) {
-        int64_t k_out = std::min(k_max, tp_size * shard_k);
+        k_out = std::min(k_max, tp_size * shard_k);
         if (vocab > 0) {
             // Same clamp the gathered path applies via .narrow(1, 0, output_vocab_size): a top-k
             // wider than the real vocab must not emit padded-column placeholders.
             k_out = std::min(k_out, vocab);
         }
-        auto vals = gathered.narrow(1, 2 * rows, rows * shard_k)
-                        .view({tp_size, rows, shard_k})
-                        .permute({1, 0, 2})
-                        .reshape({rows, tp_size * shard_k});
-        auto ids = gathered.view(torch::kInt32)
-                       .narrow(1, 2 * rows + rows * shard_k, rows * shard_k)
-                       .view({tp_size, rows, shard_k})
-                       .permute({1, 0, 2})
-                       .reshape({rows, tp_size * shard_k});
-        // Pack (value desc, global id asc) into one int64 key: flip the float bits into the
-        // order-preserving mapping, then append the id complement as tie-breaker. Keys are
-        // unique across shards, so the merge order is deterministic regardless of sort
-        // stability.
-        const int64_t kHalf = int64_t{1} << 31;
-        const int64_t kSpan = int64_t{1} << 32;
-        const auto    b     = vals.view(torch::kInt32).to(torch::kInt64);
-        const auto    skey  = torch::where(b >= 0, b + kHalf, ~b) - kHalf;
-        const auto    key   = skey * kSpan + (kSpan - 1 - ids.to(torch::kInt64));
-        const auto    ord   = std::get<1>(key.sort(1, /*descending=*/true)).narrow(1, 0, k_out);
-        out.topk_values     = vals.gather(1, ord);
-        out.topk_ids        = ids.gather(1, ord);
+        out.topk_values = torch::empty({rows, k_out}, gathered.options());
+        out.topk_ids    = torch::empty({rows, k_out}, gathered.options().dtype(torch::kInt32));
     } else {
         out.topk_values = torch::empty({rows, 0}, gathered.options());
         out.topk_ids    = torch::empty({rows, 0}, gathered.options().dtype(torch::kInt32));
+    }
+    // Pack (value desc, global id asc) into one int64 key: flip the float bits into the
+    // order-preserving mapping, then append the id complement as tie-breaker. Keys are
+    // unique across shards, so the merge order is deterministic regardless of sort
+    // stability.
+    const int64_t kHalf        = int64_t{1} << 31;
+    const int64_t kSpan        = int64_t{1} << 32;
+    const auto    gathered_i32 = gathered.view(torch::kInt32);
+    for (int64_t c0 = 0; c0 < rows; c0 += chunk_rows) {
+        const int64_t c = std::min(chunk_rows, rows - c0);
+        out.lse.narrow(0, c0, c).copy_(gathered.narrow(1, c0, c).t().logsumexp(-1));
+        out.target.narrow(0, c0, c).copy_(std::get<0>(gathered.narrow(1, rows + c0, c).max(0)));
+        if (shard_k == 0 || k_out == 0) {
+            continue;
+        }
+        auto vals = gathered.narrow(1, 2 * rows + c0 * shard_k, c * shard_k)
+                        .view({tp_size, c, shard_k})
+                        .permute({1, 0, 2})
+                        .reshape({c, tp_size * shard_k});
+        auto ids = gathered_i32.narrow(1, 2 * rows + rows * shard_k + c0 * shard_k, c * shard_k)
+                       .view({tp_size, c, shard_k})
+                       .permute({1, 0, 2})
+                       .reshape({c, tp_size * shard_k});
+        const auto b    = vals.view(torch::kInt32).to(torch::kInt64);
+        const auto skey = torch::where(b >= 0, b + kHalf, ~b) - kHalf;
+        const auto key  = skey * kSpan + (kSpan - 1 - ids.to(torch::kInt64));
+        const auto ord  = std::get<1>(key.sort(1, /*descending=*/true)).narrow(1, 0, k_out);
+        out.topk_values.narrow(0, c0, c).copy_(vals.gather(1, ord));
+        out.topk_ids.narrow(0, c0, c).copy_(ids.gather(1, ord));
     }
     return out;
 }
