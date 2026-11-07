@@ -146,8 +146,8 @@ def _no_sparse_prefill():
     # Guard both lazy imports and already imported aliases. Providers themselves
     # are never mocked with fake numerical output: forbidden calls fail loudly.
     importlib.import_module("flash_mla")
+    importlib.import_module("flash_mla_sm90")
     importlib.import_module("rtp_llm.models_py.modules.dsv41.flash_mla")
-    importlib.import_module("rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_attention")
     with contextlib.ExitStack() as stack:
         for name, module in list(sys.modules.items()):
             if name.startswith(("flash_mla", "rtp_llm.models_py.modules.dsv41")):
