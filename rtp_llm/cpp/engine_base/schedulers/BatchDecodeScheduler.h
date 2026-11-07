@@ -123,6 +123,9 @@ public:
         autil::legacy::FromJsonString(config, scheduler_info);
         if (offload_max_batch_size_) {
             validateOffloadBatchSize(config.batch_size_, *offload_max_batch_size_);
+            if (config.mode_ != "decode") {
+                throw std::invalid_argument("sparse KV offload requires scheduler mode=decode");
+            }
         }
         {
             std::lock_guard<std::mutex> lock(lock_);

@@ -1381,14 +1381,17 @@ TEST(BatchDecodeSchedulerPolicyTest, RejectsOffloadCapacityOverflow) {
 
     batch_size = 2;
     BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
-    for (const auto* invalid : {R"({"batch_size":3,"mode":"prefill"})", R"({"batch_size":0,"mode":"prefill"})"}) {
+    for (const auto* invalid : {R"({"batch_size":3,"mode":"decode"})",
+                                R"({"batch_size":0,"mode":"decode"})",
+                                R"({"batch_size":1,"mode":"prefill"})",
+                                R"({"batch_size":1,"mode":"unknown"})"}) {
         EXPECT_THROW(scheduler.updateSchedulerInfo(invalid), std::invalid_argument);
         EXPECT_EQ(scheduler.batch_size_, 2);
         EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchDecode);
     }
-    EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":1,"mode":"prefill"})"));
+    EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":1,"mode":"decode"})"));
     EXPECT_EQ(scheduler.batch_size_, 1);
-    EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchPrefill);
+    EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchDecode);
     EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":2,"mode":"decode"})"));
     EXPECT_EQ(scheduler.batch_size_, 2);
     EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchDecode);
@@ -1402,8 +1405,9 @@ TEST(BatchDecodeSchedulerPolicyTest, KeepsNonOffloadBatchSizeIndependent) {
     runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 3;
     BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
     EXPECT_EQ(scheduler.batch_size_, 3);
-    EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":4})"));
+    EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":4,"mode":"prefill"})"));
     EXPECT_EQ(scheduler.batch_size_, 4);
+    EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchPrefill);
 }
 
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerSchedulesNonzeroBatch) {

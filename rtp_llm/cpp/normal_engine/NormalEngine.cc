@@ -978,20 +978,26 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
-bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
+bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream, bool require_decode) const {
     if (stream->hasError()) {
         return false;
     }
     const auto& config = *stream->generateConfig();
     // Warmup uses one internal stream to simulate a full batch. Real requests
     // must map to one sequence for both the P/D handoff and offload capacity.
-    if (kv_cache_config.enable_sparse_kv_offload && !stream->isFakeStream()
-        && !stream->generateInput()->fake_query
-        && (config.num_return_sequences > 1 || config.num_beams > 1 || !config.variable_num_beams.empty())) {
-        stream->reportError(ErrorCode::INVALID_PARAMS,
-                            "sparse KV offload only supports single-sequence requests: num_return_sequences and "
-                            "num_beams must be 1, and variable_num_beams must be empty");
-        return false;
+    if (kv_cache_config.enable_sparse_kv_offload && !stream->isFakeStream() && !stream->generateInput()->fake_query) {
+        if (config.num_return_sequences > 1 || config.num_beams > 1 || !config.variable_num_beams.empty()) {
+            stream->reportError(ErrorCode::INVALID_PARAMS,
+                                "sparse KV offload only supports single-sequence requests: num_return_sequences and "
+                                "num_beams must be 1, and variable_num_beams must be empty");
+            return false;
+        }
+        if (require_decode && stream->isContextStream()) {
+            stream->reportError(ErrorCode::INVALID_PARAMS,
+                                "sparse KV offload does not support ordinary context prefill; "
+                                "submit requests through P/D handoff");
+            return false;
+        }
     }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
         return true;
@@ -1050,7 +1056,8 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
     auto stream = createStream(input);
     // DecodeRpcServer allocates the destination KV table before enqueue/P-D handoff.
     stream->setReserveStep(reserveStepForStream(reserve_step_, stream->generateConfig()->isPrefillOnly()));
-    (void)validateStreamForScheduling(stream);
+    // P/D streams remain context until their prompt KV has been loaded; require decode only at enqueue.
+    (void)validateStreamForScheduling(stream, /*require_decode=*/false);
     return stream;
 }
 

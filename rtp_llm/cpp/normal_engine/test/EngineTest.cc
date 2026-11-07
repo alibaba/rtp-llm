@@ -602,7 +602,7 @@ TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {
     EXPECT_EQ(positive_stream->curBlocksNum(), 0);
 }
 
-TEST_F(NormalEngineTest, testSparseOffloadRejectsMultiSequenceRequestsBeforeScheduling) {
+TEST_F(NormalEngineTest, testSparseOffloadRejectsUnsupportedRequestsBeforeScheduling) {
     auto make_query = [] {
         auto query                             = make_shared<GenerateInput>();
         query->input_ids                       = torch::tensor({1, 2, 3, 4}, torch::kInt32);
@@ -627,14 +627,14 @@ TEST_F(NormalEngineTest, testSparseOffloadRejectsMultiSequenceRequestsBeforeSche
         engine->kv_cache_config.enable_sparse_kv_offload         = true;
         engine->kv_cache_config.sparse_kv_offload_hot_cache_mode = mode;
         const auto initial_free_blocks = engine->getCacheManager()->freeBlocksNum();
-        for (int variant = 0; variant < 4; ++variant) {
+        for (int variant = 0; variant < 5; ++variant) {
             SCOPED_TRACE(variant);
             auto query = make_query();
             if (variant == 0) {
                 query->generate_config->num_return_sequences = 2;
             } else if (variant == 1) {
                 query->generate_config->num_beams = 2;
-            } else {
+            } else if (variant < 4) {
                 // Even an all-one variable schedule uses the unsupported beam API.
                 query->generate_config->variable_num_beams = variant == 2 ? std::vector<int>{1, 2} :
                                                                           std::vector<int>{1, 1};
@@ -643,11 +643,19 @@ TEST_F(NormalEngineTest, testSparseOffloadRejectsMultiSequenceRequestsBeforeSche
                 ASSERT_NE(stream, nullptr);
                 EXPECT_TRUE(stream->hasError());
                 EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
-                EXPECT_NE(stream->stopReason().find("single-sequence"), std::string::npos);
+                EXPECT_NE(stream->stopReason().find(variant == 4 ? "context prefill" : "single-sequence"),
+                          std::string::npos);
                 EXPECT_EQ(stream->curBlocksNum(), 0);
                 EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
             };
-            check_rejected(engine->makeStream(query));
+            auto prepared = engine->makeStream(query);
+            if (variant == 4) {
+                // P/D allocation creates a context stream before importing prompt KV.
+                EXPECT_FALSE(prepared->hasError());
+                EXPECT_TRUE(prepared->isContextStream());
+                engine->enqueue(prepared);
+            }
+            check_rejected(prepared);
             check_rejected(engine->enqueue(query));
             auto direct_stream = engine->createStream(query);
             engine->enqueue(direct_stream);
@@ -665,7 +673,12 @@ TEST_F(NormalEngineTest, testSparseOffloadRejectsMultiSequenceRequestsBeforeSche
         auto warmup = make_query();
         warmup->fake_query = true;
         warmup->generate_config->num_return_sequences = 32;
-        EXPECT_FALSE(engine->makeStream(warmup)->hasError());
+        auto warmup_stream                            = engine->makeStream(warmup);
+        EXPECT_FALSE(warmup_stream->hasError());
+        EXPECT_TRUE(engine->validateStreamForScheduling(warmup_stream));
+        warmup->fake_query = false;
+        warmup_stream->setIsFakeStream(true);
+        EXPECT_TRUE(engine->validateStreamForScheduling(warmup_stream));
 
         // Perform the single-token P/D handoff, then let the engine finish a
         // normal single-sequence request after all rejected requests above.
