@@ -34,17 +34,23 @@ def fp32_scores(values,bits):
 
 
 class Validator:
-    def __init__(self,roots):
+    def __init__(self,roots,*,replay_manifest=None,replay_sha256=None,historical_roots=()):
         self.roots=[root.resolve() for root in roots]
         self.errors=[];self.inventory={};self.details={}
+        self.initial_replay=None
+        if replay_manifest is not None:
+            from initial_replay_contract import InitialReplay
+            self.initial_replay=InitialReplay(self,replay_manifest,replay_sha256,historical_roots)
+        elif replay_sha256 or historical_roots:
+            self.errors.append('An explicit pinned replay manifest is required to use historical evidence')
 
     def need(self,value,message):
         if not value:self.errors.append(message)
         return bool(value)
 
-    def records(self,pattern):
+    def records(self,pattern,roots=None):
         values=[];seen={}
-        for root in self.roots:
+        for root in (self.roots if roots is None else roots):
             for path in sorted(root.rglob(pattern)):
                 if not path.is_file() or path.stat().st_size>64*1024**2:continue
                 raw=path.read_bytes();sha=hashlib.sha256(raw).hexdigest()
@@ -108,7 +114,7 @@ class Validator:
         grouped=defaultdict(dict)
         for path,row in self.records('optimizer-step-rank*.json'):
             opt=row.get('optimizer',{});steps=opt.get('steps',[])
-            if not self.need(len(steps)==1 and steps[0] in (1,2),f'{path}: expected actual optimizer step1 or2 only'):continue
+            if not self.need(len(steps)==1 and type(steps[0]) is int and steps[0] in (1,2),f'{path}: expected actual optimizer step1 or2 only'):continue
             step=steps[0];rank=row.get('rank')
             self.need(rank not in grouped[step],f'{path}: duplicate optimizer update for rank{rank}/step{step}')
             grouped[step][rank]=(path,row)
@@ -134,26 +140,29 @@ class Validator:
             self.need(moments.get('persistent_moment_dtype')=='bfloat16'
                 and moments.get('disk_offload_bytes')==moments.get('persistent_FP32_moment_bytes')==0,
                 f'{path}: observed Adam moments are not exclusively CPU BF16 memory')
-            proof=row.get('last_native_cleanup_proof') or {}
-            self.need(proof.get('training_admission_safe') is True and proof.get('all_world_pause_acknowledged') is True
-                and proof.get('all_owned_native_processes_exited') is True
-                and proof.get('remaining_owned_gpu_contexts')==[]
-                and proof.get('checked_native_ranks')==list(range(WORLD)),
-                f'{path}: actual full-world native cleanup did not authorize this update')
-            release=row.get('last_refit_source_release') or {}
-            self.need(release.get('all_source_views_released') is True and release.get('backing_released') is True,
-                f'{path}: a borrowed CUDA refit source survived training restoration')
-            transitions=row.get('phase_transition_records',[])
-            train=[item for item in transitions if item.get('phase')=='train']
-            rollout=[item for item in transitions if item.get('phase')=='rollout']
-            if self.need(bool(train) and bool(rollout),f'{path}: actual offload/restore boundary receipts are absent'):
-                self.need(train[-1].get('refit_source_release_proven') is True
-                    and train[-1].get('cuda_ipc_collect_after_native_cleanup') is True,
-                    f'{path}: restoration happened without real source/IPC cleanup')
-                before=train[-1].get('cuda_allocated_bytes_before_master_restore')
-                retained=rollout[-1].get('gpu_master_bytes')
-                self.need(type(before) is int and type(retained) is int and before<=retained+4*GIB,
-                    f'{path}: unexplained CUDA allocation before restore can conceal a live32GiB refit backing')
+            if step==1 and self.initial_replay is not None:
+                self.initial_replay.permits_first_update(rank,path,row)
+            else:
+                proof=row.get('last_native_cleanup_proof') or {}
+                self.need(proof.get('training_admission_safe') is True and proof.get('all_world_pause_acknowledged') is True
+                    and proof.get('all_owned_native_processes_exited') is True
+                    and proof.get('remaining_owned_gpu_contexts')==[]
+                    and proof.get('checked_native_ranks')==list(range(WORLD)),
+                    f'{path}: actual full-world native cleanup did not authorize this update')
+                release=row.get('last_refit_source_release') or {}
+                self.need(release.get('all_source_views_released') is True and release.get('backing_released') is True,
+                    f'{path}: a borrowed CUDA refit source survived training restoration')
+                transitions=row.get('phase_transition_records',[])
+                train=[item for item in transitions if item.get('phase')=='train']
+                rollout=[item for item in transitions if item.get('phase')=='rollout']
+                if self.need(bool(train) and bool(rollout),f'{path}: actual offload/restore boundary receipts are absent'):
+                    self.need(train[-1].get('refit_source_release_proven') is True
+                        and train[-1].get('cuda_ipc_collect_after_native_cleanup') is True,
+                        f'{path}: restoration happened without real source/IPC cleanup')
+                    before=train[-1].get('cuda_allocated_bytes_before_master_restore')
+                    retained=rollout[-1].get('gpu_master_bytes')
+                    self.need(type(before) is int and type(retained) is int and before<=retained+4*GIB,
+                        f'{path}: unexplained CUDA allocation before restore can conceal a live32GiB refit backing')
         summary=[]
         for step in (1,2):
             ranks=grouped[step]
@@ -288,11 +297,115 @@ class Validator:
             policy_step_taken_from_actual_trainer_state_not_receipt_count=True,
             cross_node_wall_clocks_not_used_to_infer_step_order=True)
 
+    def micro_memory_boundaries(self,updates,loads):
+        if self.initial_replay is None:return
+        minis=defaultdict(list)
+        for path,row in self.records('global-minibatch-step*.json'):
+            minis[row.get('trainer_global_step')].append(row)
+        expected={}
+        for step in (1,2):
+            rows=minis[step]
+            if self.need(len(rows)==1 and rows[0].get('rows_per_rank') in (1,2),
+                    f'Update{step}: actual global minibatch must identify one or two micro rows per rank'):
+                expected[step]=rows[0]['rows_per_rank']
+        groups=defaultdict(lambda:defaultdict(list));observed=defaultdict(set)
+        records=self.records('micro-memory-rank*.json')
+        self.need(bool(records),'Dedicated memory profile requires actual per-micro observations')
+        for path,row in records:
+            steps=row.get('optimizer_steps')
+            step=1 if steps==[] else 2 if steps==[1] else None
+            rank=row.get('rank');micro=row.get('actual_training_micro_index');event=row.get('event')
+            if not self.need(step is not None and type(rank) is int and 0<=rank<WORLD
+                    and type(micro) is int and micro>0,
+                    f'{path}: actual optimizer/micro/rank boundary identity differs'):continue
+            self.need(row.get('schema')=='q38-actual-engine-micro-memory-boundary-v1'
+                and row.get('world_size')==72 and row.get('tensors_loss_rewards_gradients_modified') is False
+                and row.get('CPU_cgroup_limit_or_peak_inferred') is False,
+                f'{path}: live tensor/cgroup boundaries were misrepresented')
+            self.need(event in ('before-cache-release','enter-forward','exit-forward-before-backward'),
+                f'{path}: a failed or unknown training-forward boundary remains')
+            actual=updates.get(step,{}).get(rank)
+            self.need(actual is not None and row.get('pid')==actual[1].get('pid')
+                and type(row.get('time_ns')) is int and 0<row['time_ns']<actual[1].get('time_ns',0),
+                f'{path}: micro record does not precede the same actual process optimizer commit')
+            self.need(row.get('parameter_shadow_grad_count')==row.get('parameter_shadow_grad_bytes')==0,
+                f'{path}: a BF16 parameter-shadow gradient survived the original capture hook')
+            groups[(step,rank,micro)][event].append((path,row));observed[(step,rank)].add(micro)
+        summaries=[]
+        offset=0
+        for step in (1,2):
+            count=expected.get(step)
+            if count is None:continue
+            step_errors_before=len(self.errors)
+            valid_ranks=0;gradient_elements=[];retained=[];spilled=[]
+            for rank in range(72):
+                micros=observed[(step,rank)]
+                if not self.need(micros==set(range(offset+1,offset+count+1)),
+                        f'Update{step}/rank{rank}: actual training micro loop is incomplete or duplicated'):continue
+                for local_micro,micro in enumerate(sorted(micros)):
+                    events=groups[(step,rank,micro)]
+                    if not self.need(all(len(events[event])==1 for event in
+                            ('before-cache-release','enter-forward','exit-forward-before-backward')),
+                            f'Update{step}/rank{rank}/micro{micro}: original forward observations are missing or ambiguous'):continue
+                    pre=events['before-cache-release'][0][1];enter=events['enter-forward'][0][1]
+                    self.need(pre.get('gradient_store')==enter.get('gradient_store')
+                        and pre.get('empty_allocator_cache_released') is False
+                        and enter.get('empty_allocator_cache_released') is True,
+                        f'Update{step}/rank{rank}/micro{micro}: allocator release changed retained gradient-slot facts')
+                    store=enter.get('gradient_store') or {}
+                    numel=0 if local_micro==0 else loads.get(rank,(None,{}))[1].get('loaded_local_numel')
+                    self.need(store.get('stored_gradient_dtype')=='float32'
+                        and store.get('gradient_numel')==numel
+                        and store.get('microbatch_contributions_min')==store.get('microbatch_contributions_max')==local_micro,
+                        f'Update{step}/rank{rank}/micro{micro}: preceding complete FP32 contribution was dropped or duplicated')
+                    budget=store.get('retained_budget_bytes');gpu=store.get('retained_bytes');cpu=store.get('cpu_spilled_bytes')
+                    self.need(type(budget) is int and budget==76*GIB
+                        and type(gpu) is int and type(cpu) is int and 0<=gpu<=budget and cpu>=0
+                        and type(numel) is int and gpu+cpu==numel*4,
+                        f'Update{step}/rank{rank}/micro{micro}: FP32 slot bytes or dedicated76GiB cache differ')
+                    if type(numel) is int:gradient_elements.append(numel)
+                    if type(gpu) is int:retained.append(gpu)
+                    if type(cpu) is int:spilled.append(cpu)
+                actual=updates.get(step,{}).get(rank)
+                store=actual[1].get('optimizer',{}).get('gradient_store',{}) if actual else {}
+                self.need(store.get('microbatch_contributions_min')==store.get('microbatch_contributions_max')==count,
+                    f'Update{step}/rank{rank}: actual optimizer did not consume every original micro contribution exactly once')
+                valid_ranks+=1
+            summaries.append(dict(step=step,ranks_with_micro_records=valid_ranks,
+                expected_original_micro_rows_per_rank=count,global_micro_indices=list(range(offset+1,offset+count+1)),
+                enter_gradient_numel_min=min(gradient_elements) if gradient_elements else None,
+                enter_gradient_numel_max=max(gradient_elements) if gradient_elements else None,
+                maximum_retained_FP32_gradient_bytes=max(retained) if retained else None,
+                maximum_CPU_spilled_FP32_gradient_bytes=max(spilled) if spilled else None,
+                observed_slot_metadata_and_contribution_counts_preserved_across_empty_cache=(len(self.errors)==step_errors_before),
+                raw_gradient_value_bit_hash_not_claimed_by_this_metadata_observer=True))
+            offset+=count
+        self.details['micro_memory_boundaries']=summaries
+
     def numerical_policies(self):
         syncs={};probes={};hfs=defaultdict(dict)
         for path,row in self.records('hf-probe-step*-rank*.json'):hfs[row.get('global_step')][row.get('rank')]=(path,row)
         for path,row in self.records('rtp_sync_rank0_step*.json'):syncs[row.get('global_step')]=(path,row)
         for path,row in self.records('rtp_probe_rank0_step*.json'):probes[row.get('global_step')]=(path,row)
+        if self.initial_replay is not None and self.initial_replay.valid:
+            replay=self.initial_replay;history=replay.historical_roots
+            self.need(0 not in syncs and 0 not in probes,
+                'Replay policy0 native evidence must remain explicitly historical, not be relabelled current')
+            original_syncs=self.records('rtp_sync_rank0_step0.json',roots=history)
+            original_probes=self.records('rtp_probe_rank0_step0.json',roots=history)
+            original_hfs=self.records('hf-probe-step0-rank*.json',roots=history)
+            self.need(len(original_syncs)==len(original_probes)==1,
+                'Replay requires the original full7 policy0 transaction and nine-DP report files')
+            if len(original_syncs)==1 and len(original_probes)==1:
+                old_sync_path,old_sync=original_syncs[0];old_probe_path,old_probe=original_probes[0]
+                self.need(hashlib.sha256(old_sync_path.read_bytes()).hexdigest()==replay.manifest['canonical_reference']['sha256']
+                    and old_sync['model_version']==replay.manifest['original_native_model_version']
+                    and old_probe.get('source_transaction_sha256')==hashlib.sha256(old_sync_path.read_bytes()).hexdigest(),
+                    'Historical policy0 raw files do not bind the authenticated replay manifest')
+                syncs[0]=original_syncs[0];probes[0]=original_probes[0]
+            hfs[0]={row.get('rank'):(path,row) for path,row in original_hfs}
+            self.need(len(original_hfs)==len(hfs[0])==72,
+                'The original policy0 HF references must cover all72 historical ranks explicitly')
         summary=[];previous=None
         for step in (0,1,2):
             if not self.need(step in syncs and step in probes and set(hfs[step])==set(range(WORLD)),
@@ -379,7 +492,7 @@ class Validator:
                 self.need(changed>0 and previous['full_source_sha256']!=sync['full_source_sha256']
                     and previous['model_version']!=sync['model_version'],
                     f'Policy{step}: actual BF16 source bytes and native version did not change after the update')
-            summary.append(dict(step=step,model_version=sync.get('model_version'),HF_ranks=len(hfs[step]),
+            summary.append(dict(step=step,evidence_origin=('authenticated_historical_full7_policy0' if step==0 and self.initial_replay is not None and self.initial_replay.valid else 'current_run'),model_version=sync.get('model_version'),HF_ranks=len(hfs[step]),
                 native_DP_endpoints=len(routes),recomputed_max_abs_error=maximum,
                 recomputed_mean_abs_error=sum(errors)/len(errors) if errors else None,
                 HF_comparison_mode='report_only',HF_error_used_for_acceptance=False,
@@ -401,12 +514,15 @@ class Validator:
         for label,method in (('load_and_plans',self.source_loads_and_plans),):
             try:loads=method()
             except BaseException as error:self.errors.append(f'{label}: {error!r}');loads={}
+        if self.initial_replay is not None:
+            try:self.initial_replay.validate(loads)
+            except BaseException as error:self.errors.append(f'initial replay: {error!r}')
         try:updates=self.optimizer_updates(loads)
         except BaseException as error:self.errors.append(f'optimizer: {error!r}');updates={}
-        for label,method in (('actual_loss',lambda:self.policy_loss(updates)),('actual_token_lengths',self.actual_token_lengths),('global_minibatches',lambda:self.global_minibatches(updates)),('numerical_policies',self.numerical_policies)):
+        for label,method in (('actual_loss',lambda:self.policy_loss(updates)),('actual_token_lengths',self.actual_token_lengths),('global_minibatches',lambda:self.global_minibatches(updates)),('micro_memory_boundaries',lambda:self.micro_memory_boundaries(updates,loads)),('numerical_policies',self.numerical_policies)):
             try:method()
             except BaseException as error:self.errors.append(f'{label}: {error!r}')
-        return dict(schema='q38-world72-BF16-core-offline-validation-v4',core_checks_passed=not self.errors,
+        return dict(schema='q38-world72-BF16-core-offline-validation-v5',core_checks_passed=not self.errors,
             full_RL_acceptance=False,errors=self.errors,details=self.details,inputs=self.inventory,
             remaining_mandatory_checks=['Original genuine DeepScaleR correctness rewards and72 trajectories/iteration',
                 'Decoded actual Python Tool calls, sandbox replay and exact gateway/native delivered trace linkage',
@@ -419,7 +535,10 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence-root',type=Path,action='append',required=True)
     parser.add_argument('--output',type=Path,required=True)
-    args=parser.parse_args();result=Validator(args.evidence_root).run()
+    parser.add_argument('--initial-policy-replay-manifest',type=Path)
+    parser.add_argument('--initial-policy-replay-sha256')
+    parser.add_argument('--historical-evidence-root',type=Path,action='append',default=[])
+    args=parser.parse_args();result=Validator(args.evidence_root,replay_manifest=args.initial_policy_replay_manifest,replay_sha256=args.initial_policy_replay_sha256,historical_roots=args.historical_evidence_root).run()
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(result,indent=2,allow_nan=False)+'\n')
     print(json.dumps(dict(core_checks_passed=result['core_checks_passed'],full_RL_acceptance=False,

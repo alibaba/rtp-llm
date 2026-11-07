@@ -80,3 +80,11 @@ must prove it has never started a native incarnation. Historical PIDs or pause
 receipts do not authorize the new run. Only the initial native sync/generation
 is skipped; policy1/2 refits and the post-update rollout execute normally.
 Reports must distinguish recovered policy-zero evidence from new generation.
+
+For this recovery mode, the offline core validator takes the explicit
+`--initial-policy-replay-manifest`, `--initial-policy-replay-sha256`, and
+`--historical-evidence-root` arguments. Supply only the new run's load,
+optimizer, micro and memory records as current evidence. Historical policy0
+sync/probe records remain separately labelled; update2 still requires actual
+current native cleanup. Micro records must show retained gradient counts and
+contributions across cache release and their consumption by the real update.
