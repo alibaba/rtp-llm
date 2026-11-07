@@ -44,13 +44,30 @@
     "adam_m_and_v": "CPU BF16 with counter-based stochastic rounding",
     "gradient_reduction_and_accumulation": "FP32; bounded GPU cache and CPU RAM spill",
     "update_arithmetic": "bounded FP32 chunks; no persistent FP32 master or moments",
-    "gpu_gradient_cache_bytes_per_rank": 81604378624,
+    "gpu_gradient_cache_bytes_per_rank": 80530636800,
     "gpu_rollout_master_cache_bytes_per_rank": 25769803776,
     "cpu_moment_budget_bytes_per_node": 549755813888,
     "cpu_reserved_bytes_per_node": 103079215104,
     "local_disk_model_optimizer_gradient_offload_bytes": 0,
     "checkpoint_saving": "disabled; small code, logs, dataset and Python Tool sandbox files are permitted",
-    "micro_boundary_allocator_action": "Synchronize and release only unused CUDA allocator segments before each original training micro forward; retain real FP32 gradient slots and BF16 masters"
+    "micro_boundary_allocator_action": "Synchronize and release only unused CUDA allocator segments before each original training micro forward; retain real FP32 gradient slots and BF16 masters",
+    "cpu_reserve_bytes_per_node": 103079215104,
+    "static_CPU_budget_profile": {
+      "scope": "Original BF16 CPU moments plus original clone-gradient CPU spill upper bound plus unchanged96GiB reserve; arithmetic only, not a live CPU memory measurement or guarantee of no GPU OOM",
+      "gpu_gradient_cache_bytes_per_rank": 80530636800,
+      "ranks_per_node": 4,
+      "node_memory_hard_limit_bytes": 858993459200,
+      "CPU_reserve_bytes_per_node": 103079215104,
+      "worst_BF16_two_moments_bytes_per_node": 538143391680,
+      "worst_CPU_gradient_spill_upper_bytes_per_node": 216140251072,
+      "worst_total_with_reserve_bytes": 857362857856,
+      "worst_total_with_reserve_GiB": 798.4813841581345,
+      "minimum_plan_headroom_bytes": 1630601344,
+      "rollout_upper_plan_bytes_with_reserve": 807304626080,
+      "retained_gradient_implementation": "original independent clones; arena disabled",
+      "CPU_plan_limit_must_still_pass_per_actual_node": true,
+      "actual_current_memory_and_oom_events_still_measured_separately": true
+    }
   },
   "required_checks": [
     "All18 same frozen runtime/source manifest; hash-pinned setproctitle1.3.8/thrift0.24.0 plus existing CPU dependencies; actual imports pass without changing Torch/Triton/NCCL/FlashInfer/FFI versions",
@@ -116,10 +133,10 @@
   "current_observation": {
     "full_model_training_accepted": false,
     "historical_baseline": "Previous full model had a real1590-source COMMIT, complete72-trajectory rollout, real tools/rewards and actual CUDA loss; first HF GRPO update ended in CUDA allocation OOM before any optimizer commit. History remains rejected as a completed RL run.",
-    "new_profile": "76GiB FP32 gradient cache, original micro-loop free-allocator release, and explicit authenticated initial-policy replay. Real current updates1/2 and new policy1/2 refits/probes still require observation.",
+    "new_profile": "75GiB original FP32 clone gradient cache and existing micro-loop free-cache release; explicit authenticated original72 policy0 replay restores the original synchronized cleanup/base_sync_done/active-expandable training epilogue. IPC environment stays False. Actual current two optimizer commits and real new policy1/2 native refits/probes remain required.",
     "resource_scope": "Fresh per-run GPU samplers. Actual CPU current/anon/filecache and exact800GiB cgroup event deltas use a fresh baseline; unchanged lifetime memory.peak is not labelled a current-run anonymous or optimizer peak."
   },
-  "previous_plan_sha256": "6cc533191f4cbc446acbee4b59a067082593e270baccee2397745457e63c9af9",
+  "previous_plan_sha256": "13360ea4a52c1b90e1ac916806c4d82802c49d486e03e507602a11b6ed7752ac",
   "HF_RTP_comparison_profile": {
     "runtime_env": {
       "Q38_HF_RTP_REPORT_ONLY": "1"
@@ -164,6 +181,18 @@
       "--initial-policy-replay-manifest MANIFEST.json",
       "--initial-policy-replay-sha256 SHA256",
       "--historical-evidence-root ORIGINAL_FULL7"
-    ]
+    ],
+    "current_original_training_epilogue_required": {
+      "actual_actor_child_class": "verl.workers.engine_workers.ActorRolloutRefWorker",
+      "three_original_verl_source_SHA256_pinned": true,
+      "original_synchronized_aggressive_empty_cache_completed": true,
+      "actual_child_base_sync_done_after": true,
+      "actual_active_training_expandable_segments": true,
+      "native_IPC_allocator_environment": "backend:native,expandable_segments:False",
+      "original_naive_native_update_body_unchanged": true,
+      "only_initial_sync_epilogue_replayed_no_native_transaction_fabricated": true,
+      "subsequent_native_policy1_and2_syncs_original": true
+    },
+    "historical_episode_source_and_previous_actual_sampler_run_are_separate_provenance": true
   }
 }

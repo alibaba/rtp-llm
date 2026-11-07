@@ -359,10 +359,10 @@ class Validator:
                         and store.get('microbatch_contributions_min')==store.get('microbatch_contributions_max')==local_micro,
                         f'Update{step}/rank{rank}/micro{micro}: preceding complete FP32 contribution was dropped or duplicated')
                     budget=store.get('retained_budget_bytes');gpu=store.get('retained_bytes');cpu=store.get('cpu_spilled_bytes')
-                    self.need(type(budget) is int and budget==76*GIB
+                    self.need(type(budget) is int and budget==75*GIB
                         and type(gpu) is int and type(cpu) is int and 0<=gpu<=budget and cpu>=0
                         and type(numel) is int and gpu+cpu==numel*4,
-                        f'Update{step}/rank{rank}/micro{micro}: FP32 slot bytes or dedicated76GiB cache differ')
+                        f'Update{step}/rank{rank}/micro{micro}: FP32 slot bytes or dedicated75GiB cache differ')
                     if type(numel) is int:gradient_elements.append(numel)
                     if type(gpu) is int:retained.append(gpu)
                     if type(cpu) is int:spilled.append(cpu)

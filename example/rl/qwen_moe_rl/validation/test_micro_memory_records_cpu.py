@@ -16,7 +16,7 @@ def fixture():
     micro=(step-1)*2+local+1
     store=dict(stored_gradient_dtype='float32',gradient_numel=0 if local==0 else 100,
      gradient_count=0 if local==0 else 1,microbatch_contributions_min=local,microbatch_contributions_max=local,
-     retained_budget_bytes=76*GIB,retained_bytes=0 if local==0 else 400,cpu_spilled_bytes=0)
+     retained_budget_bytes=75*GIB,retained_bytes=0 if local==0 else 400,cpu_spilled_bytes=0)
     for event in ('before-cache-release','enter-forward','exit-forward-before-backward'):
      row=dict(schema='q38-actual-engine-micro-memory-boundary-v1',world_size=72,rank=rank,
       optimizer_steps=[] if step==1 else [1],actual_training_micro_index=micro,event=event,pid=1000+rank,
@@ -51,6 +51,7 @@ cases={
  'different actual optimizer process':lambda r,l,u:row(r,rank=0,actual_training_micro_index=1,event='enter-forward').update(pid=9000),
  'CPU RSS relabelled cgroup peak':lambda r,l,u:row(r,rank=0,actual_training_micro_index=1,event='enter-forward').update(CPU_cgroup_limit_or_peak_inferred=True),
  'wrong cache budget':lambda r,l,u:row(r,rank=0,actual_training_micro_index=1,event='enter-forward')['gradient_store'].update(retained_budget_bytes=80*GIB),
+ 'historical76 cache cannot be relabelled current75':lambda r,l,u:row(r,rank=0,actual_training_micro_index=1,event='enter-forward')['gradient_store'].update(retained_budget_bytes=76*GIB),
  'failed forward retained in accepted run':lambda r,l,u:row(r,rank=0,actual_training_micro_index=1,event='enter-forward').update(event='forward-exception'),
  'optimizer dropped micro contribution':lambda r,l,u:u[1][0][1]['optimizer']['gradient_store'].update(microbatch_contributions_min=1),
  'missing one observed micro boundary':lambda r,l,u:r.pop(next(i for i,(n,v) in enumerate(r) if v.get('rank')==71 and v.get('event')=='enter-forward' and v.get('actual_training_micro_index')==4)),

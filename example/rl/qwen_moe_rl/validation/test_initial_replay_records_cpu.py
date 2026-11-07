@@ -1,7 +1,7 @@
 """Synthetic metadata corruption tests; no real model/GPU/optimizer is tested."""
 import copy,hashlib,json,tempfile
 from pathlib import Path
-from initial_replay_contract import InitialReplay,SOURCE0,SCHEMA,layout_digest,digest_json
+from initial_replay_contract import InitialReplay,SOURCE0,SCHEMA,layout_digest,digest_json,ORIGINAL_TRAINING_SOURCE_SHA256
 from validate_world72_core_evidence import Validator
 
 sha=lambda value:hashlib.sha256(value.encode()).hexdigest()
@@ -34,6 +34,14 @@ def fixture(folder,mutation=None):
    current_optimizer_steps=[],current_CPU_moment_bytes=0,current_FP32_gradient_bytes=0,old_native_version='CPU-only-old:1',
    old_evidence_is_not_current_native_cleanup=True,current_assigned_canonical_sources=[dict(index=index,**tensors[index],
     read_count=1,maximum_host_window_bytes=2) for index in range(rank,1590,72)])
+  proof['original_training_postconditions']=dict(schema='q38-original-sync-training-postconditions-v1',
+   actual_actor_child_class='verl.workers.engine_workers.ActorRolloutRefWorker',
+   source_sha256=dict(ORIGINAL_TRAINING_SOURCE_SHA256),original_sync_epilogue_replayed=True,
+   force_synchronized_aggressive_empty_cache_completed=True,base_sync_done_before=bool(rank%2),base_sync_done_after=True,
+   active_allocator_settings_before='expandable_segments:False',active_allocator_settings_after='expandable_segments:True',
+   active_training_expandable_segments=True,allocator_backend='native',
+   IPC_allocator_environment='backend:native,expandable_segments:False',
+   native_update_weights_method_unmodified=True,no_native_resume_or_weight_transaction_performed=True)
   proofs.append(proof)
  manifest=dict(schema=SCHEMA,global_step=0,world_size=72,initial_full_source_sha256=SOURCE0,
   source_run_root='/historical/full7',source_rows=list(range(18)),canonical_reference=canonical,
@@ -85,6 +93,18 @@ cases={
  'wrong original source layout':lambda m,p:p[0].update(source_layout_sha256=sha('wrong')),
  'partial source-copy proof':lambda m,p:p[0].update(current_full_source_copy_verified=False),
  'wrong original canonical COMMIT':lambda m,p:m.update(initial_full_source_sha256=sha('wrong')),
+ 'missing current training epilogue':lambda m,p:p[0].pop('original_training_postconditions'),
+ 'foreign actor training epilogue':lambda m,p:p[0]['original_training_postconditions'].update(actual_actor_child_class='fixture.Actor'),
+ 'changed original source epilogue':lambda m,p:p[0]['original_training_postconditions']['source_sha256'].update({'verl.utils.device':sha('wrong')}),
+ 'skipped original training epilogue':lambda m,p:p[0]['original_training_postconditions'].update(original_sync_epilogue_replayed=False),
+ 'unsynchronized cache cleanup':lambda m,p:p[0]['original_training_postconditions'].update(force_synchronized_aggressive_empty_cache_completed=False),
+ 'base sync left false':lambda m,p:p[0]['original_training_postconditions'].update(base_sync_done_after=False),
+ 'training allocator still false':lambda m,p:p[0]['original_training_postconditions'].update(active_allocator_settings_after='expandable_segments:False'),
+ 'training allocator self claim only':lambda m,p:p[0]['original_training_postconditions'].update(active_allocator_settings_after=''),
+ 'conflicting allocator settings':lambda m,p:p[0]['original_training_postconditions'].update(active_allocator_settings_after='expandable_segments:False,expandable_segments:True'),
+ 'IPC environment changed true':lambda m,p:p[0]['original_training_postconditions'].update(IPC_allocator_environment='backend:native,expandable_segments:True'),
+ 'modified original naive sync body':lambda m,p:p[0]['original_training_postconditions'].update(native_update_weights_method_unmodified=False),
+ 'invented initial native transaction':lambda m,p:p[0]['original_training_postconditions'].update(no_native_resume_or_weight_transaction_performed=False),
 }
 for label,mutation in cases.items():check(mutation)
 print(json.dumps(dict(passed=True,synthetic_metadata_only=True,real_RL_or_GPU_qualified=False,

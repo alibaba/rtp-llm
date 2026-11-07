@@ -12,6 +12,37 @@ SOURCES=1590
 POLICY_NUMEL=2419804697984
 SOURCE0='1303c36b3d678821c7e9393c10f5a0754fc081143d7f9c7949ad2ed1b45b744f'
 SCHEMA='q38-policy0-original-episode-replay-v1'
+ORIGINAL_TRAINING_SOURCE_SHA256={
+ 'verl.workers.engine_workers':'721f866442475a08768854b58176a4dcd99de4564809e3d067dced7cba1122db',
+ 'verl.utils.device':'52c5dd8dc3e4afc3e0d67756d3d4995282246b98b767be080c28448353c1ad11',
+ 'verl.utils.memory_utils':'2c356ff43c37d18f29dd0713cb60cb080209fff2e964f993b8d27f176669c111'}
+
+
+def validate_original_training_postconditions(need,rank,proof):
+ """Validate recorded current actor epilogue facts, not an allocator benchmark."""
+ p=proof.get('original_training_postconditions') or {}
+ if not need(isinstance(p,dict),f'rank{rank} training epilogue receipt must be an object'):return False
+ before=p.get('active_allocator_settings_before');after=p.get('active_allocator_settings_after')
+ settings=[part for part in after.replace(' ','').split(',') if part.startswith('expandable_segments:')] if isinstance(after,str) else []
+ checks=[
+  need(p.get('schema')=='q38-original-sync-training-postconditions-v1'
+   and p.get('actual_actor_child_class')=='verl.workers.engine_workers.ActorRolloutRefWorker'
+   and p.get('source_sha256')==ORIGINAL_TRAINING_SOURCE_SHA256,
+   f'rank{rank} epilogue must bind the actual original actor and three pinned verl source files'),
+  need(p.get('original_sync_epilogue_replayed') is True
+   and p.get('force_synchronized_aggressive_empty_cache_completed') is True
+   and type(p.get('base_sync_done_before')) is bool and p.get('base_sync_done_after') is True,
+   f'rank{rank} original synchronized cleanup/base-sync epilogue did not complete'),
+  need(isinstance(before,str) and bool(before) and settings==['expandable_segments:True']
+   and p.get('active_training_expandable_segments') is True and p.get('allocator_backend')=='native'
+   and p.get('IPC_allocator_environment')=='backend:native,expandable_segments:False',
+   f'rank{rank} active training allocator must be True while the native IPC environment stays False'),
+  need(p.get('native_update_weights_method_unmodified') is True
+   and p.get('no_native_resume_or_weight_transaction_performed') is True,
+   f'rank{rank} initial epilogue cannot substitute an invented native transaction or a changed sync body')]
+ return all(checks)
+
+
 LAYOUT_FIELDS=('name','canonical_name','checkpoint_file','local_numel','local_bytes','source_begin',
  'source_end','source_reads','maximum_source_slice_bytes','sample_sha256','source_coordinates_verified')
 
@@ -132,6 +163,7 @@ class InitialReplay:
     and no_native.get('checked_native_ranks')==[] and no_native.get('remaining_owned_gpu_contexts')==[]
     and no_native.get('training_admission_safe') is False,
     f'rank{rank} must preserve current never-started semantics without fabricated native pause ACKs')
+   validate_original_training_postconditions(self.need,rank,p)
    assigned=p.get('current_assigned_canonical_sources',[])
    expected=list(range(rank,SOURCES,WORLD))
    self.need([row.get('index') for row in assigned]==expected,
@@ -167,7 +199,9 @@ class InitialReplay:
    source_policy_full_sha256=SOURCE0,current_canonical_sources_verified=len(verified_indices),
    historical_native_version=m.get('original_native_model_version'),
    historical_PIDs_and_memory_not_current_evidence=True,first_native_sync_skipped_only_at_step0=True,
-   initial_native_cleanup_or_source_release_not_fabricated=True)
+   initial_native_cleanup_or_source_release_not_fabricated=True,
+   current_original_training_epilogue_required=True,
+   native_IPC_environment_false_and_active_training_allocator_true_distinguished=True)
   return self.valid
 
  def permits_first_update(self,rank,path,row):
