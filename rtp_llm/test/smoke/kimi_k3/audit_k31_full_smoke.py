@@ -3,15 +3,19 @@
 import argparse
 from bisect import bisect_left
 import json
+import hashlib
 from pathlib import Path
 import re
 
 if __package__:
+    from . import audit_k31_last_n, k31_last_n_precision
     from .k31_smoke_capacity import device_pool_usable_blocks
     from . import result_check
     from .k31_full_smoke import cache_pressure_plan, decode_batch_sizes, request_budget
     from .smoke_request_identity import resolve as resolve_request_identity
 else:
+    import audit_k31_last_n
+    import k31_last_n_precision
     from k31_smoke_capacity import device_pool_usable_blocks
     import result_check
     from k31_full_smoke import cache_pressure_plan, decode_batch_sizes, request_budget
@@ -169,13 +173,23 @@ def large_batch_evidence(stages, case_ids, decode, tp_size):
     return proofs
 
 
-def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None):
+def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None, last_n_precision=None):
     errors, proofs = [], {}
-    profile = result.get("validation_profile", "smoke")
+    declared_profile = result.get("validation_profile", "smoke")
+    last5 = declared_profile == 'last5-chunked-smoke'
+    profile = 'smoke' if last5 else declared_profile
+    if last5:
+        geometry = result.get('geometry', {})
+        if (tp_size != 8 or result.get('last_n_checkpoints') != 5
+                or result.get('scheduler_chunk_profile') is not True
+                or any(geometry.get(key) != expected for key, expected in dict(
+                    page_size=128, kernel_page_size=128, source_shards=8, checkpoint_span=1024,
+                    reuse_cache_tail_blocks=5, runtime_layers=93, runtime_verified=True).items())):
+            raise ValueError('Last-5 result lacks verified B128/CP8, TP8 and full93 geometry')
     rows = result.get("cases", [])
     plan = result.get("cache_pressure_plan")
     if profile == "smoke" and plan is not None and "requests" in plan:
-        expected = cache_pressure_plan(prefill_full_pages, result["reuse_unit_tokens"])
+        expected = cache_pressure_plan(prefill_full_pages, result["reuse_unit_tokens"], scheduler_chunking=last5)
         if plan != expected:
             raise ValueError("cache pressure plan does not match the runtime pool")
         probes = [row for row in rows if row["name"].startswith("tier-pressure-")]
@@ -220,7 +234,7 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None):
                 raise ValueError("summary and grouped native request IDs disagree")
             item.update(transport="pd_group_rpc", request_id=rid)
         raw[name] = item
-        errors.extend(result_check.independent_answer_check(row))
+        errors.extend(result_check.independent_answer_check(row, scheduler_chunking=last5))
         errors.extend(result_check._cache_errors(row, result["block_size"]))
     try:
         request_ids, methods, barriers = resolve_request_identity(
@@ -231,6 +245,9 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None):
 
     prefill_roots = [e for e in prefill[0]
                      if e.get("event") == "mtp_target_prefill_forward" and not e.get("fake")]
+    if last5 and any(not e.get('context_lengths') or any(q > 65536 for q in e['context_lengths'])
+                     for e in prefill_roots):
+        raise ValueError('Last-5 scheduled Prefill exceeds the actual 64K chunk budget')
     seen_prefill = set()
     for root in prefill_roots:
         seen_prefill.update(group_evidence(prefill, root, 8))
@@ -300,9 +317,11 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None):
     if profile == "smoke":
         cancel = host_cancel_evidence(prefill[0])
         proofs["host_cancel_while_actual_load_pending"] = cancel["request_id"]
+    if last5:
+        proofs['last_n'] = audit_last5(result, prefill, request_ids, last_n_precision)
     return {"passed": not errors, "errors": errors, "proofs": proofs,
             "counts": counts, "decode_batches": {str(k):sorted(v) for k,v in batches.items()},
-            "validation_profile": profile, "request_budget": budget,
+            "validation_profile": declared_profile, "request_budget": budget,
             "complete_smoke_passed": not errors and profile == "smoke",
             "native_K31_MTP": bool(result.get("draft_contract") and
                 result["draft_contract"].get("kind") == "native_k3_mla_mtp"),
@@ -310,11 +329,49 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None):
             "golden_alignment": "pending"}
 
 
+def audit_last5(result, prefill, request_ids, precision):
+    def ids(name):
+        values = request_ids.get(name, [])
+        if len(values) != 1:
+            raise ValueError(f'{name}: Last-5 proof requires one actual native request identity')
+        return values
+
+    if (result.get('last_n_c7_fixture') or {}).get('common_tokens') != 7168:
+        raise ValueError('C7 negative control does not declare its exact shared token boundary')
+    rows = {row['name']: row for row in result['cases']}
+    c7_inputs = [rows[name].get('input_tokens') for name in ('prefix-A-seed', 'prefix-B-partial')]
+    if (any(not isinstance(tokens, list) or len(tokens) != 12416 for tokens in c7_inputs)
+            or c7_inputs[0][:7168] != c7_inputs[1][:7168]
+            or c7_inputs[0][7168] == c7_inputs[1][7168]):
+        raise ValueError('C7 negative control lacks actual identical-prefix / divergent-suffix input token IDs')
+    for field, tokens in zip(('seed_token_sha256', 'probe_token_sha256'), c7_inputs):
+        if hashlib.sha256(json.dumps(tokens).encode()).hexdigest() != result['last_n_c7_fixture'].get(field):
+            raise ValueError('C7 actual input token IDs differ from its declared fixture')
+    proof = dict(lifecycle={}, tiers={}, c7={})
+    # TP0 owns allocation, matching and publication. Execution and conv input
+    # snapshots still require evidence from every TP rank; cache settlement
+    # follows MultiRankTransferAsyncContext's all-worker status merge.
+    for rank in (0,):
+        proof['lifecycle'][rank] = audit_k31_last_n.audit_prefill_states(prefill, root_rank=rank)
+        events = {0: prefill[rank]}
+        proof['tiers'][rank] = {
+            tier: audit_k31_last_n.audit_checkpoint_reuse(events, ids('tier-memory-seed-0'), ids(name), tier)
+            for tier, name in (('DEVICE', 'tier-device-probe-0'),
+                               ('HOST', 'tier-mixed-0-memory'), ('DISK', 'tier-memory-probe'))}
+        proof['c7'][rank] = audit_k31_last_n.audit_c7_miss(events, ids('prefix-A-seed'), ids('prefix-B-partial'))
+    if precision is None:
+        raise ValueError('Last-5 requires actual P/D logits and a pre-locked precision contract')
+    proof['precision'] = k31_last_n_precision.audit_cases(result, request_ids, *precision)
+    return proof
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ("result", "prefill-logs", "prefill-engine", "decode-logs", "decode-engine", "output"):
         parser.add_argument("--"+key, required=True, type=Path)
     parser.add_argument("--decode-tp", type=int, choices=(4,8), required=True)
+    for key in ('prefill-logits', 'decode-logits', 'precision-reference', 'precision-contract'):
+        parser.add_argument('--'+key, type=Path)
     args = parser.parse_args()
     try:
         result = json.loads(args.result.read_text())
@@ -323,14 +380,20 @@ def main():
         if "requests" in plan:
             prefill_full_pages = device_pool_usable_blocks(
                 args.prefill_engine.read_text(errors="replace"), "full")
+        precision_args = (args.prefill_logits, args.decode_logits, args.precision_reference, args.precision_contract)
+        if any(value is not None for value in precision_args) and not all(value is not None for value in precision_args):
+            raise ValueError('precision capture directories, reference and locked contract must be supplied together')
+        precision = ((args.prefill_logits, args.decode_logits,
+                      k31_last_n_precision.read_descriptor(args.precision_reference),
+                      json.loads(args.precision_contract.read_text())) if args.precision_contract is not None else None)
         proof = audit(result, read_events(args.prefill_logs,args.prefill_engine),
                       read_events(args.decode_logs,args.decode_engine), args.decode_tp,
-                      prefill_full_pages=prefill_full_pages)
+                      prefill_full_pages=prefill_full_pages, last_n_precision=precision)
         rows = {row["name"]:row for row in result["cases"]}
         proof["errors"].extend(result_check.audit_raw_answers(args.result.parent/"requests",rows))
         proof["errors"].extend(result_check._raw_consistency(args.result.parent/"requests",rows))
         proof["passed"] = not proof["errors"]
-        proof["complete_smoke_passed"] = proof["passed"] and proof["validation_profile"] == "smoke"
+        proof["complete_smoke_passed"] = proof["passed"] and proof["validation_profile"] in ('smoke', 'last5-chunked-smoke')
     except (OSError, ValueError, KeyError, TypeError) as error:
         proof = {"passed": False, "errors": [f"{type(error).__name__}: {error}"]}
     with args.output.open("x") as output:

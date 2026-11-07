@@ -30,6 +30,7 @@ class Group(Enum):
 
     DP = "DP"
     TP = "TP"
+    TP_CPU = "TP_CPU"
     DP_AND_TP = "DP_AND_TP"
 
 
@@ -351,6 +352,19 @@ def _create_process_groups(
             disable_custom_all_reduce=disable_custom_all_reduce,
         )
 
+    if (
+        tp_size > parallelism_config.local_world_size
+        and torch.distributed.is_gloo_available()
+    ):
+        # Keep idle TP ranks waiting on the CPU so background GPU transfers can progress.
+        for start in range(0, world_size, tp_size):
+            ranks = list(range(start, start + tp_size))
+            group = torch.distributed.new_group(
+                ranks=ranks, backend="gloo", timeout=timeout
+            )
+            if world_rank in ranks:
+                _group_map[Group.TP_CPU] = group
+
 
 def _register_process_groups_to_cpp():
     """Register Python comm op callbacks for C++ to call back into."""
@@ -438,6 +452,8 @@ def _register_process_groups_to_cpp():
             return t, False
         return t.to(torch.device("cuda", device_id)), True
 
+    cpu_tp_group = _group_map.get(Group.TP_CPU)
+
     def cpp_broadcast(tensors: List[torch.Tensor], root: int, mode: int) -> None:
         """Broadcast tensors from root rank to all ranks in the group.
 
@@ -450,8 +466,20 @@ def _register_process_groups_to_cpp():
         if pg is None or pg.size() < 2:
             return
         global_root = torch.distributed.get_global_rank(pg, root)
-        device_id = torch.cuda.current_device()
+        device_id = None
         for t in tensors:
+            if (
+                mode == _CPP_PARALLEL_MODE_TP
+                and cpu_tp_group is not None
+                and t.device.type == "cpu"
+            ):
+                cpu_t = t.contiguous()
+                torch.distributed.broadcast(cpu_t, global_root, group=cpu_tp_group)
+                if cpu_t is not t:
+                    t.copy_(cpu_t)
+                continue
+            if device_id is None:
+                device_id = torch.cuda.current_device()
             gpu_t, was_cpu = _ensure_cuda(t, device_id)
             torch.distributed.broadcast(gpu_t, global_root, group=pg)
             if was_cpu:
@@ -566,7 +594,7 @@ def _register_process_groups_to_cpp():
 
     # Bootstrap the UDS-backed intra-node TP broadcaster right after new_group.
     # Lazy C++ init can race if a peer reaches tpSyncModelInputs before rank 0
-    # binds; cross-node TP keeps the NCCL fallback.
+    # binds; cross-node TP uses the CPU group when Gloo is available.
     if (
         _parallelism_config is not None
         and _parallelism_config.tp_size > 1

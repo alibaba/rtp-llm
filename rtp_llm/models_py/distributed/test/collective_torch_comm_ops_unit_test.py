@@ -12,7 +12,7 @@ from rtp_llm.models_py.distributed import collective_torch as collective
 
 
 class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
-    def _registered_callbacks(self, config=None, process_group=None):
+    def _registered_callbacks(self, config=None, process_group=None, cpu_tp_group=None):
         if process_group is None:
             process_group = MagicMock()
             process_group.size.return_value = 1
@@ -25,20 +25,39 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
                 tp_rank=0,
             )
         compute_ops = SimpleNamespace(register_comm_ops=MagicMock())
+        groups = {collective.Group.DP_AND_TP: process_group}
+        if cpu_tp_group is not None:
+            groups[collective.Group.TP_CPU] = cpu_tp_group
 
         with (
             patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}),
-            patch.object(
-                collective,
-                "_group_map",
-                {collective.Group.DP_AND_TP: process_group},
-            ),
+            patch.object(collective, "_group_map", groups),
             patch.object(collective, "_parallelism_config", config),
         ):
             collective._register_process_groups_to_cpp()
 
         compute_ops.register_comm_ops.assert_called_once()
         return compute_ops.register_comm_ops.call_args.args
+
+    def test_cross_node_cpu_tp_broadcast_does_not_use_cuda(self):
+        gpu_group = MagicMock()
+        gpu_group.size.return_value = 2
+        cpu_group = MagicMock()
+        config = SimpleNamespace(
+            tp_size=2, dp_size=1, world_size=2, local_world_size=1, tp_rank=1
+        )
+        broadcast = self._registered_callbacks(config, gpu_group, cpu_group)[0]
+        tensor = torch.tensor([1, 2])
+
+        with (
+            patch.object(torch.distributed, "get_global_rank", return_value=0),
+            patch.object(torch.distributed, "broadcast") as send,
+            patch.object(torch.cuda, "current_device") as device,
+        ):
+            broadcast([tensor], 0, collective._CPP_PARALLEL_MODE_TP)
+
+        send.assert_called_once_with(tensor, 0, group=cpu_group)
+        device.assert_not_called()
 
     def _registered_allreduce(self):
         return self._registered_callbacks()[1]

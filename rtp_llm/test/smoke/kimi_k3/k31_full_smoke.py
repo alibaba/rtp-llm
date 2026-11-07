@@ -38,11 +38,15 @@ def request_budget(profile, pressure_requests=15):
             else dict(total=64, formal=64, preparation=0))
 
 
-def cache_pressure_plan(device_pages, reuse_unit_tokens):
+def cache_pressure_plan(device_pages, reuse_unit_tokens, *, scheduler_chunking=False):
     if type(device_pages) is not int or device_pages <= 0:
         raise ValueError('Prefill Device/full capacity must be positive')
     if type(reuse_unit_tokens) is not int or not 0 < reuse_unit_tokens < 65536:
         raise ValueError('Prefill checkpoint must fit in the 64K query limit')
+    if scheduler_chunking:
+        pages = (device_pages + 14) // 15
+        return dict(device_pages=device_pages, pages_per_probe=pages,
+                    input_tokens=pages * reuse_unit_tokens + 1, requests=15)
     # One suffix token lets the complete checkpoints be published as prefixes.
     pages = min((device_pages + 15) // 15, (65536 - 1) // reuse_unit_tokens)
     return dict(device_pages=device_pages, pages_per_probe=pages,
@@ -94,9 +98,19 @@ class K31FullRunner(legacy.Runner):
         super().__init__(args)
         self.submitted_requests = 0
 
+    def scheduler_chunk_profile(self):
+        return getattr(getattr(self, 'args', None), 'last_n_checkpoints', None) == 5
+
+    def prefill_case_tokens(self, label, index):
+        if not self.scheduler_chunk_profile():
+            return super().prefill_case_tokens(label, index)
+        q, unit = self.args.chunk_tokens, self.reuse_unit_tokens
+        return {('single', 0): q, ('batch', 0): 3 * q,
+                ('batch', 1): 3 * q + 2 * unit + 1}[label, index]
+
     @property
     def cache_probe_tokens(self):
-        return self.reuse_unit_tokens + 1
+        return 12 * self.reuse_unit_tokens + 128 if self.scheduler_chunk_profile() else self.reuse_unit_tokens + 1
 
     @property
     def cache_partial_minimum(self):
@@ -108,20 +122,160 @@ class K31FullRunner(legacy.Runner):
         env.pop('LD_PRELOAD', None)
         return env
 
+    def mtp_acceptance(self, aux, counters):
+        # Use actual accepted draft counts instead of an iteration estimate.
+        # The PD response carries D's counter; P's chunks are audited separately.
+        if self.scheduler_chunk_profile() and (aux.get('speculative_metrics') or {}).get('version') == 1:
+            return counters['accepted_draft_tokens'], 'native_speculative_metrics_v1'
+        return super().mtp_acceptance(aux, counters)
+
     def prepare_case(self, case):
-        return replace(case, name=case.name.replace('+', 'plus'), thinking_disabled=True)
+        case = replace(case, name=case.name.replace('+', 'plus'), thinking_disabled=True)
+        if self.scheduler_chunk_profile() and case.reuse != 'miss':
+            for pair in getattr(self, '_last_n_cache_pairs', {}).values():
+                if case.prompt == pair['probe_prompt']:
+                    return replace(case, expected_input_len=10*self.reuse_unit_tokens+128,
+                                   expected_reuse_len=10*self.reuse_unit_tokens)
+        return case
+
+    def cache_seed_prompt(self, tag, value):
+        if not self.scheduler_chunk_profile():
+            return super().cache_seed_prompt(tag, value)
+        if value == 'MEM-1' and getattr(self, '_memory_candidates', None):
+            return self._memory_candidates[0][1].prompt
+        head, tail = f'CACHE:{tag}:memory\n', f'\n只输出 JSON {{"value":"{value}"}}。'
+        shared, target = 10*self.reuse_unit_tokens, 10*self.reuse_unit_tokens+128
+        seed, seed_ids, probe, probe_ids = self.fit_linear_checkpoint_branch(
+            head, tail, tail, self.cache_probe_tokens, target, shared)
+        pairs = getattr(self, '_last_n_cache_pairs', {})
+        pairs[seed] = dict(tag=tag, probe_prompt=probe, common_tokens=shared,
+            seed_tokens=len(seed_ids), probe_tokens=len(probe_ids),
+            seed_token_sha256=hashlib.sha256(json.dumps(seed_ids).encode()).hexdigest(),
+            probe_token_sha256=hashlib.sha256(json.dumps(probe_ids).encode()).hexdigest())
+        self._last_n_cache_pairs = pairs
+        return seed
+
+    def fit_linear_checkpoint_branch(self, head, seed_tail, probe_tail, seed_target, probe_target, shared):
+        seed, seed_ids = self.fit_prompt(head, seed_tail, seed_target)
+        x_count = shared - len(self.tokenize(head+probe_tail))
+        z_count = probe_target-shared
+        for _ in range(4):
+            if min(x_count, z_count) <= 0:
+                break
+            probe = head + ' x'*x_count + ' z'*z_count + probe_tail
+            probe_ids = self.tokenize(probe)
+            common = next((i for i, pair in enumerate(zip(seed_ids, probe_ids)) if pair[0] != pair[1]),
+                          min(len(seed_ids), len(probe_ids)))
+            if common == shared and len(probe_ids) == probe_target:
+                self.save_token_fixture(probe, probe_ids, enable_thinking=False)
+                return seed, seed_ids, probe, probe_ids
+            delta = shared-common
+            x_count += delta
+            z_count += probe_target-len(probe_ids)-delta
+        raise legacy.SmokeFailure(f'cannot construct exact {shared}-token LINEAR branch')
+
+    def cache_probe_case(self, seed):
+        if not self.scheduler_chunk_profile():
+            return seed
+        pair = self._last_n_cache_pairs[seed.prompt]
+        return replace(seed, prompt=pair['probe_prompt'], expected_input_len=pair['probe_tokens'],
+                       expected_reuse_len=pair['common_tokens'])
+
+    def _precision_reference(self, case):
+        if not self._memory_candidates:
+            raise legacy.SmokeFailure('precision reference needs the C10 seed fixture')
+        probe = self.cache_probe_case(self._memory_candidates[0][1])
+        return replace(probe, name=case.name, reuse='miss', expected_reuse_len=0,
+                       preparation_only=case.preparation_only)
+
+    def cache_seed_case(self, case, attempt):
+        if self.scheduler_chunk_profile() and attempt == 1:
+            return self._precision_reference(case)
+        return case
+
+    def cache_witness_case(self, case):
+        return self._precision_reference(case) if self.scheduler_chunk_profile() else case
+
+    def _orthogonal_cache_seed(self):
+        super()._orthogonal_cache_seed()
+        if self.scheduler_chunk_profile():
+            # Keep the original seed request slots; first-attempt tier proof
+            # is mandatory for the fixed 304-request acceptance contract.
+            self._memory_candidates = self._memory_candidates[:1]
+
+    def probe_cache_witness(self):
+        if not self.scheduler_chunk_profile():
+            return super().probe_cache_witness()
+        # The existing witness probe runs after the existing long-KV traffic,
+        # which supplies real HOST pressure and SSD demotion without more RPCs.
+
+    def complete_last_n_ssd_probe(self):
+        probe = replace(self._memory_witness, name='tier-memory-probe', reuse='hit',
+            expected_cache_tier=None, preparation_only=True,
+            expected_reuse_len=10*self.reuse_unit_tokens, max_tokens=64)
+        self._required_stage(probe.name, [probe])
+        tier = self.records[-1].get('prefill_cache_tiers') or {}
+        if tier.get('disk', 0) <= 0:
+            raise legacy.SmokeFailure('C10 SSD probe did not actually read back from disk')
+        self.stages[-1].update(expected_linear_tier='DISK', expected_linear_checkpoint_tokens=10240)
+
+    def precision_case(self, case):
+        return self.scheduler_chunk_profile() and case.name in {
+            'tier-device-probe-0', 'tier-memory-seed-1', 'tier-witness-seed',
+            'tier-mixed-0-memory', 'tier-memory-probe'}
+
+    def precision_cold_case(self, case):
+        return self.scheduler_chunk_profile() and case.name in {'tier-memory-seed-1', 'tier-witness-seed'}
+
+    def run_prefix_branches(self):
+        if not self.scheduler_chunk_profile():
+            return super().run_prefix_branches()
+        a, b = self.linear_c7_cases()
+        unit = self.reuse_unit_tokens
+        self.run_stage('prefix_A_seed', [a])
+        self.run_stage('prefix_B_partial', [b])
+        a_hit = replace(a, name='prefix-A-return', reuse='hit', expected_reuse_len=12*unit)
+        b_hit = replace(b, name='prefix-B-hit', reuse='hit', expected_reuse_len=12*unit)
+        self.run_stage('prefix_A_return', [a_hit])
+        self.run_stage('prefix_AB_mixed', [replace(case, name=f'prefix-mixed-{i}',
+            decode_owner_rank=(i+4) % len(self.decode_role_addrs))
+            for i, case in enumerate((a_hit, b_hit, a_hit, b_hit))], concurrent=True)
+
+    def linear_c7_cases(self):
+        head = f'档案 {self.args.namespace}/prefix-branches。以下 x 为无关填充。\n'
+        tail_a = '\n唯一有效记录：key=chosen; value=CEDAR-AMBER。只输出 JSON {"value":"CEDAR-AMBER"}，不要解释。'
+        tail_b = '\n唯一有效记录：key=chosen; value=MAPLE-VIOLET。只输出 JSON {"value":"MAPLE-VIOLET"}，不要解释。'
+        unit, target = self.reuse_unit_tokens, 12*self.reuse_unit_tokens+128
+        prompt_a, tokens_a, prompt_b, tokens_b = self.fit_linear_checkpoint_branch(
+            head, tail_a, tail_b, target, target, 7*unit)
+        self._last_n_c7_fixture = dict(common_tokens=7*unit, input_tokens=target,
+            seed_token_sha256=hashlib.sha256(json.dumps(tokens_a).encode()).hexdigest(),
+            probe_token_sha256=hashlib.sha256(json.dumps(tokens_b).encode()).hexdigest())
+        a = legacy.Case('prefix-A-seed', prompt_a, '', 'miss', expected_json={'value':'CEDAR-AMBER'},
+                        expected_input_len=len(tokens_a), expected_reuse_len=0)
+        b = legacy.Case('prefix-B-partial', prompt_b, '', 'miss', expected_json={'value':'MAPLE-VIOLET'},
+                        expected_input_len=len(tokens_b), expected_reuse_len=0)
+        return a, b
 
     def prepare_http_payload(self, payload, case):
         payload.update(seed=3101, enable_thinking=False, top_p=1.0,
                        user="k31-smoke:" + case.name)
         payload.setdefault('extra_configs', {}).update(
             return_input_ids=True, return_output_ids=True, force_sp_accept=False)
+        if self.precision_case(case):
+            payload['extra_configs']['trace_id'] = 'k31-last-n-precision:' + case.name
+        if self.precision_cold_case(case):
+            payload['extra_configs']['reuse_cache'] = False
         return payload
 
     def prepare_group_config(self, config, case):
         config.random_seed = 3101
         config.top_p = 1.0
         config.force_sp_accept = False
+        if self.precision_case(case):
+            config.trace_id = 'k31-last-n-precision:' + case.name
+        if self.precision_cold_case(case):
+            config.reuse_cache = False
         return config
 
     def max_grouped_prefill_requests(self):
@@ -202,6 +356,8 @@ class K31FullRunner(legacy.Runner):
         page, unit = self.args.block_size, self.reuse_unit_tokens
         if unit // page != 8 or unit % page:
             raise legacy.SmokeFailure('service smoke needs the eight-page checkpoint geometry')
+        if self.scheduler_chunk_profile():
+            return (page, 2 * page, 4 * page, unit, 2 * unit, 4 * unit, 5 * unit, 6 * unit)
         return tuple(range(page, unit + 1, page))
 
     def decode_boundary_tokens(self):
@@ -221,7 +377,8 @@ class K31FullRunner(legacy.Runner):
     def _orthogonal_bounded_cache_pressure(self):
         # Demote the witness and all cancellation seeds by filling the observed
         # Device pool with newer prefixes. Larger pools need more preparations.
-        plan = cache_pressure_plan(self._orthogonal_device_blocks(), self.reuse_unit_tokens)
+        plan = cache_pressure_plan(self._orthogonal_device_blocks(), self.reuse_unit_tokens,
+                                   scheduler_chunking=self.scheduler_chunk_profile())
         self._cache_pressure_plan = plan
         self._cache_pressure_requests = plan['requests']
         for index in range(plan['requests']):
@@ -230,6 +387,7 @@ class K31FullRunner(legacy.Runner):
             self._required_stage(f'tier-pressure-{index:02d}', [legacy.Case(
                 f'tier-pressure-{index:02d}', prompt, r'.', 'miss',
                 max_tokens=8, preparation_only=True,
+                allow_long_history=plan['input_tokens'] > 65536,
                 expected_input_len=plan['input_tokens'])])
 
     def validate_prefill_capacity(self):
@@ -241,8 +399,15 @@ class K31FullRunner(legacy.Runner):
         full = self._orthogonal_device_blocks()
         full_required = largest_batch
         if self.args.decode_batch_profile == 'smoke':
-            full_required = max(full_required, 655360 // self.reuse_unit_tokens + 2)
-            linear_required = max(linear_required, full_required)
+            if self.scheduler_chunk_profile():
+                full_required = max(full_required, 1048576 // self.reuse_unit_tokens + 1)
+                # The existing cold reference disables reuse. Its short
+                # 10I+128 prompt uses the compatibility allocation path.
+                reference_slots = (10 * self.reuse_unit_tokens + 128 + self.args.block_size - 1) // self.args.block_size
+                linear_required = max(linear_required, reference_slots + 4)
+            else:
+                full_required = max(full_required, 655360 // self.reuse_unit_tokens + 2)
+                linear_required = max(linear_required, full_required)
         if linear < linear_required or full < full_required:
             raise legacy.SmokeFailure(
                 f'Prefill cache capacity is too small before smoke admission: '
@@ -291,6 +456,35 @@ class K31FullRunner(legacy.Runner):
                     value, 'miss', expected_input_len=len(ids), decode_owner_rank=(delta + 1) % owners)
                 self._required_stage(case.name, [case])
 
+    def long_kv_seed_targets(self):
+        targets = super().long_kv_seed_targets()
+        if not self.scheduler_chunk_profile():
+            return targets
+        # Keep all twenty model request slots. One becomes the cold 1M case;
+        # another retains C576 for the existing historical-KV final probe.
+        targets = [1_048_576, *targets[:-1]]
+        targets[targets.index(589_344)] = 589_824 + 128
+        return targets
+
+    def long_kv_seed_reuse(self, index):
+        if self.scheduler_chunk_profile() and index <= 1:
+            # Last-5 at 1M cannot satisfy the subsequent shorter prefix.
+            return 'miss'
+        return super().long_kv_seed_reuse(index)
+
+    def long_kv_seed_prompt(self, base, overhead, target):
+        if not self.scheduler_chunk_profile():
+            return super().long_kv_seed_prompt(base, overhead, target)
+        repeats = target - overhead
+        for _ in range(3):
+            prompt = base + ' x' * repeats
+            tokens = self.tokenize(prompt, enable_thinking=False)
+            if len(tokens) == target:
+                self.save_token_fixture(prompt, tokens, enable_thinking=False)
+                return prompt
+            repeats += target - len(tokens)
+        raise legacy.SmokeFailure(f'cannot construct exact long-KV seed length {target}')
+
     def _orthogonal_decode_batches(self):
         # BS63 exercises a full owner and a padded owner together. BS64 is an
         # explicit capacity-only suite, not a repeated default-smoke gate.
@@ -319,8 +513,11 @@ class K31FullRunner(legacy.Runner):
         self._orthogonal_cache_seed()
         for phase in (self._orthogonal_page_boundaries, self._orthogonal_bounded_cache_pressure,
                       self._orthogonal_cache, self._orthogonal_cancel_recovery,
-                      self._orthogonal_chunk_kv, self._orthogonal_decode_batches):
+                      self._orthogonal_chunk_kv):
             phase()
+        if self.scheduler_chunk_profile():
+            self.complete_last_n_ssd_probe()
+        self._orthogonal_decode_batches()
 
     def save(self, passed, error=None):
         formal = sum(row.get('phase') == 'formal' for row in self.records)
@@ -347,12 +544,19 @@ class K31FullRunner(legacy.Runner):
             draft_contract=getattr(self.args, "draft_contract", None), synthetic_draft=self.args.synthetic_draft,
             group_tokenizer_setup_seconds=getattr(self, 'group_tokenizer_setup_seconds', None),
             cache_pressure_plan=getattr(self, '_cache_pressure_plan', None))
+        value['last_n_checkpoints'] = getattr(self.args, 'last_n_checkpoints', None)
+        value['scheduler_chunk_profile'] = self.scheduler_chunk_profile()
+        value['last_n_cache_fixtures'] = [{key: item for key, item in pair.items() if key != 'probe_prompt'}
+            for pair in getattr(self, '_last_n_cache_pairs', {}).values()]
+        value['last_n_c7_fixture'] = getattr(self, '_last_n_c7_fixture', None)
+        if self.scheduler_chunk_profile():
+            value['validation_profile'] = 'last5-chunked-' + profile
         path.write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n')
         if requested_pass and not complete_count:
             raise legacy.SmokeFailure(error)
 
 
-def parse_args(argv=None):
+def parse_args(argv=None, *, calibration=False):
     p = argparse.ArgumentParser(description=__doc__)
     for key in ('base-url', 'decode-health-url', 'namespace', 'source-commit'):
         p.add_argument('--'+key, required=True)
@@ -369,6 +573,8 @@ def parse_args(argv=None):
                    type=legacy.parse_decode_role_addr, required=True)
     p.add_argument('--decode-batch-profile', choices=('smoke', 'capacity'), default='smoke',
                    help='smoke: complete service suite with BS63; capacity: BS64 only')
+    p.add_argument('--last-n-checkpoints', type=int, choices=(5,),
+                   help='Exercise Last-5 with genuine scheduler chunks in the existing 304 request slots')
     args = p.parse_args(argv)
     args.geometry_value = json.loads(args.geometry.read_text())
     g = args.geometry_value
@@ -379,6 +585,12 @@ def parse_args(argv=None):
         p.error('full93 requires audited runtime page/checkpoint geometry and eight source shards')
     if g['page_size'] % g['kernel_page_size']:
         p.error('physical pages must contain complete kernel pages')
+    if args.last_n_checkpoints is not None and (
+            g['page_size'] != 128 or g['kernel_page_size'] != 128
+            or g['checkpoint_span'] != 1024
+            or g.get('reuse_cache_tail_blocks') != (2147483647 if calibration else 5)
+            or g.get('last_n_calibration', False) != calibration):
+        p.error('Last-5 requires verified physical/kernel B128, CP8 checkpoint1024 and the requested runtime tail policy')
     if args.output.exists() or (args.output.parent/'requests').exists():
         p.error('existing evidence cannot be overwritten')
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -391,6 +603,8 @@ def parse_args(argv=None):
     args.reuse_unit_tokens = lcm(g['checkpoint_span'],g['cache_key_stride'])
     args.runtime_layers, args.profile = 93, 'k3-full'
     args.suite = 'main-text-64k-capped'
+    if args.last_n_checkpoints is not None:
+        args.suite = 'main-text-last5-chunked'
     args.run_kind = ('real93-native-mla-mtp-' if args.draft_contract is not None
                      else 'real93-synthetic-mtp-') + args.decode_batch_profile
     args.batch_size, args.chunk_tokens, args.max_tokens = 4, 65536, 128

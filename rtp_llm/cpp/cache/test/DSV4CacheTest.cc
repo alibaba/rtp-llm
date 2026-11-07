@@ -2145,6 +2145,113 @@ TEST(CacheConfigCreatorTest, FullyExplicitLinearOnlyPoolsHaveNoAutomaticMarginal
     EXPECT_EQ(config.group("linear").block_num, 7u);
 }
 
+TEST(CacheConfigCreatorTest, PrefillLinearPoolRatioUsesCpPagesAndFitsTheDeviceBudget) {
+    auto model                      = makeHybridAttentionModelConfig();
+    model.max_seq_len               = 16384;
+    model.local_kv_cache_sharded    = true;
+    model.attn_config.use_mla       = true;
+    model.attn_config.kv_lora_rank  = 16;
+    model.attn_config.rope_head_dim = 16;
+
+    KVCacheSpecDesc indexer;
+    indexer.tag               = "indexer_kv";
+    indexer.cache_type        = KVCacheSpecType::OpaqueKV;
+    indexer.entry_dtype       = DataType::TYPE_UINT8;
+    indexer.entry_elems       = 8;
+    indexer.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    indexer.compression_ratio = 1;
+    for (auto& layer : model.kv_cache_spec_descs) {
+        auto& desc = layer.front();
+        if (desc.cache_type == KVCacheSpecType::LinearAttention) {
+            desc.prefill_borrow_tail = true;
+        } else {
+            desc.cache_type = KVCacheSpecType::MultiHeadLatentAttention;
+            layer.push_back(indexer);
+        }
+    }
+
+    auto draft                                           = model;
+    draft.num_layers                                     = 1;
+    draft.attn_config.kv_lora_rank                       = 32;
+    draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    draft.kv_cache_spec_descs                            = {{model.kv_cache_spec_descs[1].front()}};
+    SpeculativeExecutionConfig sp;
+    sp.type              = SP_TYPE_MTP;
+    sp.gen_num_per_cycle = 3;
+
+    ParallelismConfig parallelism;
+    parallelism.role_type = RoleType::PREFILL;
+    parallelism.tp_size = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    RuntimeConfig runtime;
+    KVCacheConfig options;
+    options.reuse_cache = true;
+    options.reuse_cache_tail_blocks = 5;
+    options.kv_cache_mem_mb = 1;
+
+    auto default_config = CacheConfigCreator::createConfig(model, parallelism, options);
+    default_config.finalizeBlockNums(101, runtime);
+    EXPECT_EQ(default_config.group("linear").block_num, 101u);
+
+    // Eight tokens per local page, sixteen per CP page. Both reference
+    // lengths budget five checkpoints and one tail.
+    for (const auto& [tokens, pages] :
+         std::vector<std::pair<int, uint32_t>>{{1600, 100}, {1567, 98}}) {
+        options.linear_pool_avg_prompt_tokens = tokens;
+        auto config = CacheConfigCreator::createConfig(model, parallelism, options, sp, &draft, true);
+        EXPECT_EQ(config.linear_prefill_pool_ratio.reference_pages, pages);
+        EXPECT_EQ(config.linear_prefill_pool_ratio.reference_states, 6u);
+
+        const auto baseline =
+            CacheConfigCreator::computeLocalBlockNum(config, model, runtime, options, parallelism, std::nullopt, sp);
+        ASSERT_GT(baseline, 1u);
+        config.finalizeBlockNums(baseline, runtime);
+        const auto allocated_bytes = [&] {
+            size_t bytes = 0;
+            for (const auto& group : config.groups()) {
+                bytes += DeviceBlockPoolConfigHelper::createConfigForGroup(config, group).total_size_bytes;
+            }
+            return bytes;
+        };
+        EXPECT_EQ(config.group("full").block_num, baseline);
+        EXPECT_EQ(config.group("indexer_kv").block_num, baseline);
+        EXPECT_EQ(config.mtp_sub_configs.at(0)->group("full").block_num, baseline);
+        const auto full_pool = DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.group("full"));
+        ASSERT_EQ(full_pool.memory_layouts.size(), 2u);
+        EXPECT_LE(allocated_bytes(), 1u << 20);
+        config.finalizeBlockNums(baseline + 1, runtime);
+        EXPECT_GT(allocated_bytes(), 1u << 20);
+
+        config.finalizeBlockNums(2 * pages + 1, runtime);
+        EXPECT_EQ(config.group("linear").block_num, 13u);
+        // Leave room for one cold non-aligned request at a small pool size.
+        config.finalizeBlockNums(11, runtime);
+        EXPECT_EQ(config.group("linear").block_num, 7u);
+    }
+
+    options.linear_pool_blocks = 8;
+    auto explicit_config = CacheConfigCreator::createConfig(model, parallelism, options);
+    explicit_config.finalizeBlockNums(101, runtime);
+    EXPECT_EQ(explicit_config.group("linear").block_num, 8u);
+    options.linear_pool_blocks = 0;
+    parallelism.role_type = RoleType::DECODE;
+    auto decode = CacheConfigCreator::createConfig(model, parallelism, options);
+    decode.finalizeBlockNums(101, runtime);
+    EXPECT_EQ(decode.group("linear").block_num, 101u);
+}
+
+TEST(CacheConfigCreatorTest, PrefillLinearPoolRatioDoesNotWrapLargeStateCounts) {
+    KVCacheBlockBudget budget;
+    budget.paged_block_bytes          = 1;
+    budget.linear_prefill_block_bytes = 1;
+    budget.linear_prefill_pool_ratio  = {1, 6, 6};
+    const auto max_blocks = LinearPrefillPoolRatio::kMaxPhysicalBlocks;
+    const auto pages      = maxKVCacheBlockNumForBudget(std::numeric_limits<size_t>::max(), budget);
+    EXPECT_EQ(pages, 1u + (max_blocks - 1u) / 6u);
+    EXPECT_LE(budget.linear_prefill_pool_ratio.physicalBlocks(pages), max_blocks);
+    EXPECT_GT(budget.linear_prefill_pool_ratio.physicalBlocks(pages + 1u), max_blocks);
+}
+
 TEST(CacheConfigCreatorTest, ModelSpecificCapacityTakesPrecedenceOverGenericSwaPool) {
     auto              model = makeProModelConfig();
     ParallelismConfig parallelism;

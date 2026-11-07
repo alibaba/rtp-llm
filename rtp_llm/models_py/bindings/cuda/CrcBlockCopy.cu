@@ -554,6 +554,10 @@ struct CrcBlockCopyBatch::Impl {
         tiles_offset       = (arrived_offset + checkedProduct(items, sizeof(unsigned int)) + align - 1) / align * align;
         const size_t pack_bytes = tiles_offset + checkedProduct(tile_count, sizeof(CopyTile));
         checkCuda(cudaSetDevice(device));
+        // Load both kernels before transfer workers can race on their first launch.
+        checkCuda(preloadCopyTilesKernel());
+        cudaFuncAttributes crc_attributes{};
+        checkCuda(cudaFuncGetAttributes(&crc_attributes, crc32cBatchedKernel));
         staging.allocate(staging_bytes);
         results.allocate(result_bytes);
         partials.allocate(partials_bytes);

@@ -64,6 +64,9 @@ struct CacheGroupPolicy {
     int sliding_window_size = 0;
     // Share one state bank across logical blocks during chunked prefill.
     bool shared_chunk_state = false;
+    // Opt-in from models whose Prefill kernels support a borrowed state tail.
+    // Finite Last-N and the Prefill role are checked per request.
+    bool prefill_borrow_tail = false;
 };
 
 // One cache-store registration step: pair a cache key from the full logical

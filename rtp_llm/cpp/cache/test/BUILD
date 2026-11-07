@@ -3,6 +3,18 @@ load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "linear_prefill_plan_test",
+    srcs = ["LinearPrefillPlanTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:linear_prefill_plan",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {"GPU_COUNT": "0"},
+)
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
@@ -424,7 +436,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
-    env = {},
+    env = {"GPU_COUNT": "0"},
     # cache_config_test_utils -> cache_types -> torch_deps() keeps libtorch_cuda
     # in the link closure, so like its sibling tests this one needs a GPU node.
     exec_properties = {"gpu": "L20_CU13"},

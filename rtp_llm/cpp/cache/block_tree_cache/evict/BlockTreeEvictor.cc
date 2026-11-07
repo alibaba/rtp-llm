@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/LinearTransferTrace.h"
 
 #include <algorithm>
 #include <chrono>
@@ -497,6 +498,13 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
                     {
                         CompletionStageScope update(observation, "completion_tree_update", "business_completion");
                         completeEvict(task->descriptors());
+                        if (linear_prefill_trace::enabled()) {
+                            for (const auto& descriptor : task->descriptors()) {
+                                if (descriptor.node && descriptor.target_tier != Tier::NONE) {
+                                    traceCompletedLinearTransfer(tree_->groupSets(), descriptor, descriptor.node->cache_key);
+                                }
+                            }
+                        }
                     }
                     {
                         CompletionStageScope cleanup(observation, "completion_cleanup", "business_completion");

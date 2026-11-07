@@ -57,7 +57,9 @@ EVIDENCE_NAMES = (
     "checkpoint-preflight.json",
     "draft_checkpoint-preflight.json",
     "rdma-preflight.json",
+    "port-preflight.json",
     "logs",
+    "logits",
     REQUEST_EVIDENCE,
 )
 
@@ -75,16 +77,33 @@ def stage_configs(base, stages=STAGES):
     require(
         base.get("target_only", False) is False, "default smoke requires native MTP"
     )
+    last_n = base.get("last_n_checkpoints")
+    calibration = base.get('last_n_calibration', False)
+    tier_probe = base.get('last_n_tier_probe')
+    require(tier_probe is None or (tier_probe in ('DEVICE', 'HOST', 'DISK')
+            and last_n == 5 and not calibration
+            and base['prefill'].get('prefill_token_capacity') == 2048),
+            'isolated tier probe requires Last-5, 2K chunks and no calibration mode')
+    require(type(calibration) is bool and (not calibration or last_n == 5),
+            'unbounded calibration requires the explicit Last-5 geometry')
+    require(last_n is None or type(last_n) is int and last_n == 5,
+            "full Last-N smoke uses Last-5; smaller N is covered by focused tests")
+    if last_n is not None:
+        require(tuple(stages) == ("regular",),
+                "Last-5 uses the existing 304 regular slots; select --stages regular")
+        require(base.get("decode_dp", 1) == 1, "Last-5 smoke requires Decode TP8/EP8")
     configs = []
     geometry = {"regular": (2, 96), "long": (1, 140)}
     for stage in stages:
         decode_dp, block_count = geometry[stage]
         if stage == "regular":
-            decode_dp = base.get("decode_dp", decode_dp)
+            decode_dp = 1 if last_n is not None else base.get("decode_dp", decode_dp)
+        if last_n is not None:
+            block_count = max(256 if calibration else 1032, base["prefill"].get("test_block_num", 0))
         config = copy.deepcopy(base)
-        # The public cache-store implementation uses TCP. An internally
-        # linked RDMA implementation can still be selected explicitly.
-        config.setdefault("cache_store_rdma_mode", False)
+        config.setdefault("cache_store_rdma_mode", True)
+        config.setdefault("fp8_gemm", True)
+        config.setdefault("fp8_kv_cache", True)
         config.setdefault("prefill_kv_workspace_budget_gib", launcher.DEFAULT_KV_WORKSPACE_GIB)
         config.update(
             run_id=f"{base['run_id']}-{stage}",
@@ -93,6 +112,18 @@ def stage_configs(base, stages=STAGES):
             target_only=False,
         )
         config["prefill"]["test_block_num"] = block_count
+        if last_n is not None:
+            config["decode"]["test_block_num"] = max(64 if calibration else 1032, base["decode"].get("test_block_num", 0))
+            # FULL covers 1M; LINEAR needs separate pressure for a real
+            # LINEAR HOST/SSD hit, independently of MLA page eviction.
+            config["prefill"].setdefault("linear_pool_blocks", 256 if calibration else 96)
+            config['decode'].setdefault('linear_pool_blocks', 64 if calibration else 512)
+            config["prefill"].setdefault("memory_cache_size_mb", 8192)
+            config["prefill"].setdefault("disk_cache_size_mb", 65536)
+            for role in launcher.ROLES:
+                require(config[role].get("max_seq_len", 2_097_152) >=
+                        LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
+                        f"{role}: Last-5 smoke must admit the existing 1M cold seed")
         if stage == "long":
             config["prefill"].setdefault(
                 "linear_pool_blocks", long_prefill_linear_minimum() + 1
@@ -144,10 +175,12 @@ def request_args(config, root):
         "--base-url",
         f"http://127.0.0.1:{prefill['port']}",
         "--namespace",
-        config["run_id"],
+        config.get("case_namespace", config["run_id"]),
         "--geometry",
         str(root / "runtime-geometry.json"),
     ]
+    if config.get("last_n_checkpoints") is not None:
+        args += ["--last-n-checkpoints", str(config["last_n_checkpoints"])]
     for item in endpoints:
         if item["kind"] == "http":
             args += [
@@ -174,10 +207,22 @@ def run_requests(control):
 
         return main(["run", *args, "--output", str(evidence)])
     require(config["k31_smoke_stage"] == "regular", "unsupported K3.1 smoke stage")
-    if __package__:
-        from .k31_full_smoke import main
+    if config.get('last_n_calibration'):
+        if __package__:
+            from .k31_last_n_calibration import main
+        else:
+            from k31_last_n_calibration import main
+    elif config.get('last_n_tier_probe'):
+        if __package__:
+            from .k31_last_n_tier_probe import main
+        else:
+            from k31_last_n_tier_probe import main
+        args += ['--isolated-tier', config['last_n_tier_probe']]
     else:
-        from k31_full_smoke import main
+        if __package__:
+            from .k31_full_smoke import main
+        else:
+            from k31_full_smoke import main
 
     prefill, decode = config["prefill"], config["decode"]
     source = Path(prefill["repo_root"])
@@ -336,6 +381,17 @@ def audit_startup(config, output):
         )
         ready = readiness[role]
         require(ready.get("healthy") is True, f"{role}: service never became ready")
+        transport = read_json(directory / "rdma-preflight.json")
+        require(transport.get("cache_store_transport") == "rdma",
+                f"{role}: smoke requires RDMA preflight")
+        logs = directory / "logs"
+        with (logs / "engine.log").open(encoding="utf-8", errors="replace") as engine:
+            rdma_ranks = sorted({
+                int(match.group(1))
+                for line in engine
+                if (match := re.search(r"\[RANK (\d+)\].*rdma messager init success", line))
+            })
+        require(rdma_ranks == list(range(8)), f"{role}: expected native RDMA on all eight ranks")
         geometry = read_json(directory / "runtime-geometry.json")
         require(
             geometry.get("runtime_verified") is True,
@@ -364,7 +420,8 @@ def audit_startup(config, output):
                 key: report[key] for key in ("config_sha256", "index_sha256")
             }
         proof[role] = dict(
-            fastsafetensors_lines=fastsafetensors_proof(directory / "logs"),
+            fastsafetensors_lines=fastsafetensors_proof(logs),
+            rdma_ranks=rdma_ranks,
             geometry=geometry,
             checkpoints=checkpoints,
         )
@@ -450,6 +507,46 @@ def audit_stage(config, output):
     )
     evidence = output / "prefill" / REQUEST_EVIDENCE
     prefill_logs, decode_logs = (output / role / "logs" for role in launcher.ROLES)
+    if config.get('last_n_tier_probe'):
+        if __package__:
+            from .k31_last_n_tier_probe import audit_probe
+            from .audit_k31_full_smoke import read_events
+            from . import result_check
+        else:
+            from k31_last_n_tier_probe import audit_probe
+            from audit_k31_full_smoke import read_events
+            import result_check
+        result = read_json(evidence/'RESULT.json')
+        rows = {row['name']: row for row in result['cases']}
+        errors = (result_check.audit_raw_answers(evidence/'requests', rows)
+                  + result_check._raw_consistency(evidence/'requests', rows))
+        for row in rows.values():
+            errors += result_check.independent_answer_check(row) + result_check._cache_errors(row, 128)
+        require(not errors, f'isolated tier raw response audit failed: {errors}')
+        proof = audit_probe(result, read_events(prefill_logs, prefill_logs/'engine.log'),
+                            read_events(decode_logs, decode_logs/'engine.log'), output, config)
+        launcher.atomic(output/'audit.json', proof)
+        return dict(total=2, formal=1, preparation=1)
+    if config.get('last_n_calibration'):
+        if __package__:
+            from .k31_last_n_calibration import audit_calibration
+            from .audit_k31_full_smoke import read_events
+            from . import result_check
+        else:
+            from k31_last_n_calibration import audit_calibration
+            from audit_k31_full_smoke import read_events
+            import result_check
+        result = read_json(evidence/'RESULT.json')
+        rows = {row['name']: row for row in result['cases']}
+        raw_errors = (result_check.audit_raw_answers(evidence/'requests', rows)
+                      + result_check._raw_consistency(evidence/'requests', rows))
+        require(not raw_errors, f'calibration raw response audit failed: {raw_errors}')
+        proof = audit_calibration(result,
+            read_events(prefill_logs, prefill_logs/'engine.log'),
+            read_events(decode_logs, decode_logs/'engine.log'), output,
+            prefill_chunk_tokens=config['prefill'].get('prefill_token_capacity', 65536))
+        launcher.atomic(output/'audit.json', proof)
+        return dict(total=6, formal=2, preparation=4)
     if config["k31_smoke_stage"] == "regular":
         audit_path = output / "audit.json"
         with (output / "audit.log").open("xb") as log:
@@ -472,7 +569,7 @@ def audit_stage(config, output):
                     str(decode_logs / "engine.log"),
                     "--decode-tp",
                     str(8 // launcher.decode_dp_size(config)),
-                ],
+                ] + precision_audit_args(config, output),
                 cwd=Path(__file__).resolve().parents[4],
                 stdout=log,
                 stderr=subprocess.STDOUT,
@@ -562,12 +659,38 @@ def run_stage(config, output, startup_timeout):
     return record
 
 
+def precision_audit_args(config, output):
+    if config.get('last_n_checkpoints') is None:
+        return []
+    for key in ('precision_reference', 'precision_contract'):
+        require(isinstance(config.get(key), str) and Path(config[key]).is_absolute()
+                and Path(config[key]).is_file(), f'Last-5 needs an existing absolute {key} before launch')
+    return ['--prefill-logits', str(output/'prefill'/'logits'),
+            '--decode-logits', str(output/'decode'/'logits'),
+            '--precision-reference', config['precision_reference'],
+            '--precision-contract', config['precision_contract']]
+
+
 def run(base, output, startup_timeout, stages=STAGES):
     configs = stage_configs(base, stages)
+    if base.get('last_n_checkpoints') is not None and not base.get('last_n_calibration'):
+        precision_audit_args(base, output)
+        contract = read_json(Path(base['precision_contract']))
+        require(contract.get('schema') == 1 and type(contract.get('created_ns')) is int
+                and 0 < contract['created_ns'] < time.time_ns()
+                and contract.get('source_commit') == base.get('source_commit'),
+                'Last-5 precision limits must be locked for this source SHA before starting services')
+        require(contract.get('prefill_chunk_tokens', 65536) ==
+                base['prefill'].get('prefill_token_capacity', 65536),
+                'Last-5 calibration and candidate must use the same Prefill chunk capacity')
     output.mkdir(parents=True, exist_ok=False)
     launcher.atomic(output / "config.json", base)
     stage_counts = {"regular": dict(total=304, formal=267, preparation=37),
                     "long": dict(total=2, formal=1, preparation=1)}
+    if base.get('last_n_calibration'):
+        stage_counts['regular'] = dict(total=6, formal=2, preparation=4)
+    if base.get('last_n_tier_probe'):
+        stage_counts['regular'] = dict(total=2, formal=1, preparation=1)
     expected = {key: sum(stage_counts[stage][key] for stage in stages) for key in EXPECTED_COUNTS}
     result = {"passed": False, "stages": {}, "expected_counts": expected}
     try:
@@ -598,13 +721,18 @@ def run(base, output, startup_timeout, stages=STAGES):
             and "error" not in result
             and all(record["passed"] for record in result["stages"].values())
         )
+        if base.get('last_n_calibration'):
+            result.update(last_n_calibration=True, complete_smoke_passed=False)
+        if base.get('last_n_tier_probe'):
+            result.update(last_n_tier_probe=base['last_n_tier_probe'], complete_smoke_passed=False)
     except BaseException as error:
         result["error"] = f"{type(error).__name__}: {error}"
         raise
     finally:
         launcher.atomic(output / "RESULT.json", result)
+    label = 'Last-N calibration' if base.get('last_n_calibration') else 'Default K3.1 smoke'
     print(
-        f"Default K3.1 smoke {'PASS' if result['passed'] else 'FAIL'}; evidence {output}",
+        f"{label} {'PASS' if result['passed'] else 'FAIL'}; evidence {output}",
         flush=True,
     )
     return 0 if result["passed"] else 1

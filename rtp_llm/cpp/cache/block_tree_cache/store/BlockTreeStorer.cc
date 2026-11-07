@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CompletionStage.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/LinearTransferTrace.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -260,6 +261,12 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish, Comple
                 task.target_tier, {descriptor.singleBlockAt(task.target_tier)});
         }
         insert_result = tree_->insertNode(task.cache_keys, resources, true, false);
+        if (linear_prefill_trace::enabled()) {
+            for (const auto& descriptor : task.descriptors()) {
+                traceCompletedLinearTransfer(tree_->groupSets(), descriptor, task.cache_keys[descriptor.path_index],
+                                              task.transfer_task.requestId(), descriptor.path_index);
+            }
+        }
     }
 
     {

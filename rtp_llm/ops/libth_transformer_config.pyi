@@ -761,6 +761,7 @@ class KVCacheConfig:
     kv_cache_mem_mb: int
     reuse_cache_tail_blocks: int
     linear_pool_blocks: int
+    linear_pool_avg_prompt_tokens: int
     swa_pool_blocks: int
     max_block_size_per_item: int
     memory_cache_size_mb: int
@@ -1088,6 +1089,7 @@ class KVCacheSpecDesc:
     dtype: DataType
     is_state_cache: bool
     head_sharded_transfer: bool
+    prefill_borrow_tail: bool
     entry_elems: int
     entry_dtype: DataType
     entry_count_mode: OpaqueBlockEntryCountMode

@@ -853,6 +853,9 @@ bool GenerateStream::prepareUpdateWithoutLock(const std::optional<ErrorInfo>& er
     if ((hasErrorWithoutLock() || isFinished()) && (!force_update_info || middle_chunk)) {
         return false;
     }
+    if (isContextStream()) {
+        stream_cache_resource_->completeLinearPrefillChunk(prefixLength() + currentChunkLen());
+    }
     if (middle_chunk) {
         advanceChunk();
         return false;

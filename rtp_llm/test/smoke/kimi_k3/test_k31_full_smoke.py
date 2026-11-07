@@ -9,10 +9,144 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from k31_full_smoke import (K31FullRunner, legacy, parse_args, pending_host_load,
-                           decode_batch_sizes, request_budget)
+                           decode_batch_sizes, request_budget, cache_pressure_plan)
 
 
 class FullK31SmokeTest(unittest.TestCase):
+    def test_chunk_prefill_iteration_count_is_not_decode_acceptance(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(last_n_checkpoints=5)
+        aux = dict(output_len=10, iter_count=20, speculative_metrics=dict(version=1))
+        self.assertEqual(runner.mtp_acceptance(aux, dict(accepted_draft_tokens=3)),
+                         (3, 'native_speculative_metrics_v1'))
+        runner.args.last_n_checkpoints = None
+        self.assertEqual(runner.mtp_acceptance(aux, dict(accepted_draft_tokens=3)), (-10, 'iteration_count'))
+
+    def test_last5_c7_negative_control_uses_the_seven_existing_prefix_slots(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(last_n_checkpoints=5, reuse_unit_tokens=1024, namespace='c7')
+        runner.decode_role_addrs = [{}]
+        runner.fit_linear_checkpoint_branch = MagicMock(return_value=('a', [0]*12416, 'b', [1]*12416))
+        stages = []
+        runner.run_stage = lambda name, cases, **kwargs: stages.append((name, cases))
+        runner.run_prefix_branches()
+        self.assertEqual(sum(len(cases) for _, cases in stages), 7)
+        self.assertEqual(runner.fit_linear_checkpoint_branch.call_args.args[-1], 7168)
+        negative = stages[1][1][0]
+        self.assertEqual((negative.name, negative.reuse, negative.expected_reuse_len), ('prefix-B-partial', 'miss', 0))
+        self.assertEqual([case.expected_reuse_len for case in stages[-1][1]], [12288]*4)
+
+    def test_last5_precision_marker_keeps_chunk_prefill_and_mtp_request_modes(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(last_n_checkpoints=5, reuse_unit_tokens=1024)
+        seed = legacy.Case('tier-memory-seed-0', 'seed-a', '.', 'miss', expected_json={'value':'MEM-0'})
+        runner._memory_candidates = [('ns-tier-0', seed, 'MEM-0')]
+        runner._last_n_cache_pairs = {'seed-a': dict(probe_prompt='probe-b', probe_tokens=10368, common_tokens=10240)}
+        cold = runner.cache_seed_case(legacy.Case('tier-memory-seed-1', 'unused', '.', 'miss'), 1)
+        witness = runner.cache_witness_case(legacy.Case('tier-witness-seed', 'unused', '.', 'miss'))
+        for case in (cold, witness):
+            self.assertEqual(case.prompt, 'probe-b')
+            self.assertEqual(case.expected_json, {'value':'MEM-0'})
+            self.assertEqual(case.expected_reuse_len, 0)
+            payload = runner.prepare_http_payload({}, case)
+            extra = payload['extra_configs']
+            self.assertFalse(extra['reuse_cache'])
+            self.assertFalse(extra.get('return_logits', False))
+            self.assertFalse(extra['force_sp_accept'])
+            self.assertEqual(extra['trace_id'], 'k31-last-n-precision:'+case.name)
+        probe = legacy.Case('tier-mixed-0-memory', 'probe-b', '.', 'hit')
+        config = SimpleNamespace(return_logits=False, reuse_cache=True)
+        config = runner.prepare_group_config(config, probe)
+        self.assertFalse(config.return_logits)
+        self.assertTrue(config.reuse_cache)
+        self.assertFalse(config.force_sp_accept)
+        self.assertEqual(config.trace_id, 'k31-last-n-precision:tier-mixed-0-memory')
+        runner._required_stage = MagicMock()
+        runner.probe_cache_witness()
+        runner._required_stage.assert_not_called()
+
+    def test_last5_tier_seed_and_probe_fork_exactly_at_c10(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(last_n_checkpoints=5, reuse_unit_tokens=1024)
+        def tokens(text, **kwargs):
+            return [1, *[120 if word == 'x' else 122 if word == 'z' else 20+len(word)
+                         for word in text.split()], 2]
+        runner.tokenize = tokens
+        def fit(head, tail, target):
+            text = head + ' x' * (target-len(tokens(head+tail))) + tail
+            self.assertEqual(len(tokens(text)), target)
+            return text, tokens(text)
+        runner.fit_prompt = fit
+        runner.save_token_fixture = MagicMock()
+        seed = runner.cache_seed_prompt('last5-tier-0', 'MEM-0')
+        case = legacy.Case('tier-memory-seed-0', seed, '.', 'miss')
+        probe = runner.cache_probe_case(case)
+        seed_ids, probe_ids = tokens(seed), tokens(probe.prompt)
+        self.assertEqual(len(seed_ids), 12*1024+128)
+        self.assertEqual(len(probe_ids), 10*1024+128)
+        self.assertEqual(seed_ids[:10240], probe_ids[:10240])
+        self.assertNotEqual(seed_ids[10240], probe_ids[10240])
+        prepared = runner.prepare_case(legacy.Case('tier-mixed-0-memory', probe.prompt, '.', 'any'))
+        self.assertEqual(prepared.expected_reuse_len, 10240)
+        self.assertEqual(prepared.expected_input_len, 10368)
+        self.assertEqual(runner._last_n_cache_pairs[seed]['common_tokens'], 10240)
+
+    def test_last5_replaces_long_slots_with_exact_1m_and_retained_historical_boundary(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(last_n_checkpoints=5)
+        targets = runner.long_kv_seed_targets()
+        self.assertEqual(len(targets), 20)
+        self.assertEqual(targets[0], 1_048_576)
+        self.assertIn(589_824+128, targets)
+        self.assertEqual([runner.long_kv_seed_reuse(i) for i in range(3)], ['miss', 'miss', 'hit'])
+        self.assertEqual(targets[1:], sorted(targets[1:]))
+        self.assertEqual(request_budget('smoke')['total'], 304)
+        runner.tokenize = lambda text, **kwargs: [1] * (11 + text.count(' x'))
+        runner.save_token_fixture = MagicMock()
+        prompt = runner.long_kv_seed_prompt('base', 10, 1000)
+        self.assertEqual(len(runner.tokenize(prompt)), 1000)
+        runner.save_token_fixture.assert_called_once()
+        runner.args.last_n_checkpoints = None
+        self.assertEqual(runner.long_kv_seed_targets()[-1], 655360)
+
+    def test_last5_reuses_exactly_the_six_existing_long_request_slots(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(namespace='last5', last_n_checkpoints=5,
+            chunk_tokens=65536, reuse_unit_tokens=1024, block_size=128,
+            max_tokens=128, mtp_chunk_max_tokens=128)
+        runner.decode_role_addrs = [{}, {}]
+        runner.fit_prompt = lambda head, tail, count: (head + tail, [0] * count)
+        submitted = []
+        runner.run_stage = lambda name, cases, **kwargs: submitted.extend(cases)
+        runner.run_single_prefill_64k()
+        self.assertEqual(len(submitted), 6)
+        self.assertEqual([case.expected_input_len for case in submitted],
+            [65536, 65536, 196608, 198657, 196608, 198657])
+        self.assertEqual([case.expected_reuse_len for case in submitted],
+            [0, 64512, 0, 0, 195584, 198656])
+        self.assertEqual(request_budget('smoke')['total'], 304)
+
+    def test_last5_boundaries_and_pressure_include_cp_edges_without_more_requests(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(last_n_checkpoints=5, block_size=128, reuse_unit_tokens=1024)
+        self.assertEqual(runner.cache_boundary_tokens(), (128, 256, 512, 1024, 2048, 4096, 5120, 6144))
+        plan = cache_pressure_plan(1025, 1024, scheduler_chunking=True)
+        self.assertEqual(plan['requests'], 15)
+        self.assertEqual(plan['input_tokens'], 70657)
+        self.assertGreater(plan['requests'] * plan['pages_per_probe'], 1025)
+        self.assertEqual(cache_pressure_plan(1025, 1024)['requests'], 17)
+
+    def test_last5_capacity_separates_linear_states_from_full_history(self):
+        runner = object.__new__(K31FullRunner)
+        runner.args = SimpleNamespace(last_n_checkpoints=5, decode_batch_profile='smoke',
+                                     block_size=128, reuse_unit_tokens=1024)
+        capacity = {'linear': 85, 'full': 1025}
+        runner._orthogonal_device_blocks = lambda tag='full': capacity[tag]
+        runner.validate_prefill_capacity()
+        capacity['linear'] = 84
+        with self.assertRaises(legacy.SmokeFailure):
+            runner.validate_prefill_capacity()
+
     def test_bs63_shares_one_barrier_across_both_decode_owners(self):
         runner = object.__new__(K31FullRunner)
         runner.args = SimpleNamespace(output=Path("/tmp/smoke/RESULT.json"))

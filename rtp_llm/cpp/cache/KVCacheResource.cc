@@ -124,6 +124,54 @@ size_t BlockIds::kernelBlocksPerKvBlock() const {
     return kernel_blocks_per_kv_block_;
 }
 
+void BlockIds::setLinearPrefillPlan(std::shared_ptr<const LinearPrefillPlan> plan) {
+    RTP_LLM_CHECK_WITH_INFO(!plan || kernel_blocks_per_kv_block_ == 1,
+                            "borrowed LINEAR prefill requires one kernel page per state slot");
+    linear_prefill_plan_ = std::move(plan);
+    linear_prefill_completed_tokens_ = linear_prefill_plan_ ? linear_prefill_plan_->reusedTokens() : 0;
+}
+
+bool BlockIds::copyLinearPrefillKernelBlocks(int64_t prefix_tokens,
+                                             int64_t query_tokens,
+                                             BlockIdxType* destination) const {
+    if (!linear_prefill_plan_) {
+        return false;
+    }
+    RTP_LLM_CHECK_WITH_INFO(prefix_tokens == linear_prefill_completed_tokens_,
+                            "LINEAR prefill input boundary is not complete: prefix=%ld completed=%ld",
+                            prefix_tokens, linear_prefill_completed_tokens_);
+    const auto round = linear_prefill_plan_->round(prefix_tokens, query_tokens);
+    const auto owner = [&](int64_t position) {
+        RTP_LLM_CHECK_WITH_INFO(position >= 0 && static_cast<size_t>(position) < block_indices.size()
+                                   && block_indices[static_cast<size_t>(position)] > 0,
+                                "LINEAR prefill has no physical state at position=%ld", position);
+        return block_indices[static_cast<size_t>(position)];
+    };
+    std::fill_n(destination, block_indices.size(), NULL_BLOCK_IDX);
+    if (round.input_position) {
+        destination[*round.input_position] = owner(*round.input_owner_position);
+    }
+    for (const auto& write : round.writes) {
+        destination[write.execution_position] = owner(write.owner_position);
+    }
+    return true;
+}
+
+void BlockIds::completeLinearPrefillChunk(int64_t completed_tokens) {
+    if (!linear_prefill_plan_) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(completed_tokens > linear_prefill_completed_tokens_
+                               && completed_tokens <= linear_prefill_plan_->promptTokens(),
+                            "invalid LINEAR prefill completion: previous=%ld completed=%ld",
+                            linear_prefill_completed_tokens_, completed_tokens);
+    linear_prefill_completed_tokens_ = completed_tokens;
+}
+
+bool BlockIds::canPublishLinearPrefillBlock(size_t position) const {
+    return !linear_prefill_plan_ || linear_prefill_plan_->canPublish(position, linear_prefill_completed_tokens_);
+}
+
 void BlockIds::copyCyclicKernelBlocks(size_t prompt_tail, size_t bank_count, BlockIdxType* destination) const {
     RTP_LLM_CHECK(kernel_blocks_per_kv_block_ == 1 && prompt_tail < blocksNum() && bank_count > 0
                   && bank_count <= prompt_tail + 1);

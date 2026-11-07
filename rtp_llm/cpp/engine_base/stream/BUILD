@@ -57,6 +57,7 @@ cc_library(
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:linear_prefill_trace",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/models:dfa_utils",
         "@havenask//aios/autil:env_util",

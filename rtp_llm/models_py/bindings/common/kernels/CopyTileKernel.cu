@@ -44,6 +44,11 @@ __global__ void copyTilesKernel(const CopyTile* tiles, char* staging, bool scatt
 
 }  // namespace
 
+cudaError_t preloadCopyTilesKernel() {
+    cudaFuncAttributes attributes{};
+    return cudaFuncGetAttributes(&attributes, copyTilesKernel);
+}
+
 cudaError_t
 launchCopyTiles(const CopyTile* tiles, size_t count, void* staging, bool scatter, cudaStream_t stream, int threads) {
     if (count == 0) {

@@ -67,6 +67,67 @@ def native_checkpoint_reference(q, k, v, gate, beta, initial, alog, bias, prefix
 
 
 class NativeKdaCheckpointTest(unittest.TestCase):
+    def test_last_n_borrowed_chunks_match_disjoint_recurrent_storage(self):
+        # N also exceeds the two CP checkpoints covered by one chunk.
+        for n in range(1, 6):
+            for tail in (0, 128):
+                with self.subTest(n=n, tail=tail):
+                    self._check_borrowed_chunks(n, 12*1024+tail, 2048)
+
+    def test_last5_one_million_with_64k_chunks_and_optional_tail(self):
+        for tail in (0, 128):
+            with self.subTest(tail=tail):
+                self._check_borrowed_chunks(5, 1_048_576+tail, 65_536)
+
+    def _check_borrowed_chunks(self, n, length, chunk):
+        page, interval, heads = 128, 1024, 12
+        torch.manual_seed(3105+n)
+        tensors = [torch.randn(length, heads, 128, device="cuda", dtype=torch.bfloat16)*0.1
+                   for _ in range(4)]
+        beta = torch.randn(length, heads, device="cuda", dtype=torch.bfloat16)*0.1
+        alog = torch.zeros(heads, device="cuda", dtype=torch.float32)
+        bias = torch.zeros(heads*128, device="cuda", dtype=torch.float32)
+        complete = length//interval
+        retained = {(complete-n+index+1)*interval: index+1 for index in range(n)}
+        borrowed = n+1 if length % interval else n
+        candidate = torch.zeros(borrowed+1, heads, 128, 128, device="cuda", dtype=torch.float32)
+        # Every reference write gets its own state, including all earlier
+        # chunk boundaries. It never aliases a source with a destination.
+        points = sorted(set(range(chunk, length, chunk)) | set(retained) | {length})
+        reference_blocks = {point: index+1 for index, point in enumerate(points)}
+        reference = torch.zeros(len(points)+1, heads, 128, 128, device="cuda", dtype=torch.float32)
+        previous, frozen = 0, {}
+        for prefix in range(0, length, chunk):
+            end = min(length, prefix+chunk)
+            row = [-1]*((length+page-1)//page)
+            control = row.copy()
+            if prefix:
+                row[prefix//page-1] = previous
+                control[prefix//page-1] = reference_blocks[prefix]
+            for point, block in retained.items():
+                if prefix < point <= end:
+                    row[point//page-1] = block
+                    control[point//page-1] = reference_blocks[point]
+            output = retained.get(end, borrowed)
+            if end not in retained:
+                row[(end-1)//page] = output
+                control[(end-1)//page] = reference_blocks[end]
+            inputs = [value[prefix:end] for value in tensors]
+            args = [*inputs, beta[prefix:end], alog, bias, -5.0]
+            actual = cula_kda_paged_prefill(*args, candidate,
+                [0, end-prefix], [prefix], [row], page)
+            expected = cula_kda_paged_prefill(*args, reference,
+                [0, end-prefix], [prefix], [control], page)
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            torch.testing.assert_close(candidate[output], reference[reference_blocks[end]], atol=0, rtol=0)
+            for block, state in frozen.items():
+                torch.testing.assert_close(candidate[block], state, atol=0, rtol=0)
+            for point, block in retained.items():
+                if prefix < point <= end:
+                    torch.testing.assert_close(candidate[block], reference[reference_blocks[point]], atol=0, rtol=0)
+                    frozen[block] = candidate[block].clone()
+            previous = output
+
     def test_packed_batch_strided_cache_and_layer_workspace_reuse(self):
         # Empty requests must not add a cuLA sequence; virtual padding keeps its
         # token range, publishes no state, and has exactly zero output.

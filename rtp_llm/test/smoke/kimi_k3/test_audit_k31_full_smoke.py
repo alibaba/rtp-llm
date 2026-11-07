@@ -9,6 +9,48 @@ from smoke_request_identity import resolve
 
 
 class MtpExecutionAuditTest(unittest.TestCase):
+    def test_chunked_identity_checks_windows_separately_from_pd_decode_iterations(self):
+        stages = [dict(name='long', passed=True, case_names=['a'])]
+        raw = {'a': dict(passed=True, transport='http', result=dict(
+            input_len=196609, prefill_total_reuse_len=65536, decode_owner_rank=0, iter_count=2))}
+        p, d = {rank: [] for rank in range(8)}, {rank: [] for rank in range(8)}
+        for step, prefix, length in ((1, 65536, 65536), (2, 131072, 65536), (3, 196608, 1)):
+            p[0].append(dict(event='mtp_target_prefill_forward', fake=False, request_ids=[10],
+                context_lengths=[length], reuse_lengths=[prefix], prompt_lengths=[196609],
+                context_terminal=[step == 3], execution_step=step))
+        d[0] = [dict(event='mtp_target_verify_forward', fake=False, request_ids=[10])]
+        ids, _, barriers = resolve(stages, raw, p, d, tp_size=8)
+        self.assertEqual(ids, {'a': [10]})
+        self.assertEqual(barriers[0]['last_step'], 3)
+        self.assertEqual(barriers[0]['prefill_calls'], {10: 3})
+        bad_raw = copy.deepcopy(raw); bad_raw['a']['result']['iter_count'] = 4
+        with self.assertRaises(AssertionError):
+            resolve(stages, bad_raw, p, d, tp_size=8)
+        bad = copy.deepcopy(p); bad[0][1]['reuse_lengths'] = [131200]
+        with self.assertRaisesRegex(AssertionError, 'window|discontinuous'):
+            resolve(stages, raw, bad, d, tp_size=8)
+        bad = copy.deepcopy(p); bad[0].pop()
+        with self.assertRaisesRegex(AssertionError, 'complete Prefill'):
+            resolve(stages, raw, bad, d, tp_size=8)
+        bad = copy.deepcopy(p); bad[0][1]['context_terminal'] = [True]
+        with self.assertRaisesRegex(AssertionError, 'terminal flag'):
+            resolve(stages, raw, bad, d, tp_size=8)
+
+    def test_async_verify_after_terminal_output_may_be_missing_from_response_count(self):
+        stages = [dict(name='warm_hit', passed=True, case_names=['hit'])]
+        raw = {'hit': dict(passed=True, transport='http', result=dict(
+            input_len=10368, prefill_total_reuse_len=10240, decode_owner_rank=0,
+            iter_count=5, mtp_draft_rounds=4, output_len=14))}
+        p, d = {rank: [] for rank in range(8)}, {rank: [] for rank in range(8)}
+        p[0] = [dict(event='mtp_target_prefill_forward', fake=False, request_ids=[10],
+                     context_lengths=[128], reuse_lengths=[10240], execution_step=1)]
+        d[0] = [dict(event='mtp_target_verify_forward', fake=False, request_ids=[10],
+                     context_lengths=[n]) for n in (1, 5, 9, 13, 14)]
+        self.assertEqual(resolve(stages, raw, p, d, tp_size=8)[0], {'hit': [10]})
+        d[0][-1]['context_lengths'] = [13]
+        with self.assertRaises(AssertionError):
+            resolve(stages, raw, p, d, tp_size=8)
+
     def test_bs63_requires_the_complete_32_31_cohort_at_one_step(self):
         ids = {f'case{i}': [100+i] for i in range(63)}
         stages = [dict(name='orthogonal_decode_03_batch_63', case_names=list(ids))]

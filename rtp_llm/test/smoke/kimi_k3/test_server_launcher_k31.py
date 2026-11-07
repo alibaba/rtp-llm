@@ -28,6 +28,57 @@ class K31LaunchContract(unittest.TestCase):
                         self.assertEqual((env["KDA_NVFP4"], env["DSA_NVFP4"]), (str(int(kda)), str(int(dsa))))
                         self.assertEqual(env["SP_QUANTIZATION"], "")
 
+    def test_isolated_tiers_keep_pd_and_prefill_chunk_geometry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            args.last_n_checkpoints, args.prefill_token_capacity = 5, 2048
+            args.disk_cache_paths = ','.join(f'/data/rank-{rank}' for rank in range(8))
+            for tier in ('DEVICE', 'HOST', 'DISK'):
+                args.last_n_tier_probe = tier
+                with patch.object(launch.socket, 'socket') as route:
+                    route.return_value.getsockname.return_value = ('127.0.0.1', 0)
+                    env, argv = launch.launch_config(args)
+                options = dict(zip(argv[1::2], argv[2::2]))
+                self.assertEqual(env['PREFILL_CHUNK_SIZE'], '2048')
+                self.assertEqual(options['--enable_device_cache'], str(int(tier == 'DEVICE')))
+                self.assertEqual(options['--enable_memory_cache'], str(int(tier == 'HOST')))
+                self.assertEqual(options.get('--enable_disk_cache', '0'), str(int(tier == 'DISK')))
+                self.assertEqual(options['--role_type'], 'PREFILL')
+                self.assertEqual(options['--reuse_cache_tail_blocks'], '5')
+
+    def test_calibration_keeps_b128_cp8_but_uses_unbounded_allocator(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            args.last_n_checkpoints, args.last_n_calibration, args.linear_pool_blocks = 5, True, 256
+            with patch.object(launch.socket, 'socket') as route:
+                route.return_value.getsockname.return_value = ('127.0.0.1', 0)
+                _, argv = launch.launch_config(args)
+            options = dict(zip(argv[1::2], argv[2::2]))
+            self.assertEqual(options['--seq_size_per_block'], '128')
+            self.assertEqual(options['--reuse_cache_tail_blocks'], '2147483647')
+            self.assertEqual(options['--linear_pool_blocks'], '256')
+
+    def test_last_one_through_five_uses_cp_pages_and_changes_only_prefill_retention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            for n in range(1, 6):
+                for role in ("PREFILL", "DECODE"):
+                    args.role, args.last_n_checkpoints = role, n
+                    with self.subTest(n=n, role=role), patch.object(launch.socket, "socket") as route:
+                        route.return_value.getsockname.return_value = ("127.0.0.1", 0)
+                        environment, argv = launch.launch_config(args)
+                    options = dict(zip(argv[1::2], argv[2::2]))
+                    self.assertEqual(options["--seq_size_per_block"], "128")
+                    self.assertEqual(options["--kernel_seq_size_per_block"], "128")
+                    self.assertEqual(options["--prefill_cp_size"], "8")
+                    self.assertEqual(options["--reuse_cache_tail_blocks"], str(n) if role == "PREFILL" else "2147483647")
+                    if role == "PREFILL":
+                        self.assertEqual(environment["PREFILL_CHUNK_SIZE"], "65536")
+                        self.assertEqual(options["--linear_pool_blocks"], "96")
+            args.role, args.tp_size, args.dp_size = "DECODE", 4, 2
+            with self.assertRaisesRegex(ValueError, "TP8/EP8"):
+                launch.launch_config(args)
+
     def test_tcp_cache_store_keeps_disaggregated_role_and_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self.fixture(Path(tmp), 93)

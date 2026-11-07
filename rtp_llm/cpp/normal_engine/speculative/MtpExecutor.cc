@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/normal_engine/speculative/SmokeLogitsCapture.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -146,27 +147,33 @@ void MtpExecutor::recordSmokeForward(const char* event, const GptModelInputs& in
     ++smoke_forward_step_;
     const bool authoritative = tp_rank_ == 0;
     const bool real_streams = authoritative && !inputs.is_fake_stream && streams != nullptr;
-    std::string ids, lengths, prefixes;
+    std::string ids, lengths, prefixes, prompts, terminals;
     int64_t logical_batch = authoritative ? 0 : -1;
     if (real_streams) {
         const auto& requests = prefill ? streams->contextStreams() : streams->decodeStreams();
         logical_batch = prefill ? streams->totalContextBatchSize() : streams->totalDecodeBatchSize();
         for (const auto& stream : requests) {
-            if (!ids.empty()) { ids += ','; lengths += ','; prefixes += ','; }
+            if (!ids.empty()) {
+                ids += ','; lengths += ','; prefixes += ','; prompts += ','; terminals += ',';
+            }
             ids += std::to_string(stream->streamId());
             lengths += std::to_string(stream->contextLength());
             prefixes += std::to_string(stream->reuseLength());
+            prompts += std::to_string(stream->inputLength());
+            terminals += stream->isLastChunk() ? "true" : "false";
         }
     }
     RTP_LLM_LOG_INFO(
         "[K3_SMOKE_EVENT] {\"event\":\"%s\",\"execution_step\":%ld,"
         "\"world_rank\":%ld,\"dp_rank\":%ld,\"tp_rank\":%d,"
         "\"logical_authoritative\":%s,\"logical_batch\":%ld,\"request_ids\":[%s],"
-        "\"context_lengths\":[%s],\"reuse_lengths\":[%s],\"input_rows\":%ld,\"token_rows\":%ld,"
+        "\"context_lengths\":[%s],\"reuse_lengths\":[%s],\"prompt_lengths\":[%s],"
+        "\"context_terminal\":[%s],\"input_rows\":%ld,\"token_rows\":%ld,"
         "\"fake\":%s,\"time_ns\":%ld}",
         event, static_cast<long>(smoke_forward_step_), static_cast<long>(parallelism_config_.world_rank),
         static_cast<long>(parallelism_config_.dp_rank), tp_rank_, authoritative ? "true" : "false",
         static_cast<long>(logical_batch), ids.c_str(), lengths.c_str(), prefixes.c_str(),
+        prompts.c_str(), terminals.c_str(),
         inputs.input_lengths.numel(), inputs.combo_tokens.numel(), inputs.is_fake_stream ? "true" : "false",
         static_cast<long>(autil::TimeUtility::currentTimeInMicroSeconds() * 1000));
 }
@@ -1283,6 +1290,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     GptModelOutputs draft_model_output;
     SamplerOutput   draft_sampler_output;
     torch::Tensor   draft_last_hidden_states;
+    std::optional<smoke_logits_capture::PrefillBatch> smoke_prefill_batch;
     const bool      cp_enabled     = parallelism_config_.prefill_cp_config.is_enabled();
     const bool      global_mla_draft_hidden = cp_enabled && !is_dspark_ && draft_model_
         && draft_model_->requiresGlobalMtpPrefillHidden();
@@ -1427,6 +1435,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         } else {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_sample)");
             if (!model_input.is_fake_stream) {
+                if (smoke_logits_capture::prefillRequested(stream_groups)) {
+                    smoke_prefill_batch.emplace(model_output.logits);
+                }
                 CHECK_AND_RETURN_REF(
                     sampler_input,
                     batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
@@ -1607,6 +1618,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // dispatch
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(dispatch_output)");
+        if (smoke_prefill_batch) {
+            try {
+                smoke_logits_capture::prefill(stream_groups, *smoke_prefill_batch, sampler_output.token_ids, vocab_size_);
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("Prefill smoke logits capture failed: %s", error.what());
+                throw;
+            }
+        }
         auto result =
             batch_stream_processor_->dispatchPrefill(stream_groups,
                                                      {std::move(model_output), std::move(sampler_output)},
@@ -2082,6 +2101,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
             applySpecLogitsAcceptLenCap(
                 *spec_logits_result, sampler_output, speculative_sampler_output, batch_size, propose_step_);
+            try {
+                smoke_logits_capture::decode(stream_groups, model_input, model_output.logits,
+                    speculative_sampler_output.accept_len, speculative_sampler_output.accept_tokens,
+                    propose_step_ + 1, vocab_size_);
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("Decode smoke logits capture failed: %s", error.what());
+                throw;
+            }
         }
         if (is_dspark_) {
             // Target verify wrote its aux features into the shared MTP hidden

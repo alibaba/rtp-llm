@@ -32,6 +32,22 @@ inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std:
         static_cast<int>(policy.memory_placement));
 }
 
+struct LinearPrefillPoolRatio {
+    static constexpr uint32_t kMaxPhysicalBlocks = std::numeric_limits<int32_t>::max();
+
+    uint32_t reference_pages  = 0;
+    uint32_t reference_states = 0;
+    uint32_t min_states       = 0;
+
+    // Apply the ratio to usable pages, then add the LINEAR pool's block zero.
+    uint64_t physicalBlocks(uint32_t physical_pages) const {
+        const auto usable_pages = physical_pages - 1;
+        const auto scaled       = static_cast<uint64_t>(usable_pages) * reference_states;
+        const auto states       = (scaled + reference_pages - 1) / reference_pages;
+        return 1 + std::max<uint64_t>(states, std::min(min_states, usable_pages));
+    }
+};
+
 struct CacheConfig {
 private:
     std::shared_ptr<const CacheTopology> cache_topology;
@@ -61,6 +77,13 @@ public:
 
     // Attention-specific configuration
     int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+    LinearPrefillPoolRatio linear_prefill_pool_ratio;
+
+    bool usesLinearPrefillPoolRatio(const GroupBase& group) const {
+        return linear_prefill_pool_ratio.reference_pages > 0 && group.policy.explicit_block_num == 0
+               && group.policy.memory_placement == CacheMemoryPlacement::DEVICE
+               && group.supportsBorrowedLinearPrefill(seq_size_per_block);
+    }
 
     // Accepted-prefix replay is enabled for target LINEAR groups during MTP.
     // Group IDs follow the merged physical topology; the draft groups are excluded.

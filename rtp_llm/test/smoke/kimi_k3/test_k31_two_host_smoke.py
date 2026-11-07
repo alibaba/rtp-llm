@@ -37,6 +37,104 @@ def base_config():
 
 
 class K31TwoHostSmokeTest(unittest.TestCase):
+    def test_service_ports_cannot_race_with_outgoing_ephemeral_connections(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'ip_local_port_range').write_text('32768 60999\n')
+            (root/'ip_local_reserved_ports').write_text('')
+            self.assertTrue(smoke.launcher.service_port_preflight(30400, root)['passed'])
+            with self.assertRaisesRegex(ValueError, 'overlaps unreserved ephemeral'):
+                smoke.launcher.service_port_preflight(60400, root)
+            (root/'ip_local_reserved_ports').write_text('60400-60471,32000')
+            self.assertTrue(smoke.launcher.service_port_preflight(60400, root)['passed'])
+            (root/'ip_local_reserved_ports').write_text('60400-60470')
+            with self.assertRaisesRegex(ValueError, '60471'):
+                smoke.launcher.service_port_preflight(60400, root)
+
+    def test_isolated_probe_rejects_wrong_chunk_or_baseline_mode(self):
+        base = {**base_config(), 'last_n_checkpoints': 5, 'last_n_tier_probe': 'HOST'}
+        with self.assertRaisesRegex(ValueError, '2K chunks'):
+            smoke.stage_configs(base, ('regular',))
+        base['prefill']['prefill_token_capacity'] = 2048
+        self.assertEqual(smoke.stage_configs(base, ('regular',))[0]['last_n_tier_probe'], 'HOST')
+        base['last_n_calibration'] = True
+        with self.assertRaisesRegex(ValueError, 'no calibration'):
+            smoke.stage_configs(base, ('regular',))
+
+    def test_isolated_probe_cannot_reuse_a_64k_precision_contract(self):
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference, contract = root/'reference.json', root/'contract.json'
+            reference.write_text('{}')
+            contract.write_text(json.dumps(dict(schema=1, source_commit='a'*40,
+                                created_ns=time.time_ns()-1, prefill_chunk_tokens=65536)))
+            base = {**base_config(), 'last_n_checkpoints': 5, 'last_n_tier_probe': 'DEVICE',
+                    'source_commit': 'a'*40, 'precision_reference': str(reference),
+                    'precision_contract': str(contract)}
+            base['prefill']['prefill_token_capacity'] = 2048
+            with patch.object(smoke, 'run_stage') as launch:
+                with self.assertRaisesRegex(ValueError, 'same Prefill chunk'):
+                    smoke.run(base, root/'output', 1, ('regular',))
+                launch.assert_not_called()
+
+    def test_last_five_keeps_304_slots_and_tp8_endpoints(self):
+        base = {**base_config(), "last_n_checkpoints": 5}
+        configs = smoke.stage_configs(base, ("regular",))
+        self.assertEqual(len(configs), 1)
+        config = configs[0]
+        self.assertEqual(config["decode_dp"], 1)
+        self.assertEqual(config["prefill"]["test_block_num"], 1032)
+        self.assertEqual(config["decode"]["test_block_num"], 1032)
+        self.assertEqual(config["prefill"]["linear_pool_blocks"], 96)
+        self.assertEqual(config['decode']['linear_pool_blocks'], 512)
+        self.assertEqual(config["prefill"]["memory_cache_size_mb"], 8192)
+        self.assertEqual(config["prefill"]["disk_cache_size_mb"], 65536)
+        args = smoke.request_args(config, Path("/data/runs/test"))
+        self.assertEqual(args[args.index("--last-n-checkpoints")+1], "5")
+        with self.assertRaisesRegex(ValueError, "304 regular slots"):
+            smoke.stage_configs(base)
+        with self.assertRaisesRegex(ValueError, "TP8/EP8"):
+            smoke.stage_configs({**base, "decode_dp": 2}, ("regular",))
+        with self.assertRaisesRegex(ValueError, "Last-5"):
+            smoke.stage_configs({**base, "last_n_checkpoints": 1}, ("regular",))
+
+    def test_last5_cannot_launch_without_prelocked_precision_inputs(self):
+        base = {**base_config(), 'last_n_checkpoints': 5}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)/'run'
+            with patch.object(smoke, 'run_stage') as launch, self.assertRaisesRegex(ValueError, 'precision_reference'):
+                smoke.run(base, output, 1, ('regular',))
+            launch.assert_not_called()
+            self.assertFalse(output.exists())
+
+    def test_calibration_reuses_six_inputs_without_reporting_a_complete_smoke(self):
+        base = {**base_config(), 'last_n_checkpoints': 5, 'last_n_calibration': True}
+        stage = smoke.stage_configs(base, ('regular',))[0]
+        self.assertEqual(stage['prefill']['linear_pool_blocks'], 256)
+        self.assertEqual(stage['decode']['linear_pool_blocks'], 64)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)/'calibration'
+            receipt = dict(passed=True, cleanup_complete=True,
+                           request_counts=dict(total=6, formal=2, preparation=4))
+            with patch.object(smoke, 'run_stage', return_value=receipt):
+                self.assertEqual(smoke.run(base, output, 1, ('regular',)), 0)
+            result = json.loads((output/'RESULT.json').read_text())
+            self.assertEqual(result['request_counts']['total'], 6)
+            self.assertIs(result['complete_smoke_passed'], False)
+
+    def test_runtime_jit_compilers_are_available_paths_and_explicit_choices_survive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory)/'server'
+            (Path(str(binary)+'.runfiles')/'pip_gpu_cuda13_torch_torch/site-packages/torch/lib').mkdir(parents=True)
+            with patch.dict(smoke.launcher.os.environ, {}, clear=True), \
+                 patch.object(smoke.launcher.shutil, 'which', side_effect=lambda command: '/usr/bin/'+command):
+                env = smoke.launcher.runtime_environment(Path(directory), binary)
+            self.assertEqual((env['CC'], env['CXX']), ('/usr/bin/gcc', '/usr/bin/g++'))
+            with patch.dict(smoke.launcher.os.environ, dict(CC='/opt/compiler/gcc', CXX='/opt/compiler/g++'), clear=True):
+                env = smoke.launcher.runtime_environment(Path(directory), binary)
+            self.assertEqual(env['CC'], '/opt/compiler/gcc')
+
     def test_regular_only_honors_tp8_decode_and_excludes_one_million_stage(self):
         base = {**base_config(), "decode_dp": 1}
         configs = smoke.stage_configs(base, ("regular",))
@@ -209,6 +307,22 @@ assert rtp_llm.__file__ == runfiles_package
         with self.assertRaisesRegex(ValueError, "native MTP"):
             smoke.stage_configs({**base_config(), "target_only": True})
 
+    def test_default_phases_require_rdma(self):
+        for stage in smoke.stage_configs(base_config()):
+            self.assertIs(stage["cache_store_rdma_mode"], True)
+        with self.assertRaisesRegex(ValueError, "requires RDMA"):
+            smoke.stage_configs({**base_config(), "cache_store_rdma_mode": False})
+
+    def test_stage_configs_record_effective_fp8_defaults(self):
+        base = base_config()
+        del base["fp8_gemm"], base["fp8_kv_cache"]
+        for stage in smoke.stage_configs(base):
+            self.assertIs(stage["fp8_gemm"], True)
+            self.assertIs(stage["fp8_kv_cache"], True)
+        last5, = smoke.stage_configs({**base, "last_n_checkpoints": 5}, ("regular",))
+        self.assertIs(last5["fp8_gemm"], True)
+        self.assertIs(last5["fp8_kv_cache"], True)
+
     def test_loader_evidence_requires_all_ranks_and_the_final_method(self):
         with tempfile.TemporaryDirectory() as directory:
             logs = Path(directory)
@@ -229,7 +343,7 @@ assert rtp_llm.__file__ == runfiles_package
                 smoke.fastsafetensors_proof(logs)
 
     def test_startup_audit_uses_the_ready_snapshot_after_shutdown(self):
-        config, _ = smoke.stage_configs(base_config())
+        config, _ = smoke.stage_configs({**base_config(), "prefill_kv_workspace_budget_gib": 8})
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             (output / "launch").mkdir()
@@ -239,6 +353,10 @@ assert rtp_llm.__file__ == runfiles_package
                 logs = root / "logs"
                 logs.mkdir(parents=True)
                 (root / "control.json").write_text(json.dumps(config))
+                (root / "rdma-preflight.json").write_text('{"cache_store_transport": "rdma"}')
+                (logs / "engine.log").write_text(
+                    "".join(f"[RANK {rank}] rdma messager init success\n" for rank in range(8))
+                )
                 # The remote status command can replace its own readiness receipt while stopping.
                 (root / "readiness.json").write_text('{"healthy": false}')
                 geometry = {"runtime_verified": True, "role": role}
@@ -268,6 +386,7 @@ assert rtp_llm.__file__ == runfiles_package
             (output / "launch" / "readiness.json").write_text(json.dumps(ready))
             proof = smoke.audit_startup(config, output)
             self.assertEqual(len(proof["decode"]["fastsafetensors_lines"]), 8)
+            self.assertEqual(proof["decode"]["rdma_ranks"], list(range(8)))
             for budget in (2, 10):
                 config["prefill_kv_workspace_budget_gib"] = budget
                 for role in ("prefill", "decode"):
@@ -280,6 +399,11 @@ assert rtp_llm.__file__ == runfiles_package
                 (output / "launch/readiness.json").write_text(json.dumps(ready))
                 with self.assertRaisesRegex(ValueError, "all eight.*workspace"):
                     smoke.audit_startup(config, output)
+            (output / "prefill" / "logs" / "engine.log").write_text(
+                "".join(f"[RANK {rank}] rdma messager init success\n" for rank in range(7))
+            )
+            with self.assertRaisesRegex(ValueError, "prefill: expected native RDMA on all eight ranks"):
+                smoke.audit_startup(config, output)
 
     def test_routes_follow_existing_decode_owner_endpoint_stride(self):
         regular, long_case = smoke.stage_configs(base_config())

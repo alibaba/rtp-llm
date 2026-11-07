@@ -13,6 +13,9 @@ struct CopyTile {
 
 constexpr int kCopyTileThreads = 256;
 
+// Load the copy kernel into the current CUDA context without launching it.
+cudaError_t preloadCopyTilesKernel();
+
 // One CUDA block copies each tile between its device pointer and staging + staging_offset.
 // Descriptors reside on the device. The caller owns stream ordering, allocation, and bounds validation;
 // nonempty tiles must have valid, nonoverlapping source/destination spans. No allocation or synchronization occurs

@@ -85,7 +85,7 @@ def _short_conv_checkpoint(
     from_history = tl.load(
         conv_state + initial_block * stride_s_block
         + history_idx[None, :] * stride_s_w + o_d[:, None] * stride_s_d,
-        mask=has_initial & mask & (source_t[None, :] < 0),
+        mask=has_initial & ~use_current_state & mask & (source_t[None, :] < 0),
         other=0,
     )
     if HAS_CURRENT_STATE:
@@ -224,7 +224,9 @@ def _paged_short_conv_prefill_kernel(
                 None, :
             ]
             history_idx = source_t + W - 1
-            m_h = (has_initial & (source_t >= -W + 1) & (source_t < 0))[:, None] & m_d[
+            # Substitution with tl.where alone still issues the aliased load.
+            # A separate CTA may already be overwriting that address.
+            m_h = (has_initial & ~use_current_state & (source_t >= -W + 1) & (source_t < 0))[:, None] & m_d[
                 None, :
             ]
             b_yi = tl.load(

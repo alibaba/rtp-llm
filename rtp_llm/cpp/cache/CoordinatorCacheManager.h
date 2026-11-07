@@ -98,7 +98,8 @@ public:
                                     int                            remaining_tokens,
                                     int                            reserve_step,
                                     bool                           enable_reuse_cache,
-                                    int                            target_batch_size) const;
+                                    int                            target_batch_size,
+                                    int                            linear_prefill_prompt_tokens = 0) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     // Caller has completed the GPU round ending at completed_seq_len. Preserve

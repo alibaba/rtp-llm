@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -70,6 +71,11 @@ def validate(config):
     for key in ("fp8_gemm", "fp8_kv_cache", "cache_store_rdma_mode"):
         if key in config and type(config[key]) is not bool:
             raise ValueError(f"{key} must be boolean")
+    if (
+        config.get("k31_smoke_stage") in ("regular", "long")
+        and not config.get("cache_store_rdma_mode", True)
+    ):
+        raise ValueError("K3.1 smoke requires RDMA")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", config["run_id"]):
         raise ValueError("run_id must contain only letters, digits, _ and -")
     user = config.get("container_user", "luohaocheng.lhc")
@@ -177,6 +183,31 @@ def owned_data(path):
     return path
 
 
+def service_port_preflight(start_port, proc_ipv4=Path('/proc/sys/net/ipv4')):
+    """Keep the 72 service ports out of unreserved outbound ephemeral space.
+
+    A successful bind probe is insufficient: loading weights and initializing
+    RPC can create outgoing connections before the HTTP servers start.
+    """
+    bounds = [int(value) for value in (proc_ipv4/'ip_local_port_range').read_text().split()]
+    if len(bounds) != 2 or not 0 < bounds[0] <= bounds[1] <= 65535:
+        raise ValueError('invalid local ephemeral port range')
+    reserved = set()
+    for item in (proc_ipv4/'ip_local_reserved_ports').read_text().strip().split(','):
+        if item:
+            values = [int(value) for value in item.split('-')]
+            if len(values) not in (1, 2) or not 0 < values[0] <= values[-1] <= 65535:
+                raise ValueError('invalid local reserved port range')
+            reserved.update(range(values[0], values[-1]+1))
+    unreserved = [port for port in range(start_port, start_port+72)
+                  if bounds[0] <= port <= bounds[1] and port not in reserved]
+    if unreserved:
+        raise ValueError(f'service port {unreserved[0]} overlaps unreserved ephemeral ports '
+                         f'{bounds[0]}..{bounds[1]}; choose another port block')
+    return dict(service_start=start_port, service_end=start_port+71,
+                ephemeral_start=bounds[0], ephemeral_end=bounds[1], passed=True)
+
+
 def runtime_environment(source, binary):
     """Use the locally built CUDA13 closure, never inherited pip libraries."""
     runfiles = Path(str(binary) + ".runfiles")
@@ -199,6 +230,14 @@ def runtime_environment(source, binary):
     for key in ("USER", "LOGNAME"):
         if not env.get(key):
             env[key] = f"uid_{os.getuid()}"
+    # Some conda Python builds name a GCC installation that is absent from
+    # the runtime container. Pin available compilers for Triton's C launcher.
+    for variable, command in (('CC', 'gcc'), ('CXX', 'g++')):
+        if not env.get(variable):
+            compiler = shutil.which(command)
+            if compiler is None:
+                raise ValueError(f'missing runtime JIT compiler: {command}')
+            env[variable] = compiler
     return env
 
 
@@ -244,6 +283,7 @@ def serve(config, role):
     directory = owned_data(run_dir(config, role))
     if (directory / "instance.json").exists():
         raise ValueError("Role already launched; use a new run_id")
+    atomic(directory/'port-preflight.json', service_port_preflight(host['port']))
     actual_hashes = {}
     for name, expected in config.get("source_files", {}).items():
         path = (source / name).resolve(strict=True)
@@ -341,10 +381,28 @@ def serve(config, role):
         test_block_num=host.get("test_block_num"),
         linear_pool_blocks=host.get("linear_pool_blocks"),
         block_tree_transfer_worker_count=host.get("block_tree_transfer_worker_count"),
+        last_n_checkpoints=config.get("last_n_checkpoints"),
+        last_n_calibration=config.get('last_n_calibration', False),
+        last_n_tier_probe=config.get('last_n_tier_probe'),
+        disk_cache_paths=(",".join(str(directory / "disk-cache" / f"rank-{rank}") for rank in range(8))
+                          if role == "prefill" and config.get("last_n_checkpoints") is not None else None),
+        disk_cache_size_mb=host.get("disk_cache_size_mb", 65536),
         prefill_token_capacity=host.get("prefill_token_capacity"),
         max_seq_len=host.get("max_seq_len"), request_capacity=host.get("request_capacity"),
         decode_capture_batches=host.get("decode_capture_batches"), cache_store_rdma_mode=rdma)
     explicit, command = launch_config(args)
+    if config.get("last_n_checkpoints") is not None:
+        source_sha = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        if (config.get("source_commit") not in (None, source_sha)
+                or subprocess.check_output(["git", "-C", str(source), "status", "--porcelain", "--untracked-files=no"],
+                                           text=True).strip()):
+            raise ValueError("Last-N logits evidence requires a clean pinned source checkout")
+        (directory / "logits").mkdir()
+        explicit.update(KIMI_K3_SMOKE_LOGITS_DIR=str(directory / "logits"),
+                        KIMI_K3_SMOKE_SOURCE_SHA=source_sha)
+        if args.disk_cache_paths:
+            for path in args.disk_cache_paths.split(","):
+                Path(path).mkdir(parents=True)
     explicit.update(prefill_workspace_environment(config))
     service = json.loads(explicit["MODEL_SERVICE_CONFIG"])
     service["service_id"] = config["run_id"]
@@ -384,6 +442,7 @@ def serve(config, role):
             pid_namespace=os.readlink("/proc/self/ns/pid"), server_pid=process.pid,
             server_start_ticks=start_ticks(process.pid), pgid=process.pid,
             command=command, environment={**explicit, "SPT_NOENV": env["SPT_NOENV"],
+                "CC": env['CC'], "CXX": env['CXX'],
                 "K31_PD_SMOKE_ENV_ANCHOR": env["K31_PD_SMOKE_ENV_ANCHOR"]}, run_id=config["run_id"],
             source_files=actual_hashes, binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
             performance_validated=False, smoke_passed=None)
@@ -549,6 +608,8 @@ def status(config, role):
                 directory / "logs" / "engine.log", role,
                 8 if role == "prefill" else 8 // decode_dp_size(config),
                 long_case=config["k31_smoke_stage"] == "long",
+                last_n_checkpoints=config.get("last_n_checkpoints"),
+                calibration=config.get('last_n_calibration', False),
             )
             result["fastsafetensors_rank_log_lines"] = fastsafetensors_proof(directory / "logs")
         except (OSError, ValueError, TypeError) as exc:

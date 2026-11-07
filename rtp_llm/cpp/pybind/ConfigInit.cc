@@ -522,6 +522,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_full_disk_evict_high_watermark_ratio)
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
+        .def_readwrite("linear_pool_avg_prompt_tokens", &KVCacheConfig::linear_pool_avg_prompt_tokens)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
@@ -595,7 +596,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      12,
+                                      13,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -677,9 +678,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kvcm_task_timeout_ms,
                                       self.kvcm_read_backend_type,
                                       self.kvcm_min_replica_count,
-                                      self.kv_cache_event_snapshot_interval_ms);
+                                      self.kv_cache_event_snapshot_interval_ms,
+                                      self.linear_pool_avg_prompt_tokens);
             },
             [](py::tuple t) {
+                const py::tuple linear_pool_state = t;
+                const bool has_linear_pool_avg_prompt_tokens =
+                    t.size() == 85 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 13;
+                if (has_linear_pool_avg_prompt_tokens) {
+                    t = t[py::slice(0, 84, 1)].cast<py::tuple>();
+                    t[1] = py::int_(12);
+                }
                 const py::tuple backend_state = t;
                 const bool has_backend_fields = t.size() == 84 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 12;
                 if (has_backend_fields) {
@@ -742,6 +751,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_linear_pool_avg_prompt_tokens) {
+                    c.linear_pool_avg_prompt_tokens = linear_pool_state[84].cast<int>();
+                    if (c.linear_pool_avg_prompt_tokens < -1) {
+                        throw std::runtime_error("invalid KVCacheConfig linear pool average prompt tokens");
+                    }
+                    // Early version 13 snapshots encoded disabled sizing as zero.
+                    if (c.linear_pool_avg_prompt_tokens == 0) {
+                        c.linear_pool_avg_prompt_tokens = -1;
+                    }
+                }
                 if (has_host_pool_fields) {
                     c.memory_cache_swa_block_ratio = host_pool_state[78].cast<double>();
                     c.dsv41_decoder_swa_pool_blocks = host_pool_state[79].cast<uint32_t>();
@@ -2085,6 +2104,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
         .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
         .def_readwrite("head_sharded_transfer", &KVCacheSpecDesc::head_sharded_transfer)
+        .def_readwrite("prefill_borrow_tail", &KVCacheSpecDesc::prefill_borrow_tail)
         .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
         .def_readwrite("entry_dtype", &KVCacheSpecDesc::entry_dtype)
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)

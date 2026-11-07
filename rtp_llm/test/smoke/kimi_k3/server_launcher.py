@@ -323,6 +323,33 @@ def launch_config(args):
         # Match the deployed service and retain the normal staged drain defaults.
         "shutdown_timeout": 120,
     }
+    last_n = getattr(args, "last_n_checkpoints", None)
+    if last_n is not None:
+        if (type(last_n) is not int or not 1 <= last_n <= 5
+                or model_type != "kimi_k31" or not orthogonal_smoke
+                or tp_size != 8 or dp_size != 1 or source_tp_size != 8):
+            raise ValueError("K3.1 Last-N smoke requires N=1..5, TP8/EP8 and CP8")
+        options["seq_size_per_block"] = 128
+        options["linear_pool_blocks"] = (getattr(args, 'linear_pool_blocks', None)
+                                         or (96 if args.role == 'PREFILL' else 512))
+        tier = getattr(args, 'last_n_tier_probe', None)
+        if tier is not None:
+            if tier not in ('DEVICE', 'HOST', 'DISK') or last_n != 5:
+                raise ValueError('isolated Last-5 probe requires DEVICE, HOST or DISK')
+            if args.role == 'PREFILL':
+                options['enable_device_cache'] = int(tier == 'DEVICE')
+                options['enable_memory_cache'] = int(tier == 'HOST')
+        # Decode keeps its existing rolling-state policy. It needs the same
+        # physical page geometry to receive P's final state and MLA pages.
+        if args.role == "PREFILL":
+            options["reuse_cache_tail_blocks"] = (2147483647 if getattr(args, 'last_n_calibration', False) else last_n)
+            disk_paths = getattr(args, "disk_cache_paths", None)
+            if disk_paths and tier in (None, 'DISK'):
+                if len(disk_paths.split(",")) != 8:
+                    raise ValueError("Last-N SSD smoke needs one task-owned path per rank")
+                options.update(enable_disk_cache=1, disk_cache_paths=disk_paths,
+                               disk_cache_size_mb=getattr(args, "disk_cache_size_mb", 65536),
+                               disk_cache_buffered_io=1)
     if orthogonal_smoke and args.role == "PREFILL":
         options["memory_cache_size_mb"] = getattr(args, "memory_cache_size_mb", 32768)
     if kv_cache_mem_mb is not None:

@@ -45,7 +45,7 @@ def failure_details(accuracy_path: pathlib.Path | str) -> str:
     return "; ".join(details)[:4096]
 
 
-def independent_answer_check(row: dict[str, Any]) -> list[str]:
+def independent_answer_check(row: dict[str, Any], *, scheduler_chunking=False) -> list[str]:
     errors = []
     name = row.get("name", "<unnamed>")
     if row.get("phase") != "formal":
@@ -89,7 +89,7 @@ def independent_answer_check(row: dict[str, Any]) -> list[str]:
             errors.append(f"{name}: {exc}")
     if row.get("require_mtp") and not untrained and row.get("mtp_accepted_tokens", 0) <= 0:
         errors.append(f"{name}: no MTP acceptance")
-    if row.get("allow_long_history") and (
+    if not scheduler_chunking and row.get("allow_long_history") and (
         int(row.get("input_len", 0)) - int(row.get("effective_reuse_len", 0)) > 65536
     ):
         errors.append(f"{name}: current Q exceeds 64K")
@@ -276,10 +276,13 @@ def _raw_consistency(
         for key, value in comparisons.items():
             if row.get(key) != value:
                 errors.append(f"{name}: summary {key} differs from raw response")
-        if row.get("mtp_draft_kind") == "synthetic_untrained":
+        native_acceptance = row.get('mtp_accepted_tokens_source') == 'native_speculative_metrics_v1'
+        if row.get("mtp_draft_kind") == "synthetic_untrained" or native_acceptance:
             if row.get("speculative_metrics") != (aux.get("speculative_metrics") or {}):
                 errors.append(f"{name}: authoritative MTP counters differ from raw response")
-        if row.get("mtp_accepted_tokens") != aux["output_len"] - aux["iter_count"]:
+        expected_accepted = ((aux.get('speculative_metrics') or {}).get('accepted_draft_tokens')
+                             if native_acceptance else aux['output_len']-aux['iter_count'])
+        if row.get("mtp_accepted_tokens") != expected_accepted:
             errors.append(f"{name}: MTP acceptance summary differs from raw response")
         if row.get("observed_decode_role_addrs") != aux.get("role_addrs", []):
             errors.append(f"{name}: Decode owner summary differs from raw response")

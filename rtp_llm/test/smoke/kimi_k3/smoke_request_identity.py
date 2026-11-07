@@ -7,17 +7,60 @@ Within concurrent stages identical signatures remain explicitly set-valued.
 from collections import Counter, defaultdict
 
 
+def matches_iterations(row, verify_lengths):
+    verify_count = len(verify_lengths)
+    # Decode adopts P's first output token before its first local verify.
+    if row['iter_count'] == verify_count + 1:
+        return True
+    # Async Decode can launch one more verify before the previous round
+    # publishes its finished response. The extra forward starts after the
+    # last returned token and does not increment the response's draft rounds.
+    return (verify_count > 0 and row['iter_count'] == verify_count
+            and row.get('mtp_draft_rounds') == verify_count - 1
+            and verify_lengths[-1] == row.get('output_len')
+            and verify_lengths[-1] is not None)
+
+
+def has_complete_assignment(candidates):
+    assigned = {}
+
+    def assign(name, visited):
+        for rid in candidates[name]:
+            if rid in visited:
+                continue
+            visited.add(rid)
+            if rid not in assigned or assign(assigned[rid], visited):
+                assigned[rid] = name
+                return True
+        return False
+
+    return all(assign(name, set()) for name in candidates)
+
+
 def resolve(stages, raw, prefill, decode, tp_size=4):
-    metadata, order = {}, {}
+    metadata, order, finish, frontier, prefill_terminal = {}, {}, {}, {}, {}
+    prefill_calls = Counter()
     for e in prefill[0]:
         if e.get('event') != 'mtp_target_prefill_forward' or e.get('fake'):
             continue
         ids, qs, prefixes = e['request_ids'], e['context_lengths'], e['reuse_lengths']
         assert len(ids) == len(qs) == len(prefixes)
-        for rid, q, prefix in zip(ids, qs, prefixes):
-            assert rid not in metadata, 'request had multiple initial Prefill calls'
-            metadata[rid] = (q+prefix, prefix)
-            order[rid] = e['execution_step']
+        prompts = e.get('prompt_lengths', [q+p for q,p in zip(qs, prefixes)])
+        ends = e.get('context_terminal', [True]*len(ids))
+        assert len(prompts) == len(ends) == len(ids)
+        for rid, q, prefix, prompt, end in zip(ids, qs, prefixes, prompts, ends):
+            assert (type(q) is int and type(prefix) is int and type(prompt) is int
+                    and type(end) is bool and q > 0 and 0 <= prefix < prefix+q <= prompt), 'invalid Prefill window'
+            assert end == (prefix+q == prompt), 'Prefill terminal flag differs from prompt boundary'
+            if rid in metadata:
+                assert not prefill_terminal[rid] and prefix == frontier[rid], 'discontinuous or repeated Prefill chunk'
+                assert metadata[rid][0] == prompt, 'Prefill prompt changed between chunks'
+                assert finish[rid] < e['execution_step'], 'Prefill chunks executed out of order'
+            else:
+                metadata[rid] = (prompt, prefix)
+                order[rid] = e['execution_step']
+            finish[rid], frontier[rid], prefill_terminal[rid] = e['execution_step'], prefix+q, end
+            prefill_calls[rid] += 1
     owners, verifies, terminal = {}, defaultdict(list), defaultdict(list)
     for owner in range(8 // tp_size):
         for e in decode[owner*tp_size]:
@@ -28,6 +71,8 @@ def resolve(stages, raw, prefill, decode, tp_size=4):
             if e.get('event') == 'terminal_generate_output':
                 terminal[e['request_id']].append((owner, e))
             if e.get('event') == 'mtp_target_verify_forward' and not e.get('fake'):
+                assert len(e.get('context_lengths', e['request_ids'])) == len(e['request_ids']), (
+                    'incomplete Decode verify window')
                 for slot, rid in enumerate(e['request_ids']):
                     assert rid not in owners or owners[rid] == owner
                     owners[rid] = owner
@@ -35,8 +80,6 @@ def resolve(stages, raw, prefill, decode, tp_size=4):
 
     def response_signature(rid, trailing_steps):
         events = verifies[rid]
-        if rid not in terminal:
-            return len(events) + 1, None
         outputs = sorted(terminal[rid], key=lambda pair: pair[1]['time_ns'])
         assert all(owner == owners[rid] for owner, _ in outputs), (
             'terminal output came from the wrong Decode owner')
@@ -91,37 +134,38 @@ def resolve(stages, raw, prefill, decode, tp_size=4):
             index += len(names)
         steps = [order[rid] for rid in ids]
         assert min(steps) > last_step, 'stage completion/admission barrier violated'
-        last_step = max(steps)
+        last_step = max(finish[rid] for rid in ids)
         trailing_steps = {}
         if stage.get('passed'):
-            expected, actual = {}, defaultdict(list)
-            native_signatures = {}
-            verify_output_length = all(rid in terminal for rid in ids)
+            actual = defaultdict(list)
+            terminal_signatures = {}
+            verify_lengths = {}
             for rid in ids:
                 assert rid in owners
-                count, output_len = response_signature(rid, trailing_steps)
-                sig = (*metadata[rid], owners[rid], count)
-                if verify_output_length:
-                    sig += (output_len,)
-                native_signatures[rid] = sig
-                actual[sig].append(rid)
+                assert prefill_terminal[rid], 'successful request did not complete Prefill'
+                actual[(*metadata[rid], owners[rid])].append(rid)
+                if rid in terminal:
+                    terminal_signatures[rid] = response_signature(rid, trailing_steps)
+                else:
+                    verify_lengths[rid] = [event['context_lengths'][slot] if 'context_lengths' in event else None
+                                           for event, slot in verifies[rid]]
+            candidates = {}
             for name in names:
                 row = raw[name]['result']
                 assert raw[name]['passed']
-                expected[name] = (row['input_len'], row['prefill_total_reuse_len'],
-                                  row['decode_owner_rank'], row['iter_count'])
-                if verify_output_length:
-                    expected[name] += (row['output_len'],)
-                if True in modes:
-                    rid = explicit[name]
-                    assert expected[name] == native_signatures[rid], name
-            assert Counter(expected.values()) == Counter({s:len(v) for s,v in actual.items()}), (
-                stage['name'], Counter(expected.values()), {s:len(v)for s,v in actual.items()})
+                signature = (row['input_len'], row['prefill_total_reuse_len'], row['decode_owner_rank'])
+                candidates[name] = [
+                    rid for rid in actual[signature]
+                    if (name not in explicit or explicit[name] == rid)
+                    and (terminal_signatures[rid] == (row['iter_count'], row.get('output_len'))
+                         if rid in terminal_signatures else matches_iterations(row, verify_lengths[rid]))
+                ]
+            assert has_complete_assignment(candidates), (stage['name'], candidates)
             if True not in modes:
-                for name,sig in expected.items():
-                    case_ids[name] = list(actual[sig])
+                for name, compatible in candidates.items():
+                    case_ids[name] = compatible
                     methods[name] = ('stage_barrier_and_unique_execution_signature'
-                                     if len(actual[sig]) == 1 else
+                                     if len(compatible) == 1 else
                                      'stage_barrier_and_complete_equivalent_signature_set')
         else:
             # Failed stages reserve their observed traffic but are never reused.
@@ -129,7 +173,8 @@ def resolve(stages, raw, prefill, decode, tp_size=4):
                 case_ids.setdefault(name, [])
                 methods.setdefault(name, 'failed_not_reusable')
         proofs.append(dict(stage=stage['name'], passed=stage.get('passed'),
-                           native_request_ids=ids, first_step=min(steps), last_step=max(steps),
+                           native_request_ids=ids, first_step=min(steps), last_step=last_step,
+                           prefill_calls={rid: prefill_calls[rid] for rid in ids},
                            signature_multiset_checked=bool(stage.get('passed')),
                            post_terminal_verify_steps=trailing_steps))
     assert index == len(unknown)

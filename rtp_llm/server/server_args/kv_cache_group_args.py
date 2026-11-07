@@ -30,6 +30,18 @@ def _pool_blocks(value):
     return count
 
 
+def _linear_pool_avg_prompt_tokens(value):
+    try:
+        tokens = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("linear_pool_avg_prompt_tokens must be an integer") from error
+    if tokens != -1 and not 1 <= tokens <= 2147483647:
+        raise argparse.ArgumentTypeError(
+            "linear_pool_avg_prompt_tokens must be -1 or in [1, 2147483647]"
+        )
+    return tokens
+
+
 def _positive_finite_ratio(value):
     try:
         ratio = float(value)
@@ -247,6 +259,18 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=_pool_blocks,
         default=0,
         help="每个 Linear 独立池的物理 block 总数（含 block 0）；0 表示自动计算，模型专用配置优先。",
+    )
+    kv_cache_group.add_argument(
+        "--linear_pool_avg_prompt_tokens",
+        env_name="LINEAR_POOL_AVG_PROMPT_TOKENS",
+        bind_to=(kv_cache_config, "linear_pool_avg_prompt_tokens"),
+        type=_linear_pool_avg_prompt_tokens,
+        default=-1,
+        help=(
+            "用于 Prefill LINEAR/KDA 池定容的平均完整 prompt token 数。"
+            "每份参考长度对应 REUSE_CACHE_TAIL_BLOCKS + 1 个 LINEAR 槽，含一个尾块。"
+            "-1 沿用默认定容，LINEAR_POOL_BLOCKS 优先。"
+        ),
     )
     kv_cache_group.add_argument(
         "--swa_pool_blocks",

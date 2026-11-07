@@ -23,8 +23,8 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 84)
-                self.assertEqual(state[:2], ("KVCacheConfig", 12))
+                self.assertEqual(len(state), 85)
+                self.assertEqual(state[:2], ("KVCacheConfig", 13))
                 self.assertEqual(
                     state[64:69], tuple(BASE_EVENT_FIELD_VALUES.values())
                 )
@@ -103,6 +103,20 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(restored.linear_pool_blocks, 0)
         self.assertEqual(restored.swa_pool_blocks, 0)
         self.assertFalse(restored.enable_crc)
+
+    def test_linear_pool_avg_prompt_tokens_survives_worker_spawn(self):
+        config = KVCacheConfig()
+        self.assertEqual(config.linear_pool_avg_prompt_tokens, -1)
+        config.linear_pool_avg_prompt_tokens = 100_000
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.linear_pool_avg_prompt_tokens, 100_000)
+        state = config.__getstate__()
+        legacy = KVCacheConfig.__new__(KVCacheConfig)
+        legacy.__setstate__((state[0], 12, *state[2:84]))
+        self.assertEqual(legacy.linear_pool_avg_prompt_tokens, -1)
+        disabled = KVCacheConfig.__new__(KVCacheConfig)
+        disabled.__setstate__((*state[:84], 0))
+        self.assertEqual(disabled.linear_pool_avg_prompt_tokens, -1)
 
     def test_pool_settings_round_trip_and_version10_defaults(self):
         config = KVCacheConfig()

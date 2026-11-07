@@ -60,6 +60,7 @@ struct KVCacheSpecDesc {
     // LINEAR states with ordinary TP head shards require per-segment PD
     // transfer. Keep legacy whole-block keys unless the model declares it.
     bool            head_sharded_transfer = false;
+    bool            prefill_borrow_tail   = false;
 
     uint32_t entry_elems = 0;
     DataType entry_dtype = DataType::TYPE_INVALID;

@@ -363,16 +363,27 @@ class KdaPrefill(KdaBase):
             if metadata is None:
                 raise ValueError("paged convolution metadata is required for prefill")
             conv_states = block_map = None
+            current_conv_state = continuation_mask = None
             if kv_cache_tensor is not None:
                 self._validate_prefix_state(attn_inputs, seq_size_per_block)
                 conv_states = self._get_conv_states(kv_cache_tensor)
                 block_map = attn_inputs.kv_cache_kernel_block_id_device
+                from rtp_llm.models_py.triton_kernels.causal_conv1d.prefill_state_alias import (
+                    snapshot_prefill_conv_input,
+                )
+
+                current_conv_state, continuation_mask = snapshot_prefill_conv_input(
+                    conv_states, attn_inputs, seq_size_per_block, attn_meta,
+                    world_rank=self.parallelism_config.world_rank,
+                )
             elif any(attn_inputs.prefix_lengths.tolist()):
                 raise ValueError("A cached KDA prefix requires recurrent cache storage")
             q, k, v, _, beta = paged_short_conv_prefill(
                 mixed_qkv, self.conv_weights, conv_states, block_map,
                 attn_inputs.prefix_lengths_device, attn_inputs.cu_seqlens_device,
                 seq_size_per_block, metadata, aux=beta,
+                current_conv_state=current_conv_state,
+                continuation_mask=continuation_mask,
             )
             mixed_qkv = (q, k, v)
         else:

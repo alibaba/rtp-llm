@@ -96,6 +96,7 @@ public:
 
     // Returns false when the ordinary kernel block table should be used.
     bool copyChunkKernelBlocks(int batch, const std::string& tag, int32_t* dst) const;
+    void completeLinearPrefillChunk(int completed_tokens);
 
     // Rebuild KV block ownership for beam/multiple-return sequences.
     // This records copy mappings; caller must execute them via

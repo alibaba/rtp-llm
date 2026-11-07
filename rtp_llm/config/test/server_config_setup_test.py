@@ -399,6 +399,12 @@ class GenerateConfigTest(TestCase):
             self.assertEqual(config.linear_pool_blocks, 100)
             self.assertEqual(config.swa_pool_blocks, 0)
 
+    @patch.dict("os.environ", _jit_env(LINEAR_POOL_AVG_PROMPT_TOKENS="100000"), clear=True)
+    def test_linear_pool_avg_prompt_tokens_from_env_and_cli(self):
+        self.assertEqual(setup_args([]).kv_cache_config.linear_pool_avg_prompt_tokens, 100_000)
+        config = setup_args(["--linear_pool_avg_prompt_tokens", "-1"]).kv_cache_config
+        self.assertEqual(config.linear_pool_avg_prompt_tokens, -1)
+
     def test_reuse_tail_and_pool_limits(self):
         for option, value in (
             ("reuse_cache_tail_blocks", "invalid"),
@@ -408,6 +414,10 @@ class GenerateConfigTest(TestCase):
             ("linear_pool_blocks", "invalid"),
             ("linear_pool_blocks", "1"),
             ("linear_pool_blocks", "-1"),
+            ("linear_pool_avg_prompt_tokens", "invalid"),
+            ("linear_pool_avg_prompt_tokens", "0"),
+            ("linear_pool_avg_prompt_tokens", "-2"),
+            ("linear_pool_avg_prompt_tokens", "2147483648"),
             ("swa_pool_blocks", "1"),
             ("swa_pool_blocks", "4294967296"),
         ):
@@ -521,8 +531,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 84)
-        self.assertEqual(state[:2], ("KVCacheConfig", 12))
+        self.assertEqual(len(state), 85)
+        self.assertEqual(state[:2], ("KVCacheConfig", 13))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)

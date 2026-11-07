@@ -18,11 +18,14 @@ struct KVCacheBlockBudget {
     size_t explicit_pool_reserve_bytes = 0;
     size_t paged_block_bytes           = 0;
     size_t swa_block_bytes             = 0;
+    size_t linear_prefill_block_bytes  = 0;
+    LinearPrefillPoolRatio linear_prefill_pool_ratio{};
 };
 
 // Returns the largest global block count whose independent-pool backing fits
 // in total_budget_bytes:
-//   explicit reserve + N * (paged bytes + SWA bytes).
+//   explicit reserve + N * (paged bytes + SWA bytes)
+//   + physical LINEAR blocks for N paged blocks times LINEAR block bytes.
 // Fully explicit layouts use a baseline of one when their reservation fits.
 uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget);
 

@@ -5,15 +5,19 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/LinearPrefillTrace.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
 #include <limits>
 #include <thread>
+#include <unordered_set>
 
 using namespace std;
 
@@ -38,6 +42,70 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
     return topology;
 }
 
+void traceLinearPrefillAllocation(const BatchKVCacheResource& resource, int64_t request_id, int configured_n) {
+    if (!linear_prefill_trace::enabled()) {
+        return;
+    }
+    for (int batch = 0; batch < resource.batchSize(); ++batch) {
+        for (const auto& tag : resource.cacheResource(batch).groupTags()) {
+            const auto& ids = resource.cacheResource(batch).blockIds(tag);
+            const auto& plan = ids.linearPrefillPlan();
+            if (!plan) {
+                continue;
+            }
+            std::unordered_set<BlockIdxType> owned;
+            for (const auto block : ids.blocks()) {
+                if (block > 0) {
+                    owned.insert(block);
+                }
+            }
+            std::ostringstream fields;
+            fields << "\"request_id\":" << request_id << ",\"batch\":" << batch
+                   << ",\"group_tag\":" << linear_prefill_trace::quote(tag)
+                   << ",\"configured_tail_blocks\":" << configured_n
+                   << ",\"prompt_tokens\":" << plan->promptTokens()
+                   << ",\"initial_reuse_tokens\":" << plan->reusedTokens()
+                   << ",\"page_tokens\":" << plan->pageTokens()
+                   << ",\"checkpoint_tokens\":" << plan->checkpointTokens()
+                   << ",\"planned_new_blocks\":" << plan->newPositions().size()
+                   << ",\"owned_state_blocks\":" << owned.size()
+                   << ",\"borrowed_block\":" << ids.blocks()[plan->borrowedPosition()]
+                   << ",\"has_separate_tail\":" << (plan->hasSeparateTail() ? "true" : "false");
+            linear_prefill_trace::emit("linear_prefill_allocated", fields.str());
+        }
+    }
+}
+
+void traceLinearCacheLoaded(const LoadAsyncContext& context, const KVCacheManager& manager,
+                            int64_t request_id, int reuse_tokens) {
+    if (!linear_prefill_trace::enabled() || !manager.blockTreeCache()) {
+        return;
+    }
+    const auto& mapper = manager.cpSlotMapper();
+    const int interval = mapper ? mapper->reuseBlockTokens(manager.cacheConfig()) : manager.cacheConfig().seq_size_per_block;
+    const auto& sets = manager.blockTreeCache()->groupSets();
+    for (const auto& desc : context.loadDescs()) {
+        const auto tokens = (desc.path_index + 1) * static_cast<size_t>(interval);
+        if (tokens > static_cast<size_t>(reuse_tokens) || desc.group_set_id >= sets.size()) {
+            continue;
+        }
+        const auto& tags = sets[desc.group_set_id]->groupTags();
+        for (size_t member = 0; member < tags.size(); ++member) {
+            if (!manager.cacheConfig().group(tags[member]).policy.prefill_borrow_tail
+                || member >= desc.target_blocks.size()) {
+                continue;
+            }
+            std::ostringstream fields;
+            fields << "\"request_id\":" << request_id
+                   << ",\"group_tag\":" << linear_prefill_trace::quote(tags[member])
+                   << ",\"checkpoint_tokens\":" << tokens
+                   << ",\"source_tier\":" << linear_prefill_trace::quote(tierName(desc.source_tier))
+                   << ",\"device_block\":" << desc.target_blocks[member];
+            linear_prefill_trace::emit("linear_cache_loaded", fields.str());
+        }
+    }
+}
+
 }  // namespace
 
 void StreamCacheResource::init(int batch_size) {
@@ -59,6 +127,9 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
     const auto& group   = config.group(tag);
     const auto  tail    = static_cast<size_t>(stream_->seqLength() - 1) / group.seqSizePerBlock();
     const auto& ids     = batch_kv_cache_resource_->cacheResource(batch).blockIds(tag);
+    if (ids.linearPrefillPlan()) {
+        return ids.copyLinearPrefillKernelBlocks(stream_->prefixLength(), stream_->currentChunkLen(), dst);
+    }
     if (group.policy.shared_chunk_state) {
         // HCA has no overlap. Aligned chunks start a new 128-token compression interval.
         RTP_LLM_CHECK_WITH_INFO(stream_->seqSizePerBlock() % 128 == 0 && stream_->prefixLength() % 128 == 0
@@ -91,6 +162,38 @@ bool StreamCacheResource::copyChunkKernelBlocks(int batch, const std::string& ta
         "cyclic chunk cache requires aligned prefixes and bounded grants");
     ids.copyCyclicKernelBlocks(tail, banks, dst);
     return true;
+}
+
+void StreamCacheResource::completeLinearPrefillChunk(int completed_tokens) {
+    if (resource_context_.role_type != RoleType::PREFILL || !reuseCache()
+        || resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks == std::numeric_limits<int>::max()) {
+        return;
+    }
+    for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
+        for (const auto& tag : batch_kv_cache_resource_->cacheResource(batch).groupTags()) {
+            auto& ids = batch_kv_cache_resource_->mutableBlockIds(batch, tag);
+            if (linear_prefill_trace::enabled() && ids.linearPrefillPlan()) {
+                const auto round = ids.linearPrefillPlan()->round(stream_->prefixLength(), stream_->currentChunkLen());
+                std::ostringstream fields;
+                fields << "\"request_id\":" << stream_->streamId() << ",\"batch\":" << batch
+                       << ",\"group_tag\":" << linear_prefill_trace::quote(tag)
+                       << ",\"prefix_tokens\":" << stream_->prefixLength()
+                       << ",\"end_tokens\":" << completed_tokens
+                       << ",\"input_block\":" << (round.input_owner_position ? ids.blocks()[*round.input_owner_position] : 0)
+                       << ",\"output_block\":" << ids.blocks()[round.output_owner_position]
+                       << ",\"writes\":[";
+                for (size_t i = 0; i < round.writes.size(); ++i) {
+                    const auto& write = round.writes[i];
+                    fields << (i ? "," : "") << "{\"block\":" << ids.blocks()[write.owner_position]
+                           << ",\"tokens\":" << write.tokens
+                           << ",\"retained\":" << (write.retained ? "true" : "false") << "}";
+                }
+                fields << ']';
+                linear_prefill_trace::emit("linear_prefill_round_completed", fields.str());
+            }
+            ids.completeLinearPrefillChunk(completed_tokens);
+        }
+    }
 }
 
 void StreamCacheResource::releaseResource() {
@@ -203,7 +306,12 @@ int StreamCacheResource::estimatePeakNeedBlocks(
                                                                    remaining_tokens,
                                                                    reserve_step,
                                                                    reuseCache(),
-                                                                   target_batch_size);
+                                                                   target_batch_size,
+                                                                   resource_context_.role_type == RoleType::PREFILL
+                                                                       && stream_->isContextStream()
+                                                                       && stream_->chunkedPrefillEnabled()
+                                                                       && !stream_->isFakeStream() ?
+                                                                       stream_->inputLength() : 0);
 }
 
 void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int backend) {
@@ -247,6 +355,10 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.enable_storage_backend       = !skip_remote_cache_;
     malloc_info.max_chunk_tokens =
         stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
+    if (resource_context_.role_type == RoleType::PREFILL && stream_->isContextStream()
+        && stream_->chunkedPrefillEnabled() && !stream_->isFakeStream()) {
+        malloc_info.linear_prefill_prompt_tokens = stream_->inputLength();
+    }
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
@@ -273,6 +385,10 @@ absl::Status StreamCacheResource::initKVBlock() {
     // HOST/DISK reuse is published after the asynchronous load completes.
     publishReuseLengths(result.reuse_len, 0, 0, 0);
     allocator_load_context_ = std::move(result.async_context);
+    if (!allocator_load_context_) {
+        traceLinearPrefillAllocation(*batch_kv_cache_resource_, stream_->streamId(),
+                                      resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks);
+    }
     return allocator_load_context_ ? absl::OkStatus() : prepareLinearReplayResources();
 }
 
@@ -395,6 +511,14 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
 
     if (timed_out) {
         return absl::DeadlineExceededError("match-to-ready deadline exceeded");
+    }
+    if (malloc_status == MallocStatus::NONE) {
+        traceLinearPrefillAllocation(*batch_kv_cache_resource_, stream_->streamId(),
+                                      resource_context_.cache_manager->cacheConfig().reuse_cache_tail_blocks);
+        if (load_context && (load_success || load_context->localLoadSucceeded())) {
+            traceLinearCacheLoaded(*load_context, *resource_context_.cache_manager,
+                                    stream_->streamId(), stream_->initialReuseLength());
+        }
     }
     if (load_success) {
         return prepareLinearReplayResources();

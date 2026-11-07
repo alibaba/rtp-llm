@@ -944,7 +944,8 @@ class Runner:
             raise SmokeFailure(
                 f"{case.name}: invalid reuse {effective_reuse} for input_len {input_len}"
             )
-        if case.allow_long_history and input_len - effective_reuse > 65536:
+        if (case.allow_long_history and input_len - effective_reuse > 65536
+                and not self.scheduler_chunk_profile()):
             raise SmokeFailure(
                 f"{case.name}: historical-KV request has {input_len - effective_reuse} "
                 "uncached Q tokens, exceeding 65536"
@@ -983,13 +984,13 @@ class Runner:
                     f"{input_urls!r}"
                 )
         iter_count = int(aux.get("iter_count", 0))
-        mtp_accepted_tokens = output_len - iter_count
         untrained = bool(getattr(self.args, "synthetic_draft", None))
         try:
             mtp_metrics = acceptance_contract(aux, untrained=untrained,
                                               required=case.require_mtp or case.require_mtp_draft)
         except ValueError as exc:
             raise SmokeFailure(f"{case.name}: {exc}") from exc
+        mtp_accepted_tokens, mtp_accepted_tokens_source = self.mtp_acceptance(aux, mtp_metrics)
         if case.require_mtp and (iter_count <= 0 or (not untrained and mtp_accepted_tokens <= 0)):
             raise SmokeFailure(
                 f"{case.name}: MTP produced no accepted draft token: "
@@ -1035,6 +1036,7 @@ class Runner:
             "output_len": output_len,
             "iter_count": iter_count,
             "mtp_accepted_tokens": mtp_accepted_tokens,
+            "mtp_accepted_tokens_source": mtp_accepted_tokens_source,
             "mtp_draft_kind": "synthetic_untrained" if untrained else "trained",
             "mtp_metrics": mtp_metrics,
             "speculative_metrics": aux.get("speculative_metrics") or {},
@@ -1111,6 +1113,9 @@ class Runner:
 
     def prepare_case(self, case: Case) -> Case:
         return case
+
+    def mtp_acceptance(self, aux, counters):
+        return int(aux['output_len']) - int(aux['iter_count']), 'iteration_count'
 
     def http_process_environment(self) -> dict | None:
         return None
@@ -2272,6 +2277,20 @@ class Runner:
         self._observed_device_pool_blocks = cached
         return count
 
+    def cache_seed_prompt(self, tag, value):
+        return self.fit_prompt(f"CACHE:{tag}:memory\n",
+            f'\n只输出 JSON {{"value":"{value}"}}。', self.cache_probe_tokens,
+            enable_thinking=False)[0]
+
+    def cache_probe_case(self, seed):
+        return seed
+
+    def cache_seed_case(self, case, attempt):
+        return case
+
+    def cache_witness_case(self, case):
+        return case
+
     def _orthogonal_cache_seed(self) -> None:
         # K3 defaults to its complete checkpoint span. Model-specific traffic
         # adapters derive this seed from their observed cache geometry.
@@ -2282,18 +2301,16 @@ class Runner:
         for attempt in range(3):
             tag = f"{self.args.namespace}-tier-{attempt}"
             memory_value = f"MEM-{attempt}"
-            memory_tail = f'\n只输出 JSON {{"value":"{memory_value}"}}。'
-            memory_prompt, _ = self.fit_prompt(
-                f"CACHE:{tag}:memory\n", memory_tail, target, enable_thinking=False
-            )
+            memory_prompt = self.cache_seed_prompt(tag, memory_value)
             memory_seed = self._orthogonal_answer(
                 f"tier-memory-seed-{attempt}", memory_prompt, memory_value, "miss"
             )
+            memory_seed = self.cache_seed_case(memory_seed, attempt)
             self._required_stage(memory_seed.name, [memory_seed])
             self._memory_candidates.append((tag, memory_seed, memory_value))
             if attempt == 0:
                 device_probe = replace(
-                    memory_seed,
+                    self.cache_probe_case(memory_seed),
                     name="tier-device-probe-0",
                     reuse="any",
                     expected_cache_tier=None,
@@ -2317,13 +2334,12 @@ class Runner:
         self._memory_witness = self._orthogonal_answer(
             "tier-witness-seed", witness_prompt, witness_value, "miss"
         )
+        self._memory_witness = self.cache_witness_case(self._memory_witness)
         self._required_stage(self._memory_witness.name, [self._memory_witness])
         if "cancel" in getattr(self.args, "orthogonal_phases", ()):
             self._cancel_host_candidates = self._seed_cancel_candidates()
 
-    def _orthogonal_cache(self) -> None:
-        if not hasattr(self, "_memory_candidates"):
-            raise SmokeFailure("cache seeds must precede the traffic used for demotion")
+    def probe_cache_witness(self):
         probe = replace(
             self._memory_witness,
             name="tier-memory-probe",
@@ -2338,13 +2354,18 @@ class Runner:
             raise SmokeFailure(
                 "ordinary smoke traffic did not demote the witness prefix to Memory"
             )
+
+    def _orthogonal_cache(self) -> None:
+        if not hasattr(self, "_memory_candidates"):
+            raise SmokeFailure("cache seeds must precede the traffic used for demotion")
+        self.probe_cache_witness()
         owner_count = max(1, len(self.decode_role_addrs))
         device_blocks = self._orthogonal_device_blocks()
         target = self.cache_probe_tokens
         for attempt, (tag, memory_seed, memory_value) in enumerate(
             self._memory_candidates
         ):
-            memory_prompt = memory_seed.prompt
+            memory_prompt = self.cache_probe_case(memory_seed).prompt
             device_value = f"DEV-{attempt}"
             device_tail = f'\n只输出 JSON {{"value":"{device_value}"}}。'
             device_prompt, _ = self.fit_prompt(
@@ -2565,6 +2586,19 @@ class Runner:
                 )
                 self._required_stage(case.name, [case])
 
+    def long_kv_seed_targets(self):
+        seed_end, step = 655_360, 32_740
+        targets = list(range(65_504, seed_end, step))
+        if targets[-1] != seed_end:
+            targets.append(seed_end)
+        return targets
+
+    def long_kv_seed_reuse(self, index):
+        return "miss" if index == 0 else "hit"
+
+    def long_kv_seed_prompt(self, base, overhead, target):
+        return base + " x" * (target - overhead)
+
     def _orthogonal_chunk_kv(self) -> None:
         base = f"Long KV pressure test {self.args.namespace}. "
         overhead = len(self.tokenize(base, enable_thinking=False))
@@ -2572,23 +2606,20 @@ class Runner:
             raise SmokeFailure("long-KV seed filler is not one token per repeat")
         # 589824 cached tokens exceed the 6 GiB FP8 MLA expansion budget's
         # 557056-token aligned launch cap, while every seed adds <= 65536 Q.
-        seed_end, step = 655_360, 32_740
-        targets = list(range(65_504, seed_end, step))
-        if targets[-1] != seed_end:
-            targets.append(seed_end)
+        targets = self.long_kv_seed_targets()
         for index, target in enumerate(targets):
             case = Case(
                 f"orthogonal_kv_seed_{index:02d}",
-                base + " x" * (target - overhead),
+                self.long_kv_seed_prompt(base, overhead, target),
                 r".",
-                "miss" if index == 0 else "hit",
+                self.long_kv_seed_reuse(index),
                 allow_long_history=True,
                 preparation_only=True,
                 max_tokens=4,
             )
             self._required_stage(case.name, [case])
             row = self.records[-1]
-            if abs(row["input_len"] - target) > 32:
+            if abs(row["input_len"] - target) > (0 if self.scheduler_chunk_profile() else 32):
                 raise SmokeFailure(
                     f"{case.name}: observed token count differs from seed target"
                 )
@@ -2783,6 +2814,12 @@ class Runner:
             "before_cancel_observation": observation,
         }
 
+    def scheduler_chunk_profile(self):
+        return False
+
+    def prefill_case_tokens(self, label, index):
+        return 65536
+
     def run_single_prefill_64k(self) -> None:
         # Exact rendered-token count, including the serving chat template.
         # Keep two concurrent long requests; capacity failures remain failures.
@@ -2790,10 +2827,11 @@ class Runner:
             cases = []
             for index in range(count):
                 tag = f"K64-{label}-{index}"
+                target_tokens = self.prefill_case_tokens(label, index)
                 prompt, ids = self.fit_prompt(
                     f"Archive {self.args.namespace}/{tag}. Background:\n",
                     f'\nRecord value={tag}. Return only JSON {{"value":"{tag}"}}.',
-                    65536,
+                    target_tokens,
                 )
                 cases.append(
                     Case(
@@ -2805,6 +2843,7 @@ class Runner:
                         expected_json={"value": tag},
                         expected_input_len=len(ids),
                         expected_reuse_len=0,
+                        allow_long_history=target_tokens > 65536,
                         max_tokens=max(
                             self.args.max_tokens, self.args.mtp_chunk_max_tokens
                         ),
@@ -2816,7 +2855,7 @@ class Runner:
                     case,
                     name=case.name.replace("_cold", "_reuse"),
                     reuse="hit",
-                    expected_reuse_len=65535
+                    expected_reuse_len=(case.expected_input_len - 1)
                     // self.reuse_unit_tokens
                     * self.reuse_unit_tokens,
                 )

@@ -26,6 +26,19 @@ cuda13_torch_link_deps = select({
 })
 
 cc_test(
+    name = "smoke_logits_capture_test",
+    srcs = ["SmokeLogitsCaptureTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {"GPU_COUNT": "0"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "speculative_sampler_test",
     srcs = [
         "SpeculativeSamplerTest.cc",
