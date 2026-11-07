@@ -98,6 +98,61 @@ class IndexerPrefillTritonTest(unittest.TestCase):
             torch.testing.assert_close(kv, before[0], atol=0, rtol=0)
             torch.testing.assert_close(state, before[1], atol=0, rtol=0)
 
+    def test_eager_fake_prefill_uses_masked_fallback_with_and_without_host_mirrors(
+        self,
+    ):
+        for mirrors in (False, True):
+            for lengths in ([1], [129, 1], [4]):
+                with self.subTest(mirrors=mirrors, lengths=lengths):
+                    context, raw, indexer, rope, kv, state = self.runtime_inputs(
+                        lengths
+                    )
+                    # Keep the first row live in mixed batches; all rows in a
+                    # singleton batch are the engine's fake prefill request.
+                    context.indexer_kv_inputs.kv_cache_kernel_block_id_device[
+                        -1
+                    ].zero_()
+                    context.indexer_state_inputs.kv_cache_block_id_device[-1].zero_()
+                    for inputs in (
+                        context.main_inputs,
+                        context.indexer_kv_inputs,
+                        context.indexer_state_inputs,
+                    ):
+                        inputs.is_s_padded = True
+                    if mirrors:
+                        context.main_inputs.cu_seqlens = (
+                            context.main_inputs.cu_seqlens_device.cpu()
+                        )
+                        context.indexer_kv_inputs.kv_cache_kernel_block_id = (
+                            context.indexer_kv_inputs.kv_cache_kernel_block_id_device.cpu()
+                        )
+                        context.indexer_state_inputs.kv_cache_block_id = (
+                            context.indexer_state_inputs.kv_cache_block_id_device.cpu()
+                        )
+                    before = kv.clone(), state.clone()
+                    with patch(
+                        "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton.write_zero_prefix_prefill"
+                    ) as fused:
+                        _, _, _, result = context.write_prefill_indexer_cache(
+                            raw, indexer=indexer, rope_config=rope
+                        )
+                    fused.assert_not_called()
+                    self.assertEqual(result["num_state_writes"], sum(lengths[:-1]))
+                    self.assertEqual(
+                        result["num_kv_writes"], sum(n // 4 for n in lengths[:-1])
+                    )
+                    self.assertTrue(
+                        bool((result["state_slots"][-lengths[-1] :] == -1).all())
+                    )
+                    self.assertTrue(
+                        bool((result["kv_slots"][-lengths[-1] :] == -1).all())
+                    )
+                    torch.testing.assert_close(kv[0], before[0][0], rtol=0, atol=0)
+                    torch.testing.assert_close(state[0], before[1][0], rtol=0, atol=0)
+                    context.rollback_side_cache()
+                    torch.testing.assert_close(kv, before[0], rtol=0, atol=0)
+                    torch.testing.assert_close(state, before[1], rtol=0, atol=0)
+
     def test_runtime_uses_cpp_host_metadata_mirrors(self):
         context, raw, indexer, rope, _, _ = self.runtime_inputs([129, 7])
         context.main_inputs.cu_seqlens = context.main_inputs.cu_seqlens_device.cpu()

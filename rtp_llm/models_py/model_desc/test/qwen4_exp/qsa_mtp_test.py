@@ -11,6 +11,92 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import build_qsa_rope
 
 
 class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for target verification")
+    def test_eager_fake_target_verify_preserves_reserved_pages_and_returns_padding(
+        self,
+    ):
+        for head_dim in (4, 128):
+            for query_len in (1, 4):
+                with self.subTest(head_dim=head_dim, query_len=query_len):
+                    self.D = head_dim
+                    self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+                    self.kv_base = torch.randn(
+                        7, 32 * head_dim, device="cuda", dtype=torch.bfloat16
+                    ).view(torch.uint8)
+                    self.state_base = torch.randn(8, 8 * head_dim, device="cuda")
+                    self.indexer.k_norm_gamma = torch.randn(
+                        head_dim, device="cuda"
+                    ).bfloat16()
+                    if head_dim == 128:
+                        self.rope_config.dim = 64
+                        self.rope_config.mrope_dim1 = 12
+                        self.rope_config.mrope_dim2 = self.rope_config.mrope_dim3 = 10
+                    context = self._target_verify_context(
+                        q_len=query_len, committed_length=1
+                    )
+                    for inputs in (
+                        context.main_inputs,
+                        context.indexer_kv_inputs,
+                        context.indexer_state_inputs,
+                    ):
+                        inputs.is_s_padded = True
+                    context.indexer_kv_inputs.kv_cache_kernel_block_id_device.zero_()
+                    context.indexer_state_inputs.kv_cache_block_id_device.zero_()
+                    before = self.kv_base.clone(), self.state_base.clone()
+                    selected = context.select_target_verify_tokens(
+                        torch.randn(
+                            query_len, 2, head_dim, device="cuda", dtype=torch.bfloat16
+                        ),
+                        torch.randn(
+                            query_len, head_dim, device="cuda", dtype=torch.bfloat16
+                        ),
+                        indexer=self._decode_indexer(),
+                        rope_config=self.rope_config,
+                    )
+                    self.assertTrue(bool((selected == -1).all()))
+                    torch.testing.assert_close(self.kv_base, before[0], rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        self.state_base, before[1], rtol=0, atol=0
+                    )
+                    context.rollback_side_cache()
+                    torch.testing.assert_close(self.kv_base, before[0], rtol=0, atol=0)
+                    torch.testing.assert_close(
+                        self.state_base, before[1], rtol=0, atol=0
+                    )
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for target preflight")
+    def test_eager_target_padding_keeps_one_sided_missing_and_partial_pages_strict(
+        self,
+    ):
+        self.kv_base = self.kv_base.cuda()
+        self.state_base = self.state_base.cuda()
+        self.indexer.k_norm_gamma = self.indexer.k_norm_gamma.cuda()
+        for bad_region in ("kv", "state", "state_tail"):
+            with self.subTest(bad_region=bad_region):
+                context = self._target_verify_context(q_len=4, committed_length=7)
+                for inputs in (
+                    context.main_inputs,
+                    context.indexer_kv_inputs,
+                    context.indexer_state_inputs,
+                ):
+                    inputs.is_s_padded = True
+                if bad_region == "kv":
+                    context.indexer_kv_inputs.kv_cache_kernel_block_id_device.zero_()
+                elif bad_region == "state":
+                    context.indexer_state_inputs.kv_cache_block_id_device.zero_()
+                else:
+                    context.indexer_state_inputs.kv_cache_block_id_device[0, 1] = 0
+                before = self.kv_base.clone(), self.state_base.clone()
+                with self.assertRaisesRegex(RuntimeError, "unallocated"):
+                    context._target_verify_geometry(
+                        indexer=self._decode_indexer(),
+                        token_count=4,
+                        device=self.kv_base.device,
+                    )
+                self.assertIsNone(context._side_cache_undo)
+                torch.testing.assert_close(self.kv_base, before[0], rtol=0, atol=0)
+                torch.testing.assert_close(self.state_base, before[1], rtol=0, atol=0)
+
     def test_target_verify_wider_than_one_compression_group_is_rejected(self):
         q_len = self.RATIO + 1
         raw_keys = torch.randn(q_len, self.D, dtype=torch.bfloat16)

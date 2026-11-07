@@ -434,6 +434,94 @@ class IndexerCacheWriterTest(unittest.TestCase):
         self.assertTrue((skipped["state_slots"] == -1).all())
         self.assertTrue((skipped["kv_slots"] == -1).all())
 
+    def test_padding_rows_preserve_reserved_pages_and_match_live_only_writes(self):
+        for writer in (write_indexer_cache, _write_indexer_cache_vectorized):
+            for padding_length in (1, 4, 9):
+                with self.subTest(writer=writer.__name__, length=padding_length):
+                    raw = torch.randn(5 + padding_length, self.D, dtype=torch.bfloat16)
+                    kv, state = self._pools()
+                    kv.random_(-3, 3)
+                    state.normal_()
+                    before = kv.clone(), state.clone()
+                    expected_kv, expected_state = kv.clone(), state.clone()
+                    self._write(
+                        raw[:5],
+                        [0, 5],
+                        [0],
+                        expected_kv,
+                        [[3, 5]],
+                        expected_state,
+                        [[6, 7]],
+                    )
+                    result = writer(
+                        raw,
+                        torch.tensor([0, 5, raw.shape[0]], dtype=torch.int32),
+                        torch.zeros(2, dtype=torch.int64),
+                        self.cos,
+                        self.sin,
+                        self.gamma,
+                        kv,
+                        torch.tensor([[3, 5], [0, 0]], dtype=torch.int32),
+                        state,
+                        torch.tensor([[6, 7], [0, 0]], dtype=torch.int32),
+                        ratio=self.RATIO,
+                        kv_tokens_per_block=self.KV_TOKENS_PER_BLOCK,
+                        state_tokens_per_block=self.STATE_TOKENS_PER_BLOCK,
+                        norm_eps=_EPS,
+                        capture_undo=True,
+                        rope_is_token_aligned=False,
+                        invalid_block_policy="raise",
+                        is_s_padded=True,
+                    )
+                    torch.testing.assert_close(kv, expected_kv, rtol=0, atol=0)
+                    torch.testing.assert_close(state, expected_state, rtol=0, atol=0)
+                    self.assertTrue(bool((result["state_slots"][5:] == -1).all()))
+                    self.assertTrue(bool((result["kv_slots"][5:] == -1).all()))
+                    self.assertFalse(bool(result["completed"][5:].any()))
+                    restore_indexer_cache(result["undo"])
+                    torch.testing.assert_close(kv, before[0], rtol=0, atol=0)
+                    torch.testing.assert_close(state, before[1], rtol=0, atol=0)
+
+    def test_padding_does_not_hide_partially_missing_or_out_of_range_live_pages(self):
+        for writer in (write_indexer_cache, _write_indexer_cache_vectorized):
+            for bad_kv, bad_state in (
+                ([0, 0], [0, 0]),
+                ([0, 1], [0, 0]),
+                ([1, 0], [0, 0]),
+                ([0, 0], [1, 0]),
+                ([1, 0], [1, 0]),
+                ([7, 1], [1, 2]),
+                ([1, 2], [8, 1]),
+                ([-1, 0], [-1, 0]),
+            ):
+                padded = any(bad_kv) or any(bad_state)
+                with self.subTest(writer=writer.__name__, kv=bad_kv, state=bad_state):
+                    kv, state = self._pools()
+                    before = kv.clone(), state.clone()
+                    with self.assertRaises((ValueError, IndexError)):
+                        writer(
+                            torch.randn(13, self.D, dtype=torch.bfloat16),
+                            torch.tensor([0, 4, 13], dtype=torch.int32),
+                            torch.zeros(2, dtype=torch.int64),
+                            self.cos,
+                            self.sin,
+                            self.gamma,
+                            kv,
+                            torch.tensor([[3, 5], bad_kv], dtype=torch.int32),
+                            state,
+                            torch.tensor([[6, 7], bad_state], dtype=torch.int32),
+                            ratio=self.RATIO,
+                            kv_tokens_per_block=self.KV_TOKENS_PER_BLOCK,
+                            state_tokens_per_block=self.STATE_TOKENS_PER_BLOCK,
+                            norm_eps=_EPS,
+                            capture_undo=True,
+                            rope_is_token_aligned=False,
+                            invalid_block_policy="raise",
+                            is_s_padded=bool(padded),
+                        )
+                    torch.testing.assert_close(kv, before[0], rtol=0, atol=0)
+                    torch.testing.assert_close(state, before[1], rtol=0, atol=0)
+
     def test_capture_undo_deduplicates_wrapped_destinations_and_restores(self):
         raw = torch.randn(12, self.D, dtype=torch.bfloat16)
         kv_pool, state_pool = self._pools()

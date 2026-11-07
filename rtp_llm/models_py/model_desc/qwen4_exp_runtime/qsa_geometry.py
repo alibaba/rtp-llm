@@ -569,7 +569,9 @@ def _target_verify_geometry(
     else:
         visible_lengths, compressed_lengths, query_positions, block_starts = metadata
     if self.main_inputs.is_s_padded:
-        active = state_table.ne(0).any(dim=1, keepdim=True)
+        active = state_table.ne(0).any(dim=1, keepdim=True) | kv_table.ne(0).any(
+            dim=1, keepdim=True
+        )
         visible_lengths = torch.where(active, visible_lengths, 0)
         compressed_lengths = torch.where(active, compressed_lengths, 0)
     max_ctx_len = (max(prefix_values) + query_len) // ratio
@@ -596,7 +598,14 @@ def _target_verify_geometry(
     # small committed-tail + candidate window explicitly before any write.
     state_table_width = int(state_table.shape[1])
     state_pairs = []
+    active_rows = (
+        self.host_values(active.reshape(-1))
+        if self.main_inputs.is_s_padded and not graph_target
+        else None
+    )
     for request_idx, prefix in enumerate(prefix_values):
+        if active_rows is not None and not active_rows[request_idx]:
+            continue
         first_needed = max(0, prefix - (prefix % ratio))
         logical_blocks = {
             position // state_tokens_per_block

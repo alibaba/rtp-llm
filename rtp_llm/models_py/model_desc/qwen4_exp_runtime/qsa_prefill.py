@@ -121,6 +121,7 @@ def write_prefill_indexer_cache(
         ratio == 4
         and int(self.indexer_state_cache.seq_size_per_block) == kv_tokens_per_block
         and raw_keys.is_cuda
+        and not self.main_inputs.is_s_padded
     )
     if not defer_cu:
         check_cu_partition()
@@ -179,11 +180,9 @@ def write_prefill_indexer_cache(
         rope_sin[request_idx, :seq_len].copy_(sin)
         offset = end
 
-    if (
-        ratio == 4
-        and int(self.indexer_state_cache.seq_size_per_block) == kv_tokens_per_block
-        and raw_keys.is_cuda
-    ):
+    # The fused prefill writer requires allocated pages for every request.
+    # Fake/warmup batches use the transactional writer's row-level padding mask.
+    if defer_cu:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton import (
             write_zero_prefix_prefill,
         )

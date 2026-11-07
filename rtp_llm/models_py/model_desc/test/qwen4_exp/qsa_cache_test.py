@@ -303,6 +303,32 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         torch.testing.assert_close(state_pool[6, 4], first[4].float())
         torch.testing.assert_close(state_pool[2, 7], second[7].float())
 
+    def test_eager_prefill_fake_row_preserves_both_pools_and_undo(self):
+        self.kv_base.random_(0, 256)
+        self.state_base.normal_()
+        context = self._context()
+        for inputs in (
+            context.main_inputs,
+            context.indexer_kv_inputs,
+            context.indexer_state_inputs,
+        ):
+            inputs.is_s_padded = True
+        self.kv_table[1].zero_()
+        self.state_table[1].zero_()
+        before = self.kv_base.clone(), self.state_base.clone()
+        raw = torch.randn(self.total_tokens, self.D, dtype=torch.bfloat16)
+        _, _, _, result = context.write_prefill_indexer_cache(
+            raw, indexer=self.indexer, rope_config=self.rope_config
+        )
+        self.assertEqual(result["num_state_writes"], self.lengths[0])
+        self.assertEqual(result["num_kv_writes"], self.lengths[0] // self.RATIO)
+        self.assertTrue(bool((result["state_slots"][self.lengths[0] :] == -1).all()))
+        torch.testing.assert_close(self.kv_base[0], before[0][0], rtol=0, atol=0)
+        torch.testing.assert_close(self.state_base[0], before[1][0], rtol=0, atol=0)
+        context.rollback_side_cache()
+        torch.testing.assert_close(self.kv_base, before[0], rtol=0, atol=0)
+        torch.testing.assert_close(self.state_base, before[1], rtol=0, atol=0)
+
     def test_base_rope_prefill_factor_one_and_three_match(self):
         raw_keys = torch.randn(self.total_tokens, self.D, dtype=torch.bfloat16)
         scalar_positions = []

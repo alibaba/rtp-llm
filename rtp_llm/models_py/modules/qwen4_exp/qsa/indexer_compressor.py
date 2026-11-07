@@ -148,6 +148,7 @@ def _write_indexer_cache_vectorized(
     invalid_block_policy: InvalidBlockPolicy,
     capture_undo: bool,
     rope_is_token_aligned: bool,
+    is_s_padded: bool = False,
 ) -> dict:
     """Device-vectorized writer used by the production CUDA path.
 
@@ -238,6 +239,11 @@ def _write_indexer_cache_vectorized(
     )
     local_indices = flat_indices - cu.index_select(0, request_ids)
     positions = starts.index_select(0, request_ids) + local_indices
+    active = (
+        state_block_table.ne(0).any(dim=1) | kv_block_table.ne(0).any(dim=1)
+        if is_s_padded
+        else None
+    )
 
     def _resolve(
         table: torch.Tensor,
@@ -248,6 +254,8 @@ def _write_indexer_cache_vectorized(
         tag: str,
         required: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if active is not None:
+            required = required & active[requests]
         width = int(table.shape[1])
         in_bounds = (logical_blocks >= 0) & (logical_blocks < width)
         safe_columns = logical_blocks.clamp(0, max(width - 1, 0))
@@ -256,6 +264,8 @@ def _write_indexer_cache_vectorized(
         if bool(torch.any(out_of_pool).item()):
             raise IndexError(f"{tag} physical block is outside pool size {pool_blocks}")
         allocated = in_bounds & (blocks > 0) & (blocks < pool_blocks)
+        if active is not None:
+            allocated = allocated & active[requests]
         missing = required & ~allocated
         if invalid_block_policy == "raise" and bool(torch.any(missing).item()):
             raise ValueError(f"{tag} resolves to an unallocated logical block")
@@ -277,6 +287,8 @@ def _write_indexer_cache_vectorized(
     )
 
     completed = (positions + 1).remainder(ratio) == 0
+    if active is not None:
+        completed = completed & active[request_ids]
     completed_indices = torch.nonzero(completed, as_tuple=False).flatten()
     kv_slots = torch.full_like(flat_indices, -1)
     kv_write_slots = torch.empty(0, dtype=torch.long, device=device)
@@ -422,6 +434,7 @@ def write_indexer_cache(
     invalid_block_policy: InvalidBlockPolicy = "raise",
     capture_undo: bool = False,
     rope_is_token_aligned: bool = False,
+    is_s_padded: bool = False,
 ) -> dict:
     """Write ragged raw indexer keys to the state ring and completed means to KV.
 
@@ -442,6 +455,10 @@ def write_indexer_cache(
     beyond the pool extent always raise because skipping them could hide memory
     corruption. Both tables use absolute logical-block columns. Only the payload
     offset inside an ``indexer_state`` block is a ring.
+
+    With ``is_s_padded=True``, requests whose two side block-table rows are
+    entirely zero are engine fake/warmup rows and never touch either pool.
+    Every other row retains the chosen invalid-block policy.
 
     By default, ``rope_cos`` / ``rope_sin`` cover absolute positions and may be
     shared ``[max_position, rotary_dim]`` or request-specific
@@ -550,6 +567,7 @@ def write_indexer_cache(
             invalid_block_policy=invalid_block_policy,
             capture_undo=capture_undo,
             rope_is_token_aligned=rope_is_token_aligned,
+            is_s_padded=is_s_padded,
         )
 
     offsets = [int(v) for v in cu_seqlens.tolist()]
@@ -614,6 +632,12 @@ def write_indexer_cache(
     completed = torch.zeros_like(state_slots, dtype=torch.bool)
 
     for request_idx in range(batch_size):
+        if (
+            is_s_padded
+            and not bool(state_block_table[request_idx].ne(0).any())
+            and not bool(kv_block_table[request_idx].ne(0).any())
+        ):
+            continue
         flat_lo, flat_hi = offsets[request_idx], offsets[request_idx + 1]
         seq_start = starts[request_idx]
         seq_len = flat_hi - flat_lo

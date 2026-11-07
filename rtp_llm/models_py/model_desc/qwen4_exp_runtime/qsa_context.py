@@ -89,7 +89,12 @@ class Qwen4ExpQSARuntimeContext:
     def _write_indexer_cache_transactional(self, *args, **kwargs) -> dict:
         if self._side_cache_undo is not None:
             raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
-        result = write_indexer_cache(*args, **kwargs, capture_undo=True)
+        result = write_indexer_cache(
+            *args,
+            **kwargs,
+            capture_undo=True,
+            is_s_padded=bool(self.main_inputs.is_s_padded),
+        )
         undo = result.pop("undo", None)
         if not isinstance(undo, IndexerCacheUndo):
             raise RuntimeError("qwen4_exp QSA writer did not return an undo record")
