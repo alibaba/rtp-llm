@@ -1237,9 +1237,10 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         // tp>1 gather only the lm_output_indexes rows whole and reduce the
         // all_logits_row_indexes scoring rows to compact scoring partials. A long
         // prompt-scoring request then no longer materializes [tokens, vocab] fp32 per rank (the
-        // 3.46 GiB @3740-token allocation that OOMed nearly-full GPUs). The first
-        // lm_output_indexes.numel() rows of every row-selected output remain the sampler-facing
-        // logits.
+        // 3.46 GiB @3740-token allocation that OOMed nearly-full GPUs). The gathered
+        // lm_output_indexes rows are returned as `logits` (the sampler-facing rows); the
+        // merged scoring outputs carry only the selected scoring rows — one row per
+        // all_logits_row_indexes entry.
         // tp_size == 1 keeps the legacy full-row all_logits: there is no TP gather for the row
         // selection to shrink, so the row-select machinery is skipped entirely.
         const bool row_select = need_all_logits && inputs.all_logits_row_indexes.defined() && device_props_.tp_size > 1;
@@ -1296,8 +1297,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             // order. It is additionally clamped by the fixed scratch byte budget so a
             // large accepted k cannot turn a fixed row count into a multi-GiB sort
             // workspace.
-            const int64_t lm_rows  = lm_output_indexes_device.size(0);
-            const int64_t sel_rows = lm_rows + num_scoring_rows;
             const int64_t shard_k  = std::min<int64_t>(std::max<int64_t>(k_max, 0), vocab_l);
             // The per-shard candidate width the partial pass emits (k_max additionally
             // clamped to the scoring vocab, as in computeShardScoringPartials) and the
@@ -1316,9 +1315,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             const int64_t chunk =
                 num_scoring_rows > 0 ? std::min({configured_chunk, budget_chunk, num_scoring_rows}) : 1;
             const auto scoring_rows_long = scoring_rows_device.to(torch::kLong);
-            // Partials are computed for the scoring rows only — the lm prefix rows of the
-            // outputs layout are sampler-facing (served from `logits`) and their lse/top-k
-            // values are never read, so reducing them would be pure waste.
+            // Partials are computed for the scoring rows only — the sampler-facing lm rows
+            // are served from `logits`, never through the scoring outputs, so reducing them
+            // would be pure waste.
             auto reduce_chunk = [&](const torch::Tensor& src_local, int64_t c0, int64_t c) {
                 auto part = computeShardScoringPartials(src_local,
                                                         scoring_rows_long.narrow(0, c0, c),
@@ -1329,23 +1328,24 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                                         c);
                 return tpReduceScoringPartials(part, k_max, check_nan_, chunk);
             };
-            // Outputs keep the [lm prefix ++ scoring rows] layout the dispatcher expects;
-            // the lm prefix carries placeholder rows (never consumed). With zero scoring
-            // rows every merged row is such a placeholder, so the top-k tables get width 0
-            // instead of materializing [lm_rows, k_out] buffers no consumer can read — a
-            // directly constructed input may still carry a positive large k.
+            // The merged outputs are compact: one row per selected scoring row, matching
+            // all_logits_row_indexes order. The sampler-facing lm rows are served from
+            // `logits` only — prefixing them here would allocate dead placeholder space
+            // ([lm_rows, k_out] top-k rows no consumer can read even when scoring rows are
+            // present). With zero scoring rows the top-k tables still collapse to width 0:
+            // a directly constructed input may carry a positive large k.
             const int64_t   out_k = num_scoring_rows > 0 ? k_out : 0;
             ScoringPartials merged;
-            merged.lse         = torch::zeros({sel_rows}, local_logits.options().dtype(torch::kFloat32));
-            merged.target      = torch::zeros({sel_rows}, local_logits.options().dtype(torch::kFloat32));
-            merged.topk_values = torch::zeros({sel_rows, out_k}, local_logits.options().dtype(torch::kFloat32));
-            merged.topk_ids    = torch::zeros({sel_rows, out_k},
+            merged.lse         = torch::zeros({num_scoring_rows}, local_logits.options().dtype(torch::kFloat32));
+            merged.target      = torch::zeros({num_scoring_rows}, local_logits.options().dtype(torch::kFloat32));
+            merged.topk_values = torch::zeros({num_scoring_rows, out_k}, local_logits.options().dtype(torch::kFloat32));
+            merged.topk_ids    = torch::zeros({num_scoring_rows, out_k},
                                            torch::TensorOptions().dtype(torch::kInt32).device(local_logits.device()));
             auto append_chunk  = [&](const ScoringPartials& m, int64_t c0, int64_t c) {
-                merged.lse.narrow(0, lm_rows + c0, c).copy_(m.lse);
-                merged.target.narrow(0, lm_rows + c0, c).copy_(m.target);
-                merged.topk_values.narrow(0, lm_rows + c0, c).copy_(m.topk_values);
-                merged.topk_ids.narrow(0, lm_rows + c0, c).copy_(m.topk_ids);
+                merged.lse.narrow(0, c0, c).copy_(m.lse);
+                merged.target.narrow(0, c0, c).copy_(m.target);
+                merged.topk_values.narrow(0, c0, c).copy_(m.topk_values);
+                merged.topk_ids.narrow(0, c0, c).copy_(m.topk_ids);
             };
 #if USING_CUDA
             if (int8_used && int8_lm_head_check_) {
@@ -1452,7 +1452,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                 outputs.all_hidden_states  = hidden;
                 outputs.softmax_result     = softmax_result_t;
                 outputs.all_logits_lm_rows = lm_rows;
-                // Compact per-row reductions; all_logits itself is never materialized.
+                // Compact per-row reductions over the scoring rows only; all_logits itself
+                // is never materialized.
                 outputs.all_logits_lse           = scoring_lse;
                 outputs.all_logits_target_logits = scoring_target;
                 outputs.all_logits_topk_values   = scoring_topk_v;

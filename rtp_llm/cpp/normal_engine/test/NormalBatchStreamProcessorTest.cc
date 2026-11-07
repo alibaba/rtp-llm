@@ -1387,10 +1387,10 @@ TEST_F(NormalBatchStreamProcessorTest, testShardedScoringOutputsLayout) {
     aligned += torch::arange(total_tokens, torch::kFloat32).reshape({total_tokens, 1}) * 100.0f;
     aligned = aligned.to(torch::kCUDA);
 
-    // Row-selected [lm ++ per-stream [a,b)] layout plus per-stream label list, exactly like
-    // the gatherer + sharded model produce them.
+    // Dense row-selected [lm ++ per-stream [a,b)] layout for the gathered reference arm; the
+    // label list covers only the scoring rows (the gatherer's all_logits_row_labels contract).
     std::vector<torch::Tensor> pieces       = {torch::full({lm_rows, vocab}, -1e30f, aligned.options())};
-    std::vector<int32_t>       label_vec    = std::vector<int32_t>(lm_rows, -1);
+    std::vector<int32_t>       label_vec;
     int                        token_offset = 0;
     for (const auto& spec : specs) {
         const int token_size = spec.decode ? 1 : static_cast<int>(spec.ids.size());
@@ -1406,16 +1406,18 @@ TEST_F(NormalBatchStreamProcessorTest, testShardedScoringOutputsLayout) {
     }
     auto selected = torch::cat(pieces, 0);
 
-    // Merged sharded outputs the model would emit for these rows: exact full-vocab lse/top-k
-    // (the merge is value-exact for top-k; lse is subtracted identically downstream), and the
-    // raw target logit per row (-inf where the row has no label).
-    auto lse    = selected.logsumexp(-1);
-    auto topk   = selected.topk(top_k, -1);
-    auto lbl    = torch::tensor(label_vec, torch::kInt32).to(torch::kCUDA).to(torch::kLong);
-    auto tcol   = lbl.clamp(0, vocab - 1).unsqueeze(1);
-    auto tvals  = selected.gather(1, tcol).squeeze(1);
-    auto tmask  = lbl < 0;
-    auto target = tvals.masked_fill(tmask, -std::numeric_limits<float>::infinity());
+    // Merged sharded outputs the model would emit for these rows: compact — the scoring rows
+    // only, no lm prefix. Exact full-vocab lse/top-k (the merge is value-exact for top-k; lse
+    // is subtracted identically downstream) and the raw target logit per row (-inf where the
+    // row has no label).
+    auto selected_scoring = selected.narrow(0, lm_rows, selected.size(0) - lm_rows);
+    auto lse              = selected_scoring.logsumexp(-1);
+    auto topk             = selected_scoring.topk(top_k, -1);
+    auto lbl              = torch::tensor(label_vec, torch::kInt32).to(torch::kCUDA).to(torch::kLong);
+    auto tcol             = lbl.clamp(0, vocab - 1).unsqueeze(1);
+    auto tvals            = selected_scoring.gather(1, tcol).squeeze(1);
+    auto tmask            = lbl < 0;
+    auto target           = tvals.masked_fill(tmask, -std::numeric_limits<float>::infinity());
 
     auto run_dispatch = [&](const std::list<GenerateStreamPtr>& streams, bool sharded) {
         StreamGroups stream_groups(streams);
@@ -1666,16 +1668,16 @@ TEST_F(NormalBatchStreamProcessorTest, testDispatchShardedScoringOomFailsOnlyTha
 
     // tp>1 sharded layout: the model emits merged per-row partials (lse / target /
     // top-k) and all_logits_lm_rows >= 0 instead of all_logits. Build synthetic
-    // tensors in exactly that merged layout for this batch: row layout is
-    // [lm(3); loss_stream rows [0,2); prompt_stream window [0,4)] = 9 rows. The hook
-    // fails ONLY the loss stream; the neighboring prompt stream must still succeed and
-    // slice its own rows at the right offset (lm_rows + cumulative scoring rows).
+    // tensors in exactly that merged layout for this batch: compact scoring rows only,
+    // no lm prefix — [loss_stream rows [0,2); prompt_stream window [0,4)] = 6 rows. The
+    // hook fails ONLY the loss stream; the neighboring prompt stream must still succeed
+    // and slice its own rows at the right offset (cumulative scoring rows).
     const int64_t vocab    = fixture.model_config.vocab_size;
     const int64_t top_k    = fixture.prompt_stream->generateConfig()->prompt_logits_top_k;
-    auto          selected = torch::arange(9 * vocab, torch::kFloat32).reshape({9, vocab}).to(torch::kCUDA);
-    selected += torch::arange(9, torch::kFloat32).reshape({9, 1}).to(torch::kCUDA) * 100.0f;
+    auto          selected = torch::arange(6 * vocab, torch::kFloat32).reshape({6, vocab}).to(torch::kCUDA);
+    selected += torch::arange(6, torch::kFloat32).reshape({6, 1}).to(torch::kCUDA) * 100.0f;
 
-    std::vector<int32_t> label_vec = {-1, -1, -1, 2, 3, 5, 6, 7, -1};
+    std::vector<int32_t> label_vec = {2, 3, 5, 6, 7, -1};
     auto                 lbl       = torch::tensor(label_vec, torch::kInt32).to(torch::kCUDA).to(torch::kLong);
     auto                 tcol      = lbl.clamp(0, vocab - 1).unsqueeze(1);
     auto                 tvals     = selected.gather(1, tcol).squeeze(1);
@@ -1718,11 +1720,11 @@ TEST_F(NormalBatchStreamProcessorTest, testDispatchShardedScoringOomFailsOnlyTha
     const auto& pl = *go[0].prompt_logits;
     EXPECT_EQ(pl.start_pos, 0);
     EXPECT_EQ(pl.end_pos, 4);
-    // Rows 5..8 of the merged fields are this stream's window [0,4): topk ids/values
+    // Rows 2..5 of the merged fields are this stream's window [0,4): topk ids/values
     // bitwise, logprobs equal (same lse is subtracted downstream).
-    auto expect_topk_v = std::get<0>(topk).narrow(0, 5, 4);
-    auto expect_topk_i = std::get<1>(topk).narrow(0, 5, 4);
-    auto expect_lse    = selected.logsumexp(-1).narrow(0, 5, 4);
+    auto expect_topk_v = std::get<0>(topk).narrow(0, 2, 4);
+    auto expect_topk_i = std::get<1>(topk).narrow(0, 2, 4);
+    auto expect_lse    = selected.logsumexp(-1).narrow(0, 2, 4);
     EXPECT_TRUE(torch::equal(pl.topk_token_ids.cpu(), expect_topk_i.cpu().to(torch::kInt32)));
     EXPECT_TRUE(torch::equal(pl.topk_logprobs.cpu(), (expect_topk_v - expect_lse.unsqueeze(1)).cpu()));
 
