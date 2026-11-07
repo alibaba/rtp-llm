@@ -39,6 +39,17 @@ class RendererIgnoreEosTest(IsolatedAsyncioTestCase):
             GenerateEnvConfig(),
         )
 
+    def test_tokenizer_eos_fallback_accepts_scalar_and_multiple_ids(self):
+        for primary in (9, [9, 7], (9, 7), None, []):
+            with self.subTest(primary=primary):
+                renderer = CustomChatRenderer(
+                    Tokenizer(),
+                    RendererParams("test", 128, primary, [[9], [7], [8]]),
+                    GenerateEnvConfig(),
+                )
+                self.assertEqual(renderer.eos_token_id, 9)
+                self.assertEqual(renderer.eos_token_ids, frozenset((9, 7)))
+
     async def render(self, ignore_eos, tokens=(1, 9, 2)):
         request = ChatCompletionRequest(
             messages=[ChatMessage(role=RoleEnum.user, content="test")],
