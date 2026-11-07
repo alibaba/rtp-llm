@@ -1304,6 +1304,15 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_wrapper_destruction_releases_python_model(self) -> None:
+        model = CacheStoreForwardModel()
+        reference = weakref.ref(model)
+        run_scenario(model, "single_group_2d")
+        self.assertEqual(model.forward_calls, 1)
+        del model
+        gc.collect()
+        self.assertIsNone(reference())
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:

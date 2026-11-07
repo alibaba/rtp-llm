@@ -252,6 +252,9 @@ bool DeviceBlockPool::hasExternalRefNoLock(BlockIdxType block) const {
 }
 
 DeviceBlockPool::~DeviceBlockPool() {
+    // The MR must not outlive the allocation it registers. MemoryUtil is kept
+    // alive by cache_store_ even after the store's transport has stopped.
+    deregUserMr();
     cache_aligned_buffer_ = torch::Tensor();
 }
 

@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "rtp_llm/cpp/metrics/KmonParam.h"
+#include <mutex>
 
 namespace rtp_llm {
 
@@ -1323,6 +1324,51 @@ bool initKmonitorFactory() {
 
 void stopKmonitorFactory() {
     kmonitor::KMonitorFactory::Shutdown();
+}
+
+namespace {
+
+struct RuntimeKmonitorState {
+    std::mutex mutex;
+    size_t     owners{0};
+};
+
+RuntimeKmonitorState& runtimeKmonitorState() {
+    static RuntimeKmonitorState state;
+    return state;
+}
+
+class RuntimeKmonitorOwner {
+public:
+    RuntimeKmonitorOwner() {
+        auto&                       state = runtimeKmonitorState();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (state.owners == 0) {
+            (void)initKmonitorFactory();
+        }
+        ++state.owners;
+    }
+
+    ~RuntimeKmonitorOwner() {
+        auto&                       state = runtimeKmonitorState();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (--state.owners == 0) {
+            stopKmonitorFactory();
+        }
+    }
+};
+
+}  // namespace
+
+kmonitor::MetricsReporterPtr createRuntimeMetricsReporter(const kmonitor::MetricsTags& tags) {
+    auto factory = std::make_shared<RuntimeKmonitorOwner>();
+    return kmonitor::MetricsReporterPtr(new kmonitor::MetricsReporter("", "", tags),
+                                        [factory = std::move(factory)](kmonitor::MetricsReporter* reporter) mutable {
+                                            // MetricsReporter destruction itself calls KMonitorFactory. Drop the
+                                            // factory owner afterwards, even if weak reporter references remain.
+                                            delete reporter;
+                                            factory.reset();
+                                        });
 }
 
 void setHippoTags(kmonitor::MetricsConfig& config) {

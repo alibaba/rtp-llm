@@ -18,16 +18,45 @@ constexpr int    kDevicePinRetryBackoffMs         = 1000;
 }  // namespace
 
 NormalCacheStore::~NormalCacheStore() {
-    if (thread_pool_) {
-        thread_pool_close_ = true;
-        thread_pool_->stop();
-        thread_pool_.reset();
-    }
+    stop();
+}
 
-    request_block_buffer_store_->stop();
-    messager_.reset();
-    request_block_buffer_store_.reset();
-    RTP_LLM_LOG_INFO("destory cache store done");
+void NormalCacheStore::stop() {
+    std::call_once(stop_once_, [this]() {
+        if (messager_) {
+            messager_->stopMetricsReporter();
+        }
+        if (thread_pool_) {
+            thread_pool_close_ = true;
+            thread_pool_->stop();
+            thread_pool_.reset();
+        }
+
+        // Drop retired work outside its locks, while the transport and metrics
+        // backend are still alive. No new load/store submissions are allowed.
+        decltype(remote_store_tasks_) remote_tasks;
+        {
+            std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
+            remote_tasks.swap(remote_store_tasks_);
+        }
+        decltype(store_tasks_) store_tasks;
+        {
+            std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+            store_tasks.swap(store_tasks_);
+        }
+        remote_tasks.clear();
+        store_tasks.clear();
+        if (request_block_buffer_store_) {
+            request_block_buffer_store_->stop();
+        }
+        messager_.reset();
+        // Cache/tensor owners can outlive KMonitorFactory. Release both reporter
+        // references after all producers stop, rather than in their late destructors.
+        metrics_reporter_.reset();
+        params_.metrics_reporter.reset();
+        // Keep MemoryUtil and the empty request store for late MR/buffer release.
+        RTP_LLM_LOG_INFO("cache store stopped");
+    });
 }
 
 std::shared_ptr<NormalCacheStore> NormalCacheStore::createNormalCacheStore(const CacheStoreInitParams& params) {

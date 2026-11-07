@@ -7,7 +7,9 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RemoteStoreTaskImpl.h"
 #include "autil/ThreadPool.h"
 
+#include <atomic>
 #include <memory>
+#include <mutex>
 
 namespace rtp_llm {
 
@@ -60,6 +62,8 @@ public:
 
     const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override;
 
+    void stop() override;
+
 private:
     bool init(const CacheStoreInitParams& params);
     void runStoreTask(const std::shared_ptr<RequestBlockBuffer>&              value,
@@ -79,7 +83,7 @@ private:
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 
 private:
-    bool                                                                             thread_pool_close_{false};
+    std::atomic<bool>                                                                thread_pool_close_{false};
     int                                                                              device_id_{-1};
     CacheStoreInitParams                                                             params_;
     std::shared_ptr<MemoryUtil>                                                      memory_util_;
@@ -90,7 +94,10 @@ private:
     std::shared_mutex                                                                remote_store_tasks_mutex_;
     std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
     std::shared_mutex                                                                store_tasks_mutex_;
-    std::unordered_map<std::shared_ptr<RequestBlockBuffer>, std::pair<CacheStoreStoreDoneCallback, std::function<void()>>> store_tasks_;
+    std::unordered_map<std::shared_ptr<RequestBlockBuffer>,
+                       std::pair<CacheStoreStoreDoneCallback, std::function<void()>>>
+                   store_tasks_;
+    std::once_flag stop_once_;
 };
 
 }  // namespace rtp_llm
