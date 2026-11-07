@@ -23,7 +23,11 @@ def _fp8_quant_128(x_ptr, q_ptr, scale_ptr, HIDDEN: tl.constexpr):
 
 @triton.jit(do_not_specialize=["TOTAL_GROUPS"])
 def _fp8_quant_128_tiled(
-    x_ptr, q_ptr, scale_ptr, TOTAL_GROUPS, GROUPS: tl.constexpr,
+    x_ptr,
+    q_ptr,
+    scale_ptr,
+    TOTAL_GROUPS,
+    GROUPS: tl.constexpr,
 ):
     group = tl.program_id(0) * GROUPS + tl.arange(0, GROUPS)
     offset = group[:, None] * 128 + tl.arange(0, 128)[None, :]
@@ -51,7 +55,12 @@ def fp8_quantize_128(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     if rows >= 16:
         groups = rows * (hidden // 128)
         _fp8_quant_128_tiled[(triton.cdiv(groups, 4),)](
-            x, q, scales, groups, 4, num_warps=4,
+            x,
+            q,
+            scales,
+            groups,
+            4,
+            num_warps=4,
         )
     elif rows:
         _fp8_quant_128[(rows, hidden // 128)](x, q, scales, hidden, num_warps=4)
@@ -60,25 +69,38 @@ def fp8_quantize_128(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 @triton.jit(do_not_specialize=["ROWS"])
 def _silu_mul_fp8_quant_128(
-    x_ptr, q_ptr, scale_ptr, ROWS, HIDDEN: tl.constexpr,
-    GATE_FIRST: tl.constexpr, GROUPS: tl.constexpr,
+    x_ptr,
+    q_ptr,
+    scale_ptr,
+    ROWS,
+    HIDDEN: tl.constexpr,
+    GATE_FIRST: tl.constexpr,
+    GROUPS: tl.constexpr,
 ):
     groups = tl.program_id(0) * GROUPS + tl.arange(0, GROUPS)
     row = groups // (HIDDEN // 128)
     cols = (groups % (HIDDEN // 128))[:, None] * 128 + tl.arange(0, 128)[None, :]
     base = row[:, None] * (2 * HIDDEN) + cols
-    gate = tl.load(x_ptr + base + (0 if GATE_FIRST else HIDDEN), row[:, None] < ROWS, other=0).to(tl.float32)
-    up = tl.load(x_ptr + base + (HIDDEN if GATE_FIRST else 0), row[:, None] < ROWS, other=0).to(tl.float32)
+    gate = tl.load(
+        x_ptr + base + (0 if GATE_FIRST else HIDDEN), row[:, None] < ROWS, other=0
+    ).to(tl.float32)
+    up = tl.load(
+        x_ptr + base + (HIDDEN if GATE_FIRST else 0), row[:, None] < ROWS, other=0
+    ).to(tl.float32)
     value = (gate * tl.sigmoid(gate) * up).to(tl.bfloat16).to(tl.float32)
     amax = tl.maximum(tl.max(tl.abs(value), 1), 1e-10)
     scale = amax / 448.0
-    quantized = tl.clamp(value * (448.0 / amax[:, None]), -448.0, 448.0).to(q_ptr.dtype.element_ty)
+    quantized = tl.clamp(value * (448.0 / amax[:, None]), -448.0, 448.0).to(
+        q_ptr.dtype.element_ty
+    )
     tl.store(q_ptr + row[:, None] * HIDDEN + cols, quantized, row[:, None] < ROWS)
     tl.store(scale_ptr + groups, scale, row < ROWS)
 
 
 def silu_mul_fp8_quantize_128(
-    x: torch.Tensor, *, gate_first: bool,
+    x: torch.Tensor,
+    *,
+    gate_first: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse SiLU/multiply and FP8 quantization, retaining the BF16 boundary.
 
@@ -94,8 +116,15 @@ def silu_mul_fp8_quantize_128(
     scales = torch.empty((rows, hidden // 128), device=x.device, dtype=torch.float32)
     if rows:
         _silu_mul_fp8_quant_128[(triton.cdiv(rows * (hidden // 128), 4),)](
-            x, q, scales, rows, hidden, gate_first, 4,
-            num_warps=4, enable_fp_fusion=False,
+            x,
+            q,
+            scales,
+            rows,
+            hidden,
+            gate_first,
+            4,
+            num_warps=4,
+            enable_fp_fusion=False,
         )
     return q, scales
 
@@ -150,16 +179,28 @@ def masked_fp8_quantize_128(
     if x.numel():
         rows = max(1, min(expected_m, capacity, 8))
         _masked_fp8_quant_128[(hidden // 128, rows, experts)](
-            x, q, scales, masked_m, capacity, hidden, scale_capacity,
-            num_warps=4, num_stages=1,
+            x,
+            q,
+            scales,
+            masked_m,
+            capacity,
+            hidden,
+            scale_capacity,
+            num_warps=4,
+            num_stages=1,
         )
     return q, scales
 
 
 @triton.jit
 def _masked_silu_mul_fp8_quant_128(
-    x_ptr, q_ptr, scale_ptr, counts_ptr,
-    CAPACITY: tl.constexpr, HIDDEN: tl.constexpr, SCALE_CAPACITY: tl.constexpr,
+    x_ptr,
+    q_ptr,
+    scale_ptr,
+    counts_ptr,
+    CAPACITY: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    SCALE_CAPACITY: tl.constexpr,
 ):
     expert = tl.program_id(2)
     group = tl.program_id(0)
@@ -178,27 +219,45 @@ def _masked_silu_mul_fp8_quant_128(
         scaled = value * (448.0 / amax)
         q = tl.minimum(tl.maximum(scaled, -448.0), 448.0).to(q_ptr.dtype.element_ty)
         tl.store(q_ptr + (expert * CAPACITY + row) * HIDDEN + cols, q)
-        tl.store(scale_ptr + (expert * (HIDDEN // 128) + group) * SCALE_CAPACITY + row, scale)
+        tl.store(
+            scale_ptr + (expert * (HIDDEN // 128) + group) * SCALE_CAPACITY + row, scale
+        )
 
 
 def masked_silu_mul_fp8_quantize_128(
-    x: torch.Tensor, masked_m: torch.Tensor, expected_m: int,
+    x: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused [up, gate] SiLU/FP8 with a BF16 activation rounding boundary."""
     if x.ndim != 3 or x.dtype != torch.bfloat16 or not x.is_contiguous():
-        raise ValueError("masked SiLU FP8 quantization expects contiguous BF16 [E, M, 2K]")
+        raise ValueError(
+            "masked SiLU FP8 quantization expects contiguous BF16 [E, M, 2K]"
+        )
     experts, capacity, width = x.shape
     if width == 0 or width % 256 or masked_m.shape != (experts,):
-        raise ValueError("activation width must divide by 256 and counts must match experts")
+        raise ValueError(
+            "activation width must divide by 256 and counts must match experts"
+        )
     hidden = width // 2
     scale_capacity = triton.cdiv(capacity, 4) * 4
-    q = torch.empty((experts, capacity, hidden), device=x.device, dtype=torch.float8_e4m3fn)
-    scales = torch.empty((experts, hidden // 128, scale_capacity), device=x.device,
-                         dtype=torch.float32).transpose(1, 2)[:, :capacity, :]
+    q = torch.empty(
+        (experts, capacity, hidden), device=x.device, dtype=torch.float8_e4m3fn
+    )
+    scales = torch.empty(
+        (experts, hidden // 128, scale_capacity), device=x.device, dtype=torch.float32
+    ).transpose(1, 2)[:, :capacity, :]
     if x.numel():
         rows = max(1, min(expected_m, capacity, 8))
         _masked_silu_mul_fp8_quant_128[(hidden // 128, rows, experts)](
-            x, q, scales, masked_m, capacity, hidden, scale_capacity,
-            num_warps=4, num_stages=1,
+            x,
+            q,
+            scales,
+            masked_m,
+            capacity,
+            hidden,
+            scale_capacity,
+            num_warps=4,
+            num_stages=1,
         )
     return q, scales

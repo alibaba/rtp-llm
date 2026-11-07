@@ -14,9 +14,16 @@ import triton.language as tl
 
 @triton.jit
 def _block_scaled_fp8_gemm(
-    A, B, C, As, Bs, M,
-    N: tl.constexpr, K: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
+    A,
+    B,
+    C,
+    As,
+    Bs,
+    M,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
     pid = tl.program_id(0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
@@ -48,8 +55,11 @@ def _block_scaled_fp8_gemm(
         bs_ptr += 1
     out_rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     out_cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    tl.store(C + out_rows[:, None] * N + out_cols[None, :], acc.to(tl.bfloat16),
-             (out_rows[:, None] < M) & (out_cols[None, :] < N))
+    tl.store(
+        C + out_rows[:, None] * N + out_cols[None, :],
+        acc.to(tl.bfloat16),
+        (out_rows[:, None] < M) & (out_cols[None, :] < N),
+    )
 
 
 # Large-M baseline: retain the original dynamic parameters and pipeline.
@@ -57,11 +67,30 @@ def _block_scaled_fp8_gemm(
 # prefill throughput on ZW-M890P, despite identical numerical results.
 @triton.jit
 def _prefill_block_scaled_fp8_gemm(
-    A, B, C, As, Bs, M, N, K, group_n, group_k,
-    stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
-    stride_As_m, stride_As_k, stride_Bs_k, stride_Bs_n,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr, GROUP_SIZE_M: tl.constexpr,
+    A,
+    B,
+    C,
+    As,
+    Bs,
+    M,
+    N,
+    K,
+    group_n,
+    group_k,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    stride_As_m,
+    stride_As_k,
+    stride_Bs_k,
+    stride_Bs_n,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
     needs_masking: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
@@ -140,35 +169,82 @@ def fp8_block_scaled_matmul(
     m, k = q.shape
     n = weight.shape[0]
     if not n or not k or weight.shape[1] != k or k % 128:
-        raise ValueError("block-scaled FP8 GEMM requires positive N/K and K divisible by 128")
-    if (q.dtype != torch.float8_e4m3fn or weight.dtype != torch.float8_e4m3fn
-        or not q.is_contiguous() or not weight.is_contiguous()):
+        raise ValueError(
+            "block-scaled FP8 GEMM requires positive N/K and K divisible by 128"
+        )
+    if (
+        q.dtype != torch.float8_e4m3fn
+        or weight.dtype != torch.float8_e4m3fn
+        or not q.is_contiguous()
+        or not weight.is_contiguous()
+    ):
         raise ValueError("block-scaled FP8 GEMM requires contiguous E4M3 inputs")
-    if (scales.dtype != torch.float32 or weight_scales.dtype != torch.float32
+    if (
+        scales.dtype != torch.float32
+        or weight_scales.dtype != torch.float32
         or scales.shape != (m, k // 128)
         or weight_scales.shape != (triton.cdiv(n, 128), k // 128)
-        or not scales.is_contiguous() or not weight_scales.is_contiguous()):
-        raise ValueError("block-scaled FP8 GEMM requires row-major FP32 K128/N128 scales")
+        or not scales.is_contiguous()
+        or not weight_scales.is_contiguous()
+    ):
+        raise ValueError(
+            "block-scaled FP8 GEMM requires row-major FP32 K128/N128 scales"
+        )
     if any(t.device != q.device for t in (weight, scales, weight_scales)):
         raise ValueError("block-scaled FP8 GEMM inputs must be on the same device")
     if out is None:
         out = torch.empty((m, n), device=q.device, dtype=torch.bfloat16)
-    elif (out.shape != (m, n) or out.dtype != torch.bfloat16
-          or out.device != q.device or not out.is_contiguous()):
+    elif (
+        out.shape != (m, n)
+        or out.dtype != torch.bfloat16
+        or out.device != q.device
+        or not out.is_contiguous()
+    ):
         raise ValueError("block-scaled FP8 GEMM output must be contiguous BF16 [M, N]")
     if m > 64:
         _prefill_block_scaled_fp8_gemm[(triton.cdiv(m, 64) * triton.cdiv(n, 128),)](
-            q, weight, out, scales, weight_scales, m, n, k, 128, 128,
-            q.stride(0), q.stride(1), weight.stride(1), weight.stride(0),
-            out.stride(0), out.stride(1), scales.stride(0), scales.stride(1),
-            weight_scales.stride(1), weight_scales.stride(0),
-            BLOCK_SIZE_M=64, BLOCK_SIZE_N=128, BLOCK_SIZE_K=128,
-            GROUP_SIZE_M=32, needs_masking=False, num_warps=4, num_stages=3,
+            q,
+            weight,
+            out,
+            scales,
+            weight_scales,
+            m,
+            n,
+            k,
+            128,
+            128,
+            q.stride(0),
+            q.stride(1),
+            weight.stride(1),
+            weight.stride(0),
+            out.stride(0),
+            out.stride(1),
+            scales.stride(0),
+            scales.stride(1),
+            weight_scales.stride(1),
+            weight_scales.stride(0),
+            BLOCK_SIZE_M=64,
+            BLOCK_SIZE_N=128,
+            BLOCK_SIZE_K=128,
+            GROUP_SIZE_M=32,
+            needs_masking=False,
+            num_warps=4,
+            num_stages=3,
         )
     elif m:
         bm, bn, stages = _tiles(m, n, k)
         _block_scaled_fp8_gemm[(triton.cdiv(m, bm) * triton.cdiv(n, bn),)](
-            q, weight, out, scales, weight_scales, m, n, k, bm, bn,
-            num_warps=4, num_stages=stages,
+            q,
+            weight,
+            out,
+            scales,
+            weight_scales,
+            m,
+            n,
+            k,
+            bm,
+            bn,
+            num_warps=4,
+            num_stages=stages,
         )
     return out

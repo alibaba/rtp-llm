@@ -467,7 +467,9 @@ class SparseMlaFp8Op(SparseMlaOp):
         # one bs=1 request. One query token per request is exactly the case
         # where the per-request layout is expressible.
         per_request = (
-            _IS_PPU and self.block_table is not None and self.block_table.shape[0] == rows
+            _IS_PPU
+            and self.block_table is not None
+            and self.block_table.shape[0] == rows
         )
         # _convert_topk_indices_to_global already yields [T, 1, topk]; the
         # flattened path needs [1, T, topk].

@@ -602,7 +602,9 @@ class CudaImpl(GpuImpl):
         )  # fp8 scaling factors
 
         if shape[0] == 0:
-            raise RuntimeError("FP4 MoE weight preparation requires at least one expert")
+            raise RuntimeError(
+                "FP4 MoE weight preparation requires at least one expert"
+            )
 
         # Keep only one expert's scratch storage alive instead of retaining all
         # shuffled experts and allocating another full tensor in torch.stack.

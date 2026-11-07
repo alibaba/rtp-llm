@@ -345,8 +345,10 @@ class IndexerOp(nn.Module):
         self._ppu_stable_topk = stable_topk and is_ppu()
         # The native stable selection kernel is compiled for SM10x only.
         stable_topk = stable_topk and is_sm10x()
-        stable_backend = "ppu_stable" if self._ppu_stable_topk else (
-            "topk_v3_tie_break" if stable_topk else None
+        stable_backend = (
+            "ppu_stable"
+            if self._ppu_stable_topk
+            else ("topk_v3_tie_break" if stable_topk else None)
         )
         self._paged_topk_backend = stable_backend or "dsv4_persistent"
         self._paged_topk_op = rtp_llm_ops.dsv4_persistent_topk
@@ -386,6 +388,7 @@ class IndexerOp(nn.Module):
         # A stable selected set and order both matter for sparse attention.
         if self._ppu_stable_topk:
             from rtp_llm.models_py.kernels.ppu.indexer_topk import stable_topk
+
             stable_topk(logits, row_starts, row_ends, output)
         else:
             rtp_llm_ops.topk_v3_tie_break(
@@ -1207,7 +1210,8 @@ class IndexerOp(nn.Module):
                     prefill_max_kv_len,
                 )
                 if (
-                    self._prefill_topk_backend not in ("topk_v3_tie_break", "ppu_stable")
+                    self._prefill_topk_backend
+                    not in ("topk_v3_tie_break", "ppu_stable")
                     and _fp8_prefill_topk_canonicalize()
                 ):
                     topk_part = _canonicalize_topk_indices(topk_part)

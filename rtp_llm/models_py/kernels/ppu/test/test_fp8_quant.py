@@ -1,14 +1,14 @@
 import json
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 import torch
 
-from rtp_llm.models_py.kernels.ppu.deepgemm_wrapper import (
-    m_grouped_fp8_gemm_nt_masked,
-)
+from rtp_llm.models_py.kernels.ppu.deepgemm_wrapper import m_grouped_fp8_gemm_nt_masked
 from rtp_llm.models_py.kernels.ppu.fp8_quant import (
-    fp8_quantize_128, masked_fp8_quantize_128, masked_silu_mul_fp8_quantize_128,
+    fp8_quantize_128,
+    masked_fp8_quantize_128,
+    masked_silu_mul_fp8_quantize_128,
 )
 
 
@@ -22,7 +22,11 @@ class MaskedFp8QuantTest(unittest.TestCase):
         reference_q = reference_q.view(x.shape)
         reference_s = reference_s.view(*x.shape[:-1], x.shape[-1] // 128)
         active = torch.arange(x.shape[1], device=x.device)[None, :] < counts[:, None]
-        self.assertTrue(torch.equal(q.view(torch.uint8)[active], reference_q.view(torch.uint8)[active]))
+        self.assertTrue(
+            torch.equal(
+                q.view(torch.uint8)[active], reference_q.view(torch.uint8)[active]
+            )
+        )
         self.assertTrue(torch.equal(scales[active], reference_s[active]))
         self.assertEqual(scales.stride(1), 1)
 
@@ -32,8 +36,12 @@ class MaskedFp8QuantTest(unittest.TestCase):
             for count in (0, 1, 7, shape[1]):
                 with self.subTest(shape=shape, count=count):
                     counts = torch.tensor(
-                        [min(count + i % 3, shape[1]) if count else 0 for i in range(shape[0])],
-                        device="cuda", dtype=torch.int32,
+                        [
+                            min(count + i % 3, shape[1]) if count else 0
+                            for i in range(shape[0])
+                        ],
+                        device="cuda",
+                        dtype=torch.int32,
                     )
                     q, scales = masked_fp8_quantize_128(x, counts, 1)
                     self.assert_reference(x, counts, q, scales)
@@ -64,7 +72,11 @@ class MaskedFp8QuantTest(unittest.TestCase):
         new_q, new_s = masked_fp8_quantize_128(x, counts, 1)
         old_out, new_out = torch.empty_like(x), torch.empty_like(x)
         m_grouped_fp8_gemm_nt_masked(
-            (old_q.view_as(x), old_s.view(4, 128, 2)), (weight, weight_scale), old_out, counts, 32
+            (old_q.view_as(x), old_s.view(4, 128, 2)),
+            (weight, weight_scale),
+            old_out,
+            counts,
+            32,
         )
         m_grouped_fp8_gemm_nt_masked(
             (new_q, new_s), (weight, weight_scale), new_out, counts, 32
@@ -72,14 +84,19 @@ class MaskedFp8QuantTest(unittest.TestCase):
         active = torch.arange(128, device="cuda")[None, :] < counts[:, None]
         self.assertTrue(torch.equal(old_out[active], new_out[active]))
 
-
     def golden(self):
-        return json.loads(Path(__file__).with_name("test_fp8_quant_sgl_golden.json").read_text())
+        return json.loads(
+            Path(__file__).with_name("test_fp8_quant_sgl_golden.json").read_text()
+        )
 
     def golden_tensors(self, case):
         x = torch.tensor(case["input_bf16_bits"], dtype=torch.uint16, device="cpu")
         x = x.view(torch.bfloat16).reshape(case["shape"]).cuda()
-        q = torch.tensor(case["q_bytes"], dtype=torch.uint8, device="cpu").reshape(case["shape"]).cuda()
+        q = (
+            torch.tensor(case["q_bytes"], dtype=torch.uint8, device="cpu")
+            .reshape(case["shape"])
+            .cuda()
+        )
         s = torch.tensor(case["scale_f32_bits"], dtype=torch.uint32, device="cpu")
         s = s.view(torch.float32).reshape(case["shape"][0], -1).cuda()
         return x, q, s
@@ -110,26 +127,42 @@ class MaskedFp8QuantTest(unittest.TestCase):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             q, s = masked_fp8_quantize_128(x, counts, 1)
-        for name, count_values in (("dense_hidden", [1, 0]), ("dense_tiny", [0, 1]),
-                                   ("dense_zero", [0, 0]), ("dense_large", [1, 1])):
+        for name, count_values in (
+            ("dense_hidden", [1, 0]),
+            ("dense_tiny", [0, 1]),
+            ("dense_zero", [0, 0]),
+            ("dense_large", [1, 1]),
+        ):
             xx, expected_q, expected_s = self.golden_tensors(cases[name])
             x.copy_(xx[:, None])
-            counts.copy_(torch.tensor(count_values, dtype=counts.dtype, device=counts.device))
+            counts.copy_(
+                torch.tensor(count_values, dtype=counts.dtype, device=counts.device)
+            )
             graph.replay()
             for expert, count in enumerate(count_values):
                 if count:
-                    self.assertTrue(torch.equal(q[expert, 0].view(torch.uint8), expected_q[expert]))
+                    self.assertTrue(
+                        torch.equal(q[expert, 0].view(torch.uint8), expected_q[expert])
+                    )
                     self.assertTrue(torch.equal(s[expert, 0], expected_s[expert]))
 
     def test_fused_silu_matches_sgl_bf16_boundary_and_graph(self):
         case = self.golden()["activation"]
-        gate_up = torch.tensor(case["input_gate_up_bf16_bits"], dtype=torch.uint16, device="cpu")
+        gate_up = torch.tensor(
+            case["input_gate_up_bf16_bits"], dtype=torch.uint16, device="cpu"
+        )
         gate_up = gate_up.view(torch.bfloat16).reshape(case["shape"]).cuda()
-        up_gate = torch.cat((gate_up[:, 256:], gate_up[:, :256]), dim=-1).contiguous()[:, None]
+        up_gate = torch.cat((gate_up[:, 256:], gate_up[:, :256]), dim=-1).contiguous()[
+            :, None
+        ]
         x = up_gate.clone()
         counts = torch.ones(2, device=x.device, dtype=torch.int32)
-        expected_q = torch.tensor(case["q_bytes"], dtype=torch.uint8, device=x.device).reshape(2, 256)
-        expected_s = torch.tensor(case["scale_f32_bits"], dtype=torch.uint32, device="cpu")
+        expected_q = torch.tensor(
+            case["q_bytes"], dtype=torch.uint8, device=x.device
+        ).reshape(2, 256)
+        expected_s = torch.tensor(
+            case["scale_f32_bits"], dtype=torch.uint32, device="cpu"
+        )
         expected_s = expected_s.view(torch.float32).reshape(2, 2).cuda()
         q, s = masked_silu_mul_fp8_quantize_128(x, counts, 1)
         self.assertTrue(torch.equal(q[:, 0].view(torch.uint8), expected_q))
@@ -147,13 +180,19 @@ class MaskedFp8QuantTest(unittest.TestCase):
             graph.replay()
             for expert, count in enumerate(values):
                 if count:
-                    self.assertTrue(torch.equal(gq[expert, 0].view(torch.uint8), expected_q[expert]))
+                    self.assertTrue(
+                        torch.equal(gq[expert, 0].view(torch.uint8), expected_q[expert])
+                    )
                     self.assertTrue(torch.equal(gs[expert, 0], expected_s[expert]))
         x.zero_()
         graph.replay()
         self.assertEqual(int(torch.count_nonzero(gq.view(torch.uint8))), 0)
         zero_bits = self.golden()["cases"]["dense_zero"]["scale_f32_bits"][0]
-        zero_scale = torch.tensor([zero_bits], dtype=torch.uint32, device="cpu").view(torch.float32).item()
+        zero_scale = (
+            torch.tensor([zero_bits], dtype=torch.uint32, device="cpu")
+            .view(torch.float32)
+            .item()
+        )
         self.assertTrue(torch.equal(gs, torch.full_like(gs, zero_scale)))
         x.copy_(up_gate)
         graph.replay()

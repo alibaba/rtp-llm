@@ -6,9 +6,14 @@ import triton.language as tl
 
 
 @triton.jit
-def _write_indexer_k(key_ptr, cache_ptr, slots_ptr,
-                     key_stride: tl.constexpr, cache_stride: tl.constexpr,
-                     page_size: tl.constexpr):
+def _write_indexer_k(
+    key_ptr,
+    cache_ptr,
+    slots_ptr,
+    key_stride: tl.constexpr,
+    cache_stride: tl.constexpr,
+    page_size: tl.constexpr,
+):
     row = tl.program_id(0).to(tl.int64)
     slot = tl.load(slots_ptr + row).to(tl.int64)
     if slot >= 0:
@@ -16,11 +21,15 @@ def _write_indexer_k(key_ptr, cache_ptr, slots_ptr,
         values = tl.load(key_ptr + row * key_stride + offsets).to(tl.float32)
         scale = tl.div_rn(tl.maximum(tl.max(tl.abs(values)), 1e-4), 448.0)
         # Direct values / scale changes FP8 rounding ties on real rotated K.
-        quantized = tl.clamp(values * tl.div_rn(1.0, scale), -448.0, 448.0).to(tl.float8e4nv)
+        quantized = tl.clamp(values * tl.div_rn(1.0, scale), -448.0, 448.0).to(
+            tl.float8e4nv
+        )
         page = cache_ptr + slot // page_size * cache_stride
         offset = slot % page_size
         tl.store(page + offset * 128 + offsets, quantized.to(tl.uint8, bitcast=True))
-        tl.store((page + page_size * 128 + offset * 4).to(tl.pointer_type(tl.float32)), scale)
+        tl.store(
+            (page + page_size * 128 + offset * 4).to(tl.pointer_type(tl.float32)), scale
+        )
 
 
 def quantize_and_cache_indexer_k(key, cache, slots):
@@ -33,4 +42,6 @@ def quantize_and_cache_indexer_k(key, cache, slots):
     assert slots.numel() <= key.shape[0]
     if slots.numel() == 0:
         return
-    _write_indexer_k[(slots.numel(),)](key, cache, slots, key.stride(0), cache.stride(0), cache.shape[1])
+    _write_indexer_k[(slots.numel(),)](
+        key, cache, slots, key.stride(0), cache.stride(0), cache.shape[1]
+    )

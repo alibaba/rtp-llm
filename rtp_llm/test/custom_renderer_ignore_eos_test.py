@@ -34,33 +34,44 @@ class Tokenizer:
 class RendererIgnoreEosTest(IsolatedAsyncioTestCase):
     def setUp(self):
         self.renderer = CustomChatRenderer(
-            Tokenizer(), RendererParams("test", 128, 9, [[9], [7], [8]]),
+            Tokenizer(),
+            RendererParams("test", 128, 9, [[9], [7], [8]]),
             GenerateEnvConfig(),
         )
 
     async def render(self, ignore_eos, tokens=(1, 9, 2)):
         request = ChatCompletionRequest(
             messages=[ChatMessage(role=RoleEnum.user, content="test")],
-            stream=True, max_tokens=3,
+            stream=True,
+            max_tokens=3,
             extra_configs=GenerateConfig(ignore_eos=ignore_eos),
         )
         config = GenerateConfig(
-            max_new_tokens=3, is_streaming=True, ignore_eos=ignore_eos,
+            max_new_tokens=3,
+            is_streaming=True,
+            ignore_eos=ignore_eos,
             stop_words_list=[[9], [7], [8]],
             stop_words_str=["<eos>", "<turn_end>", "<stop>"],
         )
 
         async def outputs():
             for index, token in enumerate(tokens, 1):
-                yield GenerateOutputs(generate_outputs=[GenerateOutput(
-                    output_ids=torch.tensor([[token]], dtype=torch.int32),
-                    finished=index == len(tokens),
-                    aux_info=AuxInfo(input_len=1, output_len=index),
-                )])
+                yield GenerateOutputs(
+                    generate_outputs=[
+                        GenerateOutput(
+                            output_ids=torch.tensor([[token]], dtype=torch.int32),
+                            finished=index == len(tokens),
+                            aux_info=AuxInfo(input_len=1, output_len=index),
+                        )
+                    ]
+                )
 
-        responses = [response async for response in self.renderer.render_response_stream(
-            outputs(), request, config
-        )]
+        responses = [
+            response
+            async for response in self.renderer.render_response_stream(
+                outputs(), request, config
+            )
+        ]
         return responses[-1]
 
     async def test_ignore_eos_reaches_requested_length(self):
@@ -106,11 +117,14 @@ class RendererIgnoreEosTest(IsolatedAsyncioTestCase):
         endpoint.stop_words_str_list = ["<eos>", "<turn_end>", "<stop>"]
         endpoint.generate_env_config = GenerateEnvConfig()
         for ignore_eos in (True, False):
-            request = ChatCompletionRequest.model_validate({
-                "messages": [{"role": "user", "content": "test"}],
-                "max_tokens": 3, "enable_thinking": False,
-                "extra_configs": {"ignore_eos": ignore_eos},
-            })
+            request = ChatCompletionRequest.model_validate(
+                {
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 3,
+                    "enable_thinking": False,
+                    "extra_configs": {"ignore_eos": ignore_eos},
+                }
+            )
             config = endpoint._extract_generation_config(request)
             self.assertIn([8], config.stop_words_list)
             self.assertIn("<stop>", config.stop_words_str)
@@ -124,16 +138,25 @@ class RendererIgnoreEosTest(IsolatedAsyncioTestCase):
     async def test_sync_renderer_honors_ignore_eos(self):
         for ignore_eos, expected in ((True, "length"), (False, "stop")):
             statuses = self.renderer._create_status_list_sync(
-                1, json.dumps({
-                    "messages": [{"role": "user", "content": "test"}],
-                    "extra_configs": {"ignore_eos": ignore_eos},
-                })
+                1,
+                json.dumps(
+                    {
+                        "messages": [{"role": "user", "content": "test"}],
+                        "extra_configs": {"ignore_eos": ignore_eos},
+                    }
+                ),
             )
             for index, token in enumerate((1, 9, 2), 1):
                 self.renderer.render_stream_response_refactor(
-                    statuses, [1], [index], [0], [None],
-                    [torch.tensor([[token]], dtype=torch.int32)], 3,
-                    ["<eos>", "<stop>"], True,
+                    statuses,
+                    [1],
+                    [index],
+                    [0],
+                    [None],
+                    [torch.tensor([[token]], dtype=torch.int32)],
+                    3,
+                    ["<eos>", "<stop>"],
+                    True,
                 )
                 if statuses[0].finish_reason is not None:
                     break

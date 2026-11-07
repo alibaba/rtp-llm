@@ -142,7 +142,9 @@ class StreamStatus:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
-        self.ignore_eos = bool(request.extra_configs and request.extra_configs.ignore_eos)
+        self.ignore_eos = bool(
+            request.extra_configs and request.extra_configs.ignore_eos
+        )
         self.has_real_aux_info = True
         self._fallback_aux_info: Optional[AuxInfo] = None
 
@@ -231,7 +233,9 @@ class StreamStatusSync:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
-        self.ignore_eos = bool(request.extra_configs and request.extra_configs.ignore_eos)
+        self.ignore_eos = bool(
+            request.extra_configs and request.extra_configs.ignore_eos
+        )
 
     def update_output_sync(
         self,
@@ -1918,7 +1922,10 @@ class CustomChatRenderer:
         return None
 
     def _remove_stop_word_ids(
-        self, output_ids: List[int], delta_output_ids: List[int], ignore_eos: bool = False
+        self,
+        output_ids: List[int],
+        delta_output_ids: List[int],
+        ignore_eos: bool = False,
     ) -> List[int]:
         """
         Truncate token sequence at FIRST occurrence of stop word (eos or stop_word_ids).

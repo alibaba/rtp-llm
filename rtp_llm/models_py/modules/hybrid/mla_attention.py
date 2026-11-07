@@ -28,6 +28,7 @@ if _DEVICE_TYPE == DeviceType.Cuda:
         fused_strided_rmsnorm,
         fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
     )
+
     _FP8_GEMM_LINEAR = CudaFp8GEMMLinear
 elif _DEVICE_TYPE == DeviceType.Ppu:
     from rtp_llm.models_py.kernels.ppu.fused_norm_quant import (
@@ -173,7 +174,8 @@ class MlaAttention(nn.Module):
         # q-path fusion mode: "fp8_dual" (F1b), "bf16" (F1a), or "off" (fallback)
         self._fuse_q_a_norm_mode = "off"
         if (
-            _fuse_on and self.q_lora_rank > 0
+            _fuse_on
+            and self.q_lora_rank > 0
             and _DEVICE_TYPE in (DeviceType.Cuda, DeviceType.Ppu)
         ):
             q_b_is_fp8 = (
