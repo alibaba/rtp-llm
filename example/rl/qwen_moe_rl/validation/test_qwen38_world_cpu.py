@@ -190,12 +190,13 @@ class ContractTests(unittest.TestCase):
     def test_actual_verl_combines_tp_and_attention_dp_in_infer_tp_72(self):
         for rank in range(72):
             mesh=types.SimpleNamespace(mesh_dim_names=('dp','infer_tp','infer_pp'),
-                size=lambda name:{'dp':1,'infer_tp':72,'infer_pp':1}[name],
-                get_local_rank=lambda name,r=rank:r if name=='infer_tp' else 0)
+                size=lambda axis:(1,72,1)[axis],
+                get_local_rank=lambda axis,r=rank:(0,r,0)[axis])
+            with self.assertRaises(TypeError):mesh.size('infer_tp')
             proof=validate_combined_verl_mesh(mesh,rank)
             self.assertEqual((proof['native_tp_rank'],proof['native_dp_rank']),(rank%8,rank//8))
         wrong=types.SimpleNamespace(mesh_dim_names=('dp','infer_tp','infer_pp'),
-            size=lambda name:{'dp':9,'infer_tp':8,'infer_pp':1}[name],get_local_rank=lambda name:0)
+            size=lambda axis:(9,8,1)[axis],get_local_rank=lambda axis:0)
         with self.assertRaisesRegex(ValueError,'infer_tp=72'):validate_combined_verl_mesh(wrong,0)
 
     def test_fixed_expert_pool_has_one_logical_policy_and_64_padding_slots(self):

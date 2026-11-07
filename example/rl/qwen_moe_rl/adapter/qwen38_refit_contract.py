@@ -17,11 +17,18 @@ def validate_combined_verl_mesh(mesh, world_rank):
     mapping remains TP rank r%8 and attention-DP rank r//8.
     """
     names=tuple(mesh.mesh_dim_names or ())
-    sizes={name:int(mesh.size(name)) for name in names}
-    if names!=('dp','infer_tp','infer_pp') or sizes!={'dp':1,'infer_tp':72,'infer_pp':1}:
+    if type(world_rank) is not int or not 0<=world_rank<WORLD:
+        raise ValueError('The complete native world rank must be an integer in 0..71')
+    if names!=('dp','infer_tp','infer_pp'):
+        raise ValueError('The actual verl rollout mesh must name dp, infer_tp and infer_pp in that order')
+    # Torch2.13 DeviceMesh.size indexes the real MeshLayout by integer axis;
+    # unlike get_local_rank, it does not resolve string dimension names.
+    axes={name:axis for axis,name in enumerate(names)}
+    sizes={name:int(mesh.size(axis)) for name,axis in axes.items()}
+    if sizes!={'dp':1,'infer_tp':72,'infer_pp':1}:
         raise ValueError('The actual verl rollout mesh must combine TP8×DP9 as infer_tp=72, with dp=PP=1')
-    if (mesh.get_local_rank('infer_tp')!=world_rank or mesh.get_local_rank('dp')!=0
-            or mesh.get_local_rank('infer_pp')!=0):
+    if (mesh.get_local_rank(axes['infer_tp'])!=world_rank or mesh.get_local_rank(axes['dp'])!=0
+            or mesh.get_local_rank(axes['infer_pp'])!=0):
         raise ValueError('The combined verl infer_tp rank must equal the complete native world rank')
     return dict(dimension_names=list(names),dimension_sizes=sizes,
                 combined_infer_tp_rank=world_rank,native_tp_rank=world_rank%8,native_dp_rank=world_rank//8)
