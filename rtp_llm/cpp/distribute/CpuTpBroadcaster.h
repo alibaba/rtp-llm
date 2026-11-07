@@ -5,9 +5,15 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 namespace rtp_llm {
+
+class CpuTpBroadcastStopped: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 // CPU-only framed UDS broadcaster for intra-node TP input sync.
 // It avoids NCCL cudaDeviceSynchronize for small CPU tensors; cross-node or
@@ -32,6 +38,12 @@ public:
     // later distributed init can bootstrap a fresh base_path.
     void reset();
 
+    // Request shutdown without interrupting an in-flight model step. Non-root
+    // ranks keep receiving until rank 0 publishes the stop frame at a step boundary.
+    void requestStop();
+    bool shouldStop(bool locally_requested);
+    void finish();
+
     bool isInitialized() const {
         return initialized_.load(std::memory_order_acquire);
     }
@@ -39,14 +51,16 @@ public:
 private:
     CpuTpBroadcaster() = default;
     ~CpuTpBroadcaster();
-    CpuTpBroadcaster(const CpuTpBroadcaster&) = delete;
+    CpuTpBroadcaster(const CpuTpBroadcaster&)            = delete;
     CpuTpBroadcaster& operator=(const CpuTpBroadcaster&) = delete;
 
     std::mutex        mu_;
     std::mutex        broadcast_mu_;
     std::atomic<bool> initialized_{false};
-    int               tp_rank_ = 0;
-    int               tp_size_ = 1;
+    std::atomic<bool> stop_requested_{false};
+    bool              broadcast_stopped_ = false;  // protected by broadcast_mu_
+    int               tp_rank_           = 0;
+    int               tp_size_           = 1;
     std::string       base_path_;
     int               listen_fd_ = -1;  // rank 0 only
     // peer_fds_[k] = fd connecting this rank to rank k. peer_fds_[tp_rank_] = -1.

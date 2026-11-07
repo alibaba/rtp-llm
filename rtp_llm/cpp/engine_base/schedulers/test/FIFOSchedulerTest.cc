@@ -5335,7 +5335,12 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunWithPendingAsyncStillCountsRunnin
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 
-    // Simulate RTP_LLM_STREAM_ASYNC=1 where the output worker still owns this stream.
+    // NormalExecutor publishes the next length before the output worker claims
+    // the stream, allowing KV reservation while host bookkeeping is pending.
+    GenerateStream::NormalAsyncDeviceState async_state;
+    async_state.last_real_seq_len = stream1->seqLength();
+    async_state.next_real_seq_len = stream1->seqLength() + 1;
+    stream1->setNormalAsyncDeviceState(std::move(async_state));
     stream1->incPendingAsyncBookkeeping();
     ASSERT_TRUE(stream1->hasPendingAsyncBookkeeping());
 

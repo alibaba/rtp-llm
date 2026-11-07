@@ -70,6 +70,21 @@ TEST(MtpExecutorPolicyTest, DSparkPrefillRoleDisablesDraftGraphCapture) {
     EXPECT_TRUE(MtpExecutor::dsparkDraftGraphAllowed(/*is_dspark=*/false, RoleType::DECODE));
 }
 
+TEST(MtpExecutorPolicyTest, MtpInputHiddenSizeDerivesCheckedHyperConnectionWidth) {
+    ModelConfig config;
+    config.hidden_size = 8;
+    config.hc_mult     = 4;
+    EXPECT_EQ(config.getMtpInputHiddenSize(), 32);
+
+    config.hidden_size = 0;
+    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
+    config.hidden_size = 8;
+    config.hc_mult     = 0;
+    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
+    config.hc_mult = std::numeric_limits<int64_t>::max();
+    EXPECT_THROW(config.getMtpInputHiddenSize(), std::runtime_error);
+}
+
 TEST(MtpExecutorPolicyTest, CpRestoreSnapshotOwnsMutableHostInput) {
     auto         input_lengths = torch::tensor({3683}, torch::TensorOptions(torch::kInt32).pinned_memory(true));
     TensorHolder holder;
@@ -285,6 +300,95 @@ public:
         return publication_error_;
     }
 
+    std::function<std::optional<bool>(bool)> host_status_reducer;
+    std::optional<bool>                      reduceSpeculativeTargetPrepareStatus(bool local_ok) override {
+        return host_status_reducer ? host_status_reducer(local_ok) : std::nullopt;
+    }
+
+    bool hasSpeculativeTargetCommitHooks() const override {
+        return speculative_target_commit_enabled_;
+    }
+
+    std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override {
+        if (!speculative_target_commit_enabled_) {
+            return {};
+        }
+        recordEvent("prepare_target_commit");
+        prepared_accept_len_ = accept_len.cpu().contiguous();
+        if (speculative_target_prepare_throws_) {
+            throw std::runtime_error("injected prepare exception");
+        }
+        return speculative_target_prepare_error_;
+    }
+
+    std::string finishSpeculativeTargetCommit(bool commit) override {
+        if (!speculative_target_commit_enabled_) {
+            return {};
+        }
+        recordEvent(commit ? "commit_target" : "abort_target");
+        if (commit) {
+            ++speculative_target_commit_count_;
+            speculative_target_state_committed_ = true;
+            speculative_target_undo_retained_   = true;
+            if (speculative_target_commit_throws_) {
+                throw std::runtime_error("injected commit exception");
+            }
+            return {};
+        } else {
+            ++speculative_target_abort_count_;
+            speculative_target_state_committed_ = false;
+            speculative_target_undo_retained_   = false;
+            return {};
+        }
+    }
+
+    std::string finalizeSpeculativeTargetCommit() override {
+        if (!speculative_target_commit_enabled_) {
+            return {};
+        }
+        recordEvent("finalize_target");
+        ++speculative_target_finalize_count_;
+        speculative_target_undo_retained_ = false;
+        return {};
+    }
+
+    void enableSpeculativeTargetCommit(std::string prepare_error = {}) {
+        speculative_target_commit_enabled_ = true;
+        speculative_target_prepare_error_  = std::move(prepare_error);
+    }
+
+    void setSpeculativeTargetPrepareThrows(bool enabled) {
+        speculative_target_prepare_throws_ = enabled;
+    }
+
+    void setSpeculativeTargetCommitThrows(bool enabled) {
+        speculative_target_commit_throws_ = enabled;
+    }
+
+    bool speculativeTargetStateCommitted() const {
+        return speculative_target_state_committed_;
+    }
+
+    bool speculativeTargetUndoRetained() const {
+        return speculative_target_undo_retained_;
+    }
+
+    const torch::Tensor& preparedAcceptLen() const {
+        return prepared_accept_len_;
+    }
+
+    size_t speculativeTargetCommitCount() const {
+        return speculative_target_commit_count_;
+    }
+
+    size_t speculativeTargetAbortCount() const {
+        return speculative_target_abort_count_;
+    }
+
+    size_t speculativeTargetFinalizeCount() const {
+        return speculative_target_finalize_count_;
+    }
+
     void setPublicationResult(std::string error) {
         publication_error_ = std::move(error);
     }
@@ -317,6 +421,8 @@ public:
         if (input_observer_) {
             input_observer_(inputs);
         }
+        ++prepare_attention_count_;
+        recordEvent("prepare_attention");
         if (prepare_input_holder.test_data.empty()) {
             return;
         }
@@ -376,6 +482,10 @@ public:
 
     bool hasPendingPrepareInputs() const {
         return !prepare_input_holder.test_data.empty();
+    }
+
+    size_t prepareAttentionCount() const {
+        return prepare_attention_count_;
     }
 
     // Test stand-in for the shared MTP hidden buffer view (CP-local or DSpARK aux rows).
@@ -471,6 +581,17 @@ private:
     std::function<void(const GptModelInputs&)> input_observer_;
     std::shared_ptr<std::vector<std::string>>  event_log_;
     std::string                                event_name_;
+    size_t                                     prepare_attention_count_            = 0;
+    bool                                       speculative_target_commit_enabled_  = false;
+    bool                                       speculative_target_prepare_throws_  = false;
+    bool                                       speculative_target_commit_throws_   = false;
+    bool                                       speculative_target_state_committed_ = false;
+    bool                                       speculative_target_undo_retained_   = false;
+    std::string                                speculative_target_prepare_error_;
+    torch::Tensor                              prepared_accept_len_;
+    size_t                                     speculative_target_commit_count_   = 0;
+    size_t                                     speculative_target_abort_count_    = 0;
+    size_t                                     speculative_target_finalize_count_ = 0;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -656,8 +777,39 @@ private:
     std::vector<int32_t> observed_draft_tokens_;
 };
 
+class TestableMtpExecutor: public MtpExecutor {
+public:
+    using MtpExecutor::MtpExecutor;
+    using MtpExecutor::asyncPrepareAllowed;
+    using MtpExecutor::prepareAndCommitSpeculativeTargetState;
+    using MtpExecutor::reduceSpeculativeTargetPrepareStatus;
+    using MtpExecutor::rendezvousSpeculativeTargetPhaseStatus;
+    using MtpExecutor::rendezvousSpeculativeTargetSamplingStatus;
+    using MtpExecutor::validateSpeculativeTargetExecutionPolicy;
+};
+
+TEST(MtpExecutorPolicyTest, TargetHooksDisableSpeculativeAsyncPrepare) {
+    EXPECT_TRUE(TestableMtpExecutor::asyncPrepareAllowed(/*requested=*/true, /*target_commit_hooks=*/false));
+    EXPECT_FALSE(TestableMtpExecutor::asyncPrepareAllowed(/*requested=*/true, /*target_commit_hooks=*/true));
+    EXPECT_FALSE(TestableMtpExecutor::asyncPrepareAllowed(/*requested=*/false, /*target_commit_hooks=*/false));
+    EXPECT_FALSE(TestableMtpExecutor::asyncPrepareAllowed(/*requested=*/false, /*target_commit_hooks=*/true));
+}
+
+TEST(MtpExecutorPolicyTest, TargetHooksRejectEplbBeforeForward) {
+    EXPECT_TRUE(TestableMtpExecutor::validateSpeculativeTargetExecutionPolicy(
+                    /*target_commit_hooks=*/false, /*eplb_enabled=*/true)
+                    .ok());
+    EXPECT_TRUE(TestableMtpExecutor::validateSpeculativeTargetExecutionPolicy(
+                    /*target_commit_hooks=*/true, /*eplb_enabled=*/false)
+                    .ok());
+    const auto unsupported = TestableMtpExecutor::validateSpeculativeTargetExecutionPolicy(
+        /*target_commit_hooks=*/true, /*eplb_enabled=*/true);
+    EXPECT_EQ(unsupported.code(), absl::StatusCode::kFailedPrecondition);
+    EXPECT_NE(std::string(unsupported.message()).find("do not yet support EPLB"), std::string::npos);
+}
+
 struct MtpExecutorComponents {
-    std::unique_ptr<MtpExecutor>            executor;
+    std::unique_ptr<TestableMtpExecutor>    executor;
     std::unique_ptr<FakeModel>              fake_target_model;
     std::unique_ptr<FakeModel>              fake_draft_model;
     std::unique_ptr<FakeModel>              fake_draft_prefill_model;
@@ -737,13 +889,13 @@ public:
         ResourceContext            resource_context;
         SpeculativeExecutionConfig sp_config;
 
-        model_config.max_seq_len                           = test_config.max_seq_len;
-        model_config.vocab_size                            = test_config.vocab_size;
-        model_config.num_layers                            = test_config.num_layers;
-        model_config.attn_config.rope_config.index_factor  = test_config.position_id_len_factor;
-        sp_config.type                                     = test_config.sp_type;
-        sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
-        sp_config.sp_dspark_mask_token_id                  = test_config.dspark_mask_token_id;
+        model_config.max_seq_len                          = test_config.max_seq_len;
+        model_config.vocab_size                           = test_config.vocab_size;
+        model_config.num_layers                           = test_config.num_layers;
+        model_config.attn_config.rope_config.index_factor = test_config.position_id_len_factor;
+        sp_config.type                                    = test_config.sp_type;
+        sp_config.gen_num_per_cycle                       = test_config.gen_num_per_cycle;
+        sp_config.sp_dspark_mask_token_id                 = test_config.dspark_mask_token_id;
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -778,12 +930,12 @@ public:
         test_kv_cache_config.kernel_seq_size_per_block = 2;
 
         auto configure_cache_model = [](ModelConfig& cache_model_config) {
-            cache_model_config.data_type                    = rtp_llm::TYPE_INT8;
-            cache_model_config.attn_config.kv_head_num      = 128;
-            cache_model_config.attn_config.size_per_head    = 256;
+            cache_model_config.data_type                           = rtp_llm::TYPE_INT8;
+            cache_model_config.attn_config.kv_head_num             = 128;
+            cache_model_config.attn_config.size_per_head           = 256;
             cache_model_config.attn_config.tokens_per_block        = 2;
             cache_model_config.attn_config.kernel_tokens_per_block = 2;
-            cache_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            cache_model_config.attn_config.kv_cache_dtype          = KvCacheDataType::BASE;
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
@@ -831,7 +983,7 @@ public:
         cache_manager->init();
 
         // Create MtpExecutor
-        auto executor = std::make_unique<MtpExecutor>(params, propose_params, cache_manager);
+        auto executor = std::make_unique<TestableMtpExecutor>(params, propose_params, cache_manager);
 
         // Create fake models
         GptModelInitParams target_model_params(
@@ -1135,9 +1287,9 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         if (with_linear) {
             config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                    {{0}, {single_layer ? 0 : 1}},
-                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                    {"linear", "full"});
+                                               {{0}, {single_layer ? 0 : 1}},
+                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                               {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -1224,6 +1376,78 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
 
 INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
 
+TEST_F(MtpExecutorTest, MixedCacheSnapshotsPrepareTokensLengthsAndPositionsWithoutWaiting) {
+    const char* previous = std::getenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
+    struct EnvGuard {
+        std::optional<std::string> previous;
+        ~EnvGuard() {
+            if (previous)
+                setenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE", previous->c_str(), 1);
+            else
+                unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
+        }
+    } env_guard{previous ? std::optional<std::string>(previous) : std::nullopt};
+    setenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE", "1", 1);
+    for (int width : {1, 3}) {
+        SCOPED_TRACE(width);
+        MtpExecutorTestConfig config;
+        config.gen_num_per_cycle = width;
+        auto components          = createMtpExecutorComponents(config);
+        auto initial =
+            StreamSpecUpdateInfo{torch::tensor({{3}}, torch::kInt32), 1, 2, torch::ones({1, 2}), torch::ones({1, 4})};
+        auto steady = createDecodeStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1, 2}, initial);
+        auto fresh = createDecodeStream(
+            components.model_config, components.runtime_config, components.resource_context, {1, 2}, initial);
+        const auto&                         cache = components.executor->cache_manager_->cacheConfig();
+        GenerateStream::MtpAsyncDeviceState state;
+        state.next_kv_cache_block_id_gpu =
+            torch::ones({cache.groupNums(), 1, 2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        state.next_kv_cache_kernel_block_id_gpu = state.next_kv_cache_block_id_gpu.clone();
+        state.accept_tokens_gpu                 = torch::tensor({{1, 3}}, torch::kInt32).cuda();
+        state.accept_len_gpu                    = torch::tensor({2}, torch::kInt32).cuda();
+        state.next_seq_len_gpu                  = torch::tensor({6}, torch::kInt32).cuda();
+        state.propose_tokens_gpu                = torch::tensor({{1}}, torch::kInt32).cuda();
+        state.last_hidden_states_gpu            = torch::ones({1, 2}).cuda();
+        steady->setMtpAsyncDeviceState(std::move(state));
+        steady->incPendingAsyncBookkeeping();
+        struct PendingGuard {
+            GenerateStreamPtr stream;
+            ~PendingGuard() {
+                stream->decPendingAsyncBookkeepingAndMaybeRelease();
+            }
+        } pending{steady};
+        auto model_config                    = components.model_config;
+        model_config.has_positional_encoding = true;
+        SpeculativeExecutionConfig speculative;
+        speculative.gen_num_per_cycle = width;
+        MtpBatchStreamProcessor processor(
+            model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache, speculative, false);
+        TensorHolder holder;
+        // There is no worker to finish this counter: an added fallback wait
+        // would deadlock instead of consuming the immutable snapshot.
+        components.executor->waitPreviousBookkeepingBeforeStreamPreparation({steady, fresh});
+        ASSERT_TRUE(steady->hasPendingAsyncBookkeeping());
+        ASSERT_TRUE(steady->hasMtpCacheSnapshot());
+        auto input = processor.gatherDecodeModelInput(StreamGroups({steady, fresh}), holder);
+        ASSERT_TRUE(input.ok());
+        if (width == 1) {
+            processor.prepareOneStepSpecDecodeModelInput(StreamGroups({steady, fresh}), *input, holder);
+            EXPECT_EQ((std::vector<int>{3, 1, 3, 2}), toVec<int>(input->combo_tokens));
+            EXPECT_EQ((std::vector<int>{5, 6, 2, 3}), toVec<int>(input->combo_position_ids));
+        } else {
+            processor.prepareDecodeDraftModelInput(StreamGroups({steady, fresh}), *input, holder);
+            EXPECT_EQ((std::vector<int>{1, 2}), toVec<int>(input->combo_tokens));
+            EXPECT_EQ((std::vector<int>{5, 2}), toVec<int>(input->combo_position_ids));
+        }
+        EXPECT_EQ((std::vector<int>{5, 2}), toVec<int>(input->prefix_lengths));
+        EXPECT_TRUE(steady->hasPendingAsyncBookkeeping());
+        fresh->incPendingAsyncBookkeeping();
+        EXPECT_THROW(processor.expandTargetVerifyPositionIds(StreamGroups({fresh}), *input), std::runtime_error);
+        fresh->decPendingAsyncBookkeepingAndMaybeRelease();
+    }
+}
+
 TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     MtpExecutorTestConfig test_config;
     test_config.sp_type           = SP_TYPE_MTP;
@@ -1244,6 +1468,12 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     if (simulate_cp_mutation) {
         components.executor->parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
     }
+    int profile_starts   = 0;
+    int profile_finishes = 0;
+    components.executor->setModelForwardCallbacks([&]() { ++profile_starts; }, [&]() { ++profile_finishes; });
+    ASSERT_TRUE(components.executor->process({}).ok());
+    EXPECT_EQ(profile_starts, 0);
+    EXPECT_EQ(profile_finishes, 0);
 
     size_t batch_size = 1;
 
@@ -1291,6 +1521,13 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
         EXPECT_TRUE(components.fake_target_model->hasMtpTargetHiddenBuffer());
         EXPECT_EQ(draft_input.last_hidden_states.size(0), 2);
         EXPECT_EQ(draft_output.all_hidden_states.size(0), 2);
+    }
+    if (!simulate_cp_mutation) {
+        // Draft prefill uses the output's own row count. The public MTP hidden
+        // tensor must replace the ordinary hidden states without requiring an
+        // explicit row count from the caller.
+        draft_output.mtp_target_hidden_states =
+            torch::tensor({0.21f, 0.22f, 0.23f, 0.24f, 0.25f, 0.26f, 0.27f, 0.28f}).reshape({4, 2});
     }
 
     components.fake_draft_model->setInputs({draft_input});
@@ -1341,9 +1578,17 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
     if (simulate_cp_mutation) {
         EXPECT_FALSE(stream1->hasError());
     }
+    // PDFUSION runs prefill followed by an idle decode phase here: count one
+    // real work step, with balanced callbacks, rather than both phases.
+    EXPECT_EQ(profile_starts, 1);
+    EXPECT_EQ(profile_finishes, 1);
 
     // check stream result
-    checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});
+    checkOutput(stream1,
+                {0, 1, 2, 3, 1},
+                {1, 2},
+                {0.0, 0.0, 1.0, 0.0},
+                simulate_cp_mutation ? std::vector<float>{0.17, 0.18} : std::vector<float>{0.27, 0.28});
     if (simulate_cp_mutation) {
         EXPECT_EQ(target_model->forwardCount(), 1);
         EXPECT_EQ(draft_model->forwardCount(), 1);
@@ -1659,21 +1904,21 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
     // Use the real CP splitter with fake model forwards and TP collectives.
     for (const bool explicit_position_ids : {false, true}) {
         for (const bool middle_chunk : {false, true}) {
-            SCOPED_TRACE(testing::Message() << "explicit_position_ids=" << explicit_position_ids
-                                           << ", middle_chunk=" << middle_chunk);
+            SCOPED_TRACE(testing::Message()
+                         << "explicit_position_ids=" << explicit_position_ids << ", middle_chunk=" << middle_chunk);
             MtpExecutorTestConfig test_config;
-            test_config.gen_num_per_cycle      = 2;
-            test_config.mm_position_ids_style  = explicit_position_ids ? MROPE : DEFAULT;
-            test_config.position_id_len_factor = explicit_position_ids ? 3 : 1;
-            auto  components = createMtpExecutorComponents(test_config);
-            auto& executor = *components.executor;
+            test_config.gen_num_per_cycle                         = 2;
+            test_config.mm_position_ids_style                     = explicit_position_ids ? MROPE : DEFAULT;
+            test_config.position_id_len_factor                    = explicit_position_ids ? 3 : 1;
+            auto  components                                      = createMtpExecutorComponents(test_config);
+            auto& executor                                        = *components.executor;
             executor.parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
             executor.warm_up_ = true;  // Stop after draft forward, before draft sampling.
 
             constexpr int prefix_len = 4;
             constexpr int chunk_len  = 8;
             const int     prompt_len = prefix_len + chunk_len + (middle_chunk ? 2 : 0);
-            vector<int> prompt{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
+            vector<int>   prompt{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
             prompt.resize(prompt_len);
             auto stream = createContextStream(
                 components.model_config, components.runtime_config, components.resource_context, prompt);
@@ -1684,8 +1929,9 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
 
             torch::Tensor prompt_positions;
             if (explicit_position_ids) {
-                prompt_positions = (torch::arange(prompt_len, torch::kInt32).unsqueeze(1) * 10
-                                    + torch::arange(3, torch::kInt32)).flatten();
+                prompt_positions =
+                    (torch::arange(prompt_len, torch::kInt32).unsqueeze(1) * 10 + torch::arange(3, torch::kInt32))
+                        .flatten();
                 stream->setContextPositionIds(prompt_positions);
             }
 
@@ -1719,14 +1965,14 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
                 input.combo_position_ids = local_positions;
             };
 
-            GptModelInputs draft_input = target_input;
+            GptModelInputs draft_input     = target_input;
             draft_input.combo_tokens       = torch::tensor({1, 2, 3, 0, 1, 2, 3, middle_chunk ? 0 : 2}, torch::kInt32);
             draft_input.last_hidden_states = target_output.all_hidden_states;
             if (explicit_position_ids) {
                 auto tail = middle_chunk ? torch::tensor({120, 121, 122}, torch::kInt32) :
                                            torch::tensor({112, 112, 112}, torch::kInt32);
-                draft_input.combo_position_ids = torch::cat(
-                    {prompt_positions.narrow(0, (prefix_len + 1) * 3, (chunk_len - 1) * 3), tail});
+                draft_input.combo_position_ids =
+                    torch::cat({prompt_positions.narrow(0, (prefix_len + 1) * 3, (chunk_len - 1) * 3), tail});
             }
             components.fake_draft_model->setInputs({draft_input});
             components.fake_draft_model->setOutputs({GptModelOutputs{}});
@@ -2113,6 +2359,10 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only) {
     target_output.all_hidden_states =
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f, 0.09f, 0.10f})
             .reshape({(int64_t)(propose_step + 1), 2});
+    target_output.mtp_target_hidden_states = target_output.all_hidden_states;
+    // Replay returns the current features above even if the model's Python
+    // attribute still refers to rows from graph capture.
+    components.fake_target_model->setMtpTargetHiddenStates(torch::full_like(target_output.all_hidden_states, -1));
 
     next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 3);
 
@@ -2283,9 +2533,19 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f}).reshape({1, 2});
 
     components.fake_draft_model->setInputs({draft_input_1, next_draft_input});
+    // Transactional targets disable the speculative early async prepare. The
+    // draft must instead prepare from the final post-rejection ragged input,
+    // after the accept-len cap changed the preliminary 3 to 1.
+    components.fake_draft_model->setPrepareInputs({next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, next_draft_output});
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
+    auto  transaction_events = std::make_shared<std::vector<std::string>>();
+    auto* target_model       = components.fake_target_model.get();
+    auto* draft_model        = components.fake_draft_model.get();
+    target_model->enableSpeculativeTargetCommit();
+    target_model->setEventLog(transaction_events, "target");
+    components.fake_draft_model->setEventLog(transaction_events, "draft");
 
     auto draft_sampler_output_1 = spec::FastTopKSamplerOutput{torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({1, 4}),
                                                               torch::tensor({0}, torch::kInt32).reshape({1, 1})};
@@ -2306,8 +2566,11 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     auto speculative_sampler_output              = spec::SpeculativeSamplerOutput();
     speculative_sampler_output.accept_tokens_cpu = forced_accept_tokens;
     speculative_sampler_output.accept_tokens     = forced_accept_tokens.to(torch::kCUDA);
-    speculative_sampler_output.accept_len_cpu    = torch::tensor({1}, torch::kInt32);
-    speculative_sampler_output.accept_len        = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
+    // The rejection sampler initially accepts all rows; the logits processor
+    // cap lowers the final accepted length to one. The target transaction must
+    // observe the capped value, not this preliminary value.
+    speculative_sampler_output.accept_len_cpu = torch::tensor({3}, torch::kInt32);
+    speculative_sampler_output.accept_len     = speculative_sampler_output.accept_len_cpu.to(torch::kCUDA);
     components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
 
     setupFakeModels(components.executor.get(),
@@ -2319,6 +2582,34 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
 
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok());
+
+    EXPECT_EQ(toVec<int32_t>(target_model->preparedAcceptLen()), (std::vector<int32_t>{1}));
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 1u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 1u);
+    EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
+    EXPECT_EQ(target_model->prepareAttentionCount(), 1u);
+    EXPECT_EQ(draft_model->prepareAttentionCount(), 1u);
+    auto target_prepare = std::find(transaction_events->begin(), transaction_events->end(), "target.prepare_attention");
+    auto target_forward = std::find(transaction_events->begin(), transaction_events->end(), "target.forward");
+    auto prepare_commit =
+        std::find(transaction_events->begin(), transaction_events->end(), "target.prepare_target_commit");
+    auto finish_commit   = std::find(transaction_events->begin(), transaction_events->end(), "target.commit_target");
+    auto finalize_commit = std::find(transaction_events->begin(), transaction_events->end(), "target.finalize_target");
+    ASSERT_NE(target_prepare, transaction_events->end());
+    ASSERT_NE(target_forward, transaction_events->end());
+    ASSERT_NE(prepare_commit, transaction_events->end());
+    ASSERT_NE(finish_commit, transaction_events->end());
+    ASSERT_NE(finalize_commit, transaction_events->end());
+    EXPECT_LT(target_prepare, target_forward);
+    EXPECT_LT(target_forward, prepare_commit);
+    EXPECT_LT(prepare_commit, finish_commit);
+    EXPECT_LT(finish_commit, finalize_commit);
+    auto draft_prepare = std::find(finalize_commit + 1, transaction_events->end(), "draft.prepare_attention");
+    auto draft_forward = std::find(finalize_commit + 1, transaction_events->end(), "draft.forward");
+    ASSERT_NE(draft_prepare, transaction_events->end());
+    ASSERT_NE(draft_forward, transaction_events->end());
+    EXPECT_LT(draft_prepare, draft_forward);
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
 }
@@ -3123,6 +3414,320 @@ TEST_F(MtpExecutorTest, testDSparkFakeDecodeStartsWithoutProposalState) {
     EXPECT_TRUE(stream->getProposeToken().empty());
     EXPECT_EQ(stream->spIterCount(), 1);
     EXPECT_EQ((std::vector<int32_t>{1, 1, 0}), stream->speculativeAcceptedTokensPerPos());
+}
+
+TEST_F(MtpExecutorTest, testFakeDecodeUsesHyperConnectionInputHiddenSize) {
+    constexpr int32_t gamma      = 3;
+    constexpr int32_t vocab_size = 16;
+
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    model_config.max_seq_len = 64;
+    model_config.vocab_size  = vocab_size;
+    model_config.hidden_size = 8;
+    model_config.hc_mult     = 4;
+    model_config.data_type   = TYPE_FP16;
+
+    auto stream = MtpExecutor::createMinFakeDecodeStream(
+        gamma, model_config, runtime_config, resource_context, vocab_size, false);
+    auto sp_buffer = stream->getSPOutputBuffer();
+    ASSERT_NE(sp_buffer, nullptr);
+    ASSERT_TRUE(sp_buffer->hidden_states.defined());
+    EXPECT_EQ((std::vector<int64_t>{1, 32}), sp_buffer->hidden_states.sizes().vec());
+}
+
+TEST_F(MtpExecutorTest, MixedPreviousTargetTokensUseDeviceStateWithoutBookkeepingWait) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto steady =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto fresh =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1, 2});
+    auto stale    = std::make_shared<SpeculativeExecutorStreamOutput>();
+    stale->tokens = torch::tensor({-999}, torch::kInt32);
+    steady->setSPOutputBuffer(stale);
+    auto initial    = std::make_shared<SpeculativeExecutorStreamOutput>();
+    initial->tokens = torch::tensor({20}, torch::kInt32);
+    fresh->setSPOutputBuffer(initial);
+    GenerateStream::MtpAsyncDeviceState state;
+    state.accept_tokens_gpu = torch::tensor({10, 11, 12}, torch::kInt32).cuda();
+    state.accept_len_gpu    = torch::tensor({2}, torch::kInt32).cuda();
+    steady->setMtpAsyncDeviceState(state);
+    steady->incPendingAsyncBookkeeping();
+    bool          from_device = false;
+    torch::Tensor result;
+    try {
+        result = components.executor->gatherPreviousTargetTokens(StreamGroups({steady, fresh}), 2, true, from_device);
+    } catch (...) {
+        steady->decPendingAsyncBookkeepingAndMaybeRelease();
+        throw;
+    }
+    // No worker will finish until the call above returns, so an inserted join
+    // would deadlock. The poisoned host row must never reach the output.
+    EXPECT_TRUE(steady->hasPendingAsyncBookkeeping());
+    steady->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_TRUE(from_device);
+    EXPECT_EQ((std::vector<int>{11, 20}), toVec<int>(result));
+    initial->tokens.fill_(21);
+    result = components.executor->gatherPreviousTargetTokens(StreamGroups({fresh}), 1, true, from_device);
+    EXPECT_FALSE(from_device);
+    EXPECT_EQ((std::vector<int>{21}), toVec<int>(result));
+}
+
+TEST_F(MtpExecutorTest, HostTargetStatusDoesNotAllocateDeviceStatusAndPropagatesFailure) {
+    auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* model      = components.fake_target_model.get();
+    model->enableSpeculativeTargetCommit();
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    components.executor->parallelism_config_.tp_size = 2;
+    std::vector<bool> seen;
+    model->host_status_reducer = [&seen](bool ok) -> std::optional<bool> {
+        seen.push_back(ok);
+        return false;
+    };
+    EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
+    EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(false));
+    EXPECT_EQ(seen, (std::vector<bool>{true, false}));
+    model->host_status_reducer = [](bool ok) -> std::optional<bool> { return ok; };
+    EXPECT_TRUE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
+    model->host_status_reducer = [](bool) -> std::optional<bool> { throw std::runtime_error("poisoned host status"); };
+    EXPECT_THROW(components.executor->reduceSpeculativeTargetPrepareStatus(true), std::runtime_error);
+    model->host_status_reducer = {};
+    EXPECT_THROW(components.executor->reduceSpeculativeTargetPrepareStatus(true), std::runtime_error);
+    // TP1 remains local and never enters the transport, even when configured.
+    components.executor->parallelism_config_.tp_size = 1;
+    EXPECT_TRUE(components.executor->reduceSpeculativeTargetPrepareStatus(true));
+    EXPECT_FALSE(components.executor->reduceSpeculativeTargetPrepareStatus(false));
+}
+
+TEST_F(MtpExecutorTest, testSpeculativeTargetCommitDefaultIsNoop) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto* target_model = components.fake_target_model.get();
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
+    EXPECT_TRUE(status.ok());
+    EXPECT_FALSE(target_model->preparedAcceptLen().defined());
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 0u);
+}
+
+TEST_F(MtpExecutorTest, testLocalSamplingFailureRendezvousAbortsWithoutCommit) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto* target_model = components.fake_target_model.get();
+    target_model->enableSpeculativeTargetCommit();
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    size_t reduction_count                                           = 0;
+    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
+        ++reduction_count;
+        return local_ok;
+    };
+
+    auto status = components.executor->rendezvousSpeculativeTargetSamplingStatus(
+        absl::InternalError("injected local sampling failure"));
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), absl::StatusCode::kInternal);
+    EXPECT_EQ(std::string(status.message()), "speculative target sampling/cap failed on at least one TP rank");
+    EXPECT_EQ(reduction_count, 2u);  // sampling readiness, then rollback consensus
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
+    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
+}
+
+TEST_F(MtpExecutorTest, testRemoteSpecLogitsLaunchFailureRendezvousAbortsBeforeTargetForward) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto* target_model = components.fake_target_model.get();
+    target_model->enableSpeculativeTargetCommit();
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    size_t reduction_count                                           = 0;
+    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
+        ++reduction_count;
+        if (reduction_count == 1) {
+            EXPECT_TRUE(local_ok);
+            return false;  // Simulate rank 0 failing event/check/async launch.
+        }
+        return local_ok;
+    };
+
+    auto status = components.executor->rendezvousSpeculativeTargetPhaseStatus(absl::OkStatus(), "spec-logits launch");
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), absl::StatusCode::kInternal);
+    EXPECT_EQ(std::string(status.message()), "speculative target spec-logits launch failed on at least one TP rank");
+    EXPECT_EQ(reduction_count, 2u);  // launch readiness, then rollback consensus
+    EXPECT_EQ(target_model->forwardCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
+    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
+}
+
+TEST_F(MtpExecutorTest, testRemoteSamplingFailureRendezvousAbortsWithoutCommit) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto* target_model = components.fake_target_model.get();
+    target_model->enableSpeculativeTargetCommit();
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    size_t reduction_count                                           = 0;
+    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
+        ++reduction_count;
+        if (reduction_count == 1) {
+            EXPECT_TRUE(local_ok);
+            return false;  // Simulate another TP rank failing sampling.
+        }
+        return local_ok;
+    };
+
+    auto status = components.executor->rendezvousSpeculativeTargetSamplingStatus(absl::OkStatus());
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.code(), absl::StatusCode::kInternal);
+    EXPECT_EQ(std::string(status.message()), "speculative target sampling/cap failed on at least one TP rank");
+    EXPECT_EQ(reduction_count, 2u);  // sampling readiness, then rollback consensus
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
+    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
+}
+
+TEST_F(MtpExecutorTest, testSamplingFailureWithoutHooksPreservesLocalStatus) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto* target_model = components.fake_target_model.get();
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    size_t reduction_count                                           = 0;
+    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
+        ++reduction_count;
+        return local_ok;
+    };
+    const auto local_status = absl::InvalidArgumentError("legacy no-hook sampling failure");
+
+    auto status = components.executor->rendezvousSpeculativeTargetSamplingStatus(local_status);
+    EXPECT_EQ(status, local_status);
+    EXPECT_EQ(reduction_count, 0u);
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 0u);
+}
+
+TEST_F(MtpExecutorTest, testSpeculativeTargetPrepareFailureAbortsBeforeCommit) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto* target_model = components.fake_target_model.get();
+    target_model->enableSpeculativeTargetCommit("injected prepare failure");
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(status.ToString().find("injected prepare failure"), std::string::npos);
+    EXPECT_EQ(toVec<int32_t>(target_model->preparedAcceptLen()), (std::vector<int32_t>{2}));
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
+}
+
+TEST_F(MtpExecutorTest, testSpeculativeTargetPrepareExceptionBecomesStatusAndAborts) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto* target_model = components.fake_target_model.get();
+    target_model->enableSpeculativeTargetCommit();
+    target_model->setSpeculativeTargetPrepareThrows(true);
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(status.ToString().find("injected prepare exception"), std::string::npos);
+    EXPECT_EQ(toVec<int32_t>(target_model->preparedAcceptLen()), (std::vector<int32_t>{2}));
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
+}
+
+TEST_F(MtpExecutorTest, testSpeculativeTargetInvalidAcceptLenRendezvousBeforeReturn) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto* target_model = components.fake_target_model.get();
+    target_model->enableSpeculativeTargetCommit();
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    size_t reduction_count                                           = 0;
+    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
+        ++reduction_count;
+        return local_ok;
+    };
+    auto invalid_accept_len = torch::tensor({2}, torch::kInt32);
+
+    auto status = components.executor->prepareAndCommitSpeculativeTargetState(invalid_accept_len, 1);
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(status.ToString().find("accept_len validation failed"), std::string::npos);
+    EXPECT_EQ(reduction_count, 2u);  // readiness failure, then rollback consensus
+    EXPECT_FALSE(target_model->preparedAcceptLen().defined());
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 0u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
+}
+
+TEST_F(MtpExecutorTest, testSpeculativeTargetCommitExceptionRollsBack) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto* target_model = components.fake_target_model.get();
+    target_model->enableSpeculativeTargetCommit();
+    target_model->setSpeculativeTargetCommitThrows(true);
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(status.ToString().find("injected commit exception"), std::string::npos);
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 1u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
+    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
+    EXPECT_FALSE(target_model->speculativeTargetStateCommitted());
+    EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
+}
+
+TEST_F(MtpExecutorTest, testSpeculativeTargetPeerCommitFailureRollsBackLocalCommit) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto components               = createMtpExecutorComponents(test_config);
+
+    auto* target_model = components.fake_target_model.get();
+    target_model->enableSpeculativeTargetCommit();
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    size_t reduction_count                                           = 0;
+    components.executor->speculative_target_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
+        ++reduction_count;
+        if (reduction_count == 3) {
+            return false;  // Simulate another TP rank failing tentative commit.
+        }
+        return local_ok;
+    };
+    auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(status.ToString().find("commit failed on at least one TP rank"), std::string::npos);
+    EXPECT_EQ(reduction_count, 4u);  // readiness, prepare, commit, rollback
+    EXPECT_EQ(target_model->speculativeTargetCommitCount(), 1u);
+    EXPECT_EQ(target_model->speculativeTargetAbortCount(), 1u);
+    EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
+    EXPECT_FALSE(target_model->speculativeTargetStateCommitted());
+    EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
 }
 
 TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {

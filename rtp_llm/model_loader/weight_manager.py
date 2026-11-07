@@ -186,6 +186,15 @@ class WeightManager:
                 "Update request is missing the 'method' field. "
                 "It must specify the IPC method (e.g., 'cuda_ipc' or 'shm')."
             )
+        if "layers" in req["name"]:
+            layer_id = self.extract_layer_number(req["name"])
+            internal_name = rename_function(req["name"])
+            if layer_id is not None and 0 <= layer_id < len(self._weights.weights):
+                destination = self._weights.weights[layer_id].get(internal_name)
+                if getattr(destination, "_rtp_requires_restart_for_update", False):
+                    raise PermissionError(
+                        f"shared projection {internal_name!r} requires a service restart to update"
+                    )
         method: str = req["method"]
         desc: str = req["desc"]
         name: str = req["name"]

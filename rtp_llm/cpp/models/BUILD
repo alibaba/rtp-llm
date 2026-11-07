@@ -176,6 +176,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:tensor_holder",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+        "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/metrics",
@@ -192,6 +193,7 @@ cc_library(
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
+            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
             "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ],

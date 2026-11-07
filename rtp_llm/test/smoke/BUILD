@@ -142,6 +142,7 @@ test_suite(
         ":smoke_sm100_moe",
         ":smoke_sm120_dense",
         ":smoke_sm120_moe",
+        ":smoke_sm120_qwen4_exp",
         ":smoke_ppu_pd",
         ":smoke_ppu_qwen35_basic",
         ":smoke_ppu_qwen35_func",

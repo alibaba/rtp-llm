@@ -742,6 +742,7 @@ class PyEnvConfigs:
         # override reach those implementations without changing the default
         # behavior of servers that do not configure the switch.
         self.ft_disable_custom_ar_override: Optional[bool] = None
+        self.ipc_all_reduce_large_prefill: bool = False
         self.sp_config = SpeculativeExecutionConfig()
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()

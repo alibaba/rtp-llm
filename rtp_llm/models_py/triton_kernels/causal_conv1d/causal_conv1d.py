@@ -73,6 +73,28 @@ def prepare_causal_conv1d_metadata(
     for num in nums:
         offsetlist.extend(range(num))
 
+    if total > 0 and torch.device(device).type == "cuda" and torch.version.hip is None:
+        # Both arrays are host-generated. Transfer them together without
+        # blocking the CUDA stream for each copy; retain the trailing PAD slot.
+        # Empty batches have no host payload to upload.
+        host_metadata = torch.full(
+            (2, total + 1),
+            PAD_SLOT_ID,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=True,
+        )
+        host_metadata[0, : len(mlist)].copy_(torch.from_numpy(mlist.astype(np.int32)))
+        host_metadata[1, : len(offsetlist)].copy_(
+            torch.from_numpy(np.array(offsetlist, dtype=np.int32))
+        )
+        metadata = host_metadata.to(device=device, non_blocking=True)
+        return CausalConv1dMetadata(
+            batch_ptr=metadata[0],
+            token_chunk_offset_ptr=metadata[1],
+            total=total,
+        )
+
     # Create tensors
     batch_ptr = torch.full((total + 1,), PAD_SLOT_ID, dtype=torch.int32, device=device)
     token_chunk_offset_ptr = torch.full(

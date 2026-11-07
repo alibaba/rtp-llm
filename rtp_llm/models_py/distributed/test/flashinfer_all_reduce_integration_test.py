@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import builtins
 import multiprocessing as mp
 import os
 import time
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -18,6 +20,31 @@ def _worker(rank: int, port: int) -> None:
     os.environ["FT_DISABLE_CUSTOM_AR"] = "0"
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=2)
+    # Ordinary models do not enable the SM120 policy. A rank-local import or
+    # probe failure must still leave both ranks using a working NCCL fallback.
+    import flashinfer.comm
+
+    original_import = builtins.__import__
+    for error_type in (ImportError, RuntimeError):
+
+        def import_with_local_failure(name, *args, **kwargs):
+            if rank == 1 and name == "flashinfer.comm":
+                raise error_type("injected rank-local FlashInfer probe failure")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=import_with_local_failure):
+            fallback = FlashInferAllReduce(
+                dist.group.WORLD,
+                torch.device("cuda", rank),
+                single_node=True,
+                disable_custom_all_reduce=False,
+                enable_sm120_collectives=False,
+            )
+        value = torch.full((4, 5120), rank + 1, device="cuda", dtype=torch.bfloat16)
+        assert fallback.disabled and not fallback.should_use(value)
+        dist.all_reduce(value)
+        torch.testing.assert_close(value, torch.full_like(value, 3), rtol=0, atol=0)
+        fallback.destroy()
     communicator = FlashInferAllReduce(
         dist.group.WORLD, torch.device("cuda", rank), single_node=True
     )

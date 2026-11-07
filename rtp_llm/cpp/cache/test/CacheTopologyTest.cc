@@ -65,6 +65,50 @@ TEST(CacheTopologyTest, SpecConstructorValidatesGeometryAndHeadCount) {
     EXPECT_ANY_THROW(MHAKVCacheSpec("full", 8, 2, 0));
 }
 
+TEST(CacheTopologyTest, ResolvesLinearTransferFromLocalGeometryAndPreservesItOnClone) {
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    LinearAttentionConfig linear;
+    linear.linear_num_key_heads   = 4;
+    linear.linear_num_value_heads = 8;
+    linear.linear_key_head_dim    = 16;
+    linear.linear_value_head_dim  = 16;
+    linear.linear_conv_kernel_dim = 4;
+    linear.ssm_state_dtype        = DataType::TYPE_FP32;
+    linear.conv_state_dtype       = DataType::TYPE_BF16;
+    SpecBuildContext context;
+    context.parallelism_config      = &parallelism;
+    context.linear_attention_config = &linear;
+    KVCacheSpecDesc desc;
+    desc.tag              = "arbitrary_state_tag";
+    desc.cache_type       = KVCacheSpecType::LinearAttention;
+    desc.dtype            = DataType::TYPE_BF16;
+    desc.tp_transfer_mode = TpCacheTransferMode::LINEAR_QKV;
+    const auto  spec      = SpecBuilder::build(desc, context);
+    const auto& layout    = spec->tp_transfer;
+    EXPECT_EQ(layout.key_heads, 2u);
+    EXPECT_EQ(layout.value_heads, 4u);
+    EXPECT_EQ(layout.q_row_bytes, 64u);
+    EXPECT_EQ(layout.k_row_bytes, 64u);
+    EXPECT_EQ(layout.v_row_bytes, 128u);
+    EXPECT_EQ(layout.history_rows, 3u);
+    EXPECT_EQ(spec->k_block_size_bytes(), 4096u);
+    EXPECT_EQ(spec->v_block_size_bytes(), 768u);
+    auto plan = layout.plan(spec->k_block_size_bytes(), spec->v_block_size_bytes(), 4, {2, 2, 1, 1}, 1);
+    plan.validateSlices();
+    EXPECT_EQ(plan.source_bytes, 2432u);
+    EXPECT_EQ(plan.destination_bytes, 4864u);
+    const auto clone = spec->clone();
+    EXPECT_EQ(clone->tp_transfer.mode, TpCacheTransferMode::LINEAR_QKV);
+    EXPECT_EQ(clone->fingerprint(), spec->fingerprint());
+    clone->tp_transfer.mode = TpCacheTransferMode::LEGACY;
+    EXPECT_NE(clone->fingerprint(), spec->fingerprint());
+    desc.tp_transfer_mode = TpCacheTransferMode::MHA_HEADS;
+    EXPECT_ANY_THROW(SpecBuilder::build(desc, context));
+    desc.tp_transfer_mode = TpCacheTransferMode::REPLICATED;
+    EXPECT_ANY_THROW(SpecBuilder::build(desc, context));
+}
+
 TEST(CacheTopologyTest, MaximumKernelExpansionDoesNotDependOnGroupOrder) {
     auto full     = makeGroup("full");
     auto swa      = makeGroup("swa", CacheGroupType::SWA);

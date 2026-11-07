@@ -220,6 +220,15 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     )
 
     hw_kernel_group.add_argument(
+        "--ipc_all_reduce_large_prefill",
+        env_name="RTP_LLM_IPC_ALL_REDUCE_LARGE_PREFILL",
+        bind_to="ipc_all_reduce_large_prefill",
+        type=str2bool,
+        default=False,
+        help="Enable supported eager large-prefill IPC all-reduce shapes; reserves about 256 MiB per TP rank.",
+    )
+
+    hw_kernel_group.add_argument(
         "--ft_disable_custom_ar",
         env_name="FT_DISABLE_CUSTOM_AR",
         bind_to=(hw_kernel_config, "ft_disable_custom_ar"),

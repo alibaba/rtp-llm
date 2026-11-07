@@ -103,3 +103,10 @@ py_test(
         "//rtp_llm:config_ops",
     ],
 )
+
+py_test(
+    name = "moe_config_pickle_test",
+    srcs = ["moe_config_pickle_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = ["//rtp_llm:ops"],
+)

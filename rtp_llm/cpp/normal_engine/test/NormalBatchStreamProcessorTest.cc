@@ -1088,16 +1088,13 @@ class ChunkedPrefillBatchStreamProcessorTest: public NormalBatchStreamProcessorT
 protected:
     void SetUp() override {
         DeviceTestBase::SetUp();
-        model_config_.max_seq_len            = 2048;
-        model_config_.vocab_size             = 2048;
-        model_config_.num_layers             = 1;
+        model_config_.max_seq_len             = 2048;
+        model_config_.vocab_size              = 2048;
+        model_config_.num_layers              = 1;
         model_config_.has_positional_encoding = true;
         initFullCacheConfig(cache_config_, model_config_.num_layers);
-        processor_ = make_unique<NormalBatchStreamProcessor>(model_config_,
-                                                             PDSepConfig{},
-                                                             ProfilingDebugLoggingConfig{},
-                                                             cache_config_,
-                                                             false);
+        processor_ = make_unique<NormalBatchStreamProcessor>(
+            model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config_, false);
     }
 
     GenerateStreamPtr makeRunningStream(const std::vector<int32_t>&     input_ids,
@@ -1105,8 +1102,8 @@ protected:
         auto query             = make_shared<GenerateInput>();
         query->input_ids       = hostIntBuffer(input_ids);
         query->generate_config = generate_config ? generate_config : make_shared<GenerateConfig>();
-        auto stream = make_shared<NormalGenerateStream>(
-            query, model_config_, RuntimeConfig{}, ResourceContext{}, nullptr);
+        auto stream =
+            make_shared<NormalGenerateStream>(query, model_config_, RuntimeConfig{}, ResourceContext{}, nullptr);
         stream->generate_status_->status = StreamState::RUNNING;
         return stream;
     }
@@ -2506,8 +2503,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMisalignedMultimodalExtraInputIsRejec
 }
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillPositionIdsCopyCurrentChunkOnly) {
-    auto chunk_stream =
-        makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
+    auto chunk_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
     chunk_stream->setReuseLength(8);
 
     StreamGroups stream_groups({chunk_stream});
@@ -2658,8 +2654,8 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerInputSki
     auto chunk_config         = make_shared<GenerateConfig>();
     chunk_config->do_sample   = true;
     chunk_config->random_seed = 123;
-    auto chunk_stream = makeMiddleChunkStream(
-        {10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}, chunk_config);
+    auto chunk_stream =
+        makeMiddleChunkStream({10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27}, chunk_config);
 
     auto plain_config         = make_shared<GenerateConfig>();
     plain_config->do_sample   = true;
@@ -2683,15 +2679,15 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerInputSki
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkDoesNotAdvanceNormalDeviceState) {
     autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", "1");
-    auto stream = makeRunningStream({1, 2, 3, 4, 5, 6, 7, 8});
+    auto            stream = makeRunningStream({1, 2, 3, 4, 5, 6, 7, 8});
     stream->setChunkSize(4);
     setKvCacheBlocks(stream, {1});
 
     EngineInitParams params;
     params.model_config_                         = model_config_;
     params.model_config_.has_positional_encoding = false;
-    params.py_model                             = py::none();
-    NormalExecutor executor(params, nullptr, true);
+    params.py_model                              = py::none();
+    NormalExecutor             executor(params, nullptr, true);
     NormalBatchStreamProcessor processor(
         params.model_config_, PDSepConfig{}, ProfilingDebugLoggingConfig{}, cache_config_, false);
     MergedOutput outputs;
@@ -2724,9 +2720,9 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkDoesNotAdvanceNorm
 }
 
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDeviceStateAndSamplerRowOrder) {
-    auto middle_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
-    auto plain_stream  = makeRunningStream({1, 2, 3});
-    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       middle_stream = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18});
+    auto       plain_stream  = makeRunningStream({1, 2, 3});
+    const auto cuda_i32      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
     middle_stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
         .last_sample_token_gpu = torch::full({1}, 41, cuda_i32),
         .next_seq_len_gpu      = torch::full({1}, 10, cuda_i32),
@@ -2738,7 +2734,7 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkPreservesNormalDev
     params.model_config_ = model_config_;
     params.py_model      = py::none();
     NormalExecutor executor(params, nullptr, true);
-    SamplerOutput outputs;
+    SamplerOutput  outputs;
     outputs.token_ids = torch::tensor({42, 43}, torch::kInt32).reshape({2, 1}).cuda();
     executor.publishNormalDeviceState(StreamGroups({middle_stream, plain_stream}), outputs);
 

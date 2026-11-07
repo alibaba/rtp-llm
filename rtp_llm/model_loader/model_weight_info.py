@@ -847,6 +847,10 @@ class ModelWeights:
                 "Please check the provided weight 'name'."
             )
         ori_tensor = layer_weight_dict[name]
+        if getattr(ori_tensor, "_rtp_requires_restart_for_update", False):
+            raise PermissionError(
+                f"shared projection {name!r} requires a service restart to update"
+            )
         self.check_data(
             ori_tensor, data
         )  # This will raise errors if shape, device, or dtype mismatch

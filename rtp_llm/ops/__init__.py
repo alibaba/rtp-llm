@@ -110,8 +110,7 @@ import sysconfig
 from ctypes import cdll
 
 cdll.LoadLibrary(
-    sysconfig.get_config_var("LIBDIR")
-    + "/libpython%d.%d.so" % sys.version_info[:2]
+    sysconfig.get_config_var("LIBDIR") + "/libpython%d.%d.so" % sys.version_info[:2]
 )
 
 try:
@@ -145,8 +144,8 @@ try:
         FMHAType,
         GrammarConfig,
         GrpcConfig,
-        HWKernelConfig,
         HiddenStateCaptureDtype,
+        HWKernelConfig,
         HybridAttentionConfig,
         HybridAttentionType,
         KVCacheConfig,
@@ -175,6 +174,7 @@ try:
         SpeculativeExecutionConfig,
         SpeculativeType,
         TaskType,
+        TpCacheTransferMode,
         VitConfig,
         VitSeparation,
         check_rope_cache,

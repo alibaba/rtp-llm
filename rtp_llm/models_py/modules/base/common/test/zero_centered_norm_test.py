@@ -1,0 +1,102 @@
+"""Qwen4 fused Q/K norm parity and CUDA Graph replay tests."""
+
+import unittest
+
+import torch
+
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    ZeroCenteredFusedQKRMSNorm,
+)
+
+
+class Qwen4FusedQKNormTest(unittest.TestCase):
+    HEADS = 3
+    KV_HEADS = 1
+    DIM = 256
+
+    def setUp(self):
+        torch.manual_seed(21)
+        self.q_gamma = (0.1 * torch.randn(self.DIM, device="cuda")).bfloat16()
+        self.k_gamma = (0.1 * torch.randn(self.DIM, device="cuda")).bfloat16()
+        self.norm = ZeroCenteredFusedQKRMSNorm(
+            self.q_gamma, self.k_gamma, self.HEADS, self.KV_HEADS, self.DIM
+        )
+
+    def _input(self, rows):
+        return torch.randn(
+            rows,
+            (self.HEADS + 2 * self.KV_HEADS) * self.DIM,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+
+    def _run(self, value, fused):
+        if fused:
+            return self.norm(value.clone())
+        result = value.clone().reshape(-1, self.HEADS + 2 * self.KV_HEADS, self.DIM)
+        for start, stop, gamma in (
+            (0, self.HEADS, self.q_gamma),
+            (self.HEADS, self.HEADS + self.KV_HEADS, self.k_gamma),
+        ):
+            values = result[:, start:stop].float()
+            normalized = values * torch.rsqrt(
+                values.pow(2).mean(-1, keepdim=True) + self.norm.eps
+            )
+            result[:, start:stop].copy_(
+                (normalized * (1.0 + gamma.float())).to(value.dtype)
+            )
+        return result.reshape_as(value)
+
+    def test_matches_torch_and_preserves_v(self):
+        for rows in (1, 3, 7, 128):
+            with self.subTest(rows=rows):
+                source = self._input(rows)
+                reference = self._run(source, False)
+                fused = self._run(source, True)
+                torch.testing.assert_close(
+                    fused.float(), reference.float(), atol=0.016, rtol=0.01
+                )
+                v_start = (self.HEADS + self.KV_HEADS) * self.DIM
+                self.assertTrue(torch.equal(fused[:, v_start:], source[:, v_start:]))
+
+    def test_gamma_plus_one_is_not_rounded_to_bf16(self):
+        self.q_gamma.fill_(0.003)
+        self.k_gamma.fill_(0.003)
+        source = torch.arange(1, self.DIM + 1, device="cuda", dtype=torch.float32)
+        source = source.bfloat16().repeat(5, self.HEADS + 2 * self.KV_HEADS)
+        reference = self._run(source, False)
+        fused = self._run(source, True)
+        torch.testing.assert_close(fused, reference, atol=0, rtol=0)
+        # The fixture must distinguish folding +1 into the BF16 checkpoint gain.
+        rounded = self._run(source, False)
+        values = source.reshape(5, self.HEADS + 2 * self.KV_HEADS, self.DIM).float()
+        normalized = values * torch.rsqrt(
+            values.square().mean(-1, keepdim=True) + self.norm.eps
+        )
+        rounded[:, : (self.HEADS + self.KV_HEADS) * self.DIM] = (
+            (normalized[:, : self.HEADS + self.KV_HEADS] * (self.q_gamma + 1).float())
+            .bfloat16()
+            .flatten(1)
+        )
+        self.assertFalse(torch.equal(reference, rounded))
+
+    def test_replay_reads_new_inputs(self):
+        static = self._input(4)
+        self.norm(static)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            self.norm(static)
+        for _ in range(2):
+            source = self._input(4)
+            reference = self._run(source, False)
+            static.copy_(source)
+            graph.replay()
+            torch.cuda.synchronize()
+            torch.testing.assert_close(
+                static.float(), reference.float(), atol=0.016, rtol=0.01
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

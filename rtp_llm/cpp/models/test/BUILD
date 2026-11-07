@@ -80,6 +80,7 @@ cc_library(
         "//rtp_llm/cpp/config:static_config",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/metrics:metrics",
+        "//rtp_llm/cpp/engine_base:weights_converter",
         "//rtp_llm/cpp/models",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:op_defs",
@@ -107,6 +108,36 @@ pywrapped_model_test_deps = [
     "//rtp_llm:config",
     "//rtp_llm:torch",
 ]
+
+py_test(
+    name = "native_lm_head_test",
+    args = ["NativeLmHeadTest"],
+    srcs = [
+        "native_lm_head_test.py",
+        "pywrapped_model_cache_store_integration_test.py",
+    ],
+    main = "native_lm_head_test.py",
+    data = [":th_pywrapped_model_cache_store_integration_test"],
+    deps = pywrapped_model_test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+    tags = ["RTX_5000_PRO_CU13"],
+)
+
+py_test(
+    name = "native_lm_head_tp_test",
+    srcs = [
+        "native_lm_head_test.py",
+        "pywrapped_model_cache_store_integration_test.py",
+    ],
+    main = "native_lm_head_test.py",
+    args = ["NativeLmHeadTpTest"],
+    data = [":th_pywrapped_model_cache_store_integration_test"],
+    deps = pywrapped_model_test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA", "GPU_COUNT": "2"},
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+    tags = ["RTX_5000_PRO_CU13"],
+)
 
 py_test(
     name = "pywrapped_model_cache_store_integration_test",

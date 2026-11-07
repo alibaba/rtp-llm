@@ -88,19 +88,29 @@ struct LinearKVCacheSpec: public KVCacheSpec {
                                 desc.tag.c_str(),
                                 static_cast<int>(desc.cache_type));
 
-        spec->ssm_elems =
-            static_cast<size_t>(local_v_heads) * linear.linear_key_head_dim * linear.linear_value_head_dim;
-        const size_t qkv = static_cast<size_t>(linear.linear_key_head_dim) * local_k_heads * 2
-                           + static_cast<size_t>(linear.linear_value_head_dim) * local_v_heads;
-        spec->conv_elems       = static_cast<size_t>(linear.linear_conv_kernel_dim - 1) * qkv;
-        spec->ssm_state_dtype  = linear.ssm_state_dtype;
-        spec->conv_state_dtype = linear.conv_state_dtype;
+        const size_t qk_row_elems = static_cast<size_t>(local_k_heads) * linear.linear_key_head_dim;
+        const size_t v_row_elems  = static_cast<size_t>(local_v_heads) * linear.linear_value_head_dim;
+        const size_t history_rows = static_cast<size_t>(linear.linear_conv_kernel_dim - 1);
+        spec->ssm_elems           = v_row_elems * linear.linear_key_head_dim;
+        spec->conv_elems          = history_rows * (2 * qk_row_elems + v_row_elems);
+        spec->ssm_state_dtype     = linear.ssm_state_dtype;
+        spec->conv_state_dtype    = linear.conv_state_dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->ssm_state_dtype != DataType::TYPE_INVALID,
                                 "LINEAR KVCacheSpecDesc tag=%s requires valid ssm_state_dtype",
                                 desc.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(spec->conv_state_dtype != DataType::TYPE_INVALID,
                                 "LINEAR KVCacheSpecDesc tag=%s requires valid conv_state_dtype",
                                 desc.tag.c_str());
+        if (desc.tp_transfer_mode == TpCacheTransferMode::LINEAR_QKV) {
+            const auto item_size = getTypeSize(spec->conv_state_dtype);
+            auto&      layout    = spec->tp_transfer;
+            layout.key_heads     = local_k_heads;
+            layout.value_heads   = local_v_heads;
+            layout.q_row_bytes   = qk_row_elems * item_size;
+            layout.k_row_bytes   = layout.q_row_bytes;
+            layout.v_row_bytes   = v_row_elems * item_size;
+            layout.history_rows  = history_rows;
+        }
         return spec;
     }
 

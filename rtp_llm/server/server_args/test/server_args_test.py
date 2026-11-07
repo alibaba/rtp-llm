@@ -37,6 +37,23 @@ class CustomAllReduceArgumentsTest(TestCase):
 
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
+    def test_large_prefill_policy_is_parsed_and_default_off(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(server_args.setup_args([]).ipc_all_reduce_large_prefill)
+        with patch.dict(
+            os.environ, {"RTP_LLM_IPC_ALL_REDUCE_LARGE_PREFILL": "1"}, clear=True
+        ):
+            self.assertTrue(server_args.setup_args([]).ipc_all_reduce_large_prefill)
+            self.assertFalse(
+                server_args.setup_args(
+                    ["--ipc_all_reduce_large_prefill", "0"]
+                ).ipc_all_reduce_large_prefill
+            )
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(SystemExit):
+            server_args.setup_args(["--ipc_all_reduce_large_prefill", "invalid"])
+
 
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
