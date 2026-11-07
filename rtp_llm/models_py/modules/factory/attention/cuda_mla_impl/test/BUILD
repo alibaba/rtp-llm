@@ -1,5 +1,12 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
+cuda13_sm100_py_test(
+    name = "mla_async_metadata_test",
+    srcs = ["mla_async_metadata_test.py", "page_rr_jit_warmup_test.py"],
+    main = "mla_async_metadata_test.py",
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+)
+
 py_test(
     name = "fp8_prefill_dequant_metadata_test",
     srcs = ["fp8_prefill_dequant_metadata_test.py"],

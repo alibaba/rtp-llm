@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/models_py/bindings/common/FusedCopyHostSource.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 #endif
@@ -241,7 +242,9 @@ torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tenso
     // create tensor on cuda
     auto cuda_tensor = torch::empty(tensor.sizes(), torch::TensorOptions(tensor.dtype()).device(torch::kCUDA));
 
-    d2d_copies_.add(tensor.data_ptr(), cuda_tensor.data_ptr(), tensor.nbytes());
+    auto source = prepareFusedCopyHostSource(tensor);
+    buffer_holder_.hold_host(source);
+    d2d_copies_.add(source.data_ptr(), cuda_tensor.data_ptr(), source.nbytes());
 
     return cuda_tensor;
 }

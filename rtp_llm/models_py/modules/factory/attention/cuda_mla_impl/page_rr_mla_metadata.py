@@ -36,6 +36,7 @@ class PageRRMlaMetadata:
         self.global_causal_lens = None
         self.block_tables = None
         self.query_block_tables = None
+        self._prefill_kv_indptr_host = None
 
     def prepare_prefill(self, inputs, *, sparse_query_positions: bool = False) -> None:
         """Reuse framework request metadata; add Page-RR owner-only cache slots."""
@@ -95,7 +96,13 @@ class PageRRMlaMetadata:
         # Cache's mutable cu_kv_seqlens_device can be stale across producer and
         # attention streams during MTP Prefill. Keep the eager plan's own small
         # indptr from the same host lengths used by the CPU chunk planner.
-        self.prefill_ragged_kv_len_indptr_d = torch.tensor(kv_offsets, dtype=torch.int32, device=device)
+        # Retain pinned storage so the upload can remain asynchronous.
+        self._prefill_kv_indptr_host = torch.tensor(
+            kv_offsets, dtype=torch.int32, pin_memory=True,
+        )
+        self.prefill_ragged_kv_len_indptr_d = self._prefill_kv_indptr_host.to(
+            device=device, non_blocking=True,
+        )
         self.kv_lens_d = self.prefill_ragged_kv_len_indptr_d.diff()
         self.block_tables = table
         fixed_q_len = q_lens[0] if all(q == q_lens[0] for q in q_lens) else 0
