@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 from torch import nn
 
+from rtp_llm.device.device_type import is_ppu
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.distributed.pynccl_cp import all_gather
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
@@ -310,6 +311,7 @@ class IndexerOp(nn.Module):
         is_neox_style: bool = True,
         stable_topk: bool = False,
         enable_fuse_kernels: bool = True,
+        query_scale_fmt: Optional[str] = None,
     ):
         """
         Initialize IndexerOp.
@@ -333,19 +335,22 @@ class IndexerOp(nn.Module):
         self.blocksize = blocksize
         self.block_size = block_size
         self.scale_fmt = scale_fmt
+        # Query scales are folded into the head gate; their format need not
+        # match the separately packed K-cache scales (GLM uses UE8M0 Q only).
+        self.query_scale_fmt = scale_fmt if query_scale_fmt is None else query_scale_fmt
         self.is_neox_style = is_neox_style
         self.enable_fuse_kernels = enable_fuse_kernels
 
-        # The stable TopK kernel is compiled for SM10x only. Other architectures
-        # retain the existing paged and prefill backends.
+        # Native PPU TopK can change both selection at ties and output order.
+        self._ppu_stable_topk = stable_topk and is_ppu()
+        # The native stable selection kernel is compiled for SM10x only.
         stable_topk = stable_topk and is_sm10x()
-        self._paged_topk_backend = (
-            "topk_v3_tie_break" if stable_topk else "dsv4_persistent"
+        stable_backend = "ppu_stable" if self._ppu_stable_topk else (
+            "topk_v3_tie_break" if stable_topk else None
         )
+        self._paged_topk_backend = stable_backend or "dsv4_persistent"
         self._paged_topk_op = rtp_llm_ops.dsv4_persistent_topk
-        self._prefill_topk_backend = (
-            "topk_v3_tie_break" if stable_topk else "dsv4_per_row"
-        )
+        self._prefill_topk_backend = stable_backend or "dsv4_per_row"
 
     def _indexer_cache_view(self, kv_cache: LayerKVCache) -> torch.Tensor:
         entry_elems = self.index_head_dim + self.index_head_dim // self.block_size * 4
@@ -379,14 +384,18 @@ class IndexerOp(nn.Module):
         max_seq_len: int,
     ) -> None:
         # A stable selected set and order both matter for sparse attention.
-        rtp_llm_ops.topk_v3_tie_break(
-            logits,
-            row_starts,
-            row_ends,
-            output,
-            self.index_topk,
-            min(max(int(max_seq_len), 1), logits.shape[1]),
-        )
+        if self._ppu_stable_topk:
+            from rtp_llm.models_py.kernels.ppu.indexer_topk import stable_topk
+            stable_topk(logits, row_starts, row_ends, output)
+        else:
+            rtp_llm_ops.topk_v3_tie_break(
+                logits,
+                row_starts,
+                row_ends,
+                output,
+                self.index_topk,
+                min(max(int(max_seq_len), 1), logits.shape[1]),
+            )
         output.copy_(_canonicalize_topk_indices(output))
 
     def _run_prefill_topk(
@@ -397,7 +406,7 @@ class IndexerOp(nn.Module):
         output: torch.Tensor,
         max_seq_len: int,
     ) -> None:
-        if self._prefill_topk_backend == "topk_v3_tie_break":
+        if self._prefill_topk_backend in ("topk_v3_tie_break", "ppu_stable"):
             self._run_stable_topk(logits, row_starts, row_ends, output, max_seq_len)
             return
         rtp_llm_ops.dsv4_top_k_per_row_prefill(
@@ -577,9 +586,22 @@ class IndexerOp(nn.Module):
             slot_mapping: Physical slot indices [num_tokens]
         """
         assert kv_cache is not None, "kv_cache is required"
+        cache = self._indexer_cache_view(kv_cache)
+        if (
+            is_ppu()
+            and self.query_scale_fmt == "ue8m0"
+            and self.scale_fmt == "none"
+            and self.index_head_dim == self.block_size == 128
+        ):
+            from rtp_llm.models_py.kernels.ppu.indexer_k_quant import (
+                quantize_and_cache_indexer_k,
+            )
+
+            quantize_and_cache_indexer_k(key, cache, slot_mapping)
+            return
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            self._indexer_cache_view(kv_cache),
+            cache,
             slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
@@ -597,13 +619,7 @@ class IndexerOp(nn.Module):
             key.contiguous(), group=Group.TP, role="indexer_k_bf16"
         ).reshape(-1, key.size(-1))
         restored_key = gathered_key[kv_restore_unpad_indices]
-        rtp_llm_ops.indexer_k_quant_and_cache(
-            restored_key,
-            self._indexer_cache_view(kv_cache),
-            slot_mapping,
-            self.block_size,
-            self.scale_fmt,
-        )
+        self.quant_k_only(restored_key, kv_cache, slot_mapping)
 
     def quant_q_k(
         self,
@@ -634,23 +650,17 @@ class IndexerOp(nn.Module):
             eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
-            scale_ue8m0=(self.scale_fmt == "ue8m0"),
+            scale_ue8m0=(self.query_scale_fmt == "ue8m0"),
         )
         q_fp8 = q_fp8.view(-1, self.index_n_heads, self.index_head_dim)
 
-        if self.scale_fmt == "ue8m0":
+        if self.query_scale_fmt == "ue8m0":
             q_scale = _unpack_ue8m0_scale(q_scale)
         q_scale = q_scale.view(-1, self.index_n_heads, 1)
 
         # Cache key
         assert kv_cache is not None, "kv_cache is required"
-        rtp_llm_ops.indexer_k_quant_and_cache(
-            key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            self._indexer_cache_view(kv_cache),
-            slot_mapping,  # [num_tokens] physical slot indices
-            self.block_size,  # quantization block size (128)
-            self.scale_fmt,  # "ue8m0" for power-of-2 scaling
-        )
+        self.quant_k_only(key, kv_cache, slot_mapping)
 
         return q_fp8, q_scale
 
@@ -666,10 +676,10 @@ class IndexerOp(nn.Module):
             eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
-            scale_ue8m0=(self.scale_fmt == "ue8m0"),
+            scale_ue8m0=(self.query_scale_fmt == "ue8m0"),
         )
         q_fp8 = q_fp8.view(-1, self.index_n_heads, self.index_head_dim)
-        if self.scale_fmt == "ue8m0":
+        if self.query_scale_fmt == "ue8m0":
             q_scale = _unpack_ue8m0_scale(q_scale)
         q_scale = q_scale.view(-1, self.index_n_heads, 1)
         return q_fp8, q_scale
@@ -705,7 +715,7 @@ class IndexerOp(nn.Module):
             self.index_head_dim,
             actual_rot_dim,
             is_neox_style=self.is_neox_style,
-            scale_fmt=self.scale_fmt,
+            scale_fmt=self.query_scale_fmt,
         )
 
     def fused_rope_quant_qk(
@@ -741,7 +751,7 @@ class IndexerOp(nn.Module):
             self.index_head_dim,
             actual_rot_dim,
             is_neox_style=self.is_neox_style,
-            scale_fmt=self.scale_fmt,
+            scale_fmt=self.query_scale_fmt,
         )
 
     def quant_q_k_cp(
@@ -777,13 +787,7 @@ class IndexerOp(nn.Module):
         gathered_key = gathered_key.reshape(-1, key.size(-1))
         restored_key = gathered_key[kv_restore_unpad_indices]  # element wise
 
-        rtp_llm_ops.indexer_k_quant_and_cache(
-            restored_key,
-            self._indexer_cache_view(kv_cache),
-            slot_mapping,
-            self.block_size,
-            self.scale_fmt,
-        )
+        self.quant_k_only(restored_key, kv_cache, slot_mapping)
         query_flat = query.view(-1, self.index_head_dim)
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
             query_flat,
@@ -791,10 +795,10 @@ class IndexerOp(nn.Module):
             eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
-            scale_ue8m0=(self.scale_fmt == "ue8m0"),
+            scale_ue8m0=(self.query_scale_fmt == "ue8m0"),
         )
         q_fp8 = q_fp8.view(-1, self.index_n_heads, self.index_head_dim)
-        if self.scale_fmt == "ue8m0":
+        if self.query_scale_fmt == "ue8m0":
             q_scale = _unpack_ue8m0_scale(q_scale)
         q_scale = q_scale.view(-1, self.index_n_heads, 1)
         return q_fp8, q_scale
@@ -888,7 +892,7 @@ class IndexerOp(nn.Module):
         topk_result = logits.new_empty(
             (logits.shape[0], self.index_topk), dtype=torch.int32
         )
-        if self._paged_topk_backend == "topk_v3_tie_break":
+        if self._paged_topk_backend in ("topk_v3_tie_break", "ppu_stable"):
             self._run_stable_topk(
                 logits, torch.zeros_like(lengths), lengths, topk_result, max_seq_len
             )
@@ -999,7 +1003,7 @@ class IndexerOp(nn.Module):
                 prefill_max_kv_len,
             )
             if (
-                self._prefill_topk_backend != "topk_v3_tie_break"
+                self._prefill_topk_backend not in ("topk_v3_tie_break", "ppu_stable")
                 and _fp8_prefill_topk_canonicalize()
             ):
                 topk_part = _canonicalize_topk_indices(topk_part)
@@ -1203,7 +1207,7 @@ class IndexerOp(nn.Module):
                     prefill_max_kv_len,
                 )
                 if (
-                    self._prefill_topk_backend != "topk_v3_tie_break"
+                    self._prefill_topk_backend not in ("topk_v3_tie_break", "ppu_stable")
                     and _fp8_prefill_topk_canonicalize()
                 ):
                     topk_part = _canonicalize_topk_indices(topk_part)

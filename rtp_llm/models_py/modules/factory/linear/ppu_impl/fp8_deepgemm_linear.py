@@ -5,6 +5,9 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.kernels.ppu.block_scaled_fp8_gemm import (
+    fp8_block_scaled_matmul,
+)
 from rtp_llm.models_py.kernels.ppu.deepgemm_warmup import (
     get_deep_gemm_warmup_mode,
     resolve_deep_gemm_warmup_max_tokens,
@@ -16,9 +19,9 @@ from rtp_llm.models_py.kernels.ppu.deepgemm_wrapper import (
     fp8_gemm_nt,
     has_deep_gemm_fp8_dense,
 )
+from rtp_llm.models_py.kernels.ppu.fp8_quant import fp8_quantize_128
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.ops import HWKernelConfig
-from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,8 @@ class PpuFp8DeepGemmLinear(LinearBase):
         # storage; DeepGEMM consumes row-major [N, K] with (N//128, K//128)
         # block scales.
         self.k, self.n = weight.shape
+        self.K, self.N = self.k, self.n
+        self.scale_ue8m0 = False
         scale_k, scale_n = weight_scales.shape
         self.weight = weight.reshape(self.n, self.k).contiguous()
         self.weight_scales = weight_scales.reshape(scale_n, scale_k).contiguous()
@@ -103,30 +108,49 @@ class PpuFp8DeepGemmLinear(LinearBase):
                 "DeepGEMM dense FP8 warmup failed; execution will use lazy JIT"
             )
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, input: torch.Tensor, input_scales: Optional[torch.Tensor] = None,
+        *, block_scaled: bool = False,
+    ) -> torch.Tensor:
+        """Use explicit K128 scale/add arithmetic when ``block_scaled`` is set."""
         if input.shape[-1] != self.k:
             raise ValueError(
                 f"FP8 Linear expected input K={self.k}, got {input.shape[-1]}"
             )
-        if input.dtype != torch.bfloat16:
-            raise ValueError(f"FP8 Linear expects BF16 input, got {input.dtype}")
         output_shape = (*input.shape[:-1], self.n)
         input_2d = input.reshape(-1, self.k)
+        if input_scales is None:
+            if input.dtype != torch.bfloat16:
+                raise ValueError(f"FP8 Linear expects BF16 input without scales, got {input.dtype}")
+            input_q, input_scale = fp8_quantize_128(input_2d)
+        else:
+            if input.dtype != torch.float8_e4m3fn or not input_2d.is_contiguous():
+                raise ValueError("prequantized FP8 Linear input must be contiguous E4M3")
+            if (input_scales.dtype != torch.float32
+                or input_scales.shape != (input_2d.shape[0], self.k // 128)
+                or input_scales.device != input.device
+                or not input_scales.is_contiguous()):
+                raise ValueError("prequantized FP8 Linear scales must be contiguous FP32 [M, K/128]")
+            input_q, input_scale = input_2d, input_scales
         if input_2d.shape[0] == 0:
-            return input.new_empty(output_shape)
+            return torch.empty(output_shape, device=input.device, dtype=torch.bfloat16)
 
-        input_q, input_scale = trt_fp8_quantize_128(input_2d, False)
         output = torch.empty(
             (input_2d.shape[0], self.n),
             device=input.device,
             dtype=torch.bfloat16,
         )
-        with configure_deep_gemm_num_sms(self.num_gemm_sms):
-            fp8_gemm_nt(
-                (input_q, input_scale),
-                (self.weight, self.weight_scales),
-                output,
+        if block_scaled:
+            fp8_block_scaled_matmul(
+                input_q, self.weight, input_scale, self.weight_scales, out=output,
             )
+        else:
+            with configure_deep_gemm_num_sms(self.num_gemm_sms):
+                fp8_gemm_nt(
+                    (input_q, input_scale),
+                    (self.weight, self.weight_scales),
+                    output,
+                )
         if self.bias is not None:
             output.add_(self.bias.to(output.dtype))
-        return output.to(input.dtype).view(output_shape)
+        return output.view(output_shape)

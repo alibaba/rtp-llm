@@ -45,6 +45,7 @@ class Indexer(nn.Module):
         parallelism_config: Optional[ParallelismConfig] = None,
         scale_fmt: Optional[str] = "none",
         stable_topk: bool = False,
+        query_scale_fmt: Optional[str] = None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -154,6 +155,7 @@ class Indexer(nn.Module):
             scale_fmt=self.scale_fmt,
             is_neox_style=self.is_neox_style,
             stable_topk=stable_topk,
+            query_scale_fmt=query_scale_fmt,
             enable_fuse_kernels=self._fuse_kernels_enabled,
         )
 

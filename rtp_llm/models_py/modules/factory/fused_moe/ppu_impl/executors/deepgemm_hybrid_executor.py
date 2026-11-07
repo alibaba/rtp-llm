@@ -34,6 +34,11 @@ from rtp_llm.models_py.kernels.ppu.deepgemm_wrapper import (
     m_grouped_int8_gemm_nt_masked,
     m_grouped_int8_gemm_nt_nopad,
 )
+from rtp_llm.models_py.kernels.ppu.fp8_quant import (
+    fp8_quantize_128,
+    masked_silu_mul_fp8_quantize_128,
+    silu_mul_fp8_quantize_128,
+)
 from rtp_llm.models_py.kernels.ppu.int8_kernel.fused_silu_mul_int8_quant import (
     silu_and_mul_masked_per_token_quant_int8_fwd,
 )
@@ -60,10 +65,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.models_py.triton_kernels.common.activation import (
-    MaskedSiluInputLayout,
     silu_and_mul,
     silu_mul_masked_bf16_no_post_quant_fwd,
-    silu_mul_masked_fp8_post_quant_fwd,
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_gather,
@@ -72,7 +75,6 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 )
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
-from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
@@ -91,6 +93,11 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
     # Upper bound for prefill warmup tokens when not overridden via env.
     DEFAULT_WARMUP_MAX_TOKENS = 8192
     WARMUP_MASKED_LAYOUT = True
+    # Decode can use the padded-masked layout even when the packed nopad GEMM
+    # is available. Subclasses opt in; the masked path never reads the expert
+    # counts back to the host, so it keeps the decode step free of per-layer
+    # synchronisation.
+    PREFER_MASKED_DECODE = False
 
     @classmethod
     def executor_type(cls) -> ExecutorType:
@@ -213,13 +220,18 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
         except Exception:
             logger.exception("DeepGEMM BF16 warmup failed; execution will use lazy JIT")
 
-    def _to_local_expert_ids(self, topk_idx: torch.Tensor) -> torch.Tensor:
+    def _to_local_expert_ids(
+        self, topk_idx: torch.Tensor, ids_are_local: bool = False
+    ) -> torch.Tensor:
         """Convert global expert IDs to partition-local IDs (0-based), -1 for out-of-partition."""
+        if ids_are_local:
+            return topk_idx
         local = topk_idx - self.start_expert_id
+        # Pass the fill value as a Python scalar: torch.where then keeps it as a
+        # CPU 0-dim tensor, whereas torch.tensor(-1, device=...) issues a tiny
+        # blocking H2D copy on every MoE layer (a decode-step hotspot).
         return torch.where(
-            (local >= 0) & (local < self.num_experts_per_partition),
-            local,
-            torch.tensor(-1, device=local.device, dtype=local.dtype),
+            (local >= 0) & (local < self.num_experts_per_partition), local, -1
         )
 
     def execute(
@@ -256,7 +268,14 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
             return CombineForwardPayload(
                 fused_expert_output=torch.empty_like(payload.expert_x)
             )
-        if token_num <= self.masked_max_token_num:
+        # Decode (token_num <= masked_max_token_num) runs the padded-masked
+        # layout when the executor opts in: the padded rows are skipped by the
+        # masked GEMM/SiLU kernels, and the layout needs no host copy of the
+        # per-expert counts. Prefill keeps the packed nopad/contiguous layout,
+        # where the extra padded rows would dominate.
+        if token_num <= self.masked_max_token_num and (
+            not self.use_nopad or self.PREFER_MASKED_DECODE
+        ):
             return self.execute_masked(
                 payload,
                 activation,
@@ -286,7 +305,9 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
     ) -> CombineForwardPayload:
         with configure_deep_gemm_num_sms(self.num_gemm_sms):
             hidden_states = payload.expert_x
-            topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
+            topk_idx = self._to_local_expert_ids(
+                payload.expert_topk_ids, payload.expert_ids_are_local
+            )
             topk_weights = payload.expert_topk_weights
             num_recv_tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
 
@@ -406,7 +427,9 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
             GEMM tiles run over padding rows.
         """
         hidden_states = payload.expert_x
-        topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
+        topk_idx = self._to_local_expert_ids(
+            payload.expert_topk_ids, payload.expert_ids_are_local
+        )
         topk_weights = payload.expert_topk_weights
 
         # Get per-expert token counts as a Python list (needed for alignment arithmetic)
@@ -615,7 +638,9 @@ class DeepGemmInt8HybridExecutor(DeepGemmBf16HybridExecutor):
         with configure_deep_gemm_num_sms(self.num_gemm_sms):
             hidden_states = payload.expert_x
             hidden_states_scale = self._get_dispatch_scale(payload)
-            topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
+            topk_idx = self._to_local_expert_ids(
+                payload.expert_topk_ids, payload.expert_ids_are_local
+            )
             topk_weights = payload.expert_topk_weights
             tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
 
@@ -726,7 +751,9 @@ class DeepGemmInt8HybridExecutor(DeepGemmBf16HybridExecutor):
     ) -> CombineForwardPayload:
         hidden_states = payload.expert_x
         hidden_states_scale = self._get_dispatch_scale(payload)
-        topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
+        topk_idx = self._to_local_expert_ids(
+            payload.expert_topk_ids, payload.expert_ids_are_local
+        )
         topk_weights = payload.expert_topk_weights
         tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens_cpu
         if tokens_per_expert is None:
@@ -750,9 +777,16 @@ class DeepGemmInt8HybridExecutor(DeepGemmBf16HybridExecutor):
                 )
             )
 
-        token_counts = torch.tensor(
-            aligned_tokens, dtype=torch.int32, pin_memory=True, device="cpu"
-        ).to(device=device, non_blocking=True)
+        if self.use_nopad:
+            # alignment == 1, so the aligned counts are exactly the router's
+            # per-expert counts, which already live on the device. Reuse them
+            # instead of rebuilding a pinned CPU tensor and copying it over on
+            # every layer.
+            token_counts = payload.expert_tokens_meta.expert_num_tokens
+        else:
+            token_counts = torch.tensor(
+                aligned_tokens, dtype=torch.int32, pin_memory=True, device="cpu"
+            ).to(device=device, non_blocking=True)
         expert_start_loc = torch.empty_like(token_counts)
         m_indices = torch.empty(all_tokens, device=device, dtype=torch.int32)
         output_index = torch.empty_like(topk_idx)
@@ -842,11 +876,15 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
     """FP8 per-block [128,128] expert GEMMs on the DeepEP Normal path.
 
     The router dispatches FP8 activations with per-token-group scales
-    (``trt_fp8_quantize_128`` layout, ``(M, K // 128)`` row-major FP32); the
+    (``fp8_quantize_128`` layout, ``(M, K // 128)`` row-major FP32); the
     PPU wheel's grouped FP8 GEMMs consume exactly that scale layout.
     """
 
     QUANT_METHOD = "FP8_PER_BLOCK"
+
+    # Measured on PPU (8x TP/EP, single stream): masked decode is ~8% faster
+    # than the nopad layout and removes the per-layer expert-count D2H sync.
+    PREFER_MASKED_DECODE = True
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -854,7 +892,6 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
         checker.check(resolver.get_quant_method(config) == cls.QUANT_METHOD)
         checker.check(resolver.is_bf16(config))
         checker.check(has_deep_gemm_fp8_grouped())
-        checker.check(not config.enable_cuda_graph)
 
     def __init__(
         self,
@@ -863,6 +900,9 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__(config, quant_config, weights)
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+        self._fuse_silu_quant = fuse_kernels_enabled()
         self.w1_scale = weights[W.moe_s1]
         self.w2_scale = weights[W.moe_s2]
         if self.w1.dtype != torch.float8_e4m3fn or self.w2.dtype != torch.float8_e4m3fn:
@@ -969,7 +1009,9 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
         with configure_deep_gemm_num_sms(self.num_gemm_sms):
             hidden_states = payload.expert_x
             hidden_states_scale = self._get_dispatch_scale(payload)
-            topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
+            topk_idx = self._to_local_expert_ids(
+                payload.expert_topk_ids, payload.expert_ids_are_local
+            )
             topk_weights = payload.expert_topk_weights
             tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
 
@@ -985,15 +1027,17 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
                 device=device,
                 dtype=torch.float8_e4m3fn,
             )
+            # deep_gemm's masked kernel needs per-batch column-major LHS scales
+            # (strides ``(m*n, 1, m)``) and copies them itself otherwise.
             input_scale = torch.empty(
                 (
                     self.num_experts_per_partition,
-                    alignment,
                     self.hidden_size // self.DEEPGEMM_BLOCK_SHAPE[1],
+                    alignment,
                 ),
                 device=device,
                 dtype=torch.float32,
-            )
+            ).transpose(1, 2)
             output_index = torch.empty_like(topk_idx)
             expert_start_loc = torch.empty_like(tokens_per_expert)
             ep_scatter_v2(
@@ -1027,33 +1071,8 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
             dispose_tensor(input_q)
             dispose_tensor(input_scale)
 
-            down_q = torch.empty(
-                (
-                    self.num_experts_per_partition,
-                    alignment,
-                    self.intermediate_size // 2,
-                ),
-                device=device,
-                dtype=torch.float8_e4m3fn,
-            )
-            down_scale = torch.empty(
-                (
-                    self.num_experts_per_partition,
-                    alignment,
-                    self.intermediate_size // 2 // self.DEEPGEMM_BLOCK_SHAPE[0],
-                ),
-                device=device,
-                dtype=torch.float32,
-            )
-            silu_mul_masked_fp8_post_quant_fwd(
-                input=gateup_output,
-                output=down_q,
-                output_scale=down_scale,
-                quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
-                masked_m=tokens_per_expert,
-                expected_m=expected_m,
-                input_layout=MaskedSiluInputLayout.BATCH_TOKEN_ALIGNMENT,
-                scale_ue8m0=False,
+            down_q, down_scale = masked_silu_mul_fp8_quantize_128(
+                gateup_output, tokens_per_expert, expected_m
             )
             dispose_tensor(gateup_output)
 
@@ -1096,7 +1115,9 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
     ) -> CombineForwardPayload:
         hidden_states = payload.expert_x
         hidden_states_scale = self._get_dispatch_scale(payload)
-        topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
+        topk_idx = self._to_local_expert_ids(
+            payload.expert_topk_ids, payload.expert_ids_are_local
+        )
         topk_weights = payload.expert_topk_weights
         tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens_cpu
         if tokens_per_expert is None:
@@ -1120,9 +1141,16 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
                 )
             )
 
-        token_counts = torch.tensor(
-            aligned_tokens, dtype=torch.int32, pin_memory=True, device="cpu"
-        ).to(device=device, non_blocking=True)
+        if self.use_nopad:
+            # alignment == 1, so the aligned counts are exactly the router's
+            # per-expert counts, which already live on the device. Reuse them
+            # instead of rebuilding a pinned CPU tensor and copying it over on
+            # every layer.
+            token_counts = payload.expert_tokens_meta.expert_num_tokens
+        else:
+            token_counts = torch.tensor(
+                aligned_tokens, dtype=torch.int32, pin_memory=True, device="cpu"
+            ).to(device=device, non_blocking=True)
         expert_start_loc = torch.empty_like(token_counts)
         m_indices = torch.empty(all_tokens, device=device, dtype=torch.int32)
         output_index = torch.empty_like(topk_idx)
@@ -1177,15 +1205,21 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
         dispose_tensor(input_q)
         dispose_tensor(input_scale)
 
-        down_bf16 = torch.empty(
-            (all_tokens, self.intermediate_size // 2),
-            device=device,
-            dtype=torch.bfloat16,
-        )
-        silu_and_mul(down_bf16, gateup_output)
-        dispose_tensor(gateup_output)
-        down_q, down_scale = trt_fp8_quantize_128(down_bf16, False)
-        dispose_tensor(down_bf16)
+        if self._fuse_silu_quant:
+            down_q, down_scale = silu_mul_fp8_quantize_128(
+                gateup_output, gate_first=False,
+            )
+            dispose_tensor(gateup_output)
+        else:
+            down_bf16 = torch.empty(
+                (all_tokens, self.intermediate_size // 2),
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            silu_and_mul(down_bf16, gateup_output)
+            dispose_tensor(gateup_output)
+            down_q, down_scale = fp8_quantize_128(down_bf16)
+            dispose_tensor(down_bf16)
 
         down_output = torch.empty(
             (all_tokens, self.hidden_size), device=device, dtype=torch.bfloat16

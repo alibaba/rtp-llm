@@ -7,6 +7,7 @@ from torch import nn
 
 from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES, MegaMoeExecutionPolicy
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import is_ppu
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import get_layer_caches_for_groups
 from rtp_llm.models_py.model_desc.cp_mtp_hidden_handoff import CpMtpHiddenHandoff
@@ -52,6 +53,19 @@ except ImportError:
     CudaFp8GEMMLinear = None
     fused_add_rmsnorm_fp8_quant = None
     fused_add_rmsnorm_fp8_quant_with_bf16_output = None
+
+if is_ppu():
+    from rtp_llm.models_py.kernels.ppu.fused_norm_quant import (
+        fused_add_rmsnorm_fp8_quant,
+        fused_add_rmsnorm_fp8_quant_with_bf16_output,
+    )
+    from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_deepgemm_linear import (
+        PpuFp8DeepGemmLinear,
+    )
+
+    _FP8_GEMM_LINEAR = PpuFp8DeepGemmLinear
+else:
+    _FP8_GEMM_LINEAR = CudaFp8GEMMLinear
 
 
 class Glm5MoeLayer(GenericMoeLayer):
@@ -117,6 +131,9 @@ class Glm5MoeLayer(GenericMoeLayer):
         return FusedMoeFactory().create_fused_moe(adapter, weights)
 
     def _gate_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        weight_nt = getattr(self, "_ppu_gate_weight_nt", None)
+        if weight_nt is not None:
+            return torch.mm(hidden_states, weight_nt.t(), out_dtype=torch.float32)
         if (
             self.gate_chunk_rows > 0
             and hidden_states.shape[0] > 0
@@ -139,6 +156,7 @@ class Glm5MoeLayer(GenericMoeLayer):
         clone.top_k = self.top_k
         clone.gate_chunk_rows = self.gate_chunk_rows
         clone.gate = self.gate
+        clone._ppu_gate_weight_nt = getattr(self, "_ppu_gate_weight_nt", None)
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
         if self.fused_moe.supports_cuda_graph_clone:
@@ -162,6 +180,10 @@ class Glm5MoeLayer(GenericMoeLayer):
         clone.group_topk = self.group_topk
         clone.use_ep_shared_allreduce = self.use_ep_shared_allreduce
         clone.use_unified_tp_allreduce = self.use_unified_tp_allreduce
+        clone.shared_expert_overlap = self.shared_expert_overlap
+        clone._ovl_stream = self._ovl_stream
+        clone._ovl_fork = self._ovl_fork
+        clone._ovl_join = self._ovl_join
         return clone
 
     def forward_prepacked(
@@ -218,6 +240,8 @@ class Glm5MoeDecoderLayer(nn.Module):
                 has_indexer=dsa_layer_has_indexer(config, layer_idx),
                 reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
                 stable_topk=True,
+                # Match GLM's SGL indexer: UE8M0 Q, ordinary FP32 K scales.
+                indexer_query_scale_fmt="ue8m0" if is_ppu() else None,
             )
         else:
             attn_configs = config.getAttentionConfigs(
@@ -298,18 +322,18 @@ class Glm5MoeDecoderLayer(nn.Module):
         self._fuse_input_scale_ue8m0 = False
         if _fuse_on and (
             fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
-            and CudaFp8GEMMLinear is not None
+            and _FP8_GEMM_LINEAR is not None
         ):
             if isinstance(self.self_attn, CausalAttention):
                 _qkv = getattr(self.self_attn, "qkv_proj", None)
-                if isinstance(_qkv, CudaFp8GEMMLinear):
+                if isinstance(_qkv, _FP8_GEMM_LINEAR):
                     self._fuse_input_norm_quant = True
                     self._fuse_input_scale_ue8m0 = _qkv.scale_ue8m0
             elif isinstance(self.self_attn, MlaAttention):
                 _proj = getattr(self.self_attn, "fused_qkv_a_proj", None) or getattr(
                     self.self_attn, "fused_qkv_proj", None
                 )
-                if isinstance(_proj, CudaFp8GEMMLinear):
+                if isinstance(_proj, _FP8_GEMM_LINEAR):
                     self._fuse_input_norm_quant = True
                     self._fuse_input_scale_ue8m0 = _proj.scale_ue8m0
 
@@ -325,7 +349,10 @@ class Glm5MoeDecoderLayer(nn.Module):
         self._fuse_post_norm_quant_moe = (
             _fuse_on
             and fused_add_rmsnorm_fp8_quant_with_bf16_output is not None
-            and isinstance(self.mlp, Glm5MoeLayer)
+            and (
+                isinstance(self.mlp, Glm5MoeLayer)
+                or (is_ppu() and isinstance(self.mlp, GenericMoeLayer))
+            )
             and self.mlp.shared_expert is not None
             and self.mlp.shared_expert.accepts_fp8_input
         )

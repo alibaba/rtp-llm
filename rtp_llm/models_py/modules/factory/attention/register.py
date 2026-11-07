@@ -64,6 +64,25 @@ def _register_impls(
                 e,
             )
 
+        # Prefill context parallel. Once prefill_cp_config.is_enabled() the
+        # factory filters on support_prefill_cp(), which SparseMlaImpl answers
+        # False -- without this the CP list is empty and prefill has no backend.
+        # Appended after SparseMlaImpl so non-CP prefill still wins on priority.
+        try:
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
+                SparseMlaCpImpl,
+            )
+
+            prefill_mla_imps.append(SparseMlaCpImpl)
+            logging.info(
+                "[ppu attn register] SparseMlaCpImpl registered for prefill CP"
+            )
+        except ImportError as e:
+            logging.warning(
+                "[ppu attn register] prefill CP sparse MLA unavailable: %s",
+                e,
+            )
+
 
 def install() -> None:
     """Record the registration hook. Must run before the factory is imported."""

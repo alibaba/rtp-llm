@@ -26,6 +26,14 @@ if _DEVICE_TYPE == DeviceType.Cuda:
 else:
     CudaFp8GEMMLinear = None  # type: ignore
 
+if _DEVICE_TYPE == DeviceType.Ppu:
+    from rtp_llm.models_py.kernels.ppu.fp8_quant import silu_mul_fp8_quantize_128
+    from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_deepgemm_linear import (
+        PpuFp8DeepGemmLinear,
+    )
+else:
+    PpuFp8DeepGemmLinear = None  # type: ignore
+
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
     ActivationType.Swiglu: FusedSiluAndMul,
     ActivationType.Gelu: nn.GELU,
@@ -118,11 +126,22 @@ class DenseMLP(nn.Module):
         )
         if self._fuse_silu_quant and self.down_proj.scale_ue8m0:
             self._fuse_silu_quant = self.down_proj.K % 512 == 0
+        self._fuse_ppu_silu_quant = (
+            fuse_kernels_enabled(hw_kernel_config)
+            and self.is_gated
+            and PpuFp8DeepGemmLinear is not None
+            and isinstance(self.down_proj, PpuFp8DeepGemmLinear)
+            and self.down_proj.k % 128 == 0
+        )
 
     @property
     def accepts_fp8_input(self) -> bool:
-        return CudaFp8GEMMLinear is not None and isinstance(
-            self.up_proj, CudaFp8GEMMLinear
+        return (
+            CudaFp8GEMMLinear is not None
+            and isinstance(self.up_proj, CudaFp8GEMMLinear)
+        ) or (
+            PpuFp8DeepGemmLinear is not None
+            and isinstance(self.up_proj, PpuFp8DeepGemmLinear)
         )
 
     def forward(
@@ -142,7 +161,12 @@ class DenseMLP(nn.Module):
             up = self.up_proj(x_fp8, input_scales=x_scale)
         else:
             up = self.up_proj(x)
-        if self._fuse_silu_quant and up.dim() == 2:
+        if getattr(self, "_fuse_ppu_silu_quant", False) and up.dim() == 2:
+            fp8_out, scale_out = silu_mul_fp8_quantize_128(
+                up.contiguous(), gate_first=True,
+            )
+            output = self.down_proj(fp8_out, input_scales=scale_out)
+        elif self._fuse_silu_quant and up.dim() == 2:
             scale_ue8m0 = self.down_proj.scale_ue8m0
             fp8_out, scale_out = (
                 silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd(

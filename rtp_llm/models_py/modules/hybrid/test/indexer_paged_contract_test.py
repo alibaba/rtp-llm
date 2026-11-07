@@ -120,6 +120,7 @@ class IndexerPagedContractTest(unittest.TestCase):
             with (
                 self.subTest(sm10x=sm10x),
                 patch.object(indexer_op, "is_sm10x", return_value=sm10x),
+                patch.object(indexer_op, "is_ppu", return_value=False),
             ):
                 operator = indexer_op.IndexerOp(1, 128, 512, 0, stable_topk=True)
                 self.assertEqual(
@@ -311,6 +312,7 @@ class IndexerPagedContractTest(unittest.TestCase):
         operator.blocksize = 64
         operator.block_size = 128
         operator._paged_topk_backend = "dsv4_persistent"
+        operator._ppu_stable_topk = False
         operator._paged_topk_op = Mock(side_effect=lambda *args: args[2].fill_(0))
         return operator
 

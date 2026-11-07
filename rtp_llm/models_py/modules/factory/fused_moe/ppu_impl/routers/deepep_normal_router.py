@@ -5,6 +5,7 @@ from typing import Any, Optional
 import torch
 
 from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
+from rtp_llm.models_py.kernels.ppu.fp8_quant import fp8_quantize_128
 from rtp_llm.models_py.kernels.ppu.int8_kernel.int8_quant import per_token_quant_int8
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -22,7 +23,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_normal
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
-from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
 
 class PpuDeepepNormalRouterNoQuant(DeepepNormalRouterNoQuant):
@@ -93,7 +93,7 @@ class PpuDeepepNormalRouterW8A8Int8(PpuDeepepNormalRouterNoQuant):
 class PpuDeepepNormalRouterFp8PerBlock(DeepepNormalRouterFp8PerBlock):
     """FP8 per-block router without CUDA SM capability checks.
 
-    Quantizes each local token once with ``trt_fp8_quantize_128`` and dispatches
+    Quantizes each local token once with FP32 group arithmetic and dispatches
     the FP8 data together with its ``(M, K // 128)`` per-group scale.
     """
 
@@ -112,7 +112,7 @@ class PpuDeepepNormalRouterFp8PerBlock(DeepepNormalRouterFp8PerBlock):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if a1.dtype != torch.bfloat16:
             raise ValueError(f"FP8 DeepEP Normal expects BF16 input, got {a1.dtype}")
-        return trt_fp8_quantize_128(a1, False)
+        return fp8_quantize_128(a1)
 
     def prepare(
         self,

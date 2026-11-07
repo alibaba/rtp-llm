@@ -49,9 +49,15 @@ from .flashmla_sparse_impl import (
     _allocate_prefill_fused_kv,
     _as_uint8,
     _GatherWorkspace,
+    _IS_PPU,
     _topk_2d,
 )
 from .glm53_prefill_workspace import Glm53PrefillWorkspace
+
+
+# The PPU FP8 paged kernel corrupts results for large prefill Q batches.
+# Keep its launch shape within the range verified against single-query output.
+_PPU_FP8_MAX_QUERY_TOKENS = 1024
 
 
 def _total_local_ids_are_identity(
@@ -409,7 +415,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.indexer_copy_dst_idx: Optional[torch.Tensor] = None
         self.indexer_src_for_padded: Optional[torch.Tensor] = None
         self._fp8_kernel_metadata_q0: Optional[SparseMlaFp8DecodeParams] = None
+        self._fp8_kernel_metadata_chunks: List[SparseMlaFp8DecodeParams] = []
         self._fp8_kernel_metadata_q0_key = None
+        self._ppu_fresh_bf16_prefill = False
         # Wired up by SparseMlaCpImpl post-construction
         self.kv_cache_write_op = None
         self.write_cache_store_impl = None
@@ -434,20 +442,27 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         # exchange KV, but must not initialize an attention scheduler for zero Q.
         if n_q == 0:
             self._fp8_kernel_metadata_q0 = None
+            self._fp8_kernel_metadata_chunks = []
             self._fp8_kernel_metadata_q0_key = key
             return
 
-        tile_sched_q0, num_splits_q0 = get_mla_metadata(  # type: ignore
-            cache_seqlens=None,
-            num_q_tokens_per_head_k=key[0],
-            topk=self.top_k,
-            num_heads_q=self.num_heads,
-            num_heads_k=1,
-            is_fp8_kvcache=True,
-        )
-        self._fp8_kernel_metadata_q0 = SparseMlaFp8DecodeParams(
-            tile_sched_q0, num_splits_q0
-        )
+        chunk_size = min(n_q, _PPU_FP8_MAX_QUERY_TOKENS) if _IS_PPU else n_q
+        metadata_by_size = {}
+        self._fp8_kernel_metadata_chunks = []
+        for begin in range(0, n_q, chunk_size):
+            rows = min(chunk_size, n_q - begin)
+            if rows not in metadata_by_size:
+                tile_sched, num_splits = get_mla_metadata(  # type: ignore
+                    cache_seqlens=None,
+                    num_q_tokens_per_head_k=rows * int(self.num_heads),
+                    topk=self.top_k,
+                    num_heads_q=self.num_heads,
+                    num_heads_k=1,
+                    is_fp8_kvcache=True,
+                )
+                metadata_by_size[rows] = SparseMlaFp8DecodeParams(tile_sched, num_splits)
+            self._fp8_kernel_metadata_chunks.append(metadata_by_size[rows])
+        self._fp8_kernel_metadata_q0 = self._fp8_kernel_metadata_chunks[0]
         self._fp8_kernel_metadata_q0_key = key
 
     def plan(
@@ -461,6 +476,19 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.attn_inputs = attn_inputs
         self.cp_info = attn_inputs.context_parallel_info
         assert self.cp_info is not None, "context_parallel_info required for CP"
+        self._ppu_fresh_bf16_prefill = False
+        if (
+            _IS_PPU
+            and not self.use_cuda_graph
+            and not self.kv_cache_sharded
+            and getattr(attn_inputs, "is_prefill", False)
+        ):
+            prefixes = getattr(attn_inputs, "prefix_lengths", None)
+            if isinstance(prefixes, torch.Tensor):
+                prefixes = prefixes.detach().cpu().tolist()
+            self._ppu_fresh_bf16_prefill = prefixes is not None and all(
+                int(length) == 0 for length in prefixes
+            )
 
         chunk_lengths = self.cp_info.prefill_cp_chunk_lengths
         if isinstance(chunk_lengths, torch.Tensor):
@@ -812,7 +840,12 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             q0 = q if q.is_contiguous() else q.contiguous()
         else:
             q0 = q[self.total_local_ids].contiguous()
-        if self._gather is not None:
+        if self._ppu_fresh_bf16_prefill and restored_ckv.size(0) == self.total_kv_len:
+            # FP8 cache is still written above for PD/decode. Fresh prefill
+            # consumes its BF16 projections, matching sparse BF16 prefill
+            # rather than introducing KV quantization into every layer.
+            out0 = self._attend_fresh_bf16(q0, restored_ckv, restored_k_pe, topk)
+        elif self._gather is not None:
             out0 = self._attend_gather(q0, kv_cache, topk)
         else:
             out0 = self._attend_with_kvcache(q0, kv_cache, topk, layer_id)
@@ -821,6 +854,33 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             return out0
         out = triton_kv_scatter(out0, self.total_local_ids, q.size(0), out=scatter_out)
         return out
+
+    def _attend_fresh_bf16(
+        self,
+        q0: torch.Tensor,
+        compressed_kv: torch.Tensor,
+        k_pe: torch.Tensor,
+        topk: torch.Tensor,
+    ) -> torch.Tensor:
+        """Attend to restored fresh KV, preserving request boundaries and -1."""
+        assert self.cu_kv_seqlens_global is not None
+        assert self.precomputed_req_ids is not None
+        kv = torch.cat((compressed_kv, k_pe), dim=-1).unsqueeze(1)
+        offsets = self.cu_kv_seqlens_global[self.precomputed_req_ids]
+        topk_2d = _topk_2d(topk)
+        indices = torch.where(
+            topk_2d >= 0, topk_2d + offsets.unsqueeze(1), -1
+        ).unsqueeze(1)
+        output = q0.new_empty((q0.size(0), q0.size(1), self.kv_lora_rank))
+        # Keep every PPU sparse-attention launch within the validated bound,
+        # including this BF16 route. Query and indices must advance together.
+        for begin in range(0, q0.size(0), _PPU_FP8_MAX_QUERY_TOKENS):
+            end = min(begin + _PPU_FP8_MAX_QUERY_TOKENS, q0.size(0))
+            chunk, _, _ = flash_mla_sparse_fwd(
+                q0[begin:end], kv, indices[begin:end], self.scale, d_v=self.kv_lora_rank
+            )
+            output[begin:end].copy_(chunk)
+        return output
 
     def _allocate_fused_kv(self) -> torch.Tensor:
         """Allocate the layer-local BF16 gather destination after Indexer."""
@@ -928,6 +988,25 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if kv_cache_flat.ndim == 3:
             kv_cache_flat = kv_cache_flat.unsqueeze(-2)
         global_topk = self._convert_topk_indices_to_global(topk).squeeze(1).unsqueeze(0)
+        if _IS_PPU and q0.size(0) > _PPU_FP8_MAX_QUERY_TOKENS:
+            output = q0.new_empty((q0.size(0), q0.size(1), self.kv_lora_rank))
+            for index, begin in enumerate(range(0, q0.size(0), _PPU_FP8_MAX_QUERY_TOKENS)):
+                end = min(begin + _PPU_FP8_MAX_QUERY_TOKENS, q0.size(0))
+                meta = self._fp8_kernel_metadata_chunks[index]
+                chunk_out, _ = flash_mla_with_kvcache(
+                    q=q0[begin:end].unsqueeze(0),
+                    k_cache=kv_cache_flat,
+                    block_table=self.block_table,
+                    head_dim_v=self.kv_lora_rank,
+                    cache_seqlens=None,
+                    tile_scheduler_metadata=meta.tile_scheduler_metadata,
+                    num_splits=meta.num_splits,
+                    is_fp8_kvcache=True,
+                    indices=global_topk[:, begin:end],
+                    softmax_scale=self.scale,
+                )
+                output[begin:end].copy_(chunk_out.squeeze(0))
+            return output
         meta = self._fp8_kernel_metadata_q0
         attn_out, _ = flash_mla_with_kvcache(
             q=q0.unsqueeze(0),
