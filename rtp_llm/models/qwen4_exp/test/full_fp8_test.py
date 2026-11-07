@@ -38,6 +38,42 @@ def quantized(value):
 
 
 class FullFp8StorageTest(unittest.TestCase):
+    def test_small_parameters_keep_source_values_without_fp8_copies(self):
+        tensors = {
+            W.linear_attn_alog: torch.linspace(-2, 3, 48).bfloat16(),
+            W.linear_attn_dt_b: torch.linspace(-3, 2, 48).bfloat16(),
+            W.linear_attn_conv1d_w: torch.linspace(-1, 1, 128 * 4)
+            .reshape(128, 1, 4)
+            .bfloat16(),
+            W.qwen4_hc_attn_norm: torch.linspace(-1, 1, 128).bfloat16(),
+            W.shared_expert_gate: torch.linspace(-1, 1, 2560)
+            .reshape(1, 2560)
+            .bfloat16(),
+        }
+
+        class Source(_Source):
+            def load_tensor(self, name, data_type=torch.float16):
+                return [tensors[name].to(data_type)]
+
+        config = SimpleNamespace(
+            tp_size=1,
+            dp_size=1,
+            ep_size=1,
+            merge_lora=False,
+            compute_dtype=torch.bfloat16,
+            exported_device=SimpleNamespace(
+                maybe_rewrite_weight_by_key=lambda key, value, **kw: value
+            ),
+            use_swizzleA=False,
+        )
+        for name, original in tensors.items():
+            with self.subTest(name=name):
+                source = AtomicWeight(name, [CkptWeightInfo(name)])
+                loaded = Fp8StorageWeight(source).load(Source(), None, "cpu", config)
+                self.assertEqual(set(loaded), {name})
+                self.assertEqual(loaded[name].dtype, original.dtype)
+                torch.testing.assert_close(loaded[name], original, rtol=0, atol=0)
+
     def test_tied_fp8_embeddings_are_rejected_before_weight_descriptors(self):
         from rtp_llm.config.qwen4_exp_config import validate_qwen4_runtime
 
@@ -52,8 +88,8 @@ class FullFp8StorageTest(unittest.TestCase):
             validate_qwen4_runtime(config, SimpleNamespace())
 
     def test_recipe_rejects_expert_parallelism_beyond_attention_tp_before_loading(self):
-        from rtp_llm.config.qwen4_exp_config import validate_qwen4_runtime
         from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
+        from rtp_llm.config.qwen4_exp_config import validate_qwen4_runtime
 
         config = SimpleNamespace(
             enable_qwen4_qsa=True,

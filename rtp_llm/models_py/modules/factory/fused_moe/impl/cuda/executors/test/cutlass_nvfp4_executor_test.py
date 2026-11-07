@@ -83,7 +83,7 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
                     CudaImpl().py_env_configs.moe_config.fp4_moe_op, "marlin"
                 )
 
-    def test_prefill_runner_uses_optional_tensor_for_swizzled_input_scale(self):
+    def test_prefill_runner_uses_bool_for_swizzled_input_scale(self):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_nvfp4_prefill import (
             Sm120PrefillMoE,
         )
@@ -121,10 +121,8 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
                 activation,
                 workspace,
             ):
-                if swizzled_input_sf is not None and not isinstance(
-                    swizzled_input_sf, torch.Tensor
-                ):
-                    raise TypeError("swizzled_input_sf must be an optional tensor")
+                if type(swizzled_input_sf) is not bool:
+                    raise TypeError("swizzled_input_sf must be bool")
                 output.fill_(7)
 
         adapter = Sm120PrefillMoE.__new__(Sm120PrefillMoE)

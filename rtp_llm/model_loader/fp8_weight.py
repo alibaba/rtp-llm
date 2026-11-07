@@ -46,7 +46,14 @@ class Fp8StorageWeight(CompositeWeight, QuantWeight):
             for name, value in items.items():
                 if isinstance(value, dict):
                     quantize(value)
-                elif value.dtype in (torch.float16, torch.bfloat16, torch.float32):
+                elif (
+                    value.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                    and value.ndim == 2
+                    and (
+                        name in (W.embedding, W.lm_head)
+                        or all(size % 16 == 0 for size in value.shape)
+                    )
+                ):
                     values = value.float()
                     scale = values.abs().amax().clamp_min(1e-12).reshape(1) / 448.0
                     result[name] = (
