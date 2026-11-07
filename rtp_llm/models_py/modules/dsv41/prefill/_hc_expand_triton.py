@@ -9,7 +9,7 @@ import triton.language as tl
 def _expand_hc_kernel(
     source,
     output,
-    tokens: tl.constexpr,
+    tokens,
     width: tl.constexpr,
 ):
     rows = (tl.program_id(0) * 4 + tl.arange(0, 4)).to(tl.int64)

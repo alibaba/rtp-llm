@@ -28,6 +28,25 @@ class TestHCExpand(unittest.TestCase):
                     )
                 )
 
+    def test_no_recompile_across_token_counts(self):
+        # tokens is a runtime argument: one compiled variant per int
+        # specialization class (==1, %16==0, generic), not one per value.
+        from rtp_llm.models_py.modules.dsv41.prefill import _hc_expand_triton
+
+        kernel = _hc_expand_triton._expand_hc_kernel
+
+        def cache_size():
+            return sum(len(dc[0]) for dc in kernel.device_caches.values())
+
+        with torch.inference_mode():
+            for tokens in (1, 16, 17):  # cover all int specialization classes
+                expand_hc(torch.zeros((tokens, 5120), device="cuda", dtype=torch.bfloat16))
+            size_after_warmup = cache_size()
+            self.assertGreater(size_after_warmup, 0)
+            for tokens in (3, 32, 48, 1001, 126981):
+                expand_hc(torch.zeros((tokens, 5120), device="cuda", dtype=torch.bfloat16))
+            self.assertEqual(size_after_warmup, cache_size())
+
 
 if __name__ == "__main__":
     unittest.main()
