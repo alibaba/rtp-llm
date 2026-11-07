@@ -114,6 +114,14 @@ def launch_config(args):
         raise ValueError(
             "MEGA_MOE_INPUT_PACKER_IMPL must be legacy|optimized|fast_finite"
         )
+    # Full shared weights avoid two weight AllGathers per MoE forward. Keep
+    # sharding available when resident GPU memory is the limiting resource.
+    shared_weight_shard = (
+        os.environ.get("KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD", "0").strip()
+        if args.role == "PREFILL" else "0"
+    )
+    if shared_weight_shard not in ("0", "1"):
+        raise ValueError("KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD must be 0 or 1")
     environment = {
         "MODEL_TYPE": model_type,
         "CHECKPOINT_PATH": str(checkpoint),
@@ -131,7 +139,7 @@ def launch_config(args):
         "DG_JIT_PRINT_LOAD_TIME": "1",
         "FLASHINFER_CUDA_ARCH_LIST": "10.3",
         "MEGA_MOE_INPUT_PACKER": "fused",
-        "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "1" if args.role == "PREFILL" else "0",
+        "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": shared_weight_shard,
         "USE_ALL_GATHER": "0",
         "USE_DEEPEP_INTERNODE": "0",
         "USE_DEEPEP_LOW_LATENCY": "0",

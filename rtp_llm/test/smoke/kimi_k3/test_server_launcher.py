@@ -60,7 +60,7 @@ class CheckpointSourceTest(unittest.TestCase):
                     self.assertNotIn("RTP_LLM_FP8_GEMM_RS", env)
                     self.assertEqual(
                         env["KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD"],
-                        "1" if role == "PREFILL" else "0",
+                        "0",
                     )
                     grpc = json.loads(env["GRPC_CONFIG_JSON"])
                     self.assertEqual(grpc["max_server_pollers"], 4)
@@ -68,6 +68,31 @@ class CheckpointSourceTest(unittest.TestCase):
                         grpc["server_config"]["grpc.max_receive_message_length"],
                         1073741824,
                     )
+
+    def test_prefill_shared_weight_sharding_can_be_selected_explicitly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target, draft = Path(tmp) / "target", Path(tmp) / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text('{"num_hidden_layers":93}')
+            args = SimpleNamespace(
+                checkpoint=target, draft_checkpoint=draft,
+                start_port=28000, peer_port=29000, peer_ip="127.0.0.1",
+                role="PREFILL", server=sys.executable, fp8_gemm=True,
+                orthogonal_smoke=True,
+            )
+            for value in ("0", "1"):
+                with self.subTest(value=value), patch.dict(
+                    launch.os.environ,
+                    {"KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": value}, clear=True,
+                ):
+                    env, _ = launch.launch_config(args)
+                    self.assertEqual(env["KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD"], value)
+            with patch.dict(
+                launch.os.environ,
+                {"KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "invalid"}, clear=True,
+            ), self.assertRaisesRegex(ValueError, "must be 0 or 1"):
+                launch.launch_config(args)
 
     def test_default_cpu_tp_socket_location_is_unchanged(self):
         environment = launch.cpu_tp_socket_environment("/data/private/run")
