@@ -1,0 +1,17 @@
+{
+  "case_id": "cache_store_mha_int8_1to1_1k",
+  "layout": "mha",
+  "dtype": "int8",
+  "source_tp": 1,
+  "target_tp": 1,
+  "tokens": 1024,
+  "block_tokens": 64,
+  "seed": 41983,
+  "layers": 2,
+  "heads": 8,
+  "kv_heads": 8,
+  "head_dim": 64,
+  "pool_blocks": 19,
+  "deadline_ms": 30000,
+  "process_timeout_seconds": 90
+}
