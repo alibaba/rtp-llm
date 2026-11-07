@@ -24,7 +24,6 @@ def _sum32_descending(x, ROWS: tl.constexpr):
 @triton.jit
 def _rmsnorm_quant(
     x_ptr,
-    residual_ptr,
     weight_ptr,
     out_ptr,
     q_ptr,
@@ -32,9 +31,7 @@ def _rmsnorm_quant(
     H: tl.constexpr,
     EPS: tl.constexpr,
     X_STRIDE: tl.constexpr,
-    R_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
-    ADD_RESIDUAL: tl.constexpr,
     QUANTIZE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -44,14 +41,6 @@ def _rmsnorm_quant(
     vectors = tl.load(x_ptr + row * X_STRIDE + cols_vec, cols_vec < H, other=0).to(
         tl.float32
     )
-    if ADD_RESIDUAL:
-        residual = tl.load(
-            residual_ptr + row * R_STRIDE + cols_vec, cols_vec < H, other=0
-        ).to(tl.float32)
-        vectors = vectors + residual
-        # The normalization consumes the FP32 sum; only the residual store
-        # rounds to BF16, matching fused_add_rmsnorm.
-        tl.store(residual_ptr + row * R_STRIDE + cols_vec, vectors, cols_vec < H)
     # FlashInfer accumulates eight adjacent values per lane before its warp
     # reduction. Preserve that association instead of reducing x*x directly.
     lane_sum = tl.full((BLOCK // 8,), 0, tl.float32)
@@ -109,7 +98,7 @@ def _run(
         x.dtype == weight.dtype == torch.bfloat16
         and x.stride(-1) == 1
         and hidden in (512, 2048)
-        and (residual is None or residual.stride(-1) == 1)
+        and residual is None
     )
     if not eligible:
         import flashinfer
@@ -135,7 +124,6 @@ def _run(
     if rows:
         _rmsnorm_quant[(rows,)](
             x,
-            residual if residual is not None else x,
             weight,
             out,
             q,
@@ -143,9 +131,7 @@ def _run(
             hidden,
             eps,
             x.stride(0),
-            residual.stride(0) if residual is not None else 0,
             triton.next_power_of_2(hidden),
-            residual is not None,
             quantize,
             num_warps=4 if hidden <= 2048 else 8,
             enable_fp_fusion=False,

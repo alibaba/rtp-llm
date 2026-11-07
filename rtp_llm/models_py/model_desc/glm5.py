@@ -131,9 +131,6 @@ class Glm5MoeLayer(GenericMoeLayer):
         return FusedMoeFactory().create_fused_moe(adapter, weights)
 
     def _gate_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        weight_nt = getattr(self, "_ppu_gate_weight_nt", None)
-        if weight_nt is not None:
-            return torch.mm(hidden_states, weight_nt.t(), out_dtype=torch.float32)
         if (
             self.gate_chunk_rows > 0
             and hidden_states.shape[0] > 0
@@ -156,7 +153,6 @@ class Glm5MoeLayer(GenericMoeLayer):
         clone.top_k = self.top_k
         clone.gate_chunk_rows = self.gate_chunk_rows
         clone.gate = self.gate
-        clone._ppu_gate_weight_nt = getattr(self, "_ppu_gate_weight_nt", None)
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
         if self.fused_moe.supports_cuda_graph_clone:
@@ -180,10 +176,6 @@ class Glm5MoeLayer(GenericMoeLayer):
         clone.group_topk = self.group_topk
         clone.use_ep_shared_allreduce = self.use_ep_shared_allreduce
         clone.use_unified_tp_allreduce = self.use_unified_tp_allreduce
-        clone.shared_expert_overlap = self.shared_expert_overlap
-        clone._ovl_stream = self._ovl_stream
-        clone._ovl_fork = self._ovl_fork
-        clone._ovl_join = self._ovl_join
         return clone
 
     def forward_prepacked(

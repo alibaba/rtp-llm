@@ -51,7 +51,6 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla imp
 )
 from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
-from rtp_llm.models_py.utils.side_stream import is_capturing
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
@@ -230,11 +229,6 @@ class SparseMlaFp8Op(SparseMlaOp):
         self._sched_meta = None
         self._sched_meta_key = None
         self._sched_meta_pool = {}
-        # Per-row-count ``topk_length`` buffers for the sparse decode kernel.
-        # Pooled so every CUDA graph batch bucket keeps a fixed address and a
-        # captured graph is never left reading a reallocated buffer.
-        self._topk_length_pool: Dict[int, torch.Tensor] = {}
-        self._topk_length: Optional[torch.Tensor] = None
         self._deterministic_decode = os.environ.get("DETERMINISTIC_GEMM") == "1"
         self._decode_phase = False
         self._chunk_sched_meta = {}
@@ -253,9 +247,7 @@ class SparseMlaFp8Op(SparseMlaOp):
             # PPU's fwd_kvcache_mla rejects a None tile scheduler, unlike CUDA
             # where the kernel schedules itself. Keep one live object per key:
             # reuse makes graph capture/replay see a stable address instead of a
-            # freed one. The lazily built schedule also freezes the topk_length
-            # values of the call that built it, which _refresh_topk_length pins
-            # to the full index width.
+            # freed one.
             meta = self._sched_meta_pool.get(key)
             if meta is None:
                 meta, _ = get_mla_metadata(
@@ -300,39 +292,6 @@ class SparseMlaFp8Op(SparseMlaOp):
         self._sched_meta.tile_scheduler_metadata = None
         self._sched_meta.num_splits = None
 
-    def _refresh_topk_length(self) -> None:
-        """Fill the graph-stable ``topk_length`` buffer for the decode kernel.
-
-        ``dsv4_persistent_topk`` writes the valid indices leftmost and ``-1``
-        past ``min(top_k, expanded_seq_lens[r])``, which is exactly the count
-        FlashMLA wants: passing it lets the kernel skip the padded tail instead
-        of masking it.
-
-        Writes are in place so a captured graph keeps reading one address. The
-        call that lazily builds the tile schedule -- and any call under capture
-        -- must see the full index width instead: FlashMLA freezes that schedule
-        keyed on these values, so one built for short warmup lengths over-runs on
-        a longer replay. Full width reproduces the ``topk_length is None``
-        schedule, a valid superset for any real length, and replays still read
-        the real per-step values written here.
-        """
-        lengths = getattr(self.mla_params, "expanded_seq_lens", None)
-        if not isinstance(lengths, torch.Tensor) or lengths.numel() == 0:
-            self._topk_length = None
-            return
-        rows = int(lengths.numel())
-        buf = self._topk_length_pool.get(rows)
-        if buf is None:
-            buf = torch.empty(rows, dtype=torch.int32, device=lengths.device)
-            self._topk_length_pool[rows] = buf
-        self._topk_length = buf
-        builds_schedule = not bool(getattr(self._sched_meta, "have_initialized", True))
-        if builds_schedule or is_capturing():
-            buf.fill_(self.top_k)
-        else:
-            buf.copy_(lengths)
-            buf.clamp_(max=self.top_k)
-
     def plan(
         self,
         mla_params: rtp_llm_ops.FlashInferMlaAttnParams,
@@ -349,7 +308,6 @@ class SparseMlaFp8Op(SparseMlaOp):
         # get_mla_metadata returns an empty FlashMLASchedMeta; the kernel fills
         # it on first call, then reuses it for the rest of the forward.
         self._reset_sched_meta(int(mla_params.batch_indice_h.shape[0]) * self.num_heads)
-        self._refresh_topk_length()
 
         # Replicated caches use paged attention directly. Sharded CP caches
         # override this choice when their layout requires gathering.
@@ -478,13 +436,6 @@ class SparseMlaFp8Op(SparseMlaOp):
             global_indices = global_indices.squeeze(1).unsqueeze(0)
         q_axis = 1 if per_request else 0
 
-        # ``topk_length`` is per batch entry, so it only describes the
-        # per-request layout: the flattened form folds T query rows into one
-        # entry and has no single valid count to give.
-        topk_length = self._topk_length
-        if not per_request or topk_length is None or topk_length.numel() != rows:
-            topk_length = None
-
         if rows == 0:
             return q.new_empty((0, q.shape[1], self.kv_lora_rank))
 
@@ -511,14 +462,13 @@ class SparseMlaFp8Op(SparseMlaOp):
                 k_cache=kv_cache,
                 # Sparse indices already encode page * block_size + offset, so
                 # the block table is redundant here (and sglang passes None).
-                block_table=None,
+                block_table=None if _IS_PPU else self.block_table,
                 head_dim_v=self.kv_lora_rank,
                 cache_seqlens=None,
                 tile_scheduler_metadata=meta,
                 num_splits=None,
                 is_fp8_kvcache=True,
                 indices=indices_arg,
-                topk_length=topk_length[begin:end] if topk_length is not None else None,
                 softmax_scale=self.scale,
             )
             outputs.append(output.squeeze(q_axis))

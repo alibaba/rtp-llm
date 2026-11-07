@@ -147,7 +147,6 @@ def get_mla_impl(
         use_fast_path = (
             attn_inputs.is_prefill
             and not use_decode_mla
-            and get_device_type() != DeviceType.Ppu
             and attn_inputs.cu_kv_seqlens_device.max().item()
             <= attn_configs.indexer_topk
             and not (
