@@ -382,6 +382,7 @@ def serve(config, role):
         linear_pool_blocks=host.get("linear_pool_blocks"),
         block_tree_transfer_worker_count=host.get("block_tree_transfer_worker_count"),
         last_n_checkpoints=config.get("last_n_checkpoints"),
+        last_n_page_tokens=config.get("last_n_page_tokens"),
         last_n_calibration=config.get('last_n_calibration', False),
         last_n_tier_probe=config.get('last_n_tier_probe'),
         disk_cache_paths=(",".join(str(directory / "disk-cache" / f"rank-{rank}") for rank in range(8))
@@ -609,6 +610,7 @@ def status(config, role):
                 8 if role == "prefill" else 8 // decode_dp_size(config),
                 long_case=config["k31_smoke_stage"] == "long",
                 last_n_checkpoints=config.get("last_n_checkpoints"),
+                last_n_page_tokens=config.get("last_n_page_tokens"),
                 calibration=config.get('last_n_calibration', False),
             )
             result["fastsafetensors_rank_log_lines"] = fastsafetensors_proof(directory / "logs")

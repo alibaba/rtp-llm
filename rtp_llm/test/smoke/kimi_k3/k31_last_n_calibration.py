@@ -20,7 +20,7 @@ class CalibrationRunner(K31FullRunner):
         tag = f'{self.args.namespace}-tier-0'
         prompt = self.cache_seed_prompt(tag, 'MEM-0')
         seed = self._orthogonal_answer('tier-memory-seed-0', prompt, 'MEM-0', 'miss',
-            preparation_only=True, expected_input_len=12416, expected_reuse_len=0)
+            preparation_only=True, expected_input_len=self.cache_probe_tokens, expected_reuse_len=0)
         self._memory_candidates = [(tag, seed, 'MEM-0')]
         for name in ('tier-memory-seed-1', 'tier-witness-seed'):
             cold = self._precision_reference(replace(seed, name=name))
@@ -31,7 +31,8 @@ class CalibrationRunner(K31FullRunner):
         self._required_stage(probe.name, [probe])
         a, b = self.linear_c7_cases()
         self._required_stage('prefix_A_seed', [a])
-        self._required_stage('prefix_B_partial', [replace(b, reuse='partial', expected_reuse_len=7168)])
+        self._required_stage('prefix_B_partial', [replace(b, reuse='partial',
+                                                        expected_reuse_len=7*self.reuse_unit_tokens)])
 
     def save(self, passed, error=None):
         complete = len(self.records) == 6 and self.submitted_requests == 6
@@ -69,12 +70,15 @@ def audit_calibration(result, prefill, decode, output, *, prefill_chunk_tokens=6
             or any(not stage.get('passed') or stage.get('skipped') for stage in result['stages'])):
         raise ValueError('unbounded calibration is incomplete or lacks native MTP')
     g = result['geometry']
-    if any(g.get(key) != value for key,value in dict(runtime_verified=True, runtime_layers=93,
-            page_size=128, kernel_page_size=128, source_shards=8, checkpoint_span=1024,
-            reuse_cache_tail_blocks=2147483647, last_n_calibration=True).items()):
+    page = g.get('page_size')
+    if page not in (64, 128) or any(g.get(key) != value for key,value in dict(
+            runtime_verified=True, runtime_layers=93, kernel_page_size=page, source_shards=8,
+            checkpoint_span=page * 8, reuse_cache_tail_blocks=2147483647,
+            last_n_calibration=True).items()):
         raise ValueError('calibration must use the original unbounded path at the candidate CP geometry')
+    span = g['checkpoint_span']
     for row in rows.values():
-        errors = result_check.independent_answer_check(row) + result_check._cache_errors(row, 128)
+        errors = result_check.independent_answer_check(row) + result_check._cache_errors(row, page)
         if errors:
             raise ValueError('; '.join(errors))
     raw = {name: dict(result=row, passed=True, transport='http') for name,row in rows.items()}
@@ -87,11 +91,11 @@ def audit_calibration(result, prefill, decode, output, *, prefill_chunk_tokens=6
         group_evidence(prefill, forward, 8)
         if any(length > prefill_chunk_tokens for length in forward['context_lengths']):
             raise ValueError('calibration exceeded the configured Prefill chunk capacity')
-    for name, checkpoint in (('tier-device-probe-0', 10240), ('prefix-B-partial', 7168)):
+    for name, checkpoint in (('tier-device-probe-0', 10 * span), ('prefix-B-partial', 7 * span)):
         rid = ids[name][0]
         calls = [row for row in forwards if rid in row['request_ids']]
         if not calls or calls[0]['reuse_lengths'] != [checkpoint]:
-            raise ValueError(f'{name}: unbounded control did not actually resume at C{checkpoint//1024}')
+            raise ValueError(f'{name}: unbounded control did not actually resume at C{checkpoint//span}')
         # NormalEngine schedules and owns the cache tree on TP0. Other ranks
         # execute the broadcast model inputs; group_evidence checks all eight.
         if not any(row.get('event') == 'linear_cache_matched' and row.get('request_id') == rid

@@ -58,6 +58,19 @@ class K31LaunchContract(unittest.TestCase):
             self.assertEqual(options['--reuse_cache_tail_blocks'], '2147483647')
             self.assertEqual(options['--linear_pool_blocks'], '256')
 
+    def test_b64_last_n_uses_matching_pages_on_both_roles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp), 93)
+            args.last_n_checkpoints, args.last_n_page_tokens = 5, 64
+            for role in ('PREFILL', 'DECODE'):
+                args.role = role
+                with self.subTest(role=role), patch.object(launch.socket, 'socket') as route:
+                    route.return_value.getsockname.return_value = ('127.0.0.1', 0)
+                    _, argv = launch.launch_config(args)
+                options = dict(zip(argv[1::2], argv[2::2]))
+                self.assertEqual(options['--seq_size_per_block'], '64')
+                self.assertEqual(options['--kernel_seq_size_per_block'], '64')
+
     def test_last_one_through_five_uses_cp_pages_and_changes_only_prefill_retention(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self.fixture(Path(tmp), 93)

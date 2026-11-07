@@ -13,6 +13,7 @@ from pathlib import Path
 
 MODULE = 'rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.dsa_kv_chunk_execution'
 FP8_PAGE_CAPACITY = 320
+FP8_64K_KV_TOKEN_CAPACITY = 512 * 1024
 BF16_PAGE_CAPACITY = 512
 
 
@@ -37,10 +38,15 @@ def install(module):
         limit = None
         if (name == 'sfa' and params.is_prefill and not params.is_cuda_graph
                 and max(params.kv_lens_host, default=0) >= 650000):
+            rows = params.query_positions.numel()
             if not params.workspace_owner.sfa_use_fp8:
                 limit = BF16_PAGE_CAPACITY
-            elif 1024 <= params.query_positions.numel() <= 1088:
+            elif 1024 <= rows <= 1088:
                 limit = FP8_PAGE_CAPACITY
+            elif rows == 8192:
+                # A full 64K scheduler chunk at CP8. Express the limit in
+                # tokens so Last-5's 128-token pages still give two KV chunks.
+                limit = FP8_64K_KV_TOKEN_CAPACITY // params.page_size
         token = page_capacity.set(limit)
         try:
             original_init(self, params, name)

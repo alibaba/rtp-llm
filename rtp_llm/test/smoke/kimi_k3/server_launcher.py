@@ -324,12 +324,15 @@ def launch_config(args):
         "shutdown_timeout": 120,
     }
     last_n = getattr(args, "last_n_checkpoints", None)
+    last_n_page_tokens = getattr(args, "last_n_page_tokens", None)
+    if last_n_page_tokens is not None and (last_n is None or last_n_page_tokens not in (64, 128)):
+        raise ValueError("Last-N page size requires an explicit Last-N smoke and 64 or 128 tokens")
     if last_n is not None:
         if (type(last_n) is not int or not 1 <= last_n <= 5
                 or model_type != "kimi_k31" or not orthogonal_smoke
                 or tp_size != 8 or dp_size != 1 or source_tp_size != 8):
             raise ValueError("K3.1 Last-N smoke requires N=1..5, TP8/EP8 and CP8")
-        options["seq_size_per_block"] = 128
+        options["seq_size_per_block"] = options["kernel_seq_size_per_block"] = last_n_page_tokens or 128
         options["linear_pool_blocks"] = (getattr(args, 'linear_pool_blocks', None)
                                          or (96 if args.role == 'PREFILL' else 512))
         tier = getattr(args, 'last_n_tier_probe', None)

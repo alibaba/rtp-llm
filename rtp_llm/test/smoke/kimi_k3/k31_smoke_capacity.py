@@ -51,14 +51,18 @@ def fastsafetensors_proof(logs):
     return evidence
 
 
-def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=None, calibration=False):
+def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=None,
+                   last_n_page_tokens=None, calibration=False):
     if type(calibration) is not bool or calibration and last_n_checkpoints != 5:
         raise ValueError('calibration requires the explicit Last-5 CP geometry')
     if last_n_checkpoints is not None and (
         type(last_n_checkpoints) is not int or not 1 <= last_n_checkpoints <= 5 or local_tp != 8
     ):
         raise ValueError("Last-N geometry requires N=1..5 and eight local shards")
-    page_tokens = 128 if last_n_checkpoints is not None else 1024
+    if last_n_page_tokens is not None and (last_n_checkpoints is None or last_n_page_tokens not in (64, 128)):
+        raise ValueError("Last-N page size requires an explicit Last-N smoke and 64 or 128 tokens")
+    kernel_tokens = last_n_page_tokens or 128
+    page_tokens = kernel_tokens if last_n_checkpoints is not None else 1024
     checkpoint_tokens = page_tokens * local_tp
     text = engine_log.read_text(errors="replace")
     cp_rows = re.findall(
@@ -101,8 +105,8 @@ def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=
                 or set(tags) != {"full", "indexer_kv", "linear"}
                 or 93 not in groups[tags.index("full")]):
             raise ValueError(f"{role} rank {rank}: target/draft full cache group is missing")
-        if "kernel_seq_size_per_block=128" not in body:
-            raise ValueError(f"{role} rank {rank}: expected 128-token kernel pages")
+        if f"kernel_seq_size_per_block={kernel_tokens}\n" not in body:
+            raise ValueError(f"{role} rank {rank}: expected {kernel_tokens}-token kernel pages")
         if last_n_checkpoints is not None:
             expected_n = last_n_checkpoints if role == "prefill" and not calibration else 2147483647
             if (field(body, "reuse_cache_tail_blocks") != str(expected_n)
@@ -139,8 +143,9 @@ def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=
         if last_n_checkpoints is not None:
             # The 304-slot profile includes an actual cold 1M request and a
             # no-reuse 10I+128 precision reference. Reserve the next page too.
-            full_minimum = 16 if calibration else 1026
-            linear_minimum = (128 if calibration else 85) if role == 'prefill' else 3
+            full_minimum = 16 if calibration else ceil(LONG_INPUT_TOKENS / checkpoint_tokens) + 2
+            cold_reference_minimum = ceil((10 * checkpoint_tokens + 128) / page_tokens) + 4
+            linear_minimum = (128 if calibration else cold_reference_minimum) if role == 'prefill' else 3
             if (min(usable["full"], usable["indexer_kv"]) < full_minimum
                     or usable["linear"] < linear_minimum):
                 raise ValueError(f"{role} rank {rank}: Last-N smoke capacity is insufficient: {usable}")
@@ -167,7 +172,7 @@ def cache_geometry(engine_log, role, local_tp, *, long_case, last_n_checkpoints=
         capacity[rank] = usable
 
     return dict(
-        runtime_verified=True, runtime_layers=93, page_size=page_tokens, kernel_page_size=128,
+        runtime_verified=True, runtime_layers=93, page_size=page_tokens, kernel_page_size=kernel_tokens,
         source_shards=8, local_shards=local_tp, checkpoint_span=checkpoint_tokens, cache_key_stride=checkpoint_tokens,
         usable_pages=capacity, draft_layer_shared_full_group=True, role=role,
         **({"reuse_cache_tail_blocks": last_n_checkpoints if role == "prefill" and not calibration else 2147483647,

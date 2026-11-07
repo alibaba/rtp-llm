@@ -217,7 +217,8 @@ class K31FullRunner(legacy.Runner):
         tier = self.records[-1].get('prefill_cache_tiers') or {}
         if tier.get('disk', 0) <= 0:
             raise legacy.SmokeFailure('C10 SSD probe did not actually read back from disk')
-        self.stages[-1].update(expected_linear_tier='DISK', expected_linear_checkpoint_tokens=10240)
+        self.stages[-1].update(expected_linear_tier='DISK',
+                               expected_linear_checkpoint_tokens=10*self.reuse_unit_tokens)
 
     def precision_case(self, case):
         return self.scheduler_chunk_profile() and case.name in {
@@ -586,11 +587,11 @@ def parse_args(argv=None, *, calibration=False):
     if g['page_size'] % g['kernel_page_size']:
         p.error('physical pages must contain complete kernel pages')
     if args.last_n_checkpoints is not None and (
-            g['page_size'] != 128 or g['kernel_page_size'] != 128
-            or g['checkpoint_span'] != 1024
+            g['page_size'] not in (64, 128) or g['kernel_page_size'] != g['page_size']
+            or g['checkpoint_span'] != g['page_size'] * 8 or g['cache_key_stride'] != g['checkpoint_span']
             or g.get('reuse_cache_tail_blocks') != (2147483647 if calibration else 5)
             or g.get('last_n_calibration', False) != calibration):
-        p.error('Last-5 requires verified physical/kernel B128, CP8 checkpoint1024 and the requested runtime tail policy')
+        p.error('Last-5 requires matching physical/kernel B64 or B128, CP8 and the requested runtime tail policy')
     if args.output.exists() or (args.output.parent/'requests').exists():
         p.error('existing evidence cannot be overwritten')
     args.output.parent.mkdir(parents=True, exist_ok=True)

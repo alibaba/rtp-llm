@@ -22,17 +22,18 @@ class ChunkFixtureTest(unittest.TestCase):
         module=SimpleNamespace(plan_dsa_kv_chunks=planner.plan_dsa_kv_chunks)
         class Execution:
             def __init__(self,params,name):
-                self.plan=module.plan_dsa_kv_chunks(params.kv_lens_host,page_tokens=1024,
+                self.plan=module.plan_dsa_kv_chunks(params.kv_lens_host,page_tokens=params.page_size,
                     budget_bytes=params.workspace_owner.budgets[name],fixed_bytes=4096,
                     temporary_bytes=lambda block:block.tokens*2)
                 if params.fail:raise ValueError('descriptor failed')
         module.DsaKVExecution=Execution
         return module
 
-    def params(self,rows=1026,*,prefill=True,fp8=True,length=655363,fail=False):
+    def params(self,rows=1026,*,prefill=True,fp8=True,length=655363,page_size=1024,fail=False):
         return SimpleNamespace(is_prefill=prefill,is_cuda_graph=False,
             workspace_owner=SimpleNamespace(sfa_use_fp8=fp8,budgets={'sfa':12*1024**3,'indexer':8*1024**3}),
-            query_positions=SimpleNamespace(numel=lambda:rows),kv_lens_host=[length],fail=fail)
+            query_positions=SimpleNamespace(numel=lambda:rows),kv_lens_host=[length],
+            page_size=page_size,fail=fail)
 
     def test_padded_cp_rows_use_real_chunks_with_original_budget(self):
         module=self.module();fixture.install(module)
@@ -45,10 +46,18 @@ class ChunkFixtureTest(unittest.TestCase):
             self.assertEqual(execution.plan.budget_bytes,12*1024**3)
             self.assertEqual(params.workspace_owner.budgets['sfa'],12*1024**3)
 
+    def test_fp8_64k_chunk_uses_token_cap_with_128_token_pages(self):
+        module=self.module();fixture.install(module)
+        params=self.params(rows=8192,length=1048576,page_size=128)
+        execution=module.DsaKVExecution(params,'sfa')
+        self.assertEqual([block.tokens for block in execution.plan.blocks],[524288,524288])
+        self.assertEqual(execution.plan.budget_bytes,12*1024**3)
+        self.assertEqual(params.query_positions.numel(),8192)
+
     def test_other_phases_shapes_and_exception_do_not_inherit_cap(self):
         module=self.module();fixture.install(module);fixture.install(module)
         for params,name in ((self.params(),'indexer'),(self.params(prefill=False),'sfa'),
-                            (self.params(rows=8192),'sfa'),
+                            (self.params(rows=2048),'sfa'),
                             (self.params(length=65536),'sfa')):
             self.assertEqual(len(module.DsaKVExecution(params,name).plan.blocks),1)
         with self.assertRaisesRegex(ValueError,'descriptor failed'):

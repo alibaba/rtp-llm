@@ -180,12 +180,13 @@ def audit(result, prefill, decode, tp_size, *, prefill_full_pages=None, last_n_p
     profile = 'smoke' if last5 else declared_profile
     if last5:
         geometry = result.get('geometry', {})
-        if (tp_size != 8 or result.get('last_n_checkpoints') != 5
+        page = geometry.get('page_size')
+        if (tp_size != 8 or page not in (64, 128) or result.get('last_n_checkpoints') != 5
                 or result.get('scheduler_chunk_profile') is not True
                 or any(geometry.get(key) != expected for key, expected in dict(
-                    page_size=128, kernel_page_size=128, source_shards=8, checkpoint_span=1024,
+                    kernel_page_size=page, source_shards=8, checkpoint_span=8*page,
                     reuse_cache_tail_blocks=5, runtime_layers=93, runtime_verified=True).items())):
-            raise ValueError('Last-5 result lacks verified B128/CP8, TP8 and full93 geometry')
+            raise ValueError('Last-5 result lacks verified B64 or B128, CP8, TP8 and full93 geometry')
     rows = result.get("cases", [])
     plan = result.get("cache_pressure_plan")
     if profile == "smoke" and plan is not None and "requests" in plan:
@@ -336,13 +337,16 @@ def audit_last5(result, prefill, request_ids, precision):
             raise ValueError(f'{name}: Last-5 proof requires one actual native request identity')
         return values
 
-    if (result.get('last_n_c7_fixture') or {}).get('common_tokens') != 7168:
+    geometry = result['geometry']
+    span = geometry['checkpoint_span']
+    c7 = 7 * span
+    if (result.get('last_n_c7_fixture') or {}).get('common_tokens') != c7:
         raise ValueError('C7 negative control does not declare its exact shared token boundary')
     rows = {row['name']: row for row in result['cases']}
     c7_inputs = [rows[name].get('input_tokens') for name in ('prefix-A-seed', 'prefix-B-partial')]
-    if (any(not isinstance(tokens, list) or len(tokens) != 12416 for tokens in c7_inputs)
-            or c7_inputs[0][:7168] != c7_inputs[1][:7168]
-            or c7_inputs[0][7168] == c7_inputs[1][7168]):
+    if (any(not isinstance(tokens, list) or len(tokens) != 12 * span + 128 for tokens in c7_inputs)
+            or c7_inputs[0][:c7] != c7_inputs[1][:c7]
+            or c7_inputs[0][c7] == c7_inputs[1][c7]):
         raise ValueError('C7 negative control lacks actual identical-prefix / divergent-suffix input token IDs')
     for field, tokens in zip(('seed_token_sha256', 'probe_token_sha256'), c7_inputs):
         if hashlib.sha256(json.dumps(tokens).encode()).hexdigest() != result['last_n_c7_fixture'].get(field):
@@ -352,13 +356,16 @@ def audit_last5(result, prefill, request_ids, precision):
     # snapshots still require evidence from every TP rank; cache settlement
     # follows MultiRankTransferAsyncContext's all-worker status merge.
     for rank in (0,):
-        proof['lifecycle'][rank] = audit_k31_last_n.audit_prefill_states(prefill, root_rank=rank)
+        proof['lifecycle'][rank] = audit_k31_last_n.audit_prefill_states(
+            prefill, root_rank=rank, page_tokens=geometry['page_size'], checkpoint_tokens=span)
         events = {0: prefill[rank]}
         proof['tiers'][rank] = {
-            tier: audit_k31_last_n.audit_checkpoint_reuse(events, ids('tier-memory-seed-0'), ids(name), tier)
+            tier: audit_k31_last_n.audit_checkpoint_reuse(
+                events, ids('tier-memory-seed-0'), ids(name), tier, checkpoint_span=span)
             for tier, name in (('DEVICE', 'tier-device-probe-0'),
                                ('HOST', 'tier-mixed-0-memory'), ('DISK', 'tier-memory-probe'))}
-        proof['c7'][rank] = audit_k31_last_n.audit_c7_miss(events, ids('prefix-A-seed'), ids('prefix-B-partial'))
+        proof['c7'][rank] = audit_k31_last_n.audit_c7_miss(
+            events, ids('prefix-A-seed'), ids('prefix-B-partial'), checkpoint_span=span)
     if precision is None:
         raise ValueError('Last-5 requires actual P/D logits and a pre-locked precision contract')
     proof['precision'] = k31_last_n_precision.audit_cases(result, request_ids, *precision)

@@ -78,10 +78,13 @@ def stage_configs(base, stages=STAGES):
         base.get("target_only", False) is False, "default smoke requires native MTP"
     )
     last_n = base.get("last_n_checkpoints")
+    page_tokens = base.get("last_n_page_tokens", 128)
+    require(page_tokens in (64, 128) and ("last_n_page_tokens" not in base or last_n is not None),
+            "Last-N page size requires an explicit Last-N smoke and 64 or 128 tokens")
     calibration = base.get('last_n_calibration', False)
     tier_probe = base.get('last_n_tier_probe')
     require(tier_probe is None or (tier_probe in ('DEVICE', 'HOST', 'DISK')
-            and last_n == 5 and not calibration
+            and last_n == 5 and not calibration and page_tokens == 128
             and base['prefill'].get('prefill_token_capacity') == 2048),
             'isolated tier probe requires Last-5, 2K chunks and no calibration mode')
     require(type(calibration) is bool and (not calibration or last_n == 5),
@@ -99,7 +102,8 @@ def stage_configs(base, stages=STAGES):
         if stage == "regular":
             decode_dp = 1 if last_n is not None else base.get("decode_dp", decode_dp)
         if last_n is not None:
-            block_count = max(256 if calibration else 1032, base["prefill"].get("test_block_num", 0))
+            long_pool_blocks = LONG_INPUT_TOKENS // (8 * page_tokens) + 8
+            block_count = max(256 if calibration else long_pool_blocks, base["prefill"].get("test_block_num", 0))
         config = copy.deepcopy(base)
         config.setdefault("cache_store_rdma_mode", True)
         config.setdefault("fp8_gemm", True)
@@ -113,7 +117,8 @@ def stage_configs(base, stages=STAGES):
         )
         config["prefill"]["test_block_num"] = block_count
         if last_n is not None:
-            config["decode"]["test_block_num"] = max(64 if calibration else 1032, base["decode"].get("test_block_num", 0))
+            config["decode"]["test_block_num"] = max(64 if calibration else long_pool_blocks,
+                                                      base["decode"].get("test_block_num", 0))
             # FULL covers 1M; LINEAR needs separate pressure for a real
             # LINEAR HOST/SSD hit, independently of MLA page eviction.
             config["prefill"].setdefault("linear_pool_blocks", 256 if calibration else 96)

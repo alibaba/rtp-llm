@@ -1,11 +1,12 @@
 """Check borrowed Prefill state ownership using native execution evidence."""
 
 
-def audit_c7_miss(events, seed_request_ids, probe_request_ids, *, group_tag="linear"):
+def audit_c7_miss(events, seed_request_ids, probe_request_ids, *, checkpoint_span=1024, group_tag="linear"):
     root = events[0]
+    retained = [index * checkpoint_span for index in range(8, 13)]
     seeds = [row for row in root if row.get('event') == 'linear_cache_publish_candidates'
              and row.get('request_id') in seed_request_ids and row.get('group_tag') == group_tag
-             and [item['tokens'] for item in row['checkpoints']] == list(range(8192, 12289, 1024))]
+             and [item['tokens'] for item in row['checkpoints']] == retained]
     if not seeds:
         raise ValueError('C7 negative control lacks a seed with only C8..C12 published')
     proof = []
@@ -26,13 +27,16 @@ def audit_c7_miss(events, seed_request_ids, probe_request_ids, *, group_tag="lin
 
 
 def audit_checkpoint_reuse(events, seed_request_ids, probe_request_ids, source_tier,
-                           *, checkpoint_tokens=10240, group_tag="linear"):
+                           *, checkpoint_tokens=None, checkpoint_span=1024, group_tag="linear"):
     if source_tier not in {"DEVICE", "HOST", "DISK"} or not seed_request_ids or not probe_request_ids:
         raise ValueError("tier checkpoint proof needs explicit seed/probe identities")
     root = events[0]
+    if checkpoint_tokens is None:
+        checkpoint_tokens = 10 * checkpoint_span
+    retained = [index * checkpoint_span for index in range(8, 13)]
     seeds = [row for row in root if row.get("event") == "linear_cache_publish_candidates"
              and row.get("request_id") in seed_request_ids and row.get("group_tag") == group_tag
-             and [item["tokens"] for item in row["checkpoints"]] == list(range(8192, 12289, 1024))]
+             and [item["tokens"] for item in row["checkpoints"]] == retained]
     if not seeds:
         raise ValueError("seed did not publish the actual Last-5 C8..C12 checkpoints")
     seed_keys = {item["cache_key"] for seed in seeds for item in seed["checkpoints"]
