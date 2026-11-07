@@ -6,7 +6,7 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -98,6 +98,7 @@ class Block(nn.Module):
         tp_rank: int = 0,
         ep_size: int = 1,
         ep_rank: int = 0,
+        parallelism_config: Optional[Any] = None,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
         moe_strategy: str = "auto",
@@ -191,6 +192,10 @@ class Block(nn.Module):
             layer_weights=layer_weights,
             ep_size=ep_size,
             ep_rank=ep_rank,
+            # The fused-MoE runtime config reads the true tp_size from the
+            # ParallelismConfig; TP-sharded weights need the Group.TP
+            # reduction that a tp_size=1 fallback would skip.
+            parallelism_config=parallelism_config,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
             strategy=moe_strategy,
