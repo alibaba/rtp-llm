@@ -66,7 +66,7 @@ def _worker(world_rank: int, world_size: int, port: int, results: mp.Queue) -> N
         dist.barrier(group=tp_group)
 
     try:
-        extension.init_exec_ctx(world_rank, False, False, 0)
+        extension.init_exec_ctx(world_rank)
         extension.register_comm_ops(broadcast, allreduce, unexpected_allgather)
         dist.barrier(group=tp_group)
         result = extension.run_cp_completion(
@@ -164,7 +164,7 @@ class TailReuseCpCompletionIntegrationTest(unittest.TestCase):
         )
 
         torch.cuda.set_device(0)
-        extension.init_exec_ctx(0, False, False, 0)
+        extension.init_exec_ctx(0)
         extension.clear_comm_ops()
         with self.assertRaisesRegex(
             RuntimeError,

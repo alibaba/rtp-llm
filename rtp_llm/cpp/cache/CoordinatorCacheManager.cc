@@ -2772,7 +2772,8 @@ void CoordinatorCacheManager::blockBatchCopy(const BlockIdPair* begin_ptr, const
 
 void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&            copy_mapping,
                                                        const std::vector<std::string>& group_tags,
-                                                       bool                            require_complete_payload) {
+                                                       bool                            require_complete_payload,
+                                                       const torch::Tensor&            valid_token_lengths) {
     RTP_LLM_CHECK_WITH_INFO(copy_mapping.defined() && copy_mapping.device().is_cpu()
                                 && copy_mapping.scalar_type() == torch::kInt32 && copy_mapping.is_contiguous()
                                 && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3,
@@ -2784,8 +2785,7 @@ void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&     
                                 tag.c_str());
     }
     if (gpu_block_copy_ && group_tags.size() == 1 && group_tags.front() == config_.groupTags().front()) {
-        gpu_block_copy_->copy(copy_mapping,
-                              cp_slot_mapper_ && cp_slot_mapper_->isSharded() ? torch::Tensor() : valid_token_lengths);
+        gpu_block_copy_->copy(copy_mapping, valid_token_lengths);
         return;
     }
     std::vector<TaggedBlockIdPair> mappings;

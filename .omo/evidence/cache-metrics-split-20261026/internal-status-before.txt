@@ -1,4 +1,0 @@
- D .codex
- M github-opensource
-?? .trellis/
-?? CONTINUITY.md

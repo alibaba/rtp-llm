@@ -167,7 +167,6 @@ struct GatherModelInputContext {
     int*              lm_output_indexes;
     int*              combo_position_ids;
     GroupBlockIdPair* kv_cache_update_mapping;
-    int32_t*          kv_cache_copy_token_lengths;
     int               batch_idx;
     int*              sequence_lengths;
     bool              has_multimodal_input;
@@ -224,10 +223,6 @@ GatherModelInputContext createGatherContext(const NormalModelInputGathererConfig
         model_input.kv_cache_update_mapping.defined() ?
             reinterpret_cast<GroupBlockIdPair*>(model_input.kv_cache_update_mapping.data_ptr())
                 + kv_cache_mapping_offset :
-            nullptr;
-    ctx.kv_cache_copy_token_lengths =
-        model_input.kv_cache_copy_token_lengths.defined() ?
-            model_input.kv_cache_copy_token_lengths.data_ptr<int32_t>() + kv_cache_mapping_offset :
             nullptr;
 
     if (ctx.merged_text_mask) {
@@ -367,8 +362,7 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
 
 void addCacheUpdateCopy(GatherModelInputContext&              ctx,
                         const std::vector<TaggedBlockIdPair>& update_mapping,
-                        const std::vector<std::string>&       group_tags,
-                        bool                                  use_live_lengths = false) {
+                        const std::vector<std::string>&       group_tags) {
     if (!ctx.kv_cache_update_mapping) {
         return;
     }
@@ -381,9 +375,6 @@ void addCacheUpdateCopy(GatherModelInputContext&              ctx,
                                 "cache update mapping payload row exceeds int32 range");
         // The first column identifies this payload's row, not a manager's group id.
         *ctx.kv_cache_update_mapping++ = GroupBlockIdPair{static_cast<GroupIdType>(row), mapping.src, mapping.dst};
-        if (ctx.kv_cache_copy_token_lengths) {
-            *ctx.kv_cache_copy_token_lengths++ = use_live_lengths ? mapping.valid_tokens : 0;
-        }
     }
 }
 
@@ -538,8 +529,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
         model_input.kv_cache_group_types = torch::empty({(int64_t)config_.kv_cache_group_nums}, pinned_i32);
     }
     if (total_block_copy_num > 0) {
-        model_input.kv_cache_update_mapping     = torch::empty({(int64_t)total_block_copy_num, 3}, pinned_i32);
-        model_input.kv_cache_copy_token_lengths = torch::empty({(int64_t)total_block_copy_num}, pinned_i32);
+        model_input.kv_cache_update_mapping = torch::empty({(int64_t)total_block_copy_num, 3}, pinned_i32);
     }
     if (max_sparse_save_points > 0) {
         model_input.cache_save_positions = torch::full({(int64_t)total_context_batch_size,
@@ -719,8 +709,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         }
         addCacheUpdateCopy(ctx,
                            stream->streamCacheResource().getKVBlockUpdateMapping(),
-                           model_input.kv_cache_group_tags,
-                           /*use_live_lengths=*/true);
+                           model_input.kv_cache_group_tags);
         stream->step();
     }
 

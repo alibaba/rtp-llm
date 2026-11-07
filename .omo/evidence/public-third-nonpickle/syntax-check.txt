@@ -1,5 +1,0 @@
-PASS Python AST parse: rtp_llm/config/test/server_config_setup_test.py
-PASS Python AST parse: rtp_llm/server/server_args/test/server_args_test.py
-BLOCKED full stub AST parse (HEAD): illegal target for annotation, line 1500, text=QuarkMXFP4: typing.ClassVar[QuantMethod]  # value = <QuantMethod.QuarkMXFP4: 11>
-BLOCKED full stub AST parse (resolved): illegal target for annotation, line 1501, text=None: typing.ClassVar[QuantMethod]  # value = <QuantMethod.None: 0>
-PASS resolved KVCacheConfig stub class AST parse

@@ -1248,6 +1248,31 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
 }
 
+static torch::Tensor
+sliceKvCacheBlockIdByBatch(const torch::Tensor& kv_cache_block_id, size_t batch_offset, size_t batch_size) {
+    if (!kv_cache_block_id.defined()) {
+        return torch::Tensor();
+    }
+    if (kv_cache_block_id.dim() == 2) {
+        return kv_cache_block_id.narrow(0, batch_offset, batch_size);
+    }
+    if (kv_cache_block_id.dim() == 3) {
+        // [group, batch, max_blocks] → narrow on dim 1
+        auto sliced = kv_cache_block_id.narrow(1, batch_offset, batch_size);
+        if (sliced.is_contiguous()) {
+            return sliced;
+        }
+        if (sliced.device().is_cpu() && kv_cache_block_id.is_pinned()) {
+            // Materialization must preserve the fused host-to-device copy contract.
+            auto result = torch::empty(sliced.sizes(), sliced.options().pinned_memory(true));
+            result.copy_(sliced);
+            return result;
+        }
+        return sliced.contiguous();
+    }
+    return kv_cache_block_id;
+}
+
 MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
     if (!int(device_props_.enable_layer_micro_batch)) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");

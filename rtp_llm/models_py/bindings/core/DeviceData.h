@@ -14,6 +14,7 @@ struct ExecProperties {
 
     bool enable_prefill_cp           = false;
     bool prefill_cp_kv_cache_sharded = false;
+    int  enable_layer_micro_batch    = 0;
 };
 
 struct MemoryStatus {

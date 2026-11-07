@@ -160,6 +160,7 @@ struct KVCacheConfig {
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     int64_t                                 reserve_block_ratio                             = 5;
+    int                                     max_block_size_per_item                         = 16;
     int64_t                                 memory_cache_size_mb                            = 0;
     int64_t                                 memory_cache_sync_timeout_ms                    = 10000;
     std::string                             disk_cache_paths                                = "";
@@ -191,6 +192,7 @@ struct KVCacheConfig {
     int         seq_size_per_block        = 0;
     int         kernel_seq_size_per_block = 0;
     int         test_block_num            = 0;
+    int         use_block_cache           = -1;
     bool        enable_device_cache       = true;
     bool        enable_memory_cache       = false;
     bool        enable_disk_cache         = false;

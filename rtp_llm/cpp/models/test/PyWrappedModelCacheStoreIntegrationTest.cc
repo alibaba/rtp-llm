@@ -340,7 +340,7 @@ private:
 
 py::dict runExactPrefixPdGatherScenario(int cp_rank) {
     RTP_LLM_CHECK_WITH_INFO(cp_rank == 0 || cp_rank == 1, "exact-prefix PD fixture requires CP rank 0 or 1");
-    initRuntime(/*device_id=*/0, /*trace_memory=*/false, /*enable_comm_overlap=*/false, MlaOpsType::AUTO);
+    initRuntime(/*device_id=*/0);
 
     ModelConfig model;
     model.num_layers = 1;
@@ -650,7 +650,6 @@ struct Scenario {
     std::map<std::string, uintptr_t> base_addresses;
     GptModelInputs                   inputs;
     ParallelismConfig                parallelism;
-    DeviceResourceConfig             device_resources;
     size_t                           model_id{0};
     std::optional<int>               mtp_cache_config_index;
     bool                             replace_cp_processor{false};
@@ -693,7 +692,6 @@ Scenario makeMicroBatchScenario() {
                              /*global_tokens_per_block=*/2,
                              /*global_stride_bytes=*/16);
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
-    scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
     return scenario;
 }
 
@@ -718,7 +716,7 @@ Scenario makeContextParallelScenario(size_t tp_rank) {
     return scenario;
 }
 
-Scenario makeCaptureScenario(bool micro_batch, bool context_parallel, bool publisher_owner, bool fp8) {
+Scenario makeCaptureScenario(bool context_parallel, bool publisher_owner, bool fp8) {
     auto config = makeCacheConfig({{"default", 2, 16}});
     auto layout = makeLayout(config);
     auto inputs =
@@ -737,9 +735,6 @@ Scenario makeCaptureScenario(bool micro_batch, bool context_parallel, bool publi
     scenario.inputs.pd_separation         = false;
     scenario.capture_layer_ids            = {0, 1};
     scenario.capture_dtype                = fp8 ? HiddenStateCaptureDtype::FP8_E4M3 : HiddenStateCaptureDtype::BF16;
-    if (micro_batch) {
-        scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
-    }
     if (context_parallel) {
         scenario.parallelism.tp_size                  = 2;
         scenario.parallelism.tp_rank                  = 0;
@@ -753,7 +748,7 @@ Scenario makeCaptureScenario(bool micro_batch, bool context_parallel, bool publi
 }
 
 Scenario makeMicroBatchFinalNormParityScenario(bool capture_hidden_states) {
-    auto scenario                    = makeCaptureScenario(true, false, true, false);
+    auto scenario                    = makeCaptureScenario(false, true, false);
     scenario.hidden_size             = 2;
     scenario.install_final_layernorm = true;
     if (!capture_hidden_states) {
@@ -764,7 +759,7 @@ Scenario makeMicroBatchFinalNormParityScenario(bool capture_hidden_states) {
 }
 
 Scenario makeDisabledMicroBatchScenario(int32_t token_count, bool capture_hidden_states) {
-    auto scenario                         = makeCaptureScenario(true, false, true, false);
+    auto scenario                         = makeCaptureScenario(false, true, false);
     scenario.inputs                       = makeInputs(/*input_lengths=*/{token_count},
                                  /*request_ids=*/{701},
                                  /*cache_keys=*/{0, 0},
@@ -881,8 +876,7 @@ Scenario makeScenario(const std::string& name) {
             /*global_stride_bytes=*/24);
         Scenario scenario{
             std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
-        scenario.device_resources.enable_layer_micro_batch = static_cast<int>(MicroBatchType::DS_PREFILL);
-        return scenario;
+            return scenario;
     }
     if (name == "fake_micro_batch") {
         auto scenario = makeMultiTagScenario();

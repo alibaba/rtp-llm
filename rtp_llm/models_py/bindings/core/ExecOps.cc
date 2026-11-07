@@ -688,7 +688,7 @@ void confirmTpCacheWorkCompletion(int tp_size, int tp_rank) {
     auto identity = torch::zeros({tp_size + 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
     identity.data_ptr<int32_t>()[tp_rank] = 1;
     identity.data_ptr<int32_t>()[tp_size] = 1;
-    auto reduced = execAllReduce({identity.to(torch::kCUDA), ReduceOp::Sum, false, ParallelMode::TP}).buffer.cpu();
+    auto reduced = execAllReduce({identity.to(torch::kCUDA), ReduceOp::Sum, ParallelMode::TP}).buffer.cpu();
     RTP_LLM_CHECK_WITH_INFO(reduced.dim() == 1 && reduced.size(0) == tp_size + 1
                                 && reduced.scalar_type() == torch::kInt32,
                             "TP cache completion returned invalid membership payload");

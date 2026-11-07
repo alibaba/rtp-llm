@@ -138,6 +138,9 @@ private:
     // CP path's skip_final_layernorm=true) and returns the small [num_lm, hidden]
     // both as hidden_states and all_hidden_states.
     GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
+    MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
+    std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
+                    splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     void            holdInputsHostBuffers(const GptModelInputs& inputs);
     GraphBase*      selectGraphRunner(const torch_ext::PyAttentionInputs& attention_inputs) const;
     CudaGraphState& selectGraphState(const torch_ext::PyAttentionInputs& attention_inputs);

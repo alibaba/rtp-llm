@@ -1,1 +1,0 @@
-Superseded broad scan matched tokenizer vocabulary strings. Use immutable, symbol-specific prefix-no-diagnostics.json.
