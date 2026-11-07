@@ -1,3 +1,4 @@
+import os
 import concurrent.futures
 import json
 import threading
@@ -1527,3 +1528,39 @@ class DownloadedImageCacheTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GdrStartupLifetimeTest(unittest.TestCase):
+    def test_startup_registration_is_not_recreated_after_request_timeout(self):
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+
+        client = Mock(instance_id="registered-serving", instance_group="test")
+        client.object_size.side_effect = [TimeoutError("metadata timeout"), None]
+        vit = SimpleNamespace(
+            mm_remote_cache_namespace="immutable-model-revision",
+            mm_image_max_file_size_kb=1024,
+            mm_video_max_file_size_kb=1024,
+            mm_remote_cache_max_object_bytes=1024,
+            mm_remote_cache_max_inflight_bytes=4096,
+            mm_remote_cache_max_pending=2,
+            mm_remote_cache_read_timeout_ms=100,
+            mm_remote_cache_write_timeout_ms=100,
+        )
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"MM_REMOTE_CACHE_GDR_ENABLE": "1"}
+        ), patch(
+            "rtp_llm.multimodal.kvcm.registered_transport.RegisteredObjectTransport",
+            return_value=client,
+        ) as constructor:
+            model = SimpleNamespace(model_type="test", compute_dtype="bf16", ckpt_path=directory)
+            cache = MMRemoteEmbeddingCache.from_configs(model, vit, device="cuda:0")
+            constructor.assert_called_once()  # Registration precedes any request.
+            self.assertIsNone(cache.load("first"))
+            self.assertIsNone(cache.load("second"))
+            self.assertEqual(client.object_size.call_count, 2)
+            client.close.assert_not_called()
+            constructor.assert_called_once()
+            cache.close()
+            client.close.assert_called_once()

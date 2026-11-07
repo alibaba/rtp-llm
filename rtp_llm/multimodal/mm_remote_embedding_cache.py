@@ -143,9 +143,15 @@ class MMRemoteEmbeddingCache:
                 )
             return raw_factory()
 
+        # PACE seals the external GPU registration snapshot at client init.
+        # Initialize before readiness, outside a request's read deadline, and
+        # keep this registered client for the serving process lifetime. A
+        # request timeout must not unregister/recreate the arena after sealing.
+        gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
+        client = factory() if gdr_enabled else None
         return cls(
-            None,
-            client_factory=factory,
+            client,
+            client_factory=None if gdr_enabled else factory,
             namespace=namespace,
             model_identity=identity,
             max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
