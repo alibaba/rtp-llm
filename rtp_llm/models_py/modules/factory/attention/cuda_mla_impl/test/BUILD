@@ -1,5 +1,12 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 
+py_test(
+    name = "fp8_prefill_dequant_metadata_test",
+    srcs = ["fp8_prefill_dequant_metadata_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    env = {"GPU_COUNT": "0"},
+)
+
 [
     py_test(
         name = "dsa_replicated_query_tp%d_test" % tp,

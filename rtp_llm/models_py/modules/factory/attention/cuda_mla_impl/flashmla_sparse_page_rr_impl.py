@@ -161,13 +161,14 @@ class PageRRSparseMlaOp(SparseMlaOp):
                     torch.bfloat16,
                 )
                 table, lengths, starts = block.fp8_dequant_metadata
+                batches = table.shape[0]
                 # Reuse the existing 656-byte codec on a canonical chunk;
                 # only this bounded BF16 chunk is materialized after transport.
                 with profile_scope("RTP::attention.dsa.sfa.kv_dequant"):
                     rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache(
-                        history.view(1, history.shape[0], 656),
+                        history.view(batches, history.shape[0] // batches, 656),
                         dense[:, :self.kv_lora_rank], dense[:, self.kv_lora_rank:],
-                        table, lengths, starts, 1,
+                        table, lengths, starts, batches,
                     )
                 history = dense
             with profile_scope("RTP::attention.dsa.sfa.chunk_slot_map"):

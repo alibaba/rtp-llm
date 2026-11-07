@@ -18,6 +18,29 @@ from .dsa_kv_chunk_plan import (
 from .dsa_kv_workspace import _bytes, indexer_candidate_workspace_shapes, staged_workspace_bytes
 
 
+def fp8_prefill_dequant_pages(tokens):
+    # The decoder launches at most 16 CTAs per logical sequence. A single
+    # canonical 64K chunk otherwise serializes 4096 rows in each CTA.
+    return tokens // 64 if tokens >= 1024 and tokens % 64 == 0 else 1
+
+
+def fp8_prefill_dequant_metadata(tokens, device):
+    pages = fp8_prefill_dequant_pages(tokens)
+    if pages == 1:
+        return (
+            torch.zeros((1, 1), device=device, dtype=torch.int32),
+            torch.full((1,), tokens, device=device, dtype=torch.int32),
+            torch.zeros((1,), device=device, dtype=torch.int32),
+        )
+    # These are virtual pages of the already contiguous transported chunk;
+    # request ownership and real cache-page metadata are unchanged.
+    return (
+        torch.arange(pages, device=device, dtype=torch.int32).view(-1, 1),
+        torch.full((pages,), 64, device=device, dtype=torch.int32),
+        torch.arange(0, tokens, 64, device=device, dtype=torch.int32),
+    )
+
+
 @dataclass
 class DsaPreparedKVBlock:
     descriptor: object
@@ -351,7 +374,7 @@ class DsaKVExecution:
 
         def metadata_bytes(plan):
             if self.fp8_sfa and self.prefill:
-                return len(plan.blocks) * 3 * 4
+                return sum(fp8_prefill_dequant_pages(b.tokens) * 3 * 4 for b in plan.blocks)
             if self.graph and not self.prefill:
                 # All capture buckets/cache groups remain live. Reserve their
                 # mutable metadata up front, not just the current bucket.
@@ -499,11 +522,8 @@ class DsaKVExecution:
                         slices,
                         host_slices=host_slices,
                         fp8_dequant_metadata=(
-                            (
-                                torch.zeros((1, 1), device=device, dtype=torch.int32),
-                                torch.full((1,), block.tokens, device=device, dtype=torch.int32),
-                                torch.zeros((1,), device=device, dtype=torch.int32),
-                            ) if self.fp8_sfa else None
+                            fp8_prefill_dequant_metadata(block.tokens, device)
+                            if self.fp8_sfa else None
                         ),
                     )
                 )
