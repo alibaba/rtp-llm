@@ -73,6 +73,7 @@ The core features include:
    backend/quantization.md
    backend/lora.ipynb
    backend/pd_disaggregation.ipynb
+   backend/qwen35_ascend_pd_design.md
    backend/logits_processor.md
 
 
