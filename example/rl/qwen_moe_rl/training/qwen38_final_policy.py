@@ -193,6 +193,8 @@ def _forward_worker_setup():
 
 def worker_setup():
     """Passive hook: no Torch, Ray or CUDA initialization before GPU masking."""
+    from qwen38_python310_compat import install_python310_tomllib
+    install_python310_tomllib()
     # A Raylet may have inherited the deprecated alias even when the current
     # driver has unset it. Remove it before either bridge or Torch imports.
     os.environ.pop('PYTORCH_CUDA_ALLOC_CONF',None)
