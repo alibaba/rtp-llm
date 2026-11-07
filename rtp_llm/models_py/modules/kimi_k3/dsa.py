@@ -1,6 +1,8 @@
 """K3.1 sparse policy composed from shared K3 projections and Indexer kernels."""
 
 import torch
+import triton
+import triton.language as tl
 
 from rtp_llm.models_py.distributed.collective_torch import (
     Group, all_gather, reduce_scatter_bf16,
@@ -14,6 +16,45 @@ from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
 )
 from rtp_llm.models_py.utils.module_profiler import profile_scope
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.model_weight import W
+
+
+def split_bf16x3(weight):
+    """FP32 [k, n] -> BF16 [k, 3n] (hi | mid | lo) with hi + mid + lo == weight for normal values.
+
+    Each BF16 part takes 8 of the 24 FP32 significand bits, and BF16 x BF16 products are exact in
+    FP32, so x @ parts summed over the three column blocks differs from the FP32 x @ weight only in
+    the accumulation order.
+    """
+    hi = weight.bfloat16()
+    mid = (weight - hi.float()).bfloat16()
+    lo = (weight - hi.float() - mid.float()).bfloat16()
+    return torch.cat((hi, mid, lo), dim=1).contiguous()
+
+
+@triton.jit
+def _fold_head_gate_kernel(
+    Gate, PackedScale, Out, Scale, G_ROW: tl.constexpr, S_ROW: tl.constexpr, HEADS: tl.constexpr
+):
+    row = tl.program_id(0)
+    h = tl.arange(0, HEADS)
+    g0 = tl.load(Gate + row * G_ROW + h)
+    g1 = tl.load(Gate + row * G_ROW + HEADS + h)
+    g2 = tl.load(Gate + row * G_ROW + 2 * HEADS + h)
+    packed = tl.load(PackedScale + (row * HEADS + h) * S_ROW)
+    q_scale = ((packed & 0xFF) << 23).to(tl.float32, bitcast=True)
+    tl.store(Out + row * HEADS + h, (g0 + g1 + g2) * q_scale * Scale)
+
+
+def fold_head_gate_scales(head_gate, packed_scale, scale, heads):
+    rows = head_gate.shape[0]
+    out = torch.empty((rows, heads, 1), dtype=torch.float32, device=head_gate.device)
+    if rows:
+        _fold_head_gate_kernel[(rows,)](
+            head_gate, packed_scale, out, float(scale),
+            head_gate.stride(0), packed_scale.stride(0), heads, num_warps=1,
+        )
+    return out
 
 
 class KimiK31DSA(KimiK3MLA):
@@ -93,6 +134,106 @@ class KimiK31DSA(KimiK3MLA):
             self.natural_q_gate_input = NaturalQGateProjection(
                 self.natural_q_input, self.natural_gate_input,
             )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.dsa_dcp_options import (
+            dcp_prologue_mode,
+        )
+
+        self.prologue = (
+            dcp_prologue_mode()
+            if policy.indexer_use_fp8 and parallelism.role_type == RoleType.DECODE and self.tp_size > 1
+            else "dev"
+        )
+        if self.prologue != "dev":
+            self._init_prologue(config, weights)
+
+    def _init_prologue(self, config, weights):
+        """Decode prologue of DSA_DCP_PROLOGUE: every query head on every rank, BF16 head gate."""
+        heads = config.attn_config.head_num
+        if self.q_b.weight.shape[0] != heads * self.q_dim or weights[W.mla_kc].shape[0] != heads:
+            raise ValueError("DSA_DCP_PROLOGUE needs q_b and kc loaded for every head")
+        self.query_heads = heads
+        gate = weights[W.mla_indexer_weights_proj_w]
+        if gate.dtype != torch.float32 or gate.shape != (config.hidden_size, self.indexer.index_n_heads):
+            raise ValueError("the Indexer head gate weight must be FP32 [hidden, heads]")
+        self._head_gate = split_bf16x3(gate)
+        self._head_gate_scale = self.indexer.softmax_scale * self.indexer.weights_scale
+        from rtp_llm.models_py.utils.stream_dag import StreamDag
+
+        dag = StreamDag(torch.cuda.current_device(), side_streams=("index_k", "head_gate", "sfa_query"))
+        dag.add("gather", self._gather)
+        dag.add("input", self._input_projection, after=("gather",))
+        dag.add("index_k", self._index_keys, stream="index_k", after=("gather",))
+        dag.add("head_gate", self._head_gate_projection, stream="head_gate", after=("gather",))
+        dag.add("norm", self._norm, after=("input",))
+        dag.add("sfa_query", self._sfa_query, stream="sfa_query", after=("norm",))
+        dag.add("index_q", self._index_queries, after=("norm", "head_gate"))
+        dag.add("topk", self._topk, after=("index_q", "index_k"))
+        dag.add("sfa", self._sfa, after=("topk", "sfa_query"))
+        dag.finalize()
+        self._dag = dag
+
+    # DAG nodes over one state namespace per call.
+
+    def _gather(self, s):
+        s.full = all_gather(s.hidden, Group.TP)
+
+    def _input_projection(self, s):
+        s.qkv, _, s.gate = self.input(s.full).split(
+            [self.q_rank + self.kv_rank + self.suffix_dim, self._input_padding, self.heads * self.v_dim], dim=-1,
+        )
+
+    def _index_keys(self, s):
+        indexer = self.indexer
+        key = indexer.k_norm(indexer.wk(s.full))
+        indexer.indexer_op.write_key(key, s.indexer_cache, s.indexer.fmha_params)
+
+    def _head_gate_projection(self, s):
+        s.head_gate = torch.mm(s.full, self._head_gate, out_dtype=torch.float32)
+
+    def _norm(self, s):
+        q, kv = s.qkv.split([self.q_rank, self.kv_rank + self.suffix_dim], dim=-1)
+        latent, s.suffix = kv.split([self.kv_rank, self.suffix_dim], dim=-1)
+        s.q, s.latent = fused_q_kv_rmsnorm(
+            q, latent, self.q_norm.weight, self.kv_norm.weight, self.q_norm.variance_epsilon,
+        )
+
+    def _sfa_query(self, s):
+        query = self.q_b(s.q).view(-1, self.query_heads, self.q_dim)
+        s.sfa_query = s.sfa.decode_query(query, self.layer_idx)
+        s.sfa.write_decode_cache(s.latent, s.suffix, s.sfa_cache)
+
+    def _index_queries(self, s):
+        indexer = self.indexer
+        query = indexer.wq_b(s.q).view(-1, indexer.index_n_heads, indexer.index_head_dim)
+        s.index_query, scale = indexer.indexer_op.encode_query(query, unpack_scale=False)
+        s.index_weights = fold_head_gate_scales(
+            s.head_gate, scale, self._head_gate_scale, indexer.index_n_heads
+        )
+
+    def _topk(self, s):
+        fmha = s.indexer
+        s.indices = self.indexer._compute_topk(
+            s.index_query, s.index_weights, s.indexer_cache, fmha.fmha_params, fmha.attn_inputs, fmha.cp_params,
+        )
+
+    def _sfa(self, s):
+        s.output = s.sfa.forward_decode_prepared(s.sfa_query, s.sfa_cache, self.layer_idx, s.indices)
+
+    def _decode_prologue(self, hidden, fmha, cache):
+        """The dev path's decode from the input all-gather to sparse MLA, every query head on every rank
+        and the head gate as one BF16x3 GEMM; side streams under multi_stream."""
+        from types import SimpleNamespace
+
+        sfa, sfa_cache, indexer, indexer_cache = resolve_mla_routes(
+            fmha, cache, sparse=True, attention_tag="full",
+        )
+        if sfa.page_rr_params.is_prefill:
+            raise ValueError("DSA_DCP_PROLOGUE covers decode only")
+        state = SimpleNamespace(hidden=hidden, sfa=sfa, sfa_cache=sfa_cache, indexer=indexer,
+                                indexer_cache=indexer_cache)
+        with profile_scope("RTP::attention.dsa.prologue"):
+            self._dag.run(state, multi_stream=self.prologue == "multi_stream")
+        return state.output.reshape(-1, self.heads * self.v_dim), state.gate
 
     def _attend(self, qkv, fmha, cache, hidden):
         sfa, sfa_cache, indexer, indexer_cache = resolve_mla_routes(
@@ -276,41 +417,45 @@ class KimiK31DSA(KimiK3MLA):
             self.prefill_query_cp
             and getattr(metadata, "query_layout", None) is not None
         )
-        collective = self._bf16_collective
-        use_bf16_collective = (
-            not local_query
-            and not self._fp8_output_gate
-            and collective is not None
-            and collective.eligible(hidden.shape[0], attention_inputs, metadata)
-        )
-        if use_bf16_collective:
-            with profile_scope("RTP::attention.bf16_ag_gemm"):
-                projected, full = collective.all_gather_gemm(
-                    hidden,
-                    self.input,
-                    return_input=True,
-                )
+        use_bf16_collective = False
+        if self.prologue != "dev":
+            output, gate = self._decode_prologue(hidden, fmha, cache)
         else:
-            with profile_scope("RTP::attention.input_all_gather"):
-                full = (
-                    hidden
-                    if local_query or self.tp_size == 1
-                    else (
-                        self._mtp_bf16_collectives.all_gather(hidden)
-                        if self._mtp_bf16_collectives is not None
-                        else all_gather(hidden, Group.TP)
+            collective = self._bf16_collective
+            use_bf16_collective = (
+                not local_query
+                and not self._fp8_output_gate
+                and collective is not None
+                and collective.eligible(hidden.shape[0], attention_inputs, metadata)
+            )
+            if use_bf16_collective:
+                with profile_scope("RTP::attention.bf16_ag_gemm"):
+                    projected, full = collective.all_gather_gemm(
+                        hidden,
+                        self.input,
+                        return_input=True,
                     )
-                )
-            with profile_scope("RTP::attention.mla.qkv_gate_input_proj"):
-                projected = self.input(full)
-        qkv, _, gate = projected.split(
-            [self.q_rank + self.kv_rank + self.suffix_dim,
-             self._input_padding, self.heads * self.v_dim],
-            dim=-1,
-        )
-        del projected
-        output = self._attend(qkv, fmha, cache, full)
-        del full, qkv
+            else:
+                with profile_scope("RTP::attention.input_all_gather"):
+                    full = (
+                        hidden
+                        if local_query or self.tp_size == 1
+                        else (
+                            self._mtp_bf16_collectives.all_gather(hidden)
+                            if self._mtp_bf16_collectives is not None
+                            else all_gather(hidden, Group.TP)
+                        )
+                    )
+                with profile_scope("RTP::attention.mla.qkv_gate_input_proj"):
+                    projected = self.input(full)
+            qkv, _, gate = projected.split(
+                [self.q_rank + self.kv_rank + self.suffix_dim,
+                 self._input_padding, self.heads * self.v_dim],
+                dim=-1,
+            )
+            del projected
+            output = self._attend(qkv, fmha, cache, full)
+            del full, qkv
         layout = getattr(metadata, "query_layout", None)
         mask = (
             None

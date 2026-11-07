@@ -7,6 +7,9 @@
 #if defined(USING_CUDA13) && USING_CUDA13
 #include "rtp_llm/models_py/bindings/cuda/kernels/attn_res.h"
 #endif
+#ifdef RTP_MEGA_TOPK
+#include "rtp_llm/models_py/bindings/cuda/kernels/mega_topk.h"
+#endif
 
 
 #if defined(ENABLE_FP4)
@@ -60,6 +63,31 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("rank"),
                   py::arg("blocks"),
                   py::arg("threads"));
+
+#ifdef RTP_MEGA_TOPK
+    rtp_ops_m.def("mega_topk",
+                  &mega_topk,
+                  py::arg("logits"),
+                  py::arg("local_lens"),
+                  py::arg("positions"),
+                  py::arg("block_table"),
+                  py::arg("rows_per_request"),
+                  py::arg("kv_page_tokens"),
+                  py::arg("output"),
+                  py::arg("count"),
+                  py::arg("peers"),
+                  py::arg("multicast_ptr"),
+                  py::arg("epochs"),
+                  py::arg("rank"),
+                  py::arg("world"),
+                  py::arg("k"),
+                  py::arg("max_local_kvlen"),
+                  py::arg("resident"),
+                  py::arg("deterministic")      = true,
+                  py::arg("global_page_tokens") = 0);
+    rtp_ops_m.def("mega_topk_resident_clusters", &mega_topk_resident_clusters);
+    rtp_ops_m.def("mega_topk_workspace_bytes", &mega_topk_workspace_bytes, py::arg("world"), py::arg("slots"));
+#endif
 
 #if defined(USING_CUDA13) && USING_CUDA13
     rtp_ops_m.def("attn_res",

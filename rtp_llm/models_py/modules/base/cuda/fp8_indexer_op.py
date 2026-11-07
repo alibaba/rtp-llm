@@ -54,13 +54,15 @@ class Fp8IndexerOp(IndexerKVOp):
         else:
             write(key, params.slot_mapping)
 
-    def encode_query(self, query):
+    def encode_query(self, query, *, unpack_scale=True):
         if query.dtype != torch.bfloat16:
             raise ValueError("FP8 Indexer query projection must output BF16")
         q, scales = sgl_per_token_group_quant_fp8(
             query.reshape(-1, 128).contiguous(), group_size=128, eps=1e-4,
             column_major_scales=True, scale_tma_aligned=True, scale_ue8m0=True,
         )
+        if not unpack_scale:
+            return q.view(query.shape), scales
         return q.view(query.shape), _unpack_ue8m0_scale(scales).reshape(*query.shape[:-1], 1)
 
     def _score_prefill(self, query, gates, q_positions, keys, params,
@@ -87,8 +89,10 @@ class Fp8IndexerOp(IndexerKVOp):
                                (1 + execution.batch * (block.width // 64), 64, 1, 132),
                                torch.uint8)
             pack_indexer_pages64(keys, params.block_table, block.start, native)
+        # Without a wire/score workspace (MegaTopk) the MQA output is returned as is: MegaTopk reads
+        # only each row's causal length, so it needs neither the copy nor the sanitizing pass.
         return self.native_score.paged(
             query, native, gates.reshape(execution.rows, 32), block.native_context,
             block.native_table, block.native_schedule, block.width,
-            block.key_positions, wire=wire,
+            block.key_positions, wire=wire, sanitize=wire is not None,
         )

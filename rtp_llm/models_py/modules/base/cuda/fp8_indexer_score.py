@@ -118,7 +118,7 @@ class NativeFp8IndexerScore:
                             sanitize=sanitize)
 
     def paged(self, query, cache, weights, context_lens, block_table, metadata,
-              max_context_len, positions, *, out=None, wire=None):
+              max_context_len, positions, *, out=None, wire=None, sanitize=True):
         rows = self._query(query, weights)
         if out is not None and wire is not None:
             raise ValueError("Paged MQA accepts one score destination")
@@ -137,4 +137,4 @@ class NativeFp8IndexerScore:
             score = self._paged(query, cache, weights, context_lens, block_table,
                                 metadata, max_context_len, clean_logits=False)
         return self._finish(score, positions, None, context_lens.view(rows),
-                            (rows, max_context_len), out, wire=wire)
+                            (rows, max_context_len), out, sanitize=sanitize, wire=wire)

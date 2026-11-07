@@ -243,6 +243,10 @@ def launch_config(args):
             environment["NCCL_MAX_CTAS"] = "8"
     if model_type == "kimi_k31":
         environment["RTP_MTP_ACCEPTANCE_STATS"] = "1"
+        if args.role == "DECODE":
+            environment["DSA_DCP_TOPK"] = os.environ.get("DSA_DCP_TOPK", "mega_topk")
+            environment["DSA_DCP_COMBINE"] = os.environ.get("DSA_DCP_COMBINE", "mega_a2a")
+            environment["DSA_DCP_PROLOGUE"] = os.environ.get("DSA_DCP_PROLOGUE", "multi_stream")
     if getattr(args, "execution_evidence", False):
         environment["KIMI_K3_SMOKE_EVIDENCE"] = "1"
     decode_capture_batches = (
