@@ -50,6 +50,29 @@ class TaggedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class HostMetadataProbe:
+    def __init__(self, model, tag, requires_host_metadata):
+        self.model = model
+        self.tag = tag
+        if requires_host_metadata is not None:
+            self.requires_host_metadata = requires_host_metadata
+
+    def prepare_cuda_graph(self, inputs):
+        self.model.prepared[self.tag] = inputs
+
+
+class HostMetadataProbeModel(TaggedBlockTableModel):
+    def __init__(self, requirements):
+        self.requirements = requirements
+        self.prepared = {}
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return {
+            tag: HostMetadataProbe(self, tag, required)
+            for tag, required in zip(GROUP_TAGS, self.requirements)
+        }
+
+
 class TaggedSequenceLengthModel:
     """Expose the cumulative lengths used by a tagged captured graph."""
 
@@ -1119,6 +1142,87 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     ):
                         self.assertEqual(prefix + event in scopes, role == "generation")
                     torch.cuda.synchronize()
+
+    def test_device_metadata_skips_host_mirrors_and_keeps_legacy_consumers(self):
+        # None deliberately leaves the capability undeclared, as in legacy backends.
+        for role in ("decode", "verify", "draft_update"):
+            verify = role != "decode"
+            for requirements in ((False, False), (False, True), (False, None)):
+                with self.subTest(role=role, requirements=requirements):
+                    model = HostMetadataProbeModel(requirements)
+                    runner = CudaGraphRunner()
+                    if role == "draft_update":
+                        runner.init_mtp_draft_prefill(model, 2, 2, 1, 1)
+                    else:
+                        runner.init_decode(
+                            model,
+                            HIDDEN_SIZE,
+                            TOKENS_PER_BLOCK,
+                            KERNEL_BLOCK_TABLE_WIDTH,
+                            [2],
+                            GROUP_TAGS,
+                            verify,
+                            2 if verify else 1,
+                        )
+                    needs_host = requirements != (False, False)
+                    for batch, width in ((2, 2), (1, 1), (2, 3)):
+                        values = {"full": width, "aux": width + 1}
+                        inputs = (
+                            _build_target_verify_inputs(
+                                GROUP_TAGS,
+                                values,
+                                batch_size=batch,
+                                query_len=2,
+                                prefix_len=width * TOKENS_PER_BLOCK - 2,
+                            )
+                            if verify
+                            else _build_decode_inputs(
+                                GROUP_TAGS, values, batch_size=batch, block_count=width
+                            )
+                        )
+                        if role == "draft_update":
+                            inputs.combo_position_ids = torch.arange(
+                                inputs.input_ids.numel(),
+                                dtype=torch.int32,
+                                device="cuda",
+                            )
+                        tagged = inputs.attention_inputs
+                        for attn in tagged.values():
+                            if role == "draft_update":
+                                attn.is_target_verify = False
+                                attn.is_mtp_draft_update = True
+                            for field in (
+                                "input_lengths",
+                                "prefix_lengths",
+                                "sequence_lengths",
+                            ):
+                                setattr(attn, field, getattr(attn, field).cuda())
+                            attn.kv_cache_kernel_block_id = (
+                                attn.kv_cache_kernel_block_id_device
+                            )
+                        inputs.attention_inputs = tagged
+                        torch.cuda.synchronize()
+                        with torch.profiler.profile(
+                            activities=[torch.profiler.ProfilerActivity.CPU]
+                        ) as prof:
+                            self.assertTrue(runner.prepare(inputs))
+                        scopes = {event.key for event in prof.key_averages()}
+                        for scope in ("host_mirror_copy", "wait_host_mirror_d2h"):
+                            self.assertEqual(
+                                f"cuda_graph.prepareAttentionInputs({scope})" in scopes,
+                                needs_host,
+                            )
+                        self._assert_replay_signature(
+                            runner, inputs, values["full"] + 16 * values["aux"]
+                        )
+                        if needs_host:
+                            for tag, prepared in model.prepared.items():
+                                torch.testing.assert_close(
+                                    prepared.kv_cache_kernel_block_id[:batch, :width],
+                                    torch.full(
+                                        (batch, width), values[tag], dtype=torch.int32
+                                    ),
+                                )
 
     def test_decode_tag_validation_and_replay_updates(self) -> None:
         runner = CudaGraphRunner()

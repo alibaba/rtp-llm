@@ -5,6 +5,7 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
@@ -110,24 +111,29 @@ public:
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 
-    void init_mtp_draft_prefill(
-        py::object py_instance, int max_requests, int query_width, int sequence_parallel_size, int hc_mult) {
+    void init_mtp_draft_prefill(py::object py_instance,
+                                int        max_requests,
+                                int        query_width,
+                                int        sequence_parallel_size,
+                                int        hc_mult,
+                                int        kernel_block_table_width,
+                                int        max_seq_len) {
         reset_runner();
         GraphParams params;
-        params.enable_cuda_graph                = true;
-        params.is_prefill_cuda_graph_mode       = true;
-        params.role                             = CudaGraphRole::MTP_DRAFT_PREFILL;
-        params.max_seq_len                      = 64;
-        params.num_tokens_per_bs                = query_width;
-        params.sequence_parallel_size           = sequence_parallel_size;
-        params.hc_mult                          = hc_mult;
-        params.max_context_batch_size           = max_requests;
-        params.hidden_size                      = 4;
-        params.input_hidden_size                = 4 * hc_mult;
-        params.model_data_type                  = c10::ScalarType::BFloat16;
-        params.kv_cache_group_tags              = {"full", "aux"};
-        params.position_id_len_factor           = 1;
-        params.kernel_block_table_width         = 8;
+        params.enable_cuda_graph          = true;
+        params.is_prefill_cuda_graph_mode = true;
+        params.role                       = CudaGraphRole::MTP_DRAFT_PREFILL;
+        params.max_seq_len                = max_seq_len;
+        params.num_tokens_per_bs          = query_width;
+        params.sequence_parallel_size     = sequence_parallel_size;
+        params.hc_mult                    = hc_mult;
+        params.max_context_batch_size     = max_requests;
+        params.hidden_size                = 4;
+        params.input_hidden_size          = 4 * hc_mult;
+        params.model_data_type            = c10::ScalarType::BFloat16;
+        params.kv_cache_group_tags        = {"full", "aux"};
+        params.position_id_len_factor     = 1;
+        params.kernel_block_table_width   = kernel_block_table_width;
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 
@@ -190,7 +196,24 @@ public:
         prepare_inputs.attention_inputs.combo_position_ids    = prepare_inputs.combo_position_ids;
         refreshTaggedAttentionInputs(prepare_inputs);
         runner_->prepareAttentionInputs(prepare_inputs, state_, skip_forward_event_sync);
+        if (benchmark_wait_host_mirror_d2h_) {
+            // Isolate capture from host-mirror elimination: retain the legacy
+            // CPU fence even though the captured GPU hook no longer needs it.
+            RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)");
+            cuda_graph::graphGetCurrentStream().synchronize();
+        }
         return true;
+    }
+
+    void retainHostMetadataForBenchmark(bool wait_host_mirror_d2h) {
+        RTP_LLM_CHECK_WITH_INFO(runner_ != nullptr, "benchmark runner is not initialized");
+        for (auto& [key, instance] : runner_->graph_instances_) {
+            RTP_LLM_CHECK_WITH_INFO(instance.mem_hold_.capture_attention_prepare_,
+                                    "benchmark requires captured GPU metadata for graph %d",
+                                    key);
+            instance.mem_hold_.requires_host_metadata_ = true;
+        }
+        benchmark_wait_host_mirror_d2h_ = wait_host_mirror_d2h;
     }
 
     void makeInputLengthsScalar(torch_ext::PyModelInputs& inputs) {
@@ -244,6 +267,7 @@ private:
     }
 
     void reset_runner() {
+        benchmark_wait_host_mirror_d2h_ = false;
         if (runner_ != nullptr) {
             delete runner_;
             runner_ = nullptr;
@@ -252,6 +276,7 @@ private:
 
     CudaGraphRunner* runner_ = nullptr;
     CudaGraphState   state_{};
+    bool             benchmark_wait_host_mirror_d2h_{false};
 };
 
 }  // namespace rtp_llm
@@ -270,10 +295,18 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_block_table_width"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("position_encoding")     = py::none(),
-             py::arg("token_type_embedding")  = py::none())
-        .def("init_mtp_draft_prefill", &CudaGraphTestRunner::init_mtp_draft_prefill)
+             py::arg("group_tags")           = std::vector<std::string>{},
+             py::arg("position_encoding")    = py::none(),
+             py::arg("token_type_embedding") = py::none())
+        .def("init_mtp_draft_prefill",
+             &CudaGraphTestRunner::init_mtp_draft_prefill,
+             py::arg("py_instance"),
+             py::arg("max_requests"),
+             py::arg("query_width"),
+             py::arg("sequence_parallel_size"),
+             py::arg("hc_mult"),
+             py::arg("kernel_block_table_width") = 8,
+             py::arg("max_seq_len")              = 64)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -281,10 +314,10 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_seq_len"),
              py::arg("kernel_block_table_width"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("is_target_verify")      = false,
-             py::arg("num_tokens_per_bs")     = 1,
-             py::arg("position_id_len_factor") = 0,
+             py::arg("group_tags")                = std::vector<std::string>{},
+             py::arg("is_target_verify")          = false,
+             py::arg("num_tokens_per_bs")         = 1,
+             py::arg("position_id_len_factor")    = 0,
              py::arg("linear_replay_group_count") = 0)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
@@ -305,6 +338,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
         .def("make_input_lengths_scalar", &CudaGraphTestRunner::makeInputLengthsScalar)
         .def("make_input_ids_scalar", &CudaGraphTestRunner::makeInputIdsScalar)
         .def("prepare", &CudaGraphTestRunner::prepare, py::arg("inputs"), py::arg("skip_forward_event_sync") = false)
+        .def("retain_host_metadata_for_benchmark", &CudaGraphTestRunner::retainHostMetadataForBenchmark)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
         .def("getGenerationPrefillStatus", &CudaGraphTestRunner::getGenerationPrefillStatus)
