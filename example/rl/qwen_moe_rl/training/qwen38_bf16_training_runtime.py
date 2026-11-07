@@ -98,7 +98,13 @@ def install():
         class Qwen38MetaAuto:
             @classmethod
             def from_pretrained(cls,*args,**kwargs):
-                return meta_checkpoint_model(base,hf_config,*args,**kwargs)
+                # The real verl engine passes config= explicitly. Consume it
+                # before forwarding the selected config positionally, while
+                # retaining the original exact-instance guard.
+                options=dict(kwargs)
+                if options.pop('config',hf_config) is not hf_config:
+                    raise ValueError('The selected Qwen3.8 config instance must be preserved')
+                return meta_checkpoint_model(base,hf_config,*args,**options)
         return Qwen38MetaAuto
 
     def patch(model,ulysses_sp_size=1,use_remove_padding=True,use_fused_kernels=False,**kwargs):
