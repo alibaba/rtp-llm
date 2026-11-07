@@ -143,6 +143,13 @@ class ArmCpuImpl(CpuImpl):
 
 class GpuImpl(DeviceBase):
     def __init__(self):
+        # Avoid CPU thread oversubscription across accelerator workers.
+        torch.set_num_threads(1)
+        logging.info(
+            "Set PyTorch CPU intra-op threads to %d for %s",
+            torch.get_num_threads(),
+            type(self).__name__,
+        )
         super().__init__()
 
     def get_device_id(self) -> int:
