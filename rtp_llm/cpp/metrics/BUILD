@@ -53,6 +53,18 @@ cc_test(
 )
 
 cc_test(
+    name = "wall_clock_metrics_loop_reporter_test",
+    srcs = [
+        "WallClockMetricsLoopReporterTest.cc",
+    ],
+    deps = [
+        ":metrics",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "rtp_llm_eplb_metrics_test",
     srcs = [
         "RtpLLMEplbMetricsTest.cc",

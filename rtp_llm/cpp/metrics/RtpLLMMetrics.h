@@ -3,6 +3,7 @@
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <string>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 namespace kmonitor {
 class MetricsTags;
@@ -923,7 +925,7 @@ private:
                 if (collector_.hasMetrics()) {
                     should_report = takeReportCollector(now, report_collector);
                 } else if (active_count_ == 0) {
-                    // Idle service reports 0 wall TPS with priority="0". In-flight long steps stay
+                    // Idle service reports 0 wall TPS. In-flight long steps stay
                     // silent so their eventual wall window includes the full in-flight time since
                     // the last wall report.
                     collector_.markIdleWindow();
@@ -932,27 +934,88 @@ private:
             }
             if (should_report) {
                 auto priority_collectors = report_collector.priorityCollectorsForReport();
-                if (priority_collectors.empty()) {
+                std::map<int32_t, bool>   has_tokens;
+                // Every remembered priority keeps a continuous sample stream: priorities without
+                // tokens this round report a zero sample (same report window) instead of going
+                // silent, so per-series downstream time averages (for example KMonitor's 1m-avg)
+                // divide by the full wall clock - idle seconds included - rather than silently
+                // inflating to the busy-time rate. Only touched by the report loop thread.
+                if (planRoundReports(!report_collector.reportZeroTPS(),
+                                     priority_collectors,
+                                     remembered_priorities_,
+                                     has_tokens)) {
+                    for (const auto& [priority, with_tokens] : has_tokens) {
+                        kmonitor::MetricsTags tags("priority", std::to_string(priority));
+                        if (with_tokens) {
+                            auto it = priority_collectors.find(priority);
+                            metrics_reporter_->report<MetricsType, CollectType>(&tags, &it->second);
+                        } else {
+                            CollectType idle;
+                            idle.setReportWindowUs(report_collector.reportWindowUs());
+                            metrics_reporter_->report<MetricsType, CollectType>(&tags, &idle);
+                        }
+                    }
+                } else {
                     kmonitor::MetricsTags tags("priority", "0");
                     metrics_reporter_->report<MetricsType, CollectType>(&tags, &report_collector);
-                } else {
-                    for (auto& [priority, collector] : priority_collectors) {
-                        kmonitor::MetricsTags tags("priority", std::to_string(priority));
-                        metrics_reporter_->report<MetricsType, CollectType>(&tags, &collector);
-                    }
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
         }
     }
 
+    // Decides the priority-tagged sample plan for one reporting round.
+    //   round_is_active: the round carries token metrics (not the idle window)
+    //   priority_collectors: priorities with tokens this round (may be empty)
+    //   remembered_priorities: in/out FIFO (capped) of priorities that ever carried tokens
+    //   has_tokens: out map priority -> whether the round's sample carries tokens
+    // Returns true when per-priority samples should be emitted; false keeps the legacy
+    // untagged "priority=0" report (a service that never reported a priority bucket).
+    static bool planRoundReports(bool round_is_active,
+                                 const std::map<int32_t, CollectType>& priority_collectors,
+                                 std::vector<int32_t>& remembered_priorities,
+                                 std::map<int32_t, bool>& has_tokens) {
+        if (round_is_active && priority_collectors.empty()) {
+            // Token metrics without priority buckets: keep the legacy untagged round.
+            return false;
+        }
+        if (remembered_priorities.empty() && priority_collectors.empty()) {
+            return false;
+        }
+        has_tokens.clear();
+        for (auto priority : remembered_priorities) {
+            has_tokens[priority] = priority_collectors.count(priority) > 0;
+        }
+        for (const auto& entry : priority_collectors) {
+            if (!has_tokens.count(entry.first)) {
+                has_tokens[entry.first] = true;
+            }
+        }
+        for (const auto& [priority, with_tokens] : has_tokens) {
+            if (!with_tokens) {
+                continue;
+            }
+            auto it = std::find(remembered_priorities.begin(), remembered_priorities.end(), priority);
+            if (it != remembered_priorities.end()) {
+                remembered_priorities.erase(it);
+            }
+            remembered_priorities.push_back(priority);
+        }
+        while (remembered_priorities.size() > kMaxRememberedPriorities) {
+            remembered_priorities.erase(remembered_priorities.begin());
+        }
+        return true;
+    }
+
 private:
+    static constexpr size_t kMaxRememberedPriorities = 16;
     std::mutex                            mutex_;
     std::atomic_bool                      stop_{false};
     CollectType                           collector_;
     int                                   active_count_ = 0;
     int                                   interval_ms_  = 1000;
     std::chrono::steady_clock::time_point last_report_time_;
+    std::vector<int32_t>                 remembered_priorities_;
     std::thread                           metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr          metrics_reporter_ = nullptr;
 };
