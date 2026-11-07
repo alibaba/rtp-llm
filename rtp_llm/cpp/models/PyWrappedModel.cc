@@ -1042,9 +1042,11 @@ PyWrappedModel::lmHeadLocalLogits(const torch::Tensor& last_hidden, const torch:
 torch::Tensor PyWrappedModel::serveInt8CheckedLogits(torch::Tensor ref_local, const torch::Tensor& int8_logits) {
     // INT8 check mode: gather the bf16 reference, compare gathered top-1 ids against the
     // int8 output, accumulate the [rows, top1_mismatch] stats and return the reference to
-    // serve. Shared by every path that ran the int8 GEMV so check mode behaves identically
-    // whether the caller gathered all rows or a row selection. The stats tensor lives on the
-    // reference device — a CPU allocation here crashes the first later add of a CUDA tensor.
+    // serve. Used by the non-row-selected paths that ran the int8 GEMV; the tp>1 sharded
+    // scoring path applies the same gather/compare sequence inline so it can deduplicate
+    // lm rows shared with the scoring selection and count each checked row once per
+    // forward. The stats tensor lives on the reference device — a CPU allocation here
+    // crashes the first later add of a CUDA tensor.
     if (device_props_.tp_size > 1) {
         ref_local = tpSyncEmbeddingOrLogits(ref_local);
     }
@@ -1328,12 +1330,16 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                 return tpReduceScoringPartials(part, k_max, check_nan_, chunk);
             };
             // Outputs keep the [lm prefix ++ scoring rows] layout the dispatcher expects;
-            // the lm prefix carries placeholder rows (never consumed).
+            // the lm prefix carries placeholder rows (never consumed). With zero scoring
+            // rows every merged row is such a placeholder, so the top-k tables get width 0
+            // instead of materializing [lm_rows, k_out] buffers no consumer can read — a
+            // directly constructed input may still carry a positive large k.
+            const int64_t   out_k = num_scoring_rows > 0 ? k_out : 0;
             ScoringPartials merged;
             merged.lse         = torch::zeros({sel_rows}, local_logits.options().dtype(torch::kFloat32));
             merged.target      = torch::zeros({sel_rows}, local_logits.options().dtype(torch::kFloat32));
-            merged.topk_values = torch::zeros({sel_rows, k_out}, local_logits.options().dtype(torch::kFloat32));
-            merged.topk_ids    = torch::zeros({sel_rows, k_out},
+            merged.topk_values = torch::zeros({sel_rows, out_k}, local_logits.options().dtype(torch::kFloat32));
+            merged.topk_ids    = torch::zeros({sel_rows, out_k},
                                            torch::TensorOptions().dtype(torch::kInt32).device(local_logits.device()));
             auto append_chunk  = [&](const ScoringPartials& m, int64_t c0, int64_t c) {
                 merged.lse.narrow(0, lm_rows + c0, c).copy_(m.lse);
@@ -1364,20 +1370,37 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                 ref_local         = torch::Tensor();
                 // Gather the int8 lm rows as well and run the same argmax comparison
                 // serveInt8CheckedLogits does on the non-scoring path, so the check
-                // covers the sampler-facing rows — the last loss row and co-batched
-                // decode rows — not only the scoring selection. The extra lm-row
-                // gathers are part of the check-mode collective sequence and run
-                // identically on every rank (lm row count is synchronized).
+                // covers the sampler-facing lm rows — every stream's last executed row —
+                // not only the scoring selection. The extra lm-row gathers are part of the
+                // check-mode collective sequence and run identically on every rank (lm row
+                // count is synchronized).
                 const auto i8_lm =
                     tpSyncEmbeddingOrLogits(local_logits.index_select(0, lm_output_indexes_device.to(torch::kLong)));
-                logits = serveInt8CheckedLogits(std::move(ref_lm_local), i8_lm);
+                logits = tpSyncEmbeddingOrLogits(ref_lm_local);
                 if (!int8_lm_head_check_stats_.defined()) {
                     int8_lm_head_check_stats_ = torch::zeros({2}, logits.options().dtype(torch::kLong));
                 }
-                int8_lm_head_check_stats_.select(0, 0).add_(num_scoring_rows);
-                if (mismatch.defined()) {
-                    int8_lm_head_check_stats_.select(0, 1).add_(mismatch);
+                // Both the scoring rows and the sampler lm rows feed the stats, but a row
+                // present in both sets (a prompt window covering its stream's last row)
+                // counts once: the lm-row mask below restricts to rows outside the scoring
+                // selection, so this forward adds only unique rows and advances the call
+                // counter exactly once.
+                auto          ref_lm_top1  = logits;
+                auto          i8_lm_top1   = i8_lm;
+                const int64_t served_vocab = static_cast<int64_t>(description_.output_vocab_size);
+                if (served_vocab > 0 && served_vocab < logits.size(1)) {
+                    ref_lm_top1 = logits.narrow(1, 0, served_vocab);
+                    i8_lm_top1  = i8_lm.narrow(1, 0, served_vocab);
                 }
+                auto lm_row_mismatch = ref_lm_top1.argmax(-1) != i8_lm_top1.argmax(-1);
+                auto lm_new          = ~torch::isin(lm_output_indexes_device, scoring_rows_device);
+                int8_lm_head_check_stats_.select(0, 0).add_(num_scoring_rows);
+                int8_lm_head_check_stats_.select(0, 0).add_(lm_new.sum());
+                torch::Tensor checked_mismatch = lm_row_mismatch.logical_and(lm_new).sum();
+                if (mismatch.defined()) {
+                    checked_mismatch = checked_mismatch + mismatch;
+                }
+                int8_lm_head_check_stats_.select(0, 1).add_(checked_mismatch);
                 if (++int8_lm_head_check_calls_ % 256 == 0) {
                     auto s = int8_lm_head_check_stats_.cpu();
                     RTP_LLM_LOG_INFO(

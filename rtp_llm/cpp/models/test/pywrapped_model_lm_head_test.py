@@ -651,6 +651,181 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
                 else:
                     os.environ[k] = v
 
+    def test_row_selected_tp_zero_scoring_rows_allocates_no_topk(self):
+        # tp>1 with a defined-but-empty scoring row set still takes the sharded
+        # path, but every merged output row is then an unconsumed lm placeholder:
+        # a large accepted k must not materialize [lm_rows, k] top-k tables, and
+        # no payload all-gather is issued. output_vocab_size=0 is the production
+        # (unpruned) case; the positive all_logits_top_k models a directly
+        # constructed input that bypassed the gatherer's k selection.
+        gathered_shapes = []
+
+        def gather(receivers, mode, senders, inplace):
+            buffer = receivers[0]
+            gathered_shapes.append(tuple(buffer.shape))
+            local = buffer.view(2, buffer.size(0), -1)[0].clone()
+            buffer.view(2, buffer.size(0), -1).copy_(torch.stack((local, local + 16)))
+
+        register_comm_ops(lambda *args: None, lambda *args: None, gather)
+        try:
+            scoring = torch.tensor([], dtype=torch.int32, pin_memory=True)
+            labels = torch.tensor([], dtype=torch.int32, pin_memory=True)
+            with torch.no_grad():
+                result = run_lm_head(
+                    self.model,
+                    self.packed,
+                    self.hidden,
+                    self.indexes,
+                    need_all_logits=True,
+                    all_logits_row_indexes=scoring,
+                    all_logits_row_labels=labels,
+                    all_logits_top_k=262144,
+                    tp_size=2,
+                    output_vocab_size=0,
+                )
+            # Only the sampler lm-row gather runs; the per-chunk payload gathers
+            # are skipped identically on every rank.
+            self.assertEqual(gathered_shapes, [(2, 32)])
+            local = self.model.nvfp4_lm_head(self.hidden[[5, 1]])
+            expected = torch.cat((local, local + 16), dim=1).float()
+            torch.testing.assert_close(result["logits"], expected, rtol=0, atol=0)
+            self.assertIsNone(result["all_logits"])
+            self.assertEqual(result["all_logits_lm_rows"], 2)
+            # The [lm prefix ++ scoring] row layout is preserved — the lm prefix
+            # rows keep defined lse/target rows — but the top-k tables collapse
+            # to zero width instead of materializing a [2, k] allocation.
+            self.assertEqual(result["all_logits_lse"].shape, (2,))
+            self.assertEqual(result["all_logits_target_logits"].shape, (2,))
+            self.assertEqual(result["all_logits_topk_values"].shape, (2, 0))
+            self.assertEqual(result["all_logits_topk_ids"].shape, (2, 0))
+        finally:
+            clear_comm_ops()
+
+    def test_int8_check_tp2_overlap_lm_rows_deduplicated(self):
+        # tp>1 + INT8 CHECK: a scoring row that is also a sampler lm row — a
+        # prompt window covering its stream's last executed row — must feed the
+        # stats once. With scoring rows {0,2,5} and lm rows {5,1} the unique set
+        # is {0,1,2,5}: the forward adds 4 checked rows and one call, where the
+        # pre-dedup code counted 3+2 rows and advanced the call counter twice
+        # (once inside the shared lm-row helper, once for the scoring selection).
+        import os
+
+        old_env = {
+            k: os.environ.get(k)
+            for k in ("RTP_LLM_INT8_LM_HEAD", "RTP_LLM_INT8_LM_HEAD_CHECK")
+        }
+        os.environ["RTP_LLM_INT8_LM_HEAD"] = "1"
+        os.environ["RTP_LLM_INT8_LM_HEAD_CHECK"] = "1"
+        try:
+            hidden = (
+                torch.arange(6 * 256, device="cuda").reshape(6, 256).to(torch.bfloat16)
+                / 512
+            )
+            kernel = (
+                torch.arange(16 * 256, device="cuda")
+                .reshape(16, 256)
+                .to(torch.bfloat16)
+                / 512
+            )
+            kl = 2  # shard_k = min(k_max, vocab_l) = min(2, 16)
+            overlap_row = 2  # index of the lm-overlapping row in the scoring selection
+            gathered_shapes = []
+            payload_calls = [0]
+
+            def gather(receivers, mode, senders, inplace):
+                buffer = receivers[0]
+                gathered_shapes.append(tuple(buffer.shape))
+                local = buffer.view(2, buffer.size(0), -1)[0].clone()
+                if buffer.size(0) > 1:
+                    # int8/ref lm-row gathers [rows, 2*16]: peer shard = local + 16.
+                    buffer.view(2, buffer.size(0), -1).copy_(
+                        torch.stack((local, local + 16))
+                    )
+                else:
+                    payload_calls[0] += 1
+                    rows = (buffer.size(1) // 2) // (2 + 2 * kl)
+                    p = local.reshape(-1)
+                    # Payload layout per rank, packed f32:
+                    # [lse r | target r | topk_v r*kl | topk_i r*kl]. Single chunk,
+                    # so the first payload gather ships the int8 partials and the
+                    # second the reference partials. Inject a dominant candidate
+                    # with a different top-1 id into each: the mock maps peer ids
+                    # through %13+16, so the merged int8 top-1 is 16 while the
+                    # merged reference top-1 is 19 on the overlap row regardless
+                    # of the local GEMV result — one guaranteed mismatch the
+                    # dedup must still count exactly once.
+                    v_off = 2 * rows + overlap_row * kl
+                    i_off = 2 * rows + rows * kl + overlap_row * kl
+                    p[v_off] = 1e30
+                    p.view(torch.int32)[i_off] = 0 if payload_calls[0] == 1 else 3
+                    l0, t0, v0, i0 = p.split([rows, rows, rows * kl, rows * kl])
+                    r1 = torch.cat(
+                        (
+                            l0 + 16,
+                            torch.full_like(t0, float("-inf")),
+                            v0 + 16,
+                            (i0.view(torch.int32).remainder(13) + 16).view(
+                                torch.float32
+                            ),
+                        )
+                    )
+                    buffer.view(2, -1).copy_(torch.stack((p, r1)))
+
+            register_comm_ops(lambda *args: None, lambda *args: None, gather)
+            try:
+                scoring = torch.tensor([0, 2, 5], dtype=torch.int32, pin_memory=True)
+                labels = torch.tensor([7, -1, 4], dtype=torch.int32, pin_memory=True)
+                with torch.no_grad():
+                    result = run_lm_head(
+                        self.model,
+                        kernel,
+                        hidden,
+                        self.indexes,
+                        need_all_logits=True,
+                        all_logits_row_indexes=scoring,
+                        all_logits_row_labels=labels,
+                        all_logits_top_k=2,
+                        tp_size=2,
+                        output_vocab_size=29,
+                        second_forward=True,
+                    )
+            finally:
+                clear_comm_ops()
+
+            # Scoring forward: int8 + ref payload gathers, then int8 + ref lm-row
+            # gathers; the decode forward adds its int8 logits gather and its
+            # ref gather.
+            self.assertEqual(
+                gathered_shapes,
+                [(1, 36), (1, 36), (2, 32), (2, 32), (2, 32), (2, 32)],
+            )
+            stats = result.get("int8_lm_head_check_stats")
+            self.assertIsNotNone(stats)
+            self.assertTrue(stats.is_cuda)
+            # Unique rows: 3 scoring + 2 lm - 1 overlap = 4, then 2 decode rows.
+            self.assertEqual(int(stats[0].item()), 6)
+            # The injected scoring mismatch plus any natural lm-row mismatches.
+            self.assertGreaterEqual(int(stats[1].item()), 1)
+            self.assertLessEqual(int(stats[1].item()), int(stats[0].item()))
+            # One call per forward: the scoring forward and the decode forward.
+            self.assertEqual(result["int8_lm_head_check_calls"], 2)
+
+            # Check mode still serves the bf16 reference: the overlap row's
+            # merged scoring top-1 is the injected reference id (peer-mapped
+            # 3 -> 19) and the lm rows keep the gathered reference values.
+            self.assertIsNone(result["all_logits"])
+            self.assertEqual(result["all_logits_lm_rows"], 2)
+            self.assertEqual(result["all_logits_topk_ids"][4, 0].item(), 19)
+            ref = hidden.float() @ kernel.float().t()
+            ref_lm = torch.cat((ref[[5, 1]], ref[[5, 1]] + 16), dim=1)[:, :29]
+            torch.testing.assert_close(result["logits"], ref_lm, rtol=1e-4, atol=1e-4)
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def test_invalid_python_projection_is_rejected_at_boundary(self):
         self.model.compute_quantized_logits = lambda hidden: hidden
         with self.assertRaisesRegex(RuntimeError, "BF16 local logits"):

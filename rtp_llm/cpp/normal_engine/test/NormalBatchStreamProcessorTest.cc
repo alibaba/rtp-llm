@@ -1056,6 +1056,99 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     EXPECT_NEAR(2.25525, *(torch::mean(loss4).exp().data_ptr<float>()), 0.0001);
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testAllLogitsTopKIgnoresEmptyPromptWindows) {
+    // A prompt-logits request whose clamped window is empty consumes no top-k rows, so
+    // its prompt_logits_top_k must not set the batch-wide merged top-k width: the forward
+    // sizes the [lm prefix ++ scoring rows, k] tables from this value and unconsumed
+    // placeholder rows would otherwise scale with the largest requested k.
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 2;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig              runtime_config;
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    int  next_block  = 1;
+    auto make_stream = [&](std::vector<int32_t> ids,
+                           bool                 decode,
+                           int                  loss,
+                           bool                 prompt_logits,
+                           int                  prompt_start,
+                           int                  prompt_end,
+                           int                  top_k) {
+        auto query                                   = make_shared<GenerateInput>();
+        query->input_ids                             = hostIntBuffer(std::move(ids));
+        query->generate_config                       = make_shared<GenerateConfig>();
+        query->generate_config->calculate_loss       = loss;
+        query->generate_config->return_prompt_logits = prompt_logits;
+        query->generate_config->prompt_logits_start  = prompt_start;
+        query->generate_config->prompt_logits_end    = prompt_end;
+        query->generate_config->prompt_logits_top_k  = top_k;
+        GenerateStreamPtr stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        BatchKVCacheResource addr;
+        addr.resetBatchSize(1);
+        addr.initGroups(cache_config.topologyPtr());
+        addr.setBatchBlocks(0, 0, {next_block, next_block + 1, next_block + 2});
+        next_block += 3;
+        stream->setKVCache(addr);
+        if (decode) {
+            stream->setIsContextStream(false);
+        }
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+
+    // Mixed batch: a decode neighbor (lm row only), the single-token context request
+    // with an empty [0, 0) window and a large accepted k, a loss-only neighbor
+    // (scoring rows without top-k demand), and one real prompt window with a small k.
+    std::list<GenerateStreamPtr> streams = {
+        make_stream({7}, /*decode=*/true, 0, false, -1, -1, 0),
+        make_stream({9}, /*decode=*/false, 0, true, 0, 0, 300000),
+        make_stream({1, 2, 3}, /*decode=*/false, 1, false, -1, -1, 0),
+        make_stream({5, 6, 7, 8}, /*decode=*/false, 0, true, 1, 3, 5),
+    };
+    StreamGroups stream_groups(streams);
+    TensorHolder holder;
+    auto         merge_input_status = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(merge_input_status.ok());
+    const auto& model_input = merge_input_status.value();
+    EXPECT_TRUE(model_input.need_all_logits);
+
+    // Scoring rows in allStreams() order (decode first): decode -> none; the empty
+    // window contributes none; the loss stream selects [0, 2) at token offset 2;
+    // the prompt window selects [1, 3) at offset 5.
+    const auto& row_indexes = model_input.all_logits_row_indexes;
+    ASSERT_TRUE(row_indexes.defined());
+    EXPECT_EQ(toVec<int32_t>(row_indexes), (std::vector<int32_t>{2, 3, 6, 7}));
+    const auto& row_labels = model_input.all_logits_row_labels;
+    ASSERT_TRUE(row_labels.defined());
+    EXPECT_EQ(toVec<int32_t>(row_labels), (std::vector<int32_t>{2, 3, 7, 8}));
+    // The empty-window k=300000 is excluded; only the real window's k survives.
+    EXPECT_EQ(model_input.all_logits_top_k, 5);
+
+    // The exact F1 shape: only the empty-window request asks for prompt logits, so the
+    // batch keeps a defined-but-empty row set and a merged top-k width of 0.
+    std::list<GenerateStreamPtr> empty_only = {
+        make_stream({7}, /*decode=*/true, 0, false, -1, -1, 0),
+        make_stream({9}, /*decode=*/false, 0, true, 0, 0, 300000),
+    };
+    StreamGroups empty_groups(empty_only);
+    TensorHolder empty_holder;
+    auto         empty_status = processor.gatherModelInput(empty_groups, empty_holder);
+    ASSERT_TRUE(empty_status.ok());
+    EXPECT_TRUE(empty_status.value().need_all_logits);
+    ASSERT_TRUE(empty_status.value().all_logits_row_indexes.defined());
+    EXPECT_EQ(empty_status.value().all_logits_row_indexes.numel(), 0);
+    EXPECT_EQ(empty_status.value().all_logits_top_k, 0);
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testAllLogitsRowSelectedLayout) {
     // Row-selected all_logits layout (all_logits_lm_rows >= 0): the first all_logits_lm_rows rows
     // are the lm_output_indexes rows, then each stream's promptScoringRowRange slice in
