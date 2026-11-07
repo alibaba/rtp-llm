@@ -4,9 +4,14 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.service.monitor.RequestSchedulerReporter.CancelEvent;
+import org.flexlb.service.monitor.RequestSchedulerReporter.EvictionEvent;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -14,12 +19,12 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_CONFIRM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_QPS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_REQUEST_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_CANCEL_TIMEOUT_COUNT;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT;
-import static org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTAL;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_PRIORITY_PREEMPT_COUNT;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 /**
  * Cancel metric contract of {@link RequestSchedulerReporter}: the cancel
@@ -36,6 +41,136 @@ class RequestSchedulerReporterTest {
     @BeforeEach
     void setUp() {
         reporter = new RequestSchedulerReporter(monitor);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void committedVictimStatisticsDistinguishQueueWithdrawalAndEngineCancellation(
+            boolean cancelled) {
+        var observed = org.mockito.Mockito.spy(reporter);
+        var victims =
+                java.util.List.of(
+                        new org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView(
+                                String.valueOf(1L),
+                                20,
+                                100L,
+                                120L,
+                                org.flexlb.enums.DecodeTaskPhase.RUNNING,
+                                true,
+                                1L,
+                                true),
+                        new org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView(
+                                String.valueOf(2L),
+                                30,
+                                200L,
+                                220L,
+                                org.flexlb.enums.DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
+                                true,
+                                2L,
+                                true));
+        observed.reportPreemptionVictims(
+                String.valueOf(3L), 70, "decode", "capacity", victims, cancelled);
+        verify(observed)
+                .reportVictim(20, 70, cancelled ? "decode_running" : "decode_reserved", "capacity");
+        verify(observed)
+                .reportVictim(30, 70, cancelled ? "decode_cancel" : "decode_reserved", "capacity");
+        verify(observed)
+                .reportVictimKvTokens(20, cancelled ? "decode_running" : "decode_reserved", 100L);
+        verify(observed)
+                .reportVictimKvTokens(30, cancelled ? "decode_cancel" : "decode_reserved", 200L);
+        verify(observed).reportEviction(EvictionEvent.COMMIT, 70, "capacity", "success");
+        for (var victim : victims) {
+            verify(observed, org.mockito.Mockito.times(cancelled ? 1 : 0))
+                    .reportEngineCancel(CancelEvent.CONFIRM, "decode", victim.priority());
+        }
+        observed.reportPreemptionCancelRequests("decode", victims);
+        for (var victim : victims) {
+            verify(observed).reportEngineCancel(CancelEvent.REQUEST, "decode", victim.priority());
+            verify(observed).reportCancel(victim.priority(), "PRIORITY_PREEMPTED");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void metricFailureCannotInterruptSchedulingOrSuppressNextMetric(boolean error) {
+        Throwable failure =
+                error
+                        ? new AssertionError("monitor failed")
+                        : new IllegalStateException("monitor failed");
+        doThrow(failure)
+                .when(monitor)
+                .register(AUTO_TPM_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        assertDoesNotThrow(reporter::init);
+        verify(monitor)
+                .register(
+                        AUTO_TPM_CANCEL_REQUEST_COUNT,
+                        FlexMetricType.QPS,
+                        FlexPriorityType.PRECISE);
+        var tags =
+                FlexMetricTags.of(
+                        "victim_priority",
+                        "20",
+                        "incoming_priority",
+                        "70",
+                        "stage",
+                        "decode_reserved",
+                        "case",
+                        "decode_kv_full");
+        doThrow(failure).when(monitor).report(AUTO_TPM_VICTIM_COUNT, tags, 1.0);
+        assertDoesNotThrow(
+                () -> reporter.reportVictim(20, 70, "decode_reserved", "decode_kv_full"));
+        verify(monitor)
+                .report(
+                        AUTO_TPM_PRIORITY_PREEMPT_COUNT,
+                        FlexMetricTags.of("stage", "decode_reserved"),
+                        1.0);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "PLAN, auto_tpm.eviction_plan.count, feasible",
+        "PLAN, auto_tpm.eviction_plan.count, infeasible",
+        "COMMIT, auto_tpm.eviction_commit.count, success",
+        "COMMIT, auto_tpm.eviction_commit.count, conflict"
+    })
+    void evictionOutcomesPreserveTheirMetricAndTagSchema(
+            EvictionEvent event, String metric, String result) {
+        reporter.reportEviction(event, 70, "decode_kv_full", result);
+
+        var ordered = inOrder(monitor);
+        ordered.verify(monitor)
+                .report(
+                        metric,
+                        FlexMetricTags.of(
+                                "priority", "70", "case", "decode_kv_full", "result", result),
+                        1.0);
+        ordered.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void victimEventPreservesBothMetricSchemasAndTheirOrder() {
+        reporter.reportVictim(20, 70, "decode_reserved", "decode_kv_full");
+
+        var ordered = inOrder(monitor);
+        ordered.verify(monitor)
+                .report(
+                        AUTO_TPM_VICTIM_COUNT,
+                        FlexMetricTags.of(
+                                "victim_priority",
+                                "20",
+                                "incoming_priority",
+                                "70",
+                                "stage",
+                                "decode_reserved",
+                                "case",
+                                "decode_kv_full"),
+                        1.0);
+        ordered.verify(monitor)
+                .report(
+                        AUTO_TPM_PRIORITY_PREEMPT_COUNT,
+                        FlexMetricTags.of("stage", "decode_reserved"),
+                        1.0);
+        ordered.verifyNoMoreInteractions();
     }
 
     @Test
@@ -84,7 +219,7 @@ class RequestSchedulerReporterTest {
 
     @Test
     void should_report_cancel_request_with_priority_tag() {
-        reporter.reportCancelRequest("10.0.0.2:8081", 30);
+        reporter.reportEngineCancel(CancelEvent.REQUEST, "10.0.0.2:8081", 30);
 
         verify(monitor)
                 .report(
@@ -95,7 +230,7 @@ class RequestSchedulerReporterTest {
 
     @Test
     void should_report_cancel_confirm_with_priority_tag() {
-        reporter.reportCancelConfirm("10.0.0.2:8081", 30);
+        reporter.reportEngineCancel(CancelEvent.CONFIRM, "10.0.0.2:8081", 30);
 
         verify(monitor)
                 .report(
@@ -106,64 +241,12 @@ class RequestSchedulerReporterTest {
 
     @Test
     void should_report_cancel_timeout_with_incoming_priority_tag() {
-        reporter.reportCancelTimeout("10.0.0.2:8081", 70);
+        reporter.reportEngineCancel(CancelEvent.TIMEOUT, "10.0.0.2:8081", 70);
 
         verify(monitor)
                 .report(
                         AUTO_TPM_CANCEL_TIMEOUT_COUNT,
                         FlexMetricTags.of("endpoint", "10.0.0.2:8081", "priority", "70"),
                         1.0);
-    }
-
-    @Test
-    void reportsLifecycleFailuresAsPreciseCounterIncrements() {
-        reporter.init();
-        reporter.reportLifecycleFailure("terminal_cleanup");
-
-        verify(monitor)
-                .register(
-                        REQUEST_LIFECYCLE_FAILURES_TOTAL,
-                        FlexMetricType.COUNTER,
-                        FlexPriorityType.PRECISE);
-        verify(monitor)
-                .report(
-                        REQUEST_LIFECYCLE_FAILURES_TOTAL,
-                        FlexMetricTags.of("stage", "terminal_cleanup"),
-                        1.0);
-    }
-
-    @Test
-    void failingMetricsDoNotInterruptRequestCleanup() {
-        doThrow(new IllegalStateException("monitor unavailable"))
-                .when(monitor)
-                .report(
-                        REQUEST_LIFECYCLE_FAILURES_TOTAL,
-                        FlexMetricTags.of("stage", "registration"),
-                        1.0);
-
-        assertDoesNotThrow(() -> reporter.reportLifecycleFailure("registration"));
-    }
-
-    @Test
-    void registersTargetValidationFailuresAsQpsWithNormalAggregation() {
-        reporter.init();
-
-        verify(monitor)
-                .register(
-                        AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT,
-                        FlexMetricType.QPS,
-                        FlexPriorityType.NORMAL);
-    }
-
-    @Test
-    void reportsOneTargetValidationFailureWithModeAndReason() {
-        reporter.reportPreemptionTargetInvalid("return", "victim_state_changed");
-
-        verify(monitor)
-                .report(
-                        AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT,
-                        FlexMetricTags.of("mode", "return", "reason", "victim_state_changed"),
-                        1.0);
-        verifyNoMoreInteractions(monitor);
     }
 }

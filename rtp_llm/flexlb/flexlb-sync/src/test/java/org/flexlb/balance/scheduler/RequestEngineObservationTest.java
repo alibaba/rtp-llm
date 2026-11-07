@@ -1,0 +1,229 @@
+package org.flexlb.balance.scheduler;
+
+import org.flexlb.dao.route.RoleType;
+import org.junit.jupiter.api.Test;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+import static org.flexlb.balance.scheduler.ContextResult.Cancellation;
+import static org.flexlb.balance.scheduler.ContextResult.Prediction;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEvent;
+import static org.flexlb.balance.scheduler.ContextResult.WorkerRequestEventType;
+import static org.flexlb.balance.scheduler.RequestChangeAssertions.Update;
+import static org.flexlb.balance.scheduler.RequestChangeAssertions.UpdateKind;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/** Public transitions acquire the monitor themselves; observations cannot partially bypass it. */
+class RequestEngineObservationTest {
+    @Test
+    void prefillObservationCannotChangeActivityOrVisibilityOutsideItsAtomicTransition()
+            throws Exception {
+        verifyAtomicObservation(RoleType.PREFILL);
+    }
+
+    @Test
+    void decodeObservationCannotChangeActivityOrAcceptanceOutsideItsAtomicTransition()
+            throws Exception {
+        verifyAtomicObservation(RoleType.DECODE);
+    }
+
+    @Test
+    void laterActivityAndCancellationCannotMutateHistoricalSnapshotFacts() {
+        var fixture = RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
+        var context = fixture.context();
+        var first =
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                                context,
+                                observedRequest ->
+                                        observedRequest.recordWorkerRequestEvent(
+                                                new WorkerRequestEvent(
+                                                        fixture.route(),
+                                                        fixture.reservation(),
+                                                        RoleType.PREFILL,
+                                                        WorkerRequestEventType.ACTIVE,
+                                                        0L,
+                                                        null,
+                                                        1100L)))
+                        .after();
+        var firstDuplicate =
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
+                                                fixture.route(),
+                                                fixture.reservation(),
+                                                RoleType.PREFILL,
+                                                WorkerRequestEventType.ACTIVE,
+                                                0L,
+                                                null,
+                                                1100L)));
+        assertEquals(UpdateKind.NO_CHANGE, firstDuplicate.kind());
+        assertSame(first, firstDuplicate.before());
+        assertSame(first, firstDuplicate.after());
+        var later =
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                                context,
+                                observedRequest ->
+                                        observedRequest.recordWorkerRequestEvent(
+                                                new WorkerRequestEvent(
+                                                        fixture.route(),
+                                                        fixture.reservation(),
+                                                        RoleType.PREFILL,
+                                                        WorkerRequestEventType.ACTIVE,
+                                                        0L,
+                                                        null,
+                                                        1200L)))
+                        .after();
+        assertNotSame(first, later);
+        assertSame(first.route(), later.route());
+        assertSame(first.delivery(), later.delivery());
+        assertEquals(first.engine(), later.engine());
+        assertEquals(first.close(), later.close());
+        assertEquals(first.phase(), later.phase());
+        assertSame(first.deadlines(), later.deadlines(), "existing timer wake-up remains valid");
+        var laterDuplicate =
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
+                                                fixture.route(),
+                                                fixture.reservation(),
+                                                RoleType.PREFILL,
+                                                WorkerRequestEventType.ACTIVE,
+                                                0L,
+                                                null,
+                                                1200L)));
+        assertEquals(UpdateKind.NO_CHANGE, laterDuplicate.kind());
+        assertSame(later, laterDuplicate.before());
+        assertSame(later, laterDuplicate.after());
+        var foreign =
+                org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                        context,
+                        observedRequest ->
+                                observedRequest.recordWorkerRequestEvent(
+                                        new WorkerRequestEvent(
+                                                null,
+                                                fixture.reservation(),
+                                                RoleType.PREFILL,
+                                                WorkerRequestEventType.ACTIVE,
+                                                0L,
+                                                null,
+                                                1250L)));
+        assertEquals(UpdateKind.STALE, foreign.kind());
+        assertSame(later, foreign.before());
+        assertSame(later, foreign.after());
+        assertSame(
+                first,
+                firstDuplicate.after(),
+                "later results cannot repoint an already-returned update");
+        assertEquals(1100L, first.lastWorkerAtMs());
+        assertEquals(1200L, later.lastWorkerAtMs());
+        assertEquals(1100L, first.updatedAtMs());
+        assertTrue(first.engine().prefillObserved());
+        assertSame(fixture.route(), first.route());
+        var cancelled =
+                context.requestCancel(
+                        new Cancellation(
+                                0L,
+                                CancelReason.CLIENT_CANCELLED,
+                                false,
+                                1300L,
+                                org.flexlb.dao.loadbalance.StrategyErrorType.DISPATCH_FAILED,
+                                "first cancellation"));
+        assertNull(first.cancellation());
+        assertNull(later.cancellation());
+        assertTrue(cancelled);
+        assertNotNull(context.snapshot().cancellation());
+        assertEquals("first cancellation", context.snapshot().cancellation().detail());
+        assertEquals(1100L, first.lastWorkerAtMs());
+        assertSame(fixture.delivery(), first.delivery().identity());
+        assertNull(first.outcome());
+    }
+
+    @Test
+    void equalResponseValuesCannotReplaceTheSelectedResponseIdentity() {
+        var context = RequestCleanupPassTest.endingContext(7504L);
+        var selected =
+                new ContextResult.ResponseCandidate(
+                        context, ContextResult.ResponseKind.TERMINAL, 1002L);
+        var equalCandidate =
+                new ContextResult.ResponseCandidate(context, selected.kind(), selected.nowMs());
+        assertEquals(selected, equalCandidate);
+        org.junit.jupiter.api.Assertions.assertTrue(context.selectResponse(selected));
+        var committed = context.snapshot();
+        org.junit.jupiter.api.Assertions.assertFalse(context.selectResponse(equalCandidate));
+        assertSame(selected, committed.selectedResponse());
+        assertSame(committed, context.snapshot());
+        org.junit.jupiter.api.Assertions.assertTrue(context.selectResponse(selected));
+    }
+
+    private static void verifyAtomicObservation(RoleType role) throws Exception {
+        var fixture = RequestDeliveryClaimStateTest.fixture(Delivery.SendMode.BATCH_ENQUEUE, false);
+        var context = fixture.context();
+        org.flexlb.balance.scheduler.RequestChangeAssertions.record(
+                context,
+                observedRequest ->
+                        observedRequest.recordDeliveryResult(
+                                new Prediction(fixture.delivery(), 3000L, 1002L)));
+        var before = context.snapshot();
+        var visibility = before.deadlines().visibility();
+        var inactivity = before.deadlines().inactivity();
+        assertNotNull(visibility);
+        assertNotNull(inactivity);
+        var entered = new CountDownLatch(1);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            java.util.concurrent.Future<Update> applied;
+            synchronized (context) {
+                applied =
+                        executor.submit(
+                                () -> {
+                                    entered.countDown();
+                                    return org.flexlb.balance.scheduler.RequestChangeAssertions
+                                            .record(
+                                                    context,
+                                                    observedRequest ->
+                                                            observedRequest
+                                                                    .recordWorkerRequestEvent(
+                                                                            new WorkerRequestEvent(
+                                                                                    fixture.route(),
+                                                                                    fixture
+                                                                                            .reservation(),
+                                                                                    role,
+                                                                                    WorkerRequestEventType
+                                                                                            .ACTIVE,
+                                                                                    0L,
+                                                                                    null,
+                                                                                    2000L)));
+                                });
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                assertFalse(
+                        applied.isDone(),
+                        "the transition must wait for the existing request monitor owner");
+                assertSame(before, context.snapshot());
+                assertSame(visibility, context.snapshot().deadlines().visibility());
+                assertSame(inactivity, context.snapshot().deadlines().inactivity());
+                assertFalse(context.snapshot().engine().decodeAccepted());
+                assertFalse(context.snapshot().delivery().acknowledged());
+                assertNull(context.snapshot().selectedResponse());
+            }
+            var update = applied.get(5, TimeUnit.SECONDS);
+            assertEquals(UpdateKind.APPLIED, update.kind());
+            assertSame(fixture.delivery(), update.after().delivery().identity());
+            assertNull(update.after().deadlines().visibility());
+            assertEquals(role == RoleType.DECODE, update.after().engine().decodeAccepted());
+            assertEquals(2000L, update.after().lastWorkerAtMs());
+            assertFalse(update.after().delivery().acknowledged());
+            assertNull(update.after().selectedResponse());
+        }
+    }
+}

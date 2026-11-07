@@ -1,6 +1,5 @@
 package org.flexlb.mock.grpc;
 
-import com.google.protobuf.ByteString;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -8,7 +7,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockWorkerBehavior;
-import org.flexlb.service.grpc.EngineStatusConverter;
+import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -27,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 1. Start mock prefill with available_concurrency = 10
  * 2. Submit request → succeed (normal operation)
  * 3. Call {@code grpcClient.getWorkerStatusAsync()} → verify response has concurrency = 10
- * 4. Apply status update to WorkerStatus and PrefillEndpoint (simulates EngineSyncRunner)
+ * 4. Apply status update to WorkerStatus and PrefillEndpoint (simulates Runnable)
  * 5. Verify WorkerStatus reflects concurrency = 10
  * 6. Change mock prefill behavior: available_concurrency = 0 (worker full)
  * 7. Call {@code grpcClient.getWorkerStatusAsync()} again → verify concurrency = 0
@@ -42,7 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>The mock returns a {@code WorkerStatusPB} with configurable
  *       {@code available_concurrency}, {@code available_kv_cache}, {@code total_kv_cache},
  *       {@code alive}, {@code status_version}, etc.</li>
- *   <li>{@link EngineStatusConverter#convertToStatusObservation} converts the PB
+ *   <li>{@link WorkerStatusRpcClient#convertToStatusObservation} converts the PB
  *       directly to an immutable observation</li>
  *   <li>The prepared observation updates the committed in-memory status</li>
  *   <li>The prepared-status transaction atomically commits the WorkerStatus
@@ -60,9 +59,9 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
 
     @Test
     void nonNumericRoutingIdDoesNotInventAnEngineInputId() {
-        var context = createBalanceContext("request-a");
-        assertEquals("request-a", context.getRequestId());
-        assertEquals(ByteString.EMPTY, context.getGenerateInputPb());
+        var context = createRequestContext("request-a");
+        assertEquals("request-a", context.data().getRequestId());
+        assertEquals(0, context.data().getGenerateInputSize());
     }
 
     @Override
@@ -79,7 +78,7 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
     @Timeout(20)
     void workerStatusSync_masterPerceivesConcurrencyChange() throws Exception {
         // 1. Submit request — normal operation with concurrency=10
-        CompletableFuture<Response> future = submitRequest("30001");
+        CompletableFuture<Response> future = submitRequest(30001L);
         Response ackResponse = future.get(5, TimeUnit.SECONDS);
         assertTrue(ackResponse.isSuccess(), "Request should succeed with concurrency=10");
 
@@ -180,6 +179,6 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
                         .build();
         WorkerStatus ws = getPrefillEndpoint().getStatus();
         applyWorkerStatusObservation(
-                ws, EngineStatusConverter.convertToStatusObservation(ws, prefillStatus));
+                ws, WorkerStatusRpcClient.convertToStatusObservation(ws, prefillStatus));
     }
 }

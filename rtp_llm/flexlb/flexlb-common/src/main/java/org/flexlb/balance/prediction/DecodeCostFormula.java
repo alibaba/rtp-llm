@@ -2,6 +2,8 @@ package org.flexlb.balance.prediction;
 
 import java.util.Map;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Immutable Decode cost expression evaluated against one routing snapshot. */
 public final class DecodeCostFormula {
 
@@ -12,21 +14,20 @@ public final class DecodeCostFormula {
                     "kvcache_used", 2,
                     "kvcache_capacity", 3,
                     "kvcache_used_ratio", 4);
-    private static final ThreadLocal<double[]> EVALUATION_VARIABLES =
-            ThreadLocal.withInitial(() -> new double[VARIABLES.size()]);
-
     private final String expression;
     private final ArithmeticFormula formula;
+    private final ThreadLocal<Evaluator> evaluators;
 
     private DecodeCostFormula(String expression, ArithmeticFormula formula) {
         this.expression = expression;
         this.formula = formula;
+        this.evaluators = ThreadLocal.withInitial(() -> new Evaluator(formula));
     }
 
     public static DecodeCostFormula parse(String expression) {
-        if (expression == null || expression.isBlank()) {
-            throw new IllegalArgumentException("Decode cost expression must not be blank");
-        }
+        checkArgument(
+                expression != null && !expression.isBlank(),
+                "Decode cost expression must not be blank");
         return new DecodeCostFormula(expression, ArithmeticFormula.parse(expression, VARIABLES));
     }
 
@@ -38,13 +39,27 @@ public final class DecodeCostFormula {
         return formula.referencesVariable("max_running_size");
     }
 
-    public double evaluate(long runningSize, long maxRunningSize, long kvUsed, long kvCapacity) {
-        double[] vars = EVALUATION_VARIABLES.get();
-        vars[0] = runningSize;
-        vars[1] = maxRunningSize;
-        vars[2] = kvUsed;
-        vars[3] = kvCapacity;
-        vars[4] = kvCapacity == 0L ? 0.0 : (double) kvUsed / kvCapacity;
-        return formula.evaluateAsDouble(vars, null);
+    /** Borrow on the calling thread for one synchronous scoring pass; never share across threads. */
+    public Evaluator evaluator() {
+        return evaluators.get();
+    }
+
+    public static final class Evaluator {
+        private final ArithmeticFormula formula;
+        private final double[] vars = new double[VARIABLES.size()];
+
+        private Evaluator(ArithmeticFormula formula) {
+            this.formula = formula;
+        }
+
+        public double evaluate(
+                long runningSize, long maxRunningSize, long kvUsed, long kvCapacity) {
+            vars[0] = runningSize;
+            vars[1] = maxRunningSize;
+            vars[2] = kvUsed;
+            vars[3] = kvCapacity;
+            vars[4] = kvCapacity == 0L ? 0.0 : (double) kvUsed / kvCapacity;
+            return formula.evaluateAsDouble(vars, null);
+        }
     }
 }

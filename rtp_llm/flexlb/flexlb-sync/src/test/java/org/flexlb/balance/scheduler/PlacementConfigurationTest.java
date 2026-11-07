@@ -1,0 +1,142 @@
+package org.flexlb.balance.scheduler;
+
+import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.ConfigTestSupport;
+import org.flexlb.config.DispatcherConfig;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.mock.env.MockEnvironment;
+
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class PlacementConfigurationTest {
+    static class RequestConsumer {
+        final AbstractRequestScheduler entry;
+
+        RequestConsumer(
+                @org.springframework.context.annotation.Lazy AbstractRequestScheduler entry) {
+            this.entry = entry;
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(DispatcherConfig.Type.class)
+    void springAssemblyUsesOneDispatcherBeforeServingAndRuntimeCloses(
+            DispatcherConfig.Type dispatcherType) throws Exception {
+        var config = SchedulingTestConfig.batchConfig();
+        if (dispatcherType == DispatcherConfig.Type.NON_BATCH) {
+            config.setScheduler(ConfigTestSupport.direct());
+            SchedulingTestConfig.useNonBatchDispatcher(config);
+        }
+        var environment = spy(new MockEnvironment().withProperty("server.port", "7001"));
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        RequestRouteSelector router = mock(RequestRouteSelector.class);
+        var request = RequestProtocolTestSupport.context(config, 8972L);
+        when(router.select(request, null))
+                .thenReturn(
+                        PlacementResult.rejected(
+                                Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
+        var batchDispatcher =
+                spy(
+                        new DeliveryDispatcher(
+                                null,
+                                service,
+                                mock(DeliveryMetricsReporter.class),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.TaskTimer.class),
+                                new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                        .decodeAdmissionCapacity(service),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.balance.scheduler.DeliveryExecution.class)));
+        RequestRepository repository;
+        try (var spring = new AnnotationConfigApplicationContext()) {
+            spring.setEnvironment(environment);
+            spring.registerBean(
+                    "nacosConfigSource",
+                    org.flexlb.service.config.ConfigSource.class,
+                    () -> mock(org.flexlb.service.config.ConfigSource.class));
+            spring.registerBean(
+                    "uniConfigConfigSource",
+                    org.flexlb.service.config.ConfigSource.class,
+                    () -> mock(org.flexlb.service.config.ConfigSource.class));
+            spring.registerBean(
+                    "environmentConfigSource",
+                    org.flexlb.service.config.ConfigSource.class,
+                    () -> mock(org.flexlb.service.config.ConfigSource.class));
+            spring.registerBean(ConfigService.class, () -> service);
+            spring.registerBean(RequestRouteSelector.class, () -> router);
+            spring.registerBean(
+                    org.flexlb.service.VitCacheSelector.class,
+                    () -> mock(org.flexlb.service.VitCacheSelector.class));
+            spring.registerBean(EndpointRegistry.class, () -> mock(EndpointRegistry.class));
+            spring.registerBean(DecodePreemption.class, () -> mock(DecodePreemption.class));
+            spring.registerBean(
+                    DeliveryMetricsReporter.class, () -> mock(DeliveryMetricsReporter.class));
+            spring.registerBean(
+                    RequestSchedulerReporter.class, () -> mock(RequestSchedulerReporter.class));
+            spring.registerBean(
+                    TheoryCacheHitReporter.class, () -> mock(TheoryCacheHitReporter.class));
+            spring.registerBean(EngineGrpcClient.class, () -> mock(EngineGrpcClient.class));
+            spring.registerBean(DeliveryDispatcher.class, () -> batchDispatcher);
+            spring.register(
+                    RequestConsumer.class,
+                    PlacementAvailability.class,
+                    RequestRepository.class,
+                    PlacementConfiguration.class);
+            spring.refresh();
+
+            assertEquals(1, spring.getBeansOfType(DeliveryDispatcher.class).size());
+            var deliveryStrategy = spring.getBean(DeliveryDispatcher.class);
+            assertSame(batchDispatcher, deliveryStrategy);
+            assertEquals(dispatcherType, deliveryStrategy.mode());
+            var scheduler = spring.getBean(RequestScheduler.class);
+            scheduler.start();
+            if (dispatcherType == DispatcherConfig.Type.BATCH) {
+                assertInstanceOf(DeliveryDispatcher.class, deliveryStrategy);
+                assertInstanceOf(QueuedRequestScheduler.class, scheduler);
+            } else {
+                assertInstanceOf(DeliveryDispatcher.class, deliveryStrategy);
+                assertInstanceOf(DirectRequestScheduler.class, scheduler);
+                verify(environment, never()).getProperty("server.port");
+            }
+            repository = spring.getBean(RequestRepository.class);
+            request.data().setGenerateInputPb(com.google.protobuf.ByteString.copyFromUtf8("input"));
+            var future = spring.getBean(RequestConsumer.class).entry.submit(request);
+            assertSame(future, request.data().getFuture());
+            assertEquals(
+                    StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
+                    future.get(3, TimeUnit.SECONDS).getCode());
+            repository.closeRegistration();
+            scheduler.close();
+            SchedulerTestSupport.lifecycle(scheduler).stopAdmissionsAndAwaitCompletion();
+            spring.getBean(ExpirationTimer.class).close();
+            spring.getBean("deadlineTaskTimer", ScheduledTaskTimer.class).close();
+            spring.getBean(RequestTaskPool.class).close();
+            spring.getBean(ResponseCompletionExecutor.class).close();
+            spring.getBean(ScheduledTaskTimer.class).close();
+            spring.getBean(DeliveryExecution.class).awaitDeliveries();
+        }
+        assertTrue(repository.isClosed());
+    }
+}

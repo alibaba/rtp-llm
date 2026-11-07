@@ -121,14 +121,14 @@ class DecodePendingQueueHardGateTest {
         // All requests must complete normally and drain every counter.
         awaitDecodeQuiescence(decode, 30_000);
         assertEquals(0, activeDecodeRequests(decode));
-        assertEquals(0, decode.getActiveKvTokens());
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode));
         assertEquals(0, decodePendingQueueSize(decode));
         assertEquals(
                 nRequests,
-                decode.getCompletedCount(),
+                MockEngineTestSupport.getCompletedCount(decode),
                 "every accepted request must complete (none rejected)");
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode));
     }
 
     // ──────────── Test 2: queued requests drain as completions free slots ────────────
@@ -174,14 +174,14 @@ class DecodePendingQueueHardGateTest {
         // Completions hand freed slots to queued requests until fully drained.
         awaitDecodeQuiescence(decode, 30_000);
         assertEquals(0, activeDecodeRequests(decode));
-        assertEquals(0, decode.getActiveKvTokens());
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode));
         assertEquals(0, decodePendingQueueSize(decode));
         assertEquals(
                 6,
-                decode.getCompletedCount(),
+                MockEngineTestSupport.getCompletedCount(decode),
                 "all six accepted requests must complete via the drain chain");
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode));
     }
 
     // ──────────── Service / model helpers ────────────

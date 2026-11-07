@@ -16,6 +16,13 @@ public class NoOpFlexMonitor implements FlexMonitor {
     }
 
     @Override
+    public <T> void observe(
+            String name,
+            FlexMetricType type,
+            T source,
+            java.util.function.ToDoubleFunction<T> value) {}
+
+    @Override
     public void register(String metricName, FlexMetricType metricType) {}
 
     @Override

@@ -32,7 +32,7 @@ class JavaLoadClientParityTest {
             keys.add(k + idx);
         }
         return new JavaLoadClient.TraceRecord(
-                idx, "rid-" + idx, "trace-" + idx, tsMs, il, ol, keys, tokens);
+                idx, "rid-" + idx, "trace-" + idx, tsMs, il, ol, keys, tokens, 0);
     }
 
     private JavaLoadClient dryRunClient() {
@@ -68,7 +68,14 @@ class JavaLoadClientParityTest {
                         "",
                         false,
                         "",
-                        true);
+                        true,
+                        0,
+                        0,
+                        "replay",
+                        0.0,
+                        0.0,
+                        true,
+                        List.of());
         return new JavaLoadClient(config);
     }
 

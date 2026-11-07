@@ -1,129 +1,98 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.preemption.PreemptionCancelPhase;
-import org.flexlb.balance.preemption.VictimTerminal;
+import org.flexlb.balance.endpoint.DecodeResources;
+import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.balance.preemption.VictimResolution;
 
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
+import java.util.Objects;
 
 /**
- * Exact ownership token for one priority-preemption attempt.
- *
- * <p>This class owns only the attempt-local protocol. RequestSlot remains the
- * aggregate root and decides when a transition is legal for the request as a
- * whole. Keeping this small state machine separate makes that boundary
- * explicit and prevents transport bookkeeping from obscuring request
- * lifecycle decisions.</p>
+ * Exact victim and attempt identity, including its read-only completion.
  */
 public final class PreemptionRegistration {
-    private final RequestSlot owner;
-    private final String requestId;
+    @lombok.Getter
+    @lombok.experimental.Accessors(fluent = true)
+    private final RequestContext owner;
+
+    @lombok.Getter
+    @lombok.experimental.Accessors(fluent = true)
     private final long attemptToken;
-    private final String detail;
-    private final CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
 
-    private PreemptionCancelPhase phase = PreemptionCancelPhase.CLAIMED;
-    private boolean finished;
-    private DeferredTerminal pendingTerminal;
-    private boolean pendingDeliveryConfirmation;
-    private long pendingConfirmationBatchId;
+    @lombok.Getter
+    @lombok.experimental.Accessors(fluent = true)
+    private final DecodeResources.RequestReservation reservation;
 
-    PreemptionRegistration(RequestSlot owner, String requestId, long attemptToken, String detail) {
+    @lombok.Getter
+    @lombok.experimental.Accessors(fluent = true)
+    private final CancelTarget cancelTarget;
+
+    /**
+     * Intermediate Scheduler progress after one cancel reply was interpreted.
+     *
+     * <p>None of these values means that the request is closed or that the Decode ledger was
+     * released. Those decisions require the matching Context and endpoint evidence.
+     */
+    public enum Reply {
+        /**
+         * The reply was accepted as progress, but request and ledger settlement are pending.
+         */
+        WAITING,
+        /**
+         * The remote worker did not own this work; this is not completion proof.
+         */
+        NOT_FOUND,
+        /**
+         * The reply could not advance the matching attempt; this is not completion proof.
+         */
+        UNKNOWN
+    }
+
+    public PreemptionRegistration(
+            RequestContext owner,
+            long attemptToken,
+            DecodeResources.RequestReservation reservation,
+            CancelTarget cancelTarget) {
         this.owner = owner;
-        this.requestId = requestId;
         this.attemptToken = attemptToken;
-        this.detail = detail == null ? "priority preemption" : detail;
-    }
+        this.reservation = reservation;
+        this.cancelTarget = cancelTarget;
 
-    public boolean applyPhase(PreemptionCancelPhase phase) {
-        return owner.updatePreemption(this, phase);
-    }
-
-    public boolean release() {
-        return owner.releasePreemption(this);
-    }
-
-    public boolean completePreemption(String detail) {
-        return owner.completePreemption(this, detail);
-    }
-
-    public String requestId() {
-        return requestId;
-    }
-
-    public long attemptToken() {
-        return attemptToken;
-    }
-
-    public CompletionStage<VictimTerminal> terminalObservation() {
-        return terminal;
-    }
-
-    boolean signalTerminal(VictimTerminal exactTerminal) {
-        return terminal.complete(exactTerminal);
-    }
-
-    String detail() {
-        return detail;
-    }
-
-    DeferredTerminal pendingTerminal() {
-        return pendingTerminal;
-    }
-
-    boolean hasPendingDeliveryConfirmation() {
-        return pendingDeliveryConfirmation;
-    }
-
-    long pendingConfirmationBatchId() {
-        return pendingConfirmationBatchId;
-    }
-
-    boolean advanceTo(PreemptionCancelPhase next) {
-        if (finished || !phase.canTransitionTo(next)) {
-            return false;
+        Objects.requireNonNull(owner);
+        Objects.requireNonNull(reservation);
+        Objects.requireNonNull(cancelTarget);
+        if (!cancelTarget.isRoutable()) {
+            throw new IllegalArgumentException("victim has no routable Cancel target");
         }
-        phase = next;
-        return true;
     }
 
-    /** Record protocol completion once; resource cleanup and terminal notification still belong to the slot. */
-    boolean tryFinish() {
-        if (finished) {
-            return false;
-        }
-        finished = true;
-        return true;
+    private volatile java.util.concurrent.CompletableFuture<VictimResolution> completion;
+
+    @SuppressWarnings("rawtypes")
+    private static final java.util.concurrent.atomic.AtomicReferenceFieldUpdater<
+                    PreemptionRegistration, java.util.concurrent.CompletableFuture>
+            COMPLETION =
+                    java.util.concurrent.atomic.AtomicReferenceFieldUpdater.newUpdater(
+                            PreemptionRegistration.class,
+                            java.util.concurrent.CompletableFuture.class,
+                            "completion");
+
+    private java.util.concurrent.CompletableFuture<VictimResolution> completionFuture() {
+        var current = completion;
+        if (current != null) return current;
+        var created = new java.util.concurrent.CompletableFuture<VictimResolution>();
+        return COMPLETION.compareAndSet(this, null, created) ? created : completion;
     }
 
-    boolean isReleasable() {
-        return !finished && phase.isLocallyReleasable();
+    public java.util.concurrent.CompletionStage<VictimResolution> completion() {
+        return completionFuture().minimalCompletionStage();
     }
 
-    boolean isNotFound() {
-        return !finished && phase == PreemptionCancelPhase.NOT_FOUND_STALE;
+    public VictimResolution result() {
+        var current = completion;
+        return current == null ? null : current.getNow(null);
     }
 
-    boolean isUnknown() {
-        return !finished && phase == PreemptionCancelPhase.CANCEL_UNKNOWN;
-    }
-
-    boolean isFinished() {
-        return finished;
-    }
-
-    boolean canCompletePreemption() {
-        return !finished && phase.acceptsRequestFenced();
-    }
-
-    void storeTerminal(DeferredTerminal selected) {
-        pendingTerminal = selected;
-    }
-
-    void recordDeliveryConfirmation(long batchId) {
-        if (!pendingDeliveryConfirmation) {
-            pendingDeliveryConfirmation = true;
-            pendingConfirmationBatchId = batchId;
-        }
+    public void complete(VictimResolution result) {
+        completionFuture().complete(Objects.requireNonNull(result));
     }
 }

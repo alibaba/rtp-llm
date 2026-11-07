@@ -7,18 +7,18 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Contracts of the immutable request view exposed by RequestRegistry. */
+/** Contracts of the immutable request view exposed by RequestRepository. */
 class RequestStateTest {
 
     @Test
     void batchDeliverySnapshotRequiresItsExactBatchIdentity() {
         RequestState state =
-                state(RequestState.Phase.DISPATCHING, DeliveryClaimKind.BATCH_ENQUEUE, 17L);
+                state(RequestState.Phase.DISPATCHING, Delivery.SendMode.BATCH_ENQUEUE, 17L);
 
         assertEquals(17L, state.batchId());
         assertThrows(
                 IllegalArgumentException.class,
-                () -> state(RequestState.Phase.DISPATCHING, DeliveryClaimKind.BATCH_ENQUEUE, 0L));
+                () -> state(RequestState.Phase.DISPATCHING, Delivery.SendMode.BATCH_ENQUEUE, 0L));
     }
 
     @Test
@@ -28,7 +28,7 @@ class RequestStateTest {
                 () ->
                         state(
                                 RequestState.Phase.ACKNOWLEDGED,
-                                DeliveryClaimKind.ROUTE_DECISION,
+                                Delivery.SendMode.ROUTE_DECISION,
                                 17L));
     }
 
@@ -43,7 +43,16 @@ class RequestStateTest {
     }
 
     private static RequestState state(
-            RequestState.Phase phase, DeliveryClaimKind claim, long batchId) {
-        return new RequestState("1", 0L, phase, claim, batchId, 10L, 11L, "test");
+            RequestState.Phase phase, Delivery.SendMode claim, long batchId) {
+        return new RequestState(
+                "1",
+                1L,
+                org.flexlb.dao.route.RequestPhase.GENERATION,
+                phase,
+                claim,
+                batchId,
+                10L,
+                11L,
+                "test");
     }
 }

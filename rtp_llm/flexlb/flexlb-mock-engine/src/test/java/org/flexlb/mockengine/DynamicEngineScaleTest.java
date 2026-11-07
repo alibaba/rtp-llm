@@ -721,7 +721,11 @@ class DynamicEngineScaleTest {
     private HttpResponse<String> post(String path, String body) throws Exception {
         return HTTP_CLIENT.send(
                 HttpRequest.newBuilder()
-                        .uri(URI.create("http://127.0.0.1:" + controlServer.getPort() + path))
+                        .uri(
+                                URI.create(
+                                        "http://127.0.0.1:"
+                                                + MockEngineTestSupport.controlPort(controlServer)
+                                                + path))
                         .header("Content-Type", "application/json")
                         .POST(HttpRequest.BodyPublishers.ofString(body))
                         .build(),
@@ -735,7 +739,8 @@ class DynamicEngineScaleTest {
                                 .uri(
                                         URI.create(
                                                 "http://127.0.0.1:"
-                                                        + controlServer.getPort()
+                                                        + MockEngineTestSupport.controlPort(
+                                                                controlServer)
                                                         + path))
                                 .GET()
                                 .build(),

@@ -1,135 +1,150 @@
 package org.flexlb.config;
 
-import io.micrometer.core.instrument.MeterRegistry;
-import io.micrometer.prometheus.PrometheusConfig;
-import io.micrometer.prometheus.PrometheusMeterRegistry;
-import org.flexlb.constant.MetricConstant;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
-import org.flexlb.metric.MicrometerFlexMonitor;
-import org.flexlb.metric.NoOpFlexMonitor;
+import org.flexlb.metric.SafeFlexMonitor;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.actuate.autoconfigure.metrics.CompositeMeterRegistryAutoConfiguration;
-import org.springframework.boot.actuate.autoconfigure.metrics.MetricsAutoConfiguration;
-import org.springframework.boot.actuate.autoconfigure.metrics.export.prometheus.PrometheusMetricsExportAutoConfiguration;
-import org.springframework.boot.autoconfigure.AutoConfigurations;
-import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
-import static org.assertj.core.api.Assertions.assertThat;
+import javax.annotation.PostConstruct;
+import java.util.concurrent.atomic.AtomicLong;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 class MonitorClientConfigTest {
 
-    private final ApplicationContextRunner contextRunner =
-            new ApplicationContextRunner()
-                    .withUserConfiguration(MonitorClientConfig.class, MonitorDisableConfig.class);
-
-    @Test
-    void providesMicrometerMonitorWhenBootAutoConfiguresRegistry() {
-        contextRunner
-                .withConfiguration(
-                        AutoConfigurations.of(
-                                MetricsAutoConfiguration.class,
-                                CompositeMeterRegistryAutoConfiguration.class,
-                                PrometheusMetricsExportAutoConfiguration.class))
-                .withPropertyValues("flexlb.monitor.provider=micrometer")
-                .run(
-                        context -> {
-                            assertThat(context).hasNotFailed();
-                            assertThat(context).hasSingleBean(FlexMonitor.class);
-                            FlexMonitor monitor = context.getBean(FlexMonitor.class);
-                            assertThat(monitor).isInstanceOf(MicrometerFlexMonitor.class);
-                            monitor.register(
-                                    MetricConstant.CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
-                            monitor.report(
-                                    MetricConstant.CACHE_AFFINITY_DECISION,
-                                    FlexMetricTags.of(
-                                            "role",
-                                            "PREFILL",
-                                            "engineIp",
-                                            "127.0.0.1:13215",
-                                            "decision",
-                                            "NO_CACHE_LEAD"),
-                                    1.0);
-                            assertThat(context.getBean(PrometheusMeterRegistry.class).scrape())
-                                    .contains("flexlb_app_cache_affinity_decision_qps_total{")
-                                    .contains("engineIp=\"127.0.0.1:13215\"")
-                                    .contains("decision=\"NO_CACHE_LEAD\"");
-                        });
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void customSpringMonitorIsProtectedWithoutLosingBackendInitialization(boolean error) {
+        var backend = new BrokenMonitor(error);
+        try (var context = new AnnotationConfigApplicationContext()) {
+            context.register(MonitorClientConfig.class);
+            context.registerBean("customMonitor", FlexMonitor.class, () -> backend);
+            context.registerBean(Consumer.class);
+            assertDoesNotThrow(context::refresh);
+            assertTrue(backend.initialized);
+            var monitor = context.getBean(FlexMonitor.class);
+            assertInstanceOf(SafeFlexMonitor.class, monitor);
+            assertDoesNotThrow(() -> monitor.prepare("metric", null));
+            assertDoesNotThrow(monitor::close);
+            assertTrue(backend.closed);
+        }
     }
 
     @Test
-    void defaultsToNoOpEvenWhenRegistryIsAvailable() {
-        contextRunner
-                .withUserConfiguration(RegistryConfiguration.class)
-                .run(
-                        context -> {
-                            assertThat(context).hasNotFailed();
-                            assertThat(context).hasSingleBean(FlexMonitor.class);
-                            assertThat(context.getBean(FlexMonitor.class))
-                                    .isSameAs(NoOpFlexMonitor.getInstance());
-                        });
+    void pullMetricsRemainLiveAlongsideAnIndependentBusinessBackend() {
+        var backend = org.mockito.Mockito.mock(FlexMonitor.class);
+        var source = new AtomicLong(7);
+        var registry = new SimpleMeterRegistry();
+        try (var context = new AnnotationConfigApplicationContext()) {
+            context.register(MonitorClientConfig.class);
+            context.registerBean("businessMonitor", FlexMonitor.class, () -> backend);
+            context.registerBean(
+                    "meterRegistry",
+                    io.micrometer.core.instrument.MeterRegistry.class,
+                    () -> registry);
+            context.refresh();
+            var monitor = context.getBean(FlexMonitor.class);
+            monitor.observe(
+                    "delivery_executor_active_threads",
+                    FlexMetricType.GAUGE,
+                    source,
+                    AtomicLong::doubleValue);
+            monitor.observe(
+                    "delivery_executor_completed_tasks",
+                    FlexMetricType.COUNTER,
+                    source,
+                    AtomicLong::doubleValue);
+            monitor.report("business", 3);
+            org.mockito.Mockito.verify(backend).report("business", 3);
+            assertEquals(
+                    7, registry.get("flexlb.delivery_executor_active_threads").gauge().value());
+            assertEquals(
+                    7,
+                    registry.get("flexlb.delivery_executor_completed_tasks")
+                            .functionCounter()
+                            .count());
+            source.set(19);
+            assertEquals(
+                    19, registry.get("flexlb.delivery_executor_active_threads").gauge().value());
+            assertEquals(
+                    19,
+                    registry.get("flexlb.delivery_executor_completed_tasks")
+                            .functionCounter()
+                            .count());
+            org.mockito.Mockito.verify(backend, org.mockito.Mockito.never())
+                    .observe(
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.any());
+        }
     }
 
-    @Test
-    void backsOffWhenProviderMonitorAlreadyExists() {
-        contextRunner
-                .withPropertyValues("flexlb.monitor.provider=micrometer")
-                .withUserConfiguration(RegistryConfiguration.class)
-                .withBean("providerMonitor", FlexMonitor.class, NoOpFlexMonitor::getInstance)
-                .run(
-                        context -> {
-                            assertThat(context).hasNotFailed();
-                            assertThat(context).hasSingleBean(FlexMonitor.class);
-                            assertThat(context).hasBean("providerMonitor");
-                            assertThat(context).doesNotHaveBean("micrometerFlexMonitor");
-                            assertThat(context).doesNotHaveBean("flexMonitor");
-                        });
+    static class Consumer {
+        Consumer(FlexMonitor monitor) {
+            monitor.register("metric", FlexMetricType.GAUGE);
+            monitor.report("metric", 1);
+        }
     }
 
-    @Test
-    void explicitMicrometerRequiresRegistry() {
-        contextRunner
-                .withPropertyValues("flexlb.monitor.provider=micrometer")
-                .run(context -> assertThat(context).hasFailed());
-    }
+    static class BrokenMonitor implements FlexMonitor {
+        private final boolean error;
+        boolean initialized;
+        boolean closed;
 
-    @Test
-    void providesNoOpMonitorWhenProviderIsExplicitlyNoOp() {
-        contextRunner
-                .withUserConfiguration(RegistryConfiguration.class)
-                .withPropertyValues("flexlb.monitor.provider=noop")
-                .run(
-                        context -> {
-                            assertThat(context).hasNotFailed();
-                            assertThat(context).hasSingleBean(FlexMonitor.class);
-                            assertThat(context.getBean(FlexMonitor.class))
-                                    .isSameAs(NoOpFlexMonitor.getInstance());
-                        });
-    }
+        BrokenMonitor(boolean error) {
+            this.error = error;
+        }
 
-    @Test
-    void disabledMonitoringOverridesMicrometerSelection() {
-        contextRunner
-                .withUserConfiguration(RegistryConfiguration.class)
-                .withPropertyValues(
-                        "flexlb.monitor.provider=micrometer", "flexlb.monitor.enabled=false")
-                .run(
-                        context -> {
-                            assertThat(context).hasNotFailed();
-                            assertThat(context).hasSingleBean(FlexMonitor.class);
-                            assertThat(context.getBean(FlexMonitor.class))
-                                    .isSameAs(NoOpFlexMonitor.getInstance());
-                        });
-    }
+        @PostConstruct
+        void init() {
+            initialized = true;
+        }
 
-    @Configuration(proxyBeanMethods = false)
-    static class RegistryConfiguration {
-        @Bean
-        MeterRegistry meterRegistry() {
-            return new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        private void fail() {
+            if (error) {
+                throw new AssertionError("monitor failed");
+            }
+            throw new IllegalStateException("monitor failed");
+        }
+
+        public void register(String name, FlexMetricType type) {
+            fail();
+        }
+
+        public void register(String name, FlexMetricType type, FlexPriorityType priority) {
+            fail();
+        }
+
+        public void register(String name, FlexMetricType type, int statisticsType) {
+            fail();
+        }
+
+        public void report(String name, double value) {
+            fail();
+        }
+
+        public void report(String name, FlexMetricTags tags, double value) {
+            fail();
+        }
+
+        public void prepare(String name, FlexMetricTags tags) {
+            fail();
+        }
+
+        public void close() {
+            closed = true;
+            fail();
         }
     }
 }

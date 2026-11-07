@@ -121,11 +121,6 @@ final class OpenTelemetryBootstrap {
         }
     }
 
-    static synchronized void resetForTest() {
-        shutdown();
-        initialized = false;
-    }
-
     static Resource resource() {
         long pid = ProcessHandle.current().pid();
         String hostname = hostname();

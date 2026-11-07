@@ -173,8 +173,7 @@ class LocalStandbyCacheMatchProviderTest {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
         LocalStandbyCacheMatchProvider provider =
                 new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
-        Request request = request();
-        request.setBlockCacheKeys(null);
+        Request request = Request.builder().requestId("1").blockSize(4096).build();
         try {
             provider.updateFromRoutedRequest(request(), null);
             provider.updateFromRoutedRequest(request(), List.of());
@@ -186,11 +185,11 @@ class LocalStandbyCacheMatchProviderTest {
     }
 
     private Request request() {
-        Request request = new Request();
-        request.setRequestId("1");
-        request.setBlockSize(4096);
-        request.setBlockCacheKeys(List.of(11L, 22L));
-        return request;
+        return Request.builder()
+                .requestId("1")
+                .blockSize(4096)
+                .blockCacheKeys(List.of(11L, 22L))
+                .build();
     }
 
     private ServerStatus worker(RoleType role) {

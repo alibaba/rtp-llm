@@ -3,7 +3,7 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.Setter;
 
-/** Scheduler mode and QUEUE-owned settings. */
+/** Scheduler mode, diagnostics, and QUEUE-owned settings. */
 @Getter
 @Setter
 public final class SchedulerConfig {
@@ -15,6 +15,9 @@ public final class SchedulerConfig {
 
     private Type type = Type.QUEUE;
 
+    /** Opt-in diagnostics; available in both scheduler modes. */
+    private NettyMemoryReporterConfig nettyMemoryReporter = new NettyMemoryReporterConfig();
+
     /** Maximum time a request may remain owned by the QUEUE scheduler. */
     private long queueTimeoutMs = 3_600_000L;
 
@@ -25,12 +28,6 @@ public final class SchedulerConfig {
 
     /** How queued requests form decision groups. */
     private DecisionPolicyConfig decision = new DecisionPolicyConfig();
-
-    public static SchedulerConfig direct() {
-        SchedulerConfig config = new SchedulerConfig();
-        config.type = Type.DIRECT;
-        return config;
-    }
 
     public long resolveExpiresAtMs(long admissionTimeMs) {
         return admissionTimeMs > Long.MAX_VALUE - queueTimeoutMs

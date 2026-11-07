@@ -3,8 +3,6 @@ package org.flexlb.balance.strategy;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.IntFunction;
-import java.util.function.IntPredicate;
 
 /** Continues an address ring within each routing group, even as eligibility changes. */
 final class EndpointRoundRobin {
@@ -16,42 +14,32 @@ final class EndpointRoundRobin {
 
     private final ConcurrentHashMap<Scope, Cursor> cursors = new ConcurrentHashMap<>();
 
-    int next(
-            RoleType role,
-            String group,
-            int size,
-            IntPredicate eligible,
-            IntFunction<String> address) {
+    /**
+     * Candidates are caller-owned indexes into an address-ordered snapshot. The eligible
+     * prefix preserves that order and both arrays remain unchanged throughout this call.
+     */
+    int next(RoleType role, String group, String[] addresses, int[] eligible, int count) {
+        if (count == 0) {
+            return -1;
+        }
         Cursor cursor = cursors.computeIfAbsent(new Scope(role, group), ignored -> new Cursor());
         synchronized (cursor) {
-            int firstIndex = -1;
-            int nextIndex = -1;
-            String firstAddress = null;
-            String nextAddress = null;
-            for (int i = 0; i < size; i++) {
-                if (!eligible.test(i)) {
-                    continue;
-                }
-                String candidate = address.apply(i);
-                if (firstAddress == null || candidate.compareTo(firstAddress) < 0) {
-                    firstIndex = i;
-                    firstAddress = candidate;
-                }
-                if (cursor.lastSelectedAddress != null
-                        && candidate.compareTo(cursor.lastSelectedAddress) > 0
-                        && (nextAddress == null || candidate.compareTo(nextAddress) < 0)) {
-                    nextIndex = i;
-                    nextAddress = candidate;
+            int low = 0;
+            int high = count;
+            if (cursor.lastSelectedAddress != null) {
+                // Upper bound skips the previous address, including duplicate observations.
+                while (low < high) {
+                    int mid = (low + high) >>> 1;
+                    if (addresses[eligible[mid]].compareTo(cursor.lastSelectedAddress) <= 0) {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
                 }
             }
-            if (nextIndex >= 0) {
-                cursor.lastSelectedAddress = nextAddress;
-                return nextIndex;
-            }
-            if (firstIndex >= 0) {
-                cursor.lastSelectedAddress = firstAddress;
-            }
-            return firstIndex;
+            int selected = eligible[low == count ? 0 : low];
+            cursor.lastSelectedAddress = addresses[selected];
+            return selected;
         }
     }
 }

@@ -116,6 +116,23 @@ cd rtp_llm/flexlb
 
 ### Configuration
 
+For deployments using `APP-META`'s `appctl.sh` / `setenv.sh`, G1 tuning is
+controlled by `FLEXLB_JVM_GC_PAUSE_MS` (default `150`) and
+`FLEXLB_JVM_G1_MIN_YOUNG_PERCENT` (default `20`). A latency-oriented configuration
+tested with a 64 GiB heap and 750 Prefill / 750 Decode workers is:
+
+```bash
+export FLEXLB_JVM_HEAP_SIZE=64g
+export FLEXLB_JVM_GC_PAUSE_MS=20
+export FLEXLB_JVM_G1_MIN_YOUNG_PERCENT=5
+```
+
+The pause target is a goal, not a hard limit. A smaller young-generation floor
+allows shorter, more frequent collections and may increase CPU usage. Direct
+`java -jar` launches do not read these environment variables; pass
+`-XX:+UnlockExperimentalVMOptions -XX:MaxGCPauseMillis=20 -XX:G1NewSizePercent=5`
+before `-jar` when using this configuration with G1.
+
 `FLEXLB_CONFIG` is a required JSON environment variable. It configures scheduling,
 delivery, routing, worker synchronization, and observability; file paths are not accepted.
 The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fields,
@@ -127,7 +144,7 @@ The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fie
 | `dispatcher.fetchAttachTimeoutMs`                   | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
 | Prefill ownership                                   | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination.                                                                              |
 | `requestLifecycle.request.timeoutMs`                | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default.                                                                                                                                          |
-| `workerRegistry.health.cleanupIntervalMs`           | Positive integer, default 3000 ms; scan interval for retiring workers whose status exceeds `statusStaleAfterMs`.                                                                                                                                                       |
+| `workerRegistry.health.cleanupIntervalMs`           | Positive integer, default 3000 ms; retry interval for retiring workers removed by successful discovery or reporting three consecutive valid not-alive responses. RPC errors and elapsed time alone do not retire a generation.                                         |
 | `requestLifecycle.decision.lifetime`                | Finite number ≥ 1, default 2.0. At delivery, remaining Prefill time (including waiting) × lifetime + 10000 ms sets the deadline. Only observed running predecessors consume elapsed time; unstarted work keeps its full estimate. Independent of request age.          |
 | `scheduler.queueTimeoutMs`                          | QUEUE only, positive, default 3600000 ms; actual queue TTL. DIRECT has no queue timer and rejects this field.                                                                                                                                                          |
 | Removed capacity controls                           | `scheduler.capacity` and delivered-not-accepted count limits are removed. Per-Prefill concurrency uses the single dispatcher limit; lifetimes bound waiting. The old `maxUncachedTokens` field is rejected.                                                            |
@@ -265,12 +282,22 @@ The gRPC server executor and shutdown quiet period are configured in `FLEXLB_CON
   "executorCoreSize": 1000,
   "executorMaxSize": 1000,
   "executorQueueSize": 1000,
+  "maxReceivingRequests": 1024,
+  "maxReceivingControlRequests": 128,
+  "receiveBudgetBytes": 0,
+  "receiveTimeoutMs": 30000,
   "shutdownQuietPeriodMs": 5000
 }
 ```
 
 All three executor settings default to 1000. Core size may be 0; maximum size and queue size
 must be positive, and maximum size must be at least core size.
+`maxReceivingRequests` limits concurrent calls from HEADERS to decoded half-close;
+accepted scheduler/inference time does not consume this limit. Cancel has its own
+`maxReceivingControlRequests` limit. These counts are configured directly and do not
+reserve a fixed number of bytes per call. `receiveBudgetBytes=0` uses one quarter of
+the JVM Direct limit for received body bytes. The body watchdog defaults to 30 seconds.
+See [receiving limits](docs/grpc-receiving-guard.md) for byte accounting and cleanup.
 `shutdownQuietPeriodMs` (静默时间) defaults to 5000 ms and must be positive.
 The quiet period starts when shutting down; each Schedule arrival restarts it.
 After it elapses, gRPC waits for accepted RPCs to finish before serving resources

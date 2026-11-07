@@ -1,18 +1,18 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.eviction.EvictionManager;
-import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
-import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.eviction.DecodePreemption;
+import org.flexlb.balance.strategy.DecodeSelectionStrategy;
 import org.flexlb.balance.strategy.EncoderStrategy;
-import org.flexlb.balance.strategy.RandomStrategy;
+import org.flexlb.balance.strategy.PrefillSelectionStrategy;
+import org.flexlb.balance.strategy.VitSelectionStrategy;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.TrafficPolicyConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -20,477 +20,405 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.TheoryCacheHitReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.test.util.ReflectionTestUtils;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/**
- * Exercises Encoder placement through the same submission path used by Schedule.
- */
 class EncoderSchedulingIntegrationTest {
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void cancellationDuringEncoderCommitRejectsDeliveryAndReleasesAdmission(
+            boolean queue, boolean beforeCommit) throws Exception {
+        configure(queue, 1, List.of(RoleType.ENCODER));
+        var original = worker("encoder", 8001, true, "group", Map.of(), 0, 0);
+        var endpoint = org.mockito.Mockito.spy(original);
+        workers.set(0, endpoint);
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var resume = new java.util.concurrent.CountDownLatch(1);
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            RouteExecution route = call.getArgument(0);
+                            assertFalse(Thread.holdsLock(route.ctx()));
+                            boolean committed = !beforeCommit && (boolean) call.callRealMethod();
+                            entered.countDown();
+                            assertTrue(resume.await(5, TimeUnit.SECONDS));
+                            return beforeCommit ? call.callRealMethod() : committed;
+                        })
+                .when(endpoint)
+                .commit(any(), org.mockito.ArgumentMatchers.anyInt());
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            try {
+                var context = context("9900", 100, 0L);
+                var submitted = executor.submit(() -> lifecycle.submit(context));
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                assertEquals(beforeCommit ? 0L : 1L, endpoint.requestCount());
+                executor.submit(
+                                () ->
+                                        lifecycle.cancel(
+                                                "9900",
+                                                0,
+                                                CancelReason.CLIENT_CANCELLED,
+                                                RequestPhase.ENCODER))
+                        .get(2, TimeUnit.SECONDS);
+                assertNotNull(context.snapshot().cancellation());
+                assertNotNull(context.snapshot().placement());
+                assertEquals(beforeCommit ? 0L : 1L, endpoint.requestCount());
+                resume.countDown();
+                assertEquals(
+                        StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                        submitted.get(2, TimeUnit.SECONDS).get(2, TimeUnit.SECONDS).getCode());
+                SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(lifecycle));
+                assertEquals(0L, endpoint.requestCount());
+                assertNull(context.snapshot().delivery());
+                assertNull(requests.findActive("9900", RequestPhase.ENCODER));
+            } finally {
+                resume.countDown();
+            }
+        }
+    }
 
-    private ConfigService configService;
-    private WorkerDirectory directory;
-    private RequestRegistry requests;
-    private RequestScheduler scheduler;
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void retirementDuringEncoderCommitReselectsWithoutLeakingOldAdmission(
+            boolean queue, boolean beforeCommit) throws Exception {
+        configure(queue, 1, List.of(RoleType.ENCODER));
+        var first = org.mockito.Mockito.spy(worker("first", 8001, true, "group", Map.of(), 0, 0));
+        workers.set(0, first);
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var resume = new java.util.concurrent.CountDownLatch(1);
+        org.mockito.Mockito.doAnswer(
+                        call -> {
+                            RouteExecution route = call.getArgument(0);
+                            assertFalse(Thread.holdsLock(route.ctx()));
+                            boolean committed = !beforeCommit && (boolean) call.callRealMethod();
+                            entered.countDown();
+                            assertTrue(resume.await(5, TimeUnit.SECONDS));
+                            return beforeCommit ? call.callRealMethod() : committed;
+                        })
+                .when(first)
+                .commit(any(), org.mockito.ArgumentMatchers.anyInt());
+        try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            try {
+                var submitted = executor.submit(() -> submit(9901, 100, 0L));
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                assertEquals(beforeCommit ? 0L : 1L, first.requestCount());
+                workers.remove(first);
+                var replacement = worker("replacement", 8002, true, "group", Map.of(), 0, 0);
+                executor.submit(first::close).get(2, TimeUnit.SECONDS);
+                assertTrue(first.isRetired());
+                assertEquals(0L, first.requestCount());
+                resume.countDown();
+                assertEquals("replacement", selected(submitted.get(2, TimeUnit.SECONDS)));
+                SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(lifecycle));
+                assertEquals(0L, first.requestCount());
+                assertEquals(1L, replacement.requestCount());
+            } finally {
+                resume.countDown();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void retiredEncoderIsReselectedDuringConstructionOrAdmission(
+            boolean queue, boolean beforeCommit) throws Exception {
+        configure(queue, 1, List.of(RoleType.ENCODER), false);
+        var first = worker("first", 8001, true, "group", Map.of(), 0, 0);
+        var replacement = new java.util.concurrent.atomic.AtomicReference<EncoderEndpoint>();
+        Runnable retire =
+                () -> {
+                    first.close();
+                    workers.remove(first);
+                    replacement.set(worker("replacement", 8002, true, "group", Map.of(), 0, 0));
+                };
+        if (beforeCommit) {
+            org.mockito.Mockito.doAnswer(
+                            call -> {
+                                if (replacement.get() == null) retire.run();
+                                return call.callRealMethod();
+                            })
+                    .when(lifecycle)
+                    .beginRoute(any());
+        } else {
+            org.mockito.Mockito.doAnswer(
+                            call -> {
+                                retire.run();
+                                return first;
+                            })
+                    .when(endpoints)
+                    .selectEndpoint(RoleType.ENCODER, first.address());
+        }
+        lifecycle.start();
+        assertEquals("replacement", selected(submit(9001, 100, 0L)));
+        assertEquals(0L, first.requestCount());
+        assertEquals(1L, replacement.get().requestCount());
+    }
+
+    private final ConfigService configService = mock(ConfigService.class);
+    private final EndpointRegistry endpoints = mock(EndpointRegistry.class);
+    private final List<EncoderEndpoint> workers = new CopyOnWriteArrayList<>();
+    private final PlacementAvailability availability = new PlacementAvailability();
+    private AbstractRequestScheduler lifecycle;
+    private RequestRepository requests;
+    private FlexlbConfig config;
 
     @BeforeEach
     void setUp() {
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        config.setScheduler(org.flexlb.config.SchedulerConfig.direct());
-        configService = mock(ConfigService.class);
+        when(endpoints.encoderRoutingSnapshot()).thenAnswer(call -> List.copyOf(workers));
+        when(endpoints.selectEndpoint(eq(RoleType.ENCODER), anyString()))
+                .thenAnswer(
+                        call ->
+                                workers.stream()
+                                        .filter(
+                                                worker ->
+                                                        worker.address()
+                                                                .equals(call.getArgument(1)))
+                                        .findFirst()
+                                        .orElse(null));
+        configure(false, 1, List.of(RoleType.ENCODER));
+    }
+
+    private void configure(boolean queue, int limit, List<RoleType> roles) {
+        configure(queue, limit, roles, true);
+    }
+
+    private void configure(boolean queue, int limit, List<RoleType> roles, boolean start) {
+        if (lifecycle != null) stop();
+        config = SchedulingTestConfig.batchConfig();
+        if (queue) SchedulingTestConfig.useFifoQueue(config);
+        else config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        config.getDispatcher().setMaxInflightPerEncoderWorker(limit);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        directory = mock(WorkerDirectory.class);
-        requests =
-                new RequestRegistry(
-                        configService,
-                        mock(BatchSchedulerReporter.class),
-                        mock(RequestSchedulerReporter.class));
-        ModelMetaConfig model = mock(ModelMetaConfig.class);
-        when(model.requiredRoles()).thenReturn(List.of(RoleType.ENCODER));
-        DefaultRouter router =
-                new DefaultRouter(
-                        mock(CostBasedPrefillStrategy.class),
-                        mock(DecodeSelector.class),
-                        mock(RandomStrategy.class),
-                        new EncoderStrategy(directory),
+        var model = mock(ModelMetaConfig.class);
+        when(model.requiredRoles()).thenReturn(roles);
+        var selector =
+                new RequestRouteSelector(
+                        endpoints,
+                        mock(PrefillSelectionStrategy.class),
+                        mock(DecodeSelectionStrategy.class),
+                        mock(VitSelectionStrategy.class),
+                        new EncoderStrategy(),
+                        mock(CacheAwareService.class),
+                        null,
+                        mock(EngineHealthReporter.class),
+                        mock(CacheMetricsReporter.class),
                         configService,
                         model);
-        scheduler =
-                new RequestScheduler(
+        lifecycle =
+                SchedulerTestSupport.create(
                         configService,
-                        router,
-                        mock(EndpointRegistry.class),
-                        mock(BatchSchedulerReporter.class),
-                        mock(EvictionManager.class),
-                        requests,
-                        new PlacementAvailability());
+                        mock(DeliveryMetricsReporter.class),
+                        mock(RequestSchedulerReporter.class),
+                        mock(TheoryCacheHitReporter.class),
+                        selector,
+                        mock(DecodePreemption.class),
+                        availability,
+                        start);
+        requests = SchedulerTestSupport.repository(lifecycle);
     }
 
     @AfterEach
-    void tearDown() {
-        scheduler.closePlacement();
-        if (requests.closeAdmissionAndAwaitMutations()) {
-            requests.closeOutstandingAndTerminalize();
-            requests.closeExpiration();
-            requests.closePublisher();
+    void stop() {
+        SchedulerTestServices.forOwner(lifecycle).shutdown(ShutdownMode.IMMEDIATE, Duration.ZERO);
+        for (var endpoint : workers) {
+            endpoint.close();
         }
+        workers.clear();
     }
 
     @Test
     void queueLimitsEachEncoderAndResumesAfterWorkerFinished() throws Exception {
-        useEncoderQueue(1);
-        EncoderEndpoint first = worker("first", 8001, true, "group", 0, Map.of(), 0, 0);
-        worker("second", 8002, true, "group", 0, Map.of(), 0, 0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER))
-                .thenReturn(List.of("first", "second"));
-
-        assertEquals(
-                "first",
-                scheduler
-                        .submit(context(1, 100, 0L))
-                        .get(2, TimeUnit.SECONDS)
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
-        assertEquals(
-                "second",
-                scheduler
-                        .submit(context(2, 100, 0L))
-                        .get(2, TimeUnit.SECONDS)
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
-        CompletableFuture<Response> waiting = scheduler.submit(context(3, 100, 0L));
+        configure(true, 1, List.of(RoleType.ENCODER));
+        var first = worker("first", 8001, true, "group", Map.of(), 0, 0);
+        worker("second", 8002, true, "group", Map.of(), 0, 0);
+        assertEquals("first", selected(submit(1, 100, 0L)));
+        assertEquals("second", selected(submit(2, 100, 0L)));
+        var waiting = submit(3, 100, 0L);
         assertFalse(waiting.isDone());
-
-        WorkerStatus.TaskObservation finished = task("1", 100);
-        when(finished.requestId()).thenReturn("1");
-        WorkerStatus status = first.getStatus();
-        WorkerStatus.PreparedStatus prepared = mock(WorkerStatus.PreparedStatus.class);
-        WorkerStatus.StatusObservation observation = mock(WorkerStatus.StatusObservation.class);
-        when(prepared.observation()).thenReturn(observation);
-        when(observation.alive()).thenReturn(true);
-        when(observation.activeTasks()).thenReturn(Map.of());
-        when(observation.finishedTasks()).thenReturn(Map.of("1", finished));
-        first.applyPreparedStatus(status, prepared).run();
-
-        assertEquals(
-                "first",
-                waiting.get(2, TimeUnit.SECONDS).getServerStatus().getFirst().getServerIp());
+        publish(first, Map.of(), Map.of("1", task("1", 100)), 0, 0);
+        assertEquals("first", selected(waiting));
+        assertNotNull(requests.getRequestState("1", 0, RequestPhase.ENCODER));
     }
 
     @Test
-    void queueUsesRunningAndWaitingCountsAndCanCancelAWaitingRequest() throws Exception {
-        useEncoderQueue(2);
-        worker("busy", 8001, true, "group", 0, Map.of(), 1, 1);
-        worker("open", 8002, true, "group", 0, Map.of(), 0, 1);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER))
-                .thenReturn(List.of("busy", "open"));
-
-        assertEquals(
-                "open",
-                scheduler
-                        .submit(context(4, 100, 0L))
-                        .get(2, TimeUnit.SECONDS)
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
-        CompletableFuture<Response> waiting = scheduler.submit(context(5, 100, 0L));
+    void queueUsesRunningAndWaitingCountsAndCancelsWaitingRequest() throws Exception {
+        configure(true, 2, List.of(RoleType.ENCODER));
+        worker("busy", 8001, true, "group", Map.of(), 1, 1);
+        worker("open", 8002, true, "group", Map.of(), 0, 1);
+        assertEquals("open", selected(submit(4, 100, 0L)));
+        var waiting = submit(5, 100, 0L);
         assertFalse(waiting.isDone());
-        scheduler.cancelRequest("5", 0L, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
+        lifecycle.cancel("5", 0, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
         assertEquals(
                 StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 waiting.get(2, TimeUnit.SECONDS).getCode());
     }
 
     @Test
-    void queueResumesWhenWorkerStatusReportsFreeCapacityWithoutFinishedTask() throws Exception {
-        useEncoderQueue(1);
-        EncoderEndpoint encoder = worker("encoder", 8001, true, "group", 0, Map.of(), 1, 0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER)).thenReturn(List.of("encoder"));
-
-        CompletableFuture<Response> waiting = scheduler.submit(context(10, 100, 0L));
+    void statusCapacityChangeWakesWaitingEncoderWithoutAFinishedTask() throws Exception {
+        configure(true, 1, List.of(RoleType.ENCODER));
+        var worker = worker("encoder", 8001, true, "group", Map.of(), 1, 0);
+        var waiting = submit(10, 100, 0L);
         assertFalse(waiting.isDone());
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-        while (scheduler.getBlockedRequestCount() == 0 && System.nanoTime() < deadline) {
-            Thread.sleep(10L);
-        }
-        assertEquals(1, scheduler.getBlockedRequestCount());
-
-        WorkerStatus status = encoder.getStatus();
-        WorkerStatus.EngineObservation engine = status.committedEngineObservation();
-        when(engine.runningQueryLen()).thenReturn(0L);
-        WorkerStatus.StatusObservation observation = mock(WorkerStatus.StatusObservation.class);
-        when(observation.owner()).thenReturn(status);
-        when(observation.activeTasks()).thenReturn(Map.of());
-        encoder.observeStatusHeartbeat(status, observation).run();
-
-        assertEquals(
-                "encoder",
-                waiting.get(2, TimeUnit.SECONDS).getServerStatus().getFirst().getServerIp());
+        publish(worker, Map.of(), Map.of(), 0, 0);
+        assertEquals("encoder", selected(waiting));
     }
 
     @Test
-    void queuedEncoderRequestExpiresWhenNoWorkerHasCapacity() throws Exception {
-        useEncoderQueue(1);
-        worker("busy", 8001, true, "group", 0, Map.of(), 1, 0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER)).thenReturn(List.of("busy"));
-        BalanceContext context = context(7, 100, 0L);
-        context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(50, System.currentTimeMillis() + 300L));
-
-        Response response = scheduler.submit(context).get(2, TimeUnit.SECONDS);
-
+    void queuedEncoderExpiresAndLeavesNoQueueMembership() throws Exception {
+        configure(true, 1, List.of(RoleType.ENCODER));
+        var worker = worker("busy", 8001, true, "group", Map.of(), 1, 0);
+        var context = context("7", 100, 0L);
+        context.data()
+                .setSchedulingMetadata(
+                        SchedulingMetadata.explicit(50, System.currentTimeMillis() + 300));
+        var response = lifecycle.submit(context).get(2, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
+        publish(worker, Map.of(), Map.of(), 0, 0);
+        assertEquals("busy", selected(submit(8, 100, 0L)));
+        assertEquals(1, worker.requestCount());
     }
 
     @Test
-    void expiredEncoderEntryIsRemovedEvenWhenItsRequestSlotIsMissing() {
-        useEncoderQueue(1);
-        EncoderQueueCoordinator queue =
-                (EncoderQueueCoordinator) ReflectionTestUtils.getField(scheduler, "encoderQueue");
-        BalanceContext context = mock(BalanceContext.class);
-        when(context.getRequestId()).thenReturn("expired-without-slot");
-        when(context.getPriority()).thenReturn(50);
-        when(context.requestExpired(anyLong())).thenReturn(true);
-        CompletableFuture<Response> pending = new CompletableFuture<>();
-
-        assertTrue(queue.offer(context, pending));
-
-        assertTimeoutPreemptively(
-                Duration.ofSeconds(2),
-                () -> {
-                    while (queue.size() != 0) {
-                        Thread.sleep(5L);
-                    }
-                });
-        assertFalse(pending.isDone());
+    void rejectedEncoderDoesNotLeaveQueueMembership() throws Exception {
+        configure(true, 1, List.of(RoleType.PREFILL));
+        var response = lifecycle.submit(context("rejected", 100, 0L)).get(2, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertNull(requests.findActive("rejected", RequestPhase.ENCODER));
     }
 
     @Test
-    void rejectedEncoderEntryIsRemovedWhenItsRequestSlotIsMissing() {
-        DefaultRouter router = mock(DefaultRouter.class);
-        RequestRegistry registry = mock(RequestRegistry.class);
-        BalanceContext context = mock(BalanceContext.class);
-        when(context.getRequestId()).thenReturn("rejected-without-slot");
-        when(context.getPriority()).thenReturn(50);
-        when(router.selectEncoder(context))
-                .thenReturn(
-                        PlacementResult.rejected(
-                                Response.error(StrategyErrorType.REQUEST_CANCELLED)));
-        CompletableFuture<Response> pending = new CompletableFuture<>();
-        EncoderQueueCoordinator queue = new EncoderQueueCoordinator(router, registry, false);
-        try {
-            assertTrue(queue.offer(context, pending));
-            assertTimeoutPreemptively(
-                    Duration.ofSeconds(2),
-                    () -> {
-                        while (queue.size() != 0) {
-                            Thread.sleep(5L);
-                        }
-                    });
-
-            verify(router).selectEncoder(context);
-            verify(registry)
-                    .publishDecisionResponseAsync(
-                            eq("rejected-without-slot"), eq(pending),
-                            org.mockito.ArgumentMatchers.any(Response.class),
-                                    eq(RequestPhase.ENCODER));
-            assertFalse(pending.isDone());
-        } finally {
-            queue.close();
-        }
-    }
-
-    @Test
-    void closingEncoderQueueFailsWaitingRequests() throws Exception {
-        useEncoderQueue(1);
-        worker("busy", 8001, true, "group", 0, Map.of(), 1, 0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER)).thenReturn(List.of("busy"));
-        CompletableFuture<Response> waiting = scheduler.submit(context(8, 100, 0L));
+    void shutdownCompletesWaitingEncoder() throws Exception {
+        configure(true, 1, List.of(RoleType.ENCODER));
+        worker("busy", 8001, true, "group", Map.of(), 1, 0);
+        var waiting = submit(8, 100, 0L);
         assertFalse(waiting.isDone());
-
-        scheduler.closePlacement();
-
-        assertEquals(
-                StrategyErrorType.DISPATCH_FAILED.getErrorCode(),
-                waiting.get(2, TimeUnit.SECONDS).getCode());
+        SchedulerTestServices.forOwner(lifecycle).shutdown(ShutdownMode.IMMEDIATE, Duration.ZERO);
+        assertFalse(waiting.get(2, TimeUnit.SECONDS).isSuccess());
     }
 
     @Test
-    void queueDoesNotStartWithoutConfiguredEncoderRole() {
-        scheduler.closePlacement();
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        SchedulingTestConfig.useFifoQueue(config);
-        SchedulingTestConfig.useNonBatchDispatcher(config);
-        when(configService.loadBalanceConfig()).thenReturn(config);
-        ModelMetaConfig model = mock(ModelMetaConfig.class);
-        when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.DECODE));
-        DefaultRouter router =
-                new DefaultRouter(
-                        mock(CostBasedPrefillStrategy.class),
-                        mock(DecodeSelector.class),
-                        mock(RandomStrategy.class),
-                        new EncoderStrategy(directory),
-                        configService,
-                        model);
-        scheduler =
-                new RequestScheduler(
-                        configService,
-                        router,
-                        mock(EndpointRegistry.class),
-                        mock(BatchSchedulerReporter.class),
-                        mock(EvictionManager.class),
-                        requests,
-                        new PlacementAvailability());
-
-        assertNull(ReflectionTestUtils.getField(scheduler, "encoderQueue"));
-        BalanceContext encoderRequest = context(6, 100, 0L);
-        encoderRequest.setRequestPhase(RequestPhase.ENCODER);
-        assertEquals(
-                StrategyErrorType.INVALID_REQUEST.getErrorCode(),
-                scheduler.submit(encoderRequest).join().getCode());
-        assertNull(requests.requestSlot("6", RequestPhase.ENCODER));
-    }
-
-    private void useEncoderQueue(int maxInflight) {
-        scheduler.closePlacement();
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        SchedulingTestConfig.useFifoQueue(config);
-        SchedulingTestConfig.useNonBatchDispatcher(config);
-        config.getDispatcher().setMaxInflightPerEncoderWorker(maxInflight);
-        when(configService.loadBalanceConfig()).thenReturn(config);
-        ModelMetaConfig model = mock(ModelMetaConfig.class);
-        when(model.requiredRoles()).thenReturn(List.of(RoleType.ENCODER));
-        DefaultRouter router =
-                new DefaultRouter(
-                        mock(CostBasedPrefillStrategy.class),
-                        mock(DecodeSelector.class),
-                        mock(RandomStrategy.class),
-                        new EncoderStrategy(directory),
-                        configService,
-                        model);
-        scheduler =
-                new RequestScheduler(
-                        configService,
-                        router,
-                        mock(EndpointRegistry.class),
-                        mock(BatchSchedulerReporter.class),
-                        mock(EvictionManager.class),
-                        requests,
-                        new PlacementAvailability());
-    }
-
-    @Test
-    void weightedRequestChoosesLessObservedUncachedWorkDespiteMoreConcurrentTasks() {
-        worker("long", 8001, true, "group", 0, Map.of("old", task("old", 1000)), 1, 0);
-        worker(
-                "short",
-                8002,
-                true,
-                "group",
-                -1,
-                Map.of(
-                        "a",
-                        task("a", 10),
-                        "b",
-                        task("b", 10),
-                        "c",
-                        task("c", 10),
-                        "d",
-                        task("d", 10)),
-                4,
-                0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER))
-                .thenReturn(List.of("long", "short"));
-
-        Response response = scheduler.submit(context(1, 800, 200L)).join();
-
-        assertTrue(response.isSuccess());
-        assertEquals("short", response.getServerStatus().getFirst().getServerIp());
+    void weightedRequestChoosesLessObservedUncachedWorkDespiteMoreConcurrentTasks()
+            throws Exception {
+        worker("long", 8001, true, "group", Map.of("old", task("old", 1000)), 1, 0);
+        worker("short", 8002, true, "group", Map.of("a", task("a", 10), "b", task("b", 10)), 4, 0);
+        assertEquals("short", selected(submit(1, 800, 200L)));
         assertEquals(
                 RequestPhase.ENCODER,
-                requests.requestSlot("1", RequestPhase.ENCODER).requestPhase());
+                requests.getRequestState("1", 0, RequestPhase.ENCODER).requestPhase());
     }
 
     @Test
-    void legacyRequestUsesConcurrencyAndIncludesLocallyPendingSelection() {
-        EncoderEndpoint idle = worker("idle", 8001, true, "group", 0, Map.of(), 0, 0);
-        worker("busy", 8002, true, "group", 0, Map.of("old", task("old", 1)), 1, 0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER))
-                .thenReturn(List.of("idle", "busy"));
-
-        assertEquals(
-                "idle",
-                scheduler
-                        .submit(context(2, 800, null))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
-        assertEquals(1, idle.pendingEncoderRequestCount());
-        assertEquals(
-                "idle",
-                scheduler
-                        .submit(context(3, 800, null))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
-        assertEquals(2, idle.pendingEncoderRequestCount());
-        assertEquals(
-                "busy",
-                scheduler
-                        .submit(context(6, 800, null))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
+    void absentCacheEstimateUsesConcurrencyIncludingLocallyPendingSelections() throws Exception {
+        var idle = worker("idle", 8001, true, "group", Map.of(), 0, 0);
+        worker("busy", 8002, true, "group", Map.of("old", task("old", 1)), 1, 0);
+        assertEquals("idle", selected(submit(2, 800, null)));
+        assertEquals(1, idle.requestCount());
+        assertEquals("idle", selected(submit(3, 800, null)));
+        assertEquals(2, idle.requestCount());
+        assertEquals("busy", selected(submit(6, 800, null)));
     }
 
     @Test
-    void weightedTieUsesConcurrencyAndFullHitStillRoutesToEncoder() {
-        worker("busy", 8001, true, "group", 0, Map.of("old", task("old", 0)), 1, 0);
-        worker("idle", 8002, true, "group", 0, Map.of(), 0, 0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER))
-                .thenReturn(List.of("busy", "idle"));
-
-        Response response = scheduler.submit(context(4, 800, 800L)).join();
-
-        assertTrue(response.isSuccess());
-        assertEquals("idle", response.getServerStatus().getFirst().getServerIp());
+    void weightedTieUsesConcurrencyAndFullHitStillRoutesToEncoder() throws Exception {
+        worker("busy", 8001, true, "group", Map.of("old", task("old", 0)), 1, 0);
+        worker("idle", 8002, true, "group", Map.of(), 0, 0);
+        assertEquals("idle", selected(submit(4, 800, 800L)));
     }
 
     @Test
-    void workerStatusActualInputLengthChangesTheNextPlacement() {
-        EncoderEndpoint encoder = worker("encoder", 8001, true, "group", 0, Map.of(), 0, 0);
-        worker("other", 8002, true, "group", 0, Map.of("old", task("old", 500)), 1, 0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER))
-                .thenReturn(List.of("encoder", "other"));
-
-        assertEquals(
-                "encoder",
-                scheduler
-                        .submit(context(7, 1000, 200L))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
-        assertEquals(800L, encoder.inflightUncachedTokenEstimate());
-        assertEquals(
-                "other",
-                scheduler
-                        .submit(context(8, 1000, 200L))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
-
-        WorkerStatus status = encoder.getStatus();
-        WorkerStatus.EngineObservation engine = status.committedEngineObservation();
-        WorkerStatus.TaskObservation actual = task("7", 100);
-        when(actual.requestId()).thenReturn("7");
-        when(engine.runningTaskList()).thenReturn(Map.of("7", actual));
-        when(engine.runningQueryLen()).thenReturn(1L);
-        WorkerStatus.StatusObservation running = mock(WorkerStatus.StatusObservation.class);
-        when(running.owner()).thenReturn(status);
-        when(running.activeTasks()).thenReturn(Map.of("7", actual));
-        encoder.observeStatusHeartbeat(status, running).run();
-
-        assertEquals(0, encoder.pendingEncoderRequestCount());
-        assertEquals(100L, encoder.inflightUncachedTokenEstimate());
-        assertEquals(
-                "encoder",
-                scheduler
-                        .submit(context(9, 1000, 200L))
-                        .join()
-                        .getServerStatus()
-                        .getFirst()
-                        .getServerIp());
+    void actualWorkerInputReplacesPendingEstimateWithoutDoubleCounting() throws Exception {
+        var encoder = worker("encoder", 8001, true, "group", Map.of(), 0, 0);
+        worker("other", 8002, true, "group", Map.of("old", task("old", 500)), 1, 0);
+        assertEquals("encoder", selected(submit(7, 1000, 200L)));
+        assertEquals(800, encoder.uncachedTokens());
+        assertEquals("other", selected(submit(8, 1000, 200L)));
+        publish(encoder, Map.of("7", task("7", 100)), Map.of(), 1, 0);
+        assertEquals(1, encoder.requestCount());
+        assertEquals(100, encoder.uncachedTokens());
+        assertEquals("encoder", selected(submit(9, 1000, 200L)));
     }
 
     @Test
-    void deadOrWrongGroupWorkersCannotWinAndNoCandidateReturnsEncoderError() {
-        worker("dead", 8001, false, "group", 0, Map.of(), 0, 0);
-        worker("foreign", 8002, true, "other", 0, Map.of(), 0, 0);
-        when(directory.endpointAddressSnapshot(RoleType.ENCODER))
-                .thenReturn(List.of("dead", "foreign"));
+    void deadAndWrongGroupWorkersCannotWin() throws Exception {
+        worker("dead", 8001, false, "group", Map.of(), 0, 0);
+        worker("foreign", 8002, true, "other", Map.of(), 0, 0);
+        var group = mock(TrafficPolicyConfig.class);
+        config.getRouter().setGroupSelector(group);
+        when(group.resolveTargetGroup(anyString(), any(), anyLong()))
+                .thenReturn(java.util.Optional.of("group"));
+        var result = submit(5, 800, 0L).get(2, TimeUnit.SECONDS);
+        assertEquals(StrategyErrorType.NO_ENCODER_WORKER.getErrorCode(), result.getCode());
+    }
 
-        BalanceContext context = context(5, 800, 0L);
-        TrafficPolicyConfig groupSelector = mock(TrafficPolicyConfig.class);
-        context.getConfig().getRouter().setGroupSelector(groupSelector);
-        when(groupSelector.resolveTargetGroup(context.getRequest()))
-                .thenReturn(Optional.of("group"));
-        Response response = scheduler.submit(context).join();
-
-        assertEquals(StrategyErrorType.NO_ENCODER_WORKER.getErrorCode(), response.getCode());
+    @Test
+    void stringEncoderIdCanBeCancelledWithoutTouchingGenerationRequest() throws Exception {
+        configure(true, 1, List.of(RoleType.ENCODER));
+        worker("busy", 8001, true, "group", Map.of(), 1, 0);
+        var context = context("shared-id", 100, 0L);
+        var pending = lifecycle.submit(context);
+        assertNull(
+                lifecycle.cancel(
+                        "shared-id", 0, CancelReason.CLIENT_CANCELLED, RequestPhase.GENERATION));
+        assertFalse(pending.isDone());
+        lifecycle.cancel("shared-id", 0, CancelReason.CLIENT_CANCELLED, RequestPhase.ENCODER);
         assertEquals(
-                RequestPhase.ENCODER,
-                requests.requestSlot("5", RequestPhase.ENCODER).requestPhase());
+                StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                pending.get(2, TimeUnit.SECONDS).getCode());
+    }
+
+    private CompletableFuture<Response> submit(long id, long tokens, Long hit) {
+        return lifecycle.submit(context(Long.toString(id), tokens, hit));
+    }
+
+    private static String selected(CompletableFuture<Response> future) throws Exception {
+        var result = future.get(2, TimeUnit.SECONDS);
+        assertTrue(result.isSuccess(), result.getErrorMessage());
+        return result.getServerStatus().getFirst().getServerIp();
+    }
+
+    private RequestContext context(String id, long tokens, Long hit) {
+        var context = new RequestContext(config);
+        context.data()
+                .setRequest(
+                        Request.builder()
+                                .requestId(id)
+                                .seqLen(tokens)
+                                .encoderCacheHitLen(hit)
+                                .maxNewTokens(16)
+                                .build());
+        context.data().setPhase(RequestPhase.ENCODER);
+        context.data().setRequestedRoles(List.of(RoleType.ENCODER));
+        context.data()
+                .setSchedulingMetadata(
+                        SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
+        return context;
     }
 
     private EncoderEndpoint worker(
@@ -498,49 +426,63 @@ class EncoderSchedulingIntegrationTest {
             int port,
             boolean alive,
             String group,
-            long availableKv,
             Map<String, WorkerStatus.TaskObservation> tasks,
             long running,
             long waiting) {
-        WorkerStatus status = mock(WorkerStatus.class);
-        WorkerStatus.EngineObservation engine = mock(WorkerStatus.EngineObservation.class);
-        when(status.isAlive()).thenReturn(alive);
-        when(status.getGenerationId()).thenReturn(1L);
-        when(status.getIp()).thenReturn(ip);
-        when(status.getPort()).thenReturn(port);
-        when(status.getLogicalIpPort()).thenReturn(ip + ":" + port);
-        when(status.topologySnapshot())
-                .thenReturn(new WorkerStatus.TopologySnapshot(group, ip, port, port + 1, "site"));
-        when(status.committedEngineObservation()).thenReturn(engine);
-        when(engine.availableKvCacheTokens()).thenReturn(availableKv);
-        when(engine.runningTaskList()).thenReturn(tasks);
-        when(engine.runningQueryLen()).thenReturn(running);
-        when(engine.waitingQueryLen()).thenReturn(waiting);
-        EncoderEndpoint endpoint =
-                new EncoderEndpoint(status, new EndpointEventProjector(requests));
-        when(directory.captureEndpoint(eq(RoleType.ENCODER), eq(ip)))
-                .thenAnswer(invocation -> endpoint.tryPinGeneration());
+        var status =
+                WorkerStatus.createDiscovered(RoleType.ENCODER, group, ip, port, port + 1, "site");
+        var endpoint = new EncoderEndpoint(status, availability);
+        publish(endpoint, tasks, Map.of(), running, waiting);
+        status.lock.lock();
+        try {
+            status.recordSuccessfulPoll(alive);
+        } finally {
+            status.lock.unlock();
+        }
+        workers.add(endpoint);
         return endpoint;
     }
 
-    private static WorkerStatus.TaskObservation task(String requestId, long inputLength) {
-        WorkerStatus.TaskObservation task = mock(WorkerStatus.TaskObservation.class);
-        when(task.inputLength()).thenReturn(inputLength);
-        return task;
+    private static void publish(
+            EncoderEndpoint endpoint,
+            Map<String, WorkerStatus.TaskObservation> active,
+            Map<String, WorkerStatus.TaskObservation> finished,
+            long running,
+            long waiting) {
+        var status = endpoint.getStatus();
+        org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange change;
+        status.lock.lock();
+        try {
+            long version = Math.max(1L, status.appliedStatusCursor().statusVersion() + 1);
+            var engine =
+                    new WorkerStatus.EngineObservation(
+                            RoleType.ENCODER,
+                            null,
+                            0,
+                            0,
+                            active,
+                            0,
+                            0,
+                            1,
+                            1,
+                            0,
+                            0,
+                            0,
+                            running,
+                            waiting);
+            var observation =
+                    status.bindStatusObservation(engine, true, version, version, finished);
+            change = endpoint.applyPreparedStatus(status, status.prepareNewStatus(observation));
+        } finally {
+            status.lock.unlock();
+        }
+        endpoint.publishStatus(change);
     }
 
-    private BalanceContext context(long requestId, long seqLen, Long hitLen) {
-        Request request = new Request();
-        request.setRequestId(Long.toString(requestId));
-        request.setSeqLen(seqLen);
-        request.setEncoderCacheHitLen(hitLen);
-        request.setMaxNewTokens(16);
-        BalanceContext context = new BalanceContext(configService.loadBalanceConfig());
-        context.setRequest(request);
-        context.setRequestedRoles(Set.of(RoleType.ENCODER));
-        context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(
-                        50, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
-        return context;
+    private static WorkerStatus.TaskObservation task(String id, long tokens) {
+        var task = mock(WorkerStatus.TaskObservation.class);
+        when(task.requestId()).thenReturn(id);
+        when(task.inputLength()).thenReturn(tokens);
+        return task;
     }
 }

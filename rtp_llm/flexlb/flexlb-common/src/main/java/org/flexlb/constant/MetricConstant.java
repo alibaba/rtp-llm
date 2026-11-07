@@ -5,6 +5,35 @@ package org.flexlb.constant;
  * Use with standard monitoring libraries like Micrometer/Prometheus
  */
 public class MetricConstant {
+    public static final String ROUTING_QUEUE_ENTRY_QPS = "app.routing.queue.entry.qps";
+    public static final String ROUTING_QUEUE_TIMEOUT_QPS = "app.routing.queue.timeout.qps";
+    public static final String ROUTING_QUEUE_REJECTED_QPS = "app.routing.queue.rejected.qps";
+    public static final String ROUTING_ROUTE_EXECUTION_TIME_MS =
+            "app.routing.route.execution.time.ms";
+    public static final String ROUTING_SUCCESS_QPS = "app.routing.success.qps";
+    public static final String ROUTING_FAILURE_QPS = "app.routing.failure.qps";
+    public static final String ROUTING_RETRY_QPS = "app.routing.retry.qps";
+    public static final String WORKER_PERMIT_CAPACITY = "app.worker.permit.capacity";
+    public static final String AUTO_TPM_REQUEST_SLO_MS = "auto_tpm.request.slo_ms";
+    public static final String AUTO_TPM_DEADLINE_MISS_COUNT = "auto_tpm.deadline_miss.count";
+    public static final String ENGINE_WORKER_NUMBER =
+            "app.engine.health.check.engine.worker.number";
+    public static final String ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT =
+            "app.engine.health.check.engine.worker.number.service.discovery.result";
+    public static final String ENGINE_STATUS_AVAILABLE_CONCURRENCY =
+            "app.engine.health.check.available.concurrency";
+    public static final String ENGINE_STATUS_VISITOR_SUCCESS_QPS =
+            "app.engine.health.check.visitor.success.qps";
+    public static final String DECODE_INFLIGHT_KV_RESERVED_TOKENS =
+            "app.flexlb.decode.inflight.kv.reserved.tokens";
+    public static final String DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS =
+            "app.flexlb.decode.inflight.hard.kv.reserved.tokens";
+    public static final String CACHE_RECENT_KEY_HIT_COUNT = "app.cache.recent.key.hit.count";
+    public static final String CACHE_RECENT_KEY_TOTAL_COUNT = "app.cache.recent.key.total.count";
+    public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS =
+            "dispatch.executor.completed.tasks";
+    public static final String CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS =
+            "app.cache.routing.selected.match.total.tokens";
 
     /**
      * One increment per GC notification, tagged by gc, collector and pid.
@@ -15,6 +44,19 @@ public class MetricConstant {
      * Sum of GC notification pause durations in milliseconds, with the same tags as the count.
      */
     public static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
+
+    public static final String NETTY_DIRECT_RESERVED_BYTES = "app.netty.direct.reserved.bytes";
+    public static final String NETTY_DIRECT_PINNED_BYTES = "app.netty.direct.pinned.bytes";
+    public static final String NETTY_MEMORY_SAMPLE_DURATION_MS =
+            "app.netty.memory.sample.duration.ms";
+    public static final String NETTY_MEMORY_SAMPLE_TIMESTAMP_MS =
+            "app.netty.memory.sample.timestamp.ms";
+
+    public static final String GRPC_SERVER_EXECUTOR_COMPLETED_TASKS =
+            "grpc.server.executor.completed.tasks";
+    public static final String GRPC_SERVER_EXECUTOR_CALLER_RUNS =
+            "grpc.server.executor.caller.runs";
+    public static final String GRPC_RESPONSE_SIZE = "app.grpc.response.size";
 
     /* ------------------------ Engine Status Metrics -------------------------- */
 
@@ -50,8 +92,7 @@ public class MetricConstant {
     public static final String ENGINE_STATUS_CHECK_FAIL_TOTAL =
             "app.engine.health.check.fail.total";
 
-    /** Failed WorkerStatus gRPC check latency in microseconds. */
-    public static final String ENGINE_STATUS_CHECK_FAIL_RT = "app.engine.health.check.fail.rt";
+    public static final String STATUS_FAILURE_DETAIL = "app.status.failure.detail";
 
     /**
      * Master load balancing service total QPS
@@ -152,7 +193,8 @@ public class MetricConstant {
      */
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
 
-    /** Selection-time first-token readiness estimate, including outstanding work. */
+    /** Known work through the selected request; excludes collection waits and transport latency.
+     * The historical metric name is retained for dashboard compatibility. */
     public static final String PREFILL_SELECTED_ESTIMATED_TTFT_MS =
             "app.flexlb.prefill.selected.estimated_ttft_ms";
 
@@ -203,9 +245,17 @@ public class MetricConstant {
             "app.engine.health.check.running.queue.time";
 
     /**
+     * FlexLB scheduler inflight size — the scheduler's own inflight request count.
+     * <p>Reported by DeliveryMetricsReporter using role=PREFILL + engineIp="scheduler" tags.
+     * Formerly kept as a separate name from the now-removed per-engine local inflight size metric
+     * to avoid tag schema conflict (per-engine vs scheduler-level).
+     */
+    public static final String SCHEDULER_INFLIGHT_SIZE = "app.flexlb.scheduler.inflight.size";
+
+    /**
      * FlexLB batcher queue size — number of pending (not-yet-batched) requests
-     * in the per-engine WorkerBatcher queue.
-     * <p>Reported by BatchSchedulerReporter with role and engineIp tags.
+     * in the per-engine PrefillQueueScheduler queue.
+     * <p>Reported by DeliveryMetricsReporter with role and engineIp tags.
      * Independent metric name to avoid tag schema conflict with {@link #ROUTING_QUEUE_LENGTH}
      * (which uses type=batchQueue tag for backward compatibility).
      */
@@ -547,14 +597,12 @@ public class MetricConstant {
     public static final String GRPC_CALL_DURATION = "app.grpc.call.duration";
 
     /**
-     * gRPC response body size in bytes
-     */
-    public static final String GRPC_RESPONSE_SIZE = "app.grpc.response.size";
-
-    /**
      * gRPC call count
      */
     public static final String GRPC_CALL_COUNT = "app.grpc.call.count";
+
+    public static final String GRPC_CALL_FAILURE = "app.grpc.call.failure";
+    public static final String GRPC_DELIVERY_DELAY = "app.grpc.delivery.delay_ms";
 
     /**
      * gRPC connection duration in microseconds
@@ -569,52 +617,11 @@ public class MetricConstant {
     public static final String ROUTING_QUEUE_LENGTH = "app.routing.queue.length";
 
     /**
-     * Queue entry QPS
-     */
-    public static final String ROUTING_QUEUE_ENTRY_QPS = "app.routing.queue.entry.qps";
-
-    /**
-     * Timeout QPS
-     */
-    public static final String ROUTING_QUEUE_TIMEOUT_QPS = "app.routing.queue.timeout.qps";
-
-    /**
-     * Queue full rejection QPS
-     */
-    public static final String ROUTING_QUEUE_REJECTED_QPS = "app.routing.queue.rejected.qps";
-
-    /**
      * Wait time in milliseconds
      */
     public static final String ROUTING_QUEUE_WAIT_TIME_MS = "app.routing.queue.wait.time.ms";
 
-    /**
-     * Routing execution time in milliseconds
-     */
-    public static final String ROUTING_ROUTE_EXECUTION_TIME_MS =
-            "app.routing.route.execution.time.ms";
-
-    /**
-     * Routing success QPS
-     */
-    public static final String ROUTING_SUCCESS_QPS = "app.routing.success.qps";
-
-    /**
-     * Routing failure QPS
-     */
-    public static final String ROUTING_FAILURE_QPS = "app.routing.failure.qps";
-
-    /**
-     * Routing retry QPS
-     */
-    public static final String ROUTING_RETRY_QPS = "app.routing.retry.qps";
-
     /* ------------------------ Resource Monitoring -------------------------- */
-
-    /**
-     * Worker permit capacity
-     */
-    public static final String WORKER_PERMIT_CAPACITY = "app.worker.permit.capacity";
 
     /**
      * Network transfer delay: time from client requestTimeMs to gRPC server entry, in milliseconds.
@@ -623,7 +630,7 @@ public class MetricConstant {
     public static final String REQUEST_NETWORK_DELAY_MS = "app.request.network.delay.ms";
 
     /**
-     * gRPC server processing time: from gRPC server entry to BalanceContext creation (startTime), in milliseconds.
+     * gRPC server processing time: from gRPC server entry to RequestContext creation (startTime), in milliseconds.
      * Reported as: startTime - grpcEntryTime
      */
     public static final String GRPC_SERVER_PROCESS_MS = "app.grpc.server.process.ms";
@@ -713,11 +720,6 @@ public class MetricConstant {
     public static final String AUTO_TPM_REQUEST_COUNT = "auto_tpm.request.count";
 
     /**
-     * Auto-TPM per-request SLO in ms (timer), tags: priority, seq_bucket
-     */
-    public static final String AUTO_TPM_REQUEST_SLO_MS = "auto_tpm.request.slo_ms";
-
-    /**
      * Auto-TPM schedule latency in ms (timer), tags: priority, result
      */
     public static final String AUTO_TPM_SCHEDULE_LATENCY_MS = "auto_tpm.schedule.latency_ms";
@@ -772,12 +774,6 @@ public class MetricConstant {
     public static final String AUTO_TPM_TTFT_MS = "auto_tpm.ttft_ms";
 
     /**
-     * Auto-TPM deadline miss count (QPS), tags: priority.
-     * Counted when schedule completion exceeds the request deadlineMs.
-     */
-    public static final String AUTO_TPM_DEADLINE_MISS_COUNT = "auto_tpm.deadline_miss.count";
-
-    /**
      * Auto-TPM priority preemption count (QPS), tags: stage
      * (prefill_queued / decode_reserved / decode_running / decode_cancel).
      */
@@ -825,7 +821,7 @@ public class MetricConstant {
      * of the cancelled request, raw 1-100 value — matches the rest of the
      * auto_tpm family; "0" = not inflight / no budget), reason
      * (PRIORITY_PREEMPTED / USER_CANCELLED / DEADLINE_EXCEEDED). Counted
-     * once per cancel intent injected into the EngineCancelChannel: the
+     * once per cancel intent injected into the EngineGrpcClient: the
      * preemption path and the Frontend-initiated cancel path.
      */
     public static final String AUTO_TPM_CANCEL_QPS = "auto_tpm.cancel.qps";

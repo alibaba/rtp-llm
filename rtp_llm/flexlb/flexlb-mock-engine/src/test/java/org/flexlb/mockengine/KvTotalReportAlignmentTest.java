@@ -148,7 +148,7 @@ class KvTotalReportAlignmentTest {
         // Every master-facing surface derives from the pool-aligned total.
         assertEquals(
                 expectedTotal,
-                decode.getTotalKvTokens(),
+                MockEngineTestSupport.getTotalKvTokens(decode),
                 "getTotalKvTokens must equal blocks x spb (the built pool)");
         EngineRpcService.CacheStatusPB cache = cacheStatus(decode);
         assertEquals(
@@ -186,7 +186,7 @@ class KvTotalReportAlignmentTest {
         JavaMockEngineCluster.FastRpcService prefill = startOne("prefill", 4, BASE_PORT + 1, 0);
         long expectedTotal = 4L * SPB;
 
-        assertEquals(expectedTotal, prefill.getTotalKvTokens());
+        assertEquals(expectedTotal, MockEngineTestSupport.getTotalKvTokens(prefill));
         assertEquals(
                 expectedTotal,
                 cacheStatus(prefill).getTotalKvCache(),
@@ -208,13 +208,16 @@ class KvTotalReportAlignmentTest {
         // per-role default exactly (no behavior change for default configs).
         JavaMockEngineCluster.FastRpcService decode = startOne("decode", 0, BASE_PORT + 2, 0);
         assertEquals(
-                JavaMockEngineCluster.DEFAULT_DECODE_TOTAL_KV_TOKENS, decode.getTotalKvTokens());
+                JavaMockEngineCluster.DEFAULT_DECODE_TOTAL_KV_TOKENS,
+                MockEngineTestSupport.getTotalKvTokens(decode));
         assertEquals(
                 JavaMockEngineCluster.DEFAULT_DECODE_TOTAL_KV_TOKENS,
                 cacheStatus(decode).getTotalKvCache());
 
         JavaMockEngineCluster.FastRpcService prefill = startOne("prefill", 0, BASE_PORT + 3, 0);
-        assertEquals(JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS, prefill.getTotalKvTokens());
+        assertEquals(
+                JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS,
+                MockEngineTestSupport.getTotalKvTokens(prefill));
         assertEquals(
                 JavaMockEngineCluster.DEFAULT_TOTAL_KV_TOKENS,
                 cacheStatus(prefill).getTotalKvCache());
@@ -230,7 +233,7 @@ class KvTotalReportAlignmentTest {
         JavaMockEngineCluster.FastRpcService prefill = startOne("prefill", 0, BASE_PORT + 4, 5000L);
         assertEquals(
                 5L * SPB,
-                prefill.getTotalKvTokens(),
+                MockEngineTestSupport.getTotalKvTokens(prefill),
                 "non-divisible token config must report the ceil-aligned pool total");
         assertEquals(5L * SPB, cacheStatus(prefill).getTotalKvCache());
     }

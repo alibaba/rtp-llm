@@ -333,7 +333,7 @@ class PythonCompatControlApiTest {
                 prefill,
                 batch(
                         5000,
-                        slot(0, inputWithDecode("9001", 10, decodeServices.get(0).getGrpcPort()))));
+                        slot(0, inputWithDecode(9001L, 10, decodeServices.get(0).getGrpcPort()))));
 
         JsonNode requests = MAPPER.readTree(httpGet("/requests"));
         assertTrue(requests.isObject(), "/requests must be an object keyed by engine name");
@@ -363,11 +363,15 @@ class PythonCompatControlApiTest {
 
         MockLruBlockCache probeCache = new MockLruBlockCache(16);
         MockPerformanceModel.RequestShape shape =
-                perf.shape(inputWithDecode("1", 10, BASE_PORT + 1), probeCache);
+                perf.shape(inputWithDecode(1L, 10, BASE_PORT + 1), probeCache);
 
         assertEquals(10L, perf.prefillMs(List.of(shape)), "baseline prefill should be 10ms");
-        assertEquals(1L, perf.decodeMs(1, 1), "baseline decode should be 1ms");
-        assertEquals(1, prefill.getMaxPrefillConcurrency(), "default max_prefill_concurrency");
+        assertEquals(
+                1L, MockEngineTestSupport.decodeMs(perf, 1, 1), "baseline decode should be 1ms");
+        assertEquals(
+                1,
+                MockEngineTestSupport.getMaxPrefillConcurrency(prefill),
+                "default max_prefill_concurrency");
 
         httpPost(
                 "/set_perf",
@@ -375,8 +379,11 @@ class PythonCompatControlApiTest {
                         + "\"decode_scale\":2.0,\"max_prefill_concurrency\":3}");
 
         assertEquals(50L, perf.prefillMs(List.of(shape)), "prefill_fixed_ms must take effect");
-        assertEquals(2L, perf.decodeMs(1, 1), "decode_scale must double decode latency");
-        assertEquals(3, prefill.getMaxPrefillConcurrency());
+        assertEquals(
+                2L,
+                MockEngineTestSupport.decodeMs(perf, 1, 1),
+                "decode_scale must double decode latency");
+        assertEquals(3, MockEngineTestSupport.getMaxPrefillConcurrency(prefill));
 
         // worker_status available_concurrency mirrors Python:
         // max(0, max_prefill_concurrency - running) == 3 when idle.
@@ -409,12 +416,7 @@ class PythonCompatControlApiTest {
         for (int i = 0; i < 3; i++) {
             enqueue(
                     prefill,
-                    batch(
-                            6000 + i,
-                            slot(
-                                    0,
-                                    inputWithDecode(
-                                            String.valueOf(9100 + i), 10, decode.getGrpcPort()))));
+                    batch(6000 + i, slot(0, inputWithDecode(9100 + i, 10, decode.getGrpcPort()))));
         }
         awaitCompleted(decode, 3, 10_000);
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
@@ -470,7 +472,7 @@ class PythonCompatControlApiTest {
                                 slot(
                                         0,
                                         inputWithDecode(
-                                                "9200", 10, decodeServices.get(0).getGrpcPort()))));
+                                                9200L, 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(1, first.getSuccessesCount());
 
         // Second enqueue while the first is still pending -> rejected (Java semantics;
@@ -483,7 +485,7 @@ class PythonCompatControlApiTest {
                                 slot(
                                         0,
                                         inputWithDecode(
-                                                "9201", 10, decodeServices.get(0).getGrpcPort()))));
+                                                9201L, 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(0, second.getSuccessesCount());
         assertEquals(1, second.getErrorsCount());
         assertTrue(second.getErrors(0).getErrorInfo().getErrorMessage().contains("queue depth"));
@@ -498,7 +500,7 @@ class PythonCompatControlApiTest {
                                 slot(
                                         0,
                                         inputWithDecode(
-                                                "9202", 10, decodeServices.get(0).getGrpcPort()))));
+                                                9202L, 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(1, third.getSuccessesCount());
     }
 
@@ -516,8 +518,8 @@ class PythonCompatControlApiTest {
                         8000,
                         slot(
                                 0,
-                                inputWithDecode("9300", 10, decodeServices.get(0).getGrpcPort()),
-                                inputWithDecode("9301", 10, decodeServices.get(1).getGrpcPort()))));
+                                inputWithDecode(9300L, 10, decodeServices.get(0).getGrpcPort()),
+                                inputWithDecode(9301L, 10, decodeServices.get(1).getGrpcPort()))));
         awaitCompleted(decodeServices.get(0), 1, 10_000);
         awaitCompleted(decodeServices.get(1), 1, 10_000);
 
@@ -561,7 +563,7 @@ class PythonCompatControlApiTest {
                 prefill,
                 batch(
                         8100,
-                        slot(0, inputWithDecode("9400", 10, decodeServices.get(0).getGrpcPort()))));
+                        slot(0, inputWithDecode(9400L, 10, decodeServices.get(0).getGrpcPort()))));
         awaitCompleted(decodeServices.get(0), 1, 10_000);
 
         String body = httpGet("/metrics?per_engine=true");
@@ -602,10 +604,10 @@ class PythonCompatControlApiTest {
                         9000,
                         slot(
                                 0,
-                                inputWithDecode("9500", 10, decodeServices.get(0).getGrpcPort()),
-                                inputWithDecode("9501", 10, decodeServices.get(0).getGrpcPort()))));
+                                inputWithDecode(9500L, 10, decodeServices.get(0).getGrpcPort()),
+                                inputWithDecode(9501L, 10, decodeServices.get(0).getGrpcPort()))));
 
-        prefill.cancel(9500);
+        prefill.cancel(9500L);
 
         JsonNode engine = engineByName("prefill-0");
         assertEquals(1, engine.get("rpc_counts").get("enqueue_batch").asLong());
@@ -646,7 +648,7 @@ class PythonCompatControlApiTest {
             throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
-            if (service.getCompletedCount() >= expected) {
+            if (MockEngineTestSupport.getCompletedCount(service) >= expected) {
                 return;
             }
             Thread.sleep(5);
@@ -657,11 +659,12 @@ class PythonCompatControlApiTest {
                         + " completions on port "
                         + service.getGrpcPort()
                         + ", got "
-                        + service.getCompletedCount());
+                        + MockEngineTestSupport.getCompletedCount(service));
     }
 
     private String httpGet(String path) throws Exception {
-        return MockEngineTestSupport.httpGet(controlServer.getPort(), path);
+        return MockEngineTestSupport.httpGet(
+                MockEngineTestSupport.controlPort(controlServer), path);
     }
 
     private void httpPost(String path, String body) throws Exception {
@@ -670,6 +673,7 @@ class PythonCompatControlApiTest {
     }
 
     private HttpResponse<String> httpPostResponse(String path, String body) throws Exception {
-        return MockEngineTestSupport.httpPostResponse(controlServer.getPort(), path, body);
+        return MockEngineTestSupport.httpPostResponse(
+                MockEngineTestSupport.controlPort(controlServer), path, body);
     }
 }

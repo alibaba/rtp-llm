@@ -70,7 +70,7 @@ class MatrixSweepTest {
                         new EngineRpcService.GenerateInputPB[count];
                 for (int j = 0; j < count; j++) {
                     int decodePort = decodeServices.get((i * count + j) % nDecode).getGrpcPort();
-                    inputs[j] = inputWithDecode(String.valueOf(startRequestId + j), 10, decodePort);
+                    inputs[j] = inputWithDecode(startRequestId + j, 10, decodePort);
                 }
                 EngineRpcService.EnqueueBatchResponsePB response =
                         enqueue(prefillServices.get(i), batch(1000 + i, slot(0, inputs)));
@@ -83,12 +83,12 @@ class MatrixSweepTest {
             assertEquals(0, totalErrors, "enqueue errors");
             long completedCount =
                     services.values().stream()
-                            .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
+                            .mapToLong(MockEngineTestSupport::getCompletedCount)
                             .sum();
             assertEquals(concurrency, completedCount, "completed requests");
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
                 assertEquals(0, service.getInflightCount(), "inflight requests");
-                assertFalse(service.isLeakDetected(), "leak detected");
+                assertFalse(MockEngineTestSupport.isLeakDetected(service), "leak detected");
             }
         }
     }

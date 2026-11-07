@@ -35,16 +35,6 @@ public class DiffResult implements Serializable {
     @Builder.Default private Set<Long> removedBlocks = Collections.emptySet();
 
     /**
-     * Engine IP
-     */
-    private String engineIp;
-
-    /**
-     * Version number
-     */
-    private String version;
-
-    /**
      * Check if there are changes
      */
     public boolean hasChanges() {
@@ -54,9 +44,8 @@ public class DiffResult implements Serializable {
     /**
      * Create empty diff result
      */
-    public static DiffResult empty(String engineIp) {
+    public static DiffResult empty() {
         return DiffResult.builder()
-                .engineIp(engineIp)
                 .addedBlocks(Collections.emptySet())
                 .removedBlocks(Collections.emptySet())
                 .build();

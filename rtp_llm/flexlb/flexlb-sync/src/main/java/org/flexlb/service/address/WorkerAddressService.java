@@ -85,7 +85,10 @@ public class WorkerAddressService {
             engineHealthReporter.reportThreadPoolInfo(
                     ENGINE_BALANCING_THREAD_POOL_INFO,
                     "serviceDiscoveryExecutor",
-                    serviceDiscoveryExecutor);
+                    serviceDiscoveryExecutor.getActiveCount(),
+                    serviceDiscoveryExecutor.getQueue().size(),
+                    serviceDiscoveryExecutor.getCorePoolSize(),
+                    serviceDiscoveryExecutor.getPoolSize());
         } catch (Throwable failure) {
             logger.warn("Failed to report service discovery executor metrics", failure);
         }
@@ -98,8 +101,11 @@ public class WorkerAddressService {
         if (endpoints.isEmpty()) {
             logger.info(
                     "modelName={} role={} service route not found", modelName, modelEndpointType);
-            engineHealthReporter.reportRawServiceDiscoveryHostCount(
-                    modelName, modelEndpointType, 0);
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "discovery",
+                    () ->
+                            engineHealthReporter.reportRawServiceDiscoveryHostCount(
+                                    modelName, modelEndpointType, 0));
             return workerHosts;
         }
         int discoveredHostCount = 0;
@@ -123,8 +129,16 @@ public class WorkerAddressService {
             }
         }
         if (allEndpointsSucceeded) {
-            engineHealthReporter.reportRawServiceDiscoveryHostCount(
-                    modelName, modelEndpointType, discoveredHostCount);
+            int rawHostCount = discoveredHostCount;
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "discovery",
+                    () ->
+                            engineHealthReporter.reportRawServiceDiscoveryHostCount(
+                                    modelName, modelEndpointType, rawHostCount));
+        }
+        if (!allEndpointsSucceeded && workerHosts.isEmpty()) {
+            throw new IllegalStateException(
+                    "Service discovery failed without a cached worker snapshot");
         }
         return workerHosts;
     }
@@ -137,15 +151,23 @@ public class WorkerAddressService {
         String address = endpoint.getAddress();
         Future<List<WorkerHost>> future;
         try {
-            future = serviceDiscoveryExecutor.submit(() -> serviceDiscovery.getHosts(endpoint));
+            future =
+                    serviceDiscoveryExecutor.submit(
+                            () ->
+                                    java.util.Objects.requireNonNull(
+                                            serviceDiscovery.getHosts(endpoint),
+                                            "discovery hosts"));
         } catch (RejectedExecutionException e) {
             logger.error(
                     "query service discovery rejected, model={}, address={}, msg:{}",
                     modelName,
                     address,
                     e.getMessage());
-            engineHealthReporter.reportStatusCheckerFail(
-                    BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "discovery",
+                    () ->
+                            engineHealthReporter.reportStatusCheckerFail(
+                                    BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null));
             return new ServiceHosts(
                     lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of()), null);
         }
@@ -163,8 +185,11 @@ public class WorkerAddressService {
             future.cancel(true);
             logger.error(
                     "query service discovery timeout, model={}, address={}", modelName, address);
-            engineHealthReporter.reportStatusCheckerFail(
-                    BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "discovery",
+                    () ->
+                            engineHealthReporter.reportStatusCheckerFail(
+                                    BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null));
         } catch (InterruptedException e) {
             future.cancel(true);
             Thread.currentThread().interrupt();
@@ -172,16 +197,22 @@ public class WorkerAddressService {
                     "query service discovery interrupted, model={}, address={}",
                     modelName,
                     address);
-            engineHealthReporter.reportStatusCheckerFail(
-                    BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "discovery",
+                    () ->
+                            engineHealthReporter.reportStatusCheckerFail(
+                                    BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null));
         } catch (ExecutionException e) {
             logger.error(
                     "query service discovery error, model={}, address={}",
                     modelName,
                     address,
                     e.getCause());
-            engineHealthReporter.reportStatusCheckerFail(
-                    BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+            org.flexlb.metric.SafeFlexMonitor.run(
+                    "discovery",
+                    () ->
+                            engineHealthReporter.reportStatusCheckerFail(
+                                    BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null));
         }
         return new ServiceHosts(
                 lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of()), null);

@@ -3,404 +3,255 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.BalanceStatusEnum;
-import org.flexlb.service.grpc.EngineGrpcService;
-import org.flexlb.service.grpc.EngineStatusConverter;
+import org.flexlb.enums.TaskPhase;
+import org.flexlb.service.grpc.WorkerStatusRpcClient;
 import org.flexlb.service.monitor.EngineHealthReporter;
-import org.flexlb.sync.status.WorkerDirectory;
-import org.flexlb.util.IdUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
-import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
-
-public class GrpcWorkerStatusRunner implements Runnable {
-
-    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
-    private static final Runnable NO_STATUS_PROJECTION = () -> {};
-
-    private final String ipPort;
-    private final String modelName;
-    private final String site;
-    private final RoleType roleType;
-    private final WorkerStatus workerStatus;
-    private final WorkerStatus.PollLease pollLease;
-    private final WorkerDirectory workerDirectory;
-    private final EngineHealthReporter engineHealthReporter;
-    private final EngineGrpcService engineGrpcService;
-    private final String ip;
-    private final int workerStatusPort;
-    private final long createTimeUs = System.nanoTime() / 1000;
-    private final String id = IdUtils.fastUuid();
-    private final long syncRequestTimeoutMs;
-    private static final int MAX_CONSECUTIVE_FAILURES = 3;
-    private final CacheAwareService cacheAwareService;
-    private final Executor callbackExecutor;
+public class GrpcWorkerStatusRunner extends AbstractStatusRunner {
 
     public GrpcWorkerStatusRunner(
             String modelName,
-            String ipPort,
-            int workerStatusPort,
-            String site,
-            RoleType roleType,
-            String ignoredGroup,
             WorkerStatus workerStatus,
             WorkerStatus.PollLease pollLease,
-            WorkerDirectory workerDirectory,
+            EndpointRegistry endpointRegistry,
             EngineHealthReporter engineHealthReporter,
-            EngineGrpcService engineGrpcService,
+            WorkerStatusRpcClient workerStatusRpcClient,
             long syncRequestTimeoutMs,
             CacheAwareService cacheAwareService,
             Executor callbackExecutor) {
-        this.ipPort = ipPort;
-        this.ip = workerStatus.getIp();
-        this.workerStatusPort = workerStatusPort;
-        this.modelName = modelName;
-        this.workerStatus = workerStatus;
-        this.pollLease = Objects.requireNonNull(pollLease, "pollLease");
-        workerStatus.requireStatusPollLease(pollLease);
-        this.workerDirectory = Objects.requireNonNull(workerDirectory, "workerDirectory");
-        this.site = site;
-        this.roleType = roleType;
-        this.engineHealthReporter = engineHealthReporter;
-        this.engineGrpcService = engineGrpcService;
-        this.syncRequestTimeoutMs = syncRequestTimeoutMs;
-        this.cacheAwareService = Objects.requireNonNull(cacheAwareService, "cacheAwareService");
-        this.callbackExecutor = callbackExecutor;
-    }
-
-    public GrpcWorkerStatusRunner(
-            String modelName,
-            String ipPort,
-            String site,
-            RoleType roleType,
-            String ignoredGroup,
-            WorkerStatus workerStatus,
-            WorkerStatus.PollLease pollLease,
-            WorkerDirectory workerDirectory,
-            EngineHealthReporter engineHealthReporter,
-            EngineGrpcService engineGrpcService,
-            long syncRequestTimeoutMs,
-            CacheAwareService cacheAwareService,
-            Executor callbackExecutor) {
-        this(
+        super(
                 modelName,
-                ipPort,
-                defaultWorkerStatusPort(workerStatus),
-                site,
-                roleType,
-                ignoredGroup,
                 workerStatus,
                 pollLease,
-                workerDirectory,
+                endpointRegistry,
                 engineHealthReporter,
-                engineGrpcService,
-                syncRequestTimeoutMs,
+                workerStatusRpcClient,
                 cacheAwareService,
+                syncRequestTimeoutMs,
                 callbackExecutor);
-    }
-
-    private static int defaultWorkerStatusPort(WorkerStatus workerStatus) {
-        return workerStatus.getGrpcPort();
+        workerStatus.requireStatusPollLease(pollLease);
+        Objects.requireNonNull(cacheAwareService, "cacheAwareService");
     }
 
     @Override
-    public void run() {
-        boolean asyncInitiated = false;
+    protected void startRpc() {
+        logger.debug("GrpcWorkerStatusRunner run for {}", ipPort);
+        long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
+
+        long latestFinishedTaskVersion =
+                workerStatus.appliedStatusCursor().latestFinishedTaskVersion();
+
+        pollLease.trace().recordRpcStarted(requestTimeoutMs);
+        workerStatusRpcClient
+                .getWorkerStatusAsync(
+                        workerStatus.getIp(),
+                        workerStatus.getWorkerStatusPort(),
+                        latestFinishedTaskVersion,
+                        requestTimeoutMs,
+                        roleType)
+                .whenComplete((response, failure) -> onRpcCompletion(response, failure, startTime));
+    }
+
+    private void onRpcCompletion(
+            EngineRpcService.WorkerStatusPB response, Throwable failure, long startTime) {
+        pollLease.trace().record(Stage.RPC_COMPLETED, failure);
+        WorkerStatus.PollLease application;
+        boolean valid;
         try {
-            logger.debug("GrpcWorkerStatusRunner run for {}", ipPort);
-            long startTime = System.nanoTime() / 1000;
-
-            long latestFinishedTaskVersion =
-                    workerStatus.appliedStatusCursor().latestFinishedTaskVersion();
-
-            engineGrpcService
-                    .getWorkerStatusAsync(
-                            ip,
-                            workerStatusPort,
-                            latestFinishedTaskVersion,
-                            syncRequestTimeoutMs,
-                            roleType)
-                    .thenApply(
-                            response ->
-                                    EngineStatusConverter.convertToStatusObservation(
-                                            workerStatus, response))
-                    .handleAsync(
-                            (observation, failure) -> {
-                                try {
-                                    Throwable cause = unwrapCompletionFailure(failure);
-                                    if (cause != null) {
-                                        handleException(cause, startTime);
-                                        recordStatusCheckFailure(cause);
-                                    } else {
-                                        handleStatusResponse(observation, startTime);
-                                    }
-                                } catch (Throwable callbackFailure) {
-                                    logger.error(
-                                            "Worker status callback failed for {}",
-                                            ipPort,
-                                            callbackFailure);
-                                }
-                                return null;
-                            },
-                            callbackExecutor)
-                    .whenComplete(
-                            (ignored, callbackFailure) -> {
-                                pollLease.close();
-                                if (callbackFailure != null) {
-                                    logger.error(
-                                            "Worker status callback was not scheduled for {}",
-                                            ipPort,
-                                            unwrapCompletionFailure(callbackFailure));
-                                }
-                            });
-            asyncInitiated = true;
-        } finally {
-            if (!asyncInitiated) {
-                pollLease.close();
+            if (!endpointRegistry.isCurrentStatus(roleType, ipPort, workerStatus)
+                    || !workerStatus.isActiveGeneration()) {
+                return;
             }
+            valid =
+                    failure == null
+                            && response != null
+                            && response.getStatusVersion() > 0L
+                            && response.getStatusVersion()
+                                    >= workerStatus.appliedStatusCursor().statusVersion()
+                            && RoleTypeProtoConverter.fromWorkerStatus(response) == roleType;
+            workerStatus.recordStatusRpcResult(pollLease, valid, valid && response.getAlive());
+            application = workerStatus.tryBeginStatusApplication(pollLease);
+        } catch (Throwable completionFailure) {
+            logger.error("Worker status completion failed for {}", ipPort, completionFailure);
+            return;
+        } finally {
+            pollLease.close();
+        }
+        if (application == null) {
+            pollLease.trace().record(Stage.RESPONSE_DISCARDED, "APPLICATION_BUSY");
+            return;
+        }
+        pollLease.trace().record(Stage.CALLBACK_READY);
+        try {
+            callbackExecutor.execute(
+                    () -> {
+                        try (application) {
+                            pollLease.trace().record(Stage.CALLBACK_STARTED);
+                            if (failure != null) {
+                                handleException(failure);
+                            } else if (workerStatus.retirementReason() != null) {
+                                var retirement =
+                                        endpointRegistry.beginRequestedRetirement(
+                                                roleType, ipPort, workerStatus);
+                                if (retirement != null) {
+                                    retirement.completeAsync(cacheAwareService, logger);
+                                }
+                            } else if (!valid || response.getAlive()) {
+                                pollLease.trace().record(Stage.CONVERSION_STARTED);
+                                var observation =
+                                        response == null
+                                                ? null
+                                                : WorkerStatusRpcClient.convertToStatusObservation(
+                                                        workerStatus, response);
+                                pollLease.trace().record(Stage.CONVERSION_COMPLETED);
+                                handleStatusResponse(observation, startTime);
+                            }
+                        } catch (Throwable localFailure) {
+                            pollLease.trace().record(Stage.CALLBACK_FAILED, localFailure);
+                            logger.error(
+                                    "Worker status application failed for {}",
+                                    ipPort,
+                                    localFailure);
+                        }
+                    });
+        } catch (Throwable rejected) {
+            pollLease.trace().record(Stage.CALLBACK_SUBMISSION_FAILED, rejected);
+            application.close();
+            logger.warn("Worker status application was not scheduled for {}", ipPort, rejected);
         }
     }
 
-    private static Throwable unwrapCompletionFailure(Throwable failure) {
-        return failure instanceof CompletionException && failure.getCause() != null
-                ? failure.getCause()
-                : failure;
-    }
-
+    /** The complete status workflow: one generation transaction, followed by lock-free publication. */
     private void handleStatusResponse(WorkerStatus.StatusObservation observation, long startTime) {
         try {
             if (observation == null) {
-                logger.debug("query engine worker status via gRPC, response body is null");
-                reportStatusCheckFailure(BalanceStatusEnum.RESPONSE_NULL, startTime);
+                engineHealthReporter.reportStatusCheckerFail(
+                        BalanceStatusEnum.RESPONSE_NULL, workerStatus.getMetricIpPort(), roleType);
                 return;
             }
-            if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)) {
-                logger.debug(
-                        "Ignore stale worker status callback for {}, role: {}", ipPort, roleType);
-                return;
-            }
-            WorkerEndpoint ep;
-            WorkerStatus.StepMetrics previousStep;
-            WorkerStatus.StatusObservation committedObservation;
-            Runnable statusProjection = NO_STATUS_PROJECTION;
-            Runnable activityProjection = NO_STATUS_PROJECTION;
-            EndpointRegistry.DetachedGeneration endpointToRetire = null;
-            boolean generationRetiring = false;
+            StatusApplication applied = null;
+            EndpointRegistry.Retirement retirement = null;
+            pollLease.trace().record(Stage.STATUS_LOCK_ATTEMPT);
             workerStatus.lock.lock();
+            pollLease.trace().record(Stage.STATUS_LOCK_ACQUIRED);
             try {
-                if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)) {
-                    logger.debug(
-                            "Ignore stale worker status callback for {}, role: {}",
-                            ipPort,
-                            roleType);
+                if (!endpointRegistry.isCurrentStatus(roleType, ipPort, workerStatus)
+                        || !workerStatus.isActiveGeneration()) {
                     return;
                 }
-                if (!workerStatus.isActiveGeneration()) {
-                    logger.debug(
-                            "Ignore callback for retiring WorkerStatus generation {} at {}",
-                            workerStatus.getGenerationId(),
-                            ipPort);
-                    return;
-                }
-                Long responseVersion = observation.statusVersion();
-                if (responseVersion == null || responseVersion <= 0L) {
-                    endpointToRetire =
-                            workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
-                    generationRetiring = true;
-                    throw new IllegalArgumentException(
-                            "Worker status version must be positive: " + responseVersion);
-                }
-                if (observation.role() != roleType) {
-                    endpointToRetire =
-                            workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
-                    generationRetiring = true;
-                    throw new IllegalStateException(
-                            "Worker status role does not match discovery role: expected="
-                                    + roleType
-                                    + ", actual="
-                                    + observation.role());
-                }
-                committedObservation = observation;
-                previousStep = workerStatus.committedEngineObservation().lastStepMetrics();
-
-                WorkerStatus.AppliedStatusCursor cursor = workerStatus.appliedStatusCursor();
-                if (responseVersion < cursor.statusVersion()) {
-                    endpointToRetire =
-                            workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
-                    generationRetiring = true;
-                    throw new IllegalStateException(
-                            "Worker status version regressed: committed="
-                                    + cursor.statusVersion()
-                                    + ", response="
-                                    + responseVersion);
-                }
-                workerStatus.recordSuccessfulPoll(observation.alive());
-                WorkerEndpoint exactEndpoint =
-                        workerDirectory.exactEndpoint(roleType, ipPort, workerStatus);
-
-                if (responseVersion > cursor.statusVersion()) {
-                    if (observation.alive()
-                            && exactEndpoint == null
-                            && cursor.statusVersion() >= 0L) {
-                        endpointToRetire =
-                                workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
-                        generationRetiring = true;
-                        throw new IllegalStateException(
-                                "Endpoint generation cannot be recreated for committed WorkerStatus "
-                                        + ipPort
-                                        + "#"
-                                        + workerStatus.getGenerationId());
+                try {
+                    if (workerStatus.retirementReason() != null) {
+                        retirement =
+                                endpointRegistry.beginRetirement(roleType, ipPort, workerStatus);
+                        return;
                     }
-                    WorkerStatus.PreparedStatus prepared =
-                            workerStatus.prepareNewStatus(observation);
-                    try {
-                        EndpointRegistry.EndpointPublication application =
-                                applyNewStatusVersion(prepared, exactEndpoint);
-                        ep = application.endpoint();
-                        statusProjection = application.statusProjection();
-                    } catch (Throwable reductionOrPublicationFailure) {
-                        endpointToRetire =
-                                workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
-                        generationRetiring = true;
-                        throw propagate(reductionOrPublicationFailure);
+                    applied = applyStatusLocked(observation);
+                    pollLease.trace().record(Stage.STATUS_COMMITTED);
+                } catch (Throwable failure) {
+                    if (workerStatus.isActiveGeneration()) {
+                        retirement =
+                                endpointRegistry.beginRetirement(roleType, ipPort, workerStatus);
                     }
-                    if (!observation.alive()) {
-                        endpointToRetire =
-                                workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
-                        generationRetiring = true;
-                        ep = null;
-                    }
-                } else {
-                    if (!observation.alive()) {
-                        endpointToRetire =
-                                workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
-                        generationRetiring = true;
-                        ep = null;
-                    } else if (exactEndpoint != null) {
-                        ep = exactEndpoint;
-                    } else {
-                        endpointToRetire =
-                                workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
-                        generationRetiring = true;
-                        throw new IllegalStateException(
-                                "Committed WorkerStatus has no exact endpoint generation: "
-                                        + ipPort
-                                        + "#"
-                                        + workerStatus.getGenerationId());
-                    }
-                }
-                if (ep != null && responseVersion == cursor.statusVersion()) {
-                    // running_tasks is a full active snapshot even when its
-                    // status_version is unchanged. Derive exact endpoint-owned
-                    // liveness facts without replaying versioned mutation.
-                    activityProjection = ep.observeStatusHeartbeat(workerStatus, observation);
+                    throw failure;
                 }
             } finally {
                 workerStatus.lock.unlock();
+                pollLease.trace().record(Stage.STATUS_LOCK_RELEASED);
                 try {
-                    statusProjection.run();
-                    activityProjection.run();
+                    if (applied != null && applied.endpoint() != null) {
+                        applied.endpoint().publishStatus(applied.change());
+                    }
                 } finally {
-                    if (generationRetiring) {
-                        workerDirectory.completeRetirement(
-                                roleType,
-                                ipPort,
-                                workerStatus,
-                                endpointToRetire,
-                                cacheAwareService,
-                                logger);
+                    if (retirement != null) {
+                        retirement.completeAsync(cacheAwareService, logger);
                     }
                 }
             }
-
-            reportSuccessfulStatus(committedObservation, startTime, ep, previousStep);
-
-            reportCacheFeedback(committedObservation);
-            logWorkerStatusUpdate(startTime, workerStatus);
-
-        } catch (Throwable e) {
-            logger.error("Worker status response handling failed after callback for {}", ipPort, e);
-            reportStatusCheckFailure(BalanceStatusEnum.UNKNOWN_ERROR, startTime);
+            reportSuccessfulStatus(observation, startTime, applied);
+            observeCacheFeedback(observation);
+            logWorkerStatusUpdate(startTime);
+        } catch (Throwable failure) {
+            pollLease.trace().record(Stage.STATUS_RESPONSE_FAILED, failure);
+            logger.error(
+                    "Worker status response handling failed after callback for {}",
+                    ipPort,
+                    failure);
+            engineHealthReporter.reportStatusCheckerFail(
+                    BalanceStatusEnum.UNKNOWN_ERROR, workerStatus.getMetricIpPort(), roleType);
         }
     }
 
-    private EndpointRegistry.EndpointPublication applyNewStatusVersion(
-            WorkerStatus.PreparedStatus prepared, WorkerEndpoint exactEndpoint) {
-        WorkerStatus.StatusObservation observation = prepared.observation();
-        if (exactEndpoint != null) {
-            Runnable projection = exactEndpoint.applyPreparedStatus(workerStatus, prepared);
-            return new EndpointRegistry.EndpointPublication(
-                    observation.alive() ? exactEndpoint : null, projection);
-        }
+    private record StatusApplication(
+            WorkerEndpoint endpoint,
+            WorkerEndpoint.StatusChange change,
+            boolean newStatus,
+            boolean newFinished,
+            WorkerStatus.StepMetrics previousStep) {}
 
-        if (!observation.alive()) {
-            workerStatus.publishPreparedStatus(prepared);
-            return new EndpointRegistry.EndpointPublication(null, NO_STATUS_PROJECTION);
+    /** Validate the frame once and commit one exact generation; external effects are returned as data. */
+    private StatusApplication applyStatusLocked(WorkerStatus.StatusObservation observation) {
+        Long version = observation.statusVersion();
+        if (version == null || version <= 0L) {
+            throw new IllegalArgumentException(
+                    "Worker status version must be positive: " + version);
         }
-
-        // Only the first committed status of this WorkerStatus generation may
-        // create an endpoint. Every later endpoint loss retires the entire
-        // WorkerStatus generation instead of constructing a second owner.
-        return workerDirectory.publishPreparedEndpoint(ipPort, workerStatus, prepared);
+        if (observation.role() != roleType) {
+            throw new IllegalStateException(
+                    "Worker status role does not match discovery role: expected="
+                            + roleType
+                            + ", actual="
+                            + observation.role());
+        }
+        WorkerStatus.AppliedStatusCursor cursor = workerStatus.appliedStatusCursor();
+        if (version < cursor.statusVersion()) {
+            throw new IllegalStateException(
+                    "Worker status version regressed: committed="
+                            + cursor.statusVersion()
+                            + ", response="
+                            + version);
+        }
+        WorkerEndpoint endpoint = endpointRegistry.get(roleType, ipPort, workerStatus);
+        if (endpoint == null && cursor.statusVersion() >= 0L) {
+            throw new IllegalStateException(
+                    "Committed WorkerStatus has no exact endpoint generation: "
+                            + ipPort
+                            + "#"
+                            + workerStatus.getGenerationId());
+        }
+        var previousStep = workerStatus.committedEngineObservation().lastStepMetrics();
+        WorkerEndpoint.StatusChange change = WorkerEndpoint.NO_STATUS_CHANGE;
+        if (version > cursor.statusVersion()) {
+            WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(observation);
+            if (endpoint != null) {
+                change = endpoint.applyPreparedStatus(workerStatus, prepared);
+            } else {
+                endpoint = endpointRegistry.publishPreparedEndpoint(ipPort, workerStatus, prepared);
+            }
+        } else if (endpoint != null) {
+            // Same-version running_tasks is still a full liveness snapshot; never replay versioned
+            // mutations.
+            change = endpoint.applyStatusHeartbeat(workerStatus, observation);
+        }
+        return new StatusApplication(
+                endpoint,
+                change,
+                version > cursor.statusVersion(),
+                observation.latestFinishedVersion() != null
+                        && observation.latestFinishedVersion() > cursor.latestFinishedTaskVersion(),
+                previousStep);
     }
 
-    private void recordStatusCheckFailure(Throwable failure) {
-        EndpointRegistry.DetachedGeneration endpointToRetire = null;
-        boolean generationRetiring = false;
-        workerStatus.lock.lock();
-        try {
-            if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)) {
-                return;
-            }
-            if (!workerStatus.isActiveGeneration()) {
-                return;
-            }
-            WorkerStatus.PollHealth health = workerStatus.recordTransportFailure();
-            long failures = health.consecutiveTransportFailures();
-            logger.debug(
-                    "Worker status check failed, consecutiveFailures={}/{}, msg={}",
-                    failures,
-                    MAX_CONSECUTIVE_FAILURES,
-                    failure.getMessage());
-            if (failures < MAX_CONSECUTIVE_FAILURES) {
-                return;
-            }
-            endpointToRetire = workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
-            generationRetiring = true;
-            if (failures == MAX_CONSECUTIVE_FAILURES) {
-                logger.error(
-                        "worker {} marked dead after {} consecutive status check failures",
-                        ipPort,
-                        failures);
-            }
-        } finally {
-            workerStatus.lock.unlock();
-        }
-        if (generationRetiring) {
-            workerDirectory.completeRetirement(
-                    roleType, ipPort, workerStatus, endpointToRetire, cacheAwareService, logger);
-        }
-    }
-
-    private static RuntimeException propagate(Throwable failure) {
-        if (failure instanceof RuntimeException runtimeFailure) {
-            return runtimeFailure;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        return new IllegalStateException("Worker status reconciliation failed", failure);
-    }
-
-    private void reportCacheFeedback(WorkerStatus.StatusObservation observation) {
+    private void observeCacheFeedback(WorkerStatus.StatusObservation observation) {
         try {
             for (var result :
                     cacheAwareService.observeCacheHitFeedback(workerStatus, observation)) {
@@ -411,7 +262,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                 return;
                             }
                             try {
-                                LoggerFactory.getLogger("pvLogger")
+                                org.slf4j.LoggerFactory.getLogger("pvLogger")
                                         .info(
                                                 org.flexlb.util.JsonUtils.toStringOrEmpty(
                                                         comparison));
@@ -429,30 +280,42 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void reportSuccessfulStatus(
-            WorkerStatus.StatusObservation observation,
-            long startTime,
-            WorkerEndpoint endpoint,
-            WorkerStatus.StepMetrics previousStep) {
+            WorkerStatus.StatusObservation observation, long startTime, StatusApplication applied) {
+        var endpoint = applied.endpoint();
         try {
-            engineHealthReporter.reportStatusCheckRemoteInfo(workerStatus, startTime);
+            engineHealthReporter.reportStatusCheckRemoteInfo(
+                    modelName, observation.role().name(), startTime);
             engineHealthReporter.reportStatusCheckerSuccess(
                     workerStatus,
-                    endpoint,
+                    endpoint == null ? java.util.OptionalLong.empty() : endpoint.tryGetLoadMetric(),
                     observation.activeTasks().size(),
                     observation.finishedTasks().size());
-            WorkerStatus.StepMetrics step = observation.engine().lastStepMetrics();
-            if (step != null && (previousStep == null || step.stepId() != previousStep.stepId())) {
-                engineHealthReporter.reportWorkerStepMetrics(workerStatus, step);
+            if (endpoint instanceof org.flexlb.balance.endpoint.EncoderEndpoint encoder) {
+                long total = encoder.requestCount();
+                var engine = observation.engine();
+                long pending =
+                        Math.max(
+                                0,
+                                total
+                                        - Math.max(0, engine.runningQueryLen())
+                                        - Math.max(0, engine.waitingQueryLen()));
+                engineHealthReporter.reportEncoderStatus(
+                        workerStatus.getMetricIpPort(), pending, total, encoder.uncachedTokens());
             }
-            if (observation.role() == RoleType.PREFILL || observation.role() == RoleType.PDFUSION) {
-                for (WorkerStatus.TaskObservation task : observation.finishedTasks().values()) {
-                    if (task.telemetry() != null && task.telemetry().firstTokenTimeMs() > 0) {
+            var step = observation.engine().lastStepMetrics();
+            if (applied.newStatus()
+                    && step != null
+                    && (applied.previousStep() == null
+                            || step.stepId() != applied.previousStep().stepId()))
+                engineHealthReporter.reportWorkerStepMetrics(workerStatus, step);
+            if (applied.newFinished() && observation.role().supportsPrefill()) {
+                for (var task : observation.finishedTasks().values()) {
+                    if (task.telemetry() != null && task.telemetry().firstTokenTimeMs() > 0)
                         engineHealthReporter.reportPrefillWorkerStatusTask(
                                 workerStatus.getMetricIpPort(),
                                 observation.role().name(),
                                 workerStatus.getGroup(),
                                 task.telemetry());
-                    }
                 }
             }
         } catch (Throwable telemetryFailure) {
@@ -463,7 +326,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
         }
     }
 
-    private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
+    private void logWorkerStatusUpdate(long startTime) {
+        if (!logger.isDebugEnabled()) {
+            return;
+        }
         WorkerStatus.EngineObservation status = workerStatus.committedEngineObservation();
         WorkerStatus.PollHealth health = workerStatus.pollHealth();
         Map<String, WorkerStatus.TaskObservation> runningTasks = status.runningTaskList();
@@ -485,50 +351,19 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 status.tpSize(),
                 status.availableKvCacheTokens(),
                 status.totalKvCacheTokens() - status.availableKvCacheTokens(),
-                runningTasks.values().stream()
-                        .filter(t -> t.phase() != org.flexlb.enums.TaskPhase.RUNNING)
-                        .count(),
+                runningTasks.values().stream().filter(t -> t.phase() != TaskPhase.RUNNING).count(),
                 runningTasks.size(),
                 workerStatus.appliedStatusCursor().statusVersion(),
-                System.nanoTime() / 1000 - startTime);
+                TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - startTime);
     }
 
-    private void handleException(Throwable ex, long startTime) {
-        log("gRPC worker status check failed, msg=" + ex.getMessage());
-        // Report specific error based on exception type
-        if (ex.getMessage() != null
-                && ex.getMessage()
-                        .toLowerCase()
-                        .contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
-            logger.debug(
-                    "gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}",
-                    ex.getMessage(),
-                    ipPort,
-                    System.nanoTime() / 1000 - createTimeUs);
-            reportStatusCheckFailure(BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, startTime);
-        } else {
-            reportStatusCheckFailure(BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, startTime);
-        }
-    }
-
-    private void reportStatusCheckFailure(BalanceStatusEnum error, long startTime) {
+    @Override
+    protected void reportRpcFailure(boolean timeout) {
         engineHealthReporter.reportStatusCheckerFail(
-                error, workerStatus.getMetricIpPort(), roleType);
-        engineHealthReporter.reportStatusCheckFailureLatency(
-                error,
+                timeout
+                        ? BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT
+                        : BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE,
                 workerStatus.getMetricIpPort(),
-                roleType,
-                Math.max(0L, System.nanoTime() / 1000 - startTime));
-    }
-
-    private void log(String msg) {
-        logger.debug(
-                "[gRPC][{}][{}][{}][{}][{}μs]: {}",
-                id,
-                site,
-                ipPort,
-                modelName,
-                System.nanoTime() / 1000 - createTimeUs,
-                msg);
+                roleType);
     }
 }

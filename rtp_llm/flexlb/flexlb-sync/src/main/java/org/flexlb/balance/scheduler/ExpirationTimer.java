@@ -1,623 +1,362 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.config.ConfigService;
-import org.flexlb.util.Logger;
+import org.flexlb.util.Failures;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.OptionalLong;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.function.BiConsumer;
-import java.util.function.BiPredicate;
 import java.util.function.LongSupplier;
-import java.util.function.Predicate;
 
-/**
- * Semantic owner of request deadlines and lifecycle-retention maintenance.
- *
- * <p>The timer never keeps a request map. Exact request generations remain in
- * the request registry; a slot stores the opaque registration returned
- * by this class.
- *
- * <p>Maintenance removes settled terminal records before sweeping endpoint orphans.
- * A request's inactivity deadline bounds local ownership independently of
- * Engine cancellation acknowledgements or terminal status delivery.
- */
-final class ExpirationTimer implements AutoCloseable {
-
-    private enum DeadlineState {
-        PREPARED,
-        FIRED_BEFORE_INSTALL,
-        ARMED,
-        CONSUMED,
-        CANCELED
+/** Owns scheduled handles. Context owns only immutable desired deadline tokens. */
+public final class ExpirationTimer implements AutoCloseable {
+    public enum Kind {
+        REQUEST,
+        VISIBILITY,
+        INACTIVITY
     }
 
-    /** Exact capabilities detached together from one slot during shutdown. */
-    record DetachedDeadlines(
-            RequestDeadline requestDeadline,
-            DecisionDeadline decisionDeadline,
-            InactivityDeadline inactivityDeadline) {}
+    private static final Kind[] KINDS = Kind.values();
 
-    /** Timers detached atomically at ACTIVE -> TERMINALIZING. */
-    static final class DetachedRequestTimers {
-        private final RequestDeadline requestDeadline;
-        private final InactivityDeadline inactivityDeadline;
-        private final DecisionDeadline detachedDecisionDeadline;
-        private boolean released;
-
-        DetachedRequestTimers(
-                RequestDeadline requestDeadline,
-                DecisionDeadline detachedDecisionDeadline,
-                InactivityDeadline inactivityDeadline) {
-            this.requestDeadline = requestDeadline;
-            this.inactivityDeadline = inactivityDeadline;
-            this.detachedDecisionDeadline = detachedDecisionDeadline;
-        }
-
-        synchronized void release(ExpirationTimer timer) {
-            if (released) {
-                return;
+    public record Token(RequestContext owner, Kind kind, long version, long atMs) {
+        public Token {
+            Objects.requireNonNull(owner);
+            Objects.requireNonNull(kind);
+            if (version <= 0L || atMs <= 0L) {
+                throw new IllegalArgumentException("invalid deadline identity");
             }
-            released = true;
-            Throwable failure = null;
-            if (inactivityDeadline != null) {
-                try {
-                    timer.cancel(inactivityDeadline);
-                } catch (Throwable timerFailure) {
-                    failure = timerFailure;
-                }
-            }
-            if (requestDeadline != null) {
-                try {
-                    timer.cancel(requestDeadline);
-                } catch (Throwable timerFailure) {
-                    failure = RequestTerminalCleanup.appendFailure(failure, timerFailure);
-                }
-            }
-            if (detachedDecisionDeadline != null) {
-                try {
-                    timer.cancel(detachedDecisionDeadline);
-                } catch (Throwable admissionFailure) {
-                    failure = RequestTerminalCleanup.appendFailure(failure, admissionFailure);
-                }
-            }
-            RequestTerminalCleanup.rethrowCleanup(failure);
         }
     }
 
-    private enum CloseState {
-        OPEN,
-        CLOSING,
-        CLOSED
-    }
-
-    private abstract static class DeadlineRegistration {
-        private final ExpirationTimer owner;
-        private DeadlineState state = DeadlineState.PREPARED;
-        private ScheduledFuture<?> scheduled;
-
-        private DeadlineRegistration(ExpirationTimer owner) {
-            this.owner = owner;
+    public record Plan(long revision, Token request, Token visibility, Token inactivity) {
+        /** Keep unchanged tokens exact, and keep the earlier activity recheck already scheduled. */
+        Plan schedule(RequestContext owner, long requestAt, long visibilityAt, long inactivityAt) {
+            if (inactivity != null && inactivityAt > 0L && inactivity.atMs() <= inactivityAt) {
+                inactivityAt = inactivity.atMs();
+            }
+            long next = revision + 1L;
+            var requestToken = token(owner, request, Kind.REQUEST, next, requestAt);
+            var visibilityToken = token(owner, visibility, Kind.VISIBILITY, next, visibilityAt);
+            var inactivityToken = token(owner, inactivity, Kind.INACTIVITY, next, inactivityAt);
+            return requestToken == request
+                            && visibilityToken == visibility
+                            && inactivityToken == inactivity
+                    ? this
+                    : new Plan(next, requestToken, visibilityToken, inactivityToken);
         }
 
-        private synchronized void installScheduled(ScheduledFuture<?> exactScheduled) {
-            if (scheduled != null) {
-                throw new IllegalStateException("deadline already owns a scheduled task");
-            }
-            scheduled = exactScheduled;
-            if (state == DeadlineState.CANCELED) {
-                exactScheduled.cancel(false);
-            }
+        private static Token token(
+                RequestContext owner, Token previous, Kind kind, long revision, long atMs) {
+            if (atMs <= 0L) return null;
+            return previous != null && previous.atMs() == atMs
+                    ? previous
+                    : new Token(owner, kind, revision, atMs);
         }
 
-        /** Publish only after the exact slot has stored this capability. */
-        final synchronized boolean publishAfterInstall() {
-            return switch (state) {
-                case PREPARED -> {
-                    state = DeadlineState.ARMED;
-                    yield false;
-                }
-                case FIRED_BEFORE_INSTALL -> {
-                    state = DeadlineState.CONSUMED;
-                    yield true;
-                }
-                case CANCELED, CONSUMED -> false;
-                case ARMED ->
-                        throw new IllegalStateException("deadline capability was published twice");
+        Plan without(Kind kind) {
+            return new Plan(
+                    revision + 1L,
+                    kind == Kind.REQUEST ? null : request,
+                    kind == Kind.VISIBILITY ? null : visibility,
+                    kind == Kind.INACTIVITY ? null : inactivity);
+        }
+
+        Token token(Kind kind) {
+            return switch (kind) {
+                case REQUEST -> request;
+                case VISIBILITY -> visibility;
+                case INACTIVITY -> inactivity;
             };
         }
+    }
 
-        final synchronized boolean consume() {
-            return switch (state) {
-                case PREPARED -> {
-                    state = DeadlineState.FIRED_BEFORE_INSTALL;
-                    yield false;
+    private record Slot(long revision, Handle[] handles) {
+        boolean hasFailedInstallation() {
+            for (Handle handle : handles) {
+                if (handle != null && handle.installationFailed) {
+                    return true;
                 }
-                case ARMED -> {
-                    state = DeadlineState.CONSUMED;
-                    yield true;
-                }
-                case FIRED_BEFORE_INSTALL, CONSUMED, CANCELED -> false;
-            };
-        }
-
-        final boolean cancel() {
-            ScheduledFuture<?> exactScheduled;
-            synchronized (this) {
-                if (state == DeadlineState.CONSUMED || state == DeadlineState.CANCELED) {
-                    return false;
-                }
-                state = DeadlineState.CANCELED;
-                exactScheduled = scheduled;
             }
-            if (exactScheduled != null) {
-                exactScheduled.cancel(false);
-            }
-            return true;
+            return false;
         }
     }
 
-    /** Exact one-shot capability for one request's absolute scheduling deadline. */
-    static final class RequestDeadline extends DeadlineRegistration {
-        private RequestDeadline(ExpirationTimer owner) {
-            super(owner);
-        }
-    }
-
-    /** Wake-up to recheck the latest request activity, not proof of expiration. */
-    static final class InactivityDeadline extends DeadlineRegistration {
-        private InactivityDeadline(ExpirationTimer owner) {
-            super(owner);
-        }
-    }
-
-    /** Exact one-shot capability for request visibility and PD handoff detection. */
-    static final class DecisionDeadline extends DeadlineRegistration {
-        private final long deadlineAtMs;
-
-        private DecisionDeadline(ExpirationTimer owner, long deadlineAtMs) {
-            super(owner);
-            this.deadlineAtMs = deadlineAtMs;
-        }
-
-        long deadlineAtMs() {
-            return deadlineAtMs;
-        }
-    }
-
-    private final RequestRegistry lifecycle;
-    private final ConfigService config;
+    private final RequestRepository requests;
     private final LongSupplier clock;
-    private final ScheduledThreadPoolExecutor executor;
+    private final TaskTimer timer;
+    private final ConcurrentMap<RequestContext, Slot> slots = new ConcurrentHashMap<>();
     private final Object registrationMonitor = new Object();
-    private CloseState closeState = CloseState.OPEN;
-    private int inflightRegistrations;
-    private Throwable closeFailure;
+    private volatile CompletableFuture<Throwable> closing;
+    private int registrations;
 
-    ExpirationTimer(RequestRegistry lifecycle, ConfigService config) {
-        this(lifecycle, config, System::currentTimeMillis);
+    ExpirationTimer(RequestRepository requests, TaskTimer timer) {
+        this(requests, timer, System::currentTimeMillis);
     }
 
-    ExpirationTimer(RequestRegistry lifecycle, ConfigService config, LongSupplier clock) {
-        this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
-        this.config = Objects.requireNonNull(config, "config");
-        this.clock = Objects.requireNonNull(clock, "clock");
-        this.executor =
-                new ScheduledThreadPoolExecutor(
-                        1,
-                        runnable -> {
-                            Thread thread = new Thread(runnable, "request-scheduler-expiration");
-                            thread.setDaemon(true);
-                            return thread;
-                        },
-                        new ThreadPoolExecutor.AbortPolicy());
-        executor.setRemoveOnCancelPolicy(true);
-        executor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+    ExpirationTimer(RequestRepository requests, TaskTimer timer, LongSupplier clock) {
+        this.requests = Objects.requireNonNull(requests);
+        this.timer = Objects.requireNonNull(timer);
+        this.clock = Objects.requireNonNull(clock);
     }
 
-    // ── 调度期限：注册、安装与触发 ──
-
-    /**
-     * Register one absolute request deadline.
-     *
-     * @return its exact slot-owned capability, or null when the slot rejected
-     *         installation because another lifecycle transition already won
-     */
-    RequestDeadline attachRequestDeadline(RequestSlot exactSlot, long deadlineAtMs) {
-        if (lifecycle.isShuttingDown()) {
-            return null;
+    boolean needsUpdate(RequestContext context, Plan plan) {
+        Slot observed = slots.get(context);
+        if (closing != null && requests.isClosed()) {
+            return observed != null;
         }
-        try {
-            return register(
-                    exactSlot,
-                    new RequestDeadline(this),
-                    delayUntil(deadlineAtMs),
-                    this::installRequestDeadline,
-                    this::requestDeadlineExpired);
-        } catch (RuntimeException timerStopped) {
-            if (lifecycle.isShuttingDown()) {
-                return null;
-            }
-            throw timerStopped;
+        return requests.isCurrent(context)
+                && (observed == null
+                        || plan.revision() > observed.revision()
+                        || plan.revision() == observed.revision()
+                                && observed.hasFailedInstallation());
+    }
+
+    /** Effect order may differ from fact order; only the greatest accepted revision installs handles. */
+    void update(RequestContext context, Plan plan) {
+        Objects.requireNonNull(plan);
+        if (context.snapshot().key() == null || !needsUpdate(context, plan)) {
+            return;
         }
-    }
-
-    private boolean installRequestDeadline(RequestSlot exactSlot, RequestDeadline exactDeadline) {
-        synchronized (exactSlot) {
-            return lifecycle.isCurrentSlot(exactSlot)
-                    && exactSlot.installRequestDeadline(exactDeadline);
-        }
-    }
-
-    private void requestDeadlineExpired(RequestSlot slot, RequestDeadline exact) {
-        slot.onSchedulingDeadline(exact);
-    }
-
-    // ── 可见性期限：计划、注册、触发与取消 ──
-
-    void attachDecisionDeadline(RequestSlot slot) {
-        OptionalLong deadline = slot.decisionDeadlineAtMs();
-        if (deadline.isPresent()) {
-            registerDecisionDeadline(slot, deadline.getAsLong());
-        }
-    }
-
-    /**
-     * Register one exact stage deadline from the current delivery evidence.
-     *
-     * @return its exact slot-owned capability, or null when the slot rejected
-     *         installation because another lifecycle transition already won
-     */
-    DecisionDeadline registerDecisionDeadline(RequestSlot exactSlot, long deadlineAtMs) {
-        if (lifecycle.isShuttingDown()) {
-            return null;
-        }
-        try {
-            return register(
-                    exactSlot,
-                    new DecisionDeadline(this, deadlineAtMs),
-                    delayUntil(deadlineAtMs),
-                    this::installDecisionDeadline,
-                    this::decisionDeadlineExpired);
-        } catch (RuntimeException timerStopped) {
-            if (lifecycle.isShuttingDown()) {
-                return null;
-            }
-            throw timerStopped;
-        }
-    }
-
-    private boolean installDecisionDeadline(RequestSlot exactSlot, DecisionDeadline exactDeadline) {
-        synchronized (exactSlot) {
-            return lifecycle.isCurrentSlot(exactSlot)
-                    && exactSlot.installDecisionDeadline(exactDeadline);
-        }
-    }
-
-    private void decisionDeadlineExpired(RequestSlot slot, DecisionDeadline exact) {
-        slot.onDecisionVisibilityDeadline(exact);
-    }
-
-    void releaseDecisionDeadline(DecisionDeadline exact) {
-        if (exact == null) {
+        List<Handle> start = new ArrayList<>(3);
+        List<Handle> stop = new ArrayList<>(3);
+        if (!beginRegistration()) {
+            remove(context);
             return;
         }
         try {
-            release(exact);
-        } catch (Throwable failure) {
-            Logger.error("Decision deadline cancellation failed", failure);
-        }
-    }
-
-    // ── 沉默期限：计划、注册与续期检查 ──
-
-    InactivityDeadline attachInactivityDeadline(RequestSlot slot) {
-        if (lifecycle.isShuttingDown()) {
-            return null;
-        }
-        OptionalLong deadlineAtMs;
-        synchronized (slot) {
-            if (!lifecycle.isCurrentSlot(slot)) {
-                return null;
+            slots.compute(
+                    context, (key, previous) -> replaceHandles(key, plan, previous, start, stop));
+            Throwable failure = null;
+            for (Handle handle : stop) {
+                failure = Failures.run(failure, handle::cancel);
             }
-            deadlineAtMs = slot.inactivityDeadlineAtMs();
-        }
-        if (deadlineAtMs.isEmpty()) {
-            return null;
-        }
-        try {
-            return register(
-                    slot,
-                    new InactivityDeadline(this),
-                    delayUntil(deadlineAtMs.getAsLong()),
-                    (owner, exact) -> {
-                        synchronized (owner) {
-                            return lifecycle.isCurrentSlot(owner)
-                                    && owner.installInactivityDeadline(exact);
-                        }
-                    },
-                    this::inactivityDeadlineExpired);
-        } catch (RuntimeException timerStopped) {
-            if (lifecycle.isShuttingDown()) {
-                return null;
+            for (Handle handle : start) {
+                failure = Failures.run(failure, () -> install(handle));
             }
-            throw timerStopped;
-        }
-    }
-
-    private void inactivityDeadlineExpired(RequestSlot slot, InactivityDeadline exact) {
-        try {
-            slot.onInactivityDeadline(exact, clock.getAsLong());
+            Failures.rethrow(failure, "deadline update failed");
         } finally {
-            // A matching Engine fact may have extended the inactivity deadline.
-            attachInactivityDeadline(slot);
-        }
-    }
-
-    // ── 精确句柄：注册协议、调度与取消 ──
-
-    private <D extends DeadlineRegistration> D register(
-            RequestSlot exactSlot,
-            D exact,
-            long delayMs,
-            BiPredicate<RequestSlot, D> install,
-            BiConsumer<RequestSlot, D> expire) {
-        beginRegistration();
-        try {
-            schedule(
-                    exact,
-                    () -> {
-                        if (exact.consume()) {
-                            expire.accept(exactSlot, exact);
-                        }
-                    },
-                    delayMs);
-            boolean installed;
             try {
-                installed = install.test(exactSlot, exact);
-            } catch (RuntimeException | Error installationFailure) {
-                exact.cancel();
-                throw installationFailure;
+                if (!requests.isCurrent(context)) {
+                    remove(context);
+                }
+            } finally {
+                endRegistration();
             }
-            if (!installed) {
-                exact.cancel();
-                return null;
-            }
-            if (exact.publishAfterInstall()) {
-                expire.accept(exactSlot, exact);
-            }
-            return exact;
-        } finally {
-            endRegistration();
         }
     }
 
-    private void beginRegistration() {
+    /** Replace only the exact deadline handles; scheduling and cancellation stay outside compute. */
+    private Slot replaceHandles(
+            RequestContext key, Plan plan, Slot previous, List<Handle> start, List<Handle> stop) {
+        if (!requests.isCurrent(key)
+                || previous != null
+                        && (plan.revision() < previous.revision()
+                                || plan.revision() == previous.revision()
+                                        && !previous.hasFailedInstallation())) {
+            return previous;
+        }
+        var next = new Handle[KINDS.length];
+        for (Kind kind : KINDS) {
+            Token desired = plan.token(kind);
+            Handle old = previous == null ? null : previous.handles()[kind.ordinal()];
+            if (desired != null && (desired.owner() != key || desired.kind() != kind)) {
+                throw new IllegalArgumentException("deadline belongs to another request or kind");
+            }
+            if (old != null && old.token == desired && !old.installationFailed) {
+                next[kind.ordinal()] = old;
+                continue;
+            }
+            if (old != null) {
+                stop.add(old);
+            }
+            if (desired != null) {
+                var fresh = new Handle(desired);
+                next[kind.ordinal()] = fresh;
+                start.add(fresh);
+            }
+        }
+        return new Slot(plan.revision(), next);
+    }
+
+    private void install(Handle handle) {
+        if (!requests.isCurrent(handle.token.owner())) {
+            handle.cancel();
+            return;
+        }
+        try {
+            handle.install(timer.schedule(handle::fire, delayUntil(handle.token.atMs())));
+        } catch (RuntimeException | Error failure) {
+            Failures.run(failure, handle::cancel);
+            synchronized (handle) {
+                handle.installationFailed = !handle.claimed;
+            }
+            throw failure;
+        }
+    }
+
+    /** Archive drops infrastructure ownership after the terminal record's atomic directory commit. */
+    void remove(RequestContext context) {
+        Slot removed = slots.get(context);
+        Throwable failure = null;
+        if (removed != null) {
+            for (Kind kind : List.of(Kind.INACTIVITY, Kind.REQUEST, Kind.VISIBILITY)) {
+                Handle handle = removed.handles()[kind.ordinal()];
+                if (handle != null) {
+                    failure = Failures.run(failure, handle::cancel);
+                }
+            }
+        }
+        if (failure == null && removed != null) {
+            slots.remove(context, removed);
+        }
+        Failures.rethrow(failure, "deadline removal failed");
+    }
+
+    private long delayUntil(long atMs) {
+        long nowMs = clock.getAsLong();
+        if (atMs <= nowMs) {
+            return 0L;
+        }
+        long delay = atMs - nowMs;
+        return delay < 0L ? Long.MAX_VALUE : delay;
+    }
+
+    private boolean beginRegistration() {
         synchronized (registrationMonitor) {
-            if (closeState != CloseState.OPEN) {
+            if (closing != null) {
+                if (requests.isClosed()) {
+                    return false;
+                }
                 throw new RejectedExecutionException("ExpirationTimer is closing");
             }
-            inflightRegistrations++;
+            registrations++;
+            return true;
         }
     }
 
     private void endRegistration() {
         synchronized (registrationMonitor) {
-            if (inflightRegistrations <= 0) {
-                throw new IllegalStateException("ExpirationTimer registration count underflow");
-            }
-            inflightRegistrations--;
-            if (inflightRegistrations == 0) {
+            if (--registrations == 0) {
                 registrationMonitor.notifyAll();
             }
         }
     }
-
-    private void schedule(DeadlineRegistration exact, Runnable callback, long delayMs) {
-        ScheduledFuture<?> scheduled;
-        try {
-            scheduled = executor.schedule(callback, delayMs, TimeUnit.MILLISECONDS);
-        } catch (RejectedExecutionException rejected) {
-            exact.cancel();
-            throw rejected;
-        }
-        exact.installScheduled(scheduled);
-    }
-
-    private long delayUntil(long deadlineAtMs) {
-        long nowMs = clock.getAsLong();
-        if (deadlineAtMs <= nowMs) {
-            return 0L;
-        }
-        long delayMs = deadlineAtMs - nowMs;
-        return delayMs < 0L ? Long.MAX_VALUE : delayMs;
-    }
-
-    boolean cancel(InactivityDeadline exactDeadline) {
-        return requireOwner(exactDeadline).cancel();
-    }
-
-    boolean cancel(RequestDeadline exactDeadline) {
-        return requireOwner(exactDeadline).cancel();
-    }
-
-    boolean cancel(DecisionDeadline exactDeadline) {
-        return requireOwner(exactDeadline).cancel();
-    }
-
-    void release(DecisionDeadline cleanup) {
-        if (cleanup == null) {
-            return;
-        }
-        try {
-            cancel(cleanup);
-        } catch (Throwable failure) {
-            Logger.error("Decision timer cleanup failed", failure);
-        }
-    }
-
-    private DeadlineRegistration requireOwner(DeadlineRegistration exact) {
-        if (exact.owner != this) {
-            throw new IllegalArgumentException("deadline belongs to another ExpirationTimer");
-        }
-        return exact;
-    }
-
-    // ── 保留期维护：先清终态目录，再扫描 Endpoint 孤儿 ──
-
-    /** Run one complete maintenance pass using one dynamic policy snapshot. */
-    void maintain(BiConsumer<Long, Predicate<String>> exactSweeper) {
-        if (lifecycle.isShuttingDown()) {
-            return;
-        }
-        long ttlMs =
-                config.loadBalanceConfig().getWorkerRegistry().getHealth().getStatusStaleAfterMs();
-        long nowMs = clock.getAsLong();
-        List<RequestSlot> exactSlots = List.of();
-        Throwable failure = null;
-        try {
-            exactSlots = lifecycle.snapshotSlots();
-        } catch (RuntimeException | Error snapshotFailure) {
-            failure = snapshotFailure;
-        }
-
-        long terminalRecordCutoff = subtractSaturated(nowMs, ttlMs);
-        for (RequestSlot exactSlot : exactSlots) {
-            try {
-                lifecycle.removeExactTerminalRecord(exactSlot, terminalRecordCutoff);
-            } catch (RuntimeException | Error removalFailure) {
-                failure = append(failure, removalFailure);
-            }
-        }
-
-        try {
-            exactSweeper.accept(ttlMs, lifecycle::retainForSchedulerCleanup);
-        } catch (RuntimeException | Error sweepFailure) {
-            failure = append(failure, sweepFailure);
-        }
-        rethrow(failure);
-    }
-
-    private static long subtractSaturated(long value, long decrement) {
-        try {
-            return Math.subtractExact(value, decrement);
-        } catch (ArithmeticException underflow) {
-            return Long.MIN_VALUE;
-        }
-    }
-
-    // ── 关闭：等待注册完成，摘除并取消全部句柄 ──
 
     @Override
     public void close() {
-        boolean interrupted = false;
-        boolean closeOwner = false;
+        CompletableFuture<Throwable> completion;
+        boolean owner;
         synchronized (registrationMonitor) {
-            if (closeState == CloseState.OPEN) {
-                closeState = CloseState.CLOSING;
-                closeOwner = true;
+            owner = closing == null;
+            if (owner) {
+                closing = new CompletableFuture<>();
             }
-            while (closeState == CloseState.CLOSING
-                    && (!closeOwner || inflightRegistrations != 0)) {
-                try {
-                    registrationMonitor.wait();
-                } catch (InterruptedException interruption) {
-                    interrupted = true;
-                }
-            }
-            if (!closeOwner) {
-                Throwable completedFailure = closeFailure;
-                if (interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-                rethrow(completedFailure);
-                return;
-            }
+            completion = closing;
         }
-
-        Throwable failure = detachAllDeadlines();
+        if (!owner) {
+            Failures.rethrow(completion.join(), "expiration timer failed");
+            return;
+        }
+        boolean interrupted = false;
+        Throwable failure = null;
         try {
-            executor.shutdownNow();
-        } catch (RuntimeException | Error shutdownFailure) {
-            failure = append(failure, shutdownFailure);
-        } finally {
-            synchronized (registrationMonitor) {
-                closeFailure = failure;
-                closeState = CloseState.CLOSED;
-                registrationMonitor.notifyAll();
+            interrupted = awaitRegistrations();
+            for (RequestContext context : List.copyOf(slots.keySet())) {
+                failure = Failures.run(failure, () -> remove(context));
             }
+        } catch (Throwable problem) {
+            failure = Failures.append(failure, problem);
+        } finally {
+            completion.complete(failure);
             if (interrupted) {
                 Thread.currentThread().interrupt();
             }
         }
-        rethrow(failure);
+        Failures.rethrow(failure, "expiration timer failed");
     }
 
-    private Throwable detachAllDeadlines() {
-        List<RequestSlot> exactSlots;
-        try {
-            exactSlots = lifecycle.snapshotSlots();
-        } catch (RuntimeException | Error snapshotFailure) {
-            return snapshotFailure;
-        }
-
-        Throwable failure = null;
-        for (RequestSlot exactSlot : exactSlots) {
-            DetachedDeadlines detached;
-            try {
-                detached = detachDeadlinesForClose(exactSlot);
-            } catch (RuntimeException | Error detachFailure) {
-                failure = append(failure, detachFailure);
-                continue;
+    private boolean awaitRegistrations() {
+        boolean interrupted = false;
+        synchronized (registrationMonitor) {
+            while (registrations != 0) {
+                try {
+                    registrationMonitor.wait();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
             }
-            failure = cancelDetached(detached.requestDeadline(), failure);
-            failure = cancelDetached(detached.decisionDeadline(), failure);
-            failure = cancelDetached(detached.inactivityDeadline(), failure);
         }
-        return failure;
+        return interrupted;
     }
 
-    private DetachedDeadlines detachDeadlinesForClose(RequestSlot exactSlot) {
-        synchronized (exactSlot) {
-            return exactSlot.detachDeadlinesForTimerClose();
-        }
-    }
+    private final class Handle {
+        private final Token token;
+        private volatile boolean installationFailed;
+        private Future<?> scheduled;
+        private boolean fired;
+        private boolean claimed;
+        private boolean canceled;
 
-    private Throwable cancelDetached(DeadlineRegistration exact, Throwable failure) {
-        if (exact == null) {
-            return failure;
+        private Handle(Token token) {
+            this.token = token;
         }
-        try {
-            requireOwner(exact).cancel();
-        } catch (RuntimeException | Error cancelFailure) {
-            return append(failure, cancelFailure);
-        }
-        return failure;
-    }
 
-    // ── 异常汇总 ──
+        private void install(Future<?> task) {
+            boolean discard, deliver;
+            synchronized (this) {
+                scheduled = Objects.requireNonNull(task, "scheduled deadline task");
+                discard = canceled;
+                deliver = fired && !canceled && !claimed;
+                if (deliver) claimed = true;
+            }
+            if (discard) task.cancel(false);
+            if (deliver) deliver();
+        }
 
-    private static Throwable append(Throwable first, Throwable next) {
-        if (first == null) {
-            return next;
+        private void fire() {
+            boolean deliver;
+            synchronized (this) {
+                fired = true;
+                deliver = scheduled != null && !canceled && !claimed;
+                if (deliver) {
+                    claimed = true;
+                }
+            }
+            if (deliver) {
+                deliver();
+            }
         }
-        if (first != next) {
-            first.addSuppressed(next);
-        }
-        return first;
-    }
 
-    private static void rethrow(Throwable failure) {
-        if (failure instanceof RuntimeException runtime) {
-            throw runtime;
+        private void deliver() {
+            synchronized (registrationMonitor) {
+                if (closing != null) return;
+                registrations++;
+            }
+            try {
+                if (requests.isCurrent(token.owner())) {
+                    token.owner().data().getRequestScheduler().onDeadline(token, clock.getAsLong());
+                }
+            } finally {
+                endRegistration();
+            }
         }
-        if (failure instanceof Error error) {
-            throw error;
+
+        private void cancel() {
+            Future<?> task;
+            synchronized (this) {
+                if (canceled || claimed) {
+                    return;
+                }
+                canceled = true;
+                task = scheduled;
+            }
+            if (task != null) {
+                task.cancel(false);
+            }
         }
     }
 }

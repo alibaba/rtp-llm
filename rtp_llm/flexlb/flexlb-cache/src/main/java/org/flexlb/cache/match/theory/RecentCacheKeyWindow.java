@@ -59,7 +59,7 @@ public class RecentCacheKeyWindow {
                 hashTableCapacity);
     }
 
-    public Snapshot record(List<Long> cacheKeys) {
+    public synchronized Snapshot record(List<Long> cacheKeys) {
         long nowMs = nowSupplier.getAsLong();
         evictExpired(nowMs);
 

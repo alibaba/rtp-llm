@@ -84,8 +84,7 @@ public class LocalSyncCacheMatchProvider
             if (cacheStatus == null) {
                 WorkerCacheUpdateResult result =
                         buildFailureResult(logicalIpPort, "Worker Cache Status is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
-                        metricIpPort, role, startTime, "0");
+                reportUpdateTime(metricIpPort, role, startTime, "0");
                 return result;
             }
 
@@ -93,21 +92,28 @@ public class LocalSyncCacheMatchProvider
             if (cachedKeys == null) {
                 WorkerCacheUpdateResult result =
                         buildFailureResult(logicalIpPort, "Worker Cached Keys is null");
-                cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
-                        metricIpPort, role, startTime, "0");
+                reportUpdateTime(metricIpPort, role, startTime, "0");
                 return result;
             }
 
             kvCacheManager.updateEngineCache(workerStatus, role, cachedKeys);
             WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(metricIpPort, role, startTime, "1");
+            reportUpdateTime(metricIpPort, role, startTime, "1");
             return result;
         } catch (Throwable e) {
             log.error("Error updating worker cache for: {}", logicalIpPort, e);
             WorkerCacheUpdateResult result = buildFailureResult(logicalIpPort, e.getMessage());
-            cacheMetricsReporter.reportUpdateEngineBlockCacheRT(metricIpPort, role, startTime, "0");
+            reportUpdateTime(metricIpPort, role, startTime, "0");
             return result;
         }
+    }
+
+    private void reportUpdateTime(String address, String role, long startTime, String success) {
+        org.flexlb.metric.SafeFlexMonitor.run(
+                "cache.update",
+                () ->
+                        cacheMetricsReporter.reportUpdateEngineBlockCacheRT(
+                                address, role, startTime, success));
     }
 
     public void removeEngineBlockCache(String engineIpPort) {

@@ -1,13 +1,13 @@
 package org.flexlb.service;
 
 import org.apache.commons.lang3.StringUtils;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
 import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
-import org.flexlb.engine.grpc.client.EngineGrpcClient;
-import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
@@ -18,6 +18,7 @@ import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -28,11 +29,26 @@ import java.util.concurrent.TimeUnit;
 
 @Component
 public class VitCacheDirectory {
+    private static final long MIN_PENDING_TTL_MS = 120_000;
+    private static final long MAX_PENDING_TTL_MS = 600_000;
+    private static final int MAX_PENDING = 100_000;
+    private final LinkedHashMap<String, Placement> pending = new LinkedHashMap<>();
+    private long pendingPrunedAt;
+
+    private record Placement(WorkerStatus worker, String instance, long expiry) {
+        boolean matches(Candidate candidate, long now) {
+            return candidate != null
+                    && worker == candidate.worker()
+                    && expiry > now
+                    && (instance == null || Objects.equals(instance, candidate.instance()));
+        }
+    }
+
     // Cache residency changes after each image; ten-minute snapshots lose affinity.
     static final long SYNC_INTERVAL_MS = 30_000;
-    private final WorkerDirectory workers;
+    private final EndpointRegistry workers;
     private final EngineGrpcClient grpc;
-    private final LBStatusConsistencyService consistency;
+    private final MasterStatusService consistency;
     private final Map<String, Snapshot> snapshots = new HashMap<>();
     private final Map<String, Set<String>> owners = new HashMap<>();
     private final Map<String, Long> attempts = new HashMap<>();
@@ -62,9 +78,7 @@ public class VitCacheDirectory {
             int gpuHits) {}
 
     public VitCacheDirectory(
-            WorkerDirectory workers,
-            EngineGrpcClient grpc,
-            LBStatusConsistencyService consistency) {
+            EndpointRegistry workers, EngineGrpcClient grpc, MasterStatusService consistency) {
         this.workers = workers;
         this.grpc = grpc;
         this.consistency = consistency;
@@ -96,9 +110,9 @@ public class VitCacheDirectory {
                 }
                 for (WorkerStatus worker : live.values()) {
                     if (isRoutable(worker)
-                            && now - attempts.getOrDefault(worker.getIpPort(), 0L)
+                            && now - attempts.getOrDefault(worker.getLogicalIpPort(), 0L)
                                     >= SYNC_INTERVAL_MS) {
-                        attempts.put(worker.getIpPort(), now);
+                        attempts.put(worker.getLogicalIpPort(), now);
                         due.add(worker);
                     }
                 }
@@ -115,7 +129,7 @@ public class VitCacheDirectory {
                                                                             .getMultimodalCacheStatusAsync(
                                                                                     worker.getIp(),
                                                                                     worker
-                                                                                            .getGrpcPort(),
+                                                                                            .getWorkerStatusPort(),
                                                                                     request,
                                                                                     2000)))
                                             .filter(response -> response.hasMultimodalCache())
@@ -128,7 +142,7 @@ public class VitCacheDirectory {
                                                     error -> {
                                                         Logger.debug(
                                                                 "ViT cache snapshot unavailable for {}: {}",
-                                                                worker.getIpPort(),
+                                                                worker.getLogicalIpPort(),
                                                                 error.toString());
                                                         return Mono.empty();
                                                     }),
@@ -142,7 +156,7 @@ public class VitCacheDirectory {
 
     synchronized boolean replace(WorkerStatus worker, MultimodalCacheStatusPB response) {
         Map<String, WorkerStatus> live = liveWorkers();
-        if (live.get(worker.getIpPort()) != worker
+        if (live.get(worker.getLogicalIpPort()) != worker
                 || !isRoutable(worker)
                 || StringUtils.isBlank(response.getWorkerInstance())
                 || !validKeys(response.getKeysList())
@@ -159,7 +173,7 @@ public class VitCacheDirectory {
         if (allKeys.size() > 100_000 || gpuKeys.stream().anyMatch(cpuKeys::contains)) {
             return false;
         }
-        String address = worker.getIpPort();
+        String address = worker.getLogicalIpPort();
         removeSnapshot(address);
         snapshots.put(
                 address,
@@ -227,9 +241,32 @@ public class VitCacheDirectory {
         if (worker == null) {
             return false;
         }
-        try (var pin = workers.captureEndpoint(RoleType.VIT, worker.getIpPort())) {
-            return pin != null && pin.endpoint().getStatus() == worker;
+        {
+            var selectedEndpoint = workers.selectEndpoint(RoleType.VIT, worker.getLogicalIpPort());
+            return selectedEndpoint != null && selectedEndpoint.getStatus() == worker;
         }
+    }
+
+    synchronized int pendingHits(Candidate candidate, List<String> keys, long now) {
+        int hits = 0;
+        for (String key : keys) {
+            Placement placement = pending.get(key);
+            if (placement != null && placement.matches(candidate, now)) hits++;
+        }
+        return hits;
+    }
+
+    synchronized void reserve(List<String> keys, Candidate selected, long timeout, long now) {
+        long ttl =
+                timeout <= 0
+                        ? MIN_PENDING_TTL_MS
+                        : Math.clamp(timeout, MIN_PENDING_TTL_MS, MAX_PENDING_TTL_MS);
+        for (String key : keys) {
+            if (!selected.hashKeys().contains(key)) {
+                pending.put(key, new Placement(selected.worker(), selected.instance(), now + ttl));
+            }
+        }
+        while (pending.size() > MAX_PENDING) pending.pollFirstEntry();
     }
 
     /** Cache matches share immutable key sets from one directory view. */
@@ -241,14 +278,14 @@ public class VitCacheDirectory {
             if (!isRoutable(worker)) {
                 continue;
             }
-            Snapshot snapshot = snapshots.get(worker.getIpPort());
+            Snapshot snapshot = snapshots.get(worker.getLogicalIpPort());
             int hashHits = 0;
             int gpuHits = 0;
             int cpuHits = 0;
             List<String> matchingKeys =
                     group == null || Objects.equals(group, worker.getGroup()) ? keys : List.of();
             for (String key : matchingKeys) {
-                if (owners.getOrDefault(key, Set.of()).contains(worker.getIpPort())) {
+                if (owners.getOrDefault(key, Set.of()).contains(worker.getLogicalIpPort())) {
                     hashHits++;
                 }
                 if (snapshot != null) {
@@ -260,7 +297,7 @@ public class VitCacheDirectory {
                 }
             }
             matches.put(
-                    worker.getIpPort(),
+                    worker.getLogicalIpPort(),
                     new Candidate(
                             worker,
                             snapshot == null ? null : snapshot.instance(),
@@ -268,6 +305,12 @@ public class VitCacheDirectory {
                             hashHits,
                             gpuHits + cpuHits,
                             gpuHits));
+        }
+        long now = System.currentTimeMillis();
+        if (now - pendingPrunedAt >= 5000) {
+            pending.values()
+                    .removeIf(p -> !p.matches(matches.get(p.worker().getLogicalIpPort()), now));
+            pendingPrunedAt = now;
         }
         return Map.copyOf(matches);
     }

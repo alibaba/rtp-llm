@@ -1,22 +1,23 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.projection.RequestTimeEstimation.WorkSnapshot;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.SchedulerConfig;
+import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.engine.grpc.EngineGrpcClient;
+import org.flexlb.service.TheoryCacheHitReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -30,10 +31,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Request TTL reclaims real endpoint capacity locally, without an Engine Cancel channel. */
+/**
+ * Request TTL reclaims real endpoint capacity locally, without an Engine Cancel channel.
+ */
 class RequestConfirmationTimeoutTest {
     private static final long REQUEST_ID = 101L;
     private static final long TIMEOUT_MS = TimeUnit.HOURS.toMillis(1L);
@@ -43,7 +47,7 @@ class RequestConfirmationTimeoutTest {
     void unconfirmedRequestReleasesPrefillAndDecodeCapacityAtTtl(ConfirmationWait waiting)
             throws Exception {
         var config = SchedulingTestConfig.newConfig();
-        config.setScheduler(SchedulerConfig.direct());
+        config.setScheduler(ConfigTestSupport.direct());
         SchedulingTestConfig.useNonBatchDispatcher(config);
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
         config.getRequestLifecycle()
@@ -51,162 +55,239 @@ class RequestConfirmationTimeoutTest {
                 .setTimeoutMs(waiting == ConfirmationWait.AUTOMATIC_TIMER ? 300L : TIMEOUT_MS);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        var reporter = mock(BatchSchedulerReporter.class);
+        var reporter = mock(DeliveryMetricsReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
-        var requests = new RequestRegistry(service, reporter, requestReporter);
-        var projector = new EndpointEventProjector(requests);
+        var requests =
+                SchedulerTestSupport.create(
+                        service, reporter, requestReporter, mock(TheoryCacheHitReporter.class));
+        var projector = requests;
         var endpoints =
                 new EndpointRegistry(
                         service,
-                        projector,
+                        SchedulerTestSupport.repository(projector),
                         reporter,
-                        new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)),
-                        new PlacementAvailability());
-        var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
+                        DeliveryTestSupport.route(reporter),
+                        new PlacementAvailability(),
+                        org.flexlb.balance.planner.BuiltinGroupPlanner.from(
+                                service.loadBalanceConfig()),
+                        order ->
+                                org.flexlb.balance.endpoint.OrderedPrefillRequestQueue.ordered(
+                                        16, order));
+        var runtime =
+                new SchedulerTestServices(
+                        SchedulerTestSupport.repository(requests),
+                        endpoints,
+                        reporter,
+                        requestReporter,
+                        org.mockito.Mockito.mock(DeliveryDispatcher.class),
+                        service,
+                        org.mockito.Mockito.mock(EngineGrpcClient.class));
         DecodeEndpoint decode = null;
         try {
-            WorkerStatus prefillWorker = worker(RoleType.PREFILL, "127.0.0.1");
+            WorkerStatus prefillEndpoint = worker(RoleType.PREFILL, "127.0.0.1");
             PrefillEndpoint prefill;
-            prefillWorker.lock.lock();
+            prefillEndpoint.lock.lock();
             try {
                 prefill =
                         (PrefillEndpoint)
-                                endpoints
-                                        .publishPreparedEndpoint(
-                                                prefillWorker.getIpPort(),
-                                                prefillWorker,
-                                                prefillWorker.prepareNewStatus(
-                                                        prefillWorker.freezeStatusResponse(
-                                                                status(RoleType.PREFILL))))
-                                        .endpoint();
+                                endpoints.publishPreparedEndpoint(
+                                        prefillEndpoint.getLogicalIpPort(),
+                                        prefillEndpoint,
+                                        prefillEndpoint.prepareNewStatus(
+                                                WorkerStatusTestSupport.freezeStatusResponse(
+                                                        prefillEndpoint,
+                                                        status(RoleType.PREFILL))));
             } finally {
-                prefillWorker.lock.unlock();
+                prefillEndpoint.lock.unlock();
             }
-            decode = new DecodeEndpoint(worker(RoleType.DECODE, "127.0.0.2"), projector);
+            decode =
+                    EndpointTestSupport.decode(
+                            worker(RoleType.DECODE, "127.0.0.2"),
+                            SchedulerTestSupport.repository(projector));
             applyStatus(decode, status(RoleType.DECODE));
-            var capacity = new DecodeEndpoint.AdmissionCapacity(1L, 90L);
-            DecodeEndpoint.ReservationHandle reservation;
-            try (var pin = decode.tryPinGeneration()) {
+            var capacity = new DecodeResources.AdmissionCapacity(1L, 90L);
+            DecodeResources.RequestReservation reservation;
+            {
+                var selectedEndpoint = decode;
+
                 reservation =
-                        decode.reserve(pin, Long.toString(REQUEST_ID), 16L, 32L, 50, capacity);
+                        decode.tryReserveQueuedRequest(
+                                        String.valueOf(REQUEST_ID), 16L, 32L, 50, capacity)
+                                .value();
                 assertNotNull(reservation);
                 var acquired = decode.acquireDispatchPermit(reservation, capacity);
                 assertEquals(
-                        DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                        DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                         acquired.status());
                 assertEquals(
-                        DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
-                        acquired.permit().dispatch());
+                        DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                        acquired.value().dispatch().status());
             }
-            var context = RequestLifecycleTestSupport.context(config, REQUEST_ID);
-            var future = requests.register(context);
-            RequestSlot slot = requests.requestSlot(Long.toString(REQUEST_ID));
+            var context = RequestProtocolTestSupport.context(config, REQUEST_ID);
+            var future = RequestProtocolTestSupport.submitForManualPlacement(requests, context);
+            RequestContext requestContext =
+                    requests.requests.findActive(String.valueOf(REQUEST_ID));
             ServerStatus prefillMetadata = new ServerStatus();
             prefillMetadata.setRole(RoleType.PREFILL);
             prefillMetadata.setServerIp("127.0.0.1");
             prefillMetadata.setGrpcPort(8081);
-            ScheduledRequest item =
-                    new ScheduledRequest(
+            context.data().setFuture(future);
+            RouteExecution item =
+                    SchedulingTestConfig.createRoute(
                             context,
-                            future,
                             new Response(),
                             prefillMetadata,
                             null,
                             prefill,
                             decode,
                             reservation,
-                            slot.createdAtMs());
-            AtomicReference<PrefillState.RouteReservation> routeReservation =
+                            requestContext.snapshot().createdAtMs());
+            AtomicReference<PrefillEndpoint.RequestRecord> routeReservation =
                     new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle(Long.toString(REQUEST_ID), future);
-                    var pin = prefill.tryPinGeneration()) {
-                assertNotNull(mutation);
-                assertNotNull(pin);
-                assertTrue(
-                        requests.commitItemForPublication(
-                                item,
-                                () -> {
-                                    var reserved = prefill.reserveUnqueuedRoute(pin, item, 30_000L);
-                                    assertEquals(
-                                            PrefillState.CapacityStatus.ACQUIRED,
-                                            reserved.status());
-                                    routeReservation.set(reserved.reservation());
-                                    return true;
-                                }));
+            {
+                var selectedEndpoint = prefill;
+                try (var mutation =
+                                SchedulerTestSupport.claim(
+                                        requests, String.valueOf(REQUEST_ID), future);
+                        var admissionCompletion1 =
+                                RequestProtocolTestSupport.finishOnExit(mutation)) {
+                    assertNotNull(mutation);
+                    assertNotNull(selectedEndpoint);
+                    assertTrue(
+                            (RequestProtocolTestSupport.commitRoute(
+                                            requests,
+                                            item,
+                                            RequestProtocolTestSupport.publication(
+                                                    () -> {
+                                                        var reserved =
+                                                                prefill.reserveUnqueuedRoute(
+                                                                        item, 30_000L);
+                                                        assertTrue(reserved.accepted());
+                                                        routeReservation.set(reserved.value());
+                                                        return true;
+                                                    }))
+                                    == org.flexlb.balance.PlacementResult.Status.SUCCESS));
+                }
             }
-            DeliveryClaim claim;
-            try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
-                assertNotNull(routeCommit);
+            Delivery.Member claim;
+            {
                 java.util.function.BooleanSupplier commitPrefill =
                         () -> {
-                            try (var handoff =
-                                    routeCommit.commit(
-                                            List.of(item), List.of(routeReservation.get()))) {
+                            {
+                                var handoff =
+                                        org.flexlb.balance.endpoint.EndpointTestSupport
+                                                .commitDirect(
+                                                        prefill, item, routeReservation.get());
+
                                 return true;
                             }
                         };
                 claim =
                         waiting == ConfirmationWait.UNCERTAIN_REPLY
-                                ? RequestLifecycleTestSupport.claimBatchWithoutPrediction(
+                                ? RequestProtocolTestSupport.claimBatchWithoutPrediction(
                                         requests, item, 1L, commitPrefill)
-                                : RequestLifecycleTestSupport.claimRouteWithoutPrediction(
+                                : RequestProtocolTestSupport.claimRouteWithoutPrediction(
                                         requests, item, commitPrefill);
                 assertNotNull(claim);
-                requests.setDeliveryPrediction(
-                        claim,
-                        new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L),
-                        30_000L);
+                requests.onDeliveryResult(
+                        new ContextResult.Prediction(
+                                claim,
+                                org.flexlb.balance.prediction.PrefillTimePredictor
+                                        .predictedVisibilityDeadlineMs(
+                                                new WorkSnapshot(
+                                                        System.currentTimeMillis(),
+                                                        List.of(),
+                                                        List.of(),
+                                                        0L),
+                                                0L,
+                                                30_000L,
+                                                System.currentTimeMillis()),
+                                System.currentTimeMillis()));
             }
             if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
-                claim.complete(
-                        DeliveryResult.uncertain(new IllegalStateException("reply was lost")));
+                org.mockito.Mockito.when(
+                                SchedulerTestSupport.engineClient(requests)
+                                        .cancelAsync(
+                                                org.mockito.ArgumentMatchers.any(),
+                                                anyInt(),
+                                                org.mockito.ArgumentMatchers.any(),
+                                                org.mockito.ArgumentMatchers.anyLong()))
+                        .thenReturn(
+                                java.util.concurrent.CompletableFuture.completedFuture(
+                                        EngineGrpcClient.CancelReply.REQUEST_CLEANED));
+                assertTrue(claim.route().ctx().data().getRequestScheduler().tryStartSend(claim));
+                requests.onDeliveryResult(
+                        new ContextResult.TransportResult(
+                                claim,
+                                Delivery.Result.uncertain(
+                                        new IllegalStateException("reply was lost")),
+                                System.currentTimeMillis()));
             }
-            assertEquals(1, requests.trackedRequestCount());
+            assertEquals(1, SchedulerTestSupport.repository(requests).liveRequestCount());
             assertFalse(future.isDone());
-            assertEquals(1L, prefill.observedRequestCount());
-            assertEquals(16L, decode.routingView().inputKvReserved());
-            assertEquals(32L, decode.routingView().inputAndMaxOutputKvReserved());
+            assertEquals(1L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(16L, decode.routingView().inflightHardKv());
+            assertEquals(32L, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
             assertEquals(1, decode.routingView().engineCapacityUsed());
 
             if (waiting != ConfirmationWait.AUTOMATIC_TIMER) {
-                requests.expireInactiveRequest(
-                        slot,
-                        RequestLifecycleTestSupport.<Long>inspect(
-                                slot, "inactivityExpiresAtMsLocked"));
+                RequestProtocolTestSupport.expireInactiveRequest(
+                        requests,
+                        requestContext,
+                        RequestProtocolTestSupport.<Long>inspect(
+                                requests, requestContext, "inactivityExpiresAtMsLocked"));
             }
 
             // AUTOMATIC_TIMER relies only on ExpirationTimer; no manual expiry entry point runs.
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(
                     RequestState.Phase.TIMED_OUT,
-                    requests.getRequestState(Long.toString(REQUEST_ID), 0L).state());
-            assertEquals(0, requests.trackedRequestCount());
-            assertEquals(0L, prefill.observedRequestCount());
-            assertEquals(0, prefill.getLocallyOwnedRequestCount());
-            assertEquals(0L, decode.routingView().inputKvReserved());
-            assertEquals(0L, decode.routingView().inputAndMaxOutputKvReserved());
+                    SchedulerTestSupport.repository(requests)
+                            .getRequestState(String.valueOf(REQUEST_ID), 0L)
+                            .state());
+            SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(requests));
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> SchedulerTestSupport.repository(requests).liveRequestCount() == 0);
+            assertEquals(0, SchedulerTestSupport.repository(requests).liveRequestCount());
+            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
+            assertEquals(0, prefill.stats().locallyOwnedRequests());
+            assertEquals(0L, decode.routingView().inflightHardKv());
+            assertEquals(0L, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
             assertEquals(0, decode.routingView().engineCapacityUsed());
 
-            // Local expiration restores admission capacity without an Engine Cancel channel.
-            try (var pin = decode.tryPinGeneration()) {
-                var next = decode.reserve(pin, "102", 16L, 32L, 50, capacity);
+            // Admission resumes only after delivery settlement and exact local cleanup.
+            {
+                var selectedEndpoint = decode;
+
+                var next =
+                        decode.tryReserveQueuedRequest(String.valueOf(102L), 16L, 32L, 50, capacity)
+                                .value();
                 assertNotNull(next);
                 var acquired = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(
-                        DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                        DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED,
                         acquired.status());
-                assertTrue(acquired.permit().release());
-                decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                assertTrue(acquired.value().release());
+                decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK).status();
             }
-            requests.processPrefillStatus(
-                    prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
-            requests.processDecodeStatus(
-                    decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
+            RequestProtocolTestSupport.applyPrefillStatus(
+                    requests,
+                    prefill,
+                    RoleType.PREFILL,
+                    new PrefillEndpoint.PrefillRequestStatus(
+                            item, PrefillEndpoint.PrefillRequestStatus.Kind.ACTIVE, 0L));
+            RequestProtocolTestSupport.applyDecodeStatus(
+                    requests, decode, DecodeResources.DecodeRequestStatus.active(reservation));
             assertEquals(
                     RequestState.Phase.TIMED_OUT,
-                    requests.getRequestState(Long.toString(REQUEST_ID), 0L).state());
-            assertEquals(0, requests.trackedRequestCount());
-            assertEquals(0L, prefill.observedRequestCount());
+                    SchedulerTestSupport.repository(requests)
+                            .getRequestState(String.valueOf(REQUEST_ID), 0L)
+                            .state());
+            SchedulerTestSupport.awaitRequestWork(SchedulerTestSupport.runtime(requests));
+            RequestProtocolTestSupport.awaitCondition(
+                    () -> SchedulerTestSupport.repository(requests).liveRequestCount() == 0);
+            assertEquals(0, SchedulerTestSupport.repository(requests).liveRequestCount());
+            assertEquals(0L, prefill.admissionSummary(0, prefill.requestLimit).occupiedRequests());
             assertEquals(0, decode.routingView().engineCapacityUsed());
         } finally {
             try {
@@ -214,7 +295,7 @@ class RequestConfirmationTimeoutTest {
                     decode.close();
                 }
             } finally {
-                runtime.shutdown();
+                SchedulerTestSupport.shutdown(runtime);
             }
         }
     }
@@ -245,15 +326,18 @@ class RequestConfirmationTimeoutTest {
 
     private static void applyStatus(WorkerEndpoint endpoint, WorkerStatusResponse response) {
         WorkerStatus worker = endpoint.getStatus();
-        Runnable projection;
+        org.flexlb.balance.endpoint.WorkerEndpoint.StatusChange projection;
         worker.lock.lock();
         try {
             projection =
                     endpoint.applyPreparedStatus(
-                            worker, worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+                            worker,
+                            worker.prepareNewStatus(
+                                    WorkerStatusTestSupport.freezeStatusResponse(
+                                            worker, response)));
         } finally {
             worker.lock.unlock();
         }
-        projection.run();
+        endpoint.publishStatus(projection);
     }
 }
