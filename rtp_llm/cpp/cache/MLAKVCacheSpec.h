@@ -79,6 +79,11 @@ struct MLAKVCacheSpec: public KVCacheSpec {
         return dtype_;
     }
 
+    CacheEntryLayout entryLayout() const override {
+        const int64_t width = elems_per_token;
+        return {kernel_seq_size_per_block, {{false, dtype_, 0, {kernel_seq_size_per_block, width}, {width, 1}}}};
+    }
+
     KVCacheSpecPtr clone() const override {
         return std::make_shared<MLAKVCacheSpec>(*this);
     }

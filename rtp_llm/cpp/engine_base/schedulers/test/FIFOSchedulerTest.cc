@@ -1368,6 +1368,48 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerDrainsMixedTailAfterReapingErr
     }
 }
 
+TEST(BatchDecodeSchedulerPolicyTest, RejectsOffloadCapacityOverflow) {
+    auto cache_config = test::makeSimpleMhaCacheConfig(1, 11, 8, rtp_llm::DataType::TYPE_FP16, 1, 4);
+    // Scheduler validation only needs the offload capacity metadata, without allocating backing storage.
+    cache_config.tiered_cache_configs["default"] = TieredCacheConfig{4, 7, 64, 2};
+    auto          cache_manager                  = std::make_shared<KVCacheManager>(cache_config);
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size = 2;
+    auto& batch_size = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+    batch_size       = 3;
+    EXPECT_THROW(BatchDecodeScheduler(runtime_config, cache_manager, nullptr), std::invalid_argument);
+
+    batch_size = 2;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    for (const auto* invalid : {R"({"batch_size":3,"mode":"decode"})",
+                                R"({"batch_size":0,"mode":"decode"})",
+                                R"({"batch_size":1,"mode":"prefill"})",
+                                R"({"batch_size":1,"mode":"unknown"})"}) {
+        EXPECT_THROW(scheduler.updateSchedulerInfo(invalid), std::invalid_argument);
+        EXPECT_EQ(scheduler.batch_size_, 2);
+        EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchDecode);
+    }
+    EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":1,"mode":"decode"})"));
+    EXPECT_EQ(scheduler.batch_size_, 1);
+    EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchDecode);
+    EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":2,"mode":"decode"})"));
+    EXPECT_EQ(scheduler.batch_size_, 2);
+    EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchDecode);
+}
+
+TEST(BatchDecodeSchedulerPolicyTest, KeepsNonOffloadBatchSizeIndependent) {
+    auto          cache_config  = test::makeSimpleMhaCacheConfig(1, 11, 8, rtp_llm::DataType::TYPE_FP16, 1, 4);
+    auto          cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                                         = 2;
+    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 3;
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    EXPECT_EQ(scheduler.batch_size_, 3);
+    EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":4,"mode":"prefill"})"));
+    EXPECT_EQ(scheduler.batch_size_, 4);
+    EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchPrefill);
+}
+
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerSchedulesNonzeroBatch) {
     auto [cache_manager, resource_context, model_config, runtime_config] = makeBatchDecodeResources(
         makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16), /*tokens_per_block=*/0);

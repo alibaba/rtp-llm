@@ -96,7 +96,14 @@ def get_mla_impl(
         is_cuda_graph, cuda_graph_selection_mode
     )
 
-    mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+    multi_token_decode = attn_configs.is_sparse and (
+        attn_inputs.is_target_verify or attn_inputs.is_draft_extend
+    )
+    mla_impls = (
+        PREFILL_MLA_IMPS
+        if attn_inputs.is_prefill and not multi_token_decode
+        else DECODE_MLA_IMPS
+    )
     for impl in mla_impls:
         if not _implementation_allows_cuda_graph_selection_mode(impl, selection_mode):
             continue
@@ -108,6 +115,7 @@ def get_mla_impl(
         # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill
+            and not multi_token_decode
             and attn_inputs.cu_kv_seqlens_device.max().item()
             <= attn_configs.indexer_topk
             and not (

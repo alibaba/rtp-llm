@@ -219,6 +219,47 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="在测试时强制指定BLOCK的数量",
     )
     kv_cache_group.add_argument(
+        "--enable_sparse_kv_offload",
+        env_name="ENABLE_SPARSE_KV_OFFLOAD",
+        bind_to=(kv_cache_config, "enable_sparse_kv_offload"),
+        type=str2bool,
+        default=False,
+        help="Enable sparse KV offload on supported P/D decode models.",
+    )
+    kv_cache_group.add_argument(
+        "--sparse_kv_offload_host_mb",
+        env_name="SPARSE_KV_OFFLOAD_HOST_MB",
+        bind_to=(kv_cache_config, "sparse_kv_offload_host_mb"),
+        type=int,
+        default=0,
+        help="Pinned host KV budget in MiB per rank.",
+    )
+    kv_cache_group.add_argument(
+        "--sparse_kv_offload_hot_rows",
+        env_name="SPARSE_KV_OFFLOAD_HOT_ROWS",
+        bind_to=(kv_cache_config, "sparse_kv_offload_hot_rows"),
+        type=int,
+        default=2048,
+        help="Hot KV positions per request/query; multiplied by concurrency and speculative query count. Must be at least indexer_topk.",
+    )
+    kv_cache_group.add_argument(
+        "--sparse_kv_offload_hot_cache_mode",
+        env_name="SPARSE_KV_OFFLOAD_HOT_CACHE_MODE",
+        bind_to=(kv_cache_config, "sparse_kv_offload_hot_cache_mode"),
+        type=str,
+        choices=["static", "dynamic"],
+        default="static",
+        help="Hot KV cache allocation: static preallocates the concurrency limit; dynamic maps HBM for active requests and releases it when idle.",
+    )
+    kv_cache_group.add_argument(
+        "--sparse_kv_offload_test_hbm_blocks",
+        env_name="SPARSE_KV_OFFLOAD_TEST_HBM_BLOCKS",
+        bind_to=(kv_cache_config, "sparse_kv_offload_test_hbm_blocks"),
+        type=int,
+        default=0,
+        help="Test-only fixed HBM block count, including sentinel 0; zero uses the budget.",
+    )
+    kv_cache_group.add_argument(
         "--enable_memory_cache",
         env_name="ENABLE_MEMORY_CACHE",
         bind_to=(kv_cache_config, "enable_memory_cache"),

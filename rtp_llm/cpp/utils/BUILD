@@ -247,4 +247,3 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
 )
-

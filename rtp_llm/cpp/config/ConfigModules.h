@@ -181,19 +181,24 @@ struct KVCacheConfig {
     // without such a declaration keep LinearAttentionConfig's BF16 default;
     // the legacy remote connector falls back to BF16 because it requires one
     // contiguous shared cache pool.
-    std::string ssm_state_dtype           = "auto";
-    int64_t     kv_cache_mem_mb           = -1;
-    int         seq_size_per_block        = 0;
-    int         kernel_seq_size_per_block = 0;
-    int         test_block_num            = 0;
-    bool        enable_device_cache       = true;
-    bool        enable_memory_cache       = false;
-    bool        enable_disk_cache         = false;
-    bool        enable_remote_cache       = false;
-    bool        enable_crc                = true;
-    std::string device_eviction_policy    = "lru";
-    std::string memory_eviction_policy    = "lru";
-    std::string disk_eviction_policy      = "fifo";
+    std::string ssm_state_dtype                   = "auto";
+    int64_t     kv_cache_mem_mb                   = -1;
+    int         seq_size_per_block                = 0;
+    int         kernel_seq_size_per_block         = 0;
+    int         test_block_num                    = 0;
+    bool        enable_sparse_kv_offload          = false;
+    int64_t     sparse_kv_offload_host_mb         = 0;
+    int64_t     sparse_kv_offload_hot_rows        = 2048;
+    std::string sparse_kv_offload_hot_cache_mode  = "static";
+    int         sparse_kv_offload_test_hbm_blocks = 0;
+    bool        enable_device_cache               = true;
+    bool        enable_memory_cache               = false;
+    bool        enable_disk_cache                 = false;
+    bool        enable_remote_cache               = false;
+    bool        enable_crc                        = true;
+    std::string device_eviction_policy            = "lru";
+    std::string memory_eviction_policy            = "lru";
+    std::string disk_eviction_policy              = "fifo";
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
@@ -632,7 +637,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig(){};
+    GrpcConfig() {};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);

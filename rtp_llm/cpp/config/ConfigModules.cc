@@ -141,7 +141,11 @@ std::string KVCacheConfig::to_string() const {
         << "seq_size_per_block: " << seq_size_per_block << "\n"
         << "kernel_seq_size_per_block: " << kernel_seq_size_per_block << "\n"
         << "test_block_num: " << test_block_num << "\n"
-
+        << "enable_sparse_kv_offload: " << enable_sparse_kv_offload << "\n"
+        << "sparse_kv_offload_host_mb: " << sparse_kv_offload_host_mb << "\n"
+        << "sparse_kv_offload_hot_rows: " << sparse_kv_offload_hot_rows << "\n"
+        << "sparse_kv_offload_hot_cache_mode: " << sparse_kv_offload_hot_cache_mode << "\n"
+        << "sparse_kv_offload_test_hbm_blocks: " << sparse_kv_offload_test_hbm_blocks << "\n"
         << "enable_device_cache: " << enable_device_cache << "\n"
         << "enable_memory_cache: " << enable_memory_cache << "\n"
         << "enable_disk_cache: " << enable_disk_cache << "\n"

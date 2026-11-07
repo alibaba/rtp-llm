@@ -1,15 +1,18 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <algorithm>
 #include <future>
 #include <memory>
 #include <set>
 #include <vector>
 
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm::test {
 namespace {
@@ -40,6 +43,40 @@ class CoordinatorCacheManagerAtomicUpdateTest: public ::testing::Test {
 protected:
     std::shared_ptr<TestAllocator> allocator_;
 };
+
+TEST_F(CoordinatorCacheManagerAtomicUpdateTest, OffloadAdmissionRoutesLongRequestAndKeepsShortRequestOnHbm) {
+    autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", "3");
+    auto            config = createSingleTypeTestConfig(1, 30, 4);
+    config.tiered_cache_configs.emplace("default", TieredCacheConfig{30, 10, 16});
+    allocator_ = std::make_shared<TestAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+    auto make_request = [&](int length) {
+        auto input       = std::make_shared<GenerateInput>();
+        input->input_ids = torch::zeros({length}, torch::kInt32);
+        auto tokens      = std::make_shared<CompleteTokenIds>(1, 1, 128, 4);
+        tokens->init(input);
+        MallocInfo info;
+        info.batch_kv_cache_resource = createBatchKVCacheResource(1, config);
+        info.complete_token_ids      = std::move(tokens);
+        info.reuse_cache             = false;
+        info.enable_cache_lookup     = false;
+        return info;
+    };
+    auto long_request = make_request(48);
+    ASSERT_TRUE(allocator_->malloc(long_request).success);
+    const auto& long_blocks = long_request.batch_kv_cache_resource->blocks(0, "default");
+    ASSERT_EQ(long_blocks.size(), 12u);
+    EXPECT_TRUE(std::all_of(long_blocks.begin(), long_blocks.end(), [](int block) { return block >= 10; }));
+    auto short_request = make_request(8);
+    ASSERT_TRUE(allocator_->malloc(short_request).success);
+    EXPECT_EQ(short_request.batch_kv_cache_resource->blocks(0, "default"), (BlockIndicesType{1, 2}));
+    long_request.complete_token_ids->setSeqLength(52);
+    ASSERT_TRUE(allocator_->malloc(long_request).success);
+    EXPECT_GE(long_request.batch_kv_cache_resource->blocks(0, "default").back(), 10);
+    allocator_->free(FreeInfo{long_request.batch_kv_cache_resource, long_request.complete_token_ids});
+    allocator_->free(FreeInfo{short_request.batch_kv_cache_resource, short_request.complete_token_ids});
+    EXPECT_EQ(allocator_->groupBlockPools().front()->freeBlocksNum(), 29u);
+}
 
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, BatchFreePreservesOtherRequestAndTransferHolds) {
     auto config = createSingleTypeTestConfig(2, 5, 4);

@@ -125,6 +125,7 @@ try:
         CacheGroupType,
         CacheMemoryPlacement,
         CacheMemoryPolicyDesc,
+        CacheOffloadPolicy,
         CacheReusePolicyDesc,
         CacheStoreConfig,
         CacheTailPolicyDesc,
@@ -225,6 +226,7 @@ _COMPUTE_SYMBOLS = {
     "compute_ops",
     "KVCache",
     "LayerKVCache",
+    "OffloadStorage",
     "PyAttentionInputs",
     "PyCacheStoreInputs",
     "PyModelInitResources",
@@ -254,6 +256,7 @@ _rdma_ops_error: Optional[BaseException] = None
 def _set_compute_fallbacks() -> None:
     globals()["rtp_llm_ops"] = EmptyClass
     globals()["LayerKVCache"] = EmptyClass
+    globals()["OffloadStorage"] = EmptyClass
     globals()["KVCache"] = EmptyClass
     globals()["PyAttentionInputs"] = EmptyClass
     globals()["PyModelInputs"] = EmptyClass
@@ -279,6 +282,7 @@ def _load_compute_ops(required: bool = False) -> None:
 
             globals()["KVCache"] = librtp_compute_ops.KVCache
             globals()["LayerKVCache"] = librtp_compute_ops.LayerKVCache
+            globals()["OffloadStorage"] = librtp_compute_ops.OffloadStorage
             globals()["CacheStoreWriter"] = librtp_compute_ops.CacheStoreWriter
             globals()["PyAttentionInputs"] = librtp_compute_ops.PyAttentionInputs
             globals()["PyCacheStoreInputs"] = librtp_compute_ops.PyCacheStoreInputs

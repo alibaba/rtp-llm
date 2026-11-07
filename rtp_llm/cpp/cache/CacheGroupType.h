@@ -48,6 +48,13 @@ enum class CpBlockSliceMode : int8_t {
     PAYLOAD_BYTES = 2,
 };
 
+struct CacheOffloadPolicy {
+    bool     enabled           = false;
+    uint32_t max_selected_rows = 0;
+    // Zero preserves the full-batch quota of legacy serialized descriptors.
+    uint32_t max_requests      = 0;
+};
+
 struct CacheGroupPolicy {
     CacheGroupType       group_type             = CacheGroupType::FULL;
     bool                 enable_prefix_reuse    = true;
@@ -64,6 +71,7 @@ struct CacheGroupPolicy {
     int sliding_window_size = 0;
     // Share one state bank across logical blocks during chunked prefill.
     bool shared_chunk_state = false;
+    CacheOffloadPolicy offload;
 };
 
 // One cache-store registration step: pair a cache key from the full logical
