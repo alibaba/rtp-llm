@@ -19,6 +19,11 @@ from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import (
     ResizeTables,
     prepare_resize_tables,
 )
+from rtp_llm.multimodal.mm_preprocess_result import (
+    ImageSourceIdentity,
+    MMPreprocessResult,
+    is_single_image_input,
+)
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     _METRIC_TAGS,
     V41ImageProcessorConfig,
@@ -45,7 +50,6 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.vit_metrics import vit_preprocess_timer
-from rtp_llm.multimodal.mm_preprocess_result import MMPreprocessResult
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
@@ -104,6 +108,7 @@ class V41VisionAttention(Attention):
 class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
     strict_work_budget = True
     supports_inspection_sources = True
+    supports_remote_source_identity = True
 
     def __init__(
         self,
@@ -572,6 +577,14 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         # Legacy image hints are ignored; the model config owns preprocessing.
         results = []
         inspection_sources = []
+        source_identity = None
+        capture_identity = bool(
+            (
+                getattr(vit_config, "mm_remote_cache_enable", False)
+                or os.environ.get("MM_EMB_BENCHMARK_TIMING") == "1"
+            )
+            and is_single_image_input(mm_inputs)
+        )
         deadline = (
             min(deadline, time.monotonic() + 60)
             if deadline is not None
@@ -587,8 +600,14 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                     max_file_size_kb=vit_config.mm_image_max_file_size_kb,
                     deadline=deadline,
                 )
-            if capture_inspection_sources:
-                inspection_sources.append(payload.getvalue())
+            if capture_inspection_sources or capture_identity:
+                # Hash the same owned buffer passed to Image.open below. Never
+                # re-download a URL to derive identity or approve cached pixels.
+                source = payload.getvalue()
+                if capture_inspection_sources:
+                    inspection_sources.append(source)
+                if capture_identity:
+                    source_identity = ImageSourceIdentity.from_bytes(source)
             try:
                 with Image.open(payload) as image:
                     if gpu_preprocess:
@@ -615,8 +634,8 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         # already accept ordered image groups for multi-media work items.
         data = results[0] if len(results) == 1 else results
         return (
-            MMPreprocessResult(data, inspection_sources)
-            if capture_inspection_sources
+            MMPreprocessResult(data, inspection_sources, source_identity)
+            if capture_inspection_sources or capture_identity
             else data
         )
 

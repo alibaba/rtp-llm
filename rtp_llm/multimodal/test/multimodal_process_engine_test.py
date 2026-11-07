@@ -68,6 +68,7 @@ class MMRequestLatencyTest(TestCase):
 
     def setUp(self):
         self.engine = MMProcessEngine.__new__(MMProcessEngine)
+        self.engine._remote_embedding_cache = None
         self.engine.report_vit_error = MagicMock()
         self.clock = 10.0
         reporter = patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")

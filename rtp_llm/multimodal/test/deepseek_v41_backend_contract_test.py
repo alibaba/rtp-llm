@@ -88,6 +88,57 @@ class DeepSeekV41BackendContractTest(unittest.TestCase):
             mm_image_max_file_size_kb=123,
         )
 
+    def test_remote_identity_uses_same_source_as_decoder_and_inspection(self):
+        import hashlib
+        import pickle
+
+        self.vit_config.mm_remote_cache_enable = True
+        payload = _png()
+        with patch.object(
+            vision_module, "load_image_source", return_value=io.BytesIO(payload)
+        ) as load:
+            result = self.adapter.preprocess_input(
+                [_media()],
+                self.vit_config,
+                processor_config=self.adapter.processor_config,
+                capture_inspection_sources=True,
+            )
+        load.assert_called_once()
+        self.assertEqual(result.inspection_sources, [payload])
+        self.assertEqual(
+            result.source_identity.sha256, hashlib.sha256(payload).hexdigest()
+        )
+        self.assertEqual(result.source_identity.nbytes, len(payload))
+        restored = pickle.loads(pickle.dumps(result))
+        self.assertEqual(restored.source_identity, result.source_identity)
+        self.assertTrue(torch.equal(restored.data.rgb, result.data.rgb))
+
+    def test_identity_capture_does_not_admit_nonempty_auxiliary_tensor(self):
+        self.vit_config.mm_remote_cache_enable = True
+        media = _media()
+        media.tensor = torch.ones(1)
+        with patch.object(
+            vision_module, "load_image_source", return_value=io.BytesIO(_png())
+        ):
+            result = self.adapter.preprocess_input(
+                [media], self.vit_config, processor_config=self.adapter.processor_config
+            )
+        self.assertIsInstance(result, vision_module._DecodedImage)
+
+    def test_benchmark_only_captures_identity_without_enabling_remote_cache(self):
+        self.vit_config.mm_remote_cache_enable = False
+        with patch.dict("os.environ", {"MM_EMB_BENCHMARK_TIMING": "1"}), patch.object(
+            vision_module, "load_image_source", return_value=io.BytesIO(_png())
+        ):
+            result = self.adapter.preprocess_input(
+                [_media()],
+                self.vit_config,
+                processor_config=self.adapter.processor_config,
+            )
+        self.assertIsNotNone(result.source_identity)
+        self.assertEqual(result.inspection_sources, [])
+        self.assertFalse(self.vit_config.mm_remote_cache_enable)
+
     def test_cpu_hook_never_submits_cuda_in_either_preprocess_mode(self):
         payload = _png()
         guarded_rgb = (

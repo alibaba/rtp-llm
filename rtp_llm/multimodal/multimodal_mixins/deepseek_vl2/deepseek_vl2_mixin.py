@@ -9,6 +9,7 @@ from einops import rearrange, repeat
 from PIL import Image, ImageOps
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.multimodal import emb_deepseek_diagnostics
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseMultiModalMixin,
@@ -181,7 +182,20 @@ class DeepSeekVLV2ImageEmbedding(ImageEmbeddingInterface):
 
         tensor_images = tensor_images.to(self._device).to(self._data_type)
         images_feature = self.vision.forward_features(tensor_images)
+        emb_deepseek_diagnostics.vision_output(
+            images_feature, tensor_images, self.vision
+        )
         images_embeds = self.projector(images_feature)
+        emb_deepseek_diagnostics.projector_output(
+            images_feature,
+            images_embeds,
+            self.image_newline,
+            self.view_seperator,
+            num_width_tiles,
+            num_height_tiles,
+            self.global_view_pos,
+            self.tile_tag,
+        )
 
         _, hw, n_dim = images_embeds.shape
         h = w = int(hw**0.5)

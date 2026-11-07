@@ -15,6 +15,7 @@ from transformers import (
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.multimodal import emb_diagnostics
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseVitWeights,
@@ -185,6 +186,13 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         pixel_values = data[0].to(self._device).to(self._data_type)
         grid_thw = data[1].to(self._device)
         vision_output = self.visual(pixel_values, grid_thw=grid_thw)
+        emb_diagnostics.vision_output(
+            vision_output,
+            grid_thw,
+            self.visual.spatial_merge_size,
+            pixel_values,
+            self.visual,
+        )
         embeds = vision_output.pooler_output
         deepstack_embeds = vision_output.deepstack_features
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
@@ -212,6 +220,13 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         )
         grid_thw = torch.concat(grid_thw_list, dim=0).to(self._device)
         vision_output = self.visual(pixel_values, grid_thw=grid_thw)
+        emb_diagnostics.vision_output(
+            vision_output,
+            grid_thw,
+            self.visual.spatial_merge_size,
+            pixel_values,
+            self.visual,
+        )
         embeds = vision_output.pooler_output
         deepstack_embeds = vision_output.deepstack_features
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
