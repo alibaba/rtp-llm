@@ -348,9 +348,7 @@ def forward_layers(
         begin_decode(attn_metadata)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
-    with synchronized_moe_chunk_plan(
-        v4.layers, input_ids.numel(), input_ids.device, is_decode_forward=True
-    ):
+    with synchronized_moe_chunk_plan(v4.layers, input_ids.numel(), input_ids.device):
         for layer_idx, layer in enumerate(v4.layers):
             with layer_forward_range(layer_idx):
                 h = layer.forward_decode(
@@ -483,9 +481,7 @@ def forward_decode(
                 (0, v4_args.dim), dtype=v4.embed.weight.dtype, device=param_dev
             )
             empty_ids = torch.empty((0,), dtype=torch.long, device=param_dev)
-            with synchronized_moe_chunk_plan(
-                v4.layers, 0, param_dev, is_decode_forward=True
-            ):
+            with synchronized_moe_chunk_plan(v4.layers, 0, param_dev):
                 for layer in v4.layers:
                     ffn = getattr(layer, "ffn", None)
                     if (

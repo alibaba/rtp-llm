@@ -288,10 +288,7 @@ class ChunkedMoeTest(unittest.TestCase):
             ) as all_reduce,
         ):
             with synchronized_moe_chunk_plan(
-                [SimpleNamespace(ffn=layer)],
-                3,
-                torch.device("cpu"),
-                is_decode_forward=True,
+                [SimpleNamespace(ffn=layer)], 3, torch.device("cpu")
             ):
                 output = layer(
                     torch.ones(3, 4),
@@ -303,49 +300,48 @@ class ChunkedMoeTest(unittest.TestCase):
         self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
         self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
 
-    def test_decode_forward_skips_plan_when_cuda_graphs_enabled(self):
-        # A graph-replaying peer never executes the plan all-reduce (capture
-        # short-circuits it), so an eager decode fallback must skip it too;
-        # it runs one unchunked MoE invocation, matching a replayed graph.
+    def test_all_forwards_skip_plan_when_cuda_graphs_enabled(self):
+        # A graph-replaying rank never executes the plan all-reduce (capture
+        # short-circuits it), so every eager forward must skip it too — a
+        # decode fallback and a mixed-phase prefill alike.  Skipping only
+        # decode would leave the prefill all-reduce without a counterpart.
+        for is_decode_forward in (False, True):
+            with self.subTest(is_decode_forward=is_decode_forward):
+                layer = _fake_layer(capacity=4)
+                layer.strategy_name = "fp8_per_block_pure_dp"
+                layer.enable_cuda_graph = True
+
+                with (
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_available",
+                        return_value=True,
+                    ),
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_initialized",
+                        return_value=True,
+                    ),
+                    mock.patch(
+                        "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.all_reduce",
+                    ) as all_reduce,
+                ):
+                    with synchronized_moe_chunk_plan(
+                        [SimpleNamespace(ffn=layer)], 3, torch.device("cpu")
+                    ):
+                        output = layer(
+                            torch.ones(3, 4),
+                            torch.arange(3),
+                            is_decode_forward=is_decode_forward,
+                        )
+
+                all_reduce.assert_not_called()
+                self.assertEqual(layer._moe.token_chunks, [3])
+                self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
+
+    def test_prefill_forward_keeps_plan_when_graphs_disabled(self):
+        # Without CUDA graphs every rank is eager, so the plan collective
+        # stays required for the cross-phase chunk alignment.
         layer = _fake_layer(capacity=4)
         layer.strategy_name = "fp8_per_block_pure_dp"
-        layer.enable_cuda_graph = True
-
-        with (
-            mock.patch(
-                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_available",
-                return_value=True,
-            ),
-            mock.patch(
-                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.is_initialized",
-                return_value=True,
-            ),
-            mock.patch(
-                "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer.dist.all_reduce",
-            ) as all_reduce,
-        ):
-            with synchronized_moe_chunk_plan(
-                [SimpleNamespace(ffn=layer)],
-                3,
-                torch.device("cpu"),
-                is_decode_forward=True,
-            ):
-                output = layer(
-                    torch.ones(3, 4),
-                    torch.arange(3),
-                    is_decode_forward=True,
-                )
-
-        all_reduce.assert_not_called()
-        self.assertEqual(layer._moe.token_chunks, [3])
-        self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
-
-    def test_prefill_forward_keeps_plan_when_cuda_graphs_enabled(self):
-        # Prefill is always eager, so the plan collective stays required
-        # there even when the model runs decode CUDA graphs.
-        layer = _fake_layer(capacity=4)
-        layer.strategy_name = "fp8_per_block_pure_dp"
-        layer.enable_cuda_graph = True
 
         def set_remote_max(plan, **_):
             plan[0] = 9
@@ -373,6 +369,33 @@ class ChunkedMoeTest(unittest.TestCase):
         all_reduce.assert_called_once()
         self.assertEqual(layer._moe.token_chunks, [3, 0, 0])
         self.assertTrue(torch.equal(output, torch.full((3, 4), 3.0)))
+
+    def test_layer_forwards_parallelism_config_to_the_moe_layer(self):
+        # TP-sharded weights need the runtime config to see the real
+        # parallelism object; a None fallback would assume tp_size=1 and
+        # skip the Group.TP reduction.
+        import rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer as chunked_module
+
+        config = object()
+        with mock.patch.object(chunked_module, "Fp8Fp4MoeLayer") as moe_ctor:
+            moe_ctor.return_value.strategy_name = "fp8_per_block_no_dp"
+            ChunkedFp8Fp4MoeLayer(
+                layer_id=0,
+                dim=4,
+                moe_inter_dim=8,
+                n_routed_experts=4,
+                n_activated_experts=2,
+                n_shared_experts=0,
+                score_func="sigmoid",
+                route_scale=1.0,
+                swiglu_limit=1.0,
+                n_hash_layers=3,
+                vocab_size=16,
+                layer_weights={"opaque": torch.zeros(1)},
+                parallelism_config=config,
+            )
+        moe_ctor.assert_called_once()
+        self.assertIs(moe_ctor.call_args.kwargs["parallelism_config"], config)
 
     def test_input_ids_are_optional(self):
         layer = _fake_layer(dim=3, capacity=5)

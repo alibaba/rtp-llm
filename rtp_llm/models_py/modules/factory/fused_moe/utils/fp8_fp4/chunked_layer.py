@@ -140,8 +140,6 @@ def synchronized_moe_chunk_plan(
     layers: Iterable[nn.Module],
     tokens: int,
     device: torch.device,
-    *,
-    is_decode_forward: bool = False,
 ):
     """Synchronize the largest token count for one complete MoE forward.
 
@@ -152,12 +150,15 @@ def synchronized_moe_chunk_plan(
     normally rejects oversized inputs; planned empty chunks are used only to
     keep the router collectives aligned.
 
-    ``is_decode_forward=True`` marks a decode forward.  When CUDA graphs are
-    enabled for those layers, the plan is skipped: graph-replaying ranks
-    never execute this all-reduce (capture short-circuits it), so an eager
-    decode fallback entering it would block forever against a replaying
-    peer.  Skipped decode forwards run one unchunked MoE invocation per
-    layer, matching what a captured graph replays.
+    When CUDA graphs are enabled for any of these layers the plan is skipped
+    for every forward, prefill and decode alike: a graph-replaying rank
+    never executes this all-reduce (capture short-circuits it), so any eager
+    rank entering it — a decode fallback or a mixed-phase prefill — would
+    block forever against a replaying peer.  The skip is deliberately
+    symmetric; skipping only one phase would leave the other phase's
+    all-reduce without a counterpart on mixed-phase steps.  Skipped forwards
+    run one MoE invocation per layer whenever their token count fits the
+    per-rank capacity, matching what a captured graph replays.
     """
     layers = tuple(layers)
     if (
@@ -168,7 +169,7 @@ def synchronized_moe_chunk_plan(
         yield
         return
 
-    if is_decode_forward and any(
+    if any(
         getattr(getattr(layer, "ffn", layer), "enable_cuda_graph", False)
         for layer in layers
     ):
@@ -348,6 +349,10 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         # enters the layer stack.  Decode must consume it before its usual
         # no-synchronization path, otherwise a prefill rank can enter the
         # plan's all-reduce while a decode rank enters the router all-gather.
+        # When the plan was skipped because the layers run CUDA graphs, this
+        # per-layer fallback collective must be skipped too: graph-replaying
+        # ranks never enter it, so an eager prefill entering it would block
+        # against a replaying peer exactly like the plan's all-reduce.
         planned_tokens = _SYNCHRONIZED_CHUNK_TOKENS.get()
         planned_chunks = _SYNCHRONIZED_CHUNK_COUNT.get()
         if (
@@ -359,6 +364,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             self.strategy_name not in _COLLECTIVE_CHUNK_STRATEGIES
             or self._is_decode_role
             or is_decode_forward
+            or getattr(self, "enable_cuda_graph", False)
             or not self.chunking_enabled
             or not dist.is_available()
             or not dist.is_initialized()
