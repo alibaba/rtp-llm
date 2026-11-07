@@ -301,6 +301,17 @@ class OpenaiEndpoint(object):
             + self._tokenize_request_stop_words(request_stop_words_list)
             + config.stop_words_list
         )
+        if config.ignore_eos:
+            # C++ skips the primary EOS. Additional checkpoint EOS ids are
+            # represented as stop words, so remove those before the RPC too.
+            config.stop_words_list = [
+                ids
+                for ids in config.stop_words_list
+                if not (len(ids) == 1 and ids[0] in renderer.eos_token_ids)
+            ]
+            config.stop_words_str = renderer._filter_eos_stop_words(
+                config.stop_words_str, True
+            )
         if request.chat_id != None:
             config.chat_id = request.chat_id
         if request.seed != None:

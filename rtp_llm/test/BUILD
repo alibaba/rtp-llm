@@ -72,6 +72,14 @@ py_test(
 )
 
 py_test(
+    name = "custom_renderer_ignore_eos_test",
+    srcs = ["custom_renderer_ignore_eos_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "reasoning_tool_parsing_test",
     srcs = [
         "reasoning_tool_parsing_test.py",
