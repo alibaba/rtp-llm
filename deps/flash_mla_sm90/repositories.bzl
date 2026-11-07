@@ -2,7 +2,7 @@
 
 def _flash_mla_sm90_impl(ctx):
     ctx.download_and_extract(
-        url = "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
+        url = "https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/sm90/9241ae3/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
         sha256 = "67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f",
         type = "zip",
         output = "upstream",
