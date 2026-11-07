@@ -144,3 +144,17 @@ cc_test(
         ("async", "1"),
     ]
 ]
+
+cc_test(
+    name = "mtp_target_logprobs_test",
+    srcs = ["MtpTargetLogprobsTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + device_runtime_deps + cuda13_torch_link_deps,
+    env = device_test_envs(),
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
