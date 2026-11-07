@@ -717,6 +717,7 @@ def warmup_v41_prefill_jit(model, *, device):
         kv_cache=model.kv_cache,
     )
     warmup_v41_mega_jit(model, max_m=max_m, device=device, decode=False)
+    prewarm_v41_spec_class_jit(device=device)
     common._sync_cuda(device)
     common._release_cuda_cache(device)
     logging.info(
@@ -724,3 +725,68 @@ def warmup_v41_prefill_jit(model, *, device):
         time.monotonic() - start,
         model.kv_cache is not None,
     )
+
+
+def prewarm_v41_spec_class_jit(*, device):
+    """Compile the long-tail spec classes of hot small kernels up front.
+
+    The startup gRPC warmup uses pow2 token lens, so triton int/alignment
+    specialization classes outside that grid (odd token counts, pool-sliced
+    tensors with unaligned starts) first appear in serving, where each miss
+    is a synchronous compile stall on the CP critical path. Warm the
+    reachable classes here with private dummy tensors; ``warmup`` compiles
+    without launching, so no weights, KV pool or cache state are touched.
+    """
+    import torch
+
+    from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import _strided_q_rmsnorm_kernel
+    from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import _swa_kv_kernel
+
+    if not common._is_cuda_device(device):
+        return
+
+    def _offset(flat_padded, rows, width):
+        # An unaligned view with the same dtype/shape tail: pool slices and
+        # strided projections land on arbitrary byte offsets in serving.
+        return flat_padded[1 : rows * width + 1].view(rows, width)
+
+    rows_list = (1, 16, 17)
+    with torch.inference_mode():
+        # Q RMSNorm: (X, W, Y, stride_x, D, EPS, BLOCK) x num_warps=8.
+        for rows in rows_list:
+            x = torch.randn(rows * 5120 + 1, device=device, dtype=torch.bfloat16)
+            w = torch.randn(5120, device=device, dtype=torch.bfloat16)
+            for view in (x[: rows * 5120].view(rows, 5120), _offset(x, rows, 5120)):
+                y = torch.empty(rows, 5120, device=device, dtype=torch.bfloat16)
+                _strided_q_rmsnorm_kernel.warmup(
+                    view,
+                    w,
+                    y,
+                    view.stride(0),
+                    D=5120,
+                    EPS=1e-6,
+                    BLOCK=8192,
+                    grid=(1,),
+                    num_warps=8,
+                    enable_fp_fusion=False,
+                )
+        # SWA KV norm/rope: (raw, weight, freqs, output, strides, EPS) x
+        # num_warps=4; raw is a strided projection view in serving.
+        for rows in rows_list:
+            raw_full = torch.randn(rows * 512 + 1, device=device, dtype=torch.bfloat16)
+            weight = torch.randn(512, device=device, dtype=torch.bfloat16)
+            freqs = torch.randn(rows, 32, 2, device=device, dtype=torch.float32)
+            for raw in (raw_full[: rows * 512].view(rows, 512), _offset(raw_full, rows, 512)):
+                output = torch.empty(rows, 512, device=device, dtype=torch.bfloat16)
+                _swa_kv_kernel.warmup(
+                    raw,
+                    weight,
+                    freqs,
+                    output,
+                    raw.stride(0),
+                    freqs.stride(0),
+                    1e-6,
+                    grid=(1,),
+                    num_warps=4,
+                    enable_fp_fusion=False,
+                )

@@ -68,6 +68,7 @@ _TESTS = [
     "test_engram_prefetch",
     "test_gate_routing_metadata",
     "test_hc_expand",
+    "test_v41_spec_class_warmup",
     "test_mega_gate",
     "test_mega_input_pack",
     "test_mega_se_input_pack",
