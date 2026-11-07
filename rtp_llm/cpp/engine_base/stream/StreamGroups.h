@@ -76,7 +76,7 @@ public:
             auto execute_token_size = use_mtp_snapshot ? static_cast<size_t>(cur_batch_size) :
                                                          static_cast<size_t>(stream->currentExecuteTokenSize());
             if (is_context) {
-                auto reuse_length = stream->reuseLength();
+                const auto reuse_length = reuseLengthForTps(stream);
                 context_execute_token_size_ += execute_token_size;
                 context_execute_token_size_with_cache_ += execute_token_size;
                 if (reuse_length > 0) {
@@ -159,8 +159,9 @@ public:
             counts.context += execute_token_size;
             counts.context_with_cache += execute_token_size;
             counts.total += execute_token_size;
-            if (stream->reuseLength() > 0) {
-                counts.context_with_cache += static_cast<int64_t>(stream->reuseLength()) * stream->currentBatchSize();
+            const auto reuse_length = reuseLengthForTps(stream);
+            if (reuse_length > 0) {
+                counts.context_with_cache += static_cast<int64_t>(reuse_length) * stream->currentBatchSize();
             }
         }
         for (const auto& stream : decode_streams_) {
@@ -343,6 +344,16 @@ public:
     }
 
 private:
+    static int reuseLengthForTps(const GenerateStreamPtr& stream) {
+        // Later chunk prefixes include tokens already computed by this request.
+        // Credit the pre-existing cache prefix only in the first chunk. Use the
+        // chunk progress flag because initialReuseLength can use different CP units.
+        if (stream->chunkedPrefillEnabled() && stream->hasAdvancedChunk()) {
+            return 0;
+        }
+        return stream->reuseLength();
+    }
+
     std::list<GenerateStreamPtr> context_streams_;
     std::list<GenerateStreamPtr> decode_streams_;
     size_t                       total_sampler_batch_size_in_           = 0;
