@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/distribute/EngineLoopCoordinator.h"
 
 namespace rtp_llm {
 
@@ -37,6 +38,7 @@ public:
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
     absl::Status startLoop();
+    void         prepareForStop(int64_t drain_timeout_ms) override;
     int64_t      getLastScheduleTime() override;
     void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {
@@ -89,6 +91,7 @@ private:
 
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
+    std::unique_ptr<EngineLoopCoordinator>        loop_coordinator_;
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;

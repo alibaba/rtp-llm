@@ -44,13 +44,14 @@ public:
     explicit MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
-                         MlaOpsType                                     mla_ops_type       = MlaOpsType::AUTO,
-                         int32_t                                        kv_cache_group_num = 1,
-                         bool                                           warm_up            = false,
-                         std::function<void()>                          profile_step_start = nullptr,
+                         MlaOpsType                                     mla_ops_type        = MlaOpsType::AUTO,
+                         int32_t                                        kv_cache_group_num  = 1,
+                         bool                                           warm_up             = false,
+                         std::function<void()>                          profile_step_start  = nullptr,
                          std::function<void()>                          profile_step_finish = nullptr);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
+    void         drainForShutdown() override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {

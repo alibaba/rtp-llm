@@ -614,6 +614,16 @@ def _register_process_groups_to_cpp():
             f"Initialized CpuTpBroadcaster (tp_rank={_parallelism_config.tp_rank}, "
             f"tp_size={_parallelism_config.tp_size}, base_path={base_path})"
         )
+        if (
+            _parallelism_config.ep_size == _parallelism_config.world_size
+            and _parallelism_config.world_size == _parallelism_config.local_world_size
+        ):
+            # EP spans the local TP ranks. Keep every engine loop participating
+            # until a common final round, then retain IPC storage until all GPUs
+            # have drained. Reuse the session-owned short IPC directory.
+            os.environ["RTP_LLM_ENGINE_LOOP_COORDINATOR_BASE_PATH"] = base_path.rsplit(
+                "_dp", 1
+            )[0]
 
 
 def distributed_environment_initialized() -> bool:
@@ -693,6 +703,7 @@ def destroy_distributed_environment():
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None
+    os.environ.pop("RTP_LLM_ENGINE_LOOP_COORDINATOR_BASE_PATH", None)
     _initialized = False
     gc.collect()
 

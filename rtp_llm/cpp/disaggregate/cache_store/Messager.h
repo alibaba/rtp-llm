@@ -44,6 +44,9 @@ protected:
                                    uint32_t                            partition_count,
                                    uint32_t                            partition_id) = 0;
 
+public:
+    virtual void stopMetricsReporter() {}
+
 protected:
     std::shared_ptr<MemoryUtil>               memory_util_;
     std::shared_ptr<RequestBlockBufferStore>  request_block_buffer_store_;

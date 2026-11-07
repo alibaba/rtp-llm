@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -29,6 +30,9 @@ public:
     }
 
     bool deregUserMr(void* buf, bool gpu) override {
+        if (on_deregister) {
+            on_deregister();
+        }
         dereg_calls.push_back({buf, gpu});
         return true;
     }
@@ -59,6 +63,7 @@ public:
 
     std::vector<RegCall>   reg_calls;
     std::vector<DeregCall> dereg_calls;
+    std::function<void()>  on_deregister;
 };
 
 class RecordingCacheStore: public CacheStore {
@@ -171,8 +176,8 @@ bool synchronizeDevice() {
 #endif
 }
 
-DeviceBlockPoolConfig makeSmallBlockPoolConfig() {
-    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 1, DataType::TYPE_FP16, 1, 64);
+DeviceBlockPoolConfig makeSmallBlockPoolConfig(DataType dtype = DataType::TYPE_FP16) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 1, dtype, 1, 64);
     auto config =
         DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.topology().groups().front());
     config.pool_name                 = "raw_device_malloc_test";
@@ -243,6 +248,45 @@ TEST(BlockPoolDeviceMallocTest, PassesGpuBackingToMemoryRegistrationBoundary) {
     EXPECT_TRUE(memory_util->dereg_calls[0].gpu);
 #else
     GTEST_SKIP() << "Raw device allocation is only supported in CUDA and ROCm builds";
+#endif
+}
+
+TEST(BlockPoolDeviceMallocTest, DeregistersBeforeReleasingBackingAndDoesNotDeregisterTwice) {
+#if USING_CUDA || USING_ROCM
+    if (deviceCount() == 0) {
+        GTEST_SKIP() << "No GPU is visible";
+    }
+    for (auto dtype : {DataType::TYPE_FP16, DataType::TYPE_INT8}) {
+        for (bool raw_backing : {false, true}) {
+            for (bool explicit_deregister : {false, true}) {
+                auto config                      = makeSmallBlockPoolConfig(dtype);
+                config.use_device_malloc_backing = raw_backing;
+                auto pool = std::make_shared<DeviceBlockPool>(std::make_shared<const DeviceBlockPoolConfig>(config));
+                ASSERT_TRUE(pool->init());
+                auto memory = std::make_shared<RecordingMemoryUtil>();
+                auto store  = std::make_shared<RecordingCacheStore>(memory);
+                pool->regUserMr(0, store);
+                auto storage = pool->cache_aligned_buffer_.storage().getWeakStorageImpl();
+                memory->on_deregister = [storage]() { EXPECT_FALSE(storage.expired()); };
+                const auto registered = memory->reg_calls;
+                ASSERT_EQ(registered.size(), dtype == DataType::TYPE_INT8 ? 2u : 1u);
+                if (explicit_deregister) {
+                    pool->deregUserMr();
+                    pool->deregUserMr();
+                }
+                pool.reset();
+                ASSERT_EQ(memory->dereg_calls.size(), registered.size());
+                for (size_t index = 0; index < registered.size(); ++index) {
+                    EXPECT_EQ(memory->dereg_calls[index].buf, registered[index].buf);
+                    EXPECT_EQ(memory->dereg_calls[index].gpu, registered[index].gpu);
+                }
+                EXPECT_TRUE(storage.expired());
+                memory->on_deregister = {};
+            }
+        }
+    }
+#else
+    GTEST_SKIP() << "Device allocation is only supported in CUDA and ROCm builds";
 #endif
 }
 

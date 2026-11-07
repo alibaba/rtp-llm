@@ -1,8 +1,14 @@
 #include <any>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <future>
+#include <condition_variable>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+#include <unistd.h>
 #include <memory>
 #include <string>
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
@@ -53,12 +59,137 @@ protected:
     }
 };
 
+// Exercise NormalEngine::loop/stop rather than only the rendezvous class. The
+// mock collective represents a model round shared by both local DP replicas.
+struct StopCohort {
+    std::mutex              mutex;
+    std::condition_variable cv;
+    int                     arrivals = 0, generation = 0;
+    std::atomic<int>        progress{0}, drained{0}, released_early{0};
+    void                    step() {
+        std::unique_lock<std::mutex> lock(mutex);
+        const int                    round = generation;
+        if (++arrivals == 8) {
+            arrivals = 0;
+            ++generation;
+            cv.notify_all();
+        } else if (!cv.wait_for(lock, std::chrono::seconds(5), [&] { return generation != round; })) {
+            throw std::runtime_error("engine stop lost a model participant");
+        }
+        ++progress;
+    }
+};
+
+class StopCohortExecutor: public Executor {
+public:
+    StopCohortExecutor(StopCohort& cohort, int rank): cohort_(cohort), rank_(rank) {}
+    ~StopCohortExecutor() override {
+        if (cohort_.drained.load() != 8) {
+            ++cohort_.released_early;
+        }
+    }
+    absl::Status process(const std::list<GenerateStreamPtr>&, int64_t) override {
+        cohort_.step();
+        return absl::OkStatus();
+    }
+    void drainForShutdown() override {
+        if (rank_ == 2) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        ++cohort_.drained;
+    }
+
+private:
+    StopCohort& cohort_;
+    int         rank_;
+};
+
+TEST_F(EnginePeerClosedTest, LocalDpStopDrainsAllPeersBeforeReleasingAnyExecutor) {
+    char directory[] = "/tmp/rtp_engine_cohort_XXXXXX";
+    ASSERT_NE(mkdtemp(directory), nullptr);
+    const std::string                            path = std::string(directory) + "/state";
+    StopCohort                                   cohort;
+    std::array<std::shared_ptr<NormalEngine>, 8> engines;
+    std::array<std::future<absl::Status>, 8>     stops;
+    for (int rank = 0; rank < 8; ++rank) {
+        engines[rank] = createMockEngine({});
+        ASSERT_TRUE(engines[rank]->stop().ok());
+    }
+    for (int rank = 0; rank < 8; ++rank) {
+        // No scheduler inputs are needed for the mock collective executor.
+        engines[rank]->parallelism_config.tp_rank = 1;
+        engines[rank]->executor_                  = std::make_unique<StopCohortExecutor>(cohort, rank);
+        engines[rank]->loop_coordinator_          = std::make_unique<EngineLoopCoordinator>(path, rank, 8);
+        engines[rank]->running_                   = true;
+    }
+    for (auto& engine : engines) {
+        auto* pointer        = engine.get();
+        engine->loop_thread_ = autil::Thread::createThread([pointer] { pointer->loop(); }, "stop_cohort");
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (cohort.progress.load() < 80 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    stops[5] = std::async(std::launch::async, [&] { return engines[5]->stop(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    for (int rank = 0; rank < 8; ++rank) {
+        if (rank != 5) {
+            stops[rank] = std::async(std::launch::async, [&, rank] { return engines[rank]->stop(); });
+        }
+    }
+    for (auto& stop : stops) {
+        EXPECT_TRUE(stop.get().ok());
+    }
+    EXPECT_EQ(cohort.drained.load(), 8);
+    EXPECT_EQ(cohort.released_early.load(), 0);
+    const auto rounds = engines[0]->loop_coordinator_->completedSteps();
+    for (auto& engine : engines) {
+        EXPECT_EQ(engine->loop_coordinator_->completedSteps(), rounds);
+        EXPECT_EQ(engine->executor_, nullptr);
+    }
+    engines.fill(nullptr);
+    EXPECT_EQ(rmdir(directory), 0);
+}
+
 TEST_F(EnginePeerClosedTest, StopAllowsCleanPeerClose) {
     checkPeerClose(true);
 }
 
 TEST_F(EnginePeerClosedTest, RunningEngineRejectsCleanPeerClose) {
     checkPeerClose(false);
+}
+
+TEST_F(EnginePeerClosedTest, ResidentPromptRoundsAreCountedButWarmupIsNot) {
+    auto engine = createMockEngine({});
+    ASSERT_TRUE(engine->stop().ok());
+    class CountingExecutor: public Executor {
+    public:
+        absl::Status process(const std::list<GenerateStreamPtr>&, int64_t) override {
+            return absl::OkStatus();
+        }
+    };
+    engine->executor_ = std::make_unique<CountingExecutor>();
+    char directory[]  = "/tmp/rtp_prompt_round_XXXXXX";
+    ASSERT_NE(mkdtemp(directory), nullptr);
+    struct Cleanup {
+        NormalEngine& engine;
+        std::string   directory;
+        ~Cleanup() {
+            engine.loop_coordinator_.reset();
+            unlink((directory + "/state").c_str());
+            rmdir(directory.c_str());
+        }
+    } cleanup{*engine, directory};
+    engine->loop_coordinator_ = std::make_unique<EngineLoopCoordinator>(std::string(directory) + "/state", 0, 2);
+    auto query                = std::make_shared<GenerateInput>();
+    query->input_ids          = torch::tensor({1, 2, 3}, torch::kInt32);
+    query->generate_config    = std::make_shared<GenerateConfig>();
+    query->generate_config->max_new_tokens = 1;
+    ASSERT_TRUE(engine->preRun(query, preRunMode::prefill_warm_up).ok());
+    ASSERT_TRUE(engine->preRun(query, preRunMode::decode_warm_up).ok());
+    EXPECT_EQ(engine->loop_coordinator_->completedSteps(), 0u);
+    ASSERT_TRUE(engine->preRun(query, preRunMode::build_system_prompt).ok());
+    EXPECT_EQ(engine->loop_coordinator_->completedSteps(), 1u);
 }
 
 class GatedDecodeStream: public NormalGenerateStream {

@@ -61,6 +61,9 @@ public:
 
     virtual absl::Status stop() = 0;
 
+    // Keep model rounds running while other ranks finish draining ingress.
+    virtual void prepareForStop(int64_t) {}
+
     virtual absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                                      preRunMode                            mode) = 0;
 

@@ -340,7 +340,10 @@ PyWrappedModel::~PyWrappedModel() {
         graph_runner_.reset();
         // Runners retain Python methods and graph-owned tensors. Drain and
         // destroy them before releasing the model object they reference.
-        py_model_.release();
+        // release() detaches the owned reference without decref. Drop it while
+        // the GIL and runtime resources are still alive instead of leaking the
+        // Python model and its retained cache/communication objects to exit.
+        py_model_ = py::object();
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());

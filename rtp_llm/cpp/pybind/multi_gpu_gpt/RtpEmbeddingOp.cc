@@ -92,10 +92,10 @@ void RtpEmbeddingOp::init(py::object model,
 
         if (parallelism_config.tp_rank == 0) {
             // kmon metric init
-            (void)initKmonitorFactory();
             auto kmon_tags = kmonitor::MetricsTags();
             kmon_tags.AddTag("dp_rank", std::to_string(parallelism_config.dp_rank));
-            params.metrics_reporter.reset(new kmonitor::MetricsReporter("", "", kmon_tags));
+            metrics_reporter_       = createRuntimeMetricsReporter(kmon_tags);
+            params.metrics_reporter = metrics_reporter_;
         }
         embedding_engine_.reset(new EmbeddingEngine(params, py_handler));
         if (!mm_process_engine.is_none()) {
@@ -190,7 +190,7 @@ void RtpEmbeddingOp::stop() {
         grpc_server_.reset();
     }
     embedding_grpc_service_.reset();
-    stopKmonitorFactory();
+    metrics_reporter_.reset();
 }
 
 void RtpEmbeddingOp::startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,

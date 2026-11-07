@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
@@ -417,6 +418,11 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     };
     std::list<GenerateStreamPtr> streams{stream};
     THROW_IF_STATUS_ERROR(executor_->process(streams));
+    if (mode == preRunMode::build_system_prompt && loop_coordinator_) {
+        // TP followers execute this same resident-prompt round in loop().
+        // Keep its root's counter aligned before ordinary scheduling starts.
+        loop_coordinator_->afterStep();
+    }
 #if USING_CUDA
     if (mode == preRunMode::build_system_prompt) {
         // Keep the stream and its execution buffers alive until the resident KV writes finish.
@@ -841,6 +847,18 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
+    if (EngineLoopCoordinator::supportsLocalGroup(parallelism_config.world_size,
+                                                  parallelism_config.local_world_size,
+                                                  parallelism_config.tp_size,
+                                                  parallelism_config.ep_size)) {
+        loop_coordinator_ = EngineLoopCoordinator::createFromEnvironment(
+            parallelism_config.world_rank, parallelism_config.world_size, parallelism_config.local_world_size);
+        if (loop_coordinator_) {
+            RTP_LLM_LOG_INFO("local engine shutdown coordinator ready, rank=%ld, size=%ld",
+                             parallelism_config.world_rank,
+                             parallelism_config.world_size);
+        }
+    }
     if (parallelism_config.tp_rank == 0) {
         RTP_LLM_LOG_INFO("start init system prompt");
         THROW_IF_STATUS_ERROR(initSystemPrompt());
@@ -852,11 +870,31 @@ absl::Status NormalEngine::startLoop() {
     return absl::OkStatus();
 }
 
+void NormalEngine::prepareForStop(int64_t drain_timeout_ms) {
+    if (loop_coordinator_) {
+        loop_coordinator_->waitForStopReady(std::chrono::milliseconds(drain_timeout_ms));
+    }
+}
+
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
+    prepareForStop(0);
     running_ = false;
+    if (loop_coordinator_) {
+        loop_coordinator_->requestStop();
+    }
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    if (loop_coordinator_ && executor_) {
+        RTP_LLM_LOG_INFO("local engine loop stopped at common round %lu", loop_coordinator_->completedSteps());
+        // All EP peers retain their model/IPC buffers until producers and GPUs
+        // have drained. These waits run only after the common final round.
+        setCurrentThreadDevice(getDeviceId());
+        executor_->drainForShutdown();
+        runtimeSyncAndCheck();
+        loop_coordinator_->waitForGpuDrain();
+        RTP_LLM_LOG_INFO("all local engine ranks drained before model teardown");
+    }
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
@@ -868,11 +906,14 @@ void NormalEngine::loop() try {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
-    while (running_) {
+    while (loop_coordinator_ ? loop_coordinator_->beforeStep(running_) : running_.load()) {
         auto status = step();
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
+        }
+        if (loop_coordinator_) {
+            loop_coordinator_->afterStep();
         }
     }
 } catch (const CpuTpPeerClosed& error) {

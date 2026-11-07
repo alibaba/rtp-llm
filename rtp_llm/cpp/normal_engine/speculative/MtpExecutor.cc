@@ -1220,6 +1220,15 @@ void MtpExecutor::collectPrefillMetrics(const StreamGroups&  stream_groups,
     tps_collector.addTokenSizeByPriority(stream_groups.tokenCountsByPriority(), tps_execute_time_us);
 }
 
+void MtpExecutor::drainForShutdown() {
+    const auto stream = cuda_graph::graphGetCurrentStream();
+    target_verify_prepare_runner_.sync(stream);
+    draft_prefill_prepare_runner_.sync(stream);
+    spec_logits_verify_async_runner_.sync(stream);
+    spec_sampler_prepare_runner_.sync(stream);
+    spec_bookkeeping_runner_.sync(stream);
+}
+
 /*
  * @brief mtp prefill step:
  *

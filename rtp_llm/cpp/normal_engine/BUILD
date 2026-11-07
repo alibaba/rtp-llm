@@ -19,6 +19,7 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
+        "//rtp_llm/cpp/distribute:engine_loop_coordinator",
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/models:logits_processor",

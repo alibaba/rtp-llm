@@ -1653,6 +1653,10 @@ private:
 bool initKmonitorFactory();
 void stopKmonitorFactory();
 
+// Runtime cache/tensor owners may retain a reporter after the server stops.
+// Keep its factory alive until the last runtime reporter has been destroyed.
+kmonitor::MetricsReporterPtr createRuntimeMetricsReporter(const kmonitor::MetricsTags& tags);
+
 void setHippoTags(kmonitor::MetricsConfig& config);
 
 }  // namespace rtp_llm

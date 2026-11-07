@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import sys
 import unittest
 from contextlib import ExitStack
@@ -12,6 +13,53 @@ from rtp_llm.models_py.distributed import collective_torch as collective
 
 
 class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
+    def test_local_tp_and_dp_ep_groups_share_shutdown_epoch_path(self):
+        compute_ops = SimpleNamespace(
+            register_comm_ops=MagicMock(), init_cpu_tp_broadcaster=MagicMock()
+        )
+        config = SimpleNamespace(
+            tp_size=4, dp_size=2, ep_size=8, world_size=8, local_world_size=8, tp_rank=1
+        )
+        key = "RTP_LLM_ENGINE_LOOP_COORDINATOR_BASE_PATH"
+        with (
+            patch.dict(sys.modules, {"librtp_compute_ops": compute_ops}),
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(collective, "_group_map", {}),
+            patch.object(collective, "_parallelism_config", config),
+        ):
+            for dp_rank in (0, 1):
+                with patch.object(
+                    collective,
+                    "_cpu_tp_broadcaster_base_path",
+                    f"/tmp/owned/session_dp{dp_rank}",
+                ):
+                    collective._register_process_groups_to_cpp()
+                    self.assertEqual(os.environ[key], "/tmp/owned/session")
+
+            os.environ.pop(key)
+            config.local_world_size = 4
+            with patch.object(
+                collective, "_cpu_tp_broadcaster_base_path", "/tmp/owned/session_dp0"
+            ):
+                collective._register_process_groups_to_cpp()
+            self.assertNotIn(key, os.environ)
+            config.tp_size = 8
+            config.dp_size = 1
+            config.ep_size = 8
+            config.local_world_size = 8
+            with patch.object(
+                collective, "_cpu_tp_broadcaster_base_path", "/tmp/owned/session_dp0"
+            ):
+                collective._register_process_groups_to_cpp()
+            self.assertEqual(os.environ.pop(key), "/tmp/owned/session")
+            config.local_world_size = 8
+            config.ep_size = 4
+            with patch.object(
+                collective, "_cpu_tp_broadcaster_base_path", "/tmp/owned/session_dp0"
+            ):
+                collective._register_process_groups_to_cpp()
+            self.assertNotIn(key, os.environ)
+
     def _registered_callbacks(self, config=None, process_group=None, cpu_tp_group=None):
         if process_group is None:
             process_group = MagicMock()

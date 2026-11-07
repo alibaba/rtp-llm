@@ -140,6 +140,7 @@ cc_test(
         deps = [
             ":mock_engine",
             "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
+            "//rtp_llm/cpp/distribute:engine_loop_coordinator",
         ] + cuda13_torch_link_deps,
     )
     for mode, stream_async in [
