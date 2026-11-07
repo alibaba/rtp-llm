@@ -103,7 +103,6 @@ def stage_config(base, stage):
     config.setdefault("cache_store_rdma_mode", True)
     config.setdefault("fp8_gemm", True)
     config.setdefault("fp8_kv_cache", True)
-    config.setdefault("prefill_kv_workspace_budget_gib", launcher.DEFAULT_KV_WORKSPACE_GIB)
     config.update(
         run_id=f"{base['run_id']}-{stage}",
         k31_smoke_stage=stage,
@@ -123,6 +122,9 @@ def stage_config(base, stage):
                     LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
                     f"{role}: Last-5 smoke must admit the existing 1M cold seed")
     if stage == "long":
+        # The 1M LINEAR inventory coexists with both models. Bound temporary
+        # KV expansion independently; the shared planners retain every token.
+        config.setdefault("prefill_kv_workspace_budget_gib", 1)
         config["prefill"].setdefault(
             "linear_pool_blocks", long_prefill_linear_minimum() + 1
         )
@@ -141,6 +143,7 @@ def stage_config(base, stage):
                 limit >= LONG_INPUT_TOKENS + MAX_OUTPUT_TOKENS + MTP_RESERVE_TOKENS,
                 f"{role} max_seq_len must admit the exact 1M continuation and generation reserve",
             )
+    config.setdefault("prefill_kv_workspace_budget_gib", launcher.DEFAULT_KV_WORKSPACE_GIB)
     return config
 
 
