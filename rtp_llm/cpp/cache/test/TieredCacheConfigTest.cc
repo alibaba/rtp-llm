@@ -38,6 +38,45 @@ TEST(TieredCacheConfigTest, IndexerCanLimitHostCapacity) {
     EXPECT_EQ(result.gpu_bytes, 1786u);
 }
 
+TEST(TieredCacheConfigTest, HostResidentPoolsShareTheOffloadHostBudget) {
+    auto b             = budget();
+    b.fixed_host_bytes = 200;
+    b.host_block_bytes = 50;
+    const auto result  = solveTieredCacheCapacity(b);
+    EXPECT_EQ(result.config.hbm_blocks, 4u);
+    EXPECT_EQ(result.config.total_blocks, 8u);
+    EXPECT_EQ(result.host_bytes, 1000u);  // 200 fixed + 4 * 100 offloaded + 8 * 50 host pools.
+    EXPECT_LE(result.gpu_bytes, b.gpu_bytes);
+}
+
+TEST(TieredCacheConfigTest, HostPoolsCanLimitHbmGrowthWithoutOffloadedHostBlocks) {
+    auto b             = budget();
+    b.host_bytes       = 200;
+    b.fixed_host_bytes = 100;
+    b.host_block_bytes = 50;
+    const auto result  = solveTieredCacheCapacity(b);
+    EXPECT_EQ(result.config.hbm_blocks, 2u);
+    EXPECT_EQ(result.config.total_blocks, 2u);
+    EXPECT_EQ(result.host_bytes, 200u);
+    b.host_bytes = 199;
+    EXPECT_THROW(solveTieredCacheCapacity(b), std::invalid_argument);
+    b.host_block_bytes = 0;
+    b.host_bytes       = 99;
+    EXPECT_THROW(solveTieredCacheCapacity(b), std::invalid_argument);
+}
+
+TEST(TieredCacheConfigTest, HostPoolAccountingDoesNotOverflow) {
+    auto b             = budget();
+    b.host_bytes       = std::numeric_limits<size_t>::max();
+    b.host_block_bytes = b.host_bytes / 2 + 1;
+    EXPECT_THROW(solveTieredCacheCapacity(b), std::invalid_argument);
+    b.host_block_bytes = 0;
+    b.fixed_host_bytes = b.host_bytes;
+    const auto result  = solveTieredCacheCapacity(b);
+    EXPECT_EQ(result.host_bytes, b.host_bytes);
+    EXPECT_EQ(result.config.total_blocks, result.config.hbm_blocks);
+}
+
 TEST(TieredCacheConfigTest, NoHostBlocksWhenBudgetIsTooSmall) {
     auto b = budget();
     for (size_t host : {0u, 99u}) {

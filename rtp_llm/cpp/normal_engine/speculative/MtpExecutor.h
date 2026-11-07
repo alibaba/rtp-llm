@@ -247,7 +247,10 @@ private:
                                int64_t              schedule_time_us,
                                int64_t              model_forward_us);
 
-    GptModelOutputs forwardModel(ModelBase* model, GptModelInputs& inputs, ModelInputsModelRole role);
+    // Prompt seeding and decode work can share a model role and empty
+    // sequence_lengths. Decode callers explicitly opt into draft extend.
+    GptModelOutputs
+    forwardModel(ModelBase* model, GptModelInputs& inputs, ModelInputsModelRole role, bool is_draft_extend = false);
 
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;

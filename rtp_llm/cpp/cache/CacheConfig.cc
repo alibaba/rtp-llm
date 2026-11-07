@@ -136,22 +136,33 @@ TieredCacheCapacity solveTieredCacheCapacity(const TieredCacheBudget& budget) {
     if (min_hbm < 2 || min_hbm > budget.max_blocks) {
         throw std::invalid_argument("sparse KV offload requires at least two HBM blocks, including sentinel 0");
     }
-    const auto fits = [&](uint32_t hbm, uint32_t host) {
-        size_t     remaining = budget.gpu_bytes;
-        const auto consume   = [&](size_t bytes, uint64_t count) {
-            if (bytes != 0 && count > remaining / bytes) {
-                return false;
-            }
-            remaining -= bytes * count;
-            return true;
-        };
-        const uint64_t total = static_cast<uint64_t>(hbm) + host;
-        return consume(budget.fixed_gpu_bytes, 1) && consume(budget.offload_block_bytes, hbm)
-               && consume(budget.device_block_bytes, total) && consume(budget.metadata_block_bytes, total)
-               && consume(budget.swa_block_bytes, total);
+    const auto consume = [](size_t& remaining, size_t bytes, uint64_t count) {
+        if (bytes != 0 && count > remaining / bytes) {
+            return false;
+        }
+        remaining -= bytes * count;
+        return true;
     };
-    if (!fits(min_hbm, 0)) {
+    const auto fits_gpu = [&](uint32_t hbm, uint32_t host) {
+        size_t         remaining = budget.gpu_bytes;
+        const uint64_t total = static_cast<uint64_t>(hbm) + host;
+        return consume(remaining, budget.fixed_gpu_bytes, 1) && consume(remaining, budget.offload_block_bytes, hbm)
+               && consume(remaining, budget.device_block_bytes, total)
+               && consume(remaining, budget.metadata_block_bytes, total)
+               && consume(remaining, budget.swa_block_bytes, total);
+    };
+    const auto fits_host = [&](uint32_t hbm, uint32_t host) {
+        size_t         remaining = budget.host_bytes;
+        const uint64_t total     = static_cast<uint64_t>(hbm) + host;
+        return consume(remaining, budget.fixed_host_bytes, 1) && consume(remaining, budget.offload_block_bytes, host)
+               && consume(remaining, budget.host_block_bytes, total);
+    };
+    const auto fits = [&](uint32_t hbm, uint32_t host) { return fits_gpu(hbm, host) && fits_host(hbm, host); };
+    if (!fits_gpu(min_hbm, 0)) {
         throw std::invalid_argument("GPU budget cannot hold sparse KV offload fixed storage and two HBM blocks");
+    }
+    if (!fits_host(min_hbm, 0)) {
+        throw std::invalid_argument("Host budget cannot hold sparse KV offload fixed storage and baseline host pools");
     }
     const auto largest = [](uint32_t low, uint32_t high, const auto& fits_count) {
         while (low < high) {
@@ -173,7 +184,7 @@ TieredCacheCapacity solveTieredCacheCapacity(const TieredCacheBudget& budget) {
     const uint64_t      total = static_cast<uint64_t>(hbm) + host;
     TieredCacheCapacity result;
     result.config         = {static_cast<uint32_t>(total), hbm, budget.max_selected_rows};
-    result.host_bytes     = host * budget.offload_block_bytes;
+    result.host_bytes = budget.fixed_host_bytes + host * budget.offload_block_bytes + total * budget.host_block_bytes;
     result.hbm_bytes      = hbm * budget.offload_block_bytes;
     result.device_bytes   = total * budget.device_block_bytes;
     result.metadata_bytes = total * budget.metadata_block_bytes;

@@ -526,6 +526,11 @@ TieredCacheCapacity CacheConfigCreator::configureOffloadCapacity(CacheConfig&   
         const auto  block_bytes = config.blockSizeBytesForGroup(group.tag);
         if (!policy.offload.enabled) {
             if (policy.memory_placement != CacheMemoryPlacement::DEVICE) {
+                if (policy.explicit_block_num > 0) {
+                    addBudgetBytes(budget.fixed_host_bytes, block_bytes, policy.explicit_block_num);
+                } else {
+                    addBudgetBytes(budget.host_block_bytes, block_bytes);
+                }
                 continue;
             }
             if (policy.explicit_block_num > 0) {

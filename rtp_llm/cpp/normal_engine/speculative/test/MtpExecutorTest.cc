@@ -904,6 +904,11 @@ public:
             test_config.dspark_mask_token_id = 0;
         }
         auto components                               = createMtpExecutorComponents(test_config);
+        for (auto* model : {components.fake_target_model.get(),
+                            components.fake_draft_model.get(),
+                            components.fake_draft_prefill_model.get()}) {
+            model->setInputObserver([](const GptModelInputs& inputs) { EXPECT_FALSE(inputs.is_draft_extend); });
+        }
         components.executor->enable_ffn_disaggregate_ = enable_ffn_disaggregate;
         if (simulate_multi_dp) {
             ASSERT_EQ(components.executor->parallelism_config_.tp_size, 1);
@@ -1085,6 +1090,13 @@ public:
         }
         if (commit_model) {
             setupAlignmentModel(commit_model, forward_trace, commit_label, commit_verify);
+        }
+        if (role_type == RoleType::DECODE) {
+            target_model->forward_hook = [](GptModelInputs& inputs) { EXPECT_FALSE(inputs.is_draft_extend); };
+            draft_model->forward_hook  = [](GptModelInputs& inputs) { EXPECT_TRUE(inputs.is_draft_extend); };
+            if (commit_model) {
+                commit_model->forward_hook = [](GptModelInputs& inputs) { EXPECT_TRUE(inputs.is_draft_extend); };
+            }
         }
         std::unique_ptr<FakeModel> draft_prefill_model;
         if (commit_model && !sp_prefill_draft_model) {
@@ -1335,6 +1347,13 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, b
 
     components.fake_draft_model->setInputs({draft_input});
     components.fake_draft_model->setOutputs({draft_output});
+
+    // Pure prompt prefill has no decode sequence_lengths. Both ordinary and
+    // CP draft seeding must keep prefill routing despite that empty tensor.
+    components.fake_draft_model->setInputObserver([](const GptModelInputs& inputs) {
+        EXPECT_TRUE(!inputs.sequence_lengths.defined() || inputs.sequence_lengths.numel() == 0);
+        EXPECT_FALSE(inputs.is_draft_extend);
+    });
 
     // set fake sampler outputs
     auto sampler_input  = SamplerInputs{target_output.logits};

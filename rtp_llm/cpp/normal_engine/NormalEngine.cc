@@ -221,6 +221,11 @@ void NormalEngine::validateSparseKvOffloadConfig(const EngineInitParams& params,
                                 && cache.multi_task_prompt_tokens.empty(),
                             "sparse KV offload does not support multi_task_prompt prefill on DECODE");
     RTP_LLM_CHECK_WITH_INFO(!drop_broad_sync, "sparse KV offload does not support RTP_LLM_DROP_BROAD_SYNC");
+    if (params.runtime_config.use_batch_decode_scheduler) {
+        BatchDecodeScheduler::validateOffloadBatchSize(
+            params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size,
+            params.runtime_config.max_generate_batch_size);
+    }
     bool declared = false;
     for (const auto& layer : params.model_config_.kv_cache_spec_descs) {
         for (const auto& desc : layer) {

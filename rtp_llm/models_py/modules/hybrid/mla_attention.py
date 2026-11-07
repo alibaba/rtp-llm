@@ -133,9 +133,18 @@ class MlaAttention(nn.Module):
             if not fmha_impl.is_sparse():
                 return None
             if prev_topk_indices is None and kv_cache is not None:
-                raise RuntimeError(
-                    f"DSA shared layer {self.layer_idx} needs previous top-k"
+                local_query_ids = getattr(fmha_impl.cp_params, "total_local_ids", None)
+                empty_cp_rank = (
+                    fmha_impl.attn_inputs.is_prefill
+                    and local_query_ids is not None
+                    and local_query_ids.numel() == 0
                 )
+                # Padding-only CP ranks have no top-k rows, but must still
+                # enter attention's KV collectives and cache writes below.
+                if not empty_cp_rank:
+                    raise RuntimeError(
+                        f"DSA shared layer {self.layer_idx} needs previous top-k"
+                    )
             return prev_topk_indices
         if self.indexer is None or kv_cache is None:
             return None

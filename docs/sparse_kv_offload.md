@@ -224,7 +224,9 @@ reserve_blocks = ceil(reserve_step / seq_size_per_block)
 --reuse_cache 0
 ```
 
-`--kv_cache_mem_mb` 是所有 HBM cache 和热缓存的总预算；设为 0 时由部署脚本或固定 pool 参数控制容量。`--sparse_kv_offload_host_mb` 是每个 rank 可用的 pinned Host KV 上限。热缓存容量由 `--concurrency_limit`、`--sparse_kv_offload_hot_rows` 和 MTP/DSpark 的每轮 token 数共同决定；也可通过环境变量 `SPARSE_KV_OFFLOAD_HOT_ROWS` 配置每请求容量。
+`--kv_cache_mem_mb` 是所有 HBM cache 和热缓存的总预算；设为 0 时由部署脚本或固定 pool 参数控制容量。`--sparse_kv_offload_host_mb` 是每个 rank 的 Host cache 总预算，包含 offload backing 和其他放在 Host 上的 cache pool。开启 `--dsv4_fixed_pool_use_memory 1` 时，固定池的显式容量和随总 block 数增长的容量也计入该预算；预算连最小布局都无法容纳时，在分配前报错。热缓存容量由 `--concurrency_limit`、`--sparse_kv_offload_hot_rows` 和 MTP/DSpark 的每轮 token 数共同决定；也可通过环境变量 `SPARSE_KV_OFFLOAD_HOT_ROWS` 配置每请求容量。
+
+启用 `--use_batch_decode_scheduler` 时，`--batch_decode_scheduler_batch_size` 必须在 `1..concurrency_limit` 范围内；启动和运行时 `UpdateSchedulerInfo` 都检查这一限制。超限更新返回 `INVALID_ARGUMENT`，保留原调度配置。
 
 P/D 两端必须使用一致的模型和 speculative 配置。offload 只在 D 打开，P 不打开。本次验证的 V4 四卡部署为：
 

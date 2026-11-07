@@ -1530,6 +1530,27 @@ TEST(SparseKvOffloadConfigTest, AcceptsTpDecodeAndRejectsUnsupportedCombinations
     }
 }
 
+TEST(SparseKvOffloadConfigTest, RejectsBatchDecodeSizeAboveHotCacheCapacity) {
+    auto params                                      = supportedConfig();
+    params.runtime_config.use_batch_decode_scheduler = true;
+    params.runtime_config.max_generate_batch_size    = 32;
+    auto& batch_size = params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+    for (const int64_t valid : {1, 32}) {
+        batch_size = valid;
+        EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    }
+    for (const int64_t invalid : {-1, 0, 33}) {
+        SCOPED_TRACE(invalid);
+        batch_size = invalid;
+        EXPECT_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false), std::invalid_argument);
+    }
+    params.kv_cache_config.enable_sparse_kv_offload = false;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+    params.kv_cache_config.enable_sparse_kv_offload  = true;
+    params.runtime_config.use_batch_decode_scheduler = false;
+    EXPECT_NO_THROW(NormalEngine::validateSparseKvOffloadConfig(params, false, true, false));
+}
+
 TEST(SparseKvOffloadConfigTest, UsesModelDeclarationWithoutHardcodedTagsOrRowWidths) {
     StaticConfig::user_ft_core_dump_on_exception = false;
     auto params                                  = supportedConfig();

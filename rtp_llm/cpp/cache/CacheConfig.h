@@ -46,6 +46,8 @@ struct TieredCacheBudget {
     size_t   metadata_block_bytes = 0;
     size_t   fixed_gpu_bytes      = 0;
     size_t   swa_block_bytes      = 0;
+    size_t   fixed_host_bytes     = 0;
+    size_t   host_block_bytes     = 0;  // Non-offloaded host pools track total_blocks.
     uint32_t max_selected_rows    = 0;
     uint32_t test_hbm_blocks      = 0;
     uint32_t max_blocks           = std::numeric_limits<int32_t>::max();
