@@ -5,6 +5,7 @@ load("//:def.bzl", "copts")
 cc_library(
     name = "fuse_copy_op",
     srcs = ["FusedCopyOp.cc"],
+    hdrs = ["FusedCopyOp.h"],
     deps = [
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:types_hdr",

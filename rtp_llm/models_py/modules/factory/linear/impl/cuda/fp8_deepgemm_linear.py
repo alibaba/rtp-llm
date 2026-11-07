@@ -28,6 +28,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
     supports_fused_silu_quant = True
 
+    supports_deferred_bias = True
+    supports_prequantized_activation = True
+    fused_activation_quant_format = "fp8_ue8m0_block128_colmajor"
+
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
 
@@ -74,7 +78,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Check if DeepGEMM is available
         if not has_deep_gemm():
-            error_msg = "DeepGEMM is not available. Please install the `deep_gemm` package to enable DeepGEMM kernels."
+            error_msg = (
+                "DeepGEMM is not available. Please install the `deep_gemm` "
+                "package to enable DeepGEMM kernels."
+            )
             logger.error(error_msg)
             raise RuntimeError(error_msg)
         # Check weight and weight scale dimensions
@@ -138,6 +145,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         # requant_weight_ue8m0 is applied at weight load time in _postprocess;
         # detect whether UE8M0 format was applied by checking scale dtype.
         self.scale_ue8m0 = self.weight_scales.dtype == torch.int32
+        self.supports_prequantized_activation = self.scale_ue8m0
+        self.fused_activation_quant_format = (
+            "fp8_ue8m0_block128_colmajor" if self.scale_ue8m0 else None
+        )
         # Initialize cached scales attributes
         self.cached_scales = None
         self.cached_scales_max_len = 0
@@ -266,6 +277,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         input_fp8: torch.Tensor,
         input_scales: torch.Tensor,
         out: Optional[torch.Tensor] = None,
+        apply_bias: bool = True,
     ) -> torch.Tensor:
         """Run DeepGEMM with a caller-provided FP8 input and matching scales."""
         if input_fp8.dtype != torch.float8_e4m3fn:
@@ -283,7 +295,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             c=None,
             disable_ue8m0_cast=not self.scale_ue8m0,
         )
-        if self.bias is not None:
+        if apply_bias and self.bias is not None:
             output.add_(self.bias.to(output.dtype))
         return output
 
@@ -325,3 +337,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             preserve_silu_mul_rounding=True,
         )
         return self.forward_quantized(input_fp8, input_scales)
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        input_fp8, input_scales = self.quantize_input(input)
+        return self.forward_quantized(input_fp8, input_scales, apply_bias=False)

@@ -80,6 +80,7 @@ class EmbeddingBert(nn.Module):
         combo_tokens_type_ids: torch.Tensor,
         token_type_embedding: torch.Tensor,
         input_embedding_scalar: float,
+        text_tokens_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         tokens = input.size(0)
         hidden_size = self.weight.size(-1)
@@ -96,6 +97,7 @@ class EmbeddingBert(nn.Module):
             combo_tokens_type_ids,
             token_type_embedding,
             input_embedding_scalar,
+            text_tokens_mask,
         )
 
         if self.tp_size > 1:

@@ -262,6 +262,10 @@ py_library(
         "@//:using_ppu": glob(_DSV4_PPU_KERNELS),
         "//conditions:default": [],
     }),
+    visibility = [
+        "//rtp_llm/models_py:__pkg__",
+        "//rtp_llm/models_py/modules/factory/linear/impl/cuda/test:__pkg__",
+    ],
 )
 
 py_library(
