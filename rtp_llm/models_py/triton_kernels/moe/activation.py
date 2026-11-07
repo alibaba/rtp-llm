@@ -6,20 +6,6 @@ import triton.language as tl
 from triton.language.extra.cuda import libdevice
 
 
-@triton.jit
-def _situ_product(g, u, BETA: tl.constexpr, UP_BETA: tl.constexpr):
-    # vLLM c3b484463 situ_activation: preserve its FP32 evaluation order.
-    inv_beta = tl.div_rn(1.0, BETA)
-    g = (
-        (0.5 * BETA) * libdevice.tanh(g * inv_beta)
-        * (1.0 + libdevice.tanh(g * 0.5))
-    )
-    if UP_BETA is not None:
-        inv_up_beta = tl.div_rn(1.0, UP_BETA)
-        u = UP_BETA * libdevice.tanh(u * inv_up_beta)
-    return g * u
-
-
 @triton.jit(do_not_specialize=["N"])
 def _situ_and_mul_kernel(
     G,
@@ -40,20 +26,16 @@ def _situ_and_mul_kernel(
     row, col = i // W, i % W
     g = tl.load(G + row * G0 + col * G1, i < N, other=0).to(tl.float32)
     u = tl.load(U + row * U0 + col * U1, i < N, other=0).to(tl.float32)
-    tl.store(O + i, _situ_product(g, u, BETA, UP_BETA), i < N)
-
-
-@triton.jit
-def _situ_and_mul_rows_kernel(
-    G, U, O, W: tl.constexpr, G0: tl.constexpr, U0: tl.constexpr,
-    BETA: tl.constexpr, UP_BETA: tl.constexpr, BLOCK: tl.constexpr,
-):
-    row = tl.program_id(1).to(tl.int64)
-    col = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    g = tl.load(G + row * G0 + col, col < W, other=0).to(tl.float32)
-    u = tl.load(U + row * U0 + col, col < W, other=0).to(tl.float32)
-    tl.store(O + row * W + col, _situ_product(g, u, BETA, UP_BETA), col < W)
-
+    # vLLM c3b484463 situ_activation: preserve its FP32 evaluation order.
+    inv_beta = tl.div_rn(1.0, BETA)
+    g = (
+        (0.5 * BETA) * libdevice.tanh(g * inv_beta)
+        * (1.0 + libdevice.tanh(g * 0.5))
+    )
+    if UP_BETA is not None:
+        inv_up_beta = tl.div_rn(1.0, UP_BETA)
+        u = UP_BETA * libdevice.tanh(u * inv_up_beta)
+    tl.store(O + i, g * u, i < N)
 
 
 def situ_and_mul(gate, up, beta, linear_beta=None, *, inplace=False):
@@ -87,27 +69,9 @@ def situ_and_mul(gate, up, beta, linear_beta=None, *, inplace=False):
         output = gate
     else:
         output = torch.empty_like(gate, memory_format=torch.contiguous_format)
-    numel = gate.numel()
-    if not numel:
-        return output
-    rows, width = gate.shape
-    # Tile large aligned BF16 projections by row on Blackwell. This removes
-    # per-element division for split gate/up views while keeping FP32 math.
-    if (
-        gate.dtype == torch.bfloat16
-        and numel >= 1 << 20
-        and rows <= 65535
-        and width % 1024 == 0
-        and gate.stride(1) == up.stride(1) == 1
-        and torch.cuda.get_device_capability(gate.device)[0] == 10
-    ):
-        _situ_and_mul_rows_kernel[(width // 1024, rows)](
-            gate, up, output, width, gate.stride(0), up.stride(0),
-            beta, linear_beta, 1024, num_warps=4, enable_fp_fusion=False,
-        )
-    else:
-        _situ_and_mul_kernel[(triton.cdiv(numel, 256),)](
-            gate, up, output, numel, width,
+    if gate.numel():
+        _situ_and_mul_kernel[(triton.cdiv(gate.numel(), 256),)](
+            gate, up, output, gate.numel(), gate.shape[1],
             gate.stride(0), gate.stride(1), up.stride(0), up.stride(1),
             beta, linear_beta, 256, enable_fp_fusion=False,
         )
