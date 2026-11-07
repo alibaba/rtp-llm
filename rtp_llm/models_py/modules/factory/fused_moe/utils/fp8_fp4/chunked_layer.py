@@ -116,8 +116,9 @@ def _validate_strategy_role(strategy_name: str, is_decode_role: bool) -> None:
     if strategy_name == "fp8_per_block_ep_low_latency" and not is_decode_role:
         raise RuntimeError(
             "FP8-per-block DeepEP low-latency MoE is only supported for the "
-            "decode role; use fp8_per_block_ep_normal for prefill workers "
-            f"(strategy={strategy_name!r})"
+            "decode role; run the low-latency strategy on a DECODE worker or "
+            "disable DeepEP low latency (USE_DEEPEP_LOW_LATENCY) for "
+            f"non-decode workers (strategy={strategy_name!r})"
         )
 
 

@@ -294,6 +294,11 @@ class Fp8Fp4MoeLayer(nn.Module):
             runtime_config, layer_weights
         )
         self.strategy_name = self.fused_moe.strategy_name
+        # Selectable-set note for enable_cuda_graph: the hybrid-backed
+        # fp8_per_block_no_dp requires SM12, single-card auto falls back to
+        # fp8_per_block_no_dp_masked below SM12, and the DeepEP strategies
+        # carry their own graph and decode-role restrictions (see the masked
+        # strategy conditions and _validate_strategy_role).
         if self.norm_top_p.enabled and self.strategy_name not in {
             "fp8_per_block_no_dp",
             "fp8_per_block_no_dp_masked",
