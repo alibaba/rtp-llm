@@ -243,6 +243,9 @@ final class FlexlbConfigValidator {
             range(affinity.getMinPrefixHitPercent(), 0,
                     RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.cacheAffinity.minPrefixHitPercent");
+            range(affinity.getStickyPrefixHitPercent(), 0,
+                    RoutingConfig.PERCENTAGE_SCALE,
+                    "router.roles.prefill.cacheAffinity.stickyPrefixHitPercent");
         }
 
         require(routing.getRoles().getDecode() != null,

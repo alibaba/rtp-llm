@@ -210,6 +210,8 @@ public class CostBasedPrefillStrategy {
                 boolean minimumHitRateMet = false;
                 double minimumHitRate = normalizedHitRate(
                         cacheAffinity.getMinPrefixHitPercent());
+                double stickyHitRate = normalizedHitRate(
+                        cacheAffinity.getStickyPrefixHitPercent());
                 for (int i = 0; i < survivors.size(); i++) {
                     long hitTokens = survivors.cacheHit(i);
                     if (hitTokens <= referenceHitTokens
@@ -222,7 +224,12 @@ public class CostBasedPrefillStrategy {
                         continue;
                     }
                     minimumHitRateMet = true;
-                    if (survivors.projectedTtftMs(i) <= affinityCutoffMs) {
+                    boolean stickyLeader = seqLen > 0L
+                            && stickyHitRate < RoutingConfig.PERCENTAGE_SCALE
+                            && hitTokens * RoutingConfig.PERCENTAGE_SCALE / seqLen
+                                    >= stickyHitRate;
+                    if (stickyLeader
+                            || survivors.projectedTtftMs(i) <= affinityCutoffMs) {
                         preferredCandidates.set(i);
                     }
                 }

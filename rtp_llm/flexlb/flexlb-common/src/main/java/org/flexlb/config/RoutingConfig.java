@@ -62,6 +62,15 @@ public final class RoutingConfig {
 
         /** Minimum reusable-prefix percentage required before affinity applies. */
         private double minPrefixHitPercent = 5;
+
+        /**
+         * Prefix-hit percentage at or above which the cache leader is preferred
+         * regardless of the projected-TTFT cutoff. High-affinity requests carry
+         * nearly the whole conversation prefix; losing that prefix on a routing
+         * flip costs a full re-prefill, which dominates any modeled TTFT gap.
+         * Set to a value above {@link RoutingConfig#PERCENTAGE_SCALE} to disable.
+         */
+        private double stickyPrefixHitPercent = 90;
     }
 
     @Getter

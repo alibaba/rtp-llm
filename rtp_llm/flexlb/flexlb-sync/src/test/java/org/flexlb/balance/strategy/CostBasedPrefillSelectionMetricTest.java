@@ -198,6 +198,63 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void highPrefixHitSticksToCacheLeaderBeyondTtftCutoff() {
+        configureAffinity(400L, 5.0);
+        context.getRequest().setSeqLen(550L);
+
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+            verify(reporter).reportCacheAffinityDecision(
+                    RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+        }
+    }
+
+    @Test
+    void stickyLeaderCanBeDisabledAbovePercentScale() {
+        configureAffinity(400L, 5.0);
+        config.getRouter().getRoles().getPrefill().getCacheAffinity()
+                .setStickyPrefixHitPercent(RoutingConfig.PERCENTAGE_SCALE + 1.0);
+        context.getRequest().setSeqLen(550L);
+
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            verify(reporter).reportCacheAffinityDecision(
+                    RoleType.PREFILL, "10.0.0.1", "OVER_CAP");
+        }
+    }
+
+    @Test
+    void stickyHighHitOverridesProjectedTtftCutoff() {
+        configureFocusedAffinity();
+        PrefillCandidateSet candidates = candidates(
+                new long[] {100L, 5_000L},
+                new long[] {0L, 900L});
+
+        int selectedIndex = strategy.selectBestCandidate(
+                candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
+
+        assertEquals(1, selectedIndex, "90% prefix hit must stick to the cache leader");
+        verify(reporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.1.0.2", "CACHE_LEADER");
+    }
+
+    @Test
+    void mediumHitBelowStickyThresholdStillHonorsTtftCutoff() {
+        configureFocusedAffinity();
+        PrefillCandidateSet candidates = candidates(
+                new long[] {100L, 5_000L},
+                new long[] {0L, 500L});
+
+        int selectedIndex = strategy.selectBestCandidate(
+                candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
+
+        assertEquals(0, selectedIndex,
+                "50% prefix hit must still respect the projected-TTFT cutoff");
+        verify(reporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.1.0.1", "OVER_CAP");
+    }
+
+    @Test
     void cacheLeaderWithAllDispatchSlotsOccupiedStillWins() {
         configureAffinity(600L, 5.0);
         PrefillEndpoint endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
