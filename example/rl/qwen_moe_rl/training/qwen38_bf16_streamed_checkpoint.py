@@ -110,7 +110,20 @@ def _verify_copy(destination, part):
     observed = destination.reshape(-1)[indices.to(destination.device)].float().cpu()
     if not torch.equal(expected, observed):
         raise RuntimeError('Loaded BF16 shard does not reproduce sampled BF16 source coordinates')
-    return hashlib.sha256(expected.numpy().tobytes()).hexdigest()
+    sample=hashlib.sha256(expected.numpy().tobytes()).hexdigest()
+    if os.environ.get('Q38_REPLAY_VERIFY_FULL_SHARD_BYTES')=='1':
+        # Fresh recovery requires every bounded BF16 destination byte, not
+        # only the historical 64-coordinate sample, to match its source.
+        actual=destination.detach().cpu().contiguous()
+        expected_bytes=part.contiguous().view(torch.uint8)
+        actual_bytes=actual.view(torch.uint8)
+        if not torch.equal(actual_bytes,expected_bytes):
+            raise RuntimeError('Current BF16 destination differs from the complete bounded official source slice')
+        payload=memoryview(actual_bytes.numpy()).cast('B')
+        full=hashlib.sha256(payload).hexdigest()
+        del payload,actual_bytes,expected_bytes,actual
+        return {'sample_sha256':sample,'full_slice_bytes_sha256':full}
+    return sample
 
 
 def copy_source_slice(parameter, source, source_map=None, *, max_source_bytes=128*1024**2,
@@ -137,7 +150,7 @@ def copy_source_slice(parameter, source, source_map=None, *, max_source_bytes=12
         fragments=flat_source_fragments(source_shape,source_map['expert_begin'],
                                        source_map['expert_end'],begin,end)
     else:fragments=[{'feature_begin':begin,'feature_end':end,'destination_row_begin':0}]
-    hashes = []; peak = 0; reads = 0
+    hashes = []; full_hashes = []; peak = 0; reads = 0
     for fragment in fragments:
         low, high = fragment['feature_begin'], fragment['feature_end']
         for cursor in range(low, high, rows_per_read):
@@ -147,13 +160,19 @@ def copy_source_slice(parameter, source, source_map=None, *, max_source_bytes=12
             part = source[selection]
             dest_begin = fragment['destination_row_begin'] + cursor-low
             destination = target[dest_begin:dest_begin+stop-cursor]
-            hashes.append(_verify_copy(destination, part)); reads += 1
+            check=_verify_copy(destination,part)
+            if isinstance(check,dict):
+                hashes.append(check['sample_sha256']);full_hashes.append(check['full_slice_bytes_sha256'])
+            else:hashes.append(check)
+            reads += 1
             peak = max(peak, part.numel()*part.element_size())
             del part
     return {'local_numel': target.numel(), 'local_bytes': target.numel()*2,
             'source_begin': begin, 'source_end': end, 'source_reads': reads,
             'maximum_source_slice_bytes': peak, 'sample_sha256': hashes,
-            'source_coordinates_verified': True}
+            'source_coordinates_verified': True,
+            'full_destination_BF16_bytes_verified':os.environ.get('Q38_REPLAY_VERIFY_FULL_SHARD_BYTES')=='1' and len(full_hashes)==reads,
+            'full_slice_bytes_sha256':full_hashes}
 
 
 def save_buffers(model):

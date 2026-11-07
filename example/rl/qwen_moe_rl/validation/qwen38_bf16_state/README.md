@@ -72,3 +72,10 @@ The gradient-cache limit covers FP32 slots only; activation, all-gather,
 reduce-scatter and allocator memory need their own headroom. Process RSS is
 not a container cgroup limit or peak, and a static state plan is not a measured
 full-model memory result.
+
+`Q38_REPLAY_VERIFY_FULL_SHARD_BYTES=1` additionally compares every destination
+BF16 byte with each bounded checkpoint source slice and records its SHA256.
+This complements the historical coordinate samples without retaining a full
+policy copy. A legitimately empty local shard has zero reads and empty hash
+coverage. `qualify_bounded_full_copy_cpu.py --output result.json` exercises the
+real loader on tiny CPU tensors; it reads no official model weights.
