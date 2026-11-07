@@ -93,11 +93,6 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
     # Upper bound for prefill warmup tokens when not overridden via env.
     DEFAULT_WARMUP_MAX_TOKENS = 8192
     WARMUP_MASKED_LAYOUT = True
-    # Decode can use the padded-masked layout even when the packed nopad GEMM
-    # is available. Subclasses opt in; the masked path never reads the expert
-    # counts back to the host, so it keeps the decode step free of per-layer
-    # synchronisation.
-    PREFER_MASKED_DECODE = False
 
     @classmethod
     def executor_type(cls) -> ExecutorType:
@@ -220,18 +215,13 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
         except Exception:
             logger.exception("DeepGEMM BF16 warmup failed; execution will use lazy JIT")
 
-    def _to_local_expert_ids(
-        self, topk_idx: torch.Tensor, ids_are_local: bool = False
-    ) -> torch.Tensor:
+    def _to_local_expert_ids(self, topk_idx: torch.Tensor) -> torch.Tensor:
         """Convert global expert IDs to partition-local IDs (0-based), -1 for out-of-partition."""
-        if ids_are_local:
-            return topk_idx
         local = topk_idx - self.start_expert_id
-        # Pass the fill value as a Python scalar: torch.where then keeps it as a
-        # CPU 0-dim tensor, whereas torch.tensor(-1, device=...) issues a tiny
-        # blocking H2D copy on every MoE layer (a decode-step hotspot).
         return torch.where(
-            (local >= 0) & (local < self.num_experts_per_partition), local, -1
+            (local >= 0) & (local < self.num_experts_per_partition),
+            local,
+            torch.tensor(-1, device=local.device, dtype=local.dtype),
         )
 
     def execute(
@@ -268,14 +258,7 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
             return CombineForwardPayload(
                 fused_expert_output=torch.empty_like(payload.expert_x)
             )
-        # Decode (token_num <= masked_max_token_num) runs the padded-masked
-        # layout when the executor opts in: the padded rows are skipped by the
-        # masked GEMM/SiLU kernels, and the layout needs no host copy of the
-        # per-expert counts. Prefill keeps the packed nopad/contiguous layout,
-        # where the extra padded rows would dominate.
-        if token_num <= self.masked_max_token_num and (
-            not self.use_nopad or self.PREFER_MASKED_DECODE
-        ):
+        if token_num <= self.masked_max_token_num:
             return self.execute_masked(
                 payload,
                 activation,
@@ -305,9 +288,7 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
     ) -> CombineForwardPayload:
         with configure_deep_gemm_num_sms(self.num_gemm_sms):
             hidden_states = payload.expert_x
-            topk_idx = self._to_local_expert_ids(
-                payload.expert_topk_ids, payload.expert_ids_are_local
-            )
+            topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
             topk_weights = payload.expert_topk_weights
             num_recv_tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
 
@@ -427,9 +408,7 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
             GEMM tiles run over padding rows.
         """
         hidden_states = payload.expert_x
-        topk_idx = self._to_local_expert_ids(
-            payload.expert_topk_ids, payload.expert_ids_are_local
-        )
+        topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
         topk_weights = payload.expert_topk_weights
 
         # Get per-expert token counts as a Python list (needed for alignment arithmetic)
@@ -508,7 +487,7 @@ class DeepGemmBf16HybridExecutor(FusedMoeExpertExecutor):
             device=device,
             dtype=torch.bfloat16,
         )
-        silu_and_mul(down_input, gateup_output)
+        ppu_silu_and_mul_bf16(down_input, gateup_output)
         dispose_tensor(gateup_output)
 
         # Step 4: Down GEMM (deepgemm bf16)
@@ -638,9 +617,7 @@ class DeepGemmInt8HybridExecutor(DeepGemmBf16HybridExecutor):
         with configure_deep_gemm_num_sms(self.num_gemm_sms):
             hidden_states = payload.expert_x
             hidden_states_scale = self._get_dispatch_scale(payload)
-            topk_idx = self._to_local_expert_ids(
-                payload.expert_topk_ids, payload.expert_ids_are_local
-            )
+            topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
             topk_weights = payload.expert_topk_weights
             tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
 
@@ -751,9 +728,7 @@ class DeepGemmInt8HybridExecutor(DeepGemmBf16HybridExecutor):
     ) -> CombineForwardPayload:
         hidden_states = payload.expert_x
         hidden_states_scale = self._get_dispatch_scale(payload)
-        topk_idx = self._to_local_expert_ids(
-            payload.expert_topk_ids, payload.expert_ids_are_local
-        )
+        topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
         topk_weights = payload.expert_topk_weights
         tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens_cpu
         if tokens_per_expert is None:
@@ -777,16 +752,9 @@ class DeepGemmInt8HybridExecutor(DeepGemmBf16HybridExecutor):
                 )
             )
 
-        if self.use_nopad:
-            # alignment == 1, so the aligned counts are exactly the router's
-            # per-expert counts, which already live on the device. Reuse them
-            # instead of rebuilding a pinned CPU tensor and copying it over on
-            # every layer.
-            token_counts = payload.expert_tokens_meta.expert_num_tokens
-        else:
-            token_counts = torch.tensor(
-                aligned_tokens, dtype=torch.int32, pin_memory=True, device="cpu"
-            ).to(device=device, non_blocking=True)
+        token_counts = torch.tensor(
+            aligned_tokens, dtype=torch.int32, pin_memory=True, device="cpu"
+        ).to(device=device, non_blocking=True)
         expert_start_loc = torch.empty_like(token_counts)
         m_indices = torch.empty(all_tokens, device=device, dtype=torch.int32)
         output_index = torch.empty_like(topk_idx)
@@ -881,10 +849,6 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
     """
 
     QUANT_METHOD = "FP8_PER_BLOCK"
-
-    # Measured on PPU (8x TP/EP, single stream): masked decode is ~8% faster
-    # than the nopad layout and removes the per-layer expert-count D2H sync.
-    PREFER_MASKED_DECODE = True
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -997,6 +961,12 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
             )
         return hidden_states_scale.contiguous()
 
+    def _to_local_expert_ids(self, topk_idx: torch.Tensor) -> torch.Tensor:
+        local = topk_idx - self.start_expert_id
+        return torch.where(
+            (local >= 0) & (local < self.num_experts_per_partition), local, -1
+        )
+
     def execute_masked(
         self,
         payload: ExpertForwardPayload,
@@ -1009,9 +979,7 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
         with configure_deep_gemm_num_sms(self.num_gemm_sms):
             hidden_states = payload.expert_x
             hidden_states_scale = self._get_dispatch_scale(payload)
-            topk_idx = self._to_local_expert_ids(
-                payload.expert_topk_ids, payload.expert_ids_are_local
-            )
+            topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
             topk_weights = payload.expert_topk_weights
             tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
 
@@ -1115,15 +1083,9 @@ class DeepGemmFp8HybridExecutor(DeepGemmBf16HybridExecutor):
     ) -> CombineForwardPayload:
         hidden_states = payload.expert_x
         hidden_states_scale = self._get_dispatch_scale(payload)
-        topk_idx = self._to_local_expert_ids(
-            payload.expert_topk_ids, payload.expert_ids_are_local
-        )
+        topk_idx = self._to_local_expert_ids(payload.expert_topk_ids)
         topk_weights = payload.expert_topk_weights
         tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens_cpu
-        if tokens_per_expert is None:
-            tokens_per_expert = (
-                payload.expert_tokens_meta.expert_num_tokens.cpu().tolist()
-            )
         if isinstance(tokens_per_expert, torch.Tensor):
             tokens_per_expert = tokens_per_expert.tolist()
 

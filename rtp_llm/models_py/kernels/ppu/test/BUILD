@@ -3,6 +3,19 @@ load("@arch_config//:arch_select.bzl", "requirement")
 requirement(["deep_gemm", "flashinfer-python", "numpy", "torch"])
 
 py_test(
+    name = "test_fp8_pd_strategy",
+    srcs = ["test_fp8_pd_strategy.py"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    tags = ["PPU-ZW810E", "manual"],
+    target_compatible_with = select({
+        "//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//rtp_llm/models_py:ppu_modules", ":torch"],
+)
+
+py_test(
     name = "test_block_scaled_fp8_gemm",
     srcs = ["test_block_scaled_fp8_gemm.py"],
     data = ["test_block_scaled_fp8_sgl_golden.json"],
@@ -69,23 +82,6 @@ py_test(
 )
 
 py_test(
-    name = "test_indexer_query_quant",
-    srcs = ["test_indexer_query_quant.py"],
-    data = ["test_indexer_query_sgl_golden.json"],
-    exec_properties = {"gpu": "PPU-ZW810E"},
-    tags = ["PPU-ZW810E", "manual"],
-    target_compatible_with = select({
-        "//:using_ppu": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
-    deps = [
-        "//rtp_llm/models_py/triton_kernels:triton_kernels",
-        "//rtp_llm:device",
-        ":torch",
-    ],
-)
-
-py_test(
     name = "test_mla_kv_quant",
     srcs = ["test_mla_kv_quant.py"],
     data = ["test_mla_kv_sgl_golden.json"],
@@ -95,7 +91,7 @@ py_test(
         "//:using_ppu": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = ["//rtp_llm/models_py:internal_kernels", ":torch"],
+    deps = ["//rtp_llm/models_py:ppu_modules", ":torch"],
 )
 
 py_test(
@@ -161,7 +157,7 @@ py_test(
         "//:using_ppu": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = ["//rtp_llm/models_py:internal_kernels", ":torch"],
+    deps = ["//rtp_llm/models_py:ppu_modules", ":torch"],
 )
 
 py_test(
@@ -173,7 +169,7 @@ py_test(
         "//:using_ppu": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = ["//rtp_llm/models_py:internal_kernels", ":torch"],
+    deps = ["//rtp_llm/models_py:ppu_modules", ":torch"],
 )
 
 py_test(
@@ -210,5 +206,5 @@ py_test(
         "//:using_ppu": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = ["//rtp_llm/models_py:internal_kernels", ":torch", ":numpy"],
+    deps = ["//rtp_llm/models_py:internal_kernels", ":deep_gemm", ":torch", ":numpy"],
 )

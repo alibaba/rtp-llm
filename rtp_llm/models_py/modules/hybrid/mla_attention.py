@@ -1,4 +1,3 @@
-import os
 from collections.abc import Mapping
 from typing import Dict, Optional, Tuple, Union, cast
 
@@ -11,7 +10,6 @@ from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
-from rtp_llm.models_py.utils.side_stream import is_capturing, side_stream
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
@@ -46,9 +44,6 @@ else:
     _FP8_GEMM_LINEAR = None
     fused_strided_rmsnorm = None  # type: ignore
     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output = None  # type: ignore
-
-
-_INDEXER_OVERLAP_ENV = "RTP_LLM_MLA_INDEXER_OVERLAP"
 
 
 class MlaAttention(nn.Module):
@@ -193,85 +188,6 @@ class MlaAttention(nn.Module):
             elif fused_strided_rmsnorm is not None:
                 self._fuse_q_a_norm_mode = "bf16"
 
-        # DSA indexer overlap. The stream and events are created on first forward
-        # (device known, capture not yet started) rather than here, so they stay
-        # on the right device for every rank.
-        self.indexer_overlap = self._indexer_overlap_eligible()
-        self._idx_stream: Optional[torch.cuda.Stream] = None
-        self._idx_fork: Optional[torch.cuda.Event] = None
-        self._idx_join: Optional[torch.cuda.Event] = None
-        self._idx_out: Optional[torch.Tensor] = None
-
-    def _indexer_overlap_eligible(self) -> bool:
-        """Whether the DSA indexer may run on the side stream.
-
-        sglang hides part of the indexer behind the main chain this way. The
-        indexer issues no collectives and touches only its own KV cache, so the
-        only ordering it needs is against the sparse-MLA kernel that consumes
-        its top-k indices.
-        """
-        if self.indexer is None or self.reuse_topk_indices:
-            return False
-        if os.environ.get(_INDEXER_OVERLAP_ENV, "1") == "0":
-            return False
-        # Without a q_lora the indexer consumes q_view, which only exists after
-        # q_b_proj, so there would be nothing left to overlap it with.
-        return self.q_lora_rank > 0
-
-    def _ensure_indexer_overlap(self, device: torch.device) -> bool:
-        """Create the side stream and fork/join events, once, outside capture."""
-        if self._idx_stream is not None:
-            return True
-        if not torch.cuda.is_available() or is_capturing():
-            return False
-        self._idx_stream = side_stream(device)
-        self._idx_fork = torch.cuda.Event(enable_timing=False)
-        self._idx_join = torch.cuda.Event(enable_timing=False)
-        return True
-
-    def _fork_sparse_indexer(
-        self,
-        hidden_states: torch.Tensor,
-        q_c: torch.Tensor,
-        indexer_kv_cache: Optional[LayerKVCache],
-        indexer_fmha_impl: Optional[MlaImplBase],
-        x_fp8: Optional[torch.Tensor],
-        x_scale: Optional[torch.Tensor],
-        q_c_fp8: Optional[torch.Tensor],
-        q_c_scale: Optional[torch.Tensor],
-        prev_topk_indices: Optional[torch.Tensor],
-        force_reuse_topk_indices: bool,
-    ) -> bool:
-        """Start the indexer on the side stream. True means a join is pending."""
-        if not self.indexer_overlap or indexer_kv_cache is None:
-            return False
-        if indexer_fmha_impl is None:
-            return False
-        # Prefill is compute-bound anyway, and it hands the indexer cache to the
-        # PD cache-store writer, which must not move off the main stream.
-        if indexer_fmha_impl.attn_inputs.is_prefill:
-            return False
-        if not self._ensure_indexer_overlap(hidden_states.device):
-            return False
-        self._idx_fork.record(torch.cuda.current_stream())
-        self._idx_stream.wait_event(self._idx_fork)
-        with torch.cuda.stream(self._idx_stream):
-            self._idx_out = self._run_sparse_indexer(
-                hidden_states,
-                q_c,
-                None,
-                indexer_kv_cache,
-                indexer_fmha_impl,
-                x_fp8,
-                x_scale,
-                q_c_fp8,
-                q_c_scale,
-                prev_topk_indices,
-                force_reuse_topk_indices,
-            )
-            self._idx_join.record(self._idx_stream)
-        return True
-
     def _run_sparse_indexer(
         self,
         hidden_states: torch.Tensor,
@@ -372,8 +288,6 @@ class MlaAttention(nn.Module):
                 raise RuntimeError("dense MLA does not accept tagged cache routes")
             default_fmha_impl = cast(MlaImplBase, fmha_impl)
             default_kv_cache = cast(Optional[LayerKVCache], kv_cache)
-            indexer_fmha_impl = None
-            indexer_kv_cache = None
 
         fmha_impl = default_fmha_impl
         kv_cache = default_kv_cache
@@ -381,7 +295,6 @@ class MlaAttention(nn.Module):
         q_c = None
         q_c_fp8 = None
         q_c_scale = None
-        indexer_forked = False
         if self.q_lora_rank > 0:
             if x_fp8 is not None and x_scale is not None:
                 fused_qkv = self.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
@@ -417,20 +330,6 @@ class MlaAttention(nn.Module):
                 )
             else:
                 q_c = self.q_a_layernorm(q.contiguous())
-            # The indexer consumes q_c, not q_view, so it can start here and run
-            # while q_b_proj -- the largest attention GEMM -- holds the main stream.
-            indexer_forked = self._fork_sparse_indexer(
-                hidden_states,
-                q_c,
-                indexer_kv_cache,
-                indexer_fmha_impl,
-                x_fp8,
-                x_scale,
-                q_c_fp8,
-                q_c_scale,
-                prev_topk_indices,
-                force_reuse_topk_indices,
-            )
             q = (
                 self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
                 if q_c_fp8 is not None
@@ -468,26 +367,19 @@ class MlaAttention(nn.Module):
 
         topk_indices = None
         if self.attn_config.is_sparse:
-            if indexer_forked:
-                # Join before q_c is released below: the indexer reads it on the
-                # side stream, and the allocator only tracks the main one.
-                torch.cuda.current_stream().wait_event(self._idx_join)
-                topk_indices = self._idx_out
-                self._idx_out = None
-            else:
-                topk_indices = self._run_sparse_indexer(
-                    hidden_states,
-                    q_c,
-                    q_view,
-                    indexer_kv_cache,
-                    indexer_fmha_impl,
-                    x_fp8,
-                    x_scale,
-                    q_c_fp8,
-                    q_c_scale,
-                    prev_topk_indices,
-                    force_reuse_topk_indices,
-                )
+            topk_indices = self._run_sparse_indexer(
+                hidden_states,
+                q_c,
+                q_view,
+                indexer_kv_cache,
+                indexer_fmha_impl,
+                x_fp8,
+                x_scale,
+                q_c_fp8,
+                q_c_scale,
+                prev_topk_indices,
+                force_reuse_topk_indices,
+            )
         # q_c and its quantized representation are Indexer-only. Releasing
         # the local references here lets SparseMLA reuse their blocks;
         # q_view, compressed_kv and k_pe must stay live through attention.

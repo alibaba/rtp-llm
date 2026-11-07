@@ -1,5 +1,4 @@
 import logging
-import os
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
@@ -35,15 +34,11 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
-from rtp_llm.models_py.utils.side_stream import is_capturing, side_stream
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
-
-_SHARED_EXPERT_OVERLAP_ENV = "RTP_LLM_MOE_SHARED_EXPERT_OVERLAP"
 
 
 class GenericMoeLayer(nn.Module):
@@ -137,18 +132,10 @@ class GenericMoeLayer(nn.Module):
         self.use_ep_shared_allreduce = (
             self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
         )
-        # The pure-TP router is also used when ep_size == tp_size (expert shards
-        # spread over TP ranks, tokens shared by all-gather). Both the routed
-        # and the shared expert then produce TP-partial outputs, so they can
-        # share one all-reduce exactly like the single-GPU case.
-        ep_pure_tp = (
-            self.ep_size == self.ffn_tp_size
-            and self.fused_moe.router.router_type() == RouterType.PURE_TP
-        )
         self.use_unified_tp_allreduce = (
             self.shared_expert is not None
             and self.ffn_tp_size > 1
-            and (self.ep_size == 1 or ep_pure_tp)
+            and self.ep_size == 1
             and self._supports_unified_tp_allreduce()
         )
         logger.debug(
@@ -160,45 +147,6 @@ class GenericMoeLayer(nn.Module):
         )
         self.correction_bias = weights.get(W.e_score_correction_b)
         self.group_topk = GroupTopK() if self.correction_bias is not None else None
-
-        # Shared-expert overlap. The stream and events are created on first
-        # forward (device known, capture not yet started) rather than here, so
-        # they stay on the right device for every rank.
-        self.shared_expert_overlap = self._shared_expert_overlap_eligible()
-        self._ovl_stream: Optional["torch.cuda.Stream"] = None
-        self._ovl_fork: Optional["torch.cuda.Event"] = None
-        self._ovl_join: Optional["torch.cuda.Event"] = None
-
-    def _shared_expert_overlap_eligible(self) -> bool:
-        """Whether the shared expert may run on a side stream.
-
-        sglang hides ~5.8 ms per decode step this way: the shared expert only
-        depends on hidden_states, so on a single stream its GEMMs needlessly
-        serialize behind the routed experts.
-        """
-        if self.shared_expert is None:
-            return False
-        if os.environ.get(_SHARED_EXPERT_OVERLAP_ENV, "1") == "0":
-            return False
-        # A collective on the side stream would race the routed path's own
-        # collectives on the main stream. DenseMLP skips its all-reduce in the
-        # EP and unified-TP modes, and issues none at all when ffn_tp_size == 1.
-        return bool(
-            self.use_ep_shared_allreduce
-            or self.use_unified_tp_allreduce
-            or self.ffn_tp_size <= 1
-        )
-
-    def _ensure_overlap_resources(self, device: torch.device) -> bool:
-        """Create the side stream and fork/join events, once, outside capture."""
-        if self._ovl_stream is not None:
-            return True
-        if not torch.cuda.is_available() or is_capturing():
-            return False
-        self._ovl_stream = side_stream(device)
-        self._ovl_fork = torch.cuda.Event(enable_timing=False)
-        self._ovl_join = torch.cuda.Event(enable_timing=False)
-        return True
 
     def _create_fused_moe(
         self,
@@ -299,9 +247,6 @@ class GenericMoeLayer(nn.Module):
         x_fp8: Optional[torch.Tensor] = None,
         x_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # Launched before the router: the shared expert only reads hidden_states,
-        # so its GEMMs can run while the routed experts are still being selected.
-        shared_expert_output = self._start_shared_expert(hidden_states, x_fp8, x_scale)
         topk_ids, topk_weights = self._route(hidden_states)
         # In pure-TP mode both the routed experts and the shared expert produce
         # TP-partial outputs.  Reduce their sum once instead of reducing each
@@ -315,42 +260,7 @@ class GenericMoeLayer(nn.Module):
             activation="SiGLU",
             skip_tp_allreduce=self.use_unified_tp_allreduce,
         )
-        return self._add_shared_expert(
-            hidden_states, experts_output, x_fp8, x_scale, shared_expert_output
-        )
-
-    def _run_shared_expert(
-        self,
-        hidden_states: torch.Tensor,
-        x_fp8: Optional[torch.Tensor],
-        x_scale: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        return self.shared_expert(
-            hidden_states,
-            x_fp8=x_fp8,
-            x_scale=x_scale,
-            skip_allreduce=(
-                self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
-            ),
-        )
-
-    def _start_shared_expert(
-        self,
-        hidden_states: torch.Tensor,
-        x_fp8: Optional[torch.Tensor],
-        x_scale: Optional[torch.Tensor],
-    ) -> Optional[torch.Tensor]:
-        """Fork the shared expert onto the side stream; None means run it inline."""
-        if not self.shared_expert_overlap:
-            return None
-        if not self._ensure_overlap_resources(hidden_states.device):
-            return None
-        self._ovl_fork.record(torch.cuda.current_stream())
-        self._ovl_stream.wait_event(self._ovl_fork)
-        with torch.cuda.stream(self._ovl_stream):
-            output = self._run_shared_expert(hidden_states, x_fp8, x_scale)
-            self._ovl_join.record(self._ovl_stream)
-        return output
+        return self._add_shared_expert(hidden_states, experts_output, x_fp8, x_scale)
 
     def _add_shared_expert(
         self,
@@ -358,15 +268,16 @@ class GenericMoeLayer(nn.Module):
         experts_output: torch.Tensor,
         x_fp8: Optional[torch.Tensor] = None,
         x_scale: Optional[torch.Tensor] = None,
-        shared_expert_output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if self.shared_expert is not None:
-            if shared_expert_output is None:
-                shared_expert_output = self._run_shared_expert(
-                    hidden_states, x_fp8, x_scale
-                )
-            else:
-                torch.cuda.current_stream().wait_event(self._ovl_join)
+            shared_expert_output = self.shared_expert(
+                hidden_states,
+                x_fp8=x_fp8,
+                x_scale=x_scale,
+                skip_allreduce=(
+                    self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
+                ),
+            )
             if self.use_unified_tp_allreduce:
                 # Both paths are still TP-partial.  The shared-expert gate is
                 # rank-consistent because hidden_states are replicated across

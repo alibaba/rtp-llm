@@ -43,16 +43,13 @@ def _register_impls(
     # Sparse MLA (GLM-5 / DSV3.2 DSA). The PPU flash_mla 2.0 wheel exposes the
     # same flash_mla_sparse_fwd / flash_mla_with_kvcache API and the C++
     # bindings (SparseMlaParams, concat_and_cache_mla, indexer ops) build for
-    # PPU, so the CUDA SparseMlaImpl works unmodified. PPU has no dense MLA
-    # backend, so the factory's short-prefill fast path is disabled on PPU and
-    # this impl serves every sparse-MLA role.
+    # PPU. SparseMlaImpl serves DP decode; CP prefill is registered below.
     if prefill_mla_imps is not None and decode_mla_imps is not None:
         try:
             from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
                 SparseMlaImpl,
             )
 
-            prefill_mla_imps.append(SparseMlaImpl)
             decode_mla_imps.append(SparseMlaImpl)
             logging.info("[ppu attn register] SparseMlaImpl registered for sparse MLA")
         except ImportError as e:
@@ -65,7 +62,6 @@ def _register_impls(
         # Prefill context parallel. Once prefill_cp_config.is_enabled() the
         # factory filters on support_prefill_cp(), which SparseMlaImpl answers
         # False -- without this the CP list is empty and prefill has no backend.
-        # Appended after SparseMlaImpl so non-CP prefill still wins on priority.
         try:
             from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (
                 SparseMlaCpImpl,

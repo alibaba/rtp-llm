@@ -48,6 +48,7 @@ py_test(
 
 py_test(
     name = "flashmla_sparse_cp_ppu_test",
+    main = "flashmla_sparse_cp_op_test.py",
     srcs = ["flashmla_sparse_cp_op_test.py"],
     args = [
         "SparseMlaFp8CPOpTest.test_ppu_large_query_chunks_match_single_query",
