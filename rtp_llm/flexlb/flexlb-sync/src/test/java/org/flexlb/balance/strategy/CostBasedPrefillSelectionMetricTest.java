@@ -290,6 +290,21 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void fullStackMaxHitLeaderAtFloorPercentSticksBeyondTtftCutoff() {
+        configureAffinity(400L, 5.0);
+        config.getRouter().getRoles().getPrefill().getCacheAffinity()
+                .setStickyLeaderFloorPercent(50.0);
+
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp(),
+                    "the 50%-hit leader must stick beyond the 400ms cutoff at the"
+                            + " default leader floor");
+            verify(reporter).reportCacheAffinityDecision(
+                    RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+        }
+    }
+
+    @Test
     void cacheLeaderWithAllDispatchSlotsOccupiedStillWins() {
         configureAffinity(600L, 5.0);
         PrefillEndpoint endpoint = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
@@ -641,6 +656,11 @@ class CostBasedPrefillSelectionMetricTest {
                 new RoutingConfig.CacheAffinityConfig();
         affinity.setMaxExtraTtftMs(maxExtraTtftMs);
         affinity.setMinPrefixHitPercent(minPrefixHitPercent);
+        // Full-stack affinity tests model the pre-floor semantics: without this
+        // the default stickyLeaderFloorPercent would make every 50%-hit leader
+        // stick regardless of the cutoff and change their expected reasons.
+        // Floor behavior is covered by the focused candidate-set tests.
+        affinity.setStickyLeaderFloorPercent(RoutingConfig.PERCENTAGE_SCALE + 1.0);
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
 
         publish("10.0.0.2", 8080);
