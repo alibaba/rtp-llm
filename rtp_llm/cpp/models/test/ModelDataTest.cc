@@ -134,7 +134,7 @@ TEST_F(ModelDataTest, testScoringRowHintsEncodeMetadataAndChunkRows) {
     // No producer override: the hint carries the env/default value every rank agrees on.
     EXPECT_EQ(hints[GptModelInputIndex::scoringChunkRows], kDefaultScoringPartialChunkRows);
 
-    inputs.all_logits_row_indexes     = torch::empty({0}, torch::kLong);
+    inputs.all_logits_row_indexes     = torch::empty({0}, torch::kInt32);
     inputs.all_logits_row_labels      = torch::empty({0}, torch::kInt32);
     inputs.scoring_partial_chunk_rows = 3;
     hints                             = getModelInputShapeHints(inputs);
@@ -153,7 +153,7 @@ TEST_F(ModelDataTest, testScoringRowHintsEncodeLabelLengthMismatch) {
     // (both defined, lengths unequal); the broadcast check then rejects it on every rank
     // before packing — a rank-local tensor comparison could not give that guarantee.
     GptModelInputs inputs;
-    inputs.all_logits_row_indexes = torch::empty({3}, torch::kLong);
+    inputs.all_logits_row_indexes = torch::empty({3}, torch::kInt32);
     inputs.all_logits_row_labels  = torch::empty({2}, torch::kInt32);
     auto hints                    = getModelInputShapeHints(inputs);
     EXPECT_EQ(hints[GptModelInputIndex::allLogitsRowMeta], 3);

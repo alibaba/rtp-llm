@@ -377,12 +377,129 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
         finally:
             clear_comm_ops()
 
+    def test_tp2_scoring_topk_width_above_local_shard(self):
+        # k_max above a single shard's candidate width: the merged top-k width is
+        # min(k_max, tp*shard_k, output_vocab) — NOT shard_k — so k=20 (local shard 16,
+        # global real vocab 29) must return 20 columns and k=50 must clamp to 29, with
+        # values/ids matching an independent re-sort of the merged candidate set.
+        # Covering k below/at/above the local shard and at/above the real vocab guards
+        # the pre-fix shard_k-sized output buffers, which raised a size-mismatch
+        # RuntimeError for every k in (16, 32].
+        kernel = (
+            torch.arange(16 * 256, device="cuda").reshape(16, 256).to(torch.bfloat16)
+            / 512
+        )
+        hidden = (
+            torch.arange(6 * 256, device="cuda").reshape(6, 256).to(torch.bfloat16)
+            / 512
+        )
+        scoring = torch.tensor([0, 2, 3], dtype=torch.int32, pin_memory=True)
+        labels = torch.tensor([7, -1, 4], dtype=torch.int32, pin_memory=True)
+        ref = hidden.float() @ kernel.float().t()
+        local_f = ref[[0, 2, 3]]
+
+        def run_case(k, chunk_rows=None):
+            kl = min(k, 16)  # per-shard partial width min(k_max, vocab_l)
+
+            def gather(receivers, mode, senders, inplace):
+                buffer = receivers[0]
+                local = buffer.view(2, buffer.size(0), -1)[0].clone()
+                if buffer.size(0) > 1:
+                    buffer.view(2, buffer.size(0), -1).copy_(
+                        torch.stack((local, local + 16))
+                    )
+                else:
+                    rows = (buffer.size(1) // 2) // (2 + 2 * kl)
+                    p = local.reshape(-1)
+                    l0, t0, v0, i0 = p.split([rows, rows, rows * kl, rows * kl])
+                    r1 = torch.cat(
+                        (
+                            l0 + 16,
+                            torch.full_like(t0, float("-inf")),
+                            v0 + 16,
+                            (i0.view(torch.int32).remainder(13) + 16).view(
+                                torch.float32
+                            ),
+                        )
+                    )
+                    buffer.view(2, -1).copy_(torch.stack((p, r1)))
+
+            register_comm_ops(lambda *args: None, lambda *args: None, gather)
+            try:
+                kwargs = dict(
+                    need_all_logits=True,
+                    all_logits_row_indexes=scoring,
+                    all_logits_row_labels=labels,
+                    all_logits_top_k=k,
+                    tp_size=2,
+                    output_vocab_size=29,
+                )
+                if chunk_rows is not None:
+                    kwargs["scoring_partial_chunk_rows"] = chunk_rows
+                with torch.no_grad():
+                    return run_lm_head(
+                        self.model, kernel, hidden, self.indexes, **kwargs
+                    )
+            finally:
+                clear_comm_ops()
+
+        # Independent merged-candidate reference for a given k.
+        def expected_topk(k):
+            kl = min(k, 16)
+            k_out = min(k, min(2 * kl, 29))
+            v0, i0 = local_f.topk(kl, -1)
+            cand_v = torch.cat((v0, v0 + 16), dim=1)
+            cand_i = torch.cat(
+                (i0.to(torch.int32), i0.to(torch.int32).remainder(13) + 16), dim=1
+            )
+            idx = torch.argsort(cand_i, dim=1, stable=True)
+            cand_v = cand_v.gather(1, idx)
+            cand_i = cand_i.gather(1, idx)
+            idx = torch.argsort(-cand_v, dim=1, stable=True)
+            return (
+                cand_v.gather(1, idx)[:, :k_out],
+                cand_i.gather(1, idx)[:, :k_out],
+            )
+
+        # k below / at / above the local shard width and at / above the real vocab.
+        for k in (3, 16, 20, 29, 50):
+            result = run_case(k)
+            ev, ei = expected_topk(k)
+            self.assertEqual(result["all_logits_topk_values"].shape, (5, ev.size(1)))
+            self.assertEqual(result["all_logits_topk_ids"].shape, (5, ei.size(1)))
+            torch.testing.assert_close(
+                result["all_logits_topk_values"][2:],
+                ev,
+                rtol=1e-4,
+                atol=1e-4,
+                msg=f"k={k}",
+            )
+            torch.testing.assert_close(
+                result["all_logits_topk_ids"][2:],
+                ei,
+                rtol=0,
+                atol=0,
+                msg=f"k={k}",
+            )
+        # Chunked rows at the boundary width (k=20 > shard 16) must merge identically.
+        whole = run_case(20)
+        chunked = run_case(20, chunk_rows=1)
+        for key in (
+            "all_logits_lse",
+            "all_logits_target_logits",
+            "all_logits_topk_values",
+            "all_logits_topk_ids",
+        ):
+            torch.testing.assert_close(chunked[key], whole[key], rtol=0, atol=0)
+
     def test_int8_check_tp2_sharded_scoring_then_decode(self):
         # tp>1 + INT8 GEMV + CHECK on a dense bf16 head: a scoring prefill (5 selected
         # rows, M=6 <= 8 so the GEMV engages) runs the sharded check arm — int8 and ref
-        # payload gathers per chunk plus the ref lm-row gather — then an ordinary decode
-        # forward keeps the check stats accumulating. Served values must be the bf16
-        # reference merge, not the int8 output.
+        # payload gathers per chunk plus int8 and ref lm-row gathers — then an ordinary
+        # decode forward keeps the check stats accumulating. Served values must be the
+        # bf16 reference merge, not the int8 output, and the check stats must count the
+        # sampler-facing lm rows (scoring 3 + lm 2 + decode 2 = 7), not only the
+        # scoring selection.
         import os
 
         old_env = {
@@ -452,19 +569,19 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
                 clear_comm_ops()
 
             # Check arm, one chunk of 3 scoring rows: int8 payload gather then ref
-            # payload gather (P = 3*(2+2*2) = 18 floats -> [1, 36]), then the ref
-            # lm-row gather [2, 32]. The decode forward adds its int8 logits gather
-            # and its ref gather.
+            # payload gather (P = 3*(2+2*2) = 18 floats -> [1, 36]), then the int8
+            # lm-row gather and the ref lm-row gather [2, 32] each. The decode forward
+            # adds its int8 logits gather and its ref gather.
             self.assertEqual(
                 gathered_shapes,
-                [(1, 36), (1, 36), (2, 32), (2, 32), (2, 32)],
+                [(1, 36), (1, 36), (2, 32), (2, 32), (2, 32), (2, 32)],
             )
             stats = result.get("int8_lm_head_check_stats")
             self.assertIsNotNone(stats)
             self.assertTrue(stats.is_cuda)
-            # Scoring forward checked the 3 scoring rows; the decode forward checked
-            # its 2 lm rows.
-            self.assertEqual(int(stats[0].item()), 5)
+            # Scoring forward checked 3 scoring rows + 2 sampler lm rows; the decode
+            # forward checked its 2 lm rows.
+            self.assertEqual(int(stats[0].item()), 7)
             self.assertGreaterEqual(int(stats[1].item()), 0)
             self.assertLessEqual(int(stats[1].item()), int(stats[0].item()))
 

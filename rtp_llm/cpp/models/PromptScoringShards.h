@@ -58,9 +58,9 @@ inline ScoringPartials computeShardScoringPartials(const torch::Tensor& local_lo
     out.topk_ids    = torch::empty({rows, shard_k}, i32);
 
     for (int64_t c0 = 0; c0 < rows; c0 += chunk_rows) {
-        const int64_t c   = std::min(chunk_rows, rows - c0);
-        auto          sel = local_logits.index_select(0, row_indexes.narrow(0, c0, c)).to(torch::kFloat32);
-        const auto valid = n_valid < vocab_l ? sel.narrow(1, 0, n_valid) : sel;
+        const int64_t c     = std::min(chunk_rows, rows - c0);
+        auto          sel   = local_logits.index_select(0, row_indexes.narrow(0, c0, c)).to(torch::kFloat32);
+        const auto    valid = n_valid < vocab_l ? sel.narrow(1, 0, n_valid) : sel;
         out.lse.narrow(0, c0, c).copy_(valid.logsumexp(-1));
         if (shard_k > 0) {
             // Each shard contributes its local top-min(k_max, n_valid): every entry the global
@@ -85,6 +85,23 @@ inline ScoringPartials computeShardScoringPartials(const torch::Tensor& local_lo
         out.target.narrow(0, c0, c).copy_(tv.masked_fill(~owner, -std::numeric_limits<float>::infinity()));
     }
     return out;
+}
+
+// Width of the merged top-k output for a scoring batch: each shard contributes shard_k
+// local candidates, so the merge can emit up to tp_size*shard_k, capped at k_max and —
+// when the real (unpadded) vocab is known — at vocab. mergeScoringPartials allocates its
+// outputs with this width; any caller pre-allocating merged buffers (the forward's
+// [lm prefix ++ scoring rows] outputs) MUST use the same value or copy_ sees a
+// non-broadcastable mismatch for k_max > shard_k.
+inline int64_t mergedScoringTopkWidth(int64_t shard_k, int64_t k_max, int64_t tp_size, int64_t vocab) {
+    if (shard_k <= 0) {
+        return 0;
+    }
+    int64_t k_out = std::min(k_max, tp_size * shard_k);
+    if (vocab > 0) {
+        k_out = std::min(k_out, vocab);
+    }
+    return k_out;
 }
 
 // Packed fp32 payload [lse | target | topk_values | topk_ids bit-cast to f32]; the width is a
@@ -121,16 +138,12 @@ inline ScoringPartials mergeScoringPartials(
     const int64_t tp_size = gathered.size(0);
     RTP_LLM_CHECK_WITH_INFO(chunk_rows > 0, "scoring merge chunk_rows must be positive, got %ld", chunk_rows);
     ScoringPartials out;
-    out.lse       = torch::empty({rows}, gathered.options());
-    out.target    = torch::empty({rows}, gathered.options());
-    int64_t k_out = 0;
-    if (shard_k > 0) {
-        k_out = std::min(k_max, tp_size * shard_k);
-        if (vocab > 0) {
-            // Same clamp the gathered path applies via .narrow(1, 0, output_vocab_size): a top-k
-            // wider than the real vocab must not emit padded-column placeholders.
-            k_out = std::min(k_out, vocab);
-        }
+    out.lse    = torch::empty({rows}, gathered.options());
+    out.target = torch::empty({rows}, gathered.options());
+    // Same clamp the gathered path applies via .narrow(1, 0, output_vocab_size): a top-k
+    // wider than the real vocab must not emit padded-column placeholders.
+    const int64_t k_out = mergedScoringTopkWidth(shard_k, k_max, tp_size, vocab);
+    if (k_out > 0) {
         out.topk_values = torch::empty({rows, k_out}, gathered.options());
         out.topk_ids    = torch::empty({rows, k_out}, gathered.options().dtype(torch::kInt32));
     } else {
@@ -139,8 +152,9 @@ inline ScoringPartials mergeScoringPartials(
     }
     // Pack (value desc, global id asc) into one int64 key: flip the float bits into the
     // order-preserving mapping, then append the id complement as tie-breaker. Keys are
-    // unique across shards, so the merge order is deterministic regardless of sort
-    // stability.
+    // unique across shards whenever ids are unique (duplicate keys only become possible
+    // through padded or pruned vocab columns, which scoring requests cannot reach), so
+    // the merge order is deterministic regardless of sort stability.
     const int64_t kHalf        = int64_t{1} << 31;
     const int64_t kSpan        = int64_t{1} << 32;
     const auto    gathered_i32 = gathered.view(torch::kInt32);

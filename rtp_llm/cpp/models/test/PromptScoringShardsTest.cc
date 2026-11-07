@@ -222,9 +222,10 @@ TEST(PromptScoringShardsTest, LocalCutoffTieKeepsTrueValue) {
     auto full  = torch::zeros({rows, 8}, torch::TensorOptions().dtype(torch::kFloat32).device(dev));
     full[0][0] = 9.0f;
     // FOUR-way tie at value 5.0: three candidates live on shard0 (cols 1,2,3) and one on
-    // shard1 (col 5). k_max=3 lets shard0 keep only {9.0} plus two of its three 5.0s, so
-    // one tied candidate is genuinely dropped by the LOCAL cutoff — yet the merged top-3
-    // still reports {9, 5, 5} because shard1's 5.0 fills the slot.
+    // shard1 (col 5). k_max=3 lets shard0 keep only {9.0} plus two of its three 5.0s —
+    // torch.topk picks them by unspecified order, so one tied candidate is genuinely
+    // dropped by the LOCAL cutoff — yet the merged top-3 still reports {9, 5, 5}
+    // because shard1's 5.0 fills the slot.
     full[0][1]   = 5.0f;
     full[0][2]   = 5.0f;
     full[0][3]   = 5.0f;
@@ -261,7 +262,7 @@ TEST(PromptScoringShardsTest, LocalCutoffTieKeepsTrueValue) {
 // surviving candidates, every emitted id is a true carrier of its value, and a NaN
 // in the row data poisons that row's lse. The collective-uniform abort lives in
 // tpReduceScoringPartials (not exercised by this merge test).
-TEST(PromptScoringShardsTest, SpecialFloatOrderingMatchesTopkReference) {
+TEST(PromptScoringShardsTest, SpecialFloatMergeKeepsCandidateMultiset) {
     const auto    dev   = device();
     const int64_t rows  = 1;
     const int64_t vocab = 7;
@@ -278,27 +279,36 @@ TEST(PromptScoringShardsTest, SpecialFloatOrderingMatchesTopkReference) {
     auto row_idx = torch::arange(rows, torch::TensorOptions().dtype(torch::kLong).device(dev));
     auto labels  = torch::tensor({-1}, torch::TensorOptions().dtype(torch::kInt32).device(dev));
 
-    auto [gathered, shard_k] = gatherPayloads(full, row_idx, labels, /*k_max=*/vocab, tp, vocab, 512);
-    auto merged              = mergeScoringPartials(gathered, rows, shard_k, /*k_max=*/vocab, vocab, 512);
+    // Exercise both k == vocab and k < vocab: which NaN/special candidates survive the
+    // local cutoff is unspecified, so the reference multiset is recomputed per k.
+    const float   neg_inf   = -std::numeric_limits<float>::infinity();
+    const int64_t k_cases[] = {4, vocab};
+    for (const int64_t k_max : k_cases) {
+        auto [gathered, shard_k] = gatherPayloads(full, row_idx, labels, k_max, tp, vocab, 512);
+        auto merged              = mergeScoringPartials(gathered, rows, shard_k, k_max, vocab, 512);
 
-    auto expected = full.topk(vocab, -1);
-    auto mv       = merged.topk_values.cpu();
-    auto ev       = std::get<0>(expected).cpu();
-    // Same value multiset: identical NaN counts, and the non-NaN values are identical
-    // after a canonical sort (NaN slots masked to -inf before sorting).
-    EXPECT_EQ(mv.isnan().sum().item<int64_t>(), ev.isnan().sum().item<int64_t>());
-    const float neg_inf   = -std::numeric_limits<float>::infinity();
-    auto        mv_sorted = std::get<0>(mv.masked_fill(mv.isnan(), neg_inf).sort(-1));
-    auto        ev_sorted = std::get<0>(ev.masked_fill(ev.isnan(), neg_inf).sort(-1));
-    EXPECT_TRUE(torch::equal(mv_sorted, ev_sorted));
-    // Every emitted id is a true carrier of its emitted value (NaN-safe compare).
-    auto carried = full.cpu().gather(1, merged.topk_ids.cpu().to(torch::kLong));
-    EXPECT_TRUE(torch::equal(carried.isnan(), mv.isnan()));
-    EXPECT_TRUE(torch::equal(carried.masked_fill(carried.isnan(), 0), mv.masked_fill(mv.isnan(), 0)));
-    // The merge is deterministic for a fixed payload.
-    auto merged2 = mergeScoringPartials(gathered, rows, shard_k, /*k_max=*/vocab, vocab, 512);
-    EXPECT_TRUE(torch::equal(merged2.topk_ids.cpu(), merged.topk_ids.cpu()));
-    EXPECT_TRUE(std::isnan(merged.lse.cpu()[0].item<float>()));
+        const int64_t k_out = std::min(k_max, vocab);
+        EXPECT_EQ(merged.topk_values.size(1), k_out);
+        EXPECT_EQ(merged.topk_ids.size(1), k_out);
+        auto expected = full.topk(k_out, -1);
+        auto mv       = merged.topk_values.cpu();
+        auto ev       = std::get<0>(expected).cpu();
+        // Same value multiset: identical NaN counts, and the non-NaN values are
+        // identical after a canonical sort (NaN slots masked to -inf before sorting).
+        EXPECT_EQ(mv.isnan().sum().item<int64_t>(), ev.isnan().sum().item<int64_t>());
+        auto mv_sorted = std::get<0>(mv.masked_fill(mv.isnan(), neg_inf).sort(-1));
+        auto ev_sorted = std::get<0>(ev.masked_fill(ev.isnan(), neg_inf).sort(-1));
+        EXPECT_TRUE(torch::equal(mv_sorted, ev_sorted));
+        // Every emitted id is a true carrier of its emitted value (NaN-safe compare).
+        auto carried = full.cpu().gather(1, merged.topk_ids.cpu().to(torch::kLong));
+        EXPECT_TRUE(torch::equal(carried.isnan(), mv.isnan()));
+        EXPECT_TRUE(torch::equal(carried.masked_fill(carried.isnan(), 0), mv.masked_fill(mv.isnan(), 0)));
+        // The merge is deterministic for a fixed payload.
+        auto merged2 = mergeScoringPartials(gathered, rows, shard_k, k_max, vocab, 512);
+        EXPECT_TRUE(torch::equal(merged2.topk_ids.cpu(), merged.topk_ids.cpu()));
+        // A NaN in the row data poisons that row's lse.
+        EXPECT_TRUE(std::isnan(merged.lse.cpu()[0].item<float>()));
+    }
 }
 
 // k_max larger than the served vocab produces at most `vocab` entries — the legacy
