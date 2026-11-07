@@ -18,13 +18,23 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.device.device_type import is_ppu
+
 
 @triton.jit
-def _quantize_query(data, SCALE_UE8M0: tl.constexpr, USE_V2_QUANT: tl.constexpr):
+def _quantize_query(
+    data, SCALE_UE8M0: tl.constexpr, USE_V2_QUANT: tl.constexpr,
+    USE_PPU_QUANT: tl.constexpr,
+):
     # The unfused Hadamard transform writes BF16 before quantization reads it.
     data = data.to(tl.bfloat16).to(tl.float32)
     amax = tl.maximum(tl.max(tl.abs(data)), 1e-4)
-    if USE_V2_QUANT:
+    if USE_PPU_QUANT:
+        # PPU DSA uses SGL's act_quant: multiply to form the FP32 scale,
+        # then ordinary Triton division. div_rn and 448/amax change FP8 ties.
+        scale = amax * (1.0 / 448.0)
+        quantized = data / scale
+    elif USE_V2_QUANT:
         # Match per_token_group_quant_8bit_v2's multiply/reciprocal sequence.
         scale = amax * (1.0 / 448.0)
         if SCALE_UE8M0:
@@ -74,6 +84,7 @@ def _fused_q_rope_hadamard_quant_kernel(
     LOG2_HEAD_DIM: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
     USE_V2_QUANT: tl.constexpr,
+    USE_PPU_QUANT: tl.constexpr,
 ):
     """Fused RoPE + Hadamard + FP8 quant for indexer Q.
 
@@ -155,7 +166,7 @@ def _fused_q_rope_hadamard_quant_kernel(
     data = tl.load(scratch_base + idx) * (HEAD_DIM**-0.5)
 
     # ---- Step 4: FP8 quantization matching the caller's scale format ----
-    quantized, scale = _quantize_query(data, SCALE_UE8M0, USE_V2_QUANT)
+    quantized, scale = _quantize_query(data, SCALE_UE8M0, USE_V2_QUANT, USE_PPU_QUANT)
     fp8_base = q_fp8_ptr + tok_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
     tl.store(fp8_base + idx, quantized)
     tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale)
@@ -231,6 +242,7 @@ def fused_q_rope_quant(
             log2_head_dim,
             scale_fmt == "ue8m0",
             _use_v2_quant(q),
+            is_ppu() and scale_fmt != "ue8m0",
             num_warps=1,
         )
 
@@ -266,6 +278,7 @@ def _fused_qk_rope_hadamard_quant_kernel(
     LOG2_HEAD_DIM: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
     USE_V2_QUANT: tl.constexpr,
+    USE_PPU_QUANT: tl.constexpr,
 ):
     """Fused QK: K(RoPE+Hadamard→bf16) + Q(RoPE+Hadamard+FP8).
 
@@ -383,7 +396,7 @@ def _fused_qk_rope_hadamard_quant_kernel(
 
     data = tl.load(scratch_base + idx) * (HEAD_DIM**-0.5)
 
-    quantized, scale = _quantize_query(data, SCALE_UE8M0, USE_V2_QUANT)
+    quantized, scale = _quantize_query(data, SCALE_UE8M0, USE_V2_QUANT, USE_PPU_QUANT)
     fp8_base = q_fp8_ptr + tok_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
     tl.store(fp8_base + idx, quantized)
     tl.store(q_scale_ptr + tok_idx * q_scale_stride0 + head_idx, scale)
@@ -470,6 +483,7 @@ def fused_qk_rope_quant(
             log2_head_dim,
             scale_fmt == "ue8m0",
             _use_v2_quant(q),
+            is_ppu() and scale_fmt != "ue8m0",
             num_warps=1,
         )
 

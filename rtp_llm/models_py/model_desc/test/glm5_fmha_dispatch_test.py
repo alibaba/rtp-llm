@@ -483,6 +483,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
 
     def test_graph_clone_preserves_common_routing_and_collective_state(self):
         layer = self.make_moe_layer(ffn_tp_size=2)
+        layer._ppu_gate_weight_nt = torch.ones(256, 4, dtype=torch.bfloat16)
         backend = self.make_moe_layer().fused_moe
         with patch.object(
             layer.fused_moe, "clone_for_cuda_graph", return_value=backend
@@ -492,6 +493,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
         self.assertIs(clone.fused_moe, backend)
         self.assertIsNot(clone.fused_moe, layer.fused_moe)
         self.assertIs(clone.group_topk, layer.group_topk)
+        self.assertIs(clone._ppu_gate_weight_nt, layer._ppu_gate_weight_nt)
         self.assertEqual(clone.layer_idx, 7)
         self.assertTrue(clone.use_ep_shared_allreduce)
         self.assertFalse(clone.use_unified_tp_allreduce)

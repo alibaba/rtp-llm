@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
+from rtp_llm.device.device_type import is_ppu
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
@@ -264,6 +265,33 @@ class W8A8Fp8PerBlockMlaAttnAtomicWeight(
 ):
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
+
+    def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
+        if is_ppu() and self.name in (W.mla_kc, W.mla_vc):
+            # These FP8 weights become BF16 absorb matrices. AtomicWeight's
+            # compute-dtype cast is lossless for FP8 values, but rounds their
+            # FP32 block scales before dequantization. Keep the scales FP32
+            # until the final matrix is rounded to the model's compute dtype.
+            scale_names = {weight.tensor_name(layer_id) for weight in self.weights[1:]}
+            tensor_source = _MlaFp32ScaleTensorSource(tensor_source, scale_names)
+        return super()._load_raw_tensor(tensor_source, layer_id, device, load_config)
+
+
+class _MlaFp32ScaleTensorSource(TensorSource):
+    def __init__(self, base: TensorSource, scale_names: set[str]):
+        self._base = base
+        self._scale_names = scale_names
+
+    def load_tensor(self, name, data_type=torch.float16):
+        return self._base.load_tensor(
+            name, torch.float32 if name in self._scale_names else data_type
+        )
+
+    def has_tensor(self, name):
+        return self._base.has_tensor(name)
+
+    def get_database(self):
+        return self._base.get_database()
 
 
 class W8A8Fp8PerBlockFfnAtomicWeight(FfnAtomicWeight, W8A8Fp8PerBlockAtomicWeight):

@@ -21,6 +21,10 @@ from rtp_llm.models_py.kernels.ppu.deepgemm_wrapper import (
     m_grouped_fp8_gemm_nt_masked,
     m_grouped_int8_gemm_nt_masked,
 )
+from rtp_llm.models_py.kernels.ppu.fp8_quant import (
+    masked_fp8_quantize_128,
+    masked_silu_mul_fp8_quantize_128,
+)
 from rtp_llm.models_py.kernels.ppu.int8_kernel.fused_silu_mul_int8_quant import (
     silu_and_mul_masked_per_token_quant_int8_fwd,
 )
@@ -40,12 +44,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.models_py.triton_kernels.common.activation import (
-    MaskedSiluInputLayout,
     silu_mul_masked_bf16_no_post_quant_fwd,
-    silu_mul_masked_fp8_post_quant_fwd,
 )
 from rtp_llm.models_py.utils.memory import dispose_tensor
-from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
@@ -433,9 +434,8 @@ class DeepGemmFp8MaskedExecutor(FusedMoeExpertExecutor):
     """Consume DeepEP low-latency BF16 payload with PPU FP8 masked DeepGEMM.
 
     The PPU deep_ep low-latency dispatch ships BF16 activations; per-128-group
-    FP8 quantization happens here, after dispatch, with
-    ``trt_fp8_quantize_128`` whose ``(M, K // 128)`` row-major scale layout is
-    what the PPU wheel's masked grouped FP8 GEMM consumes.
+    FP8 quantization happens here, after dispatch, only for valid rows.
+    Column-major per-expert scales avoid copies inside masked DeepGEMM.
     """
 
     QUANT_METHOD = "FP8_PER_BLOCK"
@@ -600,16 +600,8 @@ class DeepGemmFp8MaskedExecutor(FusedMoeExpertExecutor):
         device = expert_x.device
 
         with configure_deep_gemm_num_sms(self._num_gemm_sms):
-            expert_x_q, expert_x_scale = trt_fp8_quantize_128(
-                expert_x.reshape(-1, self._hidden_size), False
-            )
-            expert_x_q = expert_x_q.view(
-                self._num_experts, max_tokens, self._hidden_size
-            )
-            expert_x_scale = expert_x_scale.view(
-                self._num_experts,
-                max_tokens,
-                self._hidden_size // self.DEEPGEMM_BLOCK_SHAPE[1],
+            expert_x_q, expert_x_scale = masked_fp8_quantize_128(
+                expert_x, masked_m, expected_m
             )
             dispose_tensor(expert_x)
 
@@ -628,33 +620,8 @@ class DeepGemmFp8MaskedExecutor(FusedMoeExpertExecutor):
             dispose_tensor(expert_x_q)
             dispose_tensor(expert_x_scale)
 
-            down_q = torch.empty(
-                (
-                    self._num_experts,
-                    max_tokens,
-                    self._intermediate_size // 2,
-                ),
-                device=device,
-                dtype=torch.float8_e4m3fn,
-            )
-            down_scale = torch.empty(
-                (
-                    self._num_experts,
-                    max_tokens,
-                    self._intermediate_size // 2 // self.DEEPGEMM_BLOCK_SHAPE[0],
-                ),
-                device=device,
-                dtype=torch.float32,
-            )
-            silu_mul_masked_fp8_post_quant_fwd(
-                input=gateup_output,
-                output=down_q,
-                output_scale=down_scale,
-                quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
-                masked_m=masked_m,
-                expected_m=expected_m,
-                input_layout=MaskedSiluInputLayout.PER_EXPERT_CAPACITY,
-                scale_ue8m0=False,
+            down_q, down_scale = masked_silu_mul_fp8_quantize_128(
+                gateup_output, masked_m, expected_m
             )
             dispose_tensor(gateup_output)
 

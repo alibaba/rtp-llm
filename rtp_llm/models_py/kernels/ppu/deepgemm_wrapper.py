@@ -87,6 +87,32 @@ def _resolve_bf16_masked(module: Any) -> Optional[Callable[..., Any]]:
     return m_grouped_gemm_bf16_bf16_bf16_nt_masked
 
 
+def _resolve_fp8_grouped(module: Any, layout: str) -> Optional[Callable[..., Any]]:
+    symbol = "m_grouped_gemm_fp8_fp8_bf16_nt_" + layout
+    impl = _resolve(module, symbol)
+    if impl is None:
+        return None
+    try:
+        wheel_version = importlib.metadata.version("deep-gemm")
+    except importlib.metadata.PackageNotFoundError:
+        return impl
+    if wheel_version != "1.0.0+v0.4.0.ppu2.2.0":
+        return impl
+
+    # All three grouped FP8 C++ launchers in this wheel bypass capture.
+    # The Python entry points submit on torch.cuda.current_stream().
+    m_grouped_gemm_fp8 = importlib.import_module(
+        "deep_gemm.jit_kernels.m_grouped_gemm_fp8"
+    )
+
+    logger.warning(
+        "Using the current-stream FP8 %s implementation for DeepGEMM %s",
+        layout,
+        wheel_version,
+    )
+    return getattr(m_grouped_gemm_fp8, symbol)
+
+
 def _ensure_initialized() -> None:
     global _contiguous_impl, _masked_impl, _nopad_impl
     global _int8_dense_impl, _int8_contiguous_impl, _int8_masked_impl
@@ -130,12 +156,9 @@ def _ensure_initialized() -> None:
         "m_grouped_int8_gemm_nt_nopad",
     )
     _fp8_dense_impl = _resolve(deep_gemm, "fp8_gemm_nt")
-    _fp8_contiguous_impl = _resolve(
-        deep_gemm,
-        "m_grouped_gemm_fp8_fp8_bf16_nt_contiguous",
-    )
-    _fp8_masked_impl = _resolve(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_masked")
-    _fp8_nopad_impl = _resolve(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_nopad")
+    _fp8_contiguous_impl = _resolve_fp8_grouped(deep_gemm, "contiguous")
+    _fp8_masked_impl = _resolve_fp8_grouped(deep_gemm, "masked")
+    _fp8_nopad_impl = _resolve_fp8_grouped(deep_gemm, "nopad")
     _initialized = True
 
 

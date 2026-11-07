@@ -64,6 +64,7 @@ py_library(
 py_library(
     name = "sparse_mla",
     srcs = glob(["sparse_mla/*.py"]),
+    deps = ["//rtp_llm:device"],
     visibility = ["//visibility:public"]
 )
 

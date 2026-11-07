@@ -10,6 +10,7 @@ import torch
 
 from rtp_llm.ops import KvCacheDataType, compute_ops
 from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
+from rtp_llm.device.device_type import is_ppu
 
 
 class MlaKVCacheWriteOp:
@@ -24,6 +25,7 @@ class MlaKVCacheWriteOp:
         )
         # Scale tensor is required for concat_and_cache_mla even in non-FP8 mode
         self.scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        self._ppu_fp8 = is_ppu() and self.kv_cache_type == "fp8_ds_mla"
 
     def forward(
         self,
@@ -48,6 +50,15 @@ class MlaKVCacheWriteOp:
                 slot_mapping = fmha_params.slot_mapping[total_global_ids]
             else:
                 slot_mapping = fmha_params.slot_mapping
+            if self._ppu_fp8 and append_ckv_t.dtype == torch.bfloat16:
+                from rtp_llm.models_py.kernels.ppu.mla_kv_quant import (
+                    concat_and_cache_mla_fp8,
+                )
+
+                concat_and_cache_mla_fp8(
+                    append_ckv_t, key_pe, kv_cache.kv_cache_base, slot_mapping
+                )
+                return
             compute_ops.concat_and_cache_mla(
                 append_ckv_t,
                 key_pe,

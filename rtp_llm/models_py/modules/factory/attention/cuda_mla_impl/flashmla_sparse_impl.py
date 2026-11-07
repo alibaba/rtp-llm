@@ -34,6 +34,7 @@ except (ImportError, AttributeError, ValueError) as e:
 
     logging.warning(f"flash_mla not available: {e}. Requires CUDA >= 12.9")
 
+from rtp_llm.device.device_type import is_ppu
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
@@ -50,6 +51,7 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla imp
 )
 from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+from rtp_llm.models_py.utils.side_stream import is_capturing
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
@@ -61,6 +63,9 @@ from rtp_llm.ops.compute_ops import KVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
+
+# PPU's flash_mla binding requires a concrete tile scheduler (no None path).
+_IS_PPU = is_ppu()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -224,6 +229,12 @@ class SparseMlaFp8Op(SparseMlaOp):
         # dangling/stale pointer, so plan() must refresh it in place.
         self._sched_meta = None
         self._sched_meta_key = None
+        self._sched_meta_pool = {}
+        # Per-row-count ``topk_length`` buffers for the sparse decode kernel.
+        # Pooled so every CUDA graph batch bucket keeps a fixed address and a
+        # captured graph is never left reading a reallocated buffer.
+        self._topk_length_pool: Dict[int, torch.Tensor] = {}
+        self._topk_length: Optional[torch.Tensor] = None
         self._deterministic_decode = os.environ.get("DETERMINISTIC_GEMM") == "1"
         self._decode_phase = False
         self._chunk_sched_meta = {}
@@ -238,6 +249,28 @@ class SparseMlaFp8Op(SparseMlaOp):
             1,
             True,
         )
+        if _IS_PPU:
+            # PPU's fwd_kvcache_mla rejects a None tile scheduler, unlike CUDA
+            # where the kernel schedules itself. Keep one live object per key:
+            # reuse makes graph capture/replay see a stable address instead of a
+            # freed one. The lazily built schedule also freezes the topk_length
+            # values of the call that built it, which _refresh_topk_length pins
+            # to the full index width.
+            meta = self._sched_meta_pool.get(key)
+            if meta is None:
+                meta, _ = get_mla_metadata(
+                    cache_seqlens=None,
+                    num_q_tokens_per_head_k=num_q_tokens_per_head_k,
+                    topk=self.top_k,
+                    num_heads_q=self.num_heads,
+                    num_heads_k=1,
+                    is_fp8_kvcache=True,
+                )
+                self._sched_meta_pool[key] = meta
+            self._sched_meta = meta
+            self._sched_meta_key = key
+            return
+
         if self._sched_meta is None or (
             not self.use_cuda_graph and self._sched_meta_key != key
         ):
@@ -267,6 +300,39 @@ class SparseMlaFp8Op(SparseMlaOp):
         self._sched_meta.tile_scheduler_metadata = None
         self._sched_meta.num_splits = None
 
+    def _refresh_topk_length(self) -> None:
+        """Fill the graph-stable ``topk_length`` buffer for the decode kernel.
+
+        ``dsv4_persistent_topk`` writes the valid indices leftmost and ``-1``
+        past ``min(top_k, expanded_seq_lens[r])``, which is exactly the count
+        FlashMLA wants: passing it lets the kernel skip the padded tail instead
+        of masking it.
+
+        Writes are in place so a captured graph keeps reading one address. The
+        call that lazily builds the tile schedule -- and any call under capture
+        -- must see the full index width instead: FlashMLA freezes that schedule
+        keyed on these values, so one built for short warmup lengths over-runs on
+        a longer replay. Full width reproduces the ``topk_length is None``
+        schedule, a valid superset for any real length, and replays still read
+        the real per-step values written here.
+        """
+        lengths = getattr(self.mla_params, "expanded_seq_lens", None)
+        if not isinstance(lengths, torch.Tensor) or lengths.numel() == 0:
+            self._topk_length = None
+            return
+        rows = int(lengths.numel())
+        buf = self._topk_length_pool.get(rows)
+        if buf is None:
+            buf = torch.empty(rows, dtype=torch.int32, device=lengths.device)
+            self._topk_length_pool[rows] = buf
+        self._topk_length = buf
+        builds_schedule = not bool(getattr(self._sched_meta, "have_initialized", True))
+        if builds_schedule or is_capturing():
+            buf.fill_(self.top_k)
+        else:
+            buf.copy_(lengths)
+            buf.clamp_(max=self.top_k)
+
     def plan(
         self,
         mla_params: rtp_llm_ops.FlashInferMlaAttnParams,
@@ -283,6 +349,7 @@ class SparseMlaFp8Op(SparseMlaOp):
         # get_mla_metadata returns an empty FlashMLASchedMeta; the kernel fills
         # it on first call, then reuses it for the rest of the forward.
         self._reset_sched_meta(int(mla_params.batch_indice_h.shape[0]) * self.num_heads)
+        self._refresh_topk_length()
 
         # Replicated caches use paged attention directly. Sharded CP caches
         # override this choice when their layout requires gathering.
@@ -383,7 +450,7 @@ class SparseMlaFp8Op(SparseMlaOp):
     ) -> torch.Tensor:
         """flash_mla_with_kvcache directly on FP8 paged cache."""
         assert self._sched_meta is not None
-        if layer_id == 0:
+        if layer_id == 0 and not _IS_PPU:
             self._sched_meta.tile_scheduler_metadata = None
             self._sched_meta.num_splits = None
             for meta in self._chunk_sched_meta.values():
@@ -394,41 +461,65 @@ class SparseMlaFp8Op(SparseMlaOp):
         if kv_cache.ndim == 3:
             kv_cache = kv_cache.unsqueeze(-2)
 
-        # Indices: [T, 1, topk] → [1, T, topk] (kernel expects batched layout)
-        global_indices = (
-            self._convert_topk_indices_to_global(topk_indices).squeeze(1).unsqueeze(0)
+        rows = q.shape[0]
+        # dim0 is the batch axis and PPU sizes num_splits by (bs+1,), so the
+        # flattened [1, T, ...] form serializes T independent decode rows into
+        # one bs=1 request. One query token per request is exactly the case
+        # where the per-request layout is expressible.
+        per_request = (
+            _IS_PPU and self.block_table is not None and self.block_table.shape[0] == rows
         )
+        # _convert_topk_indices_to_global already yields [T, 1, topk]; the
+        # flattened path needs [1, T, topk].
+        global_indices = self._convert_topk_indices_to_global(topk_indices)
+        if not per_request:
+            global_indices = global_indices.squeeze(1).unsqueeze(0)
+        q_axis = 1 if per_request else 0
 
-        if q.shape[0] == 0:
+        # ``topk_length`` is per batch entry, so it only describes the
+        # per-request layout: the flattened form folds T query rows into one
+        # entry and has no single valid count to give.
+        topk_length = self._topk_length
+        if not per_request or topk_length is None or topk_length.numel() != rows:
+            topk_length = None
+
+        if rows == 0:
             return q.new_empty((0, q.shape[1], self.kv_lora_rank))
 
         # Bound decode query width to keep FlashMLA's BF16 rounding consistent
         # with small batches; even one ULP can change sparse routing.
-        chunk_size = (
-            4 if self._deterministic_decode and self._decode_phase else q.shape[0]
-        )
+        chunk_size = 4 if self._deterministic_decode and self._decode_phase else rows
         outputs = []
-        for begin in range(0, q.shape[0], chunk_size):
-            end = min(begin + chunk_size, q.shape[0])
+        for begin in range(0, rows, chunk_size):
+            end = min(begin + chunk_size, rows)
             meta = self._sched_meta
-            if chunk_size < q.shape[0]:
+            if chunk_size < rows:
                 size = end - begin
                 if size not in self._chunk_sched_meta:
                     self._chunk_sched_meta[size] = get_mla_metadata()[0]
                 meta = self._chunk_sched_meta[size]
+            if per_request:
+                q_arg = q[begin:end].unsqueeze(1)
+                indices_arg = global_indices[begin:end]
+            else:
+                q_arg = q[begin:end].unsqueeze(0)
+                indices_arg = global_indices[:, begin:end]
             output, _ = flash_mla_with_kvcache(
-                q=q[begin:end].unsqueeze(0),
+                q=q_arg,
                 k_cache=kv_cache,
-                block_table=self.block_table,
+                # Sparse indices already encode page * block_size + offset, so
+                # the block table is redundant here (and sglang passes None).
+                block_table=None,
                 head_dim_v=self.kv_lora_rank,
                 cache_seqlens=None,
                 tile_scheduler_metadata=meta,
                 num_splits=None,
                 is_fp8_kvcache=True,
-                indices=global_indices[:, begin:end],
+                indices=indices_arg,
+                topk_length=topk_length[begin:end] if topk_length is not None else None,
                 softmax_scale=self.scale,
             )
-            outputs.append(output.squeeze(0))
+            outputs.append(output.squeeze(q_axis))
         return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
 
 

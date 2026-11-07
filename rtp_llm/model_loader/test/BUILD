@@ -101,3 +101,10 @@ py_test(
     deps = py_test_deps,
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
+
+py_test(
+    name = "test_mla_fp8_scale_precision",
+    srcs = ["test_mla_fp8_scale_precision.py"],
+    deps = py_test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
