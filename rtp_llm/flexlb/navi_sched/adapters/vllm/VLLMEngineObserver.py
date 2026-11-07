@@ -1832,15 +1832,8 @@ class VLLMEngineObserver:
 
         if self._engine_core is not None:
             raise RuntimeError("NaviSched VLLM observer is already bound")
-        # Native PD accounting consumes each step before submitting the next,
-        # including local fallback requests without a forwarded batch state.
-        if self._native_ingress and engine_core.batch_queue is not None:
-            if engine_core.batch_queue:
-                raise RuntimeError("cannot disable a nonempty vLLM batch queue")
-            engine_core.batch_queue = None
-            engine_core.batch_queue_size = 1
-            engine_core.step_fn = engine_core.step
-            logger.info("NaviSched disabled vLLM speculative batch queue")
+        if self._native_ingress and engine_core.batch_queue:
+            raise RuntimeError("cannot bind NaviSched to a nonempty vLLM batch queue")
         if self._native_ingress:
             logger.info(
                 "NaviSched native engine step loop: %s",
@@ -4722,7 +4715,7 @@ class VLLMEngineObserver:
         return total_padded
 
     def on_model_output(self, scheduler_output: Any, model_output: Any = None) -> None:
-        """Complete PD prefill after synchronous scheduler/cache output processing."""
+        """Complete PD prefill after scheduler/cache output processing."""
         if not self._native_ingress:
             return
         output_key = id(scheduler_output)
