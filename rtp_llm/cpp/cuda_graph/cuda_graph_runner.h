@@ -189,6 +189,8 @@ public:
     static CudaGraphRunner* initializeCapture(std::unique_ptr<CudaGraphRunner> runner);
 
 private:
+    friend class CudaGraphTestRunner;
+
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic

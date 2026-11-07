@@ -187,6 +187,14 @@ class KimiK3MlaImpl(MlaImplBase):
     def support_cuda_graph(self):
         return self._paged
 
+    @property
+    def requires_host_metadata(self):
+        return not self._paged
+
+    @property
+    def can_capture_cuda_graph_prepare(self):
+        return self._paged
+
     def prepare(self, inputs, forbid_realloc=False):
         if self._uses_paged_attention(inputs) != self._paged:
             raise ValueError("K3 MLA instance cannot switch between prefill and paged attention")
