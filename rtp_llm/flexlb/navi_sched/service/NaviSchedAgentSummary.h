@@ -29,6 +29,8 @@ public:
     double executionCapacity = 0.0;
     double executionCapacityDenominator = 0.0;
     int32_t gpuReadyQueuedRequests = 0;
+    int32_t backendWaitingRequests = 0;
+    int32_t readyBatchQueuedRequests = 0;
     NaviSchedWorkloadSnapshot workload;
     size_t nativeWorkloadBatchCount = 0;
     size_t nativeWorkloadRequestCount = 0;

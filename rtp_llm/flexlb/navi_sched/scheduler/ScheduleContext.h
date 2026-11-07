@@ -95,7 +95,7 @@ public:
     double getExecutionUtilization() const;
     double getExecutionBusyUtilization() const;
     int32_t getExecutionRunningRequests() const { return _workload.runningRequestCount; }
-    int32_t getExecutionWaitingRequests() const { return _workload.waitingRequestCount; }
+    int32_t getExecutionWaitingRequests() const;
     uint64_t getAgentIdHash() const;
     const std::string &getAgentId() const;
     int64_t getTotalBlocks() const;

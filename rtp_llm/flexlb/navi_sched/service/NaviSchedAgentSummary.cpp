@@ -16,6 +16,8 @@ void NaviSchedAgentSummary::Jsonize(JsonWrapper &json)
     json.Jsonize("execution_capacity_ema", executionCapacity);
     json.Jsonize("execution_capacity_denominator", executionCapacityDenominator);
     json.Jsonize("gpu_ready_queued_requests", gpuReadyQueuedRequests);
+    json.Jsonize("backend_waiting_requests", backendWaitingRequests);
+    json.Jsonize("ready_batch_queued_requests", readyBatchQueuedRequests);
     json.Jsonize("execution_active_count", executionActiveCount);
     json.Jsonize("execution_running_requests", executionRunningRequests);
     json.Jsonize("execution_queued_requests", executionQueuedRequests);
@@ -155,6 +157,8 @@ std::string NaviSchedAgentSummary::format() const
            std::to_string(executionCapacityDenominator) +
            "\n  execution_capacity_ema: " + std::to_string(executionCapacity) +
            "\n  gpu_ready_queued_requests: " + std::to_string(gpuReadyQueuedRequests) +
+           "\n  backend_waiting_requests: " + std::to_string(backendWaitingRequests) +
+           "\n  ready_batch_queued_requests: " + std::to_string(readyBatchQueuedRequests) +
            "\n  execution_busy_window: " + std::to_string(executionBusyWindow) +
            "\n  execution_window_busy_us: " + std::to_string(executionWindowBusyUs) +
            "\n  execution_window_elapsed_us: " +

@@ -197,7 +197,8 @@ public:
     };
 
     AgentBatchR();
-    AgentBatchR(int64_t batchTimeoutMs, int64_t closedBatchKeepMs);
+    AgentBatchR(int64_t batchTimeoutMs, int64_t closedBatchKeepMs,
+                bool includeReadyQueueInUtilization = false);
 
 public:
     bool beginLifecycleCallback();
@@ -261,6 +262,8 @@ public:
         double executionCapacity = 0.0;
         double executionCapacityDenominator = 0.0;
         int32_t gpuReadyQueuedRequests = 0;
+        int32_t backendWaitingRequests = 0;
+        int32_t readyBatchQueuedRequests = 0;
     };
     ExecutionUtilizationSnapshot getExecutionUtilizationSnapshot() const;
     const std::shared_ptr<std::atomic<double>> &getExecutionUtilizationSource() const
@@ -412,7 +415,8 @@ private:
     std::unordered_map<int64_t, CallbackBatchPtr> _readyBatches;
     std::unordered_map<int64_t, CallbackBatchPtr> _runningBatches;
     int32_t _batchWaitingRequestCount = 0;
-    int32_t _queuedBatchRequestCount = 0;
+    std::atomic<int32_t> _queuedBatchRequestCount{0};
+    const bool _includeReadyQueueInUtilization = false;
     int32_t _runningRequestCount = 0;
     uint64_t _readyWithoutRunningGapCount = 0;
     int64_t _readyWithoutRunningTotalTimeUs = 0;

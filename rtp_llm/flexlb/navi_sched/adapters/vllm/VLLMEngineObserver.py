@@ -1834,9 +1834,8 @@ class VLLMEngineObserver:
 
         if self._engine_core is not None:
             raise RuntimeError("NaviSched VLLM observer is already bound")
-        # The PD-separated Prefill path must consume each vLLM step before
-        # submitting another. Preserve vLLM's original queue behavior for
-        # unified serving, whose adapter has no PD batch serialization rule.
+        # Native PD accounting consumes each step before submitting the next,
+        # including local fallback requests without a forwarded batch state.
         if self._native_ingress and engine_core.batch_queue is not None:
             if engine_core.batch_queue:
                 raise RuntimeError("cannot disable a nonempty vLLM batch queue")
@@ -1844,6 +1843,11 @@ class VLLMEngineObserver:
             engine_core.batch_queue_size = 1
             engine_core.step_fn = engine_core.step
             logger.info("NaviSched disabled vLLM speculative batch queue")
+        if self._native_ingress:
+            logger.info(
+                "NaviSched native engine step loop: %s",
+                getattr(engine_core.step_fn, "__qualname__", type(engine_core.step_fn).__name__),
+            )
         self._engine_core = engine_core
         _execution_timing_probe.bind_engine_loop_audit(self, engine_core)
         if self._native_ingress:
@@ -2109,6 +2113,44 @@ class VLLMEngineObserver:
                 # Keep the last state explicitly supplied by the upstream cache.
                 logger.exception("failed to submit V6D resident cache snapshot")
 
+    def _log_native_forward_wait(self) -> None:
+        now_ns = time.perf_counter_ns()
+        if now_ns < getattr(self, "_next_forward_wait_log_ns", 0):
+            return
+        self._next_forward_wait_log_ns = now_ns + 5_000_000_000
+        try:
+            state = next(iter(self._scheduled_forward_batches.values()), None)
+            if state is None:
+                state = next(iter(self._pending_forward_batches.values()), None)
+        except RuntimeError:
+            # The engine loop may move a batch while this diagnostic samples it.
+            return
+        if state is None:
+            values = (-1, 0, 0, 0, 0, False, False)
+        else:
+            with state.lock:
+                values = (
+                    state.batch_id,
+                    len(state.requests),
+                    len(state.completed_prefill_request_ids),
+                    len(state.cancelled_request_ids),
+                    state.pending_prefill_steps,
+                    state.prefill_complete,
+                    state.released,
+                )
+        with self._pd_output_lock:
+            ready_finishes = len(self._pd_ready_finishes)
+            completed_outputs = len(self._pd_output_completed_ns)
+        _execution_timing_probe._diagnostic_format_info(
+            logger,
+            "[navi-vllm-forward-slot-wait] batch_id=%d requests=%d "
+            "completed_prefills=%d cancelled=%d pending_steps=%d "
+            "prefill_complete=%s released=%s ready_finishes=%d completed_outputs=%d",
+            *values,
+            ready_finishes,
+            completed_outputs,
+        )
+
     def _forward_batches(self) -> None:
         if _read_bool_env("VLLM_NAVI_SCHED_DEFER_RENDER", False):
             asyncio.run(self._forward_render_batches())
@@ -2125,6 +2167,7 @@ class VLLMEngineObserver:
                     return
                 continue
             if self._native_ingress and not self._pd_forward_slot.is_set():
+                self._log_native_forward_wait()
                 # Requests accepted for later native batches still need their
                 # cache-touch preparation while the current PD batch runs.
                 # Otherwise a busy Prefill node never drains the touch queue.
@@ -2167,6 +2210,7 @@ class VLLMEngineObserver:
             stopping = self._forward_stop.is_set()
             python_take_ns = time.monotonic_ns()
             if self._discard_cancelled_forward_requests(native_batch):
+                self._pd_forward_slot.set()
                 continue
             native_ready_ns = int(getattr(native_batch, "ready_time_ns", 0))
             admission_started_ns = (
@@ -4509,6 +4553,7 @@ class VLLMEngineObserver:
     ) -> None:
         if (
             not output_complete
+            and not self._native_ingress
             and getattr(future, "_navi_backend_execution_step", None) is execution_step
             and not future.cancelled()
             and future.exception() is None

@@ -202,6 +202,14 @@ double NaviSchedScheduleNode::getExecutionBusyUtilization() const
     return _node->getExecutionBusyUtilization();
 }
 
+int32_t NaviSchedScheduleNode::getExecutionWaitingRequests() const
+{
+    const auto readyQueued = _info->pdSeparated && !_unifiedLatencyPrediction
+        ? _queuedBatchRequests : 0;
+    return static_cast<int32_t>(std::min<int64_t>(std::numeric_limits<int32_t>::max(),
+        int64_t(_workload.waitingRequestCount) + readyQueued));
+}
+
 bool NaviSchedScheduleNode::hasLatencyModel() const { return bool(_latencyModel); }
 
 bool NaviSchedScheduleNode::hasValidLatencyModel() const

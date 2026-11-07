@@ -380,12 +380,7 @@ void MasterScheduleContextKernel::buildReadyContexts(int64_t activationTimeUs)
             }
             continue;
         }
-        const auto &coldStart = context->context->_coldStartRoutingStats;
-        _masterStateR->recordScheduleRound(
-            coldStart.evaluated
-                ? context->context->_requests.size() - coldStart.rejectedRequestCount -
-                      context->context->_queueOverloadRejectedRequestCount
-                : context->context->requestCount());
+        _masterStateR->recordScheduleRound(scheduleRoundRequestCount(*context->context));
         if (!context->context->_prepared && !context->context->prepare()) {
             context->context->fail("scheduler_error");
         }
@@ -455,6 +450,20 @@ bool MasterScheduleContextKernel::shouldDropRequest(
     const auto randomSample =
         static_cast<double>(randomValue) / std::numeric_limits<uint64_t>::max();
     return randomSample < dropProbability;
+}
+
+size_t MasterScheduleContextKernel::scheduleRoundRequestCount(
+    const NaviSchedScheduleContext &context)
+{
+    const auto &coldStart = context._coldStartRoutingStats;
+    // All-cold admission already removed rejected requests before routing.
+    const auto rejectedAfterRouting = context._allColdUtilizationAdmission
+                                          ? 0
+                                          : context._queueOverloadRejectedRequestCount;
+    return coldStart.evaluated
+               ? context._requests.size() - coldStart.rejectedRequestCount -
+                     rejectedAfterRouting
+               : context.requestCount();
 }
 
 bool MasterScheduleContextKernel::prepareAdmission(

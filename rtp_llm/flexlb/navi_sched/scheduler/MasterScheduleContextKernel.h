@@ -43,6 +43,7 @@ private:
     bool updateScheduleTimer(navi::KernelComputeContext &ctx, int64_t currentTimeUs);
     std::shared_ptr<void> beginScheduleRound();
     void buildReadyContexts(int64_t activationTimeUs);
+    static size_t scheduleRoundRequestCount(const NaviSchedScheduleContext &context);
     bool prepareAdmission(const std::shared_ptr<MasterScheduleContextData> &context,
                           const std::function<uint64_t()> &randomDraw = {});
     bool applyQueueOverloadLimit(

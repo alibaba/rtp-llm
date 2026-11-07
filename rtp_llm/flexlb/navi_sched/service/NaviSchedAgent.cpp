@@ -949,7 +949,9 @@ NaviSchedAgentImpl::NaviSchedAgentImpl(const NaviSchedAgentConfig &agentConfig,
                                        int64_t totalBlocks)
     : NaviSchedRole(agentConfig.service)
     , _agentBatchR(std::make_shared<AgentBatchR>(agentConfig.service.batchTimeoutMs,
-                                                 agentConfig.service.closedBatchKeepMs))
+                                                 agentConfig.service.closedBatchKeepMs,
+                                                 agentConfig.pdSeparated &&
+                                                     !agentConfig.unifiedLatencyPrediction))
     , _agentLatencyInputR(std::make_shared<AgentLatencyInputR>())
     , _agentReportBridgeR(std::make_shared<AgentReportBridgeR>())
     , _agentRequestR(std::make_shared<AgentRequestR>())
@@ -1992,6 +1994,8 @@ std::string NaviSchedAgentImpl::makeSnapshot() const
     summary.executionCapacity = execution.executionCapacity;
     summary.executionCapacityDenominator = execution.executionCapacityDenominator;
     summary.gpuReadyQueuedRequests = execution.gpuReadyQueuedRequests;
+    summary.backendWaitingRequests = execution.backendWaitingRequests;
+    summary.readyBatchQueuedRequests = execution.readyBatchQueuedRequests;
     summary.executionBusyWindow = execution.busyWindow;
     summary.executionWindowBusyUs = execution.windowBusyUs;
     summary.executionWindowElapsedUs = execution.windowElapsedUs;
