@@ -91,7 +91,7 @@ inline ScoringPartials computeShardScoringPartials(const torch::Tensor& local_lo
 // local candidates, so the merge can emit up to tp_size*shard_k, capped at k_max and —
 // when the real (unpadded) vocab is known — at vocab. mergeScoringPartials allocates its
 // outputs with this width; any caller pre-allocating merged buffers (the forward's
-// [lm prefix ++ scoring rows] outputs) MUST use the same value or copy_ sees a
+// scoring-row outputs) MUST use the same value or copy_ sees a
 // non-broadcastable mismatch for k_max > shard_k.
 inline int64_t mergedScoringTopkWidth(int64_t shard_k, int64_t k_max, int64_t tp_size, int64_t vocab) {
     if (shard_k <= 0) {

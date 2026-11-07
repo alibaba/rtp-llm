@@ -185,8 +185,8 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
     def test_micro_batch_scoring_tp2_emits_sharded_partials(self) -> None:
         # tp>1 over mocked communication: the same scoring input must NOT produce a
         # [rows, vocab] all_logits at all — only the gathered lm rows and the merged
-        # scoring partials (lse / target / top-k) in the [lm rows ++ scoring rows]
-        # layout. The peer shard is emulated as local + 16 over a padded vocab of 32.
+        # scoring partials (lse / target / top-k), compact over the scoring rows
+        # only. The peer shard is emulated as local + 16 over a padded vocab of 32.
         gathered_shapes = []
 
         def gather(receivers, mode, senders, inplace):
@@ -244,21 +244,20 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             atol=0,
         )
         lse = result["all_logits_lse"].cpu()
-        # Row layout [lm(2,6,8) placeholder zeros; scoring(1,3,4) merged]. A scoring
-        # row's local logits are constant v over 16 valid columns -> local lse =
-        # v + ln16; the mock peer reports lse+16 -> merged = v + ln16 + ln(1+e^16).
-        torch.testing.assert_close(lse[:3], torch.zeros(3), rtol=0, atol=0)
+        # Compact layout: scoring rows (1,3,4) only, no lm prefix. A scoring row's
+        # local logits are constant v over 16 valid columns -> local lse = v + ln16;
+        # the mock peer reports lse+16 -> merged = v + ln16 + ln(1+e^16).
+        self.assertEqual(tuple(lse.shape), (3,))
         for idx, v in enumerate([1.0, 3.0, 4.0]):
             self.assertAlmostEqual(
-                float(lse[3 + idx]),
+                float(lse[idx]),
                 v + math.log(16.0) + math.log1p(math.exp(16.0)),
                 places=4,
             )
         # Labels {7,-1,4} are next-token ids < 16 -> all on rank0's shard.
         target = result["all_logits_target_logits"].cpu()
-        torch.testing.assert_close(target[:3], torch.zeros(3), rtol=0, atol=0)
         torch.testing.assert_close(
-            target[3:],
+            target,
             torch.tensor([1.0, float("-inf"), 4.0]),
             rtol=0,
             atol=0,
@@ -267,17 +266,16 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         # v+16 and the ids are rank1-valid (< 29) positions of equal-valued columns.
         topk_values = result["all_logits_topk_values"].cpu()
         topk_ids = result["all_logits_topk_ids"].cpu()
-        self.assertEqual(tuple(topk_values.shape), (6, 3))
-        torch.testing.assert_close(topk_values[:3], torch.zeros(3, 3), rtol=0, atol=0)
+        self.assertEqual(tuple(topk_values.shape), (3, 3))
         for idx, v in enumerate([1.0, 3.0, 4.0]):
             torch.testing.assert_close(
-                topk_values[3 + idx],
+                topk_values[idx],
                 torch.tensor([v + 16.0, v + 16.0, v + 16.0]),
                 rtol=0,
                 atol=0,
             )
             for k in range(3):
-                self.assertTrue(16 <= int(topk_ids[3 + idx][k]) < 29)
+                self.assertTrue(16 <= int(topk_ids[idx][k]) < 29)
 
     def test_context_parallel_publishes_original_lengths_not_local_chunk(self) -> None:
         model = CacheStoreForwardModel()

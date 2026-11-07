@@ -204,8 +204,8 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
         # shard equals this shard's columns + 16 (its global ids are +16), so every merged
         # output is computable from rank 0's local logits alone.
         gathered_shapes = []
-        # Partials are produced for the scoring rows only (1 here); the lm prefix rows
-        # of the merged outputs are placeholders never consumed downstream.
+        # Partials are produced for the scoring rows only (1 here); the merged outputs
+        # are compact — the lm rows are served from `logits` and are not represented.
         R, kl = 1, 3
 
         def gather(receivers, mode, senders, inplace):
@@ -267,35 +267,28 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
             self.assertIsNone(result["all_logits"])
             self.assertEqual(result["all_logits_lm_rows"], 2)
 
-            # Merged layout [lm(2) placeholder zeros ++ scoring(1)]: only row 2 is
-            # reduced; the lm prefix rows are never consumed downstream.
+            # Compact layout: exactly the 1 scoring row — no lm prefix rows.
+            self.assertEqual(result["all_logits_lse"].shape, (1,))
+            self.assertEqual(result["all_logits_target_logits"].shape, (1,))
+            self.assertEqual(result["all_logits_topk_values"].shape, (1, 3))
+            self.assertEqual(result["all_logits_topk_ids"].shape, (1, 3))
             local_f = local.float()
             scoring_row_lse = local_f[2].logsumexp(-1)
-            merged_lse = torch.logsumexp(
+            expected_lse = torch.logsumexp(
                 torch.stack((scoring_row_lse, scoring_row_lse + 16), -1), -1
-            )
-            expected_lse = torch.cat((torch.zeros(2, device="cuda"), merged_lse[None]))
+            )[None]
             torch.testing.assert_close(
                 result["all_logits_lse"], expected_lse, rtol=1e-6, atol=1e-6
             )
-            expected_target = torch.tensor(
-                [0.0, 0.0, local_f[2][7].item()], device="cuda"
-            )
+            expected_target = torch.tensor([local_f[2][7].item()], device="cuda")
             torch.testing.assert_close(
                 result["all_logits_target_logits"], expected_target, rtol=0, atol=0
             )
             # Union's top-3 are rank1's entries: rank0's local top-3 values shifted +16,
             # ids wrapped into rank1's valid [16, 29) global range.
             v0, i0 = local_f[2].topk(3, -1)
-            expected_topv = torch.cat(
-                (torch.zeros(2, 3, device="cuda"), (v0 + 16)[None])
-            )
-            expected_topi = torch.cat(
-                (
-                    torch.zeros(2, 3, dtype=torch.int32, device="cuda"),
-                    (i0.to(torch.int32).remainder(13) + 16)[None],
-                )
-            )
+            expected_topv = (v0 + 16)[None]
+            expected_topi = (i0.to(torch.int32).remainder(13) + 16)[None]
             torch.testing.assert_close(
                 result["all_logits_topk_values"], expected_topv, rtol=0, atol=0
             )
@@ -304,6 +297,121 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
             )
         finally:
             clear_comm_ops()
+
+    def test_row_selected_tp_scoring_outputs_carry_no_lm_prefix(self):
+        # Direct allocation regression for the nonempty-scoring case: every merged
+        # scoring output is exactly [num_scoring_rows(, k_out)] — the sampler lm rows
+        # are never prefixed into these tensors. A many-LM/few-scoring shape (5 lm
+        # rows, 1 scoring row) with a huge accepted k (k > shard width, k >= real
+        # vocab) must therefore still produce [1, k_out] tables, and a k=0 run
+        # (loss-only shape) collapses the top-k width only.
+        scoring = torch.tensor([4], dtype=torch.int32, pin_memory=True)
+        labels = torch.tensor([7], dtype=torch.int32, pin_memory=True)
+        lm_indexes = torch.tensor([0, 1, 2, 3, 5], dtype=torch.int32, pin_memory=True)
+
+        def run_case(k):
+            kl = min(k, 16)  # per-shard partial width min(k_max, vocab_l)
+            gathered_shapes = []
+
+            def gather(receivers, mode, senders, inplace):
+                buffer = receivers[0]
+                gathered_shapes.append(tuple(buffer.shape))
+                local = buffer.view(2, buffer.size(0), -1)[0].clone()
+                if buffer.size(0) > 1:
+                    # lm-row gather [5, 2*16]: peer = local + 16.
+                    buffer.view(2, buffer.size(0), -1).copy_(
+                        torch.stack((local, local + 16))
+                    )
+                else:
+                    # payload [1, 2P], P = rows*(2+2*kl): peer values +16.
+                    rows = (buffer.size(1) // 2) // (2 + 2 * kl)
+                    p = local.reshape(-1)
+                    l0, t0, v0, i0 = p.split([rows, rows, rows * kl, rows * kl])
+                    r1 = torch.cat(
+                        (
+                            l0 + 16,
+                            torch.full_like(t0, float("-inf")),
+                            v0 + 16,
+                            (i0.view(torch.int32).remainder(13) + 16).view(
+                                torch.float32
+                            ),
+                        )
+                    )
+                    buffer.view(2, -1).copy_(torch.stack((p, r1)))
+
+            register_comm_ops(lambda *args: None, lambda *args: None, gather)
+            try:
+                with torch.no_grad():
+                    result = run_lm_head(
+                        self.model,
+                        self.packed,
+                        self.hidden,
+                        lm_indexes,
+                        need_all_logits=True,
+                        all_logits_row_indexes=scoring,
+                        all_logits_row_labels=labels,
+                        all_logits_top_k=k,
+                        tp_size=2,
+                        output_vocab_size=29,
+                    )
+            finally:
+                clear_comm_ops()
+            return result, gathered_shapes
+
+        # k = 300000: a huge accepted k stays accepted — the merged width clamps only
+        # at the real vocab (29) — while the row count stays the single scoring row.
+        result, gathered_shapes = run_case(300000)
+        self.assertEqual(gathered_shapes, [(5, 32), (1, 68)])
+        self.assertEqual(result["all_logits_lm_rows"], 5)
+        self.assertEqual(result["logits"].shape, (5, 29))
+        self.assertEqual(result["all_logits_lse"].shape, (1,))
+        self.assertEqual(result["all_logits_target_logits"].shape, (1,))
+        self.assertEqual(result["all_logits_topk_values"].shape, (1, 29))
+        self.assertEqual(result["all_logits_topk_ids"].shape, (1, 29))
+
+        # Independent merged-candidate oracle for the single scoring row: the 16
+        # local top-k plus the mock peer's 16 wrapped-id candidates, sorted
+        # value-desc/id-asc exactly like mergeScoringPartials, truncated to 29.
+        local = self.model.nvfp4_lm_head(self.hidden[[4]]).float()
+        v0, i0 = local.topk(16, -1)
+        cand_v = torch.cat((v0, v0 + 16), dim=1)
+        cand_i = torch.cat(
+            (i0.to(torch.int32), i0.to(torch.int32).remainder(13) + 16), dim=1
+        )
+        idx = torch.argsort(cand_i, dim=1, stable=True)
+        cand_v = cand_v.gather(1, idx)
+        cand_i = cand_i.gather(1, idx)
+        idx = torch.argsort(-cand_v, dim=1, stable=True)
+        expected_topv = cand_v.gather(1, idx)[:, :29]
+        expected_topi = cand_i.gather(1, idx)[:, :29]
+        torch.testing.assert_close(
+            result["all_logits_topk_values"], expected_topv, rtol=1e-4, atol=1e-4
+        )
+        torch.testing.assert_close(
+            result["all_logits_topk_ids"], expected_topi, rtol=0, atol=0
+        )
+        l0 = local[0].logsumexp(-1)
+        merged_lse = torch.logsumexp(torch.stack((l0, l0 + 16), -1), -1)
+        torch.testing.assert_close(
+            result["all_logits_lse"], merged_lse[None], rtol=1e-6, atol=1e-6
+        )
+        torch.testing.assert_close(
+            result["all_logits_target_logits"],
+            torch.tensor([local[0][7].item()], device="cuda"),
+            rtol=0,
+            atol=0,
+        )
+
+        # k = 0 (loss-only shape): lse/target keep the single compact row while the
+        # top-k tables collapse to width 0, and the payload gather shrinks to the
+        # lse/target segment only — identical on every rank.
+        result, gathered_shapes = run_case(0)
+        self.assertEqual(gathered_shapes, [(5, 32), (1, 4)])
+        self.assertEqual(result["all_logits_lm_rows"], 5)
+        self.assertEqual(result["all_logits_lse"].shape, (1,))
+        self.assertEqual(result["all_logits_target_logits"].shape, (1,))
+        self.assertEqual(result["all_logits_topk_values"].shape, (1, 0))
+        self.assertEqual(result["all_logits_topk_ids"].shape, (1, 0))
 
     def test_scoring_partial_multi_chunk_forward_matches_single_chunk(self):
         # scoring_partial_chunk_rows reaches the forward loop as a synchronized field
@@ -462,20 +570,21 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
             )
 
         # k below / at / above the local shard width and at / above the real vocab.
+        # The merged outputs are compact — the 3 scoring rows only, no lm prefix.
         for k in (3, 16, 20, 29, 50):
             result = run_case(k)
             ev, ei = expected_topk(k)
-            self.assertEqual(result["all_logits_topk_values"].shape, (5, ev.size(1)))
-            self.assertEqual(result["all_logits_topk_ids"].shape, (5, ei.size(1)))
+            self.assertEqual(result["all_logits_topk_values"].shape, (3, ev.size(1)))
+            self.assertEqual(result["all_logits_topk_ids"].shape, (3, ei.size(1)))
             torch.testing.assert_close(
-                result["all_logits_topk_values"][2:],
+                result["all_logits_topk_values"],
                 ev,
                 rtol=1e-4,
                 atol=1e-4,
                 msg=f"k={k}",
             )
             torch.testing.assert_close(
-                result["all_logits_topk_ids"][2:],
+                result["all_logits_topk_ids"],
                 ei,
                 rtol=0,
                 atol=0,
@@ -596,8 +705,7 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
             self.assertIsNone(result["all_logits"])
             self.assertEqual(result["all_logits_lm_rows"], 2)
 
-            # Merged layout [lm(2) placeholder zeros ++ scoring(3)]: the lm prefix
-            # rows are never consumed downstream.
+            # Compact merged layout: the 3 scoring rows only, no lm prefix rows.
             local_f = ref[[0, 2, 3]]
             v0, i0 = local_f.topk(2, -1)
             # Merged top-2 re-sorts ALL candidates (value desc, id asc): rank0's own
@@ -614,10 +722,8 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
             idx = torch.argsort(-cand_v, dim=1, stable=True)
             cand_v = cand_v.gather(1, idx)
             cand_i = cand_i.gather(1, idx)
-            expected_topv = torch.cat((torch.zeros(2, 2, device="cuda"), cand_v[:, :2]))
-            expected_topi = torch.cat(
-                (torch.zeros(2, 2, dtype=torch.int32, device="cuda"), cand_i[:, :2])
-            )
+            expected_topv = cand_v[:, :2]
+            expected_topi = cand_i[:, :2]
             torch.testing.assert_close(
                 result["all_logits_topk_values"], expected_topv, rtol=1e-4, atol=1e-4
             )
@@ -627,13 +733,12 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
             # Label 7 is on rank0's shard -> its target logit is rank0's local value;
             # the -1 label row merges -inf.
             l0 = local_f.logsumexp(-1)
-            merged_lse = torch.logsumexp(torch.stack((l0, l0 + 16), -1), -1)
-            expected_lse = torch.cat((torch.zeros(2, device="cuda"), merged_lse))
+            expected_lse = torch.logsumexp(torch.stack((l0, l0 + 16), -1), -1)
             torch.testing.assert_close(
                 result["all_logits_lse"], expected_lse, rtol=1e-4, atol=1e-4
             )
             expected_target = torch.tensor(
-                [0.0, 0.0, local_f[0][7].item(), float("-inf"), local_f[2][4].item()],
+                [local_f[0][7].item(), float("-inf"), local_f[2][4].item()],
                 device="cuda",
             )
             torch.testing.assert_close(
@@ -653,11 +758,11 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
 
     def test_row_selected_tp_zero_scoring_rows_allocates_no_topk(self):
         # tp>1 with a defined-but-empty scoring row set still takes the sharded
-        # path, but every merged output row is then an unconsumed lm placeholder:
-        # a large accepted k must not materialize [lm_rows, k] top-k tables, and
-        # no payload all-gather is issued. output_vocab_size=0 is the production
-        # (unpruned) case; the positive all_logits_top_k models a directly
-        # constructed input that bypassed the gatherer's k selection.
+        # path; the compact merged outputs then have zero rows: a large accepted k
+        # must not materialize any top-k storage, and no payload all-gather is
+        # issued. output_vocab_size=0 is the production (unpruned) case; the
+        # positive all_logits_top_k models a directly constructed input that
+        # bypassed the gatherer's k selection.
         gathered_shapes = []
 
         def gather(receivers, mode, senders, inplace):
@@ -691,13 +796,12 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
             torch.testing.assert_close(result["logits"], expected, rtol=0, atol=0)
             self.assertIsNone(result["all_logits"])
             self.assertEqual(result["all_logits_lm_rows"], 2)
-            # The [lm prefix ++ scoring] row layout is preserved — the lm prefix
-            # rows keep defined lse/target rows — but the top-k tables collapse
-            # to zero width instead of materializing a [2, k] allocation.
-            self.assertEqual(result["all_logits_lse"].shape, (2,))
-            self.assertEqual(result["all_logits_target_logits"].shape, (2,))
-            self.assertEqual(result["all_logits_topk_values"].shape, (2, 0))
-            self.assertEqual(result["all_logits_topk_ids"].shape, (2, 0))
+            # With no scoring rows the compact merged outputs are empty — zero
+            # rows everywhere, not lm-prefix placeholders.
+            self.assertEqual(result["all_logits_lse"].shape, (0,))
+            self.assertEqual(result["all_logits_target_logits"].shape, (0,))
+            self.assertEqual(result["all_logits_topk_values"].shape, (0, 0))
+            self.assertEqual(result["all_logits_topk_ids"].shape, (0, 0))
         finally:
             clear_comm_ops()
 
@@ -753,10 +857,14 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
                     # through %13+16, so the merged int8 top-1 is 16 while the
                     # merged reference top-1 is 19 on the overlap row regardless
                     # of the local GEMV result — one guaranteed mismatch the
-                    # dedup must still count exactly once.
+                    # dedup must still count exactly once. The value must dominate
+                    # the fixture's O(6e3) natural logits AND keep a representable
+                    # fp32 gap under the mock's +16 peer shift — 1e30+16 rounds
+                    # back to 1e30 in fp32, which would tie on value and merge-pick
+                    # the local id 3 instead of the intended peer id.
                     v_off = 2 * rows + overlap_row * kl
                     i_off = 2 * rows + rows * kl + overlap_row * kl
-                    p[v_off] = 1e30
+                    p[v_off] = 1e6
                     p.view(torch.int32)[i_off] = 0 if payload_calls[0] == 1 else 3
                     l0, t0, v0, i0 = p.split([rows, rows, rows * kl, rows * kl])
                     r1 = torch.cat(
@@ -812,10 +920,11 @@ class PyWrappedModelLmHeadTest(unittest.TestCase):
 
             # Check mode still serves the bf16 reference: the overlap row's
             # merged scoring top-1 is the injected reference id (peer-mapped
-            # 3 -> 19) and the lm rows keep the gathered reference values.
+            # 3 -> 19) and the lm rows keep the gathered reference values. The
+            # overlap row is the third compact scoring row (index 2).
             self.assertIsNone(result["all_logits"])
             self.assertEqual(result["all_logits_lm_rows"], 2)
-            self.assertEqual(result["all_logits_topk_ids"][4, 0].item(), 19)
+            self.assertEqual(result["all_logits_topk_ids"][2, 0].item(), 19)
             ref = hidden.float() @ kernel.float().t()
             ref_lm = torch.cat((ref[[5, 1]], ref[[5, 1]] + 16), dim=1)[:, :29]
             torch.testing.assert_close(result["logits"], ref_lm, rtol=1e-4, atol=1e-4)

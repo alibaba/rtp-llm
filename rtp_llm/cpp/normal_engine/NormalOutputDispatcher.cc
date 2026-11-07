@@ -244,6 +244,10 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     // prompt-scoring/loss row range, so this stream's token row r lives at
     // lm_rows + prefix + (r - range_a). The range rule must match NormalModelInputGatherer.
     int all_logits_origin = token_offset;
+    // Row origin inside the TP-sharded scoring outputs (all_logits_lse/target_logits/topk_*):
+    // those tensors carry the selected scoring rows only — no lm prefix — so this stream's
+    // token row r lives at prefix + (r - range_a).
+    int scoring_origin = 0;
     if (model_output.all_logits_lm_rows >= 0) {
         const auto config             = stream->generateConfig();
         const auto [range_a, range_b] = promptScoringRowRange(token_size,
@@ -252,6 +256,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                               config->prompt_logits_start,
                                                               config->prompt_logits_end);
         all_logits_origin = static_cast<int>(model_output.all_logits_lm_rows) + all_logits_row_offset - range_a;
+        scoring_origin                = all_logits_row_offset - range_a;
         all_logits_row_offset += range_b - range_a;
     }
 
@@ -356,8 +361,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
         if (stream->calculateLoss()) {
             if (has_sharded_scoring) {
                 // CE(label) = logsumexp - target_logit, both already reduced globally per row.
-                auto lse_rows    = model_output.all_logits_lse.narrow(0, all_logits_origin, token_size - 1);
-                auto target_rows = model_output.all_logits_target_logits.narrow(0, all_logits_origin, token_size - 1);
+                auto lse_rows    = model_output.all_logits_lse.narrow(0, scoring_origin, token_size - 1);
+                auto target_rows = model_output.all_logits_target_logits.narrow(0, scoring_origin, token_size - 1);
                 loss             = (lse_rows - target_rows).to(torch::kFloat32);
             } else {
                 auto all_logits_tensor = model_output.all_logits.narrow(0, all_logits_origin, token_size - 1);
@@ -391,12 +396,11 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                     // stream's window the same way the gathered path does.
                     const int64_t merged_k = model_output.all_logits_topk_values.size(1);
                     int           top_k    = std::min(config->prompt_logits_top_k, (int)merged_k);
-                    auto          lse = model_output.all_logits_lse.narrow(0, all_logits_origin + start_pos, slice_len);
-                    topk_logprobs =
-                        model_output.all_logits_topk_values.narrow(0, all_logits_origin + start_pos, slice_len)
-                            .narrow(1, 0, top_k)
-                        - lse.unsqueeze(1);
-                    topk_indices = model_output.all_logits_topk_ids.narrow(0, all_logits_origin + start_pos, slice_len)
+                    auto          lse = model_output.all_logits_lse.narrow(0, scoring_origin + start_pos, slice_len);
+                    topk_logprobs = model_output.all_logits_topk_values.narrow(0, scoring_origin + start_pos, slice_len)
+                                        .narrow(1, 0, top_k)
+                                    - lse.unsqueeze(1);
+                    topk_indices = model_output.all_logits_topk_ids.narrow(0, scoring_origin + start_pos, slice_len)
                                        .narrow(1, 0, top_k);
                     if (config->return_target_logprob) {
                         auto tokens      = stream->currentExecuteTokens(0);
@@ -405,7 +409,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                         int  logprob_len = label_end - label_start;
                         if (logprob_len > 0) {
                             auto target_raw = model_output.all_logits_target_logits.narrow(
-                                0, all_logits_origin + start_pos, logprob_len);
+                                0, scoring_origin + start_pos, logprob_len);
                             target_logprobs = (target_raw - lse.narrow(0, 0, logprob_len)).cpu();
                         }
                     }

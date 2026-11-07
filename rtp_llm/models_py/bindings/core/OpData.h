@@ -152,14 +152,16 @@ struct GptModelOutputs {
     // lm_output_indexes rows (the sampler-facing logits), the remaining rows are the per-stream
     // prompt-scoring/loss ranges in allStreams() order (see all_logits_row_indexes and
     // promptScoringRowRange). Set only by PyWrappedModel::forwardPostLayers on the selected path.
+    // On that path the same count is also the row count of `logits`; the sharded scoring
+    // fields below carry only the scoring ranges (no lm prefix).
     int64_t all_logits_lm_rows = -1;
 
     // TP-sharded scoring outputs, produced instead of all_logits when the row-selected path runs
     // at tp_size > 1: each rank reduces its local [rows, vocab/tp] shard to small per-row
     // partials and only those are all-gathered, so no rank materializes [rows, vocab] for
-    // scoring. All four tensors share the row-selected all_logits layout described above
-    // ([lm rows ++ per-stream scoring ranges]); the lm prefix rows are placeholders — they
-    // are never reduced and are only zero-filled to keep the layout the dispatcher expects.
+    // scoring. All four tensors are compact: one row per all_logits_row_indexes entry in
+    // allStreams() order — the sampler-facing lm rows are served from `logits` and are not
+    // represented here.
     //   all_logits_lse           [rows]      fp32 global logsumexp over the full vocab
     //   all_logits_topk_values   [rows, K]   fp32 global top-k raw logit values, ordered by the
     //                                        merge's deterministic value-desc/id-asc key (see
