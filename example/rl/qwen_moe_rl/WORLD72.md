@@ -59,10 +59,10 @@ One rollout contains 72 real trajectories; multi-turn conversion may yield
 72 to144 training rows before neutral balance padding. The original dynamic
 minibatch metadata must still cover one complete global update per iteration.
 
-The memory recovery recipe retains at most 76 GiB of FP32 gradients per GPU
+The memory recovery recipe retains at most 75 GiB of FP32 gradients per GPU
 and releases only empty CUDA allocator segments at actual micro boundaries.
 With the recorded uneven 72-rank shards, the worst four-rank CPU state plan
-is about 794.48 GiB including a 96 GiB reserve. This is a static bound, not an
+is 857362857856 bytes (798.481384 GiB), including a 96 GiB reserve. This is a static bound, not an
 accepted full-model peak; clean checkpoint page cache must remain reclaimable.
 The BF16 master/moment precision and bounded FP32 optimizer math are unchanged.
 

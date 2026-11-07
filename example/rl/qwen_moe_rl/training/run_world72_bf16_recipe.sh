@@ -17,6 +17,8 @@ export Q38_ENABLE_BF16_STATE_RUNTIME=1 Q38_BF16_ROUNDING_SEED=20261106
 export Q38_HF_RTP_REPORT_ONLY=1
 # Drain completed CUDA streams and release unused allocator segments between real training micros.
 export Q38_MICRO_BOUNDARY_RELEASE_CACHE=1
+# On a genuine CUDA OOM only, preserve allocator block-state statistics before unwinding.
+export Q38_OOM_ALLOCATOR_AUDIT=1
 # Optional authenticated recovery of original initial-policy episodes; never fabricate rollouts.
 if [[ "${Q38_INITIAL_POLICY_REPLAY:-0}" == 1 ]]; then
   : "${Q38_INITIAL_POLICY_REPLAY_MANIFEST:?Pin the immutable original-episode manifest}"
@@ -26,7 +28,7 @@ if [[ "${Q38_INITIAL_POLICY_REPLAY:-0}" == 1 ]]; then
 fi
 export Q38_VERIFIED_CPU_LIMIT_BYTES_PER_NODE=858993459200
 export Q38_CPU_MOMENT_BYTES_PER_NODE=549755813888 Q38_CPU_RESERVE_BYTES_PER_NODE=103079215104
-export Q38_GPU_GRADIENT_CACHE_BYTES=81604378624 Q38_GPU_REFIT_MASTER_CACHE_BYTES=25769803776
+export Q38_GPU_GRADIENT_CACHE_BYTES=80530636800 Q38_GPU_REFIT_MASTER_CACHE_BYTES=25769803776
 export Q38_TRAINING_AUDIT_DIR="$RUN/training" Q38_POLICY_AUDIT_DIR="$RUN/policy-loss"
 export RTP_PROJECT_ROOT="$PROJECT" QWEN36_RL_ROOT="$PROJECT"
 export RTP_SOURCE="${RTP_SOURCE:-$DEPLOY/rtp-runtime}"
