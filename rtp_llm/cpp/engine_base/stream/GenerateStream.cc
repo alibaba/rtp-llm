@@ -5,8 +5,13 @@
 #include <memory>
 #include <typeinfo>
 #include <ATen/Generator.h>
-#if defined(USING_CUDA) || defined(USING_ROCM)
+// Test the macro VALUES, not defined(): non-GPU configs such as --config=cpu
+// pass -DUSING_CUDA=0, which makes defined(USING_CUDA) true and would compile a
+// CUDA generator into a build that has no CUDA runtime.
+#if USING_CUDA || USING_ROCM
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#else
+#include <ATen/CPUGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -200,7 +205,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
 
     if (generateConfig()->random_seed.has_value()) {
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if USING_CUDA || USING_ROCM
         generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
 #else
         generator_ = torch::make_generator<torch::CPUGeneratorImpl>();
