@@ -183,6 +183,35 @@ class RemoteEmbeddingEngineTest(unittest.TestCase):
         torch.testing.assert_close(actual[0][0], value[0], rtol=0, atol=0)
         self.part.batched_embedding.assert_not_called()
 
+    def test_separated_v41_rpc_placeholder_uses_remote_and_skips_encoder(self):
+        from rtp_llm.multimodal.kvcm.tensor_object import pack_object, plan_object
+
+        remote, storage = self.real_remote("deepseek_v41")
+        inputs = self.inputs()
+        inputs[0].url = "data:application/octet-stream;base64,AQID"
+        key = remote.key(inputs)
+        storage[key] = pack_object(plan_object(self.value))
+        inputs[0].tensor = torch.empty(1)  # QueryConverter GenerateInput wire.
+        items = self.engine._create_work_items(inputs)
+        self.engine._compute_embeddings(items)
+        self.assertEqual(inputs[0].tensor.numel(), 0)
+        self.assertEqual(items[0].remote_cache_key, key)
+        self.assertEqual(items[0].cache_source, "remote")
+        self.engine._scheduler.submit_and_wait.assert_not_called()
+        self.part.batched_embedding.assert_not_called()
+
+    def test_async_rpc_normalizes_before_cache_claim(self):
+        self.real_remote("deepseek_v41")
+        inputs = self.inputs()
+        inputs[0].tensor = torch.empty(1)
+        observed = []
+        def claim(items, **kwargs):
+            observed.append(items[0].tensor.numel())
+            return []
+        self.engine._claim_and_submit_async = Mock(side_effect=claim)
+        self.assertEqual(self.engine.async_submit(inputs), [])
+        self.assertEqual(observed, [0])
+
     def test_encoder_event_at_actual_batched_embedding_call(self):
         remote = self.engine._remote_embedding_cache
         remote.load.return_value = None

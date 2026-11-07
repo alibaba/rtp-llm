@@ -520,6 +520,7 @@ class MMProcessEngine:
         if not self.is_proxy_mode:
             _report_vit_metric(AccMetrics.VIT_QPS_METRIC, 1, {"source": "mm_embedding"})
         try:
+            self._normalize_remote_url_inputs(mm_inputs)
             self.mm_part.validate_inputs(mm_inputs)
             result = self._embed_with_greennet_sync_impl(
                 mm_inputs,
@@ -842,6 +843,14 @@ class MMProcessEngine:
             raise
         return res
 
+    def _normalize_remote_url_inputs(self, mm_inputs):
+        # Both the local C++ path and separated ViT RPCs may carry the
+        # GenerateInput URL placeholder. Normalize before any cache claim.
+        remote = getattr(self, "_remote_embedding_cache", None)
+        if remote is not None:
+            for item in mm_inputs:
+                remote.normalize_cpp_url_input(item)
+
     def mm_embedding_impl(
         self,
         mm_inputs: List[MultimodalInput],
@@ -884,6 +893,7 @@ class MMProcessEngine:
         scheduled = []
         query_started = False
         try:
+            self._normalize_remote_url_inputs(mm_inputs)
             self.mm_part.validate_inputs(mm_inputs)
             if report_image_count:
                 _report_image_count(mm_inputs)
@@ -986,6 +996,7 @@ class MMProcessEngine:
         region: Optional[str] = None,
     ) -> List[MMWorkItem]:
         """Create work items and submit preprocessing tasks."""
+        self._normalize_remote_url_inputs(mm_inputs)
         # Request-level image-count cap BEFORE any preprocessing: a request whose
         # media count exceeds the scheduler's per-request limit can never fit a
         # batch, so reject it up front instead of spending preprocess on it. (Serial
@@ -1303,6 +1314,7 @@ class MMProcessEngine:
         are not recomputed.
         """
         try:
+            self._normalize_remote_url_inputs(mm_inputs)
             self.mm_part.validate_inputs(mm_inputs)
             claims = self._claim_and_submit_async(
                 mm_inputs,
@@ -1343,6 +1355,7 @@ class MMProcessEngine:
         current_entry: Optional[MMEmbeddingCacheEntry] = None
         deadline = time.monotonic() + timeout_ms / 1000.0
         try:
+            self._normalize_remote_url_inputs(mm_inputs)
             self.mm_part.validate_inputs(mm_inputs)
             _report_image_count(mm_inputs)
             self._raise_if_async_request_cancelled(request_id, cancellation_event)
