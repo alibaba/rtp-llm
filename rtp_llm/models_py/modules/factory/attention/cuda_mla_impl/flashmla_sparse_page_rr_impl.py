@@ -432,6 +432,14 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
                               self.kv_lora_rank,
                               self.fmha_impl.kernel_heads if query_cp else q.shape[1])
 
+    @property
+    def requires_host_metadata(self):
+        return self.page_rr_params.is_prefill
+
+    @property
+    def can_capture_cuda_graph_prepare(self):
+        return not self.page_rr_params.is_prefill
+
     def prepare(self, inputs, forbid_realloc=False):
         self.page_rr_params.prepare(inputs, forbid_realloc=forbid_realloc)
         # Reserve the small Decode SFA arena before freezing the Graph

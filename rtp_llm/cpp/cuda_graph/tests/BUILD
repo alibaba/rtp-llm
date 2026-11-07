@@ -228,6 +228,63 @@ py_test(
     tags = ["L20_CU13"],
 )
 
+[
+    py_test(
+        name = "cuda_graph_attention_prepare" + suffix + "_test",
+        srcs = [
+            "cuda_graph_attention_prepare_test.py",
+            "cuda_graph_tagged_cache_test.py",
+        ],
+        main = "cuda_graph_attention_prepare_test.py",
+        data = [
+            ":test_cuda_graph_runner",
+            "//:th_transformer",
+        ],
+        deps = [
+            ":cuda_graph_test_utils",
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm/test/model_test/test_util",
+        ],
+        env = {
+            "NOT_USE_DEFAULT_STREAM": "1",
+            "TEST_USING_DEVICE": "CUDA",
+            "RTP_LLM_STREAM_ASYNC": async_prepare,
+            "RTP_LLM_MTP_ASYNC_PREPARE": async_prepare,
+        },
+        exec_properties = {"gpu": "SM103_CU13"},
+        tags = ["SM103_CU13"],
+    )
+    for suffix, async_prepare in [("", "0"), ("_async", "1")]
+]
+
+[
+    py_test(
+        name = "cuda_graph_metadata_microbenchmark" + suffix,
+        srcs = [
+            "cuda_graph_metadata_microbenchmark.py",
+            "cuda_graph_attention_prepare_test.py",
+            "cuda_graph_tagged_cache_test.py",
+        ],
+        main = "cuda_graph_metadata_microbenchmark.py",
+        data = [":test_cuda_graph_runner", "//:th_transformer"],
+        deps = [
+            ":cuda_graph_test_utils",
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm/test/model_test/test_util",
+        ],
+        env = {
+            "NOT_USE_DEFAULT_STREAM": "1",
+            "TEST_USING_DEVICE": "CUDA",
+            "RTP_LLM_STREAM_ASYNC": async_prepare,
+            "RTP_LLM_MTP_ASYNC_PREPARE": async_prepare,
+        },
+        exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+        tags = ["manual", "SM103_CU13"],
+        timeout = "long",
+    )
+    for suffix, async_prepare in [("", "0"), ("_async", "1")]
+]
+
 py_test(
     name = "cuda_graph_tagged_cache_test_rocm",
     main = "cuda_graph_tagged_cache_test.py",
