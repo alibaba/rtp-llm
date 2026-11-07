@@ -65,6 +65,40 @@ class ActivationTest(TestCase):
             ):
                 self._run_silu_and_mul_test(*params)
 
+    def test_situ_row_tiles_match_flat_bytes(self):
+        import triton
+        from rtp_llm.models_py.triton_kernels.moe.activation import (
+            _situ_and_mul_kernel,
+            _situ_and_mul_rows_kernel,
+        )
+
+        torch.manual_seed(3101)
+        rows, width = 257, 6144
+        for split, linear_beta in ((True, 25.0), (False, None)):
+            with self.subTest(split=split, linear_beta=linear_beta):
+                if split:
+                    gate, up = torch.randn(
+                        rows, 2 * width, device=self.device, dtype=torch.bfloat16,
+                    ).chunk(2, dim=-1)
+                    output = torch.empty((rows, width), device=self.device, dtype=gate.dtype)
+                else:
+                    gate, up = [torch.randn(
+                        rows, width, device=self.device, dtype=torch.bfloat16,
+                    ) for _ in range(2)]
+                    output = gate  # The caller may consume an owned contiguous gate.
+                gate[0, :4] = torch.tensor([-256.0, -0.0, 0.0, 256.0], device=self.device)
+                reference = torch.empty((rows, width), device=self.device, dtype=gate.dtype)
+                _situ_and_mul_kernel[(triton.cdiv(gate.numel(), 256),)](
+                    gate, up, reference, gate.numel(), width,
+                    *gate.stride(), *up.stride(), 4.0, linear_beta, 256,
+                    enable_fp_fusion=False,
+                )
+                _situ_and_mul_rows_kernel[(width // 1024, rows)](
+                    gate, up, output, width, gate.stride(0), up.stride(0),
+                    4.0, linear_beta, 1024, num_warps=4, enable_fp_fusion=False,
+                )
+                self.assertTrue(torch.equal(output.view(torch.uint8), reference.view(torch.uint8)))
+
     def test_situ_row_counts_reuse_jit(self):
         from rtp_llm.models_py.triton_kernels.moe.activation import (
             _situ_and_mul_kernel,
