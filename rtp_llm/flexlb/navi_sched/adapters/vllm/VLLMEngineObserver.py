@@ -1600,8 +1600,6 @@ class VLLMEngineObserver:
         self._render_config = vllm_config
         self._render_continuation = None
         self._forward_stop = threading.Event()
-        self._pd_forward_slot = threading.Event()
-        self._pd_forward_slot.set()
         self._shutdown_lock = threading.Lock()
         self._shutdown_started = False
         self._forward_thread = None
@@ -2166,17 +2164,6 @@ class VLLMEngineObserver:
                 if self._forward_stop.wait(0.1):
                     return
                 continue
-            if self._native_ingress and not self._pd_forward_slot.is_set():
-                self._log_native_forward_wait()
-                # Requests accepted for later native batches still need their
-                # cache-touch preparation while the current PD batch runs.
-                # Otherwise a busy Prefill node never drains the touch queue.
-                self._drain_forward_request_touches(
-                    decoder, msgspec.msgpack, max_count=1
-                )
-                if self._forward_stop.wait(0.01):
-                    return
-                continue
             stopping = self._forward_stop.is_set()
             try:
                 native_batch = self._bridge.take_next_forward_batch(
@@ -2199,7 +2186,6 @@ class VLLMEngineObserver:
                     )
                 continue
             if self._native_ingress:
-                self._pd_forward_slot.clear()
                 # The PD bridge transfers pending touches with the ready batch
                 # instead of dropping them. Prepare these before decoding so
                 # vLLM can reuse and promote the preprocessed requests.
@@ -2210,7 +2196,6 @@ class VLLMEngineObserver:
             stopping = self._forward_stop.is_set()
             python_take_ns = time.monotonic_ns()
             if self._discard_cancelled_forward_requests(native_batch):
-                self._pd_forward_slot.set()
                 continue
             native_ready_ns = int(getattr(native_batch, "ready_time_ns", 0))
             admission_started_ns = (
@@ -2230,7 +2215,6 @@ class VLLMEngineObserver:
                 )
             except Exception:
                 self._release_native_forward_batch(native_batch)
-                self._pd_forward_slot.set()
                 logger.exception("failed to decode NaviSched VLLM forwarded batch")
                 continue
             if stopping:
@@ -2239,7 +2223,6 @@ class VLLMEngineObserver:
                 )
                 self._discard_cancelled_before_decode(native_batch.request_ids)
                 self._release_native_forward_batch(native_batch)
-                self._pd_forward_slot.set()
                 continue
             decode_done_ns = time.time_ns()
             try:
@@ -2269,14 +2252,6 @@ class VLLMEngineObserver:
                     (enqueue_done_ns - ready_ns) / 1000.0,
                 )
             except Exception:
-                # A partial enqueue leaves requests in vLLM until their ABORTs
-                # arrive. Keep the PD slot closed until that state is released.
-                if self._native_ingress and not any(
-                    request_id in self._pending_forward_batches
-                    or request_id in self._scheduled_forward_batches
-                    for request_id in native_batch.request_ids
-                ):
-                    self._pd_forward_slot.set()
                 logger.exception("failed to submit NaviSched VLLM forwarded batch")
 
     async def _forward_render_batches(self) -> None:
@@ -5698,8 +5673,6 @@ class VLLMEngineObserver:
             if self._scheduled_forward_batches.get(request_id) is state:
                 self._scheduled_forward_batches.pop(request_id, None)
         self._release_native_forward_batch(native_batch)
-        if self._native_ingress:
-            self._pd_forward_slot.set()
 
     def _release_forward_batch(self, state) -> None:
         with state.lock:
