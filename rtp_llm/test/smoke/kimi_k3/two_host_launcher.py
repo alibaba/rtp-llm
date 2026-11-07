@@ -185,6 +185,9 @@ def runtime_environment(source, binary):
         "/opt/rh/gcc-toolset-12/root/usr/lib64", "/usr/local/cuda/lib64",
         "/opt/conda310/lib", "/usr/local/nvidia/lib64", "/usr/lib64"))
     env["SPT_NOENV"] = "1"  # Preserve the process ownership tag in /proc/PID/environ.
+    for key in ("USER", "LOGNAME"):
+        if not env.get(key):
+            env[key] = f"uid_{os.getuid()}"
     return env
 
 
@@ -277,10 +280,15 @@ def serve(config, role):
             sock = socket.socket()
             sockets.append(sock)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind(("0.0.0.0", port))
-            except OSError as exc:
-                raise OSError(exc.errno, f"{role} smoke port {port}: {exc.strerror}") from exc
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    sock.bind(("0.0.0.0", port))
+                    break
+                except OSError as exc:
+                    if time.monotonic() >= deadline:
+                        raise OSError(exc.errno, f"{role} smoke port {port}: {exc.strerror}") from exc
+                    time.sleep(0.5)
     finally:
         for sock in sockets: sock.close()
     rdma = config.get("cache_store_rdma_mode", True)

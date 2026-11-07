@@ -70,8 +70,14 @@ class K31LaunchContract(unittest.TestCase):
                         self.assertEqual(options['--enable_cuda_graph'],str(int(role=='DECODE')))
                         if role=='PREFILL':
                             self.assertEqual(env['PREFILL_CHUNK_SIZE'],'65536')
+                            self.assertNotIn('DSA_DCP_TOPK',env)
+                            self.assertNotIn('DSA_DCP_COMBINE',env)
+                            self.assertNotIn('DSA_DCP_PROLOGUE',env)
                         else:
                             self.assertEqual(env['ENABLE_LINEAR_REPLAY'],'1')
+                            self.assertEqual(env['DSA_DCP_TOPK'],'mega_topk')
+                            self.assertEqual(env['DSA_DCP_COMBINE'],'mega_a2a')
+                            self.assertEqual(env['DSA_DCP_PROLOGUE'],'multi_stream')
                             self.assertEqual(options['--decode_capture_config'],
                                              '1,2,4,8,16,32' if dp==2 else '1,2,4,8,16,32,64')
                         self.assertNotIn('force_sp_accept',options)

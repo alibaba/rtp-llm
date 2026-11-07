@@ -39,7 +39,7 @@ namespace cg = cooperative_groups;
 namespace rtp_llm {
 namespace {
 
-constexpr int kMaxRanks      = 8;
+constexpr int kMaxRanks      = 32;
 constexpr int kMaxCtasPerRow = 16;
 // 16-byte LL words per exchange slot. X1: header + 1024 u32 counts; X2: 512 values;
 // radix fallback: 256 u32 counts.
@@ -1534,7 +1534,7 @@ void mega_topk(const torch::Tensor&        logits,
     TORCH_CHECK(output.dtype() == torch::kInt32 && output.dim() == 2 && output.stride(1) == 1 && output.size(0) == rows
                     && output.size(1) >= k,
                 "output must be int32 [rows, >= k]");
-    TORCH_CHECK(world > 0 && world <= kMaxRanks && rank >= 0 && rank < world, "world must be 1..8");
+    TORCH_CHECK(world > 0 && world <= kMaxRanks && rank >= 0 && rank < world, "world must be 1..", kMaxRanks);
     TORCH_CHECK(peers.dtype() == torch::kInt64 && peers.is_contiguous() && peers.numel() == world,
                 "peers must be int64 [world]");
     TORCH_CHECK(epochs.dtype() == torch::kInt32 && epochs.is_contiguous() && epochs.numel() > 0,
