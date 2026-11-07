@@ -51,7 +51,8 @@ def _audit(engine, boundary):
             'real_update_gate':getattr(engine,'_q38_last_real_update_gate',None),
             'native_contexts_released':getattr(engine,'_q38_native_contexts_released',False),
             'last_native_cleanup_proof':getattr(engine,'_q38_last_native_cleanup_proof',None),
-            'last_refit_source_release':getattr(engine,'_q38_last_refit_source_release',None)}
+            'last_refit_source_release':getattr(engine,'_q38_last_refit_source_release',None),
+            'initial_policy_replay_proof':getattr(engine,'_q38_initial_policy_replay_proof',None)}
     with (directory/f'{boundary}-rank{dist.get_rank()}-{record["time_ns"]}.json').open('x') as stream:
         json.dump(record,stream);stream.write('\n')
 
@@ -334,6 +335,8 @@ def install():
     ColocatedCheckpointEngine.receive_weights=receive
     from qwen38_policy_audit import install_policy_loss_audit
     install_policy_loss_audit()
+    from qwen38_memory_boundaries import install as install_memory_boundaries
+    install_memory_boundaries()
     _INSTALLED=True
 
 

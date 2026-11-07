@@ -62,3 +62,13 @@ CPU boundary tests exercise the actual installed converter; no tool calls or
 rewards are manufactured by those tests. The separate GPU 8K single-layer GDN
 measurement does not certify a full-model 8K training peak, so the initial
 complete-model recipe uses a 4K real-token bound.
+
+`Q38_MICRO_BOUNDARY_RELEASE_CACHE=1` enables the dedicated training hook that
+synchronizes CUDA and releases empty allocator segments before each original
+micro forward. Live BF16 masters and FP32 gradient slots are preserved. Its
+JSON audit records the actual micro index, accumulated gradient contributions,
+parameter `.grad` shadows, allocated/reserved CUDA bytes, and process CPU RSS.
+The gradient-cache limit covers FP32 slots only; activation, all-gather,
+reduce-scatter and allocator memory need their own headroom. Process RSS is
+not a container cgroup limit or peak, and a static state plan is not a measured
+full-model memory result.
