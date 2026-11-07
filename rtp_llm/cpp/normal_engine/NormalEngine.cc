@@ -972,6 +972,19 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
         }
     }
 
+    const bool force_batch = std::any_of(inputs.begin(), inputs.end(), [](const auto& input) {
+        return input->force_batch;
+    });
+    if (force_batch && (schedulable_streams.size() != streams.size()
+                        || dynamic_cast<FIFOScheduler*>(scheduler_.get()) == nullptr)) {
+        for (const auto& stream : streams) {
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS,
+                                    "force_batch requires valid inputs and the FIFO group scheduler");
+            }
+        }
+        return {std::vector<bool>(streams.size(), false), std::move(streams)};
+    }
     auto              schedulable_result = scheduler_->enqueueGroup(schedulable_streams);
     std::vector<bool> enqueue_successes(streams.size(), false);
     for (size_t i = 0; i < schedulable_indexes.size(); ++i) {

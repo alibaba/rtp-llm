@@ -110,6 +110,21 @@ FIFOScheduler::enqueueGroup(const vector<GenerateStreamPtr>& streams) {
         max_inited_kv_cache_streams_ > 0 && valid_streams.size() > max_inited_kv_cache_streams_;
     const bool exceeds_batch_limit            = valid_streams.size() > max_generate_batch_size_;
     const bool fallback_to_individual_streams = exceeds_inited_kv_limit || exceeds_batch_limit;
+    const bool force_batch = std::any_of(streams.begin(), streams.end(), [](const auto& stream) {
+        return stream->generateInput()->force_batch;
+    });
+    if (force_batch
+        && (valid_streams.size() != streams.size() || fallback_to_individual_streams
+            || (cp_force_single_prefill_ && streams.size() > 1)
+            || (prefill_chunk_size_ > 0 && pd_sep_config_.role_type != RoleType::DECODE))) {
+        for (const auto& stream : streams) {
+            if (!stream->hasError()) {
+                stream->reportError(ErrorCode::INVALID_PARAMS,
+                                    "force_batch cannot fit scheduler limits or uses incompatible chunked/CP prefill");
+            }
+        }
+        return {std::vector<bool>(streams.size(), false), streams};
+    }
     if (fallback_to_individual_streams) {
         RTP_LLM_LOG_DEBUG("enqueue group exceeds scheduler limits; fallback to individual streams: "
                           "group_size=%zu max_generate_batch_size=%zu max_inited_kv_cache_streams=%zu",
@@ -546,7 +561,11 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     }
 
     // Evaluate at most one waiting group per scheduling round.
-    auto&        group         = waiting_group_queue_.front();
+    auto& group = waiting_group_queue_.front();
+    if (!group.empty() && group.front()->generateInput()->force_batch) {
+        evaluateForcedGroup(group);
+        return;
+    }
     const size_t original_size = group.size();
     for (auto it = group.begin(); it != group.end();) {
         if ((*it)->hasError()) {
@@ -616,6 +635,69 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
                           group.size());
         dispatchPreparedGroup(admitted_streams);
         pending_group_fallback_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void FIFOScheduler::evaluateForcedGroup(StreamGroup& group) {
+    // This path is enabled only by /batch_infer. Keep every member in the waiting
+    // group until cache loads finish. KV shortages fail the group immediately.
+    auto fail_group = [&](ErrorCode code, const char* message) {
+        for (const auto& stream : group) {
+            if (!stream->hasError()) {
+                stream->reportError(code, message);
+            }
+            stream->moveToNext();
+        }
+        waiting_group_queue_.pop_front();
+    };
+    StreamGroup checked;
+    for (const auto& stream : group) {
+        if (stream->checkTimeoutAndHasError() || stream->getStatus() == StreamState::FINISHED) {
+            fail_group(ErrorCode::CANCELLED, "force_batch aborted because a member failed or was cancelled");
+            return;
+        }
+        if (!evaluateRunningBatch(checked, stream)) {
+            fail_group(ErrorCode::INVALID_PARAMS, "force_batch exceeds the whole-batch prefill token/shape limit");
+            return;
+        }
+        checked.push_back(stream);
+    }
+
+    size_t inited_kv_streams = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    bool   all_running       = true;
+    for (const auto& stream : group) {
+        if (stream->getStatus() == StreamState::RUNNING) {
+            continue;
+        }
+        const bool already_inited_kv = stream->curBlocksNum() > 0;
+        if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
+            && inited_kv_streams >= max_inited_kv_cache_streams_) {
+            fail_group(ErrorCode::MALLOC_FAILED, "force_batch has no available KV initialization slots");
+            return;
+        }
+        if (!stream->hasEvent(StreamEvents::CanRun)) {
+            stream->reportEvent(StreamEvents::CanRun);
+        }
+        auto state = stream->moveToNext();
+        if (state == StreamState::WAITING && stream->hasEvent(StreamEvents::LoadInitiated)) {
+            state = stream->moveToNext();
+        }
+        if (state == StreamState::FINISHED || stream->hasError()) {
+            fail_group(ErrorCode::CANCELLED, "force_batch aborted during whole-batch KV allocation/cache loading");
+            return;
+        }
+        if (state == StreamState::WAITING) {
+            fail_group(ErrorCode::MALLOC_FAILED, "force_batch cannot allocate KV for every member; retry the batch");
+            return;
+        }
+        if (!already_inited_kv && stream->curBlocksNum() > 0) {
+            ++inited_kv_streams;
+        }
+        all_running = all_running && state == StreamState::RUNNING;
+    }
+    if (all_running) {
+        moveGroupToNewStreams(group);
+        waiting_group_queue_.pop_front();
     }
 }
 

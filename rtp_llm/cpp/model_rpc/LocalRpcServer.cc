@@ -704,6 +704,7 @@ grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        conte
                 }
                 return grpc::Status::OK;
             }
+            input->force_batch = request->force_batch();
             inputs.push_back(input);
         }
 

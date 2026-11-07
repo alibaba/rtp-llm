@@ -1,8 +1,12 @@
+import asyncio
 import unittest
+from types import SimpleNamespace
 from typing import List
+from unittest.mock import AsyncMock, MagicMock
 
 import torch
 
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import DecodingState
@@ -59,6 +63,49 @@ class MockTokenizer(BaseTokenizer):
 
     def get_added_vocab(self):
         return {}
+
+
+class BatchInferForceBatchTest(unittest.TestCase):
+    def make_pipeline(self):
+        pipeline = object.__new__(Pipeline)
+        pipeline.tokenizer = MagicMock()
+        pipeline.tokenizer.encode.return_value = [1, 2, 3]
+        pipeline._special_tokens = None
+        pipeline.create_generate_config = MagicMock(return_value=GenerateConfig())
+        pipeline.backend_rpc_server_visitor = SimpleNamespace(
+            batch_enqueue=AsyncMock(return_value=[])
+        )
+        return pipeline
+
+    def test_force_batch_is_scoped_to_batch_rpc_and_does_not_mutate_config(self):
+        for option in ({}, {"force_batch": False}, {"force_batch": True}):
+            with self.subTest(option=option):
+                pipeline = self.make_pipeline()
+                config = {"max_new_tokens": 2, **option}
+                original = dict(config)
+                asyncio.run(pipeline.batch_infer(["prompt"] * 8, 100, config))
+                call = pipeline.backend_rpc_server_visitor.batch_enqueue.call_args
+                self.assertEqual(len(call.args[0]), 8)
+                self.assertEqual(
+                    call.kwargs,
+                    {"force_batch": True} if option.get("force_batch") else {},
+                )
+                self.assertNotIn(
+                    "force_batch", pipeline.create_generate_config.call_args.args[0]
+                )
+                self.assertEqual(config, original)
+
+    def test_invalid_force_batch_fails_before_enqueue(self):
+        for value in ("false", "true", 0, 1, None, [], {}):
+            with self.subTest(value=value):
+                pipeline = self.make_pipeline()
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "force_batch must be a boolean"
+                ):
+                    asyncio.run(
+                        pipeline.batch_infer(["prompt"], 100, {"force_batch": value})
+                    )
+                pipeline.backend_rpc_server_visitor.batch_enqueue.assert_not_called()
 
 
 class PipelineDecodeTest(unittest.TestCase):

@@ -300,8 +300,10 @@ public:
     enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override {
         ++calls;
         request_ids.clear();
+        force_batch_flags.clear();
         for (const auto& input : inputs) {
             request_ids.push_back(input->request_id);
+            force_batch_flags.push_back(input->force_batch);
         }
         return {{true, true}, streams};
     }
@@ -316,8 +318,37 @@ public:
     }
     int                            calls = 0;
     std::vector<int64_t>           request_ids;
+    std::vector<bool>              force_batch_flags;
     std::vector<GenerateStreamPtr> streams;
 };
+
+TEST(LocalRpcServerTest, BatchGenerateCallPropagatesForceBatchToEveryInput) {
+    for (bool force_batch : {false, true}) {
+        TestLocalRpcServer server;
+        auto engine = std::make_shared<BatchTraceEngine>();
+        auto first = createMockStream();
+        auto second = createMockStream();
+        EXPECT_CALL(*first, nextOutput(_)).WillOnce(Return(wakeResult(WakeReason::FINISHED)));
+        EXPECT_CALL(*second, nextOutput(_)).WillOnce(Return(wakeResult(WakeReason::FINISHED)));
+        engine->streams = {first, second};
+        server.setEngineForTest(engine);
+        BatchGenerateInputPB request;
+        request.set_force_batch(force_batch);
+        for (int i = 0; i < 2; ++i) {
+            auto* input = request.add_inputs();
+            input->set_request_id(i + 1);
+            input->add_token_ids(1);
+            input->mutable_generate_config()->set_max_new_tokens(1);
+        }
+        grpc::ServerContext context;
+        BatchGenerateOutputsPB response;
+        EXPECT_TRUE(server.BatchGenerateCall(&context, &request, &response).ok());
+        EXPECT_EQ(engine->force_batch_flags, std::vector<bool>(2, force_batch));
+        ASSERT_EQ(response.results_size(), 2);
+        EXPECT_FALSE(response.results(0).has_error_info());
+        EXPECT_FALSE(response.results(1).has_error_info());
+    }
+}
 
 class BatchTraceService: public RpcService::Service {
 public:

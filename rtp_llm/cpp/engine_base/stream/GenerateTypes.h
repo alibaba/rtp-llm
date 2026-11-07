@@ -119,6 +119,8 @@ public:
     // Batch grouping params
     int     group_size = 1;
     int64_t group_id   = -1;
+    // Set only by BatchGenerateCall; ordinary generation and batch enqueue RPCs are unchanged.
+    bool force_batch = false;
 
     bool isGroup() const {
         return group_id != -1;

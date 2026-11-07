@@ -654,6 +654,32 @@ class ModelRpcClientTest(TestCase):
             ExceptionType.P2P_CONNECTOR_WORKER_READ_CANCELLED,
         )
 
+    def test_force_batch_is_serialized_only_on_batch_envelope(self):
+        for method in ("batch_generate", "batch_enqueue"):
+            for force_batch in (False, True):
+                with self.subTest(method=method, force_batch=force_batch):
+                    client = self._make_batch_client()
+                    inputs = [self._make_generate_input(GenerateConfig())]
+                    response = BatchGenerateOutputsPB()
+                    response.results.add().final_output.flatten_output.finished.append(
+                        True
+                    )
+                    stub = MagicMock()
+                    stub.BatchGenerateCall = AsyncMock(return_value=response)
+                    with patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                        return_value=stub,
+                    ):
+                        asyncio.run(
+                            getattr(client, method)(inputs, force_batch=force_batch)
+                        )
+                    request = stub.BatchGenerateCall.call_args.args[0]
+                    self.assertEqual(request.force_batch, force_batch)
+                    self.assertNotIn(
+                        "force_batch",
+                        request.inputs[0].generate_config.DESCRIPTOR.fields_by_name,
+                    )
+
     def test_batch_generate_timeout_semantics(self):
         cases = (
             (0, [0, 0], None),
