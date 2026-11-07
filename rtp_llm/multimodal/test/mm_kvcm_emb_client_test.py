@@ -68,6 +68,33 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             )
         return result, underlying, config_type, client_type
 
+    def test_invalid_gpu_sequence_fails_before_loading_sdk(self):
+        for value in ("", b"", None, iter(()), tuple(object() for _ in range(65))):
+            with (
+                self.subTest(value=value),
+                patch.object(kvcm_client, "_load_kvcm_client_types") as loader,
+            ):
+                with self.assertRaises((TypeError, ValueError)):
+                    RtpKvMetaObjectClient._from_config(
+                        _client_config(), gpu_tensors=value
+                    )
+                loader.assert_not_called()
+
+    def test_gpu_arenas_forwarded_to_generic_client(self):
+        arena = object()
+        client_type = MagicMock()
+        config_type = MagicMock()
+        with patch.object(
+            kvcm_client,
+            "_load_kvcm_client_types",
+            return_value=(client_type, config_type),
+        ):
+            client = RtpKvMetaObjectClient._from_config(
+                _client_config(), gpu_tensors=(arena,)
+            )
+        self.assertEqual(client_type.call_args.kwargs, {"gpu_tensors": (arena,)})
+        client.close()
+
     def test_maps_validated_rtp_config_and_registers_once(self):
         config = _client_config()
 
@@ -210,7 +237,10 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
         )
         self.assertFalse(hasattr(kvcm_package, "RtpKvMetaObjectClientConfig"))
         self.assertFalse(hasattr(kvcm_package, "KVE_INSTANCE_PREFIX"))
-        self.assertEqual(list(inspect.signature(RtpKvMetaObjectClient).parameters), [])
+        parameters = inspect.signature(RtpKvMetaObjectClient).parameters
+        self.assertEqual(list(parameters), ["gpu_tensors"])
+        self.assertEqual(parameters["gpu_tensors"].kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(parameters["gpu_tensors"].default, ())
 
     def test_context_manager_returns_facade_and_never_suppresses_body_error(self):
         client, generic_client, _, _ = self._create()

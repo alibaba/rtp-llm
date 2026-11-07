@@ -35,18 +35,31 @@ class RtpKvMetaObjectClient:
     instance is thread-safe and should be reused for the worker lifetime.
     """
 
-    def __init__(self) -> None:
-        self._initialize(RtpKvMetaObjectClientConfig.from_env())
+    def __init__(self, *, gpu_tensors: Sequence[Any] = ()) -> None:
+        self._initialize(
+            RtpKvMetaObjectClientConfig.from_env(), gpu_tensors=gpu_tensors
+        )
 
     @classmethod
-    def _from_config(cls, config: RtpKvMetaObjectClientConfig) -> RtpKvMetaObjectClient:
+    def _from_config(
+        cls, config: RtpKvMetaObjectClientConfig, *, gpu_tensors=()
+    ) -> RtpKvMetaObjectClient:
         instance = object.__new__(cls)
-        instance._initialize(config)
+        instance._initialize(config, gpu_tensors=gpu_tensors)
         return instance
 
-    def _initialize(self, config: RtpKvMetaObjectClientConfig) -> None:
+    def _initialize(
+        self, config: RtpKvMetaObjectClientConfig, *, gpu_tensors=()
+    ) -> None:
         if not isinstance(config, RtpKvMetaObjectClientConfig):
             raise TypeError("config must be a RtpKvMetaObjectClientConfig")
+        if isinstance(gpu_tensors, (str, bytes)) or not isinstance(
+            gpu_tensors, Sequence
+        ):
+            raise TypeError("gpu_tensors must be a sequence")
+        if len(gpu_tensors) > 64:
+            raise ValueError("at most 64 GPU registration tensors are allowed")
+        gpu_tensors = tuple(gpu_tensors)
         client_type, config_type = _load_kvcm_client_types()
         generic_config = config_type(
             addresses=config.addresses,
@@ -58,7 +71,11 @@ class RtpKvMetaObjectClient:
             write_timeout_seconds=config.write_timeout_seconds,
             max_object_bytes=config.max_object_bytes,
         )
-        client = client_type(generic_config)
+        client = (
+            client_type(generic_config, gpu_tensors=gpu_tensors)
+            if gpu_tensors
+            else client_type(generic_config)
+        )
 
         self._config = config
         self._client = client
@@ -72,6 +89,7 @@ class RtpKvMetaObjectClient:
         *,
         environ: Mapping[str, str] | None = None,
         max_object_bytes: int = 1024 * 1024 * 1024,
+        gpu_tensors: Sequence[Any] = (),
     ) -> RtpKvMetaObjectClient:
         """Create from ``environ``, or the current process's ``RECO_*`` values."""
 
@@ -79,7 +97,7 @@ class RtpKvMetaObjectClient:
             environ=environ,
             max_object_bytes=max_object_bytes,
         )
-        return cls._from_config(config)
+        return cls._from_config(config, gpu_tensors=gpu_tensors)
 
     @classmethod
     def from_kv_cache_config(
@@ -87,6 +105,7 @@ class RtpKvMetaObjectClient:
         kv_cache_config: Any,
         *,
         max_object_bytes: int = 1024 * 1024 * 1024,
+        gpu_tensors: Sequence[Any] = (),
     ) -> RtpKvMetaObjectClient:
         """Create and register from RTP's parsed ``KVCacheConfig`` object."""
 
@@ -94,7 +113,7 @@ class RtpKvMetaObjectClient:
             kv_cache_config,
             max_object_bytes=max_object_bytes,
         )
-        return cls._from_config(config)
+        return cls._from_config(config, gpu_tensors=gpu_tensors)
 
     @property
     def instance_id(self) -> str:
