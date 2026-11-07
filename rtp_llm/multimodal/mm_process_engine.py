@@ -734,6 +734,9 @@ class MMProcessEngine:
         )
 
         self.mm_part = mm_part
+        self.supports_precomputed_embedding = (
+            getattr(mm_part, "supports_inline_embedding", False) is True
+        )
 
         self._remote_embedding_cache = None
         if vit_config.mm_remote_cache_enable:
@@ -790,7 +793,7 @@ class MMProcessEngine:
         preprocess_params = self.mm_part.get_preprocess_params()
         preprocess_func = self.mm_part.preprocess_input
 
-        if vit_config.use_local_preprocess:
+        if vit_config.use_local_preprocess or self.supports_precomputed_embedding:
             self.preprocess_executor: PreprocessExecutor = LocalPreprocessExecutor(
                 preprocess_func, vit_config, preprocess_params
             )
@@ -1476,6 +1479,22 @@ class MMProcessEngine:
             raise
         return res
 
+    def mm_embedding_precomputed_cpp(
+        self, tensors: List[torch.Tensor], timeout_ms: int = 0
+    ) -> MMEmbeddingRes:
+        """Avoid the C++ per-input config conversion, retaining scheduler admission."""
+        if not self.supports_precomputed_embedding:
+            raise RuntimeError(
+                "multimodal model does not support precomputed fast path"
+            )
+        config = MMPreprocessConfig()
+        config.mm_timeout_ms = timeout_ms
+        inputs = [MultimodalInput("", MMUrlType.TENSOR, tensor, config) for tensor in tensors]
+        result = self.mm_embedding_impl(inputs)
+        with cuda_graph_gate.operation():
+            result.position_ids = [pos.cpu() for pos in result.position_ids]
+        return result
+
     def mm_embedding_impl(
         self, mm_inputs: List[MultimodalInput], request_id: int = 0
     ) -> MMEmbeddingRes:
@@ -1520,30 +1539,39 @@ class MMProcessEngine:
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_query_access(mm_inputs, request_id)
 
+                precomputed_embedding = (
+                    self.supports_precomputed_embedding
+                    and cache_claim is None
+                    and all(not inp.url and inp.tensor is not None for inp in mm_inputs)
+                )
                 with torch.profiler.record_function("preprocess"):
                     work_items = self._create_work_items(
                         mm_inputs,
                         cache_claim=cache_claim,
                         defer_cache_complete=defer_cache_complete,
-                        defer_feature_hashes=defer_feature_hashes,
+                        defer_feature_hashes=(
+                            defer_feature_hashes or precomputed_embedding
+                        ),
                         deadline=deadline,
                     )
                     self._wait_for_preprocessing(work_items)
 
+                # Reuse the scheduler's timeout, overload, shutdown and batching
+                # contracts for precomputed inputs as well as ordinary media.
                 with torch.profiler.record_function("compute_embeddings"):
                     emb_res, pos_res, extra_input_res = self._compute_embeddings(
                         work_items, deadline=deadline
                     )
-                    if report_embedding_length:
-                        kmonitor.report(
-                            GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
-                            _embedding_token_length(emb_res),
-                        )
+                if report_embedding_length:
+                    kmonitor.report(
+                        GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
+                        _embedding_token_length(emb_res),
+                    )
 
                 with torch.profiler.record_function("postprocess"):
                     hashes = (
                         None
-                        if defer_feature_hashes
+                        if defer_feature_hashes or precomputed_embedding
                         else [h for wi in work_items for h in wi.feature_hashes or []]
                     )
                     result = MMEmbeddingRes(emb_res, pos_res, extra_input_res, hashes)

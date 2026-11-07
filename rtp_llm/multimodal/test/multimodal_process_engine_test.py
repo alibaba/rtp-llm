@@ -215,6 +215,165 @@ class MMProcessEngineTest(TestCase):
         self.assertEqual(res.embeddings, [torch.tensor(0)])
         self.assertEqual(res.position_ids, [])
 
+    def _make_precomputed_engine(self):
+        class PrecomputedEmbedding(FakeMultiModalEmbeddingInterface):
+            supports_inline_embedding = True
+
+            @staticmethod
+            def preprocess_input(mm_inputs, vit_config, **kwargs):
+                return [item.tensor for item in mm_inputs]
+
+            def embedding(self, data, **kwargs):
+                return data, None
+
+        model = FakeModel(PrecomputedEmbedding())
+        model.model_config.mm_related_params.preprocess_batch_size = -1
+        config = VitConfig()
+        config.mm_cache_gpu_max_bytes = 0
+        config.mm_cache_cpu_max_bytes = 0
+        engine = MMProcessEngine(
+            model.mm_part, model.model_config, config, ProfilingDebugLoggingConfig()
+        )
+        self.addCleanup(engine.stop)
+        return engine
+
+    def test_precomputed_embedding_preserves_timeout_and_cleanup(self):
+        engine = self._make_precomputed_engine()
+        release = threading.Event()
+
+        def wait_for_release(*args, **kwargs):
+            if not release.wait(timeout=2):
+                raise RuntimeError("test did not release embedding")
+            return [torch.zeros(2, 4)], None
+
+        try:
+            with patch.object(engine.mm_part, "embedding", side_effect=wait_for_release):
+                with self.assertRaises(TimeoutError):
+                    engine.mm_embedding_precomputed_cpp([torch.zeros(2, 4)], 20)
+                self.assertEqual(engine.get_query_num(), 0)
+                release.set()
+                # A timed-out request must not poison the next submission.
+                engine.mm_embedding_precomputed_cpp([torch.zeros(2, 4)], 1000)
+        finally:
+            release.set()
+
+    def test_precomputed_embedding_preserves_shutdown_and_image_limit(self):
+        engine = self._make_precomputed_engine()
+        tensors = [torch.zeros(2, 4), torch.ones(2, 4)]
+        with patch.object(engine._scheduler, "_max_batch_images", 1):
+            with self.assertRaisesRegex(ValueError, "image count"):
+                engine.mm_embedding_precomputed_cpp(tensors)
+        self.assertEqual(engine.get_query_num(), 0)
+        engine._scheduler.close()
+        with self.assertRaisesRegex(RuntimeError, "closed"):
+            engine.mm_embedding_precomputed_cpp(tensors[:1])
+        self.assertEqual(engine.get_query_num(), 0)
+
+    def test_precomputed_embedding_preserves_queue_limit(self):
+        engine = self._make_precomputed_engine()
+        engine._scheduler._max_queue_size = 1
+        entered, queued, release = threading.Event(), threading.Event(), threading.Event()
+        original_enqueue = engine._scheduler._enqueue_chunk
+        submissions = 0
+
+        def enqueue(chunk):
+            nonlocal submissions
+            original_enqueue(chunk)
+            submissions += 1
+            if submissions == 2:
+                queued.set()
+
+        def embedding(data, **kwargs):
+            entered.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("test did not release embedding")
+            return data, None
+
+        with patch.object(engine.mm_part, "embedding", side_effect=embedding), patch.object(
+            engine._scheduler, "_enqueue_chunk", side_effect=enqueue
+        ), concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            try:
+                first = pool.submit(
+                    engine.mm_embedding_precomputed_cpp, [torch.zeros(2, 4)]
+                )
+                self.assertTrue(entered.wait(timeout=2))
+                second = pool.submit(
+                    engine.mm_embedding_precomputed_cpp, [torch.zeros(2, 4)]
+                )
+                self.assertTrue(queued.wait(timeout=2))
+                with self.assertRaisesRegex(RuntimeError, "queue full"):
+                    engine.mm_embedding_precomputed_cpp([torch.zeros(2, 4)])
+                release.set()
+                first.result(timeout=2)
+                second.result(timeout=2)
+            finally:
+                release.set()
+        self.assertEqual(engine.get_query_num(), 0)
+
+    def test_precomputed_embedding_preserves_original_deadline(self):
+        engine = self._make_precomputed_engine()
+        inputs = [
+            MultimodalInput("", MMUrlType.TENSOR, torch.zeros(2, 4), MMPreprocessConfig())
+        ]
+        with patch.object(engine.mm_part, "embedding") as embedding:
+            with self.assertRaisesRegex(FtRuntimeException, "deadline"):
+                engine._mm_embedding_impl(inputs, deadline=time.monotonic() - 1)
+            embedding.assert_not_called()
+        self.assertEqual(engine.get_query_num(), 0)
+
+    def test_precomputed_embedding_caps_scheduler_wait_by_original_deadline(self):
+        engine = self._make_precomputed_engine()
+        inputs = [
+            MultimodalInput("", MMUrlType.TENSOR, torch.zeros(2, 4), MMPreprocessConfig())
+        ]
+        entered, release = threading.Event(), threading.Event()
+
+        def embedding(data, **kwargs):
+            entered.set()
+            if not release.wait(timeout=2):
+                raise RuntimeError("test did not release embedding")
+            return data, None
+
+        try:
+            with patch.object(engine.mm_part, "embedding", side_effect=embedding):
+                with self.assertRaises(TimeoutError):
+                    engine._mm_embedding_impl(inputs, deadline=time.monotonic() + 0.1)
+                self.assertTrue(entered.is_set())
+                self.assertEqual(engine.get_query_num(), 0)
+                release.set()
+                engine.mm_embedding_precomputed_cpp([torch.zeros(2, 4)], 1000)
+        finally:
+            release.set()
+
+    def test_precomputed_cpp_position_ids_are_cpu(self):
+        engine = self._make_precomputed_engine()
+        position_ids = torch.tensor([3, 4], dtype=torch.int32, device=engine.device)
+        embeddings = torch.zeros((2, 4), device=engine.device)
+        with patch.object(
+            engine.mm_part, "embedding", return_value=(embeddings, position_ids)
+        ) as embedding:
+            result = engine.mm_embedding_precomputed_cpp([embeddings])
+        embedding.assert_called_once()
+        self.assertEqual(result.position_ids[0].device.type, "cpu")
+        torch.testing.assert_close(result.position_ids[0], position_ids.cpu())
+
+    def test_opt_in_embedding_rejects_invalid_visual_tokens(self):
+        engine = self._make_precomputed_engine()
+        config = MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
+        mm_input = MultimodalInput("image", MMUrlType.IMAGE, torch.empty(0), config)
+        for embedding, error in (
+            (torch.tensor(1, device=engine.device), "scalar embedding"),
+            (torch.empty((0, 2, 4), device=engine.device), "empty embedding"),
+        ):
+            with self.subTest(error=error):
+                with patch.object(
+                    engine.mm_part, "embedding", return_value=(embedding, None)
+                ):
+                    with self.assertRaisesRegex(RuntimeError, error):
+                        engine.mm_embedding_precomputed_cpp([embedding])
+                    with self.assertRaisesRegex(RuntimeError, error):
+                        engine.mm_embedding_impl([mm_input])
+
     @patch("rtp_llm.multimodal.mm_process_engine.kmonitor.report")
     def test_embedding_length_metric_sums_a_request(self, report):
         """A multi-image request emits one gauge containing all visual tokens."""
@@ -1935,6 +2094,24 @@ class _UrlRecordingEmbedding(FakeMultiModalEmbeddingInterface):
 
 
 class MMProcessEngineGreenNetTest(TestCase):
+    def test_inline_embedding_with_cache_claim_uses_work_items(self):
+        engine = self._make_engine()
+        engine.supports_precomputed_embedding = True
+        inp = self._make_input("fake://inline-cache")
+        key = inp.cache_key()
+        _, entry = engine._embedding_cache.try_acquire(key)
+        try:
+            with patch.object(
+                engine, "_create_work_items", side_effect=RuntimeError("work-item path")
+            ) as create_work_items:
+                with self.assertRaisesRegex(RuntimeError, "work-item path"):
+                    engine._mm_embedding_impl(
+                        [inp], cache_claim=(key, entry, "miss"), report_vit_error=False
+                    )
+                create_work_items.assert_called_once()
+        finally:
+            engine.stop()
+
     def test_stop_drains_running_compute_before_closing_dependencies(self):
         engine = self._make_engine()
         entered, release, stopping = (
