@@ -110,6 +110,10 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
 
     def test_existing_custom_ar_keeps_legacy_backend_on_sm120(self):
         comm = MagicMock()
+
+        def agree(peers, value, group):
+            peers[:] = [value, value]
+
         with (
             patch.dict(
                 sys.modules,
@@ -117,7 +121,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
             ),
             patch.object(flashinfer_ar.dist, "get_world_size", return_value=2),
             patch.object(flashinfer_ar.dist, "get_rank", return_value=0),
-            patch.object(flashinfer_ar.dist, "all_gather_object") as gather,
+            patch.object(
+                flashinfer_ar.dist, "all_gather_object", side_effect=agree
+            ) as gather,
             patch.object(torch.cuda, "get_device_capability", return_value=(12, 0)),
             patch.object(torch.cuda, "is_current_stream_capturing", return_value=False),
             patch.object(flashinfer_ar.dist, "all_reduce"),
@@ -138,7 +144,39 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         self.assertEqual(
             comm.create_allreduce_fusion_workspace.call_args.kwargs["backend"], "trtllm"
         )
-        gather.assert_not_called()
+        gather.assert_called_once_with(
+            [(True, False, False)] * 2,
+            (True, False, False),
+            group=communicator.group,
+        )
+
+    def test_legacy_custom_ar_disables_when_a_peer_probe_failed(self):
+        comm = MagicMock()
+
+        def peer_failed(peers, value, group):
+            self.assertEqual(value, (True, False, False))
+            peers[:] = [value, (False, False, False)]
+
+        with (
+            patch.dict(
+                sys.modules,
+                {"flashinfer": MagicMock(comm=comm), "flashinfer.comm": comm},
+            ),
+            patch.object(flashinfer_ar.dist, "get_world_size", return_value=2),
+            patch.object(flashinfer_ar.dist, "get_rank", return_value=0),
+            patch.object(
+                flashinfer_ar.dist, "all_gather_object", side_effect=peer_failed
+            ),
+        ):
+            communicator = flashinfer_ar.FlashInferAllReduce(
+                object(),
+                torch.device("cuda", 0),
+                single_node=True,
+                disable_custom_all_reduce=False,
+            )
+        self.assertTrue(communicator.disabled)
+        self.assertFalse(communicator.should_use(_FakeTensor()))
+        comm.create_allreduce_fusion_workspace.assert_not_called()
 
     def test_default_tp8_skips_canonical_initialization(self):
         module = MagicMock()

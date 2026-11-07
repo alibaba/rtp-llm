@@ -119,15 +119,17 @@ class FlashInferAllReduce:
             logging.info("FlashInfer all-reduce unavailable; using NCCL: %s", error)
 
         self._large_prefill = large_prefill
-        if enable_sm120_collectives:
-            policy = (not self.disabled, self.cpp_small_enabled, self._large_prefill)
-            dist.all_gather_object(peers, policy, group=self.group)
-            if any(peer != policy for peer in peers):
-                self.disabled = True
-                self.cpp_small_enabled = False
-                logging.warning(
-                    "FlashInfer all-reduce eligibility differs across ranks; using NCCL"
-                )
+        # Probe failures must agree on the legacy TRT-LLM path too. Otherwise a
+        # disabled rank can enter NCCL while its peer initializes a workspace.
+        peers = [None] * self.world_size
+        policy = (not self.disabled, self.cpp_small_enabled, self._large_prefill)
+        dist.all_gather_object(peers, policy, group=self.group)
+        if any(peer != policy for peer in peers):
+            self.disabled = True
+            self.cpp_small_enabled = False
+            logging.warning(
+                "FlashInfer all-reduce eligibility differs across ranks; using NCCL"
+            )
 
     def _create_workspace(self, tensor: torch.Tensor) -> bool:
         if self.disabled or self._flashinfer_comm is None:

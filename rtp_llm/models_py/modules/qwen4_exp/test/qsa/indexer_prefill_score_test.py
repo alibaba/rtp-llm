@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.qwen4_exp.qsa import indexer as indexer_module
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import Qwen4ExpQSAIndexer
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_score import (
     try_prefill_score,
 )
@@ -89,6 +91,79 @@ class IndexerPrefillScoreTest(unittest.TestCase):
             self.assertIsNone(try_prefill_score(q, k))
         with patch("torch.cuda.get_device_capability", return_value=(7, 0)):
             self.assertIsNone(try_prefill_score(q, k))
+
+    def reference_selection(self, q, keys, past_length):
+        batch, length = q.shape[:2]
+        positions = past_length + torch.arange(length, device=q.device)
+        complete = (positions + 1) // 4
+        scores = self.reference(q, keys)
+        visible = torch.arange(keys.shape[1], device=q.device)[None] < complete[:, None]
+        values, blocks = scores.masked_fill(~visible[None], float("-inf")).topk(
+            min(512, keys.shape[1]), dim=-1
+        )
+        tokens = blocks[..., None] * 4 + torch.arange(4, device=q.device)
+        tokens = torch.where(values[..., None] > float("-inf"), tokens, -1)
+        output = torch.full(
+            (batch, length, 2051), -1, device=q.device, dtype=torch.int32
+        )
+        output[..., : tokens.shape[-2] * 4] = tokens.flatten(-2).int()
+        tail = complete[:, None] * 4 + torch.arange(3, device=q.device)
+        output[..., 2048:] = torch.where(tail <= positions[:, None], tail, -1).int()
+        return output
+
+    def test_bounded_fallback_keeps_absolute_positions_ties_and_tail(self):
+        for past_length, tied in ((0, False), (5, False), (0, True), (5, True)):
+            with self.subTest(past_length=past_length, tied=tied):
+                q, _ = self.inputs(length=131, strided=True)
+                raw = torch.randn(2, 131, 128, device=q.device, dtype=q.dtype)
+                past = torch.randn(2, past_length, 128, device=q.device, dtype=q.dtype)
+                if tied:
+                    q.zero_()
+                cosine = torch.ones(
+                    2, past_length + 131, 64, device=q.device, dtype=q.dtype
+                )
+                sine = torch.zeros_like(cosine)
+                indexer = Qwen4ExpQSAIndexer(
+                    torch.zeros(640, 8, device=q.device, dtype=q.dtype),
+                    torch.zeros(128, device=q.device, dtype=q.dtype),
+                    torch.zeros(128, device=q.device, dtype=q.dtype),
+                    n_heads=4,
+                    kv_heads=1,
+                    head_dim=128,
+                    token_budget=2048,
+                    compress_ratio=4,
+                    norm_eps=1e-6,
+                )
+                keys = indexer.pooled_block_keys_all(
+                    torch.cat((past, raw), 1), cosine, sine
+                )
+                expected = self.reference_selection(q, keys, past_length)
+                bytes_per_query = 2 * keys.shape[1] * (2 * 4 + 2) * 4
+                with (
+                    patch(
+                        "rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_score.try_prefill_score",
+                        return_value=None,
+                    ),
+                    patch.object(
+                        indexer_module,
+                        "_MAX_SCORE_WORKSPACE_BYTES",
+                        bytes_per_query * 7,
+                    ),
+                    patch.object(torch, "matmul", wraps=torch.matmul) as matmul,
+                ):
+                    actual = indexer.forward_causal_from_projected(
+                        q,
+                        raw,
+                        cosine,
+                        sine,
+                        past if past_length else None,
+                        precomputed_block_keys=keys if not past_length else None,
+                    )
+                self.assertGreater(matmul.call_count, 1)
+                self.assertTrue(
+                    all(call.args[0].shape[1] <= 7 for call in matmul.call_args_list)
+                )
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,9 @@ from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
 
 from .validation import DeviceChecks
 
+# Bound fallback logits and their head reduction independently of context length.
+_MAX_SCORE_WORKSPACE_BYTES = 64 * 1024 * 1024
+
 
 def _normalized_rope_style_name(style: Any) -> str:
     """Read pybind, string and integer RopeStyle representations lazily."""
@@ -553,8 +556,8 @@ class Qwen4ExpQSAIndexer(nn.Module):
     ) -> torch.Tensor:
         """Loop-free causal selection: ``[B,S,hidden] -> [B,S,max_selected]``.
 
-        Block keys are pooled once per sequence and every query is scored in one
-        batched matmul. All shapes are static: no ``nonzero``, no data-dependent slicing.
+        Block keys are pooled once per sequence. Long fallback scoring is split
+        into bounded query chunks. All shapes are static: no ``nonzero``, no data-dependent slicing.
         Causal visibility only -- prefill with ``past_raw_keys=None``, decode with
         ``S=1``.
 
@@ -600,10 +603,7 @@ class Qwen4ExpQSAIndexer(nn.Module):
             q, cos[:, past_len:].unsqueeze(2), sin[:, past_len:].unsqueeze(2)
         )
 
-        out = None
         positions = past_len + torch.arange(seq_len, device=device)
-        # Complete blocks visible to each query; also where its tail starts.
-        complete = (positions + 1) // ratio
 
         if precomputed_block_keys is not None:
             if past_raw_keys is not None or not (
@@ -620,19 +620,56 @@ class Qwen4ExpQSAIndexer(nn.Module):
         else:
             block_keys = self.pooled_block_keys_all(raw_keys, cos, sin)
         num_blocks = block_keys.shape[1]
+        if num_blocks == 0:
+            return self._select_causal_scores(
+                torch.empty((batch, seq_len, 0), device=device), positions
+            )
+
+        from .indexer_prefill_score import try_prefill_score
+
+        scores = try_prefill_score(q, block_keys)
+        if scores is not None:
+            return self._select_causal_scores(scores, positions)
+
+        # The unfused route holds FP32 per-head logits, ReLU output and reduced
+        # scores. Select each query chunk before allocating the next one, so a
+        # supported long request never materializes an S-by-S score tensor.
+        bytes_per_query = batch * num_blocks * (2 * heads + 2) * 4
+        chunk_size = max(1, _MAX_SCORE_WORKSPACE_BYTES // bytes_per_query)
+        keys = block_keys.float().transpose(-1, -2).unsqueeze(1)
+        out = None
+        for start in range(0, seq_len, chunk_size):
+            end = min(start + chunk_size, seq_len)
+            logits = torch.matmul(q[:, start:end].float(), keys)
+            scores = torch.relu(logits.transpose(-1, -2)).sum(dim=-1) / math.sqrt(
+                self.head_dim
+            )
+            selected = self._select_causal_scores(scores, positions[start:end])
+            if start == 0 and end == seq_len:
+                return selected
+            if out is None:
+                out = torch.empty(
+                    (batch, seq_len, self.max_selected),
+                    dtype=torch.int32,
+                    device=device,
+                )
+            out[:, start:end].copy_(selected)
+            del logits, scores, selected
+        if out is None:
+            out = torch.empty(
+                (batch, seq_len, self.max_selected), dtype=torch.int32, device=device
+            )
+        return out
+
+    def _select_causal_scores(self, scores, positions):
+        batch, seq_len, num_blocks = scores.shape
+        ratio = self.compress_ratio
+        device = scores.device
+        # Keep absolute positions when queries belong to a later score chunk.
+        complete = (positions + 1) // ratio
+        out = None
         top_k = min(self.block_topk, num_blocks)
         if top_k > 0:
-            from .indexer_prefill_score import try_prefill_score
-
-            scores = try_prefill_score(q, block_keys)
-            if scores is None:
-                # [B,S,H,nb] -> relu -> sum(H), with FP32 intermediate scores.
-                scores = torch.matmul(
-                    q.float(), block_keys.float().transpose(-1, -2).unsqueeze(1)
-                )
-                scores = torch.relu(scores.transpose(-1, -2)).sum(dim=-1) / math.sqrt(
-                    self.head_dim
-                )
             if ratio == 4 and self.token_budget == 2048:
                 from .qsa_topk_triton import try_select_qsa_tokens
 
