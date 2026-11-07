@@ -402,7 +402,9 @@ class CustomChatRenderer:
         self.tokenizer = tokenizer
         self.model_type = renderer_params.model_type
         self.max_seq_len = renderer_params.max_seq_len
-        self.eos_token_id = renderer_params.eos_token_id
+        primary_eos_ids = renderer_params.eos_token_id
+        if not isinstance(primary_eos_ids, (list, tuple)):
+            primary_eos_ids = [primary_eos_ids]
         # Some checkpoints (including GLM) declare several EOS ids, while the
         # tokenizer exposes only the primary one. Keep the full model set for
         # per-request ignore_eos handling, separate from ordinary stop words.
@@ -414,7 +416,13 @@ class CustomChatRenderer:
         )
         if isinstance(model_eos_ids, int):
             model_eos_ids = [model_eos_ids]
-        self.eos_token_ids = frozenset([self.eos_token_id] + (model_eos_ids or []))
+        eos_token_ids = [
+            token
+            for token in [*primary_eos_ids, *(model_eos_ids or [])]
+            if isinstance(token, int)
+        ]
+        self.eos_token_id = next(iter(eos_token_ids), -1)
+        self.eos_token_ids = frozenset(eos_token_ids)
         self.stop_words_id_list = renderer_params.stop_word_ids_list
         self.stop_words_str_list = [
             self.tokenizer.decode(stop_word_ids)
