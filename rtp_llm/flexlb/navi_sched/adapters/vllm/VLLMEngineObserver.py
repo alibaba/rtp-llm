@@ -5290,15 +5290,9 @@ class VLLMEngineObserver:
                     actual_cache_hits, predicted_cache_hits, strict=True
                 )
             )
-            inter_step_gap_ms = wall_ms - execution_step_ms
-            if inter_step_gap_ms < 0.0:
-                logger.error(
-                    "negative NaviSched vLLM inter-step gap: batch_id=%d "
-                    "wall_ms=%.3f execute_model_sum_ms=%.3f",
-                    batch_id,
-                    wall_ms,
-                    execution_step_ms,
-                )
+            # Pipeline steps overlap, so their summed latency can exceed wall time.
+            # Match the native reporter's nonnegative gap statistic.
+            inter_step_gap_ms = max(0.0, wall_ms - execution_step_ms)
             _execution_timing_probe._diagnostic_format_info(
                 logger,
                 "[navi-vllm-execution-batch] batch_id=%d chunks=%d steps=%d "
