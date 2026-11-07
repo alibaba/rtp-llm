@@ -81,6 +81,15 @@ receipts do not authorize the new run. Only the initial native sync/generation
 is skipped; policy1/2 refits and the post-update rollout execute normally.
 Reports must distinguish recovered policy-zero evidence from new generation.
 
+Recovery also restores the original naive-sync success epilogue on each
+authenticated actor child: synchronized empty-cache cleanup, `base_sync_done`
+and the active training allocator setting. The skipped transaction must not
+skip these framework postconditions. The pinned original future native-sync
+method still switches to non-expandable allocations before IPC, then restores
+expandable allocations for training. The process environment remains the
+non-expandable IPC setting; the worker proof records the actual active setting
+separately. No optimizer precision or gradient-cache implementation changes.
+
 For this recovery mode, the offline core validator takes the explicit
 `--initial-policy-replay-manifest`, `--initial-policy-replay-sha256`, and
 `--historical-evidence-root` arguments. Supply only the new run's load,

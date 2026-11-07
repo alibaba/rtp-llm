@@ -147,6 +147,54 @@ def hash_canonical_source(checkpoint,weight_map,row,*,maximum_read_bytes=128*102
     return dict(name=name,sha256=actual,source_bytes=bytes_hashed,read_count=read_count,maximum_host_window_bytes=peak)
 
 
+def restore_original_training_postconditions(child):
+    """Restore the original naive-sync epilogue after authenticated sync0 replay.
+
+    The initial native transaction is legitimately absent, but its caller also
+    establishes process-local training allocator state. Keep the original IPC
+    environment and all future real sync calls unchanged; only reproduce the
+    original cleanup/base-sync/allocator epilogue on the actual actor child.
+    """
+    import importlib,inspect,torch
+    expected={
+        'verl.workers.engine_workers':'721f866442475a08768854b58176a4dcd99de4564809e3d067dced7cba1122db',
+        'verl.utils.device':'52c5dd8dc3e4afc3e0d67756d3d4995282246b98b767be080c28448353c1ad11',
+        'verl.utils.memory_utils':'2c356ff43c37d18f29dd0713cb60cb080209fff2e964f993b8d27f176669c111'}
+    modules={name:importlib.import_module(name) for name in expected}
+    for name,module in modules.items():
+        if hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest()!=expected[name]:
+            raise RuntimeError('Original naive-sync training epilogue source differs: '+name)
+    workers=modules['verl.workers.engine_workers']
+    original=inspect.unwrap(workers.ActorRolloutRefWorker.update_weights)
+    actual=inspect.unwrap(type(child).update_weights)
+    if (not isinstance(child,workers.ActorRolloutRefWorker) or actual is not original
+            or Path(inspect.getsourcefile(original)).resolve()!=Path(workers.__file__).resolve()
+            or workers.set_expandable_segments is not modules['verl.utils.device'].set_expandable_segments
+            or workers.aggressive_empty_cache is not modules['verl.utils.memory_utils'].aggressive_empty_cache
+            or not torch.cuda.is_initialized() or torch.cuda.memory.get_allocator_backend()!='native'):
+        raise RuntimeError('Replay epilogue is restricted to the original CUDA actor and native allocator')
+    before=torch._C._accelerator_getAllocatorSettings()
+    previous_base=child.base_sync_done
+    # Same order as the pinned original update_weights epilogue. There is no
+    # native cache to resume or source to offload in this fresh virgin state.
+    workers.aggressive_empty_cache(force_sync=True)
+    child.base_sync_done=True
+    workers.set_expandable_segments(True)
+    after=torch._C._accelerator_getAllocatorSettings()
+    if 'expandable_segments:True' not in after.replace(' ','') or child.base_sync_done is not True:
+        raise RuntimeError('Original training allocator postcondition was not established')
+    return dict(schema='q38-original-sync-training-postconditions-v1',
+        actual_actor_child_class=type(child).__module__+'.'+type(child).__name__,
+        source_sha256=expected,original_sync_epilogue_replayed=True,
+        force_synchronized_aggressive_empty_cache_completed=True,
+        base_sync_done_before=previous_base,base_sync_done_after=child.base_sync_done,
+        active_allocator_settings_before=before,active_allocator_settings_after=after,
+        active_training_expandable_segments=True,allocator_backend='native',
+        IPC_allocator_environment=os.environ.get('PYTORCH_ALLOC_CONF'),
+        native_update_weights_method_unmodified=True,
+        no_native_resume_or_weight_transaction_performed=True)
+
+
 def _fresh_worker_proof(worker,manifest,expected_rank,expected_uuid,no_native):
     import torch
     import torch.distributed as dist
@@ -155,10 +203,11 @@ def _fresh_worker_proof(worker,manifest,expected_rank,expected_uuid,no_native):
     matches=[]
     for child in worker.worker_dict.values():
         engine=getattr(getattr(child,'actor',None),'engine',None)
-        if getattr(child,'_is_actor',False) and hasattr(engine,'_q38_phases'):matches.append((engine,child.rollout))
+        if getattr(child,'_is_actor',False) and hasattr(engine,'_q38_phases'):matches.append((engine,child.rollout,child))
     if (len(matches)!=1 or not dist.is_initialized() or dist.get_world_size()!=72 or dist.get_rank()!=expected_rank):
         raise RuntimeError('Replay source verification reached the wrong current FSDP actor')
-    engine,adapter=matches[0]
+    engine,adapter,actor_child=matches[0]
+    _require_initial_no_native(no_native)
     if (engine._q38_phases.phase!='train' or engine._q38_exporter is not None
             or engine._q38_gradient_store.slots or engine.optimizer.audit()['steps']
             or engine.optimizer.audit()['moments']['cpu_moment_bytes']!=0
@@ -180,6 +229,7 @@ def _fresh_worker_proof(worker,manifest,expected_rank,expected_uuid,no_native):
     actual_uuid=canonical_uuid(str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid))
     if actual_uuid!=canonical_uuid(expected_uuid):raise RuntimeError('The fresh replay actor uses a different allocated GPU')
     canonical_verified=verify_owned_canonical_sources(manifest,expected_rank)
+    training_postconditions=restore_original_training_postconditions(actor_child)
     proof=dict(schema='q38-fresh-initial-policy-replay-worker-v1',rank=expected_rank,world_size=72,
         pid=os.getpid(),time_ns=time.time_ns(),current_run_root=os.environ['Q38_RUN_ROOT'],gpu_uuid=actual_uuid,
         previous_run_root=manifest['source_run_root'],previous_checkpoint_load_sha256=old['sha256'],
@@ -191,7 +241,8 @@ def _fresh_worker_proof(worker,manifest,expected_rank,expected_uuid,no_native):
         current_assigned_canonical_sources=canonical_verified,native_never_started_proof=no_native,
         native_source_export_never_created=True,current_optimizer_steps=[],current_CPU_moment_bytes=0,
         current_FP32_gradient_bytes=0,old_native_version=manifest['original_native_model_version'],
-        old_evidence_is_not_current_native_cleanup=True)
+        old_evidence_is_not_current_native_cleanup=True,
+        original_training_postconditions=training_postconditions)
     engine._q38_initial_policy_replay_proof=proof
     output=Path(os.environ['Q38_TRAINING_AUDIT_DIR'])/f'initial-policy-replay-rank{expected_rank}.json'
     with output.open('x') as stream:json.dump(proof,stream);stream.write('\n')
