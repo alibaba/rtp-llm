@@ -32,6 +32,36 @@ from qwen38_world_contract import (
 from qwen38_refit_contract import validate_policy_probe_sources
 
 
+def _probe_attempt_payload(values, hf, prompt, target, request_ids, context):
+    """Record returned scores before validation; never grant admission here.
+
+    Final protobuf payloads are preserved separately by NativeRpcJournal. These
+    FP32 encodings describe the parsed score values, not network frames.
+    """
+    rows = []
+    for dp, value in enumerate(values):
+        row = dict(dp_rank=dp, generation_world_rank=dp * 8,
+                   request_id=request_ids[dp], returned=not isinstance(value, BaseException))
+        if isinstance(value, BaseException):
+            row['error'] = repr(value)
+        else:
+            row['raw_log_probs'] = [x if math.isfinite(x) else None for x in value]
+            row['nonfinite_indices'] = [i for i, x in enumerate(value) if not math.isfinite(x)]
+            row['parsed_fp32_bits_hex'] = struct.pack(f'<{len(value)}f', *value).hex()
+        rows.append(row)
+    finite = (len(values) == 9 and not any(isinstance(row, BaseException) for row in values)
+              and all(len(row) == len(target) and all(math.isfinite(x) for x in row) for row in values))
+    return dict(schema='q38-native-HF-probe-attempt-v1',
+        numeric_gates_not_yet_evaluated=True, acceptance_proven_here=False,
+        generation_admission_granted_here=False, tolerance=.05,
+        prompt_ids=prompt, response_ids=target, probes=rows,
+        hf_raw_log_probs=hf['raw_log_probs'], hf_raw_fp32_bits_hex=hf.get('raw_fp32_bits_hex'),
+        all_nine_scores_finite_and_complete=finite,
+        observed_max_dp_error=(max(abs(a-b) for row in values for a, b in zip(values[0], row)) if finite else None),
+        observed_max_HF_error=(max(abs(a-b) for row in values for a, b in zip(hf['raw_log_probs'], row)) if finite else None),
+        **context)
+
+
 def _check_native_port_available(host, port):
     # Match restartable TCP listeners: expired connections may retain a
     # TIME_WAIT tuple after every owned process has actually exited.
@@ -556,8 +586,23 @@ class World72RTPServer(RTPServer):
             client.expected_step, client.expected_version = expected_step, expected_version
             client.open_admission()  # Internal probes only; controller admission is still closed.
         try:
-            values = await asyncio.gather(*[client.score_tokens(uuid.uuid4().int & ((1 << 63) - 1), prompt, target,
-                expected_version=expected_version) for client in self.clients], return_exceptions=True)
+            probe_request_ids = [uuid.uuid4().int & ((1 << 63) - 1) for _ in self.clients]
+            values = await asyncio.gather(*[client.score_tokens(request_id, prompt, target,
+                expected_version=expected_version) for client, request_id in zip(self.clients, probe_request_ids)],
+                return_exceptions=True)
+            # Persist failures too. The accepted probe filename below remains
+            # reserved for scores that pass every original numerical gate.
+            attempt_time_ns = time.time_ns()
+            attempt = _probe_attempt_payload(values, hf, prompt, target, probe_request_ids, dict(
+                logical_model_replicas=1, world_size=72, tp_size=8, dp_size=9, ep_size=72,
+                native_boot=self.boot, native_incarnation=self.incarnation, global_step=expected_step,
+                model_version=expected_version, recorded_unix_ns=attempt_time_ns,
+                actual_HF_reference_path=str(hf_path),
+                actual_HF_reference_sha256=hashlib.sha256(hf_path.read_bytes()).hexdigest(),
+                source_transaction_path=str(sync_path),
+                source_transaction_sha256=hashlib.sha256(sync_path.read_bytes()).hexdigest(),
+                full_source_sha256=sync['full_source_sha256']))
+            _write_json(self.main_audit_root / f'rtp_probe_attempt_step{expected_step}_{attempt_time_ns}.json', attempt)
             require(len(values) == 9 and not any(isinstance(row, BaseException) for row in values)
                     and all(len(row) == len(target) and all(math.isfinite(x) for x in row) for row in values),
                     'all nine actual DP probes must return finite target logprobs')
