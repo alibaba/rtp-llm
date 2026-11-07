@@ -111,6 +111,14 @@ class Qwen4ExpTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "128-token"):
             Qwen4Exp._post_build_model_config(self.config)
 
+    def test_split_physical_and_kernel_cache_pages_are_rejected_before_build(self):
+        for physical in (256, 512, 32768):
+            with self.subTest(physical=physical):
+                self.config.attn_config.tokens_per_block = physical
+                self.config.attn_config.kernel_tokens_per_block = 128
+                with self.assertRaisesRegex(ValueError, "physical and kernel"):
+                    Qwen4Exp._post_build_model_config(self.config)
+
     def test_ple_document_eos_survives_chat_tokenizer_setup(self):
         from rtp_llm.config.qwen4_exp_config import ple_eos_token_id
 

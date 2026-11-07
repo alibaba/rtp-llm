@@ -217,9 +217,13 @@ class Qwen4Exp(Qwen35Moe):
             attn.tokens_per_block = 128
         if int(attn.kernel_tokens_per_block) == 0:
             attn.kernel_tokens_per_block = 128
-        if int(attn.tokens_per_block) % 128 or int(attn.kernel_tokens_per_block) != 128:
+        if (
+            int(attn.tokens_per_block) != 128
+            or int(attn.kernel_tokens_per_block) != 128
+        ):
             raise ValueError(
-                "qwen4_exp requires 128-token kernel pages and logical blocks divisible by 128"
+                "qwen4_exp requires 128-token physical and kernel cache pages "
+                "(tokens_per_block == kernel_tokens_per_block == 128)"
             )
         # Generic precision initialization reads source checkpoint metadata;
         # finalize the complete source-to-runtime recipe after that stage.
