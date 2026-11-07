@@ -6,6 +6,58 @@
 
 namespace rtp_llm {
 
+namespace {
+int64_t appendCacheKeySegment(int64_t hash, const CompleteTokenIds& ids, const int32_t* tokens, int pos, int len) {
+    hash = hashInt64Array(hash, tokens + pos, tokens + pos + len);
+    const auto identity = ids.imageCacheIdentity(pos, len);
+    if (!identity.empty()) {
+        hash = hashInt64Array(hash, identity.data(), identity.data() + identity.size());
+    }
+    return hash;
+}
+}  // namespace
+
+int64_t cacheKeyForSourceSegment(const CompleteTokenIds& complete_token_ids,
+                                 const std::vector<int>& source_tokens,
+                                 int                     segment_begin,
+                                 int                     seq_size_per_block,
+                                 int64_t                 initial_hash) {
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0 && segment_begin >= 0 && segment_begin % seq_size_per_block == 0,
+                            "cached segment must begin at a base-block boundary");
+    int64_t hash = initial_hash;
+    for (size_t offset = 0; offset < source_tokens.size(); offset += seq_size_per_block) {
+        const size_t count = std::min(static_cast<size_t>(seq_size_per_block), source_tokens.size() - offset);
+        hash               = hashInt64Array(hash, source_tokens.data() + offset, source_tokens.data() + offset + count);
+        const auto identity =
+            complete_token_ids.imageCacheIdentity(segment_begin + static_cast<int>(offset), static_cast<int>(count));
+        if (!identity.empty()) {
+            hash = hashInt64Array(hash, identity.data(), identity.data() + identity.size());
+        }
+    }
+    return hash;
+}
+
+int64_t cacheKeyAtTokenEnd(CompleteTokenIds&       complete_token_ids,
+                           int                     batch_id,
+                           int                     seq_size_per_block,
+                           int                     token_end,
+                           int64_t                 initial_hash) {
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0 && token_end >= 0 && token_end <= complete_token_ids.seqLength(),
+                            "invalid cache endpoint=%d block_size=%d seq_length=%d",
+                            token_end,
+                            seq_size_per_block,
+                            complete_token_ids.seqLength());
+    RTP_LLM_CHECK_WITH_INFO(batch_id >= 0 && batch_id < complete_token_ids.batchSize(),
+                            "invalid cache batch id=%d", batch_id);
+    const int32_t* tokens = complete_token_ids.data(batch_id);
+    int64_t        hash   = initial_hash;
+    for (int pos = 0; pos < token_end; pos += seq_size_per_block) {
+        hash = appendCacheKeySegment(
+            hash, complete_token_ids, tokens, pos, std::min(seq_size_per_block, token_end - pos));
+    }
+    return hash;
+}
+
 void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                    CompleteTokenIdsPtr     complete_token_ids,
                    int                     seq_size_per_block,
@@ -24,11 +76,7 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         for (int index = 0; index < desired_blocks; ++index) {
             const int pos       = index * seq_size_per_block;
             const int block_len = std::min(seq_size_per_block, seq_len - pos);
-            rolling_hash        = rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + block_len);
-            const auto identity = complete_token_ids->imageCacheIdentity(pos, block_len);
-            if (!identity.empty()) {
-                rolling_hash = hashInt64Array(rolling_hash, identity.data(), identity.data() + identity.size());
-            }
+            rolling_hash = appendCacheKeySegment(rolling_hash, *complete_token_ids, token_ids, pos, block_len);
             batch_kv_cache_resource->pushBackCacheKey(i, rolling_hash);
         }
     }
@@ -49,7 +97,7 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
 
     for (int i = 0; i < batch_size; ++i) {
         const auto& keys         = batch_kv_cache_resource->cacheKeys(i);
-        const int   total_blocks = seq_len / seq_size_per_block;  // floor, only full blocks
+        const int   total_blocks = seq_len / seq_size_per_block;
 
         // If last_block_aligned was false previously, the last cache key corresponds to a partial block.
         // Drop it before we append new full-block cache keys.
@@ -63,17 +111,18 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
 
         for (int index = start_idx; index < total_blocks; ++index) {
             const int pos = index * seq_size_per_block;
-            hash          = rtp_llm::hashInt64Array(hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
-            const auto identity = complete_token_ids->imageCacheIdentity(pos, seq_size_per_block);
-            if (!identity.empty()) {
-                hash = hashInt64Array(hash, identity.data(), identity.data() + identity.size());
-            }
+            hash = appendCacheKeySegment(hash, *complete_token_ids, token_ids, pos, seq_size_per_block);
+            batch_kv_cache_resource->pushBackCacheKey(i, hash);
+        }
+        const int tail_length = seq_len % seq_size_per_block;
+        if (tail_length != 0) {
+            hash = appendCacheKeySegment(
+                hash, *complete_token_ids, token_ids, total_blocks * seq_size_per_block, tail_length);
             batch_kv_cache_resource->pushBackCacheKey(i, hash);
         }
     }
 
-    // After incremental update we guarantee all existing keys are for full blocks.
-    batch_kv_cache_resource->setLastBlockAligned(true);
+    batch_kv_cache_resource->setLastBlockAligned(seq_len % seq_size_per_block == 0);
     for (int i = 0; i < batch_size; ++i) {
         batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
     }

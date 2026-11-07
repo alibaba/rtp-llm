@@ -128,27 +128,36 @@ def _select_cp_state_read_tail_blocks(
 
     suffix_len = int(token_count) - 1
     block_tokens = int(state_tokens_per_block)
-    # Correctness relies on prefix-cache match producing reuse lengths aligned
-    # to the state block size. With that invariant, the prefix suffix window
-    # [seq_start - suffix_len, seq_start) is fully covered by the tail state
-    # block below. If the cache match granularity is changed to allow
-    # unaligned seq_start_per_req, this must be changed back to a multi-block
-    # selector. Do not add a runtime alignment check here: seq_start_per_req is
-    # a CUDA tensor on the hot path, and checking it on host would reintroduce
-    # the device-host sync this path is meant to avoid.
+    # A short reuse point can place the required history across two physical
+    # blocks (e.g. CP2 G1025 needs CSA/indexer rows 1020..1024). Build the
+    # fixed maximum number of candidate columns entirely on-device so all CP
+    # ranks enter the same collective with the same tensor shape.
     starts = seq_start_per_req[:B].to(device=bt.device, dtype=torch.long).reshape(B)
-    last_pos = (starts - 1).clamp_min(0)
-    last_block = last_pos // block_tokens
-    cols = (last_block % max_blocks).view(B, 1)
+    candidates = (suffix_len + block_tokens - 1) // block_tokens + 1
+    last_block = (starts - 1).clamp_min(0) // block_tokens
+    offsets = torch.arange(candidates - 1, -1, -1, device=bt.device)
+    raw_blocks = last_block[:, None] - offsets[None, :]
+    first_pos = (starts - suffix_len).clamp_min(0)
+    slot_valid = (starts[:, None] > 0) & (
+        raw_blocks >= first_pos[:, None] // block_tokens
+    )
+    slot_valid = slot_valid & (raw_blocks >= 0)
+    cols = raw_blocks.clamp_min(0) % max_blocks
+    block_ids = bt[:B].gather(1, cols)
+    slot_valid = slot_valid & (block_ids > 0)
+    block_ids = (
+        torch.where(slot_valid, block_ids, torch.zeros_like(block_ids))
+        .reshape(-1)
+        .contiguous()
+    )
 
-    block_ids = bt[:B].gather(1, cols).reshape(-1)
-    slot_valid = (starts > 0) & (block_ids > 0)
-    block_ids = torch.where(slot_valid, block_ids, torch.zeros_like(block_ids))
-    block_ids = block_ids.contiguous()
-
-    slot_ids = torch.arange(1, B + 1, device=bt.device, dtype=torch.long)
+    slot_ids = torch.arange(
+        1, B * candidates + 1, device=bt.device, dtype=torch.long
+    ).view(B, candidates)
     slot_ids = torch.where(slot_valid, slot_ids, torch.zeros_like(slot_ids))
-    read_bt[:B].scatter_(1, cols, slot_ids.view(B, 1).to(dtype=read_bt.dtype))
+    read_bt[:B].scatter_reduce_(
+        1, cols, slot_ids.to(dtype=read_bt.dtype), reduce="amax", include_self=True
+    )
     return _CPStateReadSelection(
         block_ids=block_ids,
         read_block_table=read_bt.to(dtype=block_table.dtype),
@@ -301,6 +310,27 @@ def _build_cp_full_state_read_cache(
         read_cache, gathered, cp_size, num_blocks, local_eb, hidden
     )
     return read_cache, selection.read_block_table
+
+
+def _build_local_state_read_cache(
+    state_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    *,
+    seq_start_per_req: torch.Tensor,
+    token_count: int,
+    state_tokens_per_block: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Capture only prefix-history blocks before runtime ring writes."""
+    selection = _select_cp_state_read_blocks(
+        state_cache,
+        block_table,
+        seq_start_per_req=seq_start_per_req,
+        token_count=token_count,
+        state_tokens_per_block=state_tokens_per_block,
+    )
+    empty = torch.zeros_like(state_cache[:1])
+    selected = state_cache.index_select(0, selection.block_ids)
+    return torch.cat((empty, selected), dim=0), selection.read_block_table
 
 
 def _cp_sliced_state_read_needed(
@@ -859,17 +889,6 @@ class CompressorFP8(PoolBackedModule):
         cos_sin_cache = self._cos_sin_cache
         assert cos_sin_cache is not None
 
-        with record_function_range("dsv4.fp8.compressor.launch.save_partial_states"):
-            run_save_partial_states(
-                kv_flat,
-                score_flat,
-                self.ape,
-                meta.positions,
-                self._state_pool_3d,
-                meta.state_slots,
-                compress_ratio=self.compress_ratio,
-            )
-
         # Decode path passes seq_start=None: disable the raw branch so the
         # kernel only reads state_cache. seq_start value is then irrelevant.
         # Phase-3a part 4c: when meta carries per-request raw windows, the
@@ -883,28 +902,97 @@ class CompressorFP8(PoolBackedModule):
         raw_disabled = (seq_start is None) and not use_varlen_raw
         state_cache_for_read = self._state_pool_3d
         state_block_table_for_read = self._state_block_table
-        if _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled):
-            with record_function_range(
-                "dsv4.fp8.compressor.launch.cp_gather_state_read_cache"
-            ):
-                state_cache_for_read, state_block_table_for_read = (
-                    _build_cp_full_state_read_cache(
-                        self._state_pool_3d,
-                        self._state_block_table,
-                        int(self._cp_ctx.cp_size),
-                        seq_start_per_req=(
-                            meta.seq_start_per_req if use_varlen_raw else None
-                        ),
-                        token_count=(1 + int(self.overlap)) * self.compress_ratio,
-                        state_tokens_per_block=self._state_tokens_per_block,
-                        # All layers of the same attention-type share this
-                        # meta object per forward, so layer 1 builds the
-                        # selection and layers 2..N reuse it.
-                        selection_cache_key=meta,
-                    )
+        cp_state_read = _cp_sliced_state_read_needed(meta, self._cp_ctx, raw_disabled)
+        if (
+            meta.has_prefix
+            and not raw_disabled
+            and (cp_state_read or getattr(self, "_protect_short_prefix", False))
+        ):
+            starts = meta.seq_start_per_req
+            if starts is None:
+                assert seq_start is not None
+                starts = torch.full(
+                    (int(self._state_block_table.shape[0]),),
+                    int(seq_start),
+                    device=meta.positions.device,
+                    dtype=torch.long,
                 )
+            state_window = (1 + int(self.overlap)) * self.compress_ratio
+            if cp_state_read:
+                with record_function_range(
+                    "dsv4.fp8.compressor.launch.cp_gather_state_read_cache"
+                ):
+                    state_cache_for_read, state_block_table_for_read = (
+                        _build_cp_full_state_read_cache(
+                            self._state_pool_3d,
+                            self._state_block_table,
+                            int(self._cp_ctx.cp_size),
+                            seq_start_per_req=starts,
+                            token_count=state_window,
+                            state_tokens_per_block=self._state_tokens_per_block,
+                            selection_cache_key=meta,
+                        )
+                    )
+            else:
+                with record_function_range(
+                    "dsv4.fp8.compressor.launch.local_state_read_cache"
+                ):
+                    state_cache_for_read, state_block_table_for_read = (
+                        _build_local_state_read_cache(
+                            self._state_pool_3d,
+                            self._state_block_table,
+                            seq_start_per_req=starts,
+                            token_count=state_window,
+                            state_tokens_per_block=self._state_tokens_per_block,
+                        )
+                    )
 
-        with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
+        with record_function_range("dsv4.fp8.compressor.launch.save_partial_states"):
+            run_save_partial_states(
+                kv_flat,
+                score_flat,
+                self.ape,
+                meta.positions,
+                self._state_pool_3d,
+                meta.state_slots,
+                compress_ratio=self.compress_ratio,
+            )
+
+        sparse_targets = getattr(self, "_sparse_save_targets_by_tag", None)
+        state_tag = getattr(self, "_sparse_state_tag", None)
+        state_targets = (
+            sparse_targets.get(state_tag) if sparse_targets and state_tag else None
+        )
+        if state_targets is not None:
+            from rtp_llm.models_py.modules.dsv4.fp8.sparse_save import (
+                iter_sparse_save_slots,
+            )
+
+            cp_ctx = self._cp_ctx if self._kv_cache_sharded else None
+            for _, save_slots in iter_sparse_save_slots(
+                state_targets,
+                meta.positions,
+                meta.b_idx,
+                entries_per_block=self._state_eb,
+                tokens_per_block=self._state_tokens_per_block,
+                runtime_block_table=self._state_block_table,
+                cp_size=int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+                cp_rank=int(cp_ctx.cp_rank) if cp_ctx is not None else 0,
+            ):
+                with record_function_range(
+                    "dsv4.fp8.compressor.launch.sparse_state_save"
+                ):
+                    run_save_partial_states(
+                        kv_flat,
+                        score_flat,
+                        self.ape,
+                        meta.positions,
+                        self._state_pool_3d,
+                        save_slots,
+                        compress_ratio=self.compress_ratio,
+                    )
+
+        def write_compressed_kv(kv_slots: torch.Tensor) -> None:
             run_fused_compress_kv_write(
                 state_cache_for_read,
                 meta.token_to_req,
@@ -915,7 +1003,7 @@ class CompressorFP8(PoolBackedModule):
                 self.norm_eps,
                 cos_sin_cache,
                 self._kv_pool_view,
-                meta.kv_slots,
+                kv_slots,
                 kv_flat,
                 score_flat,
                 self.ape,
@@ -929,6 +1017,32 @@ class CompressorFP8(PoolBackedModule):
                 cu_seq_per_req=meta.cu_seq_per_req if use_varlen_raw else None,
                 state_tokens_per_block=self._state_tokens_per_block,
             )
+
+        with record_function_range("dsv4.fp8.compressor.launch.compress_kv_write"):
+            write_compressed_kv(meta.kv_slots)
+
+        kv_tag = getattr(self, "_sparse_kv_tag", None)
+        kv_targets = sparse_targets.get(kv_tag) if sparse_targets and kv_tag else None
+        if kv_targets is not None:
+            from rtp_llm.models_py.modules.dsv4.fp8.sparse_save import (
+                iter_sparse_full_kv_slots,
+            )
+
+            cp_ctx = self._cp_ctx if self._kv_cache_sharded else None
+            for _, save_slots in iter_sparse_full_kv_slots(
+                kv_targets,
+                meta.positions,
+                meta.b_idx,
+                physical_tokens_per_block=self._kv_owner_tokens_per_block,
+                kernel_tokens_per_block=self._kv_tokens_per_block,
+                entries_per_kernel_block=self._kv_eb,
+                ratio=self.compress_ratio,
+                runtime_block_table=self._kv_block_table,
+                cp_size=int(cp_ctx.cp_size) if cp_ctx is not None else 1,
+                cp_rank=int(cp_ctx.cp_rank) if cp_ctx is not None else 0,
+            ):
+                with record_function_range("dsv4.fp8.compressor.launch.sparse_kv_save"):
+                    write_compressed_kv(save_slots)
 
     # ----------------------------------------------------------------------
     # Overlap orchestration: split-phase prefill (start / finish).

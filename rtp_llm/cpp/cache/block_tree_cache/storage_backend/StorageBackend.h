@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
@@ -64,6 +65,7 @@ public:
 struct StorageMatchResult {
     size_t                                   matched_blocks_num{0};
     std::shared_ptr<StorageBackendMatchMeta> match_meta;
+    PrefixCacheRemoteQueryStatus             query_status{PrefixCacheRemoteQueryStatus::UNSET};
 };
 
 struct StorageRequest {
@@ -90,11 +92,11 @@ struct StorageTaskState;
 
 class StorageWriteTask {
 public:
-    StorageWriteTask()                            = default;
-    StorageWriteTask(StorageWriteTask&&) noexcept = default;
+    StorageWriteTask()                                       = default;
+    StorageWriteTask(StorageWriteTask&&) noexcept            = default;
     StorageWriteTask& operator=(StorageWriteTask&&) noexcept = default;
 
-    StorageWriteTask(const StorageWriteTask&) = delete;
+    StorageWriteTask(const StorageWriteTask&)            = delete;
     StorageWriteTask& operator=(const StorageWriteTask&) = delete;
 
     explicit operator bool() const {
@@ -111,8 +113,10 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
-    using MatchDone      = std::function<void(
-        size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
+    using MatchDone      = std::function<void(size_t                                   matched_blocks_num,
+                                         std::shared_ptr<StorageBackendMatchMeta> match_meta,
+                                         bool                                     success,
+                                         PrefixCacheRemoteQueryStatus             query_status)>;
     using Done           = std::function<void(ErrorInfo error)>;
     using PoolsByTag     = std::unordered_map<std::string, DeviceBlockPoolPtr>;
     using BufferResolver = std::function<std::vector<BlockInfo>(int layer_id, const std::string& tag, int block_id)>;
@@ -124,9 +128,12 @@ public:
 
     // Initialization is single-attempt. A failed start may permanently stop
     // an injected executor; create a fresh backend/executor to retry.
-    bool init(std::shared_ptr<const CacheTopology> topology, PoolsByTag pools_by_tag, BufferResolver buffer_resolver);
-    void match(StorageRequest request, MatchDone done);
-    void read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
+    bool             init(std::shared_ptr<const CacheTopology> topology,
+                          PoolsByTag                           pools_by_tag,
+                          BufferResolver                       buffer_resolver,
+                          size_t                               canonical_size_per_block);
+    void             match(StorageRequest request, MatchDone done);
+    void             read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
     StorageWriteTask prepareWrite(StorageRequest request);
     // Returns admission only, not the I/O result; never waits for completion.
     // Source pins live until execution or rejection.
@@ -172,6 +179,7 @@ private:
     std::shared_ptr<const CacheTopology> topology_;
     PoolsByTag                           pools_by_tag_;
     BufferResolver                       buffer_resolver_;
+    size_t                               canonical_size_per_block_{0};
     std::shared_ptr<StorageBackendExecutor> executor_;
     bool                                    init_attempted_{false};
     bool                                    initialized_{false};

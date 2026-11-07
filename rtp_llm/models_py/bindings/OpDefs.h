@@ -288,6 +288,8 @@ struct PyAttentionInputs {
     // Shape: [batch, max_blocks].
     torch::Tensor    kv_cache_block_id;
     torch::Tensor    kv_cache_block_id_device;
+    torch::Tensor    cache_save_positions;  // int64 [context, sparse points], absolute token ends
+    torch::Tensor    cache_save_block_ids;  // int32 [context, sparse points] for this tag
     caffe2::TypeMeta dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
     // cu_seqlens_device lives on CUDA device; cu_seqlens is its pinned-memory CPU mirror

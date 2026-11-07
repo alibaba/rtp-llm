@@ -8,11 +8,11 @@ namespace rtp_llm {
 // Uses Any-node heaps: any node with data can be evicted.
 class SWAGroupSet: public GroupSet {
 public:
-    SWAGroupSet(size_t                         sliding_window_size,
-                size_t                         seq_size_per_block,
+    SWAGroupSet(size_t                          sliding_window_size,
+                size_t                          canonical_size_per_block,
                 std::vector<DeviceBlockPoolPtr> device_pools,
-                std::shared_ptr<HostBlockPool> host_pool,
-                BlockTreeDiskBlockPoolPtr      disk_pool);
+                std::shared_ptr<HostBlockPool>  host_pool,
+                BlockTreeDiskBlockPoolPtr       disk_pool);
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
 
@@ -22,21 +22,24 @@ public:
     size_t slidingWindowSize() const {
         return sliding_window_size_;
     }
-    size_t seqSizePerBlock() const {
-        return seq_size_per_block_;
+    size_t canonicalSizePerBlock() const {
+        return canonical_size_per_block_;
     }
 
 private:
     size_t sliding_window_size_;
-    size_t seq_size_per_block_;
+    size_t canonical_size_per_block_;
 };
 
 // SWA window match validator.
 class SWAMatchValidator: public MatchValidator {
 public:
-    explicit SWAMatchValidator(size_t sliding_window_size, size_t seq_size_per_block);
+    explicit SWAMatchValidator(size_t sliding_window_size, size_t canonical_size_per_block);
 
-    bool validate(const GroupSetResource& resource) override;
+    bool                            validate(const GroupSetResource& resource) override;
+    std::unique_ptr<MatchValidator> clone() const override {
+        return std::make_unique<SWAMatchValidator>(*this);
+    }
 
     bool connectedToRoot() const {
         return connected_to_root_;
@@ -47,7 +50,7 @@ public:
 
 private:
     size_t sliding_window_size_;
-    size_t seq_size_per_block_;
+    size_t canonical_size_per_block_;
     bool   connected_to_root_{true};
     size_t accumulated_length_{0};
 };

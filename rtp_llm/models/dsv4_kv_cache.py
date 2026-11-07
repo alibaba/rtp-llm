@@ -137,6 +137,11 @@ def _make_dsv4_desc(
         capacity.charge_to_paged_budget = True
         desc.capacity = capacity
         reuse.enable_prefix_reuse = False
+        # HCA state is a local-only tail state: it owns an independent DEVICE
+        # GroupSet and stays out of the combined stride / lower-tier pools.
+        # Mark it on the policy so the block-tree factory selects that topology
+        # by policy instead of matching the "hca_state" tag string.
+        reuse.local_only_state = True
         tail = CacheTailPolicyDesc()
         tail.active_tail_blocks = 1
         tail.validate_tail_blocks = False

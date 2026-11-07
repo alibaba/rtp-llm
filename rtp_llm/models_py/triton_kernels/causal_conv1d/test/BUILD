@@ -25,6 +25,23 @@ py_test(
 )
 
 py_test(
+    name = "test_private_initial_state",
+    srcs = [
+        "test_private_initial_state.py",
+    ],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:causal_conv1d",
+    ] + [
+        ":numpy",
+        ":torch",
+        ":triton",
+    ],
+    visibility = ["//visibility:public"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "test_casual_conv1d_decode",
     srcs = [
         "test_casual_conv1d_decode.py",

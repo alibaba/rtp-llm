@@ -51,6 +51,23 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="控制是否激活KV Cache的重用机制, 默认开启显存重用, 其他cache重用需手动开启。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
+        "--enable_prefill_partial_tail_reuse",
+        env_name="ENABLE_PREFILL_PARTIAL_TAIL_REUSE",
+        bind_to=(kv_cache_config, "enable_prefill_partial_tail_reuse"),
+        type=str2bool,
+        default=False,
+        help="P/D 分离 PREFILL 的本地 DEVICE 不完整尾 block 复用，默认关闭。",
+    )
+    kv_cache_group.add_argument(
+        "--enable_prefill_common_prefix_recovery",
+        env_name="ENABLE_PREFILL_COMMON_PREFIX_RECOVERY",
+        bind_to=(kv_cache_config, "enable_prefill_common_prefix_recovery"),
+        type=str2bool,
+        default=False,
+        help="P/D 分离 PREFILL 的本地 DEVICE 内部公共前缀恢复点保存，主要让后继请求受益，"
+        "默认关闭，可与尾复用独立组合。",
+    )
+    kv_cache_group.add_argument(
         "--enable_device_cache",
         env_name="ENABLE_DEVICE_CACHE",
         bind_to=(kv_cache_config, "enable_device_cache"),

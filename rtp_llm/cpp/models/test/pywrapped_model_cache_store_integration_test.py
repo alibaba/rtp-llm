@@ -796,7 +796,14 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                 )
                 self.assertEqual(result["group_tags"], tags)
                 if skip_run:
-                    for name in ("physical", "kernel", "group_types", "copy_mapping"):
+                    for name in (
+                        "physical",
+                        "kernel",
+                        "group_types",
+                        "copy_mapping",
+                        "cache_save_positions",
+                        "cache_save_block_ids",
+                    ):
                         self.assertIsNone(result[name], name)
                 else:
                     physical = {"linear": [[31, 32]], "full": [[11, 12]]}
@@ -818,6 +825,17 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
                         torch.tensor(
                             [[tags.index("linear"), 3, 4], [tags.index("full"), 1, 2]],
                             dtype=torch.int32,
+                        ),
+                    )
+                    torch.testing.assert_close(
+                        result["cache_save_positions"],
+                        torch.tensor([[1536, 2000]], dtype=torch.int64),
+                    )
+                    expected_save_ids = {"linear": [[41, -1]], "full": [[-1, 51]]}
+                    torch.testing.assert_close(
+                        result["cache_save_block_ids"],
+                        torch.tensor(
+                            [expected_save_ids[tag] for tag in tags], dtype=torch.int32
                         ),
                     )
             if skip_run:
@@ -943,6 +961,17 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    @_skip_rocm_context_parallel
+    def test_exact_prefix_pd_gather_transfers_seven_keys(self) -> None:
+        owner = _extension.run_exact_prefix_pd_gather(0)
+        peer = _extension.run_exact_prefix_pd_gather(1)
+        self.assertEqual(owner["key_count"], 7)
+        self.assertEqual(peer["key_count"], 7)
+        self.assertEqual(owner["seventh_key"], peer["seventh_key"])
+        self.assertNotEqual(owner["seventh_key"], 0)
+        self.assertEqual(owner["sent_base_indices"], [0, 2, 4, 6])
+        self.assertEqual(peer["sent_base_indices"], [1, 3, 5])
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:
@@ -1400,6 +1429,135 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             rank_key_sets.append(set(blocks))
 
         self.assertEqual(rank_key_sets[0], rank_key_sets[1])
+
+    def test_mtp_writer_uses_selected_sub_config_for_real_write(self) -> None:    def test_micro_batch_preserves_reordered_group_rows(self) -> None:
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, "micro_batch_multi_tag")
+        self.assertEqual(model.seen_input_lengths, [[2, 4], [2]])
+        self.assertEqual(len(model.seen_cache_tables), 2)
+        expected_tables = [
+            {
+                "full": [[1, -1, -1, -1], [2, 3, -1, -1]],
+                "linear": [[2, 3, -1, -1], [4, 5, 6, 7]],
+            },
+            {"full": [[4, -1, -1, -1]], "linear": [[1, 2, -1, -1]]},
+        ]
+        for actual, expected in zip(model.seen_cache_tables, expected_tables):
+            self.assertEqual(set(actual), set(expected))
+            for tag, table in expected.items():
+                self.assertEqual(actual[tag]["physical"], table)
+                self.assertEqual(actual[tag]["kernel"], table)
+
+        blocks = _blocks_by_key(result)
+        for tag, offsets in (
+            ("full", [16, 32, 48, 64]),
+            ("linear", [24, 48, 48, 72, 96, 120, 144, 168]),
+        ):
+            self.assertEqual(
+                sorted(
+                    block["address"] - result["base_addresses"][tag]
+                    for key, block in blocks.items()
+                    if f"_tag_{tag}" in key
+                ),
+                offsets,
+            )
+
+    def test_micro_batch_split_preserves_cache_storage_contract(self) -> None:
+        multi_group_tables = [
+            [[1, -1, -1, -1], [2, 3, -1, -1], [4, -1, -1, -1]],
+            [[2, 3, -1, -1], [4, 5, 6, 7], [1, 2, -1, -1]],
+        ]
+        single_group_tables = [[[1, -1], [2, 3], [4, -1]]]
+        for scenario, on_cuda, two_dimensional, tags, tables in (
+            (
+                "micro_batch_split_pinned",
+                False,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_cuda",
+                True,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_single_group",
+                False,
+                False,
+                ["default"],
+                single_group_tables,
+            ),
+            ("micro_batch_split_2d", False, True, ["default"], single_group_tables),
+        ):
+            with self.subTest(scenario=scenario):
+                result = run_scenario(CacheStoreForwardModel(), scenario)
+                self.assertEqual(result["source_tags"], tags)
+                self.assertEqual(len(result["batches"]), 2)
+                physical = torch.tensor(tables, dtype=torch.int32)
+                kernel = torch.where(physical >= 0, physical + 100, physical)
+                if two_dimensional:
+                    physical = physical.squeeze(0)
+                    kernel = kernel.squeeze(0)
+                batch_axis = 0 if two_dimensional else 1
+                for field, expected in (("physical", physical), ("kernel", kernel)):
+                    source = result[f"source_{field}"]
+                    self.assertEqual(source.dtype, torch.int32)
+                    self.assertEqual(source.is_cuda, on_cuda)
+                    self.assertEqual(source.is_pinned(), not on_cuda)
+                    torch.testing.assert_close(source.cpu(), expected)
+                    for batch, start, count in zip(result["batches"], (0, 2), (2, 1)):
+                        self.assertEqual(batch["tags"], tags)
+                        tensor = batch[field]
+                        self.assertEqual(tensor.dtype, torch.int32)
+                        self.assertEqual(tensor.device, source.device)
+                        self.assertEqual(tensor.is_pinned(), not on_cuda)
+                        self.assertTrue(tensor.is_contiguous())
+                        torch.testing.assert_close(
+                            tensor.cpu(), expected.narrow(batch_axis, start, count)
+                        )
+                self.assertEqual(
+                    [batch["input_lengths"].tolist() for batch in result["batches"]],
+                    [[2, 4], [2]],
+                )
+
+    def test_fake_micro_batch_has_no_cache_identity(self) -> None:
+        result = run_scenario(CacheStoreForwardModel(), "fake_micro_batch")
+        self.assertEqual(result["real_tags"], ["full", "linear"])
+        self.assertEqual(result["fake_tags"], [])
+        self.assertFalse(result["fake_physical_defined"])
+        self.assertFalse(result["fake_kernel_defined"])
+        self.assertTrue(result["real_cache_save_defined"])
+        self.assertFalse(result["fake_cache_save_defined"])
+
+    def test_sparse_save_microbatch_uses_prefill_rows_only(self) -> None:
+        result = run_scenario(CacheStoreForwardModel(), "sparse_save_split")
+        positions = result["source_cache_save_positions"]
+        block_ids = result["source_cache_save_block_ids"]
+        torch.testing.assert_close(
+            positions, torch.tensor([[3, -1], [5, 6]], dtype=torch.int64)
+        )
+        torch.testing.assert_close(
+            block_ids, torch.tensor([[[31, -1], [41, 42]]], dtype=torch.int32)
+        )
+
+        decode, mixed, prefill = result["batches"]
+        self.assertIsNone(decode["cache_save_positions"])
+        self.assertIsNone(decode["cache_save_block_ids"])
+        torch.testing.assert_close(
+            mixed["cache_save_positions"], positions.narrow(0, 0, 1)
+        )
+        torch.testing.assert_close(
+            mixed["cache_save_block_ids"], block_ids.narrow(1, 0, 1)
+        )
+        torch.testing.assert_close(
+            prefill["cache_save_positions"], positions.narrow(0, 1, 1)
+        )
+        torch.testing.assert_close(
+            prefill["cache_save_block_ids"], block_ids.narrow(1, 1, 1)
+        )
 
     def test_mtp_writer_uses_selected_sub_config_for_real_write(self) -> None:
         model = CacheStoreForwardModel()

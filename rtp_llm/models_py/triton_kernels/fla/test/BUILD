@@ -9,6 +9,21 @@ requirement([
     "packaging",
 ])
 
+py_test(
+    name = "test_selected_states",
+    srcs = ["test_selected_states.py"],
+    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [
+        ":einops",
+        ":numpy",
+        ":packaging",
+        ":torch",
+        ":triton",
+    ],
+    visibility = ["//visibility:public"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
 # flydsl is ROCm-only (only present in pip_gpu_rocm requirements).
 # On non-ROCm configs we point to an empty stub to avoid analysis failures.
 py_library(
@@ -29,6 +44,22 @@ py_library(
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "test_selected_cache_stores",
+    srcs = ["test_selected_cache_stores.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:causal_conv1d",
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [
+        ":numpy",
+        ":torch",
+        ":triton",
+    ],
+    visibility = ["//visibility:public"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(

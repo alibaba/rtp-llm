@@ -265,6 +265,12 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
         dtype=torch.uint8,
         device=k_cache_raw.device,
     )
+    # A sparse destination may already contain copied prefix history. The
+    # writer touches only its selected token rows, so preserve every other
+    # byte of this rank's slice before the full-block scratch is scattered
+    # back. This also keeps ordinary short continuation writes from clearing
+    # earlier rows in the same physical SWA block.
+    full_raw[:, slice_start:slice_end].copy_(k_cache_raw.index_select(0, unique_blocks))
     full_view = full_raw.as_strided(
         (int(unique_blocks.numel()), full_entries_per_block, 584),
         (full_stride_bytes, 584, 1),

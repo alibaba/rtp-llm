@@ -38,6 +38,8 @@ def chunk_kda_fwd(
     dt_bias: torch.Tensor | None = None,
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
+    state_positions: torch.Tensor | None = None,
+    selected_states: torch.Tensor | None = None,
 ):
     # Apply gate activation
     g_org = None
@@ -86,6 +88,9 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
         use_exp2=True,
         transpose_state_layout=False,
+        state_positions=state_positions,
+        selected_states=selected_states,
+        raw_k=k if state_positions is not None else None,
     )
 
     o = chunk_gla_fwd_o_gk(
