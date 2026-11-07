@@ -71,6 +71,20 @@ public final class RoutingConfig {
          * Set to a value above {@link RoutingConfig#PERCENTAGE_SCALE} to disable.
          */
         private double stickyPrefixHitPercent = 90;
+
+        /**
+         * Estimated prefix-hit percentage floor at which the endpoint holding
+         * the MAXIMUM estimated hit is preferred regardless of the projected-TTFT
+         * cutoff. The per-request hit estimate is block-granular and
+         * refresh-batched, so a request whose true reusable prefix covers most of
+         * its length can still estimate slightly below
+         * {@code stickyPrefixHitPercent}; flipping such a request away from the
+         * unique max-hit endpoint forfeits the whole cached prefix, which costs
+         * far more than any modeled TTFT gap. The floor only recognizes the
+         * strict maximum-hit endpoint, never partial-match runners-up.
+         * Set to a value above {@link RoutingConfig#PERCENTAGE_SCALE} to disable.
+         */
+        private double stickyLeaderFloorPercent = 50;
     }
 
     @Getter

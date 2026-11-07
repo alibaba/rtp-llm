@@ -241,6 +241,24 @@ class CostBasedPrefillSelectionMetricTest {
     @Test
     void mediumHitBelowStickyThresholdStillHonorsTtftCutoff() {
         configureFocusedAffinity();
+        config.getRouter().getRoles().getPrefill().getCacheAffinity()
+                .setStickyLeaderFloorPercent(RoutingConfig.PERCENTAGE_SCALE + 1.0);
+        PrefillCandidateSet candidates = candidates(
+                new long[] {100L, 5_000L},
+                new long[] {0L, 400L});
+
+        int selectedIndex = strategy.selectBestCandidate(
+                candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
+
+        assertEquals(0, selectedIndex,
+                "40% prefix hit must still respect the projected-TTFT cutoff");
+        verify(reporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.1.0.1", "OVER_CAP");
+    }
+
+    @Test
+    void maxHitLeaderAtFloorPercentSticksBeyondTtftCutoff() {
+        configureFocusedAffinity();
         PrefillCandidateSet candidates = candidates(
                 new long[] {100L, 5_000L},
                 new long[] {0L, 500L});
@@ -248,8 +266,25 @@ class CostBasedPrefillSelectionMetricTest {
         int selectedIndex = strategy.selectBestCandidate(
                 candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
 
+        assertEquals(1, selectedIndex,
+                "the max-hit endpoint at the 50% leader floor must stick");
+        verify(reporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.1.0.2", "CACHE_LEADER");
+    }
+
+    @Test
+    void maxHitLeaderBelowFloorPercentStillHonorsTtftCutoff() {
+        configureFocusedAffinity();
+        PrefillCandidateSet candidates = candidates(
+                new long[] {100L, 5_000L},
+                new long[] {0L, 400L});
+
+        int selectedIndex = strategy.selectBestCandidate(
+                candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
+
         assertEquals(0, selectedIndex,
-                "50% prefix hit must still respect the projected-TTFT cutoff");
+                "the max-hit endpoint below the 50% leader floor must still respect"
+                        + " the projected-TTFT cutoff");
         verify(reporter).reportCacheAffinityDecision(
                 RoleType.PREFILL, "10.1.0.1", "OVER_CAP");
     }
