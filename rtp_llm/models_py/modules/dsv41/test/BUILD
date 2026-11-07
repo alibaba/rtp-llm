@@ -58,6 +58,7 @@ _ENGRAM_SM100_TESTS = [
 ]
 
 _TESTS = [
+    "test_cp_metadata_high_batch",
     "test_dspark_commit_wkv",
     "mega_moe_static_buf_test",
     "test_dspark_cuda_graph_contract",

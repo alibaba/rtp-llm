@@ -74,11 +74,11 @@ class FusedMegaMoeSEInputPacker(MegaMoeSEInputPacker):
             x,
             weights,
             indices,
-            buf.x[:tokens],
-            buf.x_sf[:tokens],
+            buf.x,
+            buf.x_sf,
             buf.shared_l1_acts_sf,
-            buf.topk_idx[:tokens],
-            buf.topk_weights[:tokens],
+            buf.topk_idx,
+            buf.topk_weights,
             block_m,
         )
 

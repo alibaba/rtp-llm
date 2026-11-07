@@ -43,6 +43,52 @@ def reference_stage(source, destination, tokens, block_m):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class MegaSEScaleStageFusedTest(unittest.TestCase):
+    def test_full_capacity_outputs_match_token_slices(self):
+        from rtp_llm.models_py.modules.dsv41.moe._mega_se_input_pack_triton import (
+            fused_pack_mega_moe_se_inputs,
+        )
+
+        tokens, capacity, dim, topk, block_m = 33, 128, 5120, 8, 32
+        x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
+        weights = torch.rand(tokens, topk, device="cuda")
+        indices = torch.randint(0, 256, (tokens, topk), device="cuda")
+
+        def outputs():
+            return (
+                torch.zeros(capacity, dim, device="cuda", dtype=torch.float8_e4m3fn),
+                torch.zeros(capacity, dim // 128, device="cuda", dtype=torch.int32),
+                torch.zeros(512, dim // 128, device="cuda", dtype=torch.int32),
+                torch.zeros(capacity, topk, device="cuda", dtype=torch.int64),
+                torch.zeros(capacity, topk, device="cuda", dtype=torch.float32),
+            )
+
+        sliced, full = outputs(), outputs()
+        fused_pack_mega_moe_se_inputs(
+            x,
+            weights,
+            indices,
+            sliced[0][:tokens],
+            sliced[1][:tokens],
+            sliced[2],
+            sliced[3][:tokens],
+            sliced[4][:tokens],
+            block_m,
+        )
+        fused_pack_mega_moe_se_inputs(
+            x,
+            weights,
+            indices,
+            *full,
+            block_m,
+        )
+        torch.cuda.synchronize()
+        for expected, actual in zip(sliced, full):
+            self.assertTrue(torch.equal(expected[:tokens], actual[:tokens]))
+        self.assertTrue(torch.equal(sliced[2][:256], full[2][:256]))
+        for output in (full[0], full[1], full[3], full[4]):
+            self.assertTrue(torch.all(output[tokens:] == 0).item())
+        self.assertTrue(torch.all(full[2][256:] == 0).item())
+
     def _check(
         self,
         tokens,

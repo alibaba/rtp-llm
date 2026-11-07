@@ -342,10 +342,10 @@ class V4Transformer(nn.Module):
         ``capture_aux_hidden_layer_ids`` (capture order follows the
         configured ids, not model traversal order). ``hidden`` is
         ``[T, hc, H]`` in prefill and ``[B, S, hc, H]`` in decode/verify; the
-        mHC lane is mean-reduced and token rows are flattened. The ``copy_``
-        into the fixed-address registered buffer keeps the write inside a
-        captured CUDA graph, mirroring ``_write_mtp_hidden_buffer``. In CP
-        prefill the rows intentionally stay rank-local zigzag order — the
+        mHC lane is mean-reduced and token rows are flattened. Prefill writes
+        directly into the fixed-address buffer; Decode uses ``copy_``. Both
+        writes remain inside a captured CUDA graph. In CP prefill the rows
+        intentionally stay rank-local zigzag order — the
         same semantics as the MTP pre-hc rows in this buffer.
         """
         try:
@@ -353,6 +353,13 @@ class V4Transformer(nn.Module):
         except ValueError:
             return
         buf = self._mtp_hidden_buffer
+        if hidden.ndim == 3 and hidden.is_cuda:
+            from rtp_llm.models_py.modules.dsv41._aux_capture_triton import (
+                capture_aux_hidden,
+            )
+
+            capture_aux_hidden(hidden, buf, segment)
+            return
         pooled = hidden.mean(dim=-2)
         flat = pooled.reshape(-1, pooled.size(-1))
         rows, dim = flat.shape

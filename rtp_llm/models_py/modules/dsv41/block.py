@@ -614,7 +614,16 @@ class Block(nn.Module):
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
             )
-        fused_mhc = self._try_mega_mhc(attn_out, residual, post, comb)
+        moe_inputs = (
+            self.ffn.prepare_mhc_inputs(attn_out)
+            if routing_metadata is None and type(self.ffn) is MoE
+            else None
+        )
+        fused_mhc = self._try_mega_mhc(
+            attn_out, residual, post, comb, moe_inputs=moe_inputs
+        )
+        if fused_mhc is None:
+            moe_inputs = None
         x = (
             attn_hc_post(attn_out, residual, post, comb)
             if fused_mhc is None
@@ -628,16 +637,19 @@ class Block(nn.Module):
             x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
         else:
             _, x_pre, post, comb = fused_mhc
-        ffn_out = (
-            self.ffn(x_pre, input_ids, expert_load=expert_load)
-            if routing_metadata is None
-            else self.ffn(
+        if moe_inputs is not None:
+            ffn_out = self.ffn(
+                x_pre, input_ids, expert_load=expert_load, mhc_inputs=moe_inputs
+            )
+        elif routing_metadata is None:
+            ffn_out = self.ffn(x_pre, input_ids, expert_load=expert_load)
+        else:
+            ffn_out = self.ffn(
                 x_pre,
                 input_ids,
                 expert_load=expert_load,
                 routing_metadata=routing_metadata,
             )
-        )
         if _defer_ffn_post:
             from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
                 PendingDecodePost,

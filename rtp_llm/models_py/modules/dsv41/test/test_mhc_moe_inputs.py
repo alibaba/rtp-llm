@@ -104,14 +104,16 @@ class MHCPreparedMoEHostTest(unittest.TestCase):
             strategy.prepare_mhc_inputs(torch.empty((6, _DIM), dtype=torch.bfloat16))
         )
 
-    def test_moe_only_prepares_for_the_eligible_decode_router(self):
+    def test_moe_prepares_for_eligible_prefill_and_decode_routers(self):
         moe = make_moe(make_strategy())
         x = torch.zeros((1, 6, _DIM), dtype=torch.bfloat16)
         with patch.object(mega_gate, "can_use_mega_gate", return_value=True):
             self.assertIsNotNone(moe.prepare_mhc_inputs(x))
-            for attr in ("_is_decode_role", "_gate_pack_static"):
-                with patch.object(moe, attr, False):
-                    self.assertIsNone(moe.prepare_mhc_inputs(x))
+            moe._is_decode_role = False
+            moe._strategy.cfg.is_decode_role = False
+            self.assertIsNotNone(moe.prepare_mhc_inputs(x))
+            with patch.object(moe, "_gate_pack_static", False):
+                self.assertIsNone(moe.prepare_mhc_inputs(x))
             with patch.object(moe, "_has_visual_tokens", True):
                 self.assertIsNone(moe.prepare_mhc_inputs(x))
         with patch.object(mega_gate, "can_use_mega_gate", return_value=False):
@@ -289,6 +291,58 @@ class MHCPreparedMoEHostTest(unittest.TestCase):
             ):
                 results.append(
                     block.forward_decode(hidden.clone(), None, ids, expert_load=None)
+                )
+            self.assertEqual(packs, [] if fused else [6])
+        torch.testing.assert_close(results[0], results[1], rtol=0, atol=0)
+
+    def test_prefill_block_consumes_only_successfully_produced_inputs(self):
+        from rtp_llm.models_py.modules.dsv41.test.test_v41_cross_layer_mhc import (
+            make_blocks,
+            reference_transition,
+        )
+
+        hidden = torch.randn((6, 4, _DIM), dtype=torch.bfloat16)
+        ids = torch.arange(6)
+        results = []
+        for fused in (False, True):
+            block = make_blocks(dim=_DIM, count=1)[0]
+            block._cp_sync_after_attn_done = True
+            strategy = make_strategy()
+            strategy.cfg.is_decode_role = False
+            block.ffn = make_moe(strategy)
+            block.ffn._is_decode_role = False
+            packs = []
+
+            def pack(x, weights, indices, buf, tokens, block_m):
+                packs.append(tokens)
+                buf.x[:tokens].copy_(x)
+
+            strategy._input_packer = SimpleNamespace(pack=pack)
+            strategy._launch = lambda y, tokens, device, **kwargs: y.copy_(
+                strategy._mega_buf.x[:tokens].float()
+            )
+
+            def gate_kernel(x, *args, out, **kwargs):
+                out[0].fill_(0)
+                out[1].fill_(1 / 6)
+
+            def mhc(*args, original_tokens=None, moe_inputs=None, reuse_residual=False):
+                if not fused:
+                    return None
+                result = reference_transition(*args)
+                if moe_inputs is not None:
+                    moe_inputs.x.copy_(result[1].view(6, _DIM))
+                return result
+
+            with (
+                patch.object(mega_gate, "can_use_mega_gate", return_value=True),
+                patch.object(mega_gate, "_native_gate", return_value=gate_kernel),
+                patch.object(v41_mega_mhc, "try_fused_post_pre", side_effect=mhc),
+            ):
+                results.append(
+                    block._forward_prefill_fast_fp8(
+                        hidden.clone(), ids, ids, torch.tensor([0, 6]), None
+                    )
                 )
             self.assertEqual(packs, [] if fused else [6])
         torch.testing.assert_close(results[0], results[1], rtol=0, atol=0)
