@@ -12,6 +12,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._fast_launch import FastKernel1D
+
 
 @triton.jit
 def norm_rope_bf16(values, weight, cos, sin, EPS: tl.constexpr):
@@ -67,6 +69,9 @@ def _swa_kv_kernel(
     tl.store(output + row * 512 + columns, decoded)
 
 
+_swa_kv_fast = FastKernel1D(_swa_kv_kernel, num_warps=4, enable_fp_fusion=False)
+
+
 def swa_kv_norm_rope(
     raw: torch.Tensor,
     weight: torch.Tensor,
@@ -88,16 +93,14 @@ def swa_kv_norm_rope(
     assert freqs_cis.dtype == torch.complex64 and freqs_cis.device == raw.device
     assert freqs.shape[0] == flat.shape[0] and freqs.stride(1) == 2
     output = torch.empty(raw.shape, device=raw.device, dtype=raw.dtype)
-    if flat.shape[0]:
-        _swa_kv_kernel[(flat.shape[0],)](
-            flat,
-            weight,
-            freqs,
-            output,
-            flat.stride(0),
-            freqs.stride(0),
-            eps,
-            num_warps=4,
-            enable_fp_fusion=False,
-        )
+    _swa_kv_fast(
+        flat.shape[0],
+        flat,
+        weight,
+        freqs,
+        output,
+        flat.stride(0),
+        freqs.stride(0),
+        eps,
+    )
     return output

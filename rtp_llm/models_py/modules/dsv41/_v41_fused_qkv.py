@@ -14,6 +14,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._fast_launch import FastKernel1D
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
 
@@ -36,23 +37,30 @@ def _strided_q_rmsnorm_kernel(
     tl.store(Y + row * D + cols, x * inv * w, cols < D)
 
 
+_strided_q_rmsnorm_fast_w8 = FastKernel1D(
+    _strided_q_rmsnorm_kernel, num_warps=8, enable_fp_fusion=False
+)
+_strided_q_rmsnorm_fast_w4 = FastKernel1D(
+    _strided_q_rmsnorm_kernel, num_warps=4, enable_fp_fusion=False
+)
+
+
 def strided_q_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float):
     """Normalize a regular row-strided view and return a dense BF16 tensor."""
     shape = x.shape
     flat = x.view(-1, shape[-1])
     output = torch.empty(shape, device=x.device, dtype=x.dtype)
-    if flat.shape[0]:
-        _strided_q_rmsnorm_kernel[(flat.shape[0],)](
-            flat,
-            weight,
-            output,
-            flat.stride(0),
-            D=shape[-1],
-            EPS=eps,
-            BLOCK=triton.next_power_of_2(shape[-1]),
-            num_warps=8 if shape[-1] > 1024 else 4,
-            enable_fp_fusion=False,
-        )
+    fast = _strided_q_rmsnorm_fast_w8 if shape[-1] > 1024 else _strided_q_rmsnorm_fast_w4
+    fast(
+        flat.shape[0],
+        flat,
+        weight,
+        output,
+        flat.stride(0),
+        shape[-1],
+        eps,
+        triton.next_power_of_2(shape[-1]),
+    )
     return output
 
 
