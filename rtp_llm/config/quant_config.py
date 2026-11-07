@@ -223,9 +223,20 @@ class QuantizationConfig(ABC):
             bits = 8
             if "weight_block_size" in quant_config:
                 weight_block = quant_config.get("weight_block_size")
-                assert isinstance(weight_block, list) and all(
-                    element == weight_block[0] for element in weight_block
-                ), f"weight_block_size: {weight_block} must be same"
+                if (
+                    not isinstance(weight_block, list)
+                    or not weight_block
+                    or not all(
+                        type(element) is int
+                        and element > 0
+                        and element == weight_block[0]
+                        for element in weight_block
+                    )
+                ):
+                    raise ValueError(
+                        "weight_block_size must be a non-empty list of equal "
+                        f"positive integers, got {weight_block!r}"
+                    )
                 group_size = weight_block[0]
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
         if quant_method == "compressed-tensors":
