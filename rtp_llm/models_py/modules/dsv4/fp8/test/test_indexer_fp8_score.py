@@ -52,10 +52,10 @@ except ImportError:
 
     pytest = _NoOpPytest()
 
+from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as _indexer_score_mod
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
 )
-from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as _indexer_score_mod
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_paged_indexer_score,
     supports_paged_mqa_logits,
@@ -184,9 +184,7 @@ def test_fp8_paged_indexer_score_via_deepgemm(block_size, monkeypatch):
     deepgemm = _CountingDeepGemm(_indexer_score_mod._deep_gemm)
     monkeypatch.setattr(_indexer_score_mod, "_deep_gemm", deepgemm)
     fallback = _CountingFallback(_legacy_fallback_mod.legacy_fp8_paged_mqa_logits)
-    monkeypatch.setattr(
-        _legacy_fallback_mod, "legacy_fp8_paged_mqa_logits", fallback
-    )
+    monkeypatch.setattr(_legacy_fallback_mod, "legacy_fp8_paged_mqa_logits", fallback)
 
     torch.manual_seed(0xDEAD)
     device = torch.device("cuda")
@@ -301,3 +299,232 @@ if __name__ == "__main__":
         for _block_size in (32, 64):
             test_fp8_paged_indexer_score_via_deepgemm(_block_size, _NullMonkeypatch())
     print("OK")
+
+
+def test_renamed_deepgemm_fp8_mqa_api_on_sm90(monkeypatch):
+    """The renamed entry points keep the existing FP8/FP32 ABI on SM90."""
+    from types import SimpleNamespace
+
+    from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as score
+    from rtp_llm.models_py.modules.dsv4.fp8 import _mqa_layout
+
+    calls = {}
+
+    def paged(*args):
+        calls["paged"] = args
+        return torch.zeros((1, 64), dtype=torch.float32)
+
+    def contiguous(*args):
+        calls["contiguous"] = args
+        return torch.zeros((1, 64), dtype=torch.float32)
+
+    provider = SimpleNamespace(
+        get_paged_mqa_logits_metadata=lambda *args: torch.zeros(
+            (2, 2), dtype=torch.int32
+        ),
+        fp8_fp4_paged_mqa_logits=paged,
+        fp8_fp4_mqa_logits=contiguous,
+    )
+    monkeypatch.setattr(score, "_deep_gemm", provider)
+    monkeypatch.setattr(score, "_HAS_DEEP_GEMM", True)
+    monkeypatch.setattr(score, "_HAS_DEEP_GEMM_MQA", True)
+    monkeypatch.setattr(score, "_HAS_DEEP_GEMM_LEGACY", False)
+    monkeypatch.setattr(score, "_DEEP_GEMM_SM100_LEGACY_OK", False)
+    monkeypatch.setattr(score, "_get_num_sms", lambda device: 1)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (9, 0))
+
+    def normalize(values, starts, ends, width, *, relative):
+        calls["normalize"] = (values.shape, width, relative)
+        return values.float()
+
+    monkeypatch.setattr(_mqa_layout, "normalize_mqa_logits", normalize)
+
+    q = torch.zeros((1, 1, 32, 128), dtype=torch.float8_e4m3fn)
+    weights = torch.zeros((1, 32), dtype=torch.float32)
+    pool = torch.zeros((64, 132), dtype=torch.uint8)
+    lengths = torch.tensor([[64]], dtype=torch.int32)
+    table = torch.tensor([[0]], dtype=torch.int32)
+    result = score.fp8_paged_indexer_score(q, weights, pool, table, lengths, 64, 64)
+    assert result.shape == (1, 64)
+    assert isinstance(calls["paged"][0], tuple)
+    assert calls["paged"][0][0].shape == q.shape
+    assert calls["paged"][0][1] is None
+    assert calls["paged"][1].shape == (1, 64, 1, 132)
+
+    k = torch.zeros((64, 128), dtype=torch.float8_e4m3fn)
+    scale = torch.ones(64, dtype=torch.float32)
+    starts = torch.zeros(1, dtype=torch.int32)
+    ends = torch.full((1,), 64, dtype=torch.int32)
+    result = score.fp8_mqa_indexer_score(
+        q.view(1, 32, 128), weights, k, scale, starts, ends
+    )
+    assert result.shape == (1, 64)
+    assert calls["contiguous"][0][1] is None
+    assert calls["contiguous"][1][1] is scale
+    assert calls["contiguous"][5] == 64
+    assert calls["normalize"] == ((1, 64), 64, False)
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (10, 3))
+    assert not score.supports_mqa_logits(q.device)
+    assert not score.supports_paged_mqa_logits(q.device, 64)
+
+
+def test_dsv41_fp8_score_reuses_shared_legacy_layout(monkeypatch):
+    """V4.1 FP8 must remain runnable when DeepGEMM exposes only MX MQA."""
+    from types import SimpleNamespace
+
+    from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as score
+
+    sentinel = object()
+    calls = []
+    monkeypatch.setattr(
+        score,
+        "_shared_fp8_paged_indexer_score",
+        lambda *args, **kwargs: calls.append(("paged", args, kwargs)) or sentinel,
+    )
+    monkeypatch.setattr(
+        score,
+        "_shared_fp8_mqa_indexer_score",
+        lambda *args, **kwargs: calls.append(("contiguous", args, kwargs)) or sentinel,
+    )
+    q = SimpleNamespace(is_cuda=True, device="cuda:0")
+    assert score.has_fp8_paged_mqa_logits()
+    assert score.has_fp8_mqa_logits()
+    assert score.fp8_paged_indexer_score(q, None, None, None, None, 64, 64) is sentinel
+    assert score.fp8_mqa_indexer_score(q, None, None, None, None, None) is sentinel
+    assert [call[0] for call in calls] == ["paged", "contiguous"]
+
+
+def test_mx_fp8_mqa_api_uses_packed_scales_and_request_rows(monkeypatch):
+    """SM100 calls the new ABI without reinterpreting packed scales as floats."""
+    from types import SimpleNamespace
+
+    from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as score
+    from rtp_llm.models_py.modules.dsv4.fp8 import _mqa_layout
+
+    calls = {}
+
+    def paged(*args, **kwargs):
+        calls["paged"] = (args, kwargs)
+        return torch.zeros((4, 64), dtype=torch.bfloat16)
+
+    def contiguous(*args):
+        calls["contiguous"] = args
+        return torch.zeros((1, 64), dtype=torch.bfloat16)
+
+    provider = SimpleNamespace(
+        get_paged_mqa_logits_metadata=lambda *args, **kwargs: torch.zeros(
+            (2, 2), dtype=torch.int32
+        ),
+        fp8_fp4_paged_mqa_logits=paged,
+        fp8_fp4_mqa_logits=contiguous,
+    )
+    monkeypatch.setattr(score, "_deep_gemm", provider)
+    monkeypatch.setattr(score, "_HAS_DEEP_GEMM_NEW", True)
+    monkeypatch.setattr(score, "_get_num_sms", lambda device: 1)
+    monkeypatch.setattr(
+        _mqa_layout,
+        "normalize_mqa_logits",
+        lambda values, *args, **kwargs: values.float(),
+    )
+
+    q = torch.zeros((2, 2, 32, 128), dtype=torch.float8_e4m3fn)
+    sf = torch.full((2, 2, 32), 0x7F7F7F7F, dtype=torch.int32)
+    weights = torch.zeros((4, 32), dtype=torch.bfloat16)
+    pool = torch.zeros((128, 132), dtype=torch.uint8)
+    lengths = torch.tensor([[32, 33], [40, 41]], dtype=torch.int32)
+    table = torch.tensor([[0], [1]], dtype=torch.int32)
+    result = score.fp8_paged_indexer_score(
+        q, weights, pool, table, lengths, 64, 64, q_sf=sf
+    )
+    assert result.shape == (4, 64)
+    args, kwargs = calls["paged"]
+    assert args[0][0].shape == (4, 1, 32, 128)
+    assert args[0][1].shape == (4, 1, 32)
+    assert args[1].shape == (2, 64, 1, 132)
+    assert args[4].tolist() == [[0], [0], [1], [1]]
+    assert kwargs["indices"].tolist() == [0, 0, 1, 1]
+
+    k = torch.zeros((64, 128), dtype=torch.float8_e4m3fn)
+    k_sf = torch.full((64,), 0x7F7F7F7F, dtype=torch.int32)
+    starts = torch.zeros(1, dtype=torch.int32)
+    ends = torch.full((1,), 64, dtype=torch.int32)
+    result = score.fp8_mqa_indexer_score(
+        q[:1, :1].reshape(1, 32, 128),
+        weights[:1],
+        k,
+        k_sf,
+        starts,
+        ends,
+        q_sf=sf[:1, :1].reshape(1, 32),
+    )
+    assert result.shape == (1, 64)
+    assert calls["contiguous"][0][1].dtype == torch.int32
+    assert calls["contiguous"][1][1].dtype == torch.int32
+    assert calls["contiguous"][2].dtype == torch.bfloat16
+
+
+def test_mx_fp8_fused_writer_prefill_decode_against_dequantized_reference():
+    """Real SM100 MX writer and both DeepGEMM score paths share one cache ABI."""
+    from rtp_llm.models_py.modules.dsv4.fp8.test.test_compressor_raw_dispatch import (
+        _run_reference,
+    )
+    from rtp_llm.models_py.modules.indexer_mx_abi import use_mx_indexer_cache
+
+    if not torch.cuda.is_available() or not use_mx_indexer_cache(
+        torch.device("cuda:0")
+    ):
+        pytest.skip("SM100 DeepGEMM MX MQA wheel required")
+    torch.manual_seed(23)
+    ref = _run_reference(256, 128, seed=7)
+    raw = ref["kv_cache"]._flat_backing
+    cache = raw.view(2, 64, 132)
+    k = raw[1, : 64 * 128].view(torch.float8_e4m3fn).reshape(64, 128)
+    k_sf = raw[1, 64 * 128 :].view(torch.int32)
+    q = torch.randn(1, 2, 32, 128, device="cuda", dtype=torch.bfloat16) * 0.1
+    weights = torch.randn(1, 2, 32, device="cuda", dtype=torch.bfloat16) * 0.01
+    from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_q_quant_triton as _q_mod
+
+    q_fp8, w_bf16, q_sf = _q_mod.indexer_q_fp8_quant_fold(q, weights, mx=True)
+
+    k_bytes = k_sf.view(torch.uint8).reshape(64, 4).int()
+    q_bytes = q_sf.view(torch.uint8).reshape(2, 32, 4).int()
+    assert torch.unique(k_bytes[:, 0]).numel() > 1
+    assert torch.equal(k_bytes, k_bytes[:, :1].expand_as(k_bytes))
+    assert torch.equal(q_bytes, q_bytes[..., :1].expand_as(q_bytes))
+    k_deq = (
+        k.float().reshape(64, 4, 32) * torch.exp2((k_bytes - 127).float()).unsqueeze(-1)
+    ).reshape(64, 128)
+    q_deq = (
+        q_fp8.float().reshape(2, 32, 4, 32)
+        * torch.exp2((q_bytes - 127).float()).unsqueeze(-1)
+    ).reshape(2, 32, 128)
+    oracle = torch.relu(q_deq @ k_deq.T).mul(w_bf16.float().reshape(2, 32, 1)).sum(1)
+    starts = torch.zeros(2, dtype=torch.int32, device="cuda")
+    ends = torch.tensor([32, 64], dtype=torch.int32, device="cuda")
+    prefill = _indexer_score_mod.fp8_mqa_indexer_score(
+        q_fp8.reshape(2, 32, 128),
+        w_bf16.reshape(2, 32),
+        k,
+        k_sf,
+        starts,
+        ends,
+        q_sf=q_sf.reshape(2, 32),
+    )
+    decode = _indexer_score_mod.fp8_paged_indexer_score(
+        q_fp8,
+        w_bf16.reshape(2, 32),
+        cache.flatten(0, 1),
+        torch.tensor([[1]], dtype=torch.int32, device="cuda"),
+        ends.reshape(1, 2),
+        64,
+        64,
+        q_sf=q_sf,
+    )
+    for row, valid in enumerate((32, 64)):
+        torch.testing.assert_close(
+            prefill[row, :valid], oracle[row, :valid], rtol=0.03, atol=0.01
+        )
+        torch.testing.assert_close(
+            decode[row, :valid], oracle[row, :valid], rtol=0.03, atol=0.01
+        )

@@ -453,10 +453,11 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
             patch.object(indexer_mod, "has_fp8_mqa_logits", return_value=True),
             patch.object(
                 indexer_mod,
-                "indexer_q_rope_fp8_quant_fold",
+                "quantize_indexer_q_for_score",
                 return_value=(
                     torch.empty(0, dtype=torch.float8_e4m3fn),
                     torch.empty(0, dtype=torch.float32),
+                    None,
                 ),
             ),
             patch(
@@ -588,10 +589,11 @@ class IndexerFP8OverlapEntryPointsTest(unittest.TestCase):
             patch.object(indexer_mod, "has_fp8_mqa_logits", return_value=True),
             patch.object(
                 indexer_mod,
-                "indexer_q_rope_fp8_quant_fold",
+                "quantize_indexer_q_for_score",
                 return_value=(
                     torch.empty(0, dtype=torch.float8_e4m3fn),
                     torch.empty(0, dtype=torch.float32),
+                    None,
                 ),
             ),
         ):

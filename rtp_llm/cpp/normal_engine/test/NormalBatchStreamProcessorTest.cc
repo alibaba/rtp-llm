@@ -376,6 +376,25 @@ TEST_F(NormalBatchStreamProcessorTest, testSpeculativeReserveStepFormula) {
     EXPECT_ANY_THROW((void)config.speculativeReserveStep());
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testDSparkStaticVerifyWidth) {
+    SpeculativeExecutionConfig config;
+    config.type                      = SP_TYPE_DSPARK;
+    config.gen_num_per_cycle         = 7;
+    EXPECT_EQ(config.verifySteps(), 7);
+    config.sp_dspark_verify_tokens = 4;
+    EXPECT_EQ(config.verifySteps(), 4);
+    EXPECT_EQ(config.speculativeReserveStep(), 21);
+    config.sp_dspark_verify_tokens = 8;
+    EXPECT_ANY_THROW((void)config.verifySteps());
+    config.sp_dspark_verify_tokens = -1;
+    EXPECT_ANY_THROW((void)config.verifySteps());
+    config.sp_dspark_verify_tokens = 4;
+    config.type                    = SP_TYPE_MTP;
+    EXPECT_ANY_THROW((void)config.verifySteps());
+    config.sp_dspark_verify_tokens = 0;
+    EXPECT_EQ(config.verifySteps(), 7);
+}
+
 TEST_P(OutputDispatchTest, testExecutorPassesFinalGraphWidthOnlyWithLayout) {
     struct FactoryResetGuard {
         ~FactoryResetGuard() {

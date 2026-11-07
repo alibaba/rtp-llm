@@ -38,3 +38,9 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "test_minimax_m31_dspark_context",
+    srcs = ["test_minimax_m31_dspark_context.py"],
+    deps = ["//rtp_llm:testlib"],
+)

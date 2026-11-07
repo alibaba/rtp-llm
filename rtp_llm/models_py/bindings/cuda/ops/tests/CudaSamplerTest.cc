@@ -347,6 +347,44 @@ TEST_F(CudaSamplerTest, testCudaSamplingKernelTopKTopP) {
     assertTokenIn(output_token_ids_host, 23, {7, 8});
 }
 
+TEST_F(CudaSamplerTest, testTopKTopPAllProbsMatchesJointSamplingSupport) {
+    auto              logits_t = cudaTensor({std::log(0.5f), std::log(0.3f), std::log(0.19f), std::log(0.01f)}, {1, 4});
+    constexpr int64_t step     = 5;
+    auto              output_token_ids_t = cudaIntTensor({0, 0, 0, 0, 0, 0}, {1, step + 1});
+    auto              sequence_lengths_t = cudaIntTensor({5}, {1});
+    auto              input_lengths_t    = cudaIntTensor({-1}, {1});
+    auto              top_k_t            = pinnedIntTensor({2});
+    auto              top_p_t            = pinnedFloatTensor({0.55f});
+    auto              temperature_t      = pinnedFloatTensor({1.0f});
+    auto              output_all_probs_t = cudaTensor({0, 0, 0, 0}, {1, 4});
+    std::vector<at::Generator> generators{torch::make_generator<at::CUDAGeneratorImpl>()};
+    generators[0].set_current_seed(20261022);
+
+    GreedyParams params({logits_t,
+                         input_lengths_t,
+                         sequence_lengths_t,
+                         output_token_ids_t,
+                         step,
+                         top_k_t,
+                         top_p_t,
+                         temperature_t,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         false,
+                         output_all_probs_t,
+                         nullopt,
+                         nullopt,
+                         nullopt,
+                         generators});
+    execSampleGreedy(params);
+    check_cuda_error();
+
+    ASSERT_VECTOR_NEAR(toHostFloat(output_all_probs_t), std::vector<float>({0.625f, 0.375f, 0, 0}), 1e-5);
+    assertTokenIn(toHostInt(output_token_ids_t), step, {0, 1});
+}
+
 TEST_F(CudaSamplerTest, testCudaSamplingKernelFailed) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(

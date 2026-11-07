@@ -533,6 +533,10 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args(args)
+    py_env_configs.generate_env_config.think_mode_explicit = (
+        "think_mode" in getattr(parser, "_cli_provided_args", set())
+        or "THINK_MODE" in os.environ
+    )
     py_env_configs.server_config.validate_allocator_dump_config()
 
     # Normalize the two switches before model construction and process spawn.

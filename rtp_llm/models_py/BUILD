@@ -45,12 +45,14 @@ flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
 flashattn2 = ["flash_attn"]
 flashattn = flashattn2 + ["flash-attn-3"]
+m31_prefill = ["fmha-sm100", "quack-kernels"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
 requirement(["flash-mla-legacy"])
 requirement(rtp_kernel)
 requirement(flashattn)
+requirement(m31_prefill)
 
 
 filegroup(
@@ -109,6 +111,15 @@ _DSV4_PPU_KERNELS = [
     "kernels/ppu/jit/**/*.py", "kernels/ppu/runtime.py",
 ]
 
+filegroup(
+    name = "minimax_m31_union_sources",
+    srcs = glob([
+        "modules/minimax_m31/msa/prefill/native_union/*.cu",
+        "modules/minimax_m31/msa/prefill/native_union/*.cpp",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([
@@ -121,6 +132,7 @@ py_library(
     data = [
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
+        ":minimax_m31_union_sources",
         ":rocm_fp8_ptpc_hipb_solutions",
     ] + select({
         "@//:using_ppu": [":ppu_sources"],
@@ -152,6 +164,10 @@ py_library(
         "@//:using_cuda13_x86": ["flash-mla", "fast-hadamard-transform", "tilelang"],
         "@//:using_cuda13_arm": ["flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda13_x86": m31_prefill,
+        "@//:using_cuda13_arm": m31_prefill,
         "//conditions:default": [],
     }) + select({
         "@//:using_cuda13_x86": rtp_kernel,

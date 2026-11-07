@@ -1834,7 +1834,9 @@ def _fp8_mqa_logits_available() -> bool:
     try:
         import deep_gemm
 
-        return hasattr(deep_gemm, "fp8_mqa_logits")
+        return hasattr(deep_gemm, "fp8_mqa_logits") or hasattr(
+            deep_gemm, "fp8_fp4_mqa_logits"
+        )
     except Exception:
         return False
 
@@ -2633,13 +2635,23 @@ def _launch_dummy_fp8_mqa_logits(
     ks = torch.zeros((seq_len,), dtype=torch.int32, device=device)
     ke = torch.full((seq_len,), seq_len_kv, dtype=torch.int32, device=device)
 
-    logits = deep_gemm.fp8_mqa_logits(
-        q,
-        (k, k_scale),
-        weights,
-        ks,
-        ke,
-        False,
-        0,
-    )
+    if hasattr(deep_gemm, "fp8_mqa_logits"):
+        logits = deep_gemm.fp8_mqa_logits(q, (k, k_scale), weights, ks, ke, False, 0)
+    else:
+        mx = torch.cuda.get_device_capability(device)[0] == 10
+        q_sf = (
+            torch.full(
+                (seq_len, num_heads), 0x7F7F7F7F, dtype=torch.int32, device=device
+            )
+            if mx
+            else None
+        )
+        if mx:
+            k_scale = torch.full(
+                (seq_len_kv,), 0x7F7F7F7F, dtype=torch.int32, device=device
+            )
+            weights = weights.to(torch.bfloat16)
+        logits = deep_gemm.fp8_fp4_mqa_logits(
+            (q, q_sf), (k, k_scale), weights, ks, ke, seq_len_kv
+        )
     del q, k, k_scale, weights, ks, ke, logits

@@ -174,6 +174,63 @@ class Qwen3Detector(BaseReasoningFormatDetector):
         )
 
 
+class MiniMaxM31ReasoningDetector(BaseReasoningFormatDetector):
+    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
+        super().__init__(
+            "<mm:think>",
+            "</mm:think>",
+            force_reasoning=force_reasoning,
+            stream_reasoning=stream_reasoning,
+        )
+
+    def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
+        self._buffer += new_text
+        reasoning, normal = [], []
+        while self._buffer:
+            if self._in_reasoning:
+                if not self.stripped_think_start:
+                    if self.think_start_token.startswith(self._buffer) and len(
+                        self._buffer
+                    ) < len(self.think_start_token):
+                        break
+                    if self._buffer.startswith(self.think_start_token):
+                        self._buffer = self._buffer[len(self.think_start_token) :]
+                    self.stripped_think_start = True
+                marker = self.think_end_token
+            else:
+                marker = self.think_start_token
+
+            if not marker:
+                (reasoning if self._in_reasoning else normal).append(self._buffer)
+                self._buffer = ""
+                break
+            pos = self._buffer.find(marker)
+            if pos >= 0:
+                (reasoning if self._in_reasoning else normal).append(self._buffer[:pos])
+                self._buffer = self._buffer[pos + len(marker) :]
+                self._in_reasoning = not self._in_reasoning
+                continue
+
+            if self._in_reasoning and not self.stream_reasoning:
+                break
+
+            keep = 0
+            for length in range(min(len(self._buffer), len(marker) - 1), 0, -1):
+                if marker.startswith(self._buffer[-length:]):
+                    keep = length
+                    break
+            (reasoning if self._in_reasoning else normal).append(
+                self._buffer[: len(self._buffer) - keep]
+            )
+            self._buffer = self._buffer[len(self._buffer) - keep :]
+            break
+        return StreamingParseResult("".join(normal), "".join(reasoning))
+
+    def drain_pending_text(self) -> Tuple[str, str]:
+        text, self._buffer = self._buffer, ""
+        return (text, "") if self._in_reasoning else ("", text)
+
+
 class KimiDetector(BaseReasoningFormatDetector):
     """
     Detector for Kimi Thinking model.
@@ -209,6 +266,7 @@ class ReasoningParser:
         "glm45": Qwen3Detector,
         "kimi": KimiDetector,
         "kimi_k2": Qwen3Detector,
+        "minimax_m31": MiniMaxM31ReasoningDetector,
         "qwen3": Qwen3Detector,
         "qwen3-thinking": Qwen3Detector,
         "step3": DeepSeekR1Detector,

@@ -235,6 +235,13 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model("cohere", "rtp_llm.models.llama", ["CohereForCausalLM"])
     register_lazy_model("mpt", "rtp_llm.models.mpt")
     register_lazy_model("phi", "rtp_llm.models.phi")
+    register_lazy_model("minimax_m31", "rtp_llm.models.minimax_m31")
+    register_lazy_model("minimax_m31_vl", "rtp_llm.models.minimax_m31_vl")
+    register_lazy_model(
+        "minimax_m31_dspark",
+        "rtp_llm.models.minimax_m31_dspark",
+        ["DSparkMiniMaxDraftModel"],
+    )
     register_lazy_model("qwen", "rtp_llm.models.qwen", ["QWenLMHeadModel"])
     register_lazy_model("qwen_7b", "rtp_llm.models.qwen")
     register_lazy_model("qwen_13b", "rtp_llm.models.qwen")

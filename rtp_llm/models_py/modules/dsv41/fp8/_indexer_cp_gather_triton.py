@@ -168,10 +168,11 @@ def _cp_gather_indexer_k_to_padded_kernel(
 
     cache_scale_ptr = (
         cache_block_base + cache_block_size * D + block_offset * SCALE_BYTES
-    ).to(tl.pointer_type(tl.float32))
-    scale = tl.load(cache_scale_ptr, mask=valid_cache_block, other=0.0)
+    ).to(tl.pointer_type(tl.uint32))
+    # Copy all four scale bytes unchanged: either FP32 or packed MX UE8M0.
+    scale = tl.load(cache_scale_ptr, mask=valid_cache_block, other=0)
     out_scale_row = (out_scale_ptr + token_idx * SCALE_BYTES).to(
-        tl.pointer_type(tl.float32)
+        tl.pointer_type(tl.uint32)
     )
     tl.store(out_scale_row, scale)
 

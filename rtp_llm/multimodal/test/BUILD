@@ -204,3 +204,9 @@ py_test(
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "minimax_m31_vl_test",
+    srcs = ["minimax_m31_vl_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
