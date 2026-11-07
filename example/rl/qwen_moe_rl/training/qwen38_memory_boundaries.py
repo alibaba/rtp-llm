@@ -41,10 +41,64 @@ def _write_boundary(engine, event, micro, *, exception=None, released_cache=Fals
     return record
 
 
+def _observe_failure(engine,event,micro,exc):
+    """Exception-only allocator metadata; never synchronize or replace failure."""
+    import torch
+    try:
+        _write_boundary(engine,event,micro,exception=f'{type(exc).__name__}: {exc}')
+        if (os.environ.get('Q38_OOM_ALLOCATOR_AUDIT')!='1'
+                or not isinstance(exc,torch.OutOfMemoryError)
+                or getattr(exc,'_q38_allocator_audit_saved',False)):
+            return
+        # The normal path does not call these APIs or record allocation history.
+        # Take the snapshot before any cache release/synchronization can erase
+        # the distinction between inactive blocks and delayed stream frees.
+        stats=torch.cuda.memory_stats()
+        selected={key:value for key,value in stats.items()
+            if key.startswith(('allocated_bytes.','active_bytes.','reserved_bytes.','inactive_split_bytes.',
+                               'allocation.','active.','segment.','inactive_split.','requested_bytes.'))
+            or key in ('num_alloc_retries','num_ooms','oversize_allocations.current','oversize_segments.current')}
+        segments=torch.cuda.memory_snapshot();state_bytes={};state_blocks={};largest={}
+        for segment in segments:
+            for block in segment.get('blocks',[]):
+                state=block.get('state','unknown');size=int(block['size'])
+                state_bytes[state]=state_bytes.get(state,0)+size
+                state_blocks[state]=state_blocks.get(state,0)+1
+                largest[state]=max(largest.get(state,0),size)
+        record=dict(schema='q38-exception-only-CUDA-allocator-block-metadata-v1',event=event,
+            pid=os.getpid(),time_ns=time.time_ns(),actual_training_micro_index=micro,
+            original_exception=f'{type(exc).__name__}: {exc}',stats=selected,
+            allocator_backend=torch.cuda.memory.get_allocator_backend(),
+            active_allocator_settings=torch._C._accelerator_getAllocatorSettings(),
+            block_bytes_by_state=state_bytes,block_count_by_state=state_blocks,
+            largest_block_bytes_by_state=largest,segment_count=len(segments),
+            expandable_segment_count=sum(s.get('is_expandable') is True for s in segments),
+            nonexpandable_segment_count=sum(s.get('is_expandable') is False for s in segments),
+            unknown_expandability_segment_count=sum(not isinstance(s.get('is_expandable'),bool) for s in segments),
+            inactive_split_stat_excludes_expandable_segments=True,
+            full_segment_and_block_metadata=segments,
+            snapshot_is_metadata_only=True,model_optimizer_or_gradient_tensor_payload_saved=False,
+            observer_synchronized_or_released_cache=False,original_exception_will_be_reraised_unchanged=True)
+        root=Path(os.environ['Q38_TRAINING_AUDIT_DIR']);root.mkdir(parents=True,exist_ok=True)
+        path=root/f'allocator-oom-pid{os.getpid()}-{record["time_ns"]}.json'
+        with path.open('x') as out:json.dump(record,out,allow_nan=False);out.write('\n')
+        exc._q38_allocator_audit_saved=True
+    except BaseException as observer_error:
+        # Diagnostic failures, including a read-only/full disk, cannot mask the
+        # original CUDA/Python exception or grant any successful step/admission.
+        try:
+            root=Path(os.environ['Q38_TRAINING_AUDIT_DIR']);root.mkdir(parents=True,exist_ok=True)
+            path=root/f'allocator-observer-failed-pid{os.getpid()}-{time.time_ns()}.json'
+            with path.open('x') as out:
+                json.dump(dict(original_exception=repr(exc),observer_exception=repr(observer_error)),out)
+        except BaseException:
+            pass
+
+
 def install():
     if os.environ.get('Q38_MICRO_BOUNDARY_RELEASE_CACHE')!='1':return False
     import torch
-    from verl.workers.engine.fsdp.transformer_impl import FSDPEngineWithLMHead
+    from verl.workers.engine.fsdp.transformer_impl import FSDPEngine,FSDPEngineWithLMHead
     original=FSDPEngineWithLMHead.forward_step
     if getattr(original,'_q38_micro_memory_boundary',False):return True
 
@@ -64,11 +118,23 @@ def install():
         try:
             result=original(self,micro_batch,loss_function,forward_only)
         except BaseException as exc:
-            _write_boundary(self,'forward-exception',micro,exception=f'{type(exc).__name__}: {exc}')
+            _observe_failure(self,'forward-exception',micro,exc)
             raise
         _write_boundary(self,'exit-forward-before-backward',micro)
         return result
 
     forward._q38_micro_memory_boundary=True
     FSDPEngineWithLMHead.forward_step=forward
+    if os.environ.get('Q38_OOM_ALLOCATOR_AUDIT')=='1':
+        original_batch=FSDPEngine.forward_backward_batch
+        @functools.wraps(original_batch)
+        def batch(self,*args,**kwargs):
+            try:
+                return original_batch(self,*args,**kwargs)
+            except BaseException as exc:
+                if hasattr(self,'_q38_gradient_store'):
+                    _observe_failure(self,'forward-backward-exception',
+                        getattr(self,'_q38_training_micro_index',0),exc)
+                raise
+        FSDPEngine.forward_backward_batch=batch
     return True

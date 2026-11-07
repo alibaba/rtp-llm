@@ -66,6 +66,12 @@ is about 794.48 GiB including a 96 GiB reserve. This is a static bound, not an
 accepted full-model peak; clean checkpoint page cache must remain reclaimable.
 The BF16 master/moment precision and bounded FP32 optimizer math are unchanged.
 
+`Q38_OOM_ALLOCATOR_AUDIT=1` records allocator block metadata only after an
+actual CUDA OOM. It preserves the original exception and does not add CUDA
+operations to the successful path or save model, gradient or optimizer tensor
+payloads. Delayed stream frees and inactive blocks are reported separately;
+reserved-minus-allocated bytes alone do not establish fragmentation.
+
 Initial-policy recovery is optional and requires
 `Q38_INITIAL_POLICY_REPLAY=1`, `Q38_INITIAL_POLICY_REPLAY_MANIFEST`, and its
 `Q38_INITIAL_POLICY_REPLAY_MANIFEST_SHA256`. Keep this private evidence manifest
