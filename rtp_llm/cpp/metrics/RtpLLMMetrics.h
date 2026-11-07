@@ -915,6 +915,52 @@ private:
         return true;
     }
 
+    // Decides the priority-tagged sample plan for one reporting round.
+    //   round_is_active: the round carries token metrics (not the idle window)
+    //   priority_collectors: priorities with tokens this round (may be empty)
+    //   remembered_priorities: in/out FIFO (capped) of priorities that ever carried tokens
+    //   has_tokens: out map priority -> whether the round's sample carries tokens
+    // Returns true when per-priority samples should be emitted; false keeps the legacy
+    // untagged "priority=0" report (a service that never reported a priority bucket).
+    // Public so the plan decision table stays unit-testable without a kmonitor reporter.
+public:
+    static bool planRoundReports(bool round_is_active,
+                                 const std::map<int32_t, CollectType>& priority_collectors,
+                                 std::vector<int32_t>& remembered_priorities,
+                                 std::map<int32_t, bool>& has_tokens) {
+        if (round_is_active && priority_collectors.empty()) {
+            // Token metrics without priority buckets: keep the legacy untagged round.
+            return false;
+        }
+        if (remembered_priorities.empty() && priority_collectors.empty()) {
+            return false;
+        }
+        has_tokens.clear();
+        for (auto priority : remembered_priorities) {
+            has_tokens[priority] = priority_collectors.count(priority) > 0;
+        }
+        for (const auto& entry : priority_collectors) {
+            if (!has_tokens.count(entry.first)) {
+                has_tokens[entry.first] = true;
+            }
+        }
+        for (const auto& [priority, with_tokens] : has_tokens) {
+            if (!with_tokens) {
+                continue;
+            }
+            auto it = std::find(remembered_priorities.begin(), remembered_priorities.end(), priority);
+            if (it != remembered_priorities.end()) {
+                remembered_priorities.erase(it);
+            }
+            remembered_priorities.push_back(priority);
+        }
+        while (remembered_priorities.size() > kMaxRememberedPriorities) {
+            remembered_priorities.erase(remembered_priorities.begin());
+        }
+        return true;
+    }
+
+private:
     void reportLoop() {
         while (metrics_reporter_ && !stop_.load(std::memory_order_acquire)) {
             bool        should_report = false;
@@ -962,49 +1008,6 @@ private:
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
         }
-    }
-
-    // Decides the priority-tagged sample plan for one reporting round.
-    //   round_is_active: the round carries token metrics (not the idle window)
-    //   priority_collectors: priorities with tokens this round (may be empty)
-    //   remembered_priorities: in/out FIFO (capped) of priorities that ever carried tokens
-    //   has_tokens: out map priority -> whether the round's sample carries tokens
-    // Returns true when per-priority samples should be emitted; false keeps the legacy
-    // untagged "priority=0" report (a service that never reported a priority bucket).
-    static bool planRoundReports(bool round_is_active,
-                                 const std::map<int32_t, CollectType>& priority_collectors,
-                                 std::vector<int32_t>& remembered_priorities,
-                                 std::map<int32_t, bool>& has_tokens) {
-        if (round_is_active && priority_collectors.empty()) {
-            // Token metrics without priority buckets: keep the legacy untagged round.
-            return false;
-        }
-        if (remembered_priorities.empty() && priority_collectors.empty()) {
-            return false;
-        }
-        has_tokens.clear();
-        for (auto priority : remembered_priorities) {
-            has_tokens[priority] = priority_collectors.count(priority) > 0;
-        }
-        for (const auto& entry : priority_collectors) {
-            if (!has_tokens.count(entry.first)) {
-                has_tokens[entry.first] = true;
-            }
-        }
-        for (const auto& [priority, with_tokens] : has_tokens) {
-            if (!with_tokens) {
-                continue;
-            }
-            auto it = std::find(remembered_priorities.begin(), remembered_priorities.end(), priority);
-            if (it != remembered_priorities.end()) {
-                remembered_priorities.erase(it);
-            }
-            remembered_priorities.push_back(priority);
-        }
-        while (remembered_priorities.size() > kMaxRememberedPriorities) {
-            remembered_priorities.erase(remembered_priorities.begin());
-        }
-        return true;
     }
 
 private:
